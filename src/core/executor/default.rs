@@ -23,6 +23,22 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
                 .with_header("X-Title", "Endpoint Proxy"),
         ),
         (
+            "glm",
+            ProviderConfig::claude_compatible("https://api.z.ai/api/anthropic/v1/messages"),
+        ),
+        (
+            "kimi",
+            ProviderConfig::claude_compatible("https://api.kimi.com/coding/v1/messages"),
+        ),
+        (
+            "minimax",
+            ProviderConfig::claude_compatible("https://api.minimax.io/anthropic/v1/messages"),
+        ),
+        (
+            "minimax-cn",
+            ProviderConfig::claude_compatible("https://api.minimaxi.com/anthropic/v1/messages"),
+        ),
+        (
             "deepseek",
             ProviderConfig::openai("https://api.deepseek.com/chat/completions"),
         ),
@@ -52,11 +68,11 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "cohere",
-            ProviderConfig::openai("https://api.cohere.com/compatibility/v1/chat/completions"),
+            ProviderConfig::openai("https://api.cohere.ai/v1/chat/completions"),
         ),
         (
             "nebius",
-            ProviderConfig::openai("https://api.studio.nebius.com/v1/chat/completions"),
+            ProviderConfig::openai("https://api.studio.nebius.ai/v1/chat/completions"),
         ),
         (
             "siliconflow",
@@ -67,8 +83,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.hyperbolic.xyz/v1/chat/completions"),
         ),
         (
+            "perplexity",
+            ProviderConfig::openai("https://api.perplexity.ai/chat/completions"),
+        ),
+        (
             "nanobanana",
-            ProviderConfig::openai("https://api.nanobanana.com/v1/chat/completions"),
+            ProviderConfig::openai("https://api.nanobananaapi.ai/v1/chat/completions"),
         ),
         (
             "chutes",
@@ -76,11 +96,11 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "gitlab",
-            ProviderConfig::openai("https://gitlab.com/api/v4/ai/chat/completions"),
+            ProviderConfig::openai("https://gitlab.com/api/v4/chat/completions"),
         ),
         (
             "codebuddy",
-            ProviderConfig::openai("https://api.codebuddy.ca/v1/chat/completions"),
+            ProviderConfig::openai("https://copilot.tencent.com/v1/chat/completions"),
         ),
         (
             "opencode-go",
@@ -133,6 +153,15 @@ impl ProviderConfig {
             format: "openai".into(),
             default_headers: Vec::new(),
         }
+    }
+
+    fn claude_compatible(base_url: &str) -> Self {
+        Self::openai(base_url)
+            .with_header("anthropic-version", "2023-06-01")
+            .with_header(
+                "anthropic-beta",
+                "claude-code-20250219,interleaved-thinking-2025-05-14",
+            )
     }
 
     fn with_header(mut self, name: &str, value: &str) -> Self {
@@ -296,10 +325,18 @@ impl DefaultExecutor {
                 .as_deref()
                 .or(credentials.access_token.as_deref())
                 .ok_or_else(|| ExecutorError::MissingCredentials(self.provider.clone()))?;
-            headers.insert(
-                AUTHORIZATION,
-                HeaderValue::from_str(&format!("Bearer {token}"))?,
-            );
+
+            if matches!(
+                self.provider.as_str(),
+                "glm" | "kimi" | "minimax" | "minimax-cn"
+            ) {
+                headers.insert("x-api-key", HeaderValue::from_str(token)?);
+            } else {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {token}"))?,
+                );
+            }
         }
 
         if stream {

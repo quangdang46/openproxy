@@ -3,10 +3,11 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::Duration;
 
-use openproxy::core::executor::{ClientPool, DefaultExecutor};
+use openproxy::core::executor::{ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError};
 use openproxy::core::proxy::{normalize_proxy_url, resolve_proxy_target, ProxyTarget};
 use openproxy::types::{AppDb, ProviderConnection, ProviderNode, ProxyPool, Settings};
-use wiremock::matchers::{method, path};
+use serde_json::json;
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn connection(provider: &str) -> ProviderConnection {
@@ -145,6 +146,10 @@ fn default_executor_builds_expected_headers() {
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert_eq!(headers["accept"], "text/event-stream");
     assert_eq!(headers["http-referer"], "https://endpoint-proxy.local");
+    let non_stream_headers = openrouter
+        .build_headers(&connection("openrouter"), false)
+        .expect("non-stream headers");
+    assert!(non_stream_headers.get("accept").is_none());
 
     let compatible_node = ProviderNode {
         id: "anthropic-node".into(),
@@ -174,6 +179,182 @@ fn default_executor_builds_expected_headers() {
     assert_eq!(headers["authorization"], "Bearer oauth-token");
     assert_eq!(headers["anthropic-version"], "2023-06-01");
     assert!(headers.get("x-api-key").is_none());
+}
+
+#[test]
+fn default_executor_builds_beta_provider_urls_and_special_headers() {
+    let pool = Arc::new(ClientPool::new());
+
+    let groq = DefaultExecutor::new("groq", pool.clone(), None).expect("groq executor");
+    assert_eq!(
+        groq.build_url("llama-3.3-70b", false, &connection("groq"))
+            .expect("groq url"),
+        "https://api.groq.com/openai/v1/chat/completions"
+    );
+
+    let glm = DefaultExecutor::new("glm", pool.clone(), None).expect("glm executor");
+    assert_eq!(
+        glm.build_url("glm-5", false, &connection("glm"))
+            .expect("glm url"),
+        "https://api.z.ai/api/anthropic/v1/messages?beta=true"
+    );
+    let headers = glm
+        .build_headers(&connection("glm"), false)
+        .expect("glm headers");
+    assert_eq!(headers["x-api-key"], "sk-test");
+    assert_eq!(headers["anthropic-version"], "2023-06-01");
+    assert!(headers.get("authorization").is_none());
+
+    let minimax = DefaultExecutor::new("minimax", pool.clone(), None).expect("minimax executor");
+    assert_eq!(
+        minimax
+            .build_url("minimax-m2.5", false, &connection("minimax"))
+            .expect("minimax url"),
+        "https://api.minimax.io/anthropic/v1/messages?beta=true"
+    );
+
+    let perplexity =
+        DefaultExecutor::new("perplexity", pool.clone(), None).expect("perplexity executor");
+    assert_eq!(
+        perplexity
+            .build_url("sonar", false, &connection("perplexity"))
+            .expect("perplexity url"),
+        "https://api.perplexity.ai/chat/completions"
+    );
+
+    let gitlab = DefaultExecutor::new("gitlab", pool, None).expect("gitlab executor");
+    assert_eq!(
+        gitlab
+            .build_url("duo", false, &connection("gitlab"))
+            .expect("gitlab url"),
+        "https://gitlab.com/api/v4/chat/completions"
+    );
+}
+
+#[test]
+fn default_executor_transform_request_is_passthrough() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("openai", pool, None).expect("openai executor");
+    let body = json!({
+        "model": "gpt-4.1",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    assert_eq!(executor.transform_request(&body), body);
+}
+
+#[tokio::test]
+async fn default_executor_execute_posts_expected_request() {
+    let upstream = MockServer::start().await;
+    let request_body = json!({
+        "model": "gpt-4.1",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer sk-test"))
+        .and(header("accept", "text/event-stream"))
+        .and(body_json(request_body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let provider_node = ProviderNode {
+        id: "node-openai".into(),
+        r#type: "openai-compatible".into(),
+        name: "Node".into(),
+        prefix: Some("custom".into()),
+        api_type: Some("chat".into()),
+        base_url: Some(format!("{}/v1", upstream.uri())),
+        created_at: None,
+        updated_at: None,
+        extra: BTreeMap::new(),
+    };
+
+    let executor = DefaultExecutor::new(
+        "node-openai",
+        Arc::new(ClientPool::new()),
+        Some(provider_node),
+    )
+    .expect("compatible executor");
+
+    let response = executor
+        .execute(ExecutionRequest {
+            model: "gpt-4.1".into(),
+            body: request_body.clone(),
+            stream: true,
+            credentials: connection("node-openai"),
+            proxy: None,
+        })
+        .await
+        .expect("execute request");
+
+    assert_eq!(
+        response.url,
+        format!("{}/v1/chat/completions", upstream.uri())
+    );
+    assert_eq!(response.transformed_body, request_body);
+    assert_eq!(response.headers["authorization"], "Bearer sk-test");
+    assert_eq!(response.response.status(), 200);
+}
+
+#[test]
+fn default_executor_reports_missing_credentials_and_invalid_headers() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("openai", pool, None).expect("openai executor");
+
+    let mut missing = connection("openai");
+    missing.api_key = None;
+    let error = executor
+        .build_headers(&missing, false)
+        .expect_err("missing credentials should fail");
+    assert!(matches!(error, ExecutorError::MissingCredentials(provider) if provider == "openai"));
+
+    let mut invalid = connection("openai");
+    invalid.api_key = Some("bad\nkey".into());
+    let error = executor
+        .build_headers(&invalid, false)
+        .expect_err("invalid header should fail");
+    assert!(matches!(error, ExecutorError::InvalidHeader(_)));
+
+    let anthropic_node = ProviderNode {
+        id: "anthropic-node".into(),
+        r#type: "anthropic-compatible".into(),
+        name: "Anthropic".into(),
+        prefix: Some("custom".into()),
+        api_type: None,
+        base_url: Some("https://example.com".into()),
+        created_at: None,
+        updated_at: None,
+        extra: BTreeMap::new(),
+    };
+    let anthropic = DefaultExecutor::new(
+        "anthropic-node",
+        Arc::new(ClientPool::new()),
+        Some(anthropic_node),
+    )
+    .expect("anthropic executor");
+
+    let mut anthropic_missing = connection("anthropic-node");
+    anthropic_missing.api_key = None;
+    let error = anthropic
+        .build_headers(&anthropic_missing, false)
+        .expect_err("anthropic missing credentials should fail");
+    assert!(matches!(
+        error,
+        ExecutorError::MissingCredentials(provider) if provider == "anthropic-node"
+    ));
+
+    let mut anthropic_invalid = connection("anthropic-node");
+    anthropic_invalid.api_key = Some("bad\nkey".into());
+    let error = anthropic
+        .build_headers(&anthropic_invalid, false)
+        .expect_err("anthropic invalid api key should fail");
+    assert!(matches!(error, ExecutorError::InvalidHeader(_)));
 }
 
 #[test]
