@@ -3,9 +3,11 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use hmac::{Hmac, Mac};
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
 use openproxy::types::{ApiKey, Combo, CustomModel, ProviderConnection};
+use sha2::Sha256;
 use tempfile::tempdir;
 use tower::util::ServiceExt;
 
@@ -19,6 +21,23 @@ fn active_key(key: &str) -> ApiKey {
         created_at: None,
         extra: BTreeMap::new(),
     }
+}
+
+fn active_key_with_machine_id(key: &str, machine_id: &str) -> ApiKey {
+    ApiKey {
+        machine_id: Some(machine_id.into()),
+        ..active_key(key)
+    }
+}
+
+fn cli_token(machine_id: &str, key_id: &str) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+
+    let mut mac = HmacSha256::new_from_slice(b"endpoint-proxy-api-key-secret").unwrap();
+    mac.update(machine_id.as_bytes());
+    mac.update(key_id.as_bytes());
+    let crc = hex::encode(mac.finalize().into_bytes());
+    format!("sk-{machine_id}-{key_id}-{}", &crc[..8])
 }
 
 fn connection(
@@ -80,6 +99,7 @@ async fn app_state() -> AppState {
     db.update(|state| {
         state.api_keys = vec![
             active_key("valid-bearer"),
+            active_key_with_machine_id(&cli_token("machine1", "cli01"), "machine1"),
             ApiKey {
                 is_active: Some(false),
                 ..active_key("inactive-key")
@@ -205,6 +225,7 @@ async fn bearer_takes_precedence_over_x_api_key() {
                 .uri("/v1/models")
                 .header("authorization", "Bearer wrong-key")
                 .header("x-api-key", "valid-bearer")
+                .header("x-9r-cli-token", cli_token("machine1", "cli01"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -212,6 +233,84 @@ async fn bearer_takes_precedence_over_x_api_key() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn valid_cli_token_allows_models_request() {
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("x-9r-cli-token", cli_token("machine1", "cli01"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn cli_token_machine_id_mismatch_is_unauthorized() {
+    let state = app_state().await;
+    state
+        .db
+        .update(|db| {
+            db.api_keys = vec![active_key_with_machine_id(
+                &cli_token("machine1", "cli01"),
+                "othermachine",
+            )];
+        })
+        .await
+        .unwrap();
+
+    let app = openproxy::build_app(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("x-9r-cli-token", cli_token("machine1", "cli01"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn valid_key_still_resolves_with_many_stored_keys() {
+    let state = app_state().await;
+    state
+        .db
+        .update(|db| {
+            db.api_keys = (0..2_000)
+                .map(|index| active_key(&format!("bulk-key-{index:04}")))
+                .collect();
+            db.api_keys.push(active_key_with_machine_id(
+                &cli_token("machine1", "cli01"),
+                "machine1",
+            ));
+        })
+        .await
+        .unwrap();
+
+    let app = openproxy::build_app(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("x-9r-cli-token", cli_token("machine1", "cli01"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
