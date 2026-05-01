@@ -2,6 +2,7 @@ mod client_pool;
 mod codex;
 mod cursor;
 mod default;
+mod grok_web;
 mod kiro;
 mod ollama;
 mod vertex;
@@ -21,6 +22,11 @@ pub use cursor::{
 pub use default::{
     DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError, ProviderConfig,
     TransportKind, UpstreamResponse,
+};
+pub use grok_web::{
+    GrokWebExecutor, GrokWebExecutorError, GrokWebExecutionRequest, GrokWebExecutorResponse,
+    PerplexityWebExecutor, PerplexityWebExecutorError, PerplexityWebExecutionRequest,
+    PerplexityWebExecutorResponse,
 };
 pub use kiro::{
     AwsCredentials, EventStreamDecoder, KiroExecutor, KiroExecutorError, KiroExecutorResponse,
