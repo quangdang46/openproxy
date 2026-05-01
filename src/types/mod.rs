@@ -375,6 +375,8 @@ impl Settings {
         if !self.outbound_proxy_enabled && !self.outbound_proxy_url.trim().is_empty() {
             self.outbound_proxy_enabled = true;
         }
+
+        self.caveman_level = normalize_caveman_level_value(&self.caveman_level);
     }
 }
 
@@ -587,6 +589,15 @@ fn default_mitm_router_base_url() -> String {
 
 fn default_caveman_level() -> String {
     "full".into()
+}
+
+fn normalize_caveman_level_value(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "lite" => "lite".into(),
+        "full" => "full".into(),
+        "ultra" => "ultra".into(),
+        _ => default_caveman_level(),
+    }
 }
 
 fn default_true() -> bool {

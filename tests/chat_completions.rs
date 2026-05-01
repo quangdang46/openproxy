@@ -3,9 +3,10 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use openproxy::core::rtk::CompressionLevel;
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
-use openproxy::types::{ApiKey, Combo, ProviderConnection, ProviderNode};
+use openproxy::types::{ApiKey, Combo, ProviderConnection, ProviderNode, Settings};
 use serde_json::json;
 use tempfile::tempdir;
 use tower::util::ServiceExt;
@@ -78,6 +79,15 @@ async fn seeded_state(
     connections: Vec<ProviderConnection>,
     combos: Vec<Combo>,
 ) -> AppState {
+    seeded_state_with_settings(nodes, connections, combos, Settings::default()).await
+}
+
+async fn seeded_state_with_settings(
+    nodes: Vec<ProviderNode>,
+    connections: Vec<ProviderConnection>,
+    combos: Vec<Combo>,
+    settings: Settings,
+) -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
     db.update(|state| {
@@ -85,6 +95,7 @@ async fn seeded_state(
         state.provider_nodes = nodes;
         state.provider_connections = connections;
         state.combos = combos;
+        state.settings = settings;
     })
     .await
     .expect("seed db");
@@ -154,6 +165,240 @@ async fn chat_completions_streams_openai_compatible_response() {
     let text = String::from_utf8(body.to_vec()).unwrap();
     assert!(text.contains("data: {\"choices\""));
     assert!(text.contains("data: [DONE]"));
+}
+
+#[tokio::test]
+async fn chat_completions_injects_caveman_prompt_for_long_requests() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer upstream-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-caveman",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let settings = Settings {
+        caveman_enabled: true,
+        caveman_level: "ultra".into(),
+        ..Settings::default()
+    };
+    let state = seeded_state_with_settings(
+        vec![provider_node(
+            "node-openai",
+            "custom",
+            &format!("{}/v1", upstream.uri()),
+        )],
+        vec![connection("conn-1", "node-openai", 1, "upstream-key")],
+        Vec::new(),
+        settings,
+    )
+    .await;
+    let long_prompt = "Need concise summary of massive transcript. ".repeat(220);
+
+    let app = openproxy::build_app(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer valid-bearer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "custom/gpt-4o-mini",
+                        "messages": [
+                            { "role": "system", "content": "Existing rules" },
+                            { "role": "user", "content": long_prompt }
+                        ],
+                        "stream": false,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = upstream
+        .received_requests()
+        .await
+        .expect("received requests");
+    assert_eq!(requests.len(), 1);
+
+    let forwarded: serde_json::Value = requests[0].body_json().expect("forwarded body");
+    assert_eq!(forwarded["model"], "gpt-4o-mini");
+    let messages = forwarded["messages"].as_array().expect("messages array");
+    let system = messages[0]["content"].as_str().expect("system content");
+    assert!(system.starts_with("Existing rules"));
+    assert!(system.contains(CompressionLevel::Ultra.prompt()));
+}
+
+#[tokio::test]
+async fn chat_completions_skips_caveman_prompt_for_short_requests() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer upstream-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-short",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let settings = Settings {
+        caveman_enabled: true,
+        caveman_level: "lite".into(),
+        ..Settings::default()
+    };
+    let state = seeded_state_with_settings(
+        vec![provider_node(
+            "node-openai",
+            "custom",
+            &format!("{}/v1", upstream.uri()),
+        )],
+        vec![connection("conn-1", "node-openai", 1, "upstream-key")],
+        Vec::new(),
+        settings,
+    )
+    .await;
+
+    let app = openproxy::build_app(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer valid-bearer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "custom/gpt-4o-mini",
+                        "messages": [
+                            { "role": "user", "content": "hi" }
+                        ],
+                        "stream": false,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = upstream
+        .received_requests()
+        .await
+        .expect("received requests");
+    assert_eq!(requests.len(), 1);
+
+    let forwarded: serde_json::Value = requests[0].body_json().expect("forwarded body");
+    let messages = forwarded["messages"].as_array().expect("messages array");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    assert_eq!(messages[0]["content"], "hi");
+}
+
+#[tokio::test]
+async fn chat_completions_preserves_chat_content_part_schema_when_injecting_caveman() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer upstream-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-parts",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let settings = Settings {
+        caveman_enabled: true,
+        caveman_level: "full".into(),
+        ..Settings::default()
+    };
+    let state = seeded_state_with_settings(
+        vec![provider_node(
+            "node-openai",
+            "custom",
+            &format!("{}/v1", upstream.uri()),
+        )],
+        vec![connection("conn-1", "node-openai", 1, "upstream-key")],
+        Vec::new(),
+        settings,
+    )
+    .await;
+    let long_prompt = "Need concise summary of massive transcript. ".repeat(220);
+
+    let app = openproxy::build_app(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer valid-bearer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "custom/gpt-4o-mini",
+                        "messages": [
+                            {
+                                "role": "developer",
+                                "content": [{ "type": "text", "text": "Keep exact schema" }]
+                            },
+                            { "role": "user", "content": long_prompt }
+                        ],
+                        "stream": false,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = upstream
+        .received_requests()
+        .await
+        .expect("received requests");
+    assert_eq!(requests.len(), 1);
+
+    let forwarded: serde_json::Value = requests[0].body_json().expect("forwarded body");
+    let parts = forwarded["messages"][0]["content"]
+        .as_array()
+        .expect("developer content parts");
+    assert_eq!(
+        parts[0],
+        json!({ "type": "text", "text": "Keep exact schema" })
+    );
+    assert_eq!(
+        parts.last().expect("last developer part"),
+        &json!({ "type": "text", "text": CompressionLevel::Full.prompt() })
+    );
 }
 
 #[tokio::test]
@@ -487,6 +732,108 @@ async fn chat_completions_returns_retry_after_while_model_is_cooling_down() {
         .as_str()
         .unwrap()
         .contains("cooling down"));
+}
+
+#[tokio::test]
+async fn chat_completions_does_not_cool_down_entire_connection_for_model_specific_404() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer upstream-key"))
+        .and(body_partial_json(json!({ "model": "gpt-missing" })))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": { "message": "model not found" }
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer upstream-key"))
+        .and(body_partial_json(json!({ "model": "gpt-ok" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "chatcmpl-ok",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "ok" },
+                "finish_reason": "stop"
+            }]
+        })))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let mut connection = connection("conn-1", "node-openai", 1, "upstream-key");
+    connection.default_model = None;
+    connection
+        .provider_specific_data
+        .insert("enabledModels".into(), json!(["gpt-missing", "gpt-ok"]));
+
+    let state = seeded_state(
+        vec![provider_node(
+            "node-openai",
+            "custom",
+            &format!("{}/v1", upstream.uri()),
+        )],
+        vec![connection],
+        Vec::new(),
+    )
+    .await;
+
+    let app = openproxy::build_app(state.clone());
+    let missing = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer valid-bearer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "custom/gpt-missing",
+                        "messages": [{ "role": "user", "content": "hi" }],
+                        "stream": false,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let snapshot = state.db.snapshot();
+    let stored = snapshot
+        .provider_connections
+        .iter()
+        .find(|connection| connection.id == "conn-1")
+        .expect("stored connection");
+    assert!(stored.extra.contains_key("modelLock_gpt-missing"));
+    assert!(stored.rate_limited_until.is_none());
+
+    let app = openproxy::build_app(state);
+    let ok = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/v1/chat/completions")
+                .header("authorization", "Bearer valid-bearer")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "model": "custom/gpt-ok",
+                        "messages": [{ "role": "user", "content": "hi again" }],
+                        "stream": false,
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(ok.status(), StatusCode::OK);
 }
 
 #[tokio::test]

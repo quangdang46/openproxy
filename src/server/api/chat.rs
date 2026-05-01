@@ -16,6 +16,7 @@ use crate::core::combo::{
 use crate::core::executor::{DefaultExecutor, ExecutionRequest, ExecutorError};
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
+use crate::core::rtk::apply_request_preprocessing;
 use crate::server::auth::require_api_key;
 use crate::server::state::AppState;
 use crate::types::{AppDb, ProviderConnection};
@@ -108,6 +109,8 @@ async fn execute_single_model(
             retry_after: None,
         });
     }
+
+    let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &resolved.model);
 
     forward_with_provider_fallback(state, &provider, &resolved.model, body).await
 }
@@ -416,9 +419,6 @@ async fn mark_connection_unavailable(
                 connection
                     .extra
                     .insert(model_lock_key.clone(), Value::String(until.to_rfc3339()));
-                if (401..=404).contains(&status) {
-                    connection.rate_limited_until = Some(until.to_rfc3339());
-                }
                 connection.last_error = Some(message.clone());
                 connection.last_error_at = Some(Utc::now().to_rfc3339());
                 connection.error_code = Some(status.to_string());

@@ -10,6 +10,7 @@ use openproxy::types::{
     ApiKey, AppDb, Combo, DailySummary, ModelAliasTarget, ProviderConnection, ProviderModelRef,
     ProviderNode, Settings, SummaryCounter, TokenUsage, UsageDb, UsageEntry,
 };
+use serde_json::json;
 use tempfile::tempdir;
 
 #[test]
@@ -162,6 +163,30 @@ fn usage_db_round_trips_through_serde() {
     let decoded: UsageDb = serde_json::from_value(encoded).expect("decode usage db");
 
     assert_eq!(decoded, usage);
+}
+
+#[test]
+fn settings_normalize_canonicalizes_caveman_level() {
+    let mut settings = Settings {
+        caveman_level: " ULTRA ".into(),
+        ..Settings::default()
+    };
+
+    settings.normalize();
+    assert_eq!(settings.caveman_level, "ultra");
+
+    settings.caveman_level = "not-a-level".into();
+    settings.normalize();
+    assert_eq!(settings.caveman_level, "full");
+
+    let db = AppDb::from_json_value(json!({
+        "settings": {
+            "cavemanEnabled": null,
+            "cavemanLevel": " ??? "
+        }
+    }));
+    assert!(!db.settings.caveman_enabled);
+    assert_eq!(db.settings.caveman_level, "full");
 }
 
 #[tokio::test]
