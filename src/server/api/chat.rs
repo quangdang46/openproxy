@@ -162,10 +162,10 @@ async fn forward_with_provider_fallback(
 
 use crate::core::executor::{
             DefaultExecutor, ExecutionRequest, KiroExecutor, KiroExecutionRequest,
-            KiroExecutorResponse,
+            KiroExecutorResponse, VertexExecutor, VertexExecutionRequest,
         };
 
-        let executor_result: Result<_, ComboAttemptError> = if provider == "kiro" {
+        let executor_result: Result<KiroExecutorResponse, ComboAttemptError> = if provider == "kiro" {
             let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
                 .map_err(|e| ComboAttemptError {
                     status: 500,
@@ -184,6 +184,32 @@ use crate::core::executor::{
                     message: format!("Kiro execution failed: {:?}", e),
                     retry_after: None,
                 })
+        } else if provider == "vertex" {
+            let executor = VertexExecutor::new(state.client_pool.clone(), provider_node)
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Vertex executor creation failed: {:?}", e),
+                    retry_after: None,
+                })?;
+            let result = executor.execute_request(VertexExecutionRequest {
+                model: model.to_string(),
+                body: request_body.clone(),
+                stream,
+                credentials: connection.clone(),
+                proxy,
+            }).await
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Vertex execution failed: {:?}", e),
+                    retry_after: None,
+                })?;
+            Ok(KiroExecutorResponse {
+                response: result.response,
+                url: result.url,
+                headers: result.headers,
+                transformed_body: result.transformed_body,
+                transport: result.transport,
+            })
         } else {
             let executor = DefaultExecutor::new(provider.to_string(), state.client_pool.clone(), provider_node)
                 .map_err(|e| ComboAttemptError {

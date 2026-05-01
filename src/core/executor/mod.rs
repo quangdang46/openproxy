@@ -1,6 +1,7 @@
 mod client_pool;
 mod default;
 mod kiro;
+mod vertex;
 
 pub use client_pool::{
     ClientPool, DirectHyperClient, CLIENT_POOL_IDLE_TIMEOUT, CLIENT_POOL_MAX_IDLE_PER_HOST,
@@ -13,6 +14,9 @@ pub use default::{
 pub use kiro::{
     AwsCredentials, EventStreamDecoder, KiroExecutor, KiroExecutorError, KiroExecutorResponse,
     KiroExecutionRequest, SseEvent,
+};
+pub use vertex::{
+    VertexExecutor, VertexExecutorError, VertexExecutionRequest, VertexExecutorResponse,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

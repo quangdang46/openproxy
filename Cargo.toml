@@ -84,6 +84,10 @@ fnv = "1.0"
 # Async stream
 async-stream = "0.3"
 
+# RSA for JWT signing
+rsa = "0.9"
+time = "0.3"
+
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
