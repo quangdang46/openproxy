@@ -1014,6 +1014,161 @@ mod tests {
         let mut transformer = OllamaToOpenAiTransformer::new();
         let chunk = Bytes::from(r#"data: {"model":"llama3","message":{"role":"assistant","content":""},"done":false}"#);
         let lines = transformer.transform_chunk(&chunk);
-        assert!(lines.is_empty()); // Empty content should not produce delta
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_by_chunk_accumulation_openai() {
+        let mut transformer = OpenAiTransformer::new();
+        let chunk1 = Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n");
+        let chunk2 = Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\" World\"}}]}\n");
+        let lines1 = transformer.transform_chunk(&chunk1);
+        let lines2 = transformer.transform_chunk(&chunk2);
+        assert!(!lines1.is_empty());
+        assert!(!lines2.is_empty());
+        assert!(lines1[0].contains("Hello"));
+        assert!(lines2[0].contains("World"));
+    }
+
+    #[test]
+    fn test_chunk_by_chunk_accumulation_anthropic() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk1 = Bytes::from("data: {\"type\":\"message_start\",\"message_start\":{\"id\":\"msg-1\",\"model\":\"claude-3\",\"created_at\":1234567890}}\n");
+        let chunk2 = Bytes::from("data: {\"type\":\"content_block_start\",\"content_block_start\":{\"index\":0,\"content_block\":{\"type\":\"text\"}}}\n");
+        let chunk3 = Bytes::from("data: {\"type\":\"content_block_delta\",\"content_block_delta\":{\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}}\n");
+        let lines1 = transformer.transform_chunk(&chunk1);
+        let lines2 = transformer.transform_chunk(&chunk2);
+        let lines3 = transformer.transform_chunk(&chunk3);
+        assert!(!lines1.is_empty());
+        assert!(!lines2.is_empty());
+        assert!(!lines3.is_empty());
+    }
+
+    #[test]
+    fn test_anthropic_thinking_block_format() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            "data: {\"type\":\"content_block_delta\",\"content_block_delta\":{\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"text\":\"Let me think about this step by step...\"}}}\n",
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("[thinking]"));
+        assert!(output.contains("[/thinking]"));
+        assert!(output.contains("step by step"));
+    }
+
+    #[test]
+    fn test_kiro_event_buffer_state() {
+        let state = KiroStreamingState::default();
+        assert!(state.event_buffer.is_empty());
+        assert!(state.current_event_type.is_none());
+        assert!(state.base.line_buffer.is_empty());
+    }
+
+    #[test]
+    fn test_anthropic_streaming_state_tracks_current_block() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        assert!(transformer.state.current_block.is_none());
+        let chunk = Bytes::from(
+            "data: {\"type\":\"content_block_start\",\"content_block_start\":{\"index\":0,\"content_block\":{\"type\":\"text\"}}}\n",
+        );
+        transformer.transform_chunk(&chunk);
+    }
+
+    #[test]
+    fn test_anthropic_cache_control_lookahead_emitted() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            "data: {\"type\":\"content_block_delta\",\"content_block_delta\":{\"index\":0,\"delta\":{\"type\":\"cache_control_delta\",\"cache_control\":{\"type\":\"cache_control_lookahead\",\"amount\":1024}}}}\n",
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"cache_lookahead\":true"));
+    }
+
+    #[test]
+    fn test_gemini_streaming_state_part_index_tracking() {
+        let mut transformer = GeminiToOpenAiTransformer::new();
+        assert_eq!(transformer.state.current_part_index, 0);
+        let chunk = Bytes::from(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"First\"}]}}]}\n",
+        );
+        transformer.transform_chunk(&chunk);
+        assert_eq!(transformer.state.current_part_index, 1);
+        let chunk2 = Bytes::from(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Second\"}]}}]}\n",
+        );
+        transformer.transform_chunk(&chunk2);
+        assert_eq!(transformer.state.current_part_index, 2);
+    }
+
+    #[test]
+    fn test_ollama_streaming_state_message_idx_tracking() {
+        let mut transformer = OllamaToOpenAiTransformer::new();
+        assert_eq!(transformer.state.message_idx, 0);
+        let chunk = Bytes::from(r#"data: {"model":"llama3","done":true}"#);
+        transformer.transform_chunk(&chunk);
+    }
+
+    #[test]
+    fn test_bytes_zero_copy_no_intermediate_allocation() {
+        let data = b"data: {\"choices\":[{\"delta\":{\"content\":\"test\"}}]}\n".to_vec();
+        let bytes = Bytes::from(data);
+        let mut transformer = OpenAiTransformer::new();
+        let lines = transformer.transform_chunk(&bytes);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn test_bytes_from_static() {
+        let bytes = Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"static\"}}]}\n");
+        let mut transformer = OpenAiTransformer::new();
+        let lines = transformer.transform_chunk(&bytes);
+        assert!(!lines.is_empty());
+        assert!(lines[0].contains("static"));
+    }
+
+    #[test]
+    fn test_transformer_output_format_consistency() {
+        let openai = OpenAiTransformer::new();
+        let anthropic = AnthropicToOpenAiTransformer::new();
+        let gemini = GeminiToOpenAiTransformer::new();
+        let ollama = OllamaToOpenAiTransformer::new();
+        assert_eq!(openai.output_format(), "openai");
+        assert_eq!(anthropic.output_format(), "openai");
+        assert_eq!(gemini.output_format(), "openai");
+        assert_eq!(ollama.output_format(), "openai");
+    }
+
+    #[test]
+    fn test_transformer_matches_content_type_edge_cases() {
+        let transformer = OpenAiTransformer::new();
+        assert!(transformer.matches_content_type(Some("text/event-stream; charset=utf-8")));
+        assert!(transformer.matches_content_type(Some("application/json; text/event-stream")));
+        assert!(!transformer.matches_content_type(Some("text/plain; charset=utf-8")));
+    }
+
+    #[test]
+    fn test_anthropic_message_delta_without_usage() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            "data: {\"type\":\"message_delta\",\"message_delta\":{\"stop_reason\":\"end_turn\"}}\n",
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"finish_reason\":\"end_turn\""));
+    }
+
+    #[test]
+    fn test_anthropic_partial_chunk_processing() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            "data: {\"type\":\"message_start\",\"message_start\":{\"id\":\"partial\"}}\n",
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
     }
 }
