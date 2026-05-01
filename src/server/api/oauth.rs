@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-use crate::oauth::pending::{PendingFlowStore, PendingOAuthFlow};
+use crate::oauth::pending::PendingOAuthFlow;
 use crate::oauth::providers;
 use crate::oauth::device_code;
 use crate::oauth::{OAuthProviderConfig, TokenResponse};
@@ -159,7 +159,7 @@ fn is_pkce_provider(provider: &str) -> bool {
 }
 
 fn is_device_code_provider(provider: &str) -> bool {
-    matches!(provider, "github" | "kiro")
+    matches!(provider, "github" | "kiro" | "kimi-coding" | "kilocode" | "codebuddy")
 }
 
 fn now_secs() -> i64 {
@@ -237,6 +237,9 @@ async fn store_connection(
                 consecutive_use_count: None,
                 backoff_level: None,
                 consecutive_errors: None,
+                proxy_url: None,
+                proxy_label: None,
+                use_connection_proxy: None,
                 provider_specific_data: std::collections::BTreeMap::new(),
                 extra: std::collections::BTreeMap::new(),
             };
@@ -494,16 +497,36 @@ pub async fn start_device_code(
 pub async fn poll_device_code(
     State(state): State<AppState>,
     Path(provider): Path<String>,
-    body: Result<Json<serde_json::Value>, JsonRejection>,
-    headers: axum::http::HeaderMap,
+    request: axum::extract::Request,
 ) -> Response {
-    let Ok(Json(body)) = body else {
-        return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Invalid request body",
-            "invalid_body",
-            &provider,
-        );
+    let headers = request.headers();
+    let api_key = match require_api_key(headers, &state.db) {
+        Ok(key) => key,
+        Err(e) => return crate::server::api::auth_error_response(e),
+    };
+    let account_id = api_key.id;
+
+    let body = match axum::body::to_bytes(request.into_body(), 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Invalid request body",
+                "invalid_body",
+                &provider,
+            );
+        }
+    };
+    let body: serde_json::Value = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Invalid JSON body",
+                "invalid_body",
+                &provider,
+            );
+        }
     };
     let device_code = match body.get("device_code").and_then(|v| v.as_str()) {
         Some(code) => code.trim().to_string(),
@@ -517,10 +540,7 @@ pub async fn poll_device_code(
         }
     };
 
-    let _api_key = match require_api_key(&headers, &state.db) {
-        Ok(key) => key,
-        Err(e) => return crate::server::api::auth_error_response(e),
-    };
+    let _account_id = account_id;
 
     let pending_flow = state.pending_flows.get(&device_code);
     let flow = match pending_flow {
@@ -556,7 +576,24 @@ pub async fn poll_device_code(
         Ok(token_response) => {
             state.pending_flows.remove(&device_code);
 
-            if let Err(e) = store_connection(&state.db, &flow.account_id, &provider, &token_response, None).await {
+            // GitHub special: exchange OAuth token for Copilot token
+            let final_token_response = if provider == "github" {
+                match device_code::exchange_github_copilot_token(&token_response.access_token).await {
+                    Ok(copilot_token) => copilot_token,
+                    Err(e) => {
+                        return make_error_response(
+                            StatusCode::BAD_REQUEST,
+                            &format!("Copilot token exchange failed: {}", e.error_description.unwrap_or_else(|| e.error.clone())),
+                            "copilot_exchange_failed",
+                            &provider,
+                        );
+                    }
+                }
+            } else {
+                token_response
+            };
+
+            if let Err(e) = store_connection(&state.db, &flow.account_id, &provider, &final_token_response, None).await {
                 return make_error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("Failed to store connection: {}", e),
@@ -568,7 +605,7 @@ pub async fn poll_device_code(
             Json(PollResponse {
                 success: true,
                 provider: provider.clone(),
-                expires_in: token_response.expires_in.map(|e| e as u64),
+                expires_in: final_token_response.expires_in.map(|e| e as u64),
                 pending: Some(false),
                 retry_after: None,
                 message: Some("Authorization successful".to_string()),
@@ -609,22 +646,37 @@ pub async fn poll_device_code(
 pub async fn refresh_token(
     State(state): State<AppState>,
     Path(provider): Path<String>,
-    body: Result<Json<RefreshBody>, JsonRejection>,
-    headers: axum::http::HeaderMap,
+    request: axum::extract::Request,
 ) -> Response {
-    let Ok(Json(body)) = body else {
-        return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Invalid request body",
-            "invalid_body",
-            &provider,
-        );
-    };
-    let api_key = match require_api_key(&headers, &state.db) {
+    let headers = request.headers();
+    let api_key = match require_api_key(headers, &state.db) {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
     let account_id = api_key.id;
+
+    let body_bytes = match axum::body::to_bytes(request.into_body(), 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Invalid request body",
+                "invalid_body",
+                &provider,
+            );
+        }
+    };
+    let body: RefreshBody = match serde_json::from_slice(&body_bytes) {
+        Ok(b) => b,
+        Err(_) => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Invalid JSON body",
+                "invalid_body",
+                &provider,
+            );
+        }
+    };
 
     let snapshot = state.db.snapshot();
     let connection = snapshot.provider_connections.iter().find(|conn| {
@@ -758,5 +810,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oauth/:provider/start", get(start_oauth_flow))
         .route("/api/oauth/:provider/callback", get(oauth_callback))
         .route("/api/oauth/:provider/device_code", post(start_device_code))
+        .route("/api/oauth/:provider/poll", post(poll_device_code))
+        .route("/api/oauth/:provider/refresh", post(refresh_token))
         .route("/api/oauth/:provider/status", get(oauth_status))
 }

@@ -66,7 +66,7 @@ impl AppDb {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConnection {
     pub id: String,
@@ -127,6 +127,12 @@ pub struct ProviderConnection {
     pub backoff_level: Option<u32>,
     #[serde(default)]
     pub consecutive_errors: Option<u32>,
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub proxy_label: Option<String>,
+    #[serde(default)]
+    pub use_connection_proxy: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub provider_specific_data: BTreeMap<String, Value>,
     #[serde(flatten)]
@@ -159,7 +165,7 @@ pub struct ProviderNode {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyPool {
     pub id: String,
@@ -182,6 +188,14 @@ pub struct ProxyPool {
     pub last_tested_at: Option<String>,
     #[serde(default)]
     pub last_error: Option<String>,
+    #[serde(default)]
+    pub success_rate: Option<f64>,
+    #[serde(default)]
+    pub rtt_ms: Option<u64>,
+    #[serde(default)]
+    pub total_requests: Option<u64>,
+    #[serde(default)]
+    pub failed_requests: Option<u64>,
     #[serde(default)]
     pub created_at: Option<String>,
     #[serde(default)]
