@@ -661,12 +661,14 @@ mod tests {
 
         let chosen_connection = connection("chosen", 3);
 
-        let mut snapshot = AppDb::default();
-        snapshot.provider_connections = vec![
-            excluded_connection.clone(),
-            locked_connection,
-            chosen_connection.clone(),
-        ];
+        let snapshot = AppDb {
+            provider_connections: vec![
+                excluded_connection.clone(),
+                locked_connection,
+                chosen_connection.clone(),
+            ],
+            ..AppDb::default()
+        };
 
         let excluded = HashSet::from([excluded_connection.id]);
         let selected = select_connection(&snapshot, "openai", "gpt-4.1", &excluded)
@@ -688,8 +690,10 @@ mod tests {
         let mut late_rate_limited = connection("late", 2);
         late_rate_limited.rate_limited_until = Some(late.to_rfc3339());
 
-        let mut snapshot = AppDb::default();
-        snapshot.provider_connections = vec![late_rate_limited, early_locked];
+        let snapshot = AppDb {
+            provider_connections: vec![late_rate_limited, early_locked],
+            ..AppDb::default()
+        };
 
         let retry_after = earliest_retry_after(&snapshot, "openai", "gpt-4.1", &HashSet::new())
             .expect("retry-after should be derived from the earliest blocked account");

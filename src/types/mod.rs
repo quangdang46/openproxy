@@ -5,7 +5,7 @@ use serde_json::Value;
 
 pub const DEFAULT_MITM_ROUTER_BASE: &str = "http://localhost:20128";
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppDb {
     #[serde(default, deserialize_with = "deserialize_null_default")]
@@ -30,24 +30,6 @@ pub struct AppDb {
     pub pricing: PricingTable,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
-}
-
-impl Default for AppDb {
-    fn default() -> Self {
-        Self {
-            provider_connections: Vec::new(),
-            provider_nodes: Vec::new(),
-            proxy_pools: Vec::new(),
-            model_aliases: BTreeMap::new(),
-            custom_models: Vec::new(),
-            mitm_alias: BTreeMap::new(),
-            combos: Vec::new(),
-            api_keys: Vec::new(),
-            settings: Settings::default(),
-            pricing: BTreeMap::new(),
-            extra: BTreeMap::new(),
-        }
-    }
 }
 
 impl AppDb {
@@ -414,7 +396,7 @@ pub struct ProviderModelRef {
 
 pub type PricingTable = BTreeMap<String, BTreeMap<String, Value>>;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageDb {
     #[serde(default, deserialize_with = "deserialize_null_default")]
@@ -425,17 +407,6 @@ pub struct UsageDb {
     pub daily_summary: BTreeMap<String, DailySummary>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
-}
-
-impl Default for UsageDb {
-    fn default() -> Self {
-        Self {
-            history: Vec::new(),
-            total_requests_lifetime: 0,
-            daily_summary: BTreeMap::new(),
-            extra: BTreeMap::new(),
-        }
-    }
 }
 
 impl UsageDb {
@@ -767,18 +738,20 @@ fn aggregate_usage_entry(daily_summary: &mut BTreeMap<String, DailySummary>, ent
     );
 }
 
+type SummaryMetadata = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 fn add_to_counter(
     target: &mut BTreeMap<String, SummaryCounter>,
     key: &str,
     prompt_tokens: u64,
     completion_tokens: u64,
     cost: f64,
-    metadata: Option<(
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )>,
+    metadata: Option<SummaryMetadata>,
 ) {
     let counter = target
         .entry(key.to_string())

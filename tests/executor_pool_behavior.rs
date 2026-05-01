@@ -1,12 +1,20 @@
 use std::collections::BTreeMap;
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Barrier;
+use std::thread;
 use std::time::Duration;
 
-use openproxy::core::executor::{ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError};
+use openproxy::core::executor::{
+    ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError, CLIENT_POOL_IDLE_TIMEOUT,
+    CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE,
+};
 use openproxy::core::proxy::{normalize_proxy_url, resolve_proxy_target, ProxyTarget};
 use openproxy::types::{AppDb, ProviderConnection, ProviderNode, ProxyPool, Settings};
 use serde_json::json;
+use tokio::sync::oneshot;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -403,6 +411,372 @@ fn client_pool_reuses_same_provider_key_and_splits_by_proxy_fingerprint() {
         .expect("proxied client with no_proxy");
     assert!(!Arc::ptr_eq(&proxied, &proxied_with_no_proxy));
     assert_eq!(pool.len(), 3);
+}
+
+#[test]
+fn client_pool_reuses_single_client_under_concurrent_same_provider_requests() {
+    let pool = Arc::new(ClientPool::new());
+    let barrier = Arc::new(Barrier::new(16));
+    let build_count = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+
+    for _ in 0..16 {
+        let pool = pool.clone();
+        let barrier = barrier.clone();
+        let build_count = build_count.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            pool.get_or_insert_with("openai", None, || {
+                build_count.fetch_add(1, Ordering::SeqCst);
+                thread::sleep(Duration::from_millis(25));
+                reqwest::Client::builder().build().map(Arc::new)
+            })
+            .expect("shared client")
+        }));
+    }
+
+    let clients: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("thread joined"))
+        .collect();
+
+    let first = &clients[0];
+    assert!(clients.iter().all(|client| Arc::ptr_eq(client, first)));
+    assert_eq!(pool.len(), 1);
+    assert_eq!(build_count.load(Ordering::SeqCst), 1);
+
+    let cache_hit_build_count = Arc::new(AtomicUsize::new(0));
+    let cached = pool
+        .get_or_insert_with("openai", None, || {
+            cache_hit_build_count.fetch_add(1, Ordering::SeqCst);
+            reqwest::Client::builder().build().map(Arc::new)
+        })
+        .expect("cached client");
+    assert!(Arc::ptr_eq(first, &cached));
+    assert_eq!(cache_hit_build_count.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn client_pool_exposes_documented_tuning() {
+    assert_eq!(CLIENT_POOL_IDLE_TIMEOUT, Duration::from_secs(90));
+    assert_eq!(CLIENT_POOL_MAX_IDLE_PER_HOST, 8);
+    assert_eq!(CLIENT_POOL_TCP_KEEPALIVE, Duration::from_secs(60));
+}
+
+#[test]
+fn client_pool_isolates_concurrent_provider_and_proxy_keys() {
+    let pool = Arc::new(ClientPool::new());
+    let barrier = Arc::new(Barrier::new(24));
+    let mut handles = Vec::new();
+
+    for _ in 0..8 {
+        let pool = pool.clone();
+        let barrier = barrier.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            pool.get("openai", None).expect("openai client")
+        }));
+    }
+
+    for _ in 0..8 {
+        let pool = pool.clone();
+        let barrier = barrier.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            pool.get("groq", None).expect("groq client")
+        }));
+    }
+
+    for _ in 0..8 {
+        let pool = pool.clone();
+        let barrier = barrier.clone();
+        handles.push(thread::spawn(move || {
+            barrier.wait();
+            pool.get(
+                "openai",
+                Some(&ProxyTarget {
+                    url: "http://127.0.0.1:8080".into(),
+                    no_proxy: "localhost".into(),
+                    strict_proxy: false,
+                    pool_id: Some("pool-a".into()),
+                }),
+            )
+            .expect("proxied openai client")
+        }));
+    }
+
+    let clients: Vec<_> = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("thread joined"))
+        .collect();
+
+    let openai = &clients[0];
+    let groq = &clients[8];
+    let proxied_openai = &clients[16];
+
+    assert!(clients[..8]
+        .iter()
+        .all(|client| Arc::ptr_eq(client, openai)));
+    assert!(clients[8..16]
+        .iter()
+        .all(|client| Arc::ptr_eq(client, groq)));
+    assert!(clients[16..]
+        .iter()
+        .all(|client| Arc::ptr_eq(client, proxied_openai)));
+
+    assert!(!Arc::ptr_eq(openai, groq));
+    assert!(!Arc::ptr_eq(openai, proxied_openai));
+    assert!(!Arc::ptr_eq(groq, proxied_openai));
+    assert_eq!(pool.len(), 3);
+}
+
+#[test]
+fn client_pool_fingerprint_includes_strict_proxy_and_pool_id() {
+    let pool = ClientPool::new();
+    let strict_false = pool
+        .get(
+            "openai",
+            Some(&ProxyTarget {
+                url: "http://127.0.0.1:8080".into(),
+                no_proxy: String::new(),
+                strict_proxy: false,
+                pool_id: None,
+            }),
+        )
+        .expect("strict false client");
+    let strict_true = pool
+        .get(
+            "openai",
+            Some(&ProxyTarget {
+                url: "http://127.0.0.1:8080".into(),
+                no_proxy: String::new(),
+                strict_proxy: true,
+                pool_id: None,
+            }),
+        )
+        .expect("strict true client");
+    let pool_a = pool
+        .get(
+            "openai",
+            Some(&ProxyTarget {
+                url: "http://127.0.0.1:8080".into(),
+                no_proxy: String::new(),
+                strict_proxy: false,
+                pool_id: Some("pool-a".into()),
+            }),
+        )
+        .expect("pool A client");
+    let pool_b = pool
+        .get(
+            "openai",
+            Some(&ProxyTarget {
+                url: "http://127.0.0.1:8080".into(),
+                no_proxy: String::new(),
+                strict_proxy: false,
+                pool_id: Some("pool-b".into()),
+            }),
+        )
+        .expect("pool B client");
+
+    assert!(!Arc::ptr_eq(&strict_false, &strict_true));
+    assert!(!Arc::ptr_eq(&strict_false, &pool_a));
+    assert!(!Arc::ptr_eq(&pool_a, &pool_b));
+    assert_eq!(pool.len(), 4);
+}
+
+#[test]
+fn client_pool_keeps_proxied_providers_isolated_even_with_same_proxy() {
+    let pool = ClientPool::new();
+    let proxy = ProxyTarget {
+        url: "http://127.0.0.1:8080".into(),
+        no_proxy: "localhost".into(),
+        strict_proxy: false,
+        pool_id: Some("shared-proxy".into()),
+    };
+
+    let openai = pool.get("openai", Some(&proxy)).expect("openai client");
+    let groq = pool.get("groq", Some(&proxy)).expect("groq client");
+
+    assert!(!Arc::ptr_eq(&openai, &groq));
+    assert_eq!(pool.len(), 2);
+}
+
+#[tokio::test]
+async fn client_pool_reuses_connection_for_sequential_requests() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind keepalive server");
+    let addr = listener.local_addr().expect("keepalive server addr");
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_counter = accepted.clone();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept first connection");
+        accepted_counter.fetch_add(1, Ordering::SeqCst);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        for _ in 0..2 {
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            assert!(request_line.starts_with("GET /health HTTP/1.1"));
+
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read header line");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok",
+                )
+                .expect("write response");
+            stream.flush().expect("flush response");
+        }
+    });
+
+    let pool = ClientPool::new();
+    let client = pool.get("openai", None).expect("openai client");
+    let url = format!("http://{addr}/health");
+
+    let first = client
+        .get(&url)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .expect("first request")
+        .text()
+        .await
+        .expect("first body");
+    let second = client
+        .get(&url)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .expect("second request")
+        .text()
+        .await
+        .expect("second body");
+
+    assert_eq!(first, "ok");
+    assert_eq!(second, "ok");
+    server.join().expect("server joined");
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn client_pool_keeps_provider_traffic_independent_under_concurrent_requests() {
+    let openai_listener = TcpListener::bind("127.0.0.1:0").expect("bind openai server");
+    let openai_addr = openai_listener.local_addr().expect("openai server addr");
+    let groq_listener = TcpListener::bind("127.0.0.1:0").expect("bind groq server");
+    let groq_addr = groq_listener.local_addr().expect("groq server addr");
+    let (openai_started_tx, openai_started_rx) = oneshot::channel();
+    let (release_openai_tx, release_openai_rx) = oneshot::channel();
+
+    let openai_server = thread::spawn(move || {
+        let (mut stream, _) = openai_listener.accept().expect("accept openai connection");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set openai read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone openai stream"));
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read openai request line");
+        assert!(request_line.starts_with("GET /slow HTTP/1.1"));
+
+        loop {
+            let mut line = String::new();
+            reader
+                .read_line(&mut line)
+                .expect("read openai header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+
+        openai_started_tx.send(()).expect("signal openai start");
+        release_openai_rx
+            .blocking_recv()
+            .expect("wait for openai release");
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nopenai-ok",
+            )
+            .expect("write openai response");
+        stream.flush().expect("flush openai response");
+    });
+
+    let groq_server = thread::spawn(move || {
+        let (mut stream, _) = groq_listener.accept().expect("accept groq connection");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set groq read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone groq stream"));
+        let mut request_line = String::new();
+        reader
+            .read_line(&mut request_line)
+            .expect("read groq request line");
+        assert!(request_line.starts_with("GET /fast HTTP/1.1"));
+
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read groq header line");
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ngroq-ok")
+            .expect("write groq response");
+        stream.flush().expect("flush groq response");
+    });
+
+    let pool = ClientPool::new();
+    let openai_client = pool.get("openai", None).expect("openai client");
+    let groq_client = pool.get("groq", None).expect("groq client");
+    let openai_url = format!("http://{openai_addr}/slow");
+    let groq_url = format!("http://{groq_addr}/fast");
+
+    let openai_task = tokio::spawn(async move {
+        openai_client
+            .get(&openai_url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+            .expect("openai request")
+            .text()
+            .await
+            .expect("openai body")
+    });
+
+    openai_started_rx.await.expect("openai request started");
+
+    let groq_body = groq_client
+        .get(&groq_url)
+        .timeout(Duration::from_secs(2))
+        .send()
+        .await
+        .expect("groq request")
+        .text()
+        .await
+        .expect("groq body");
+
+    assert_eq!(groq_body, "groq-ok");
+    assert!(!openai_task.is_finished());
+
+    release_openai_tx
+        .send(())
+        .expect("release delayed openai response");
+    assert_eq!(openai_task.await.expect("openai task joined"), "openai-ok");
+    openai_server.join().expect("openai server joined");
+    groq_server.join().expect("groq server joined");
 }
 
 #[test]

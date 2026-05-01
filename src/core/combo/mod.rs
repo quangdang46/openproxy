@@ -53,7 +53,7 @@ pub struct FallbackDecision {
 }
 
 pub fn get_quota_cooldown(backoff_level: u32) -> Duration {
-    let level = backoff_level.saturating_sub(1) as u32;
+    let level = backoff_level.saturating_sub(1);
     let cooldown_ms = BACKOFF_BASE_MS.saturating_mul(2u64.saturating_pow(level));
     Duration::from_millis(cooldown_ms.min(BACKOFF_MAX_MS))
 }
