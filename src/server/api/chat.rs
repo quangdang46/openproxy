@@ -556,6 +556,9 @@ fn executor_error_message(error: &ExecutorError) -> String {
         ExecutorError::MissingCredentials(provider) => {
             format!("Missing credentials for provider: {provider}")
         }
+        ExecutorError::MissingProviderSpecificData(provider, field) => {
+            format!("Missing provider-specific field {field} for: {provider}")
+        }
         ExecutorError::InvalidHeader(error) => format!("Invalid upstream header: {error}"),
         ExecutorError::Request(error) => format!("Upstream request failed: {error}"),
     }

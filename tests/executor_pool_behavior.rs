@@ -117,6 +117,15 @@ fn default_executor_builds_static_and_compatible_urls() {
             .expect("compatible responses url"),
         "https://fallback.example/v1/responses"
     );
+    compatible_connection
+        .provider_specific_data
+        .insert("apiType".into(), serde_json::Value::String("chat".into()));
+    assert_eq!(
+        compatible
+            .build_url("gpt-4.1", true, &compatible_connection)
+            .expect("compatible chat fallback url"),
+        "https://fallback.example/v1/chat/completions"
+    );
 
     let anthropic_node = ProviderNode {
         id: "node-anthropic".into(),
@@ -141,6 +150,166 @@ fn default_executor_builds_static_and_compatible_urls() {
             .expect("anthropic fallback url"),
         "https://anthropic.example/v1/messages"
     );
+
+    let anthropic =
+        DefaultExecutor::new("anthropic", pool.clone(), None).expect("anthropic executor");
+    assert_eq!(
+        anthropic
+            .build_url("claude-sonnet-4.5", false, &connection("anthropic"))
+            .expect("anthropic url"),
+        "https://api.anthropic.com/v1/messages"
+    );
+
+    let gemini = DefaultExecutor::new("gemini", pool.clone(), None).expect("gemini executor");
+    assert_eq!(
+        gemini
+            .build_url("gemini-2.5-flash", false, &connection("gemini"))
+            .expect("gemini non-stream url"),
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    );
+    assert_eq!(
+        gemini
+            .build_url("gemini-2.5-flash", true, &connection("gemini"))
+            .expect("gemini stream url"),
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
+    );
+
+    let cline = DefaultExecutor::new("cline", pool.clone(), None).expect("cline executor");
+    assert_eq!(
+        cline
+            .build_url("gpt-5.4", false, &connection("cline"))
+            .expect("cline url"),
+        "https://api.cline.bot/api/v1/chat/completions"
+    );
+
+    let opencode_go =
+        DefaultExecutor::new("opencode-go", pool.clone(), None).expect("opencode-go executor");
+    assert_eq!(
+        opencode_go
+            .build_url("kimi-k2.6", false, &connection("opencode-go"))
+            .expect("opencode-go url"),
+        "https://opencode.ai/zen/go/v1/chat/completions"
+    );
+    assert_eq!(
+        opencode_go
+            .build_url("minimax-m2.5", false, &connection("opencode-go"))
+            .expect("opencode-go claude-format url"),
+        "https://opencode.ai/zen/go/v1/messages"
+    );
+
+    let cloudflare =
+        DefaultExecutor::new("cloudflare-ai", pool, None).expect("cloudflare executor");
+    let mut cloudflare_connection = connection("cloudflare-ai");
+    cloudflare_connection.provider_specific_data.insert(
+        "accountId".into(),
+        serde_json::Value::String("acct-123".into()),
+    );
+    assert_eq!(
+        cloudflare
+            .build_url("@cf/moonshotai/kimi-k2.6", false, &cloudflare_connection,)
+            .expect("cloudflare url"),
+        "https://api.cloudflare.com/client/v4/accounts/acct-123/ai/v1/chat/completions"
+    );
+}
+
+#[test]
+fn default_executor_supports_current_passthrough_provider_matrix() {
+    let pool = Arc::new(ClientPool::new());
+    let static_providers = [
+        ("openai", "https://api.openai.com/v1/chat/completions"),
+        (
+            "openrouter",
+            "https://openrouter.ai/api/v1/chat/completions",
+        ),
+        ("deepseek", "https://api.deepseek.com/chat/completions"),
+        ("groq", "https://api.groq.com/openai/v1/chat/completions"),
+        ("xai", "https://api.x.ai/v1/chat/completions"),
+        ("mistral", "https://api.mistral.ai/v1/chat/completions"),
+        ("cline", "https://api.cline.bot/api/v1/chat/completions"),
+        ("together", "https://api.together.xyz/v1/chat/completions"),
+        (
+            "fireworks",
+            "https://api.fireworks.ai/inference/v1/chat/completions",
+        ),
+        ("cerebras", "https://api.cerebras.ai/v1/chat/completions"),
+        ("cohere", "https://api.cohere.ai/v1/chat/completions"),
+        ("nebius", "https://api.studio.nebius.ai/v1/chat/completions"),
+        (
+            "siliconflow",
+            "https://api.siliconflow.cn/v1/chat/completions",
+        ),
+        (
+            "hyperbolic",
+            "https://api.hyperbolic.xyz/v1/chat/completions",
+        ),
+        ("perplexity", "https://api.perplexity.ai/chat/completions"),
+        (
+            "nanobanana",
+            "https://api.nanobananaapi.ai/v1/chat/completions",
+        ),
+        ("chutes", "https://llm.chutes.ai/v1/chat/completions"),
+        ("gitlab", "https://gitlab.com/api/v4/chat/completions"),
+        (
+            "codebuddy",
+            "https://copilot.tencent.com/v1/chat/completions",
+        ),
+        (
+            "kilocode",
+            "https://api.kilo.ai/api/openrouter/chat/completions",
+        ),
+        (
+            "opencode-go",
+            "https://opencode.ai/zen/go/v1/chat/completions",
+        ),
+        (
+            "glm-cn",
+            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+        ),
+        (
+            "alicode",
+            "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+        ),
+        (
+            "alicode-intl",
+            "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+        ),
+        (
+            "volcengine-ark",
+            "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+        ),
+        (
+            "byteplus",
+            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+        ),
+        (
+            "nvidia",
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+        ),
+    ];
+
+    for (provider, expected_url) in static_providers {
+        let executor = DefaultExecutor::new(provider, pool.clone(), None)
+            .unwrap_or_else(|_| panic!("missing passthrough provider config for {provider}"));
+        assert_eq!(
+            executor
+                .build_url("matrix-model", false, &connection(provider))
+                .unwrap_or_else(|_| panic!("missing URL builder for {provider}")),
+            expected_url,
+            "unexpected URL for {provider}"
+        );
+    }
+
+    for provider in ["glm", "kimi", "minimax", "minimax-cn"] {
+        let executor = DefaultExecutor::new(provider, pool.clone(), None)
+            .unwrap_or_else(|_| panic!("missing beta provider config for {provider}"));
+        let url = executor
+            .build_url("matrix-model", false, &connection(provider))
+            .unwrap_or_else(|_| panic!("missing URL builder for {provider}"));
+        assert!(
+            url.ends_with("?beta=true"),
+            "expected beta URL for {provider}"
+        );
+    }
 }
 
 #[test]
@@ -149,15 +318,53 @@ fn default_executor_builds_expected_headers() {
     let openrouter =
         DefaultExecutor::new("openrouter", pool.clone(), None).expect("openrouter executor");
     let headers = openrouter
-        .build_headers(&connection("openrouter"), true)
+        .build_headers("gpt-4.1", &connection("openrouter"), true)
         .expect("headers");
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert_eq!(headers["accept"], "text/event-stream");
     assert_eq!(headers["http-referer"], "https://endpoint-proxy.local");
+    assert_eq!(headers["x-title"], "Endpoint Proxy");
     let non_stream_headers = openrouter
-        .build_headers(&connection("openrouter"), false)
+        .build_headers("gpt-4.1", &connection("openrouter"), false)
         .expect("non-stream headers");
     assert!(non_stream_headers.get("accept").is_none());
+
+    let mut oauth_connection = connection("openai");
+    oauth_connection.api_key = None;
+    oauth_connection.access_token = Some("oauth-token".into());
+    let oauth_headers = DefaultExecutor::new("openai", pool.clone(), None)
+        .expect("openai")
+        .build_headers("gpt-4.1", &oauth_connection, false)
+        .expect("oauth headers");
+    assert_eq!(oauth_headers["authorization"], "Bearer oauth-token");
+
+    let anthropic =
+        DefaultExecutor::new("anthropic", pool.clone(), None).expect("anthropic executor");
+    let anthropic_headers = anthropic
+        .build_headers("claude-sonnet-4.5", &connection("anthropic"), false)
+        .expect("anthropic headers");
+    assert_eq!(anthropic_headers["x-api-key"], "sk-test");
+    assert_eq!(
+        anthropic_headers["anthropic-beta"],
+        "claude-code-20250219,interleaved-thinking-2025-05-14"
+    );
+    assert!(anthropic_headers.get("authorization").is_none());
+
+    let gemini = DefaultExecutor::new("gemini", pool.clone(), None).expect("gemini executor");
+    let gemini_headers = gemini
+        .build_headers("gemini-2.5-flash", &connection("gemini"), true)
+        .expect("gemini headers");
+    assert_eq!(gemini_headers["x-goog-api-key"], "sk-test");
+    assert_eq!(gemini_headers["accept"], "text/event-stream");
+    assert!(gemini_headers.get("authorization").is_none());
+
+    let cline = DefaultExecutor::new("cline", pool.clone(), None).expect("cline executor");
+    let cline_headers = cline
+        .build_headers("gpt-5.4", &connection("cline"), false)
+        .expect("cline headers");
+    assert_eq!(cline_headers["authorization"], "Bearer sk-test");
+    assert_eq!(cline_headers["http-referer"], "https://cline.bot");
+    assert_eq!(cline_headers["x-title"], "Cline");
 
     let compatible_node = ProviderNode {
         id: "anthropic-node".into(),
@@ -173,20 +380,48 @@ fn default_executor_builds_expected_headers() {
     let anthropic =
         DefaultExecutor::new("anthropic-node", pool, Some(compatible_node)).expect("anthropic");
     let headers = anthropic
-        .build_headers(&connection("anthropic-node"), false)
+        .build_headers("claude-sonnet", &connection("anthropic-node"), false)
         .expect("anthropic headers");
     assert_eq!(headers["x-api-key"], "sk-test");
     assert_eq!(headers["anthropic-version"], "2023-06-01");
+    assert!(headers.get("anthropic-beta").is_none());
 
     let mut oauth_connection = connection("anthropic-node");
     oauth_connection.api_key = None;
     oauth_connection.access_token = Some("oauth-token".into());
     let headers = anthropic
-        .build_headers(&oauth_connection, false)
+        .build_headers("claude-sonnet", &oauth_connection, false)
         .expect("anthropic oauth headers");
     assert_eq!(headers["authorization"], "Bearer oauth-token");
     assert_eq!(headers["anthropic-version"], "2023-06-01");
     assert!(headers.get("x-api-key").is_none());
+
+    let kilocode =
+        DefaultExecutor::new("kilocode", Arc::new(ClientPool::new()), None).expect("kilocode");
+    let mut kilocode_connection = connection("kilocode");
+    kilocode_connection
+        .provider_specific_data
+        .insert("orgId".into(), serde_json::Value::String("org-42".into()));
+    let headers = kilocode
+        .build_headers("openai/gpt-4.1", &kilocode_connection, false)
+        .expect("kilocode headers");
+    assert_eq!(headers["authorization"], "Bearer sk-test");
+    assert_eq!(headers["x-kilocode-organizationid"], "org-42");
+
+    let opencode_go = DefaultExecutor::new("opencode-go", Arc::new(ClientPool::new()), None)
+        .expect("opencode-go");
+    let headers = opencode_go
+        .build_headers("kimi-k2.6", &connection("opencode-go"), false)
+        .expect("opencode-go openai headers");
+    assert_eq!(headers["authorization"], "Bearer sk-test");
+    assert!(headers.get("x-api-key").is_none());
+
+    let claude_headers = opencode_go
+        .build_headers("minimax-m2.5", &connection("opencode-go"), false)
+        .expect("opencode-go claude headers");
+    assert_eq!(claude_headers["x-api-key"], "sk-test");
+    assert_eq!(claude_headers["anthropic-version"], "2023-06-01");
+    assert!(claude_headers.get("authorization").is_none());
 }
 
 #[test]
@@ -207,10 +442,14 @@ fn default_executor_builds_beta_provider_urls_and_special_headers() {
         "https://api.z.ai/api/anthropic/v1/messages?beta=true"
     );
     let headers = glm
-        .build_headers(&connection("glm"), false)
+        .build_headers("glm-5", &connection("glm"), false)
         .expect("glm headers");
     assert_eq!(headers["x-api-key"], "sk-test");
     assert_eq!(headers["anthropic-version"], "2023-06-01");
+    assert_eq!(
+        headers["anthropic-beta"],
+        "claude-code-20250219,interleaved-thinking-2025-05-14"
+    );
     assert!(headers.get("authorization").is_none());
 
     let minimax = DefaultExecutor::new("minimax", pool.clone(), None).expect("minimax executor");
@@ -237,6 +476,75 @@ fn default_executor_builds_beta_provider_urls_and_special_headers() {
             .expect("gitlab url"),
         "https://gitlab.com/api/v4/chat/completions"
     );
+}
+
+#[test]
+fn default_executor_builds_bearer_headers_for_openai_passthrough_matrix() {
+    let pool = Arc::new(ClientPool::new());
+    let providers = [
+        "xai",
+        "mistral",
+        "together",
+        "fireworks",
+        "cerebras",
+        "cohere",
+        "nebius",
+        "siliconflow",
+        "hyperbolic",
+        "codebuddy",
+        "kilocode",
+        "opencode-go",
+        "glm-cn",
+        "alicode",
+        "alicode-intl",
+        "volcengine-ark",
+        "byteplus",
+        "nvidia",
+    ];
+
+    for provider in providers {
+        let executor =
+            DefaultExecutor::new(provider, pool.clone(), None).expect("passthrough executor");
+        let headers = executor
+            .build_headers("gpt-4.1", &connection(provider), true)
+            .expect("passthrough headers");
+        assert_eq!(
+            headers["authorization"], "Bearer sk-test",
+            "{provider} auth"
+        );
+        assert_eq!(headers["accept"], "text/event-stream", "{provider} stream");
+        assert!(headers.get("x-api-key").is_none(), "{provider} auth mode");
+    }
+}
+
+#[test]
+fn default_executor_builds_claude_headers_for_compatible_passthrough_matrix() {
+    let pool = Arc::new(ClientPool::new());
+    let providers = ["glm", "kimi", "minimax", "minimax-cn"];
+
+    for provider in providers {
+        let executor =
+            DefaultExecutor::new(provider, pool.clone(), None).expect("claude-compatible executor");
+        let headers = executor
+            .build_headers("claude-sonnet", &connection(provider), false)
+            .expect("claude-compatible headers");
+        assert_eq!(
+            headers["x-api-key"], "sk-test",
+            "{provider} credential header"
+        );
+        assert_eq!(
+            headers["anthropic-version"], "2023-06-01",
+            "{provider} version header"
+        );
+        assert_eq!(
+            headers["anthropic-beta"], "claude-code-20250219,interleaved-thinking-2025-05-14",
+            "{provider} beta header"
+        );
+        assert!(
+            headers.get("authorization").is_none(),
+            "{provider} auth mode"
+        );
+    }
 }
 
 #[test]
@@ -313,19 +621,28 @@ async fn default_executor_execute_posts_expected_request() {
 #[test]
 fn default_executor_reports_missing_credentials_and_invalid_headers() {
     let pool = Arc::new(ClientPool::new());
+    let unknown = match DefaultExecutor::new("unknown-provider", pool.clone(), None) {
+        Ok(_) => panic!("unknown provider should fail"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        unknown,
+        ExecutorError::UnsupportedProvider(provider) if provider == "unknown-provider"
+    ));
+
     let executor = DefaultExecutor::new("openai", pool, None).expect("openai executor");
 
     let mut missing = connection("openai");
     missing.api_key = None;
     let error = executor
-        .build_headers(&missing, false)
+        .build_headers("gpt-4.1", &missing, false)
         .expect_err("missing credentials should fail");
     assert!(matches!(error, ExecutorError::MissingCredentials(provider) if provider == "openai"));
 
     let mut invalid = connection("openai");
     invalid.api_key = Some("bad\nkey".into());
     let error = executor
-        .build_headers(&invalid, false)
+        .build_headers("gpt-4.1", &invalid, false)
         .expect_err("invalid header should fail");
     assert!(matches!(error, ExecutorError::InvalidHeader(_)));
 
@@ -350,7 +667,7 @@ fn default_executor_reports_missing_credentials_and_invalid_headers() {
     let mut anthropic_missing = connection("anthropic-node");
     anthropic_missing.api_key = None;
     let error = anthropic
-        .build_headers(&anthropic_missing, false)
+        .build_headers("claude-sonnet", &anthropic_missing, false)
         .expect_err("anthropic missing credentials should fail");
     assert!(matches!(
         error,
@@ -360,9 +677,24 @@ fn default_executor_reports_missing_credentials_and_invalid_headers() {
     let mut anthropic_invalid = connection("anthropic-node");
     anthropic_invalid.api_key = Some("bad\nkey".into());
     let error = anthropic
-        .build_headers(&anthropic_invalid, false)
+        .build_headers("claude-sonnet", &anthropic_invalid, false)
         .expect_err("anthropic invalid api key should fail");
     assert!(matches!(error, ExecutorError::InvalidHeader(_)));
+
+    let cloudflare = DefaultExecutor::new("cloudflare-ai", Arc::new(ClientPool::new()), None)
+        .expect("cloudflare");
+    let error = cloudflare
+        .build_url(
+            "@cf/moonshotai/kimi-k2.6",
+            false,
+            &connection("cloudflare-ai"),
+        )
+        .expect_err("cloudflare missing accountId should fail");
+    assert!(matches!(
+        error,
+        ExecutorError::MissingProviderSpecificData(provider, field)
+            if provider == "cloudflare-ai" && field == "accountId"
+    ));
 }
 
 #[test]

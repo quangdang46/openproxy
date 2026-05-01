@@ -23,6 +23,14 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
                 .with_header("X-Title", "Endpoint Proxy"),
         ),
         (
+            "anthropic",
+            ProviderConfig::anthropic("https://api.anthropic.com/v1/messages"),
+        ),
+        (
+            "gemini",
+            ProviderConfig::gemini("https://generativelanguage.googleapis.com/v1beta/models"),
+        ),
+        (
             "glm",
             ProviderConfig::claude_compatible("https://api.z.ai/api/anthropic/v1/messages"),
         ),
@@ -103,8 +111,18 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://copilot.tencent.com/v1/chat/completions"),
         ),
         (
+            "kilocode",
+            ProviderConfig::openai("https://api.kilo.ai/api/openrouter/chat/completions"),
+        ),
+        (
+            "cline",
+            ProviderConfig::openai("https://api.cline.bot/api/v1/chat/completions")
+                .with_header("HTTP-Referer", "https://cline.bot")
+                .with_header("X-Title", "Cline"),
+        ),
+        (
             "opencode-go",
-            ProviderConfig::openai("http://localhost:4096/v1/chat/completions"),
+            ProviderConfig::openai("https://opencode.ai/zen/go/v1"),
         ),
         (
             "glm-cn",
@@ -136,6 +154,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             "nvidia",
             ProviderConfig::openai("https://integrate.api.nvidia.com/v1/chat/completions"),
         ),
+        (
+            "cloudflare-ai",
+            ProviderConfig::openai(
+                "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
+            ),
+        ),
     ])
 });
 
@@ -155,13 +179,25 @@ impl ProviderConfig {
         }
     }
 
-    fn claude_compatible(base_url: &str) -> Self {
+    fn gemini(base_url: &str) -> Self {
+        Self {
+            base_url: base_url.to_string(),
+            format: "gemini".into(),
+            default_headers: Vec::new(),
+        }
+    }
+
+    fn anthropic(base_url: &str) -> Self {
         Self::openai(base_url)
             .with_header("anthropic-version", "2023-06-01")
             .with_header(
                 "anthropic-beta",
                 "claude-code-20250219,interleaved-thinking-2025-05-14",
             )
+    }
+
+    fn claude_compatible(base_url: &str) -> Self {
+        Self::anthropic(base_url)
     }
 
     fn with_header(mut self, name: &str, value: &str) -> Self {
@@ -198,6 +234,7 @@ pub struct ExecutionResponse {
 pub enum ExecutorError {
     UnsupportedProvider(String),
     MissingCredentials(String),
+    MissingProviderSpecificData(String, &'static str),
     InvalidHeader(reqwest::header::InvalidHeaderValue),
     Request(reqwest::Error),
 }
@@ -247,8 +284,8 @@ impl DefaultExecutor {
 
     pub fn build_url(
         &self,
-        _model: &str,
-        _stream: bool,
+        model: &str,
+        stream: bool,
         credentials: &ProviderConnection,
     ) -> Result<String, ExecutorError> {
         if let Some(node) = &self.provider_node {
@@ -276,6 +313,36 @@ impl DefaultExecutor {
             }
         }
 
+        if self.provider == "gemini" {
+            let action = if stream {
+                "streamGenerateContent?alt=sse"
+            } else {
+                "generateContent"
+            };
+            return Ok(format!("{}/{model}:{action}", self.config.base_url));
+        }
+
+        if self.provider == "opencode-go" {
+            let path = if opencode_go_uses_claude_format(model) {
+                "messages"
+            } else {
+                "chat/completions"
+            };
+            return Ok(format!(
+                "{}/{}",
+                self.config.base_url.trim_end_matches('/'),
+                path
+            ));
+        }
+
+        if self.config.base_url.contains("{accountId}") {
+            let account_id =
+                compatible_value(credentials.provider_specific_data.get("accountId")).ok_or(
+                    ExecutorError::MissingProviderSpecificData(self.provider.clone(), "accountId"),
+                )?;
+            return Ok(self.config.base_url.replace("{accountId}", account_id));
+        }
+
         if matches!(
             self.provider.as_str(),
             "claude" | "glm" | "kimi" | "minimax" | "minimax-cn" | "kimi-coding"
@@ -288,6 +355,7 @@ impl DefaultExecutor {
 
     pub fn build_headers(
         &self,
+        model: &str,
         credentials: &ProviderConnection,
         stream: bool,
     ) -> Result<HeaderMap, ExecutorError> {
@@ -307,7 +375,37 @@ impl DefaultExecutor {
             .as_ref()
             .is_some_and(|node| node.r#type == "anthropic-compatible");
 
-        if is_anthropic_compatible {
+        if self.provider == "gemini" {
+            if let Some(api_key) = credentials.api_key.as_deref() {
+                headers.insert("x-goog-api-key", HeaderValue::from_str(api_key)?);
+            } else if let Some(access_token) = credentials.access_token.as_deref() {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {access_token}"))?,
+                );
+            } else {
+                return Err(ExecutorError::MissingCredentials(self.provider.clone()));
+            }
+        } else if self.provider == "anthropic" {
+            if let Some(api_key) = credentials.api_key.as_deref() {
+                headers.insert("x-api-key", HeaderValue::from_str(api_key)?);
+            } else if let Some(access_token) = credentials.access_token.as_deref() {
+                headers.insert(
+                    AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {access_token}"))?,
+                );
+            } else {
+                return Err(ExecutorError::MissingCredentials(self.provider.clone()));
+            }
+        } else if self.provider == "opencode-go" && opencode_go_uses_claude_format(model) {
+            let token = credentials
+                .api_key
+                .as_deref()
+                .or(credentials.access_token.as_deref())
+                .ok_or_else(|| ExecutorError::MissingCredentials(self.provider.clone()))?;
+            headers.insert("x-api-key", HeaderValue::from_str(token)?);
+            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        } else if is_anthropic_compatible {
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             if let Some(api_key) = credentials.api_key.as_deref() {
                 headers.insert("x-api-key", HeaderValue::from_str(api_key)?);
@@ -337,6 +435,14 @@ impl DefaultExecutor {
                     HeaderValue::from_str(&format!("Bearer {token}"))?,
                 );
             }
+
+            if self.provider == "kilocode" {
+                if let Some(org_id) =
+                    compatible_value(credentials.provider_specific_data.get("orgId"))
+                {
+                    headers.insert("x-kilocode-organizationid", HeaderValue::from_str(org_id)?);
+                }
+            }
         }
 
         if stream {
@@ -355,7 +461,7 @@ impl DefaultExecutor {
         request: ExecutionRequest,
     ) -> Result<ExecutionResponse, ExecutorError> {
         let url = self.build_url(&request.model, request.stream, &request.credentials)?;
-        let headers = self.build_headers(&request.credentials, request.stream)?;
+        let headers = self.build_headers(&request.model, &request.credentials, request.stream)?;
         let transformed_body = self.transform_request(&request.body);
         let client = self.pool.get(&self.provider, request.proxy.as_ref())?;
         let response = client
@@ -387,4 +493,8 @@ fn compatible_value(value: Option<&Value>) -> Option<&str> {
 
 fn non_empty_option(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn opencode_go_uses_claude_format(model: &str) -> bool {
+    matches!(model, "minimax-m2.5" | "minimax-m2.7")
 }
