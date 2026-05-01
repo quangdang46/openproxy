@@ -45,6 +45,8 @@ fn app_db_round_trips_through_serde() {
             expires_in: None,
             error_code: None,
             consecutive_use_count: Some(0),
+            backoff_level: None,
+            consecutive_errors: None,
             provider_specific_data: BTreeMap::new(),
             extra: BTreeMap::new(),
         }],

@@ -52,6 +52,8 @@ fn kiro_connection_with_aws_credentials(access_key: &str, secret_key: &str) -> P
         expires_in: None,
         error_code: None,
         consecutive_use_count: None,
+        backoff_level: None,
+        consecutive_errors: None,
         provider_specific_data: BTreeMap::new(),
         extra: BTreeMap::new(),
     }
@@ -96,6 +98,8 @@ fn kiro_connection_with_session_token(
         expires_in: None,
         error_code: None,
         consecutive_use_count: None,
+        backoff_level: None,
+        consecutive_errors: None,
         provider_specific_data: BTreeMap::new(),
         extra: BTreeMap::new(),
     }

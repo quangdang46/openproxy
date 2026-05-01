@@ -88,6 +88,8 @@ fn connection(
         expires_in: None,
         error_code: None,
         consecutive_use_count: None,
+        backoff_level: None,
+        consecutive_errors: None,
         provider_specific_data,
         extra: BTreeMap::new(),
     }
