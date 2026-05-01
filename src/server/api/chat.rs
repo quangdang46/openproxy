@@ -16,7 +16,7 @@ use crate::core::combo::{
     check_fallback_error, execute_combo_strategy, get_combo_models_from_data, ComboAttemptError,
     ComboExecutionError, ComboStrategy,
 };
-use crate::core::executor::{ExecutorError, UpstreamResponse};
+use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
@@ -595,27 +595,6 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(value)
         .map(|timestamp| timestamp.with_timezone(&Utc))
         .ok()
-}
-
-fn executor_error_message(error: &ExecutorError) -> String {
-    match error {
-        ExecutorError::UnsupportedProvider(provider) => format!("Unsupported provider: {provider}"),
-        ExecutorError::MissingCredentials(provider) => {
-            format!("Missing credentials for provider: {provider}")
-        }
-        ExecutorError::MissingProviderSpecificData(provider, field) => {
-            format!("Missing provider-specific field {field} for: {provider}")
-        }
-        ExecutorError::InvalidHeader(error) => format!("Invalid upstream header: {error}"),
-        ExecutorError::InvalidUri(error) => format!("Invalid upstream URL: {error}"),
-        ExecutorError::InvalidRequest(error) => format!("Invalid upstream request: {error}"),
-        ExecutorError::Serialize(error) => format!("Failed to encode upstream body: {error}"),
-        ExecutorError::HyperClientInit(error) => {
-            format!("Failed to initialize hyper client: {error}")
-        }
-        ExecutorError::Hyper(error) => format!("Upstream hyper request failed: {error}"),
-        ExecutorError::Request(error) => format!("Upstream request failed: {error}"),
-    }
 }
 
 fn combo_error_response(error: ComboExecutionError) -> Response {

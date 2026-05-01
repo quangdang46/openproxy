@@ -102,6 +102,7 @@ impl From<hyper_util::client::legacy::Error> for KiroExecutorError {
 }
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct KiroExecutor {
     pool: Arc<ClientPool>,
     provider_node: Option<ProviderNode>,
@@ -197,21 +198,21 @@ impl KiroExecutor {
         let x_amz_date = HeaderName::from_bytes(b"x-amz-date").unwrap();
         headers.insert(
             x_amz_date,
-            HeaderValue::from_str(&date_time).map_err(|e| KiroExecutorError::InvalidHeader(e))?,
+            HeaderValue::from_str(&date_time).map_err(KiroExecutorError::InvalidHeader)?,
         );
 
         let nonce = generate_nonce();
         let x_amz_nonce = HeaderName::from_bytes(b"x-amz-nonce").unwrap();
         headers.insert(
             x_amz_nonce,
-            HeaderValue::from_str(&nonce).map_err(|e| KiroExecutorError::InvalidHeader(e))?,
+            HeaderValue::from_str(&nonce).map_err(KiroExecutorError::InvalidHeader)?,
         );
 
         if let Some(ref session_token) = credentials.session_token {
             let x_amz_security_token = HeaderName::from_bytes(b"x-amz-security-token").unwrap();
             headers.insert(
                 x_amz_security_token,
-                HeaderValue::from_str(session_token).map_err(|e| KiroExecutorError::InvalidHeader(e))?,
+                HeaderValue::from_str(session_token).map_err(KiroExecutorError::InvalidHeader)?,
             );
         }
 
@@ -225,8 +226,8 @@ impl KiroExecutor {
             host,
             date_time,
             nonce,
-            if credentials.session_token.is_some() {
-                format!("\nx-amz-security-token:{}", credentials.session_token.as_ref().unwrap())
+            if let Some(token) = &credentials.session_token {
+                format!("\nx-amz-security-token:{token}")
             } else {
                 String::new()
             }
@@ -282,7 +283,7 @@ impl KiroExecutor {
         let authorization = HeaderName::from_bytes(b"authorization").unwrap();
         headers.insert(
             authorization,
-            HeaderValue::from_str(&auth_header).map_err(|e| KiroExecutorError::InvalidHeader(e))?,
+            HeaderValue::from_str(&auth_header).map_err(KiroExecutorError::InvalidHeader)?,
         );
 
         Ok(headers)
