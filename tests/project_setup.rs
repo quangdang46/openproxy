@@ -7,7 +7,9 @@ use axum::{body::Body, routing::get, Router};
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use clap::Parser;
+use http_body_util::Full;
 use hyper::Request;
+use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
 use hyper_util::rt::TokioExecutor;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
@@ -65,6 +67,15 @@ fn dependency_stack_smoke_test() {
     let _request = Request::new(Body::from("ping"));
     let connector = HttpConnector::new();
     let _client = Client::builder(TokioExecutor::new()).build_http::<Body>();
+    let https = HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .expect("native roots load")
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    let _hyper_tls_client: Client<_, Full<Bytes>> =
+        Client::builder(TokioExecutor::new()).build(https);
 
     let mut payload = br#"{"message":"hello"}"#.to_vec();
     let parsed = simd_json::to_owned_value(payload.as_mut_slice()).expect("simd-json parses");

@@ -13,6 +13,7 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 # HTTP client (hot path)
 hyper = { version = "1.5", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+hyper-rustls = { version = "0.27", features = ["http2"] }
 
 # HTTP client (complex - OAuth, proxy)
 reqwest = { version = "0.12", features = ["json", "cookies", "multipart", "gzip", "brotli", "socks", "stream"] }
@@ -31,6 +32,7 @@ jsonwebtoken = "9"
 # Streaming / bytes
 bytes = "1"
 futures-util = "0.3"
+http-body-util = "0.1"
 tokio-util = { version = "0.7", features = ["io", "net", "codec"] }
 
 # Async runtime utilities

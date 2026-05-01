@@ -7,13 +7,14 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
 use crate::core::combo::{
     check_fallback_error, execute_combo_strategy, get_combo_models_from_data, ComboAttemptError,
     ComboExecutionError, ComboStrategy,
 };
-use crate::core::executor::{DefaultExecutor, ExecutionRequest, ExecutorError};
+use crate::core::executor::{DefaultExecutor, ExecutionRequest, ExecutorError, UpstreamResponse};
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
@@ -447,10 +448,16 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
         .await;
 }
 
-fn proxy_response(response: reqwest::Response) -> Response {
+fn proxy_response(response: UpstreamResponse) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
-    let body = Body::from_stream(response.bytes_stream());
+    let body = match response {
+        UpstreamResponse::Reqwest(response) => Body::from_stream(response.bytes_stream()),
+        UpstreamResponse::Hyper(response) => {
+            let (_, body) = response.into_parts();
+            Body::new(body)
+        }
+    };
     let mut proxied = Response::new(body);
     *proxied.status_mut() = status;
     let connection_tokens = connection_header_tokens(&headers);
@@ -467,9 +474,18 @@ fn proxy_response(response: reqwest::Response) -> Response {
     proxied
 }
 
-async fn extract_error_message(response: reqwest::Response) -> String {
+async fn extract_error_message(response: UpstreamResponse) -> String {
     let status = response.status();
-    let text = response.text().await.unwrap_or_default();
+    let text = match response {
+        UpstreamResponse::Reqwest(response) => response.text().await.unwrap_or_default(),
+        UpstreamResponse::Hyper(response) => {
+            let (_, body) = response.into_parts();
+            body.collect()
+                .await
+                .map(|collected| String::from_utf8_lossy(&collected.to_bytes()).into_owned())
+                .unwrap_or_default()
+        }
+    };
     if let Ok(value) = serde_json::from_str::<Value>(&text) {
         if let Some(message) = value
             .get("error")
@@ -502,7 +518,7 @@ async fn extract_error_message(response: reqwest::Response) -> String {
     }
 }
 
-fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<DateTime<Utc>> {
+fn retry_after_from_headers(headers: &HeaderMap) -> Option<DateTime<Utc>> {
     let value = headers.get("retry-after")?.to_str().ok()?.trim();
     if value.is_empty() {
         return None;
@@ -560,6 +576,13 @@ fn executor_error_message(error: &ExecutorError) -> String {
             format!("Missing provider-specific field {field} for: {provider}")
         }
         ExecutorError::InvalidHeader(error) => format!("Invalid upstream header: {error}"),
+        ExecutorError::InvalidUri(error) => format!("Invalid upstream URL: {error}"),
+        ExecutorError::InvalidRequest(error) => format!("Invalid upstream request: {error}"),
+        ExecutorError::Serialize(error) => format!("Failed to encode upstream body: {error}"),
+        ExecutorError::HyperClientInit(error) => {
+            format!("Failed to initialize hyper client: {error}")
+        }
+        ExecutorError::Hyper(error) => format!("Upstream hyper request failed: {error}"),
         ExecutorError::Request(error) => format!("Upstream request failed: {error}"),
     }
 }

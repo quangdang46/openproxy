@@ -1,6 +1,12 @@
 use std::collections::BTreeMap;
+use std::io;
 use std::sync::Arc;
 
+use http_body_util::Full;
+use hyper::body::Incoming as HyperIncoming;
+use hyper::http;
+use hyper::http::uri::InvalidUri;
+use hyper::{Request as HyperRequest, Response as HyperResponse, Uri};
 use once_cell::sync::Lazy;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
@@ -224,10 +230,38 @@ pub struct ExecutionRequest {
 }
 
 pub struct ExecutionResponse {
-    pub response: reqwest::Response,
+    pub response: UpstreamResponse,
     pub url: String,
     pub headers: HeaderMap,
     pub transformed_body: Value,
+    pub transport: TransportKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportKind {
+    Reqwest,
+    Hyper,
+}
+
+pub enum UpstreamResponse {
+    Reqwest(reqwest::Response),
+    Hyper(HyperResponse<HyperIncoming>),
+}
+
+impl UpstreamResponse {
+    pub fn status(&self) -> http::StatusCode {
+        match self {
+            Self::Reqwest(response) => response.status(),
+            Self::Hyper(response) => response.status(),
+        }
+    }
+
+    pub fn headers(&self) -> &HeaderMap {
+        match self {
+            Self::Reqwest(response) => response.headers(),
+            Self::Hyper(response) => response.headers(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -236,6 +270,11 @@ pub enum ExecutorError {
     MissingCredentials(String),
     MissingProviderSpecificData(String, &'static str),
     InvalidHeader(reqwest::header::InvalidHeaderValue),
+    InvalidUri(InvalidUri),
+    InvalidRequest(http::Error),
+    Serialize(serde_json::Error),
+    HyperClientInit(io::Error),
+    Hyper(hyper_util::client::legacy::Error),
     Request(reqwest::Error),
 }
 
@@ -248,6 +287,36 @@ impl From<reqwest::Error> for ExecutorError {
 impl From<reqwest::header::InvalidHeaderValue> for ExecutorError {
     fn from(error: reqwest::header::InvalidHeaderValue) -> Self {
         Self::InvalidHeader(error)
+    }
+}
+
+impl From<InvalidUri> for ExecutorError {
+    fn from(error: InvalidUri) -> Self {
+        Self::InvalidUri(error)
+    }
+}
+
+impl From<http::Error> for ExecutorError {
+    fn from(error: http::Error) -> Self {
+        Self::InvalidRequest(error)
+    }
+}
+
+impl From<serde_json::Error> for ExecutorError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Serialize(error)
+    }
+}
+
+impl From<io::Error> for ExecutorError {
+    fn from(error: io::Error) -> Self {
+        Self::HyperClientInit(error)
+    }
+}
+
+impl From<hyper_util::client::legacy::Error> for ExecutorError {
+    fn from(error: hyper_util::client::legacy::Error) -> Self {
+        Self::Hyper(error)
     }
 }
 
@@ -463,7 +532,34 @@ impl DefaultExecutor {
         let url = self.build_url(&request.model, request.stream, &request.credentials)?;
         let headers = self.build_headers(&request.model, &request.credentials, request.stream)?;
         let transformed_body = self.transform_request(&request.body);
-        let client = self.pool.get(&self.provider, request.proxy.as_ref())?;
+        if self.use_hyper_transport(&request, &url) {
+            return self.execute_via_hyper(url, headers, transformed_body).await;
+        }
+
+        self.execute_via_reqwest(url, headers, transformed_body, request.proxy)
+            .await
+    }
+
+    pub fn pool(&self) -> &Arc<ClientPool> {
+        &self.pool
+    }
+
+    fn use_hyper_transport(&self, request: &ExecutionRequest, url: &str) -> bool {
+        request.proxy.is_none()
+            && url
+                .split('?')
+                .next()
+                .is_some_and(|path| path.ends_with("/chat/completions"))
+    }
+
+    async fn execute_via_reqwest(
+        &self,
+        url: String,
+        headers: HeaderMap,
+        transformed_body: Value,
+        proxy: Option<ProxyTarget>,
+    ) -> Result<ExecutionResponse, ExecutorError> {
+        let client = self.pool.get(&self.provider, proxy.as_ref())?;
         let response = client
             .post(&url)
             .headers(headers.clone())
@@ -472,15 +568,34 @@ impl DefaultExecutor {
             .await?;
 
         Ok(ExecutionResponse {
-            response,
+            response: UpstreamResponse::Reqwest(response),
             url,
             headers,
             transformed_body,
+            transport: TransportKind::Reqwest,
         })
     }
 
-    pub fn pool(&self) -> &Arc<ClientPool> {
-        &self.pool
+    async fn execute_via_hyper(
+        &self,
+        url: String,
+        headers: HeaderMap,
+        transformed_body: Value,
+    ) -> Result<ExecutionResponse, ExecutorError> {
+        let client = self.pool.get_hyper_direct(&self.provider)?;
+        let uri: Uri = url.parse()?;
+        let body_bytes = serde_json::to_vec(&transformed_body)?;
+        let mut request = HyperRequest::post(uri).body(Full::new(body_bytes.into()))?;
+        *request.headers_mut() = headers.clone();
+        let response = client.request(request).await?;
+
+        Ok(ExecutionResponse {
+            response: UpstreamResponse::Hyper(response),
+            url,
+            headers,
+            transformed_body,
+            transport: TransportKind::Hyper,
+        })
     }
 }
 

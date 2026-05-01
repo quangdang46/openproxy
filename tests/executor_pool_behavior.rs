@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -8,8 +8,8 @@ use std::thread;
 use std::time::Duration;
 
 use openproxy::core::executor::{
-    ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError, CLIENT_POOL_IDLE_TIMEOUT,
-    CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE,
+    ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError, TransportKind,
+    CLIENT_POOL_IDLE_TIMEOUT, CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE,
 };
 use openproxy::core::proxy::{normalize_proxy_url, resolve_proxy_target, ProxyTarget};
 use openproxy::types::{AppDb, ProviderConnection, ProviderNode, ProxyPool, Settings};
@@ -616,6 +616,120 @@ async fn default_executor_execute_posts_expected_request() {
     assert_eq!(response.transformed_body, request_body);
     assert_eq!(response.headers["authorization"], "Bearer sk-test");
     assert_eq!(response.response.status(), 200);
+    assert_eq!(response.transport, TransportKind::Hyper);
+}
+
+#[tokio::test]
+async fn default_executor_execute_uses_reqwest_when_proxy_present() {
+    let upstream = MockServer::start().await;
+    let request_body = json!({
+        "model": "gpt-4.1",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer sk-test"))
+        .and(body_json(request_body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let provider_node = ProviderNode {
+        id: "node-openai".into(),
+        r#type: "openai-compatible".into(),
+        name: "Node".into(),
+        prefix: Some("custom".into()),
+        api_type: Some("chat".into()),
+        base_url: Some(format!("{}/v1", upstream.uri())),
+        created_at: None,
+        updated_at: None,
+        extra: BTreeMap::new(),
+    };
+
+    let executor = DefaultExecutor::new(
+        "node-openai",
+        Arc::new(ClientPool::new()),
+        Some(provider_node),
+    )
+    .expect("compatible executor");
+
+    let response = executor
+        .execute(ExecutionRequest {
+            model: "gpt-4.1".into(),
+            body: request_body,
+            stream: true,
+            credentials: connection("node-openai"),
+            proxy: Some(ProxyTarget {
+                url: "http://127.0.0.1:9".into(),
+                no_proxy: "127.0.0.1,localhost".into(),
+                strict_proxy: false,
+                pool_id: Some("proxy-a".into()),
+            }),
+        })
+        .await
+        .expect("execute request");
+
+    assert_eq!(response.response.status(), 200);
+    assert_eq!(response.transport, TransportKind::Reqwest);
+}
+
+#[tokio::test]
+async fn default_executor_execute_uses_reqwest_for_responses_api() {
+    let upstream = MockServer::start().await;
+    let request_body = json!({
+        "model": "gpt-4.1",
+        "input": [{"role": "user", "content": "hello"}]
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(header("authorization", "Bearer sk-test"))
+        .and(body_json(request_body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "resp_1"})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let provider_node = ProviderNode {
+        id: "node-openai".into(),
+        r#type: "openai-compatible".into(),
+        name: "Node".into(),
+        prefix: Some("custom".into()),
+        api_type: Some("responses".into()),
+        base_url: Some(format!("{}/v1", upstream.uri())),
+        created_at: None,
+        updated_at: None,
+        extra: BTreeMap::new(),
+    };
+    let mut credentials = connection("node-openai");
+    credentials.provider_specific_data.insert(
+        "apiType".into(),
+        serde_json::Value::String("responses".into()),
+    );
+
+    let executor = DefaultExecutor::new(
+        "node-openai",
+        Arc::new(ClientPool::new()),
+        Some(provider_node),
+    )
+    .expect("compatible executor");
+
+    let response = executor
+        .execute(ExecutionRequest {
+            model: "gpt-4.1".into(),
+            body: request_body,
+            stream: false,
+            credentials,
+            proxy: None,
+        })
+        .await
+        .expect("execute request");
+
+    assert_eq!(response.response.status(), 200);
+    assert_eq!(response.transport, TransportKind::Reqwest);
 }
 
 #[test]
@@ -743,6 +857,22 @@ fn client_pool_reuses_same_provider_key_and_splits_by_proxy_fingerprint() {
         .expect("proxied client with no_proxy");
     assert!(!Arc::ptr_eq(&proxied, &proxied_with_no_proxy));
     assert_eq!(pool.len(), 3);
+}
+
+#[test]
+fn hyper_client_pool_reuses_same_provider_key() {
+    let pool = ClientPool::new();
+    let openai = pool
+        .get_hyper_direct("openai")
+        .expect("openai hyper client");
+    let openai_again = pool
+        .get_hyper_direct("openai")
+        .expect("openai hyper client again");
+    let groq = pool.get_hyper_direct("groq").expect("groq hyper client");
+
+    assert!(Arc::ptr_eq(&openai, &openai_again));
+    assert!(!Arc::ptr_eq(&openai, &groq));
+    assert_eq!(pool.hyper_len(), 2);
 }
 
 #[test]
@@ -999,6 +1129,103 @@ async fn client_pool_reuses_connection_for_sequential_requests() {
     assert_eq!(second, "ok");
     server.join().expect("server joined");
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn default_executor_reuses_hyper_connection_for_sequential_requests() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind hyper keepalive server");
+    let addr = listener.local_addr().expect("hyper keepalive server addr");
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let accepted_counter = accepted.clone();
+
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept first connection");
+        accepted_counter.fetch_add(1, Ordering::SeqCst);
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set read timeout");
+        let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+
+        for _ in 0..2 {
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            assert!(request_line.starts_with("POST /v1/chat/completions HTTP/1.1"));
+
+            let mut content_length = 0usize;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).expect("read header line");
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+
+                let lower = line.to_ascii_lowercase();
+                if let Some(length) = lower.strip_prefix("content-length:") {
+                    content_length = length.trim().parse().expect("parse content-length");
+                }
+            }
+
+            let mut body = vec![0; content_length];
+            reader.read_exact(&mut body).expect("read request body");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("decode request body");
+            assert_eq!(json["model"], "gpt-4.1");
+
+            let payload = br#"{"ok":true}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                        payload.len()
+                    )
+                    .as_bytes(),
+                )
+                .expect("write response headers");
+            stream.write_all(payload).expect("write response body");
+            stream.flush().expect("flush response");
+        }
+    });
+
+    let provider_node = ProviderNode {
+        id: "node-openai".into(),
+        r#type: "openai-compatible".into(),
+        name: "Node".into(),
+        prefix: Some("custom".into()),
+        api_type: Some("chat".into()),
+        base_url: Some(format!("http://{addr}/v1")),
+        created_at: None,
+        updated_at: None,
+        extra: BTreeMap::new(),
+    };
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("node-openai", pool.clone(), Some(provider_node))
+        .expect("compatible executor");
+    let request_body = json!({
+        "model": "gpt-4.1",
+        "stream": true,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    for _ in 0..2 {
+        let response = executor
+            .execute(ExecutionRequest {
+                model: "gpt-4.1".into(),
+                body: request_body.clone(),
+                stream: true,
+                credentials: connection("node-openai"),
+                proxy: None,
+            })
+            .await
+            .expect("execute request");
+        assert_eq!(response.transport, TransportKind::Hyper);
+        assert_eq!(response.response.status(), 200);
+    }
+
+    server.join().expect("server joined");
+    assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(pool.hyper_len(), 1);
 }
 
 #[tokio::test]

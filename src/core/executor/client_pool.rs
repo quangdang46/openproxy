@@ -1,7 +1,13 @@
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
+use bytes::Bytes;
 use dashmap::DashMap;
+use http_body_util::Full;
+use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
+use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
+use hyper_util::rt::{TokioExecutor, TokioTimer};
 
 use crate::core::proxy::ProxyTarget;
 
@@ -11,8 +17,11 @@ pub const CLIENT_POOL_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 pub struct ClientPool {
-    clients: DashMap<String, Arc<reqwest::Client>>,
+    reqwest_clients: DashMap<String, Arc<reqwest::Client>>,
+    hyper_clients: DashMap<String, Arc<DirectHyperClient>>,
 }
+
+pub type DirectHyperClient = HyperClient<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
 impl ClientPool {
     pub fn new() -> Self {
@@ -24,7 +33,18 @@ impl ClientPool {
         provider_key: &str,
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
-        self.get_or_insert_with(provider_key, proxy, || build_client(proxy))
+        self.get_or_insert_with(provider_key, proxy, || build_reqwest_client(proxy))
+    }
+
+    pub fn get_hyper_direct(
+        &self,
+        provider_key: &str,
+    ) -> Result<Arc<DirectHyperClient>, io::Error> {
+        let entry = self
+            .hyper_clients
+            .entry(provider_key.to_string())
+            .or_try_insert_with(build_hyper_client)?;
+        Ok(entry.clone())
     }
 
     pub fn get_or_insert_with<F>(
@@ -39,20 +59,26 @@ impl ClientPool {
         let key = client_key(provider_key, proxy);
         // Initialize the client while holding the per-key entry so same-key races
         // cannot build duplicate pools and then discard the extras.
-        let entry = self.clients.entry(key).or_try_insert_with(build)?;
+        let entry = self.reqwest_clients.entry(key).or_try_insert_with(build)?;
         Ok(entry.clone())
     }
 
     pub fn len(&self) -> usize {
-        self.clients.len()
+        self.reqwest_clients.len()
+    }
+
+    pub fn hyper_len(&self) -> usize {
+        self.hyper_clients.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.clients.is_empty()
+        self.reqwest_clients.is_empty() && self.hyper_clients.is_empty()
     }
 }
 
-fn build_client(proxy: Option<&ProxyTarget>) -> Result<Arc<reqwest::Client>, reqwest::Error> {
+fn build_reqwest_client(
+    proxy: Option<&ProxyTarget>,
+) -> Result<Arc<reqwest::Client>, reqwest::Error> {
     let mut builder = reqwest::Client::builder()
         .pool_idle_timeout(CLIENT_POOL_IDLE_TIMEOUT)
         .pool_max_idle_per_host(CLIENT_POOL_MAX_IDLE_PER_HOST)
@@ -67,6 +93,28 @@ fn build_client(proxy: Option<&ProxyTarget>) -> Result<Arc<reqwest::Client>, req
     }
 
     Ok(Arc::new(builder.build()?))
+}
+
+fn build_hyper_client() -> Result<Arc<DirectHyperClient>, io::Error> {
+    let mut http = HttpConnector::new();
+    http.enforce_http(false);
+    http.set_keepalive(Some(CLIENT_POOL_TCP_KEEPALIVE));
+    http.set_nodelay(true);
+
+    let https = HttpsConnectorBuilder::new()
+        .with_native_roots()
+        .map_err(io::Error::other)?
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .wrap_connector(http);
+
+    let mut builder = HyperClient::builder(TokioExecutor::new());
+    builder.pool_idle_timeout(CLIENT_POOL_IDLE_TIMEOUT);
+    builder.pool_max_idle_per_host(CLIENT_POOL_MAX_IDLE_PER_HOST);
+    builder.pool_timer(TokioTimer::new());
+
+    Ok(Arc::new(builder.build(https)))
 }
 
 fn client_key(provider_key: &str, proxy: Option<&ProxyTarget>) -> String {
