@@ -8,10 +8,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bytes::Bytes;
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use futures_util::{Stream, StreamExt};
+use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
-use tokio_util::sync::CancellationToken;
 
 use crate::core::combo::{
     check_fallback_error, execute_combo_strategy, get_combo_models_from_data, ComboAttemptError,
@@ -454,48 +453,10 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
 fn proxy_response(response: UpstreamResponse) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
-    let (body, _is_streaming) = match response {
-        UpstreamResponse::Reqwest(response) => {
-            let is_streaming = response
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|v| v.contains("text/event-stream"));
-            (Body::from_stream(response.bytes_stream()), is_streaming)
-        }
-        UpstreamResponse::Hyper(response) => {
-            let (_, body) = response.into_parts();
-            (Body::new(body), false)
-        }
-    };
-    let mut proxied = Response::new(body);
-    *proxied.status_mut() = status;
-    let connection_tokens = connection_header_tokens(&headers);
-
-    for (name, value) in &headers {
-        if is_hop_by_hop_header(name.as_str())
-            || connection_tokens.contains(&name.as_str().to_ascii_lowercase())
-        {
-            continue;
-        }
-        proxied.headers_mut().insert(name, value.clone());
-    }
-
-    proxied
-}
-
-fn proxy_response_with_sse_transform(
-    response: UpstreamResponse,
-    transformer: impl FnMut(Bytes) -> Bytes + Send + 'static,
-) -> Response {
-    let status = response.status();
-    let headers = response.headers().clone();
     let body = match response {
         UpstreamResponse::Reqwest(response) => {
-            let stream = response.bytes_stream();
-            let cancellation_token = CancellationToken::new();
-            let pipe = pipe_with_disconnect(stream, transformer, cancellation_token);
-            Body::from_stream(pipe)
+            let stream = response.bytes_stream().map_ok(|b: Bytes| b);
+            Body::from_stream(stream)
         }
         UpstreamResponse::Hyper(response) => {
             let (_, body) = response.into_parts();
@@ -518,21 +479,7 @@ fn proxy_response_with_sse_transform(
     proxied
 }
 
-fn pipe_with_disconnect(
-    upstream: impl Stream<Item = Result<Bytes, reqwest::Error>> + Send + 'static,
-    mut transformer: impl FnMut(Bytes) -> Bytes + Send + 'static,
-    _cancellation_token: CancellationToken,
-) -> impl Stream<Item = Result<Bytes, std::convert::Infallible>> + Send + 'static {
-    upstream.map(move |item| {
-        match item {
-            Ok(chunk) => Ok(transformer(chunk)),
-            Err(e) => {
-                tracing::warn!("Upstream stream error: {}", e);
-                Ok(Bytes::new())
-            }
-        }
-    })
-}
+
 
 async fn extract_error_message(response: UpstreamResponse) -> String {
     let status = response.status();

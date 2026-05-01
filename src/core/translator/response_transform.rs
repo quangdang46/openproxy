@@ -35,41 +35,23 @@ pub struct AnthropicStreamingState {
 }
 
 /// Gemini streaming state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GeminiStreamingState {
     pub base: StreamingBase,
     /// Track current part index
     pub current_part_index: usize,
 }
 
-impl Default for GeminiStreamingState {
-    fn default() -> Self {
-        Self {
-            base: StreamingBase::default(),
-            current_part_index: 0,
-        }
-    }
-}
-
 /// Ollama streaming state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OllamaStreamingState {
     pub base: StreamingBase,
     /// Track message index
     pub message_idx: usize,
 }
 
-impl Default for OllamaStreamingState {
-    fn default() -> Self {
-        Self {
-            base: StreamingBase::default(),
-            message_idx: 0,
-        }
-    }
-}
-
 /// Cursor Connect Protocol streaming state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CursorStreamingState {
     pub base: StreamingBase,
     /// Raw frame buffer for binary protocol
@@ -80,35 +62,14 @@ pub struct CursorStreamingState {
     pub in_message: bool,
 }
 
-impl Default for CursorStreamingState {
-    fn default() -> Self {
-        Self {
-            base: StreamingBase::default(),
-            frame_buffer: Vec::new(),
-            decompress_buffer: Vec::new(),
-            in_message: false,
-        }
-    }
-}
-
 /// Kiro EventStream state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct KiroStreamingState {
     pub base: StreamingBase,
     /// Event stream buffer
     pub event_buffer: Vec<u8>,
     /// Current event type
     pub current_event_type: Option<String>,
-}
-
-impl Default for KiroStreamingState {
-    fn default() -> Self {
-        Self {
-            base: StreamingBase::default(),
-            event_buffer: Vec::new(),
-            current_event_type: None,
-        }
-    }
 }
 
 /// Trait for transforming streaming responses
@@ -233,24 +194,19 @@ if let Some(data) = line.strip_prefix("data: ") {
                         let index = delta.index;
 
                         match delta_type {
-                            "text_delta" => {
-                                if !text.is_empty() {
-                                    output_lines.push(format!(
-                                        r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
-                                        index,
-                                        escape_json_string(text)
-                                    ));
-                                }
+                            "text_delta" if !text.is_empty() => {
+                                output_lines.push(format!(
+                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                    index,
+                                    escape_json_string(text)
+                                ));
                             }
-                            "thinking_delta" => {
-                                // Convert thinking to a special content block for OpenAI compatibility
-                                if !text.is_empty() {
-                                    output_lines.push(format!(
-                                        r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"[thinking] {} [/thinking]"}},"logprobs":null,"finish_reason":null}}]}}"#,
-                                        index,
-                                        escape_json_string(text)
-                                    ));
-                                }
+                            "thinking_delta" if !text.is_empty() => {
+                                output_lines.push(format!(
+                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"[thinking] {} [/thinking]"}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                    index,
+                                    escape_json_string(text)
+                                ));
                             }
                             "cache_control_delta" => {
                                 // Emit cache_lookahead metadata
@@ -379,9 +335,7 @@ impl StreamingTransformer for GeminiToOpenAiTransformer {
         for line in text.lines() {
             let line = line.trim();
 
-            if line.starts_with("data: ") {
-                let data = &line[6..];
-
+            if let Some(data) = line.strip_prefix("data: ") {
                 if data.trim() == "[DONE]" {
                     output_lines.push("data: [DONE]".to_string());
                     continue;
