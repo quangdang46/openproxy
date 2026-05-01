@@ -78,6 +78,9 @@ aws-sigv4 = "1.4"
 # Random
 rand = "0.8"
 
+# FNV hash for cache keys
+fnv = "1.0"
+
 # Async stream
 async-stream = "0.3"
 

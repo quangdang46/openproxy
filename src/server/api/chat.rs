@@ -16,7 +16,7 @@ use crate::core::combo::{
     check_fallback_error, execute_combo_strategy, get_combo_models_from_data, ComboAttemptError,
     ComboExecutionError, ComboStrategy,
 };
-use crate::core::executor::{DefaultExecutor, ExecutionRequest, ExecutorError, UpstreamResponse};
+use crate::core::executor::{ExecutorError, UpstreamResponse};
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
@@ -160,30 +160,58 @@ async fn forward_with_provider_fallback(
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-        let executor = match DefaultExecutor::new(
-            provider.to_string(),
-            state.client_pool.clone(),
-            provider_node,
-        ) {
-            Ok(executor) => executor,
-            Err(error) => {
-                return Err(ComboAttemptError {
-                    status: 500,
-                    message: executor_error_message(&error),
-                    retry_after: None,
-                })
-            }
+use crate::core::executor::{
+            DefaultExecutor, ExecutionRequest, KiroExecutor, KiroExecutionRequest,
+            KiroExecutorResponse,
         };
 
-        let execution = executor
-            .execute(ExecutionRequest {
+        let executor_result: Result<_, ComboAttemptError> = if provider == "kiro" {
+            let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Kiro executor creation failed: {:?}", e),
+                    retry_after: None,
+                })?;
+            executor.execute_request(KiroExecutionRequest {
                 model: model.to_string(),
                 body: request_body.clone(),
                 stream,
                 credentials: connection.clone(),
                 proxy,
+            }).await
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Kiro execution failed: {:?}", e),
+                    retry_after: None,
+                })
+        } else {
+            let executor = DefaultExecutor::new(provider.to_string(), state.client_pool.clone(), provider_node)
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Default executor creation failed: {:?}", e),
+                    retry_after: None,
+                })?;
+            let result = executor.execute(ExecutionRequest {
+                model: model.to_string(),
+                body: request_body.clone(),
+                stream,
+                credentials: connection.clone(),
+                proxy,
+            }).await.map_err(|err| ComboAttemptError {
+                status: 500,
+                message: format!("Execution failed: {:?}", err),
+                retry_after: None,
+            })?;
+            Ok(KiroExecutorResponse {
+                response: result.response,
+                url: result.url,
+                headers: result.headers,
+                transformed_body: result.transformed_body,
+                transport: result.transport,
             })
-            .await;
+        };
+
+        let execution = executor_result;
 
         match execution {
             Ok(result) => {
@@ -222,13 +250,9 @@ async fn forward_with_provider_fallback(
                 return Err(last_error.expect("set last error"));
             }
             Err(error) => {
-                let message = executor_error_message(&error);
+                let message = format!("{:?}", error);
                 let decision = check_fallback_error(502, &message, 0);
-                last_error = Some(ComboAttemptError {
-                    status: 502,
-                    message: message.clone(),
-                    retry_after: None,
-                });
+                last_error = Some(error);
 
                 if decision.should_fallback {
                     mark_connection_unavailable(

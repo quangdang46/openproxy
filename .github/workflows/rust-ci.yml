@@ -1,0 +1,37 @@
+name: Rust CI
+
+on:
+  push:
+    paths:
+      - ".github/workflows/rust-ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**/*.rs"
+      - "tests/**/*.rs"
+  pull_request:
+    paths:
+      - ".github/workflows/rust-ci.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "src/**/*.rs"
+      - "tests/**/*.rs"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Rust tests
+        run: cargo test --lib --tests

@@ -74,3 +74,6 @@ scripts/agSniffer/*
 # Added by cargo
 
 /target
+
+# bv (beads viewer) local config and caches
+.bv/
