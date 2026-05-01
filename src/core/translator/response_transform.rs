@@ -5,8 +5,7 @@
 //! streaming formats to OpenAI SSE format.
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Deserialize;
 
 /// Base streaming state shared across all transformations
 #[derive(Debug, Clone, Default)]
@@ -26,23 +25,13 @@ pub struct OpenAiStreamingState {
 }
 
 /// Anthropic SSE streaming state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AnthropicStreamingState {
     pub base: StreamingBase,
     /// Track partial message for content blocks
     pub current_block: Option<String>,
     /// Cache control metadata
     pub cache_lookaheads: Vec<String>,
-}
-
-impl Default for AnthropicStreamingState {
-    fn default() -> Self {
-        Self {
-            base: StreamingBase::default(),
-            current_block: None,
-            cache_lookaheads: Vec::new(),
-        }
-    }
 }
 
 /// Gemini streaming state
@@ -151,9 +140,10 @@ impl StreamingTransformer for OpenAiTransformer {
 
         for line in text.lines() {
             let line = line.trim();
-            if line.starts_with("data: ") {
-                let data = &line[6..];
-                if data.trim() == "[DONE]" {
+if let Some(data) = line.strip_prefix("data: ") {
+                let data = data.trim();
+
+                if data == "[DONE]" {
                     lines.push("data: [DONE]".to_string());
                 } else {
                     lines.push(line.to_string());
@@ -202,15 +192,15 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
         for line in text.lines() {
             let line = line.trim();
 
-            if line.starts_with("data: ") {
-                let data = &line[6..];
+if let Some(data) = line.strip_prefix("data: ") {
+                let data = data.trim();
 
                 if data == "[DONE]" {
                     output_lines.push("data: [DONE]".to_string());
                     continue;
                 }
 
-                // Parse Anthropic SSE event
+                // Parse event
                 if let Ok(event) = serde_json::from_str::<AnthropicSSEEvent>(data) {
 // Convert message_start
                     if let Some(msg_start) = event.message_start {
@@ -224,7 +214,7 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
 
                     // Convert content_block_start
                     if let Some(block_start) = event.content_block_start {
-                        let block_type = block_start
+                        let _block_type = block_start
                             .content_block
                             .get("type")
                             .and_then(|t| t.as_str())
@@ -524,10 +514,10 @@ impl StreamingTransformer for OllamaToOpenAiTransformer {
         for line in text.lines() {
             let line = line.trim();
 
-            if line.starts_with("data: ") {
-                let data = &line[6..];
+            if let Some(data) = line.strip_prefix("data: ") {
+                let data = data.trim();
 
-                if data.trim() == "[DONE]" {
+                if data == "[DONE]" {
                     output_lines.push("data: [DONE]".to_string());
                     continue;
                 }
