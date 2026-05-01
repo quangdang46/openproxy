@@ -1,4 +1,5 @@
 mod chat;
+mod oauth;
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,6 +24,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/health", get(health))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat::chat_completions))
+        .merge(oauth::routes())
 }
 
 async fn health() -> Json<HealthResponse> {

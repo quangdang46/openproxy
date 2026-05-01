@@ -13,6 +13,8 @@ use url::form_urlencoded;
 
 pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 
+pub mod pending;
+
 pub enum OAuthFlowKind {
     AuthorizationCodePkce,
     DeviceCode,
@@ -71,11 +73,7 @@ pub mod pkce {
     pub fn generate_code_verifier() -> String {
         let mut random_bytes = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut random_bytes);
-        let charset = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-        random_bytes
-            .iter()
-            .map(|&b| charset[(b as usize) % charset.len()] as char)
-            .collect()
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
     }
 
     pub fn generate_code_challenge(verifier: &str) -> String {
@@ -377,7 +375,7 @@ mod tests {
     #[test]
     fn test_pkce_generate() {
         let (verifier, challenge) = pkce::generate_verifier_and_challenge();
-        assert_eq!(verifier.len(), 32);
+        assert_eq!(verifier.len(), 43);
         assert!(!challenge.is_empty());
 
         let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -398,5 +396,37 @@ mod tests {
 
         let soon = (chrono::Utc::now() + chrono::Duration::minutes(3)).to_rfc3339();
         assert!(needs_refresh(&Some(soon)));
+    }
+}
+
+#[cfg(test)]
+mod pkce_tests {
+    use super::*;
+
+    #[test]
+    fn test_code_verifier_length() {
+        let verifier = pkce::generate_code_verifier();
+        assert_eq!(verifier.len(), 43);
+    }
+
+    #[test]
+    fn test_code_verifier_chars() {
+        let verifier = pkce::generate_code_verifier();
+        assert!(verifier.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~')));
+    }
+
+    #[test]
+    fn test_code_challenge_derivation() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let challenge = pkce::generate_code_challenge(verifier);
+        assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+    }
+
+    #[test]
+    fn test_code_challenge_is_deterministic() {
+        let verifier = pkce::generate_code_verifier();
+        let c1 = pkce::generate_code_challenge(&verifier);
+        let c2 = pkce::generate_code_challenge(&verifier);
+        assert_eq!(c1, c2);
     }
 }
