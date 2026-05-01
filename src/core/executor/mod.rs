@@ -1,3 +1,4 @@
+mod api_key;
 mod client_pool;
 mod codex;
 mod cursor;
@@ -6,6 +7,11 @@ mod grok_web;
 mod kiro;
 mod ollama;
 mod vertex;
+
+pub use api_key::{
+    ApiKeyExecutor, ApiKeyExecutorError, ApiKeyExecutorResponse, ApiKeyExecutionRequest,
+    get_api_key_provider_config, is_api_key_provider,
+};
 
 pub use client_pool::{
     ClientPool, DirectHyperClient, CLIENT_POOL_IDLE_TIMEOUT, CLIENT_POOL_MAX_IDLE_PER_HOST,
