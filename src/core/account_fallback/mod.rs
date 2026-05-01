@@ -169,7 +169,7 @@ impl AccountRegistry {
         let key = format!("sticky_{}", combo_id);
         let now = Utc::now().timestamp();
         let lock = ModelLockState {
-            model: key,
+            model: key.clone(),
             account_id: account_id.to_string(),
             locked_at: now,
             ttl_secs: duration_secs,
