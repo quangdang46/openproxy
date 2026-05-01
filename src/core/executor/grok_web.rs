@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hyper::http::uri::InvalidUri;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE};
 use serde_json::Value;
 
 use crate::core::proxy::ProxyTarget;
@@ -449,6 +449,8 @@ mod tests {
             expires_in: None,
             error_code: None,
             consecutive_use_count: None,
+            backoff_level: None,
+            consecutive_errors: None,
             provider_specific_data: BTreeMap::new(),
             extra: BTreeMap::new(),
         };

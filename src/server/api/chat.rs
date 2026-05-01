@@ -305,7 +305,8 @@ use crate::core::executor::{
 
                 let retry_after = retry_after_from_headers(result.response.headers());
                 let message = extract_error_message(result.response).await;
-                let decision = check_fallback_error(status.as_u16(), &message, 0);
+                let current_backoff = connection.backoff_level.unwrap_or(0);
+                let decision = check_fallback_error(status.as_u16(), &message, current_backoff);
                 let cooldown = retry_after
                     .map(|timestamp| (timestamp - Utc::now()).to_std().unwrap_or_default())
                     .unwrap_or(decision.cooldown);
@@ -323,6 +324,7 @@ use crate::core::executor::{
                         status.as_u16(),
                         &message,
                         cooldown,
+                        decision.new_backoff_level.unwrap_or(current_backoff + 1),
                     )
                     .await;
                     excluded.insert(connection.id.clone());
@@ -333,7 +335,8 @@ use crate::core::executor::{
             }
             Err(error) => {
                 let message = format!("{:?}", error);
-                let decision = check_fallback_error(502, &message, 0);
+                let current_backoff = connection.backoff_level.unwrap_or(0);
+                let decision = check_fallback_error(502, &message, current_backoff);
                 last_error = Some(error);
 
                 if decision.should_fallback {
@@ -344,6 +347,7 @@ use crate::core::executor::{
                         502,
                         &message,
                         decision.cooldown,
+                        decision.new_backoff_level.unwrap_or(current_backoff + 1),
                     )
                     .await;
                     excluded.insert(connection.id.clone());
@@ -509,6 +513,7 @@ async fn mark_connection_unavailable(
     status: u16,
     message: &str,
     cooldown: std::time::Duration,
+    backoff_level: u32,
 ) {
     let until = ChronoDuration::from_std(cooldown)
         .map(|duration| Utc::now() + duration)
@@ -531,6 +536,11 @@ async fn mark_connection_unavailable(
                 connection.last_error = Some(message.clone());
                 connection.last_error_at = Some(Utc::now().to_rfc3339());
                 connection.error_code = Some(status.to_string());
+                connection.backoff_level = Some(backoff_level);
+                connection.consecutive_errors = connection
+                    .consecutive_errors
+                    .map(|e| e.saturating_add(1))
+                    .or(Some(1));
                 connection.test_status = Some("unavailable".into());
             }
         })
@@ -550,6 +560,8 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
                 connection.last_error = None;
                 connection.last_error_at = None;
                 connection.error_code = None;
+                connection.backoff_level = Some(0);
+                connection.consecutive_errors = Some(0);
                 connection.test_status = None;
             }
         })
@@ -761,6 +773,8 @@ mod tests {
             expires_in: None,
             error_code: None,
             consecutive_use_count: None,
+            backoff_level: None,
+            consecutive_errors: None,
             provider_specific_data: BTreeMap::new(),
             extra: BTreeMap::new(),
         }

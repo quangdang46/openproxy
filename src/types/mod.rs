@@ -123,6 +123,10 @@ pub struct ProviderConnection {
     pub error_code: Option<String>,
     #[serde(default)]
     pub consecutive_use_count: Option<u32>,
+    #[serde(default)]
+    pub backoff_level: Option<u32>,
+    #[serde(default)]
+    pub consecutive_errors: Option<u32>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub provider_specific_data: BTreeMap<String, Value>,
     #[serde(flatten)]
