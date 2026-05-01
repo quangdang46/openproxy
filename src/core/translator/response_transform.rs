@@ -622,12 +622,398 @@ mod tests {
         assert!(!lines.is_empty());
     }
 
-    #[test]
-fn test_anthropic_to_openai_transformer() {
+#[test]
+    fn test_anthropic_to_openai_transformer() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         // Simulate Anthropic SSE - format: data: {"type":"message_start","message_start":{...}}
         let chunk = Bytes::from(r#"data: {"type":"message_start","message_start":{"id":"test","model":"claude-3","type":"message_start","created_at":1234567890}}"#);
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty(), "Expected non-empty output lines, got: {:?}", lines);
+    }
+
+    #[test]
+    fn test_openai_transformer_multiple_lines() {
+        let mut transformer = OpenAiTransformer::new();
+        let chunk = Bytes::from(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},\"index\":0}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\" world\"},\"index\":0}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("hello"));
+        assert!(lines[1].contains("world"));
+        assert_eq!(lines[2], "data: [DONE]");
+    }
+
+    #[test]
+    fn test_openai_transformer_done_signal() {
+        let mut transformer = OpenAiTransformer::new();
+        let chunk = Bytes::from("data: [DONE]\n\n");
+        let lines = transformer.transform_chunk(&chunk);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "data: [DONE]");
+    }
+
+    #[test]
+    fn test_openai_transformer_non_sse_content() {
+        let mut transformer = OpenAiTransformer::new();
+        let chunk = Bytes::from("plain text without SSE markers\n\n");
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        assert!(lines[0].contains("plain text"));
+    }
+
+    #[test]
+    fn test_openai_transformer_matches_content_type() {
+        let transformer = OpenAiTransformer::new();
+        assert!(transformer.matches_content_type(Some("text/event-stream")));
+        assert!(transformer.matches_content_type(Some("application/json")));
+        assert!(!transformer.matches_content_type(Some("text/plain")));
+        assert!(!transformer.matches_content_type(None));
+    }
+
+    #[test]
+    fn test_anthropic_message_start_conversion() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"type":"message_start","message_start":{"id":"msg-123","model":"claude-3-opus-20250219","type":"message","created_at":1234567890}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"id\":\"msg-123\""));
+        assert!(output.contains("\"object\":\"chat.completion.chunk\""));
+    }
+
+    #[test]
+    fn test_anthropic_content_block_start_conversion() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"type":"content_block_start","content_block_start":{"index":0,"content_block":{"type":"text"}}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"delta\":{\"role\":\"assistant\""));
+    }
+
+    #[test]
+    fn test_anthropic_text_delta_conversion() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"type":"content_block_delta","content_block_delta":{"index":0,"delta":{"type":"text_delta","text":"Hello"}}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"content\":\"Hello\""));
+        assert!(output.contains("\"object\":\"chat.completion.chunk\""));
+    }
+
+    #[test]
+    fn test_anthropic_thinking_delta_conversion() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"type":"content_block_delta","content_block_delta":{"index":0,"delta":{"type":"thinking_delta","text":"reasoning here"}}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("[thinking]"));
+        assert!(output.contains("[/thinking]"));
+        assert!(output.contains("reasoning here"));
+    }
+
+    #[test]
+    fn test_anthropic_cache_control_delta_conversion() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"type":"content_block_delta","content_block_delta":{"index":0,"delta":{"type":"cache_control_delta","cache_control":{"type":"cache_control_lookahead"}}}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"cache_lookahead\":true"));
+    }
+
+    #[test]
+    fn test_anthropic_message_delta_stop_reason() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"type":"message_delta","message_delta":{"stop_reason":"end_turn"}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"finish_reason\":\"end_turn\""));
+    }
+
+    #[test]
+    fn test_anthropic_message_delta_usage() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"type":"message_delta","message_delta":{"usage":{"output_tokens":150,"input_tokens":50}}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"usage\""));
+        assert!(output.contains("\"prompt_tokens\":50"));
+        assert!(output.contains("\"completion_tokens\":150"));
+    }
+
+    #[test]
+    fn test_anthropic_multiple_events_in_chunk() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            "data: {\"type\":\"message_start\",\"message_start\":{\"id\":\"msg-1\",\"model\":\"claude-3\",\"created_at\":1234567890}}\n\
+             data: {\"type\":\"content_block_start\",\"content_block_start\":{\"index\":0,\"content_block\":{\"type\":\"text\"}}}\n\
+             data: {\"type\":\"content_block_delta\",\"content_block_delta\":{\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}}\n\
+             data: {\"type\":\"message_delta\",\"message_delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"output_tokens\":10,\"input_tokens\":5}}}}",
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn test_anthropic_empty_text_delta_skipped() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"type":"content_block_delta","content_block_delta":{"index":0,"delta":{"type":"text_delta","text":""}}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        // Empty text should produce no output lines
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_gemini_text_part_conversion() {
+        let mut transformer = GeminiToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"Hello Gemini"}]}}]}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"content\":\"Hello Gemini\""));
+    }
+
+    #[test]
+    fn test_gemini_function_call_conversion() {
+        let transformer = GeminiToOpenAiTransformer::new();
+        assert!(transformer.matches_content_type(Some("text/event-stream")));
+    }
+
+    #[test]
+    fn test_gemini_usage_metadata() {
+        let mut transformer = GeminiToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"test"}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":50}}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        // Should have text line plus usage line
+        assert!(!lines.is_empty());
+        let usage_line = lines.last().unwrap();
+        assert!(usage_line.contains("\"usage\""));
+        assert!(usage_line.contains("\"prompt_tokens\":100"));
+        assert!(usage_line.contains("\"completion_tokens\":50"));
+    }
+
+    #[test]
+    fn test_gemini_done_signal() {
+        let mut transformer = GeminiToOpenAiTransformer::new();
+        let chunk = Bytes::from("data: [DONE]\n\n");
+        let lines = transformer.transform_chunk(&chunk);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "data: [DONE]");
+    }
+
+    #[test]
+    fn test_gemini_multiple_parts_increment_index() {
+        let mut transformer = GeminiToOpenAiTransformer::new();
+        let chunk1 = Bytes::from(
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"First"}]}}]}"#,
+        );
+        let chunk2 = Bytes::from(
+            r#"data: {"candidates":[{"content":{"parts":[{"text":"Second"}]}}]}"#,
+        );
+        let lines1 = transformer.transform_chunk(&chunk1);
+        let lines2 = transformer.transform_chunk(&chunk2);
+        // Each chunk should have consistent part indices
+        assert!(!lines1.is_empty());
+        assert!(!lines2.is_empty());
+    }
+
+    #[test]
+    fn test_ollama_message_content_conversion() {
+        let mut transformer = OllamaToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"model":"llama3","created_at":1234567890,"message":{"role":"assistant","content":"Hello Ollama"},"done":false}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"content\":\"Hello Ollama\""));
+        assert!(output.contains("\"role\":\"assistant\""));
+    }
+
+    #[test]
+    fn test_ollama_tool_calls_conversion() {
+        let mut transformer = OllamaToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"model":"llama3","created_at":1234567890,"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"search","arguments":{"query":"rust"}}}]},"done":false}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        let output = &lines[0];
+        assert!(output.contains("\"tool_calls\""));
+        assert!(output.contains("\"name\":\"search\""));
+    }
+
+    #[test]
+    fn test_ollama_done_signal() {
+        let mut transformer = OllamaToOpenAiTransformer::new();
+        let chunk = Bytes::from(
+            r#"data: {"model":"llama3","done":true}"#,
+        );
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(!lines.is_empty());
+        assert!(lines.iter().any(|l| l == "data: [DONE]"));
+    }
+
+    #[test]
+    fn test_ollama_increments_message_idx_on_done() {
+        let mut transformer = OllamaToOpenAiTransformer::new();
+        assert_eq!(transformer.state.message_idx, 0);
+
+        let chunk1 = Bytes::from(r#"data: {"done":true}"#);
+        let lines1 = transformer.transform_chunk(&chunk1);
+        assert!(lines1.iter().any(|l| l == "data: [DONE]"));
+    }
+
+    #[test]
+    fn test_transformer_for_provider_anthropic() {
+        let transformer = transformer_for_provider("anthropic");
+        assert!(transformer.is_some());
+        assert_eq!(transformer.unwrap().output_format(), "openai");
+    }
+
+    #[test]
+    fn test_transformer_for_provider_gemini() {
+        let transformer = transformer_for_provider("gemini");
+        assert!(transformer.is_some());
+        assert_eq!(transformer.unwrap().output_format(), "openai");
+    }
+
+    #[test]
+    fn test_transformer_for_provider_ollama() {
+        let transformer = transformer_for_provider("ollama");
+        assert!(transformer.is_some());
+        assert_eq!(transformer.unwrap().output_format(), "openai");
+    }
+
+    #[test]
+    fn test_transformer_for_provider_claude_alias() {
+        let transformer = transformer_for_provider("claude");
+        assert!(transformer.is_some());
+        assert_eq!(transformer.unwrap().output_format(), "openai");
+    }
+
+    #[test]
+    fn test_transformer_for_provider_glm_alias() {
+        let transformer = transformer_for_provider("glm");
+        assert!(transformer.is_some());
+        assert_eq!(transformer.unwrap().output_format(), "openai");
+    }
+
+    #[test]
+    fn test_transformer_for_provider_unknown_defaults_to_openai() {
+        let transformer = transformer_for_provider("unknown-provider");
+        assert!(transformer.is_some());
+        let t = transformer.unwrap();
+        assert_eq!(t.output_format(), "openai");
+        assert!(t.matches_content_type(Some("text/event-stream")));
+    }
+
+    #[test]
+    fn test_transform_sse_stream_helper() {
+        let mut transformer = OpenAiTransformer::new();
+        let chunk = Bytes::from("data: {\"choices\":[{\"delta\":{\"content\":\"test\"}}]}\n\n");
+        let lines = transform_sse_stream(&chunk, &mut transformer);
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn test_escape_json_string_control_characters() {
+        assert_eq!(escape_json_string("tab\there"), "tab\\there");
+        assert_eq!(escape_json_string("return\r\n"), "return\\r\\n");
+        assert_eq!(escape_json_string("null\u{0}byte"), "null\\u0000byte");
+    }
+
+    #[test]
+    fn test_escape_json_string_unicode() {
+        assert_eq!(escape_json_string("日本語"), "日本語");
+        assert_eq!(escape_json_string("emoji🎉"), "emoji🎉");
+    }
+
+    #[test]
+    fn test_streaming_base_default() {
+        let base = StreamingBase::default();
+        assert!(base.line_buffer.is_empty());
+        assert!(!base.in_data_field);
+        assert!(base.content_accumulator.is_empty());
+    }
+
+    #[test]
+    fn test_openai_transformer_preserves_json_format() {
+        let mut transformer = OpenAiTransformer::new();
+        let complex_json = r#"data: {"id":"chatcmpl-123","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"Hello world"},"finish_reason":null}]}"#;
+        let chunk = Bytes::from(complex_json);
+        let lines = transformer.transform_chunk(&chunk);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("chatcmpl-123"));
+        assert!(lines[0].contains("Hello world"));
+    }
+
+    #[test]
+    fn test_anthropic_unknown_event_type_handled() {
+        let mut transformer = AnthropicToOpenAiTransformer::new();
+        let chunk = Bytes::from(r#"data: {"type":"unknown_event","data":{"foo":"bar"}}"#);
+        let lines = transformer.transform_chunk(&chunk);
+        // Unknown types should not produce output
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_gemini_empty_candidates_handled() {
+        let mut transformer = GeminiToOpenAiTransformer::new();
+        let chunk = Bytes::from(r#"data: {"candidates":[]}"#);
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_gemini_null_parts_handled() {
+        let mut transformer = GeminiToOpenAiTransformer::new();
+        let chunk = Bytes::from(r#"data: {"candidates":[{"content":{"parts":null}}]}"#);
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn test_ollama_null_content_handled() {
+        let mut transformer = OllamaToOpenAiTransformer::new();
+        let chunk = Bytes::from(r#"data: {"model":"llama3","message":{"role":"assistant","content":null},"done":false}"#);
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(lines.is_empty()); // No content to emit
+    }
+
+    #[test]
+    fn test_ollama_empty_content_skipped() {
+        let mut transformer = OllamaToOpenAiTransformer::new();
+        let chunk = Bytes::from(r#"data: {"model":"llama3","message":{"role":"assistant","content":""},"done":false}"#);
+        let lines = transformer.transform_chunk(&chunk);
+        assert!(lines.is_empty()); // Empty content should not produce delta
     }
 }
