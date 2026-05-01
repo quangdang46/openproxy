@@ -3,6 +3,7 @@ mod codex;
 mod cursor;
 mod default;
 mod kiro;
+mod ollama;
 mod vertex;
 
 pub use client_pool::{
@@ -24,6 +25,9 @@ pub use default::{
 pub use kiro::{
     AwsCredentials, EventStreamDecoder, KiroExecutor, KiroExecutorError, KiroExecutorResponse,
     KiroExecutionRequest, SseEvent as KiroSseEvent,
+};
+pub use ollama::{
+    OllamaExecutor, OllamaExecutorError, OllamaExecutionRequest, OllamaExecutorResponse,
 };
 pub use vertex::{
     VertexExecutor, VertexExecutorError, VertexExecutionRequest, VertexExecutorResponse,
