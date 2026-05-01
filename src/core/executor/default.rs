@@ -166,6 +166,30 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
                 "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
             ),
         ),
+        (
+            "azure",
+            ProviderConfig::openai("https://{resource}.openai.azure.com/v1/chat/completions"),
+        ),
+        (
+            "blackbox",
+            ProviderConfig::openai("https://api.blackbox.ai/api/chat/completions"),
+        ),
+        (
+            "ollama-cloud",
+            ProviderConfig::openai("https://api.ollama.com/v1/chat/completions"),
+        ),
+        (
+            "vertex",
+            ProviderConfig::gemini("https://generativelanguage.googleapis.com/v1beta/models"),
+        ),
+        (
+            "vertex-partner",
+            ProviderConfig::openai("https://{project}.{location}.掉ax.com/v1/chat/completions"),
+        ),
+        (
+            "ollama-local",
+            ProviderConfig::openai("http://localhost:11434/v1/chat/completions"),
+        ),
     ])
 });
 

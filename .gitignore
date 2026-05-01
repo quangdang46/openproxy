@@ -69,3 +69,8 @@ deploy*.sh
 ecosystem.config.*
 
 scripts/agSniffer/*
+
+
+# Added by cargo
+
+/target

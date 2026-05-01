@@ -42,7 +42,7 @@ impl OAuthProviderConfig {
             ("state".to_string(), state.to_string()),
         ];
 
-if self.uses_pkce {
+        if self.uses_pkce {
             pairs.push(("code_challenge".to_string(), code_challenge.to_string()));
             pairs.push(("code_challenge_method".to_string(), "S256".to_string()));
         }
@@ -206,7 +206,142 @@ pub mod providers {
     }
 }
 
-pub fn needs_refresh(expires_at: &Option<String>) -> bool {
+pub mod device_code {
+    use super::*;
+
+    pub async fn start_device_flow(
+        provider_config: &OAuthProviderConfig,
+        client_id: &str,
+    ) -> Result<DeviceCodeResponse, OAuthError> {
+        let client = reqwest::Client::new();
+        let params = [
+            ("client_id", client_id),
+            ("scope", &provider_config.scopes.join(" ")),
+        ];
+        let response = client
+            .post(&provider_config.auth_url)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| OAuthError {
+                error: "request_failed".to_string(),
+                error_description: Some(e.to_string()),
+            })?;
+
+        if !response.status().is_success() {
+            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
+                error: "unknown_error".to_string(),
+                error_description: None,
+            });
+            return Err(error);
+        }
+
+        response.json().await.map_err(|e| OAuthError {
+            error: "parse_error".to_string(),
+            error_description: Some(e.to_string()),
+        })
+    }
+
+    pub async fn poll_for_token(
+        provider_config: &OAuthProviderConfig,
+        device_code: &str,
+        user_code: &str,
+        interval_secs: u64,
+    ) -> Result<TokenResponse, OAuthError> {
+        let client = reqwest::Client::new();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+
+        loop {
+            interval.tick().await;
+            let params = [
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("client_id", "openproxy"),
+                ("device_code", device_code),
+            ];
+            let response = client
+                .post(&provider_config.token_url)
+                .form(&params)
+                .send()
+                .await
+                .map_err(|e| OAuthError {
+                    error: "request_failed".to_string(),
+                    error_description: Some(e.to_string()),
+                })?;
+
+            let body: serde_json::Value = response.json().await.unwrap_or_default();
+            let error = body.get("error").and_then(|e| e.as_str());
+
+            match error {
+                Some("authorization_pending") => continue,
+                Some("slow_down") => continue,
+                Some("access_denied") => {
+                    return Err(OAuthError {
+                        error: "access_denied".to_string(),
+                        error_description: Some("User denied the authorization request".to_string()),
+                    });
+                }
+                Some("expired_token") => {
+                    return Err(OAuthError {
+                        error: "expired_token".to_string(),
+                        error_description: Some("The device code has expired".to_string()),
+                    });
+                }
+                _ => {
+                    if body.get("access_token").is_some() {
+                        let token_response: TokenResponse = serde_json::from_value(body).map_err(|e| OAuthError {
+                            error: "parse_error".to_string(),
+                            error_description: Some(e.to_string()),
+                        })?;
+                        return Ok(token_response);
+                    }
+                    continue;
+                }
+            }
+        }
+    }
+
+    pub async fn exchange_code_for_token(
+        provider_config: &OAuthProviderConfig,
+        code: &str,
+        code_verifier: &str,
+        redirect_uri: &str,
+        client_id: &str,
+    ) -> Result<TokenResponse, OAuthError> {
+        let client = reqwest::Client::new();
+        let params = [
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", client_id),
+            ("code_verifier", code_verifier),
+        ];
+
+        let response = client
+            .post(&provider_config.token_url)
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| OAuthError {
+                error: "request_failed".to_string(),
+                error_description: Some(e.to_string()),
+            })?;
+
+        if !response.status().is_success() {
+            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
+                error: "token_exchange_failed".to_string(),
+                error_description: None,
+            });
+            return Err(error);
+        }
+
+        response.json().await.map_err(|e| OAuthError {
+            error: "parse_error".to_string(),
+            error_description: Some(e.to_string()),
+        })
+    }
+}
+
+pub mod token_refresh {
     let Some(expires_at) = expires_at else {
         return true;
     };

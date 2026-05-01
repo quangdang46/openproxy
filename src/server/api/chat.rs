@@ -451,11 +451,18 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
 fn proxy_response(response: UpstreamResponse) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
-    let body = match response {
-        UpstreamResponse::Reqwest(response) => Body::from_stream(response.bytes_stream()),
+    let (body, _is_streaming) = match response {
+        UpstreamResponse::Reqwest(response) => {
+            let is_streaming = response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.contains("text/event-stream"));
+            (Body::from_stream(response.bytes_stream()), is_streaming)
+        }
         UpstreamResponse::Hyper(response) => {
             let (_, body) = response.into_parts();
-            Body::new(body)
+            (Body::new(body), false)
         }
     };
     let mut proxied = Response::new(body);
