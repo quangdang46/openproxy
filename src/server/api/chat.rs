@@ -641,7 +641,7 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
 
     use chrono::{Duration as ChronoDuration, Utc};
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     use super::{earliest_retry_after, select_connection};
     use crate::types::{AppDb, ProviderConnection};
@@ -732,5 +732,242 @@ mod tests {
             .expect("retry-after should be derived from the earliest blocked account");
 
         assert!(retry_after <= early + ChronoDuration::seconds(1));
+    }
+
+    #[test]
+    fn select_connection_skips_rate_limited_accounts() {
+        let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
+        let mut rate_limited = connection("rate-limited", 1);
+        rate_limited.rate_limited_until = Some(future);
+
+        let available = connection("available", 2);
+
+        let snapshot = AppDb {
+            provider_connections: vec![rate_limited, available.clone()],
+            ..AppDb::default()
+        };
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
+            .expect("should find available connection");
+
+        assert_eq!(selected.id, "available");
+    }
+
+    #[test]
+    fn select_connection_respects_model_locks_for_specific_model() {
+        let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
+        let mut locked = connection("locked-model", 1);
+        locked.extra.insert(
+            "modelLock_gpt-4.1".into(),
+            Value::String(future),
+        );
+
+        let available = connection("available", 2);
+
+        let snapshot = AppDb {
+            provider_connections: vec![locked, available.clone()],
+            ..AppDb::default()
+        };
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
+            .expect("should skip locked model and find available");
+
+        assert_eq!(selected.id, "available");
+    }
+
+    #[test]
+    fn select_connection_skips_account_level_lock() {
+        let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
+        let mut all_locked = connection("all-locked", 1);
+        all_locked.extra.insert("modelLock___all".into(), Value::String(future));
+
+        let available = connection("available", 2);
+
+        let snapshot = AppDb {
+            provider_connections: vec![all_locked, available.clone()],
+            ..AppDb::default()
+        };
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
+            .expect("should skip account-level lock and find available");
+
+        assert_eq!(selected.id, "available");
+    }
+
+    #[test]
+    fn select_connection_skips_inactive_connections() {
+        let mut inactive = connection("inactive", 1);
+        inactive.is_active = Some(false);
+
+        let available = connection("active", 2);
+
+        let snapshot = AppDb {
+            provider_connections: vec![inactive, available.clone()],
+            ..AppDb::default()
+        };
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
+            .expect("should find active connection");
+
+        assert_eq!(selected.id, "active");
+    }
+
+    #[test]
+    fn select_connection_skips_connections_without_credentials() {
+        let mut no_creds = connection("no-creds", 1);
+        no_creds.api_key = None;
+        no_creds.access_token = None;
+
+        let with_creds = connection("with-creds", 2);
+
+        let snapshot = AppDb {
+            provider_connections: vec![no_creds, with_creds.clone()],
+            ..AppDb::default()
+        };
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
+            .expect("should find connection with credentials");
+
+        assert_eq!(selected.id, "with-creds");
+    }
+
+    #[test]
+    fn select_connection_prioritizes_by_priority_field() {
+        let low_priority = connection("low-priority", 2);
+        let high_priority = connection("high-priority", 1);
+
+        let snapshot = AppDb {
+            provider_connections: vec![low_priority, high_priority.clone()],
+            ..AppDb::default()
+        };
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
+            .expect("should select highest priority connection");
+
+        assert_eq!(selected.id, "high-priority");
+    }
+
+    #[test]
+    fn select_connection_filters_by_model_support() {
+        let mut conn_a = connection("conn-a", 1);
+        conn_a.default_model = None;
+        conn_a
+            .provider_specific_data
+            .insert("enabledModels".into(), json!(["gpt-4o"]));
+
+        let mut conn_b = connection("conn-b", 2);
+        conn_b.default_model = None;
+        conn_b
+            .provider_specific_data
+            .insert("enabledModels".into(), json!(["gpt-4.1"]));
+
+        let snapshot = AppDb {
+            provider_connections: vec![conn_a, conn_b.clone()],
+            ..AppDb::default()
+        };
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
+            .expect("should select connection supporting gpt-4.1");
+
+        assert_eq!(selected.id, "conn-b");
+    }
+
+    #[test]
+    fn select_connection_returns_none_when_all_excluded() {
+        let conn_a = connection("conn-a", 1);
+        let conn_b = connection("conn-b", 2);
+
+        let snapshot = AppDb {
+            provider_connections: vec![conn_a, conn_b],
+            ..AppDb::default()
+        };
+
+        let excluded: HashSet<String> = ["conn-a".to_string(), "conn-b".to_string()]
+            .into_iter()
+            .collect();
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &excluded);
+
+        assert!(selected.is_none(), "should return None when all accounts excluded");
+    }
+
+    #[test]
+    fn select_connection_returns_none_when_no_connections_match() {
+        let snapshot = AppDb::default();
+
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new());
+
+        assert!(selected.is_none(), "should return None when no connections exist");
+    }
+
+    #[test]
+    fn is_connection_rate_limited_detects_expired_timestamp() {
+        let past = (Utc::now() - ChronoDuration::seconds(10)).to_rfc3339();
+        let mut conn = connection("conn", 1);
+        conn.rate_limited_until = Some(past);
+
+        assert!(
+            !super::is_connection_rate_limited(&conn, Utc::now()),
+            "expired rate_limited_until should not block connection"
+        );
+    }
+
+    #[test]
+    fn is_connection_rate_limited_allows_null_timestamp() {
+        let conn = connection("conn", 1);
+        assert!(
+            !super::is_connection_rate_limited(&conn, Utc::now()),
+            "null rate_limited_until should not block connection"
+        );
+    }
+
+    #[test]
+    fn is_model_locked_returns_false_when_no_lock() {
+        let conn = connection("conn", 1);
+        assert!(
+            !super::is_model_locked(&conn, "gpt-4.1", Utc::now()),
+            "connection without lock should not be locked"
+        );
+    }
+
+    #[test]
+    fn is_model_locked_checks_specific_model_key() {
+        let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
+        let mut conn = connection("conn", 1);
+        conn.extra
+            .insert("modelLock_gpt-4.1".into(), Value::String(future));
+
+        assert!(
+            super::is_model_locked(&conn, "gpt-4.1", Utc::now()),
+            "specific model lock should block that model"
+        );
+        assert!(
+            !super::is_model_locked(&conn, "gpt-4o", Utc::now()),
+            "specific model lock should not block different model"
+        );
+    }
+
+    #[test]
+    fn is_model_locked_checks_account_level_all_key() {
+        let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
+        let mut conn = connection("conn", 1);
+        conn.extra.insert("modelLock___all".into(), Value::String(future));
+
+        assert!(
+            super::is_model_locked(&conn, "any-model", Utc::now()),
+            "account-level lock should block any model"
+        );
+    }
+
+    #[test]
+    fn is_model_locked_expired_lock_allows_connection() {
+        let past = (Utc::now() - ChronoDuration::seconds(10)).to_rfc3339();
+        let mut conn = connection("conn", 1);
+        conn.extra.insert("modelLock_gpt-4.1".into(), Value::String(past));
+
+        assert!(
+            !super::is_model_locked(&conn, "gpt-4.1", Utc::now()),
+            "expired model lock should not block"
+        );
     }
 }
