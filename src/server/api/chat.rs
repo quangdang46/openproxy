@@ -161,10 +161,12 @@ async fn forward_with_provider_fallback(
             .unwrap_or(false);
 
 use crate::core::executor::{
-            DefaultExecutor, ExecutionRequest, KiroExecutor, KiroExecutionRequest,
-            KiroExecutorResponse, VertexExecutor, VertexExecutionRequest,
+            CodexExecutor, CodexExecutionRequest, DefaultExecutor,
+            ExecutionRequest, KiroExecutor, KiroExecutionRequest, KiroExecutorResponse,
+            VertexExecutor, VertexExecutionRequest,
         };
 
+        let is_codex_model = model.starts_with("codex/");
         let executor_result: Result<KiroExecutorResponse, ComboAttemptError> = if provider == "kiro" {
             let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
                 .map_err(|e| ComboAttemptError {
@@ -201,6 +203,32 @@ use crate::core::executor::{
                 .map_err(|e| ComboAttemptError {
                     status: 500,
                     message: format!("Vertex execution failed: {:?}", e),
+                    retry_after: None,
+                })?;
+            Ok(KiroExecutorResponse {
+                response: result.response,
+                url: result.url,
+                headers: result.headers,
+                transformed_body: result.transformed_body,
+                transport: result.transport,
+            })
+        } else if is_codex_model {
+            let executor = CodexExecutor::new(state.client_pool.clone(), provider_node)
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Codex executor creation failed: {:?}", e),
+                    retry_after: None,
+                })?;
+            let result = executor.execute(CodexExecutionRequest {
+                model: model.to_string(),
+                body: request_body.clone(),
+                stream,
+                credentials: connection.clone(),
+                proxy,
+            }).await
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Codex execution failed: {:?}", e),
                     retry_after: None,
                 })?;
             Ok(KiroExecutorResponse {
