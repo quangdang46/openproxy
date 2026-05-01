@@ -161,12 +161,14 @@ async fn forward_with_provider_fallback(
             .unwrap_or(false);
 
 use crate::core::executor::{
-            CodexExecutor, CodexExecutionRequest, DefaultExecutor,
+            CodexExecutor, CodexExecutionRequest, CursorExecutor,
+            CursorExecutionRequest, DefaultExecutor,
             ExecutionRequest, KiroExecutor, KiroExecutionRequest, KiroExecutorResponse,
             VertexExecutor, VertexExecutionRequest,
         };
 
         let is_codex_model = model.starts_with("codex/");
+        let is_cursor_model = model.starts_with("cursor/");
         let executor_result: Result<KiroExecutorResponse, ComboAttemptError> = if provider == "kiro" {
             let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
                 .map_err(|e| ComboAttemptError {
@@ -229,6 +231,32 @@ use crate::core::executor::{
                 .map_err(|e| ComboAttemptError {
                     status: 500,
                     message: format!("Codex execution failed: {:?}", e),
+                    retry_after: None,
+                })?;
+            Ok(KiroExecutorResponse {
+                response: result.response,
+                url: result.url,
+                headers: result.headers,
+                transformed_body: result.transformed_body,
+                transport: result.transport,
+            })
+        } else if is_cursor_model {
+            let executor = CursorExecutor::new(state.client_pool.clone(), provider_node)
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Cursor executor creation failed: {:?}", e),
+                    retry_after: None,
+                })?;
+            let result = executor.execute(CursorExecutionRequest {
+                model: model.to_string(),
+                body: request_body.clone(),
+                stream,
+                credentials: connection.clone(),
+                proxy,
+            }).await
+                .map_err(|e| ComboAttemptError {
+                    status: 500,
+                    message: format!("Cursor execution failed: {:?}", e),
                     retry_after: None,
                 })?;
             Ok(KiroExecutorResponse {

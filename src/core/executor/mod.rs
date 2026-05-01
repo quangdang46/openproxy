@@ -1,5 +1,6 @@
 mod client_pool;
 mod codex;
+mod cursor;
 mod default;
 mod kiro;
 mod vertex;
@@ -12,13 +13,17 @@ pub use codex::{
     CodexExecutor, CodexExecutorError, CodexExecutionRequest, CodexExecutorResponse,
     convert_openai_sse_to_standard,
 };
+pub use cursor::{
+    CursorExecutor, CursorExecutorError, CursorExecutionRequest, CursorExecutorResponse,
+    parse_cursor_sse_events, SseEvent,
+};
 pub use default::{
     DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError, ProviderConfig,
     TransportKind, UpstreamResponse,
 };
 pub use kiro::{
     AwsCredentials, EventStreamDecoder, KiroExecutor, KiroExecutorError, KiroExecutorResponse,
-    KiroExecutionRequest, SseEvent,
+    KiroExecutionRequest, SseEvent as KiroSseEvent,
 };
 pub use vertex::{
     VertexExecutor, VertexExecutorError, VertexExecutionRequest, VertexExecutorResponse,
