@@ -398,7 +398,7 @@ impl std::str::FromStr for StrategyType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.trim().to_lowercase().as_str() {
             "fillfirst" | "fill-first" | "fill_first" => Ok(StrategyType::FillFirst),
-            "roundrobin" | "round-robin" | "round_robin" | "round_robin" => Ok(StrategyType::RoundRobin),
+            "roundrobin" | "round-robin" | "round_robin" => Ok(StrategyType::RoundRobin),
             "sticky" => Ok(StrategyType::Sticky),
             "leastloaded" | "least-loaded" | "least_loaded" => Ok(StrategyType::LeastLoaded),
             _ => Err(format!("Unknown strategy type: {}", s)),
@@ -701,6 +701,9 @@ mod tests {
             consecutive_use_count: None,
             backoff_level: Some(0),
             consecutive_errors: Some(0),
+            proxy_url: None,
+            proxy_label: None,
+            use_connection_proxy: None,
             provider_specific_data: BTreeMap::new(),
             extra: BTreeMap::new(),
         }
@@ -840,5 +843,190 @@ mod tests {
         let conn2_time = now + chrono::Duration::minutes(5);
         // Allow 1 second tolerance
         assert!((earliest_time - conn2_time).num_seconds().abs() <= 1);
+    }
+
+    #[test]
+    fn test_strategy_type_from_str() {
+        assert_eq!("fillFirst".parse::<StrategyType>().unwrap(), StrategyType::FillFirst);
+        assert_eq!("fill-first".parse::<StrategyType>().unwrap(), StrategyType::FillFirst);
+        assert_eq!("fill_first".parse::<StrategyType>().unwrap(), StrategyType::FillFirst);
+        assert_eq!("roundRobin".parse::<StrategyType>().unwrap(), StrategyType::RoundRobin);
+        assert_eq!("round-robin".parse::<StrategyType>().unwrap(), StrategyType::RoundRobin);
+        assert_eq!("round_robin".parse::<StrategyType>().unwrap(), StrategyType::RoundRobin);
+        assert_eq!("sticky".parse::<StrategyType>().unwrap(), StrategyType::Sticky);
+        assert_eq!("leastLoaded".parse::<StrategyType>().unwrap(), StrategyType::LeastLoaded);
+        assert_eq!("least-loaded".parse::<StrategyType>().unwrap(), StrategyType::LeastLoaded);
+        assert_eq!("least_loaded".parse::<StrategyType>().unwrap(), StrategyType::LeastLoaded);
+        assert!("invalid".parse::<StrategyType>().is_err());
+    }
+
+    #[test]
+    fn test_strategy_type_display() {
+        assert_eq!(StrategyType::FillFirst.to_string(), "fillFirst");
+        assert_eq!(StrategyType::RoundRobin.to_string(), "roundRobin");
+        assert_eq!(StrategyType::Sticky.to_string(), "sticky");
+        assert_eq!(StrategyType::LeastLoaded.to_string(), "leastLoaded");
+    }
+
+    #[test]
+    fn test_provider_strategy_settings_default() {
+        let settings = ProviderStrategySettings::default();
+        assert_eq!(settings.strategy, StrategyType::FillFirst);
+        assert_eq!(settings.sticky_duration_secs, DEFAULT_STICKY_DURATION_SECS);
+        assert!(settings.fallback_enabled);
+        assert_eq!(settings.max_fallback_attempts, 3);
+    }
+
+    #[test]
+    fn test_provider_strategy_settings_from_config() {
+        let settings = ProviderStrategySettings::from_config_value(Some("roundRobin"), false, 5);
+        assert_eq!(settings.strategy, StrategyType::RoundRobin);
+        assert!(!settings.fallback_enabled);
+        assert_eq!(settings.max_fallback_attempts, 5);
+    }
+
+    #[test]
+    fn test_sticky_session_expired() {
+        let expired = StickySession {
+            account_id: "test".to_string(),
+            expires_at: Utc::now() - chrono::Duration::seconds(1),
+        };
+        assert!(expired.is_expired(Utc::now()));
+
+        let valid = StickySession {
+            account_id: "test".to_string(),
+            expires_at: Utc::now() + chrono::Duration::seconds(300),
+        };
+        assert!(!valid.is_expired(Utc::now()));
+    }
+
+    #[test]
+    fn test_select_account_fill_first() {
+        let registry = AccountRegistry::default();
+        registry.update_rate_limit("acc1", 100, 0);
+        registry.update_rate_limit("acc2", 200, 0);
+        registry.update_rate_limit("acc3", 50, 0);
+
+        let conn1 = make_connection("acc1");
+        let conn2 = make_connection("acc2");
+        let conn3 = make_connection("acc3");
+        let available = vec![&conn1, &conn2, &conn3];
+
+        let idx = registry.select_account_by_strategy(
+            &available,
+            StrategyType::FillFirst,
+            None,
+            300,
+        );
+        assert_eq!(idx, Some(1)); // acc2 has highest rate_limit_remaining
+    }
+
+    #[test]
+    fn test_select_account_least_loaded() {
+        let registry = AccountRegistry::default();
+        // Direct state manipulation for testing
+        {
+            let mut states = registry.states.write();
+            states.insert("acc1".to_string(), AccountLockState { in_flight: 2, rate_limit_remaining: 100, rate_limit_reset: 0 });
+            states.insert("acc2".to_string(), AccountLockState { in_flight: 1, rate_limit_remaining: 100, rate_limit_reset: 0 });
+            states.insert("acc3".to_string(), AccountLockState { in_flight: 3, rate_limit_remaining: 100, rate_limit_reset: 0 });
+        }
+
+        let conn1 = make_connection("acc1");
+        let conn2 = make_connection("acc2");
+        let conn3 = make_connection("acc3");
+        let available = vec![&conn1, &conn2, &conn3];
+
+        let idx = registry.select_account_by_strategy(
+            &available,
+            StrategyType::LeastLoaded,
+            None,
+            300,
+        );
+        assert_eq!(idx, Some(1)); // acc2 has 1 in_flight (least)
+    }
+
+    #[test]
+    fn test_select_account_round_robin() {
+        let registry = AccountRegistry::default();
+        let conn1 = make_connection("acc1");
+        let conn2 = make_connection("acc2");
+        let conn3 = make_connection("acc3");
+        let available = vec![&conn1, &conn2, &conn3];
+
+        let idx0 = registry.select_account_by_strategy(
+            &available,
+            StrategyType::RoundRobin,
+            Some("combo1"),
+            300,
+        );
+        let idx1 = registry.select_account_by_strategy(
+            &available,
+            StrategyType::RoundRobin,
+            Some("combo1"),
+            300,
+        );
+        let idx2 = registry.select_account_by_strategy(
+            &available,
+            StrategyType::RoundRobin,
+            Some("combo1"),
+            300,
+        );
+
+        assert_eq!(idx0, Some(0));
+        assert_eq!(idx1, Some(1));
+        assert_eq!(idx2, Some(2));
+    }
+
+    #[test]
+    fn test_sticky_session_set_and_get() {
+        let registry = AccountRegistry::default();
+        registry.set_sticky_session("combo1", "acc1", 300);
+
+        let sticky = registry.get_sticky_session("combo1");
+        assert!(sticky.is_some());
+        let sticky_val = sticky.as_ref().unwrap();
+        assert_eq!(sticky_val.account_id, "acc1");
+        assert!(!sticky_val.is_expired(Utc::now()));
+    }
+
+    #[test]
+    fn test_sticky_session_expired_after_duration() {
+        let registry = AccountRegistry::default();
+        registry.set_sticky_session("combo2", "acc2", 1);
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let sticky = registry.get_sticky_session("combo2");
+        assert!(sticky.is_none());
+    }
+
+    #[test]
+    fn test_clear_sticky_session() {
+        let registry = AccountRegistry::default();
+        registry.set_sticky_session("combo3", "acc3", 300);
+        assert!(registry.get_sticky_session("combo3").is_some());
+
+        registry.clear_sticky_session("combo3");
+        assert!(registry.get_sticky_session("combo3").is_none());
+    }
+
+    #[test]
+    fn test_select_account_sticky() {
+        let registry = AccountRegistry::default();
+        registry.set_sticky_session("combo_sticky", "acc2", 300);
+
+        let conn1 = make_connection("acc1");
+        let conn2 = make_connection("acc2");
+        let conn3 = make_connection("acc3");
+        let available = vec![&conn1, &conn2, &conn3];
+
+        let idx = registry.select_account_by_strategy(
+            &available,
+            StrategyType::Sticky,
+            Some("combo_sticky"),
+            300,
+        );
+        assert_eq!(idx, Some(1)); // acc2 is sticky
     }
 }
