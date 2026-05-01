@@ -75,6 +75,12 @@ anyhow = "1"
 aws-credential-types = "1"
 aws-sigv4 = "1.4"
 
+# Random
+rand = "0.8"
+
+# Async stream
+async-stream = "0.3"
+
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
