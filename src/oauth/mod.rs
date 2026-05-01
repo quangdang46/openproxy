@@ -245,7 +245,7 @@ pub mod device_code {
     pub async fn poll_for_token(
         provider_config: &OAuthProviderConfig,
         device_code: &str,
-        user_code: &str,
+        _user_code: &str,
         interval_secs: u64,
     ) -> Result<TokenResponse, OAuthError> {
         let client = reqwest::Client::new();
@@ -359,6 +359,10 @@ pub mod token_refresh {
             Err(_) => true,
         }
     }
+}
+
+pub fn needs_refresh(expires_at: &Option<String>) -> bool {
+    token_refresh::needs_refresh(expires_at)
 }
 
 pub fn expires_at_from_seconds(expires_in: i64) -> String {

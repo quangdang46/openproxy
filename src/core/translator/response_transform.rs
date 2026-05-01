@@ -669,11 +669,11 @@ mod tests {
     }
 
     #[test]
-    fn test_anthropic_to_openai_transformer() {
+fn test_anthropic_to_openai_transformer() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
-        // Simulate Anthropic SSE
-        let chunk = Bytes::from(r#"data: {"type":"message_start","message_start":{"id":"test","model":"claude-3"}}"""#);
+        // Simulate Anthropic SSE - format: data: {"type":"message_start","message_start":{...}}
+        let chunk = Bytes::from(r#"data: {"type":"message_start","message_start":{"id":"test","model":"claude-3","type":"message_start","created_at":1234567890}}"#);
         let lines = transformer.transform_chunk(&chunk);
-        assert!(!lines.is_empty());
+        assert!(!lines.is_empty(), "Expected non-empty output lines, got: {:?}", lines);
     }
 }
