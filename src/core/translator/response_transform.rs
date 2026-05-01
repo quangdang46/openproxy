@@ -212,13 +212,13 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
 
                 // Parse Anthropic SSE event
                 if let Ok(event) = serde_json::from_str::<AnthropicSSEEvent>(data) {
-                    // Convert message_start
+// Convert message_start
                     if let Some(msg_start) = event.message_start {
                         let id = msg_start.id.as_deref().unwrap_or("anonymous");
+                        let model = msg_start.model.as_deref().unwrap_or("");
                         output_lines.push(format!(
-                            r#"{{"id":"{id}","object":"chat.completion.chunk","created":{},"model":"{}","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":null}}]}}"#,
-                            msg_start.created_at.unwrap_or(0),
-                            msg_start.model
+                            r#"{{"id":"{id}","object":"chat.completion.chunk","created":{},"model":"{model}","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":null}}]}}"#,
+                            msg_start.created_at.unwrap_or(0)
                         ));
                     }
 
@@ -571,7 +571,7 @@ impl StreamingTransformer for OllamaToOpenAiTransformer {
                     }
 
                     // Handle done signal
-                    if event.done {
+                    if event.done.unwrap_or(false) {
                         output_lines.push("data: [DONE]".to_string());
                         self.state.message_idx += 1;
                     }
