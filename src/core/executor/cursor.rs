@@ -1411,8 +1411,6 @@ pub enum SseEvent {
     Raw(String),
 }
 
-// ==================== TESTS ====================
-
 #[cfg(test)]
 mod tests {
     use super::*;
