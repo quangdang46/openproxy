@@ -17,6 +17,29 @@ pub struct AccountLockState {
     pub rate_limit_reset: i64,
 }
 
+/// Tracks round-robin state for a combo's account rotation.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComboRotationState {
+    /// The combo identifier.
+    pub combo_id: String,
+    /// Last used account index (wraps around).
+    pub last_index: usize,
+    /// Unix timestamp of last rotation.
+    pub last_rotation: i64,
+    /// Total requests through this combo.
+    pub total_requests: u64,
+}
+
+/// Model lock state for sticky routing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelLockState {
+    pub model: String,
+    pub account_id: String,
+    pub locked_at: i64,
+    pub ttl_secs: i64,
+    pub combo_id: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct AccountSlotGuard<'a> {
     registry: &'a AccountRegistry,
@@ -41,6 +64,8 @@ impl<'a> AccountSlotGuard<'a> {
 #[derive(Debug, Default)]
 pub struct AccountRegistry {
     states: RwLock<HashMap<String, AccountLockState>>,
+    combo_rotation: RwLock<HashMap<String, ComboRotationState>>,
+    model_locks: RwLock<HashMap<String, ModelLockState>>,
 }
 
 impl AccountRegistry {
@@ -116,6 +141,198 @@ impl AccountRegistry {
         let state = self.states.read();
         state.get(account_id).map(|s| s.in_flight).unwrap_or(0)
     }
+
+    pub fn get_sticky_session(&self, combo_id: &str) -> Option<StickySession> {
+        let locks = self.model_locks.read();
+        let key = format!("sticky_{}", combo_id);
+        locks.get(&key).and_then(|lock| {
+            let now = Utc::now().timestamp();
+            if lock.locked_at + lock.ttl_secs > now {
+                Some(StickySession {
+                    account_id: lock.account_id.clone(),
+                    expires_at: DateTime::from_timestamp(lock.locked_at + lock.ttl_secs, 0)
+                        .unwrap_or_else(Utc::now),
+                })
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn set_sticky_session(
+        &self,
+        combo_id: &str,
+        account_id: &str,
+        duration_secs: i64,
+    ) {
+        let mut locks = self.model_locks.write();
+        let key = format!("sticky_{}", combo_id);
+        let now = Utc::now().timestamp();
+        let lock = ModelLockState {
+            model: key,
+            account_id: account_id.to_string(),
+            locked_at: now,
+            ttl_secs: duration_secs,
+            combo_id: Some(combo_id.to_string()),
+        };
+        locks.insert(key, lock);
+    }
+
+    pub fn clear_sticky_session(&self, combo_id: &str) {
+        let mut locks = self.model_locks.write();
+        let key = format!("sticky_{}", combo_id);
+        locks.remove(&key);
+    }
+
+    pub fn select_account_by_strategy(
+        &self,
+        available: &[&ProviderConnection],
+        strategy: StrategyType,
+        combo_id: Option<&str>,
+        sticky_duration_secs: i64,
+    ) -> Option<usize> {
+        if available.is_empty() {
+            return None;
+        }
+
+        match strategy {
+            StrategyType::FillFirst => {
+                available
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|(_, conn)| self.get_state(&conn.id).rate_limit_remaining)
+                    .map(|(i, _)| i)
+            }
+            StrategyType::RoundRobin => {
+                let combo_id = combo_id?;
+                let mut rotation = self.combo_rotation.write();
+                let state = rotation.entry(combo_id.to_string()).or_default();
+                let idx = state.last_index;
+                state.last_index = (idx + 1) % available.len();
+                state.total_requests += 1;
+                state.last_rotation = Utc::now().timestamp();
+                Some(idx)
+            }
+            StrategyType::Sticky => {
+                let combo_id = combo_id?;
+                if let Some(sticky) = self.get_sticky_session(combo_id) {
+                    if !sticky.is_expired(Utc::now()) {
+                        if let Some(pos) = available
+                            .iter()
+                            .position(|conn| conn.id == sticky.account_id)
+                        {
+                            return Some(pos);
+                        }
+                    }
+                }
+                let idx = 0;
+                if !available.is_empty() {
+                    let first_account = &available[idx].id;
+                    self.set_sticky_session(combo_id, first_account, sticky_duration_secs);
+                }
+                Some(idx)
+            }
+            StrategyType::LeastLoaded => {
+                available
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, conn)| self.in_flight_count(&conn.id))
+                    .map(|(i, _)| i)
+            }
+        }
+    }
+
+    pub fn lock_model(
+        &self,
+        model: &str,
+        account_id: &str,
+        ttl_secs: i64,
+        combo_id: Option<String>,
+    ) -> Result<(), String> {
+        let mut locks = self.model_locks.write();
+        let now = Utc::now().timestamp();
+
+        if let Some(existing) = locks.get(model) {
+            if existing.account_id == account_id {
+                let updated = ModelLockState {
+                    model: model.to_string(),
+                    account_id: account_id.to_string(),
+                    locked_at: now,
+                    ttl_secs,
+                    combo_id,
+                };
+                locks.insert(model.to_string(), updated);
+                return Ok(());
+            }
+            if existing.locked_at + existing.ttl_secs > now {
+                return Err(format!(
+                    "model {} is locked to account {} until TTL expires",
+                    model, existing.account_id
+                ));
+            }
+        }
+
+        let lock = ModelLockState {
+            model: model.to_string(),
+            account_id: account_id.to_string(),
+            locked_at: now,
+            ttl_secs,
+            combo_id,
+        };
+        locks.insert(model.to_string(), lock);
+        Ok(())
+    }
+
+    pub fn unlock_model(&self, model: &str) {
+        let mut locks = self.model_locks.write();
+        locks.remove(model);
+    }
+
+    pub fn get_locked_account(&self, model: &str) -> Option<String> {
+        let locks = self.model_locks.read();
+        let now = Utc::now().timestamp();
+
+        locks.get(model).and_then(|lock| {
+            if lock.locked_at + lock.ttl_secs > now {
+                Some(lock.account_id.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn next_in_combo(
+        &self,
+        combo_id: &str,
+        accounts: &[String],
+    ) -> Option<(usize, String)> {
+        if accounts.is_empty() {
+            return None;
+        }
+        let now = Utc::now().timestamp();
+        let mut rotation = self.combo_rotation.write();
+        let state = rotation.entry(combo_id.to_string()).or_default();
+        let idx = state.last_index;
+        state.total_requests += 1;
+        state.last_index = (idx + 1) % accounts.len();
+        state.last_rotation = now;
+        Some((idx, accounts[idx].clone()))
+    }
+
+    pub fn record_rotation(&self, combo_id: &str, index: usize) {
+        let now = Utc::now().timestamp();
+        let mut rotation = self.combo_rotation.write();
+        let state = rotation.entry(combo_id.to_string()).or_default();
+        state.last_index = index;
+        state.last_rotation = now;
+    }
+
+    pub fn get_combo_stats(&self, combo_id: &str) -> Option<ComboRotationState> {
+        self.combo_rotation
+            .read()
+            .get(combo_id)
+            .cloned()
+    }
 }
 
 /// Prefix for model lock flat fields on connection record.
@@ -141,6 +358,107 @@ pub const LONG_COOLDOWN_SECS: i64 = 120;
 
 /// Short cooldown for minor errors.
 pub const SHORT_COOLDOWN_SECS: i64 = 5;
+
+/// Default sticky duration in seconds.
+pub const DEFAULT_STICKY_DURATION_SECS: i64 = 300;
+
+/// Strategy type for provider account selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrategyType {
+    /// Use account with most remaining quota first.
+    FillFirst,
+    /// Rotate through accounts in round-robin fashion.
+    RoundRobin,
+    /// Stick to first successful account for a duration.
+    Sticky,
+    /// Always pick account with fewest in-flight requests.
+    LeastLoaded,
+}
+
+impl Default for StrategyType {
+    fn default() -> Self {
+        StrategyType::FillFirst
+    }
+}
+
+impl std::fmt::Display for StrategyType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StrategyType::FillFirst => write!(f, "fillFirst"),
+            StrategyType::RoundRobin => write!(f, "roundRobin"),
+            StrategyType::Sticky => write!(f, "sticky"),
+            StrategyType::LeastLoaded => write!(f, "leastLoaded"),
+        }
+    }
+}
+
+impl std::str::FromStr for StrategyType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "fillfirst" | "fill-first" | "fill_first" => Ok(StrategyType::FillFirst),
+            "roundrobin" | "round-robin" | "round_robin" | "round_robin" => Ok(StrategyType::RoundRobin),
+            "sticky" => Ok(StrategyType::Sticky),
+            "leastloaded" | "least-loaded" | "least_loaded" => Ok(StrategyType::LeastLoaded),
+            _ => Err(format!("Unknown strategy type: {}", s)),
+        }
+    }
+}
+
+/// Provider strategy settings for account selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderStrategySettings {
+    /// Strategy type for account selection.
+    pub strategy: StrategyType,
+    /// Duration in seconds to stick to a successful account (for sticky strategy).
+    pub sticky_duration_secs: i64,
+    /// Whether fallback to other accounts is enabled on failure.
+    pub fallback_enabled: bool,
+    /// Maximum number of fallback attempts before giving up.
+    pub max_fallback_attempts: usize,
+}
+
+impl Default for ProviderStrategySettings {
+    fn default() -> Self {
+        Self {
+            strategy: StrategyType::FillFirst,
+            sticky_duration_secs: DEFAULT_STICKY_DURATION_SECS,
+            fallback_enabled: true,
+            max_fallback_attempts: 3,
+        }
+    }
+}
+
+impl ProviderStrategySettings {
+    /// Parse strategy settings from a string value (e.g., from config).
+    pub fn from_config_value(value: Option<&str>, fallback_enabled: bool, max_fallback_attempts: usize) -> Self {
+        match value.and_then(|v| v.parse().ok()) {
+            Some(strategy) => Self {
+                strategy,
+                sticky_duration_secs: DEFAULT_STICKY_DURATION_SECS,
+                fallback_enabled,
+                max_fallback_attempts,
+            },
+            None => Self::default(),
+        }
+    }
+}
+
+/// Sticky session state for tracking which account to stick to.
+#[derive(Debug, Clone)]
+pub struct StickySession {
+    /// Account ID that was last successful.
+    pub account_id: String,
+    /// Timestamp when the sticky session expires.
+    pub expires_at: DateTime<Utc>,
+}
+
+impl StickySession {
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at <= now
+    }
+}
 
 /// Get the flat field key for a model lock.
 pub fn get_model_lock_key(model: &str) -> String {
