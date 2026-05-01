@@ -3,9 +3,120 @@
 //! Mirrors the functionality of `open-sse/services/accountFallback.js`.
 //! Provides per-account state tracking, health scoring, and fallback routing logic.
 
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 
 use crate::types::ProviderConnection;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountLockState {
+    pub in_flight: usize,
+    pub rate_limit_remaining: i64,
+    pub rate_limit_reset: i64,
+}
+
+#[derive(Debug)]
+pub struct AccountSlotGuard<'a> {
+    registry: &'a AccountRegistry,
+    account_id: String,
+}
+
+impl Drop for AccountSlotGuard<'_> {
+    fn drop(&mut self) {
+        let mut states = self.registry.states.write();
+        if let Some(state) = states.get_mut(&self.account_id) {
+            state.in_flight = state.in_flight.saturating_sub(1);
+        }
+    }
+}
+
+impl<'a> AccountSlotGuard<'a> {
+    pub fn in_flight(&self) -> usize {
+        self.registry.get_state(&self.account_id).in_flight
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AccountRegistry {
+    states: RwLock<HashMap<String, AccountLockState>>,
+}
+
+impl AccountRegistry {
+    pub fn get_state(&self, account_id: &str) -> AccountLockState {
+        self.states
+            .read()
+            .get(account_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn acquire_slot(
+        &self,
+        account_id: &str,
+        max_in_flight: usize,
+        rate_limit_remaining: i64,
+        rate_limit_reset: i64,
+    ) -> Option<AccountSlotGuard<'_>> {
+        if rate_limit_remaining <= 0 {
+            let now = Utc::now().timestamp();
+            if rate_limit_reset > now {
+                return None;
+            }
+        }
+
+        self.acquire_slot_internal(account_id, max_in_flight)
+    }
+
+    fn acquire_slot_internal(
+        &self,
+        account_id: &str,
+        max_in_flight: usize,
+    ) -> Option<AccountSlotGuard<'_>> {
+        let mut states = self.states.write();
+        let state = states
+            .entry(account_id.to_string())
+            .or_default();
+
+        if state.in_flight >= max_in_flight {
+            return None;
+        }
+
+        state.in_flight += 1;
+        Some(AccountSlotGuard {
+            registry: self,
+            account_id: account_id.to_string(),
+        })
+    }
+
+    pub fn update_rate_limit(&self, account_id: &str, remaining: i64, reset: i64) {
+        let mut states = self.states.write();
+        let state = states
+            .entry(account_id.to_string())
+            .or_default();
+        state.rate_limit_remaining = remaining;
+        state.rate_limit_reset = reset;
+    }
+
+    pub fn rate_limit_info(&self, account_id: &str) -> (i64, i64) {
+        let state = self.states.read();
+        state
+            .get(account_id)
+            .map(|s| (s.rate_limit_remaining, s.rate_limit_reset))
+            .unwrap_or((0, 0))
+    }
+
+    pub fn remove_account(&self, account_id: &str) {
+        let mut states = self.states.write();
+        states.remove(account_id);
+    }
+
+    pub fn in_flight_count(&self, account_id: &str) -> usize {
+        let state = self.states.read();
+        state.get(account_id).map(|s| s.in_flight).unwrap_or(0)
+    }
+}
 
 /// Prefix for model lock flat fields on connection record.
 pub const MODEL_LOCK_PREFIX: &str = "modelLock_";

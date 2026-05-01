@@ -126,6 +126,7 @@ async fn forward_with_provider_fallback(
 ) -> Result<Response, ComboAttemptError> {
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
+    let registry = &state.account_registry;
 
     loop {
         let snapshot = state.db.snapshot();
@@ -155,6 +156,21 @@ async fn forward_with_provider_fallback(
             .find(|node| node.id == provider)
             .cloned();
         let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+
+        let (rate_limit_remaining, rate_limit_reset) =
+            registry.rate_limit_info(&connection.id);
+        let slot = registry.acquire_slot(
+            &connection.id,
+            10,
+            rate_limit_remaining,
+            rate_limit_reset,
+        );
+
+        let Some(_slot) = slot else {
+            excluded.insert(connection.id.clone());
+            continue;
+        };
+
         let stream = request_body
             .get("stream")
             .and_then(Value::as_bool)
@@ -299,6 +315,11 @@ use crate::core::executor::{
             Ok(result) => {
                 let status = result.response.status();
                 if status.is_success() {
+                    if let Some(retry_after) = retry_after_from_headers(result.response.headers()) {
+                        let remaining = 0;
+                        let reset = retry_after.timestamp();
+                        registry.update_rate_limit(&connection.id, remaining, reset);
+                    }
                     clear_connection_error(state, &connection.id).await;
                     return Ok(proxy_response(result.response));
                 }

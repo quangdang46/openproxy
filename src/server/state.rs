@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::core::account_fallback::AccountRegistry;
 use crate::core::executor::ClientPool;
 use crate::db::Db;
 use crate::oauth::pending::PendingFlowStore;
@@ -9,6 +10,7 @@ pub struct AppState {
     pub db: Arc<Db>,
     pub client_pool: Arc<ClientPool>,
     pub pending_flows: PendingFlowStore,
+    pub account_registry: Arc<AccountRegistry>,
 }
 
 impl AppState {
@@ -17,6 +19,7 @@ impl AppState {
             db,
             client_pool: Arc::new(ClientPool::new()),
             pending_flows: PendingFlowStore::new(),
+            account_registry: Arc::new(AccountRegistry::default()),
         }
     }
 }
