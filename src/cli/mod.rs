@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, CommandFactory};
 use clap_complete::{Generator, Shell};
+use crate::core::tunnel::{TunnelManager, TunnelProvider};
 
 use crate::db::Db;
 use crate::types::{ProviderConnection, ApiKey, ProxyPool};
@@ -38,6 +39,27 @@ pub enum Command {
     Pool {
         #[command(subcommand)]
         cmd: PoolCmd,
+    },
+    Tunnel {
+        #[command(subcommand)]
+        cmd: TunnelCmd,
+    },
+    Route {
+        /// Model ID (e.g. openai/gpt-4o-mini)
+        #[arg(long)]
+        model: Option<String>,
+        /// Combo name
+        #[arg(long)]
+        combo: Option<String>,
+        /// Prompt text
+        #[arg(long)]
+        prompt: String,
+        /// Stream output
+        #[arg(long, default_value_t = true)]
+        stream: bool,
+        /// JSON output
+        #[arg(long)]
+        json: bool,
     },
     Completion {
         #[arg(value_enum)]
@@ -97,6 +119,18 @@ pub enum PoolCmd {
     },
 }
 
+#[derive(Debug, Clone, Subcommand)]
+pub enum TunnelCmd {
+    Start {
+        #[arg(long, default_value = "cloudflare")]
+        provider: String,
+        #[arg(long, default_value_t = 20128)]
+        port: u16,
+    },
+    Stop,
+    Status,
+}
+
 impl Cli {
     pub fn run(self) -> anyhow::Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
@@ -120,6 +154,18 @@ impl Cli {
                     let rt = tokio::runtime::Runtime::new()?;
                     rt.block_on(run_pool(cmd, &db))
                 }
+                Command::Tunnel { cmd } => {
+                    let db = rt.block_on(Db::load())?;
+                    let db = std::sync::Arc::new(db);
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(run_tunnel(cmd, db.clone()))
+                }
+                Command::Route { model, combo, prompt, stream, json } => {
+                    eprintln!("Route command placeholder");
+                    eprintln!("  model: {:?}, combo: {:?}", model, combo);
+                    eprintln!("  prompt: {}, stream: {}, json: {}", prompt, stream, json);
+                    Ok(())
+                }
                 Command::Completion { shell } => {
                     let mut cmd = Cli::command();
                     clap_complete::generate(shell, &mut cmd, "openproxy", &mut std::io::stdout());
@@ -132,7 +178,7 @@ impl Cli {
     }
 }
 
-async fn run_provider(cmd: ProviderCmd, db: &Db) -> anyhow::Result<()> {
+ pub async fn run_provider(cmd: ProviderCmd, db: &Db) -> anyhow::Result<()> {
     match cmd {
         ProviderCmd::List { json } => {
             let connections = db.provider_connections(crate::db::ProviderConnectionFilter::default());
@@ -194,8 +240,62 @@ async fn run_provider(cmd: ProviderCmd, db: &Db) -> anyhow::Result<()> {
     }
     Ok(())
 }
+ pub async fn run_tunnel(cmd: TunnelCmd, db: std::sync::Arc<Db>) -> anyhow::Result<()> {
+    let tunnel_manager = TunnelManager::new((db).clone());
 
-async fn run_key(cmd: KeyCmd, db: &Db) -> anyhow::Result<()> {
+    match cmd {
+        TunnelCmd::Start { provider, port } => {
+            let provider = provider.parse::<TunnelProvider>().map_err(|e| {
+                anyhow::anyhow!("{}", e)
+            })?;
+
+            println!("Starting {} tunnel on port {}...", provider, port);
+            tunnel_manager.start(provider, port).await?;
+
+            // Wait a bit for URL to appear
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+
+            let status = tunnel_manager.status().await;
+            if status.running {
+                println!("Tunnel started successfully");
+                if let Some(url) = status.url {
+                    println!("  URL: {}", url);
+                }
+                if let Some(pid) = status.pid {
+                    println!("  PID: {}", pid);
+                }
+            } else {
+                eprintln!("Tunnel failed to start");
+                std::process::exit(1);
+            }
+        }
+        TunnelCmd::Stop => {
+            println!("Stopping tunnel...");
+            tunnel_manager.stop().await?;
+            println!("Tunnel stopped");
+        }
+        TunnelCmd::Status => {
+            let status = tunnel_manager.status().await;
+            if status.running {
+                println!("Tunnel is running");
+                if let Some(p) = status.provider {
+                    println!("  Provider: {}", p);
+                }
+                if let Some(url) = status.url {
+                    println!("  URL: {}", url);
+                }
+                if let Some(pid) = status.pid {
+                    println!("  PID: {}", pid);
+                }
+            } else {
+                println!("Tunnel is stopped");
+            }
+        }
+    }
+    Ok(())
+}
+
+ pub async fn run_key(cmd: KeyCmd, db: &Db) -> anyhow::Result<()> {
     match cmd {
         KeyCmd::List { json } => {
             let snapshot = db.snapshot();
@@ -242,7 +342,7 @@ async fn run_key(cmd: KeyCmd, db: &Db) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_pool(cmd: PoolCmd, db: &Db) -> anyhow::Result<()> {
+ pub async fn run_pool(cmd: PoolCmd, db: &Db) -> anyhow::Result<()> {
     match cmd {
         PoolCmd::List { json } => {
             let snapshot = db.snapshot();

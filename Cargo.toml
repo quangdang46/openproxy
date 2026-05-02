@@ -81,6 +81,8 @@ rand = "0.8"
 
 # FNV hash for cache keys
 fnv = "1.0"
+libc = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Async stream
 async-stream = "0.3"

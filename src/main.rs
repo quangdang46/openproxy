@@ -1,11 +1,12 @@
-use clap::{Parser, CommandFactory};
 use std::sync::Arc;
+use clap::CommandFactory;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use clap_complete::Generator;
+use clap::Parser;
+use clap_complete::Shell;
 
-use openproxy::cli::Cli;
+use openproxy::cli::{Cli, Command};
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
 
@@ -13,14 +14,50 @@ use openproxy::server::state::AppState;
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    if let Some(data_dir) = &cli.data_dir {
-        std::env::set_var("DATA_DIR", data_dir);
+    // Handle CLI-only commands before starting server
+    if let Some(cmd) = &cli.cmd {
+        match cmd {
+            Command::Provider { cmd } => {
+                let db = Db::load().await?;
+                let db = Arc::new(db);
+                openproxy::cli::run_provider(cmd.clone(), &db).await?;
+                return Ok(());
+            }
+            Command::Key { cmd } => {
+                let db = Db::load().await?;
+                let db = Arc::new(db);
+                openproxy::cli::run_key(cmd.clone(), &db).await?;
+                return Ok(());
+            }
+            Command::Pool { cmd } => {
+                let db = Db::load().await?;
+                let db = Arc::new(db);
+                openproxy::cli::run_pool(cmd.clone(), &db).await?;
+                return Ok(());
+            }
+            Command::Tunnel { cmd } => {
+                let db = Db::load().await?;
+                let db = Arc::new(db);
+                openproxy::cli::run_tunnel(cmd.clone(), db).await?;
+                return Ok(());
+            }
+            Command::Route { model, combo, prompt, stream, json } => {
+                eprintln!("Route command: model={:?}, combo={:?}, prompt={}, stream={}, json={}", 
+                          model, combo, prompt, stream, json);
+                // TODO: Implement full route logic
+                return Ok(());
+            }
+            Command::Completion { shell } => {
+                let mut cmd = Cli::command();
+                clap_complete::generate(*shell, &mut cmd, "openproxy", &mut std::io::stdout());
+                return Ok(());
+            }
+        }
     }
 
-    if let Some(openproxy::cli::Command::Completion { shell }) = &cli.cmd {
-        let mut cmd = Cli::command();
-        clap_complete::generate(*shell, &mut cmd, "openproxy", &mut std::io::stdout());
-        return Ok(());
+    // No command - start server
+    if let Some(data_dir) = &cli.data_dir {
+        std::env::set_var("DATA_DIR", data_dir);
     }
 
     // Init tracing
