@@ -16,7 +16,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/", get(index_handler))
         .route("/page.js", get(index_handler))
-        .route("/dashboard/*path", get(static_handler))
+        .route("/dashboard/{*path}", get(static_handler))
 }
 
 async fn index_handler() -> impl IntoResponse {

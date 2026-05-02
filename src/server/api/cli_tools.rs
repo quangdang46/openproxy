@@ -280,6 +280,6 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/cli-tools", get(list_tools))
         .route("/api/cli-tools/execute", post(execute_command))
-        .route("/api/cli-tools/run/:tool_name", post(run_tool))
+        .route("/api/cli-tools/run/{tool_name}", post(run_tool))
         .route("/api/cli-tools/help", get(get_help))
 }
