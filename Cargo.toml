@@ -90,6 +90,7 @@ rsa = "0.9"
 time = "0.3"
 
 [dev-dependencies]
+toml = "0.8"
 tempfile = "3"
 wiremock = "0.6"
 
