@@ -1,6 +1,7 @@
 mod chat;
 mod media;
 mod oauth;
+mod cloud_sync;
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,6 +31,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/embeddings", post(media::embeddings))
         .route("/v1/images/generations", post(media::images_generations))
         .route("/v1/search", post(media::search))
+        .merge(cloud_sync::routes())
         .merge(oauth::routes())
 }
 
