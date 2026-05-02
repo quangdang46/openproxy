@@ -119,6 +119,15 @@ pub struct DeviceCodeResponse {
     pub expires_in: Option<i64>,
 }
 
+/// Result of Kiro AWS SSO OIDC device flow initiation.
+/// Contains the device code response plus the dynamically registered client credentials.
+#[derive(Debug, Clone)]
+pub struct KiroDeviceFlow {
+    pub device_code: DeviceCodeResponse,
+    pub client_id: String,
+    pub client_secret: String,
+}
+
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct OAuthError {
     pub error: String,
@@ -422,6 +431,22 @@ pub mod device_code {
         response.json().await.map_err(|e| OAuthError {
             error: "parse_error".to_string(),
             error_description: Some(e.to_string()),
+        })
+    }
+
+    /// Kiro AWS SSO OIDC flow: combined client registration + device code start.
+    /// Step 1: Register client with Kiro's OIDC endpoint.
+    /// Step 2: Start device authorization using the registered client credentials.
+    pub async fn kiro_start_device_flow() -> Result<super::KiroDeviceFlow, OAuthError> {
+        let (client_id, client_secret) = kiro_register_client().await?;
+
+        let kiro_config = super::providers::kiro();
+        let device_resp = start_device_flow(&kiro_config, &client_id).await?;
+
+        Ok(super::KiroDeviceFlow {
+            device_code: device_resp,
+            client_id,
+            client_secret,
         })
     }
 

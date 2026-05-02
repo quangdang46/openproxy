@@ -296,6 +296,7 @@ pub async fn start_oauth_flow(
         user_code: None,
         created_at: now,
         expires_at: now + PKCE_FLOW_TTL_SECS,
+        kiro_credentials: None,
     };
 
     if let Err(_) = state.pending_flows.insert(flow) {
@@ -443,21 +444,39 @@ pub async fn start_device_code(
         ),
     };
 
-    let client_id = provider_config
-        .extra_params.get("client_id")
-        .map(|v| v.as_str())
-        .unwrap_or("openproxy")
-        .to_string();
+    // Kiro uses a special combined flow: register client + start device code
+    let (device_resp, kiro_credentials) = if provider == "kiro" {
+        match device_code::kiro_start_device_flow().await {
+            Ok(kiro_flow) => {
+                let creds = Some((kiro_flow.client_id.clone(), kiro_flow.client_secret.clone()));
+                (kiro_flow.device_code, creds)
+            }
+            Err(e) => {
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &e.error_description.unwrap_or_else(|| e.error.clone()),
+                    &e.error,
+                    &provider,
+                );
+            }
+        }
+    } else {
+        let client_id = provider_config
+            .extra_params.get("client_id")
+            .map(|v| v.as_str())
+            .unwrap_or("openproxy")
+            .to_string();
 
-    let device_resp = match device_code::start_device_flow(&provider_config, &client_id).await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return make_error_response(
-                StatusCode::BAD_REQUEST,
-                &e.error_description.unwrap_or_else(|| e.error.clone()),
-                &e.error,
-                &provider,
-            );
+        match device_code::start_device_flow(&provider_config, &client_id).await {
+            Ok(resp) => (resp, None),
+            Err(e) => {
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &e.error_description.unwrap_or_else(|| e.error.clone()),
+                    &e.error,
+                    &provider,
+                );
+            }
         }
     };
 
@@ -472,6 +491,9 @@ pub async fn start_device_code(
         user_code: Some(device_resp.user_code.clone()),
         created_at: now,
         expires_at: now + DEVICE_FLOW_TTL_SECS,
+        kiro_credentials: kiro_credentials.map(|(id, secret)| {
+            crate::oauth::pending::KiroCredentials { client_id: id, client_secret: secret }
+        }),
     };
 
     if let Err(_) = state.pending_flows.insert(flow) {
