@@ -273,6 +273,17 @@ impl UnifiedExecutor {
         }
     }
 
+    /// Build URL with optional API key appended as query param for providers that need it.
+    /// Currently used by gemini free tier which has 15 RPM limit.
+    pub fn build_url_with_api_key(&self, model: &str, stream: bool, api_key: Option<&str>) -> String {
+        let base_url = self.build_url(model, stream);
+        if let Some(key) = api_key {
+            format!("{base_url}&key={key}")
+        } else {
+            base_url
+        }
+    }
+
     pub fn build_headers(
         &self,
         credentials: &ProviderConnection,
@@ -339,7 +350,12 @@ impl UnifiedExecutor {
         &self,
         request: ProviderExecutionRequest,
     ) -> Result<ProviderExecutionResponse, ProviderExecutorError> {
-        let url = self.build_url(&request.model, request.stream);
+        let api_key = request.credentials.api_key.as_deref();
+        let url = if self.provider == "gemini" && api_key.is_some() {
+            self.build_url_with_api_key(&request.model, request.stream, api_key)
+        } else {
+            self.build_url(&request.model, request.stream)
+        };
         let headers = self.build_headers(&request.credentials, request.stream)?;
         let transformed_body = self.transform_request(&request.body);
 
@@ -457,9 +473,24 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             ("glm-cn", ProviderExecutorConfig::openai("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions")),
             ("vertex-partner", ProviderExecutorConfig::openai("https://{project}.{location}.掉ax.com/v1/chat/completions")),
             ("azure", ProviderExecutorConfig::openai("https://{resource}.openai.azure.com/v1/chat/completions")),
-            ("grok", ProviderExecutorConfig::openai("https://api.x.ai/v1")),
+("grok", ProviderExecutorConfig::openai("https://api.x.ai/v1")),
+            ("elevenlabs", ProviderExecutorConfig::openai("https://api.elevenlabs.io/v1")),
+            ("cartesia", ProviderExecutorConfig::openai("https://api.cartesia.ai/v1")),
+            ("playht", ProviderExecutorConfig::openai("https://api.play.ht/api/v1")),
+            ("deepgram", ProviderExecutorConfig::openai("https://api.deepgram.com/v1")),
+            ("google-tts", ProviderExecutorConfig::openai("https://texttospeech.googleapis.com/v1")),
+            ("edge-tts", ProviderExecutorConfig::openai("https://edge.tts.api.speech.microsoft.com/cognitiveservices/v1")),
+            ("openai-embedding", ProviderExecutorConfig::openai("https://api.openai.com/v1")),
+            ("cohere-embedding", ProviderExecutorConfig::openai("https://api.cohere.ai/v1")),
+            ("voyage-ai", ProviderExecutorConfig::openai("https://api.voyageai.com/v1")),
+            ("dalle", ProviderExecutorConfig::openai("https://api.openai.com/v1")),
+            ("stable-diffusion", ProviderExecutorConfig::openai("https://api.stability.ai/v1")),
+            ("tavily", ProviderExecutorConfig::openai("https://api.tavily.com/v1")),
+            ("brave-search", ProviderExecutorConfig::openai("https://api.search.brave.com/v1")),
+            ("serper", ProviderExecutorConfig::openai("https://google.serper.dev/search")),
+            ("exa", ProviderExecutorConfig::openai("https://api.exa.ai/v1")),
         ])
-    });
+});
 
 pub fn get_provider_config(provider: &str) -> Option<ProviderExecutorConfig> {
     PROVIDER_REGISTRY.get(provider).cloned()
@@ -487,12 +518,14 @@ pub fn get_api_key_providers() -> Vec<&'static str> {
         "gemini", "codebuddy", "kilocode", "alicode", "alicode-intl", "volcengine-ark",
         "byteplus", "openrouter", "ollama-cloud", "ollama-local", "stability-ai",
         "replicate", "cline", "opencode-go", "glm-cn", "vertex-partner", "azure",
-        "grok",
+        "grok", "elevenlabs", "cartesia", "playht", "deepgram",
+        "google-tts", "edge-tts", "openai-embedding", "cohere-embedding", "voyage-ai",
+        "dalle", "stable-diffusion", "tavily", "brave-search", "serper", "exa",
     ]
 }
 
 pub fn get_free_providers() -> Vec<&'static str> {
-    vec!["kiro", "opencode", "vertex"]
+    vec!["kiro", "opencode", "vertex", "openrouter", "nvidia", "ollama-cloud", "gemini"]
 }
 
 pub fn get_specialty_providers() -> Vec<&'static str> {

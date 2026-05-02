@@ -1,4 +1,5 @@
 mod chat;
+mod media;
 mod oauth;
 
 use std::collections::HashSet;
@@ -24,6 +25,11 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/health", get(health))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat::chat_completions))
+        .route("/v1/audio/transcriptions", post(media::audio_transcriptions))
+        .route("/v1/audio/speech", post(media::audio_speech))
+        .route("/v1/embeddings", post(media::embeddings))
+        .route("/v1/images/generations", post(media::images_generations))
+        .route("/v1/search", post(media::search))
         .merge(oauth::routes())
 }
 
