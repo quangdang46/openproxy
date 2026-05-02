@@ -1,100 +1,70 @@
+//! Dashboard module - serves static dashboard files from the dashboard/ directory.
+
 use axum::{
     body::Body,
     extract::Path,
-    http::{Request, StatusCode},
+    http::{header, StatusCode},
     response::IntoResponse,
     routing::get,
     Router,
 };
-use axum::response::Html;
-use http_body_util::BodyExt;
+use std::path::PathBuf;
 
 use crate::server::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/", get(dashboard))
-        .route("/dashboard", get(dashboard))
-        .route("/dashboard/{*path}", get(proxy_dashboard))
+        .route("/", get(index_handler))
+        .route("/page.js", get(index_handler))
+        .route("/dashboard/*path", get(static_handler))
 }
 
-async fn dashboard() -> Html<&'static str> {
-    Html(include_str!("dashboard.html"))
+async fn index_handler() -> impl IntoResponse {
+    let index_path = PathBuf::from("dashboard/page.js");
+    match tokio::fs::read_to_string(&index_path).await {
+        Ok(content) => axum::response::Html(content).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, "Dashboard not found").into_response(),
+    }
 }
 
-async fn proxy_dashboard(
+async fn static_handler(
     Path(path): Path<String>,
-    req: Request<Body>,
-) -> Response {
-    let target_url = format!("http://127.0.0.1:3000/dashboard/{}", path);
+) -> impl IntoResponse {
+    let file_path = PathBuf::from("dashboard").join(&path);
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return (StatusCode::BAD_GATEWAY, format!("Client error: {}", e)).into_response(),
-    };
-
-    let method = req.method().clone();
-    let mut builder = client.request(method, &target_url);
-
-    for (name, value) in req.headers() {
-        let name_str = name.as_str();
-        if !is_hop_by_hop(name_str) {
-            builder = builder.header(name_str, value.as_bytes());
-        }
-    }
-
-    let body = req.into_body();
-    let bytes = match body.collect().await {
-        Ok(b) => b.to_bytes().to_vec(),
-        Err(_) => Vec::new(),
-    };
-
-    let req_builder = builder.body(bytes);
-
-    let response = req_builder.send().await;
-
-    match response {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let mut builder = axum::response::Response::builder().status(status_code);
-
-            for (name, value) in resp.headers().iter() {
-                let name_str = name.as_str();
-                if !is_hop_by_hop(name_str) {
-                    builder = builder.header(name_str, value.as_bytes());
-                }
+    if file_path.exists() && file_path.is_file() {
+        match tokio::fs::read(&file_path).await {
+            Ok(content) => {
+                let mime = get_mime_type(&path);
+                axum::response::Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, mime)
+                    .body(Body::from(content))
+                    .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response())
             }
-            let body = resp.bytes().await.unwrap_or_default().to_vec();
-            builder.body(Body::from(body)).unwrap_or_else(|e| {
-                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-            })
+            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response(),
         }
-        Err(e) => {
-            if e.is_connect() || e.is_timeout() {
-                (StatusCode::BAD_GATEWAY, "Dashboard server not reachable on port 3000. Is the Next.js dev server running?".to_string()).into_response()
-            } else {
-                (StatusCode::BAD_GATEWAY, format!("Failed to proxy dashboard: {}", e)).into_response()
-            }
-        }
+    } else {
+        (StatusCode::NOT_FOUND, "File not found").into_response()
     }
 }
 
-type Response = axum::response::Response;
-
-fn is_hop_by_hop(header: &str) -> bool {
-    matches!(
-        header.to_lowercase().as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-            | "host"
-    )
+fn get_mime_type(path: &str) -> &'static str {
+    if path.ends_with(".js") {
+        "application/javascript"
+    } else if path.ends_with(".css") {
+        "text/css"
+    } else if path.ends_with(".html") {
+        "text/html"
+    } else if path.ends_with(".json") {
+        "application/json"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
+        "image/jpeg"
+    } else {
+        "text/plain"
+    }
 }

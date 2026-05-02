@@ -1,9 +1,22 @@
-mod chat;
-mod media;
-mod oauth;
-mod cloud_sync;
-mod mitm_config;
-mod media_providers;
+mod auth;
+pub mod chat;
+pub mod cloud_credentials;
+pub mod cloud_sync;
+pub mod locale;
+pub mod media;
+pub mod media_providers;
+pub mod mitm_config;
+pub mod models_alias;
+pub mod models_availability;
+pub mod models_custom;
+pub mod oauth;
+pub mod pricing;
+pub mod providers;
+pub mod tags;
+pub mod translator;
+pub mod usage;
+pub mod shutdown;
+pub mod cli_tools;
 
 use std::collections::HashSet;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,9 +48,19 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/images/generations", post(media::images_generations))
         .route("/v1/search", post(media::search))
         .merge(cloud_sync::routes())
+        .merge(cloud_credentials::routes())
+        .merge(locale::routes())
+        .merge(models_alias::routes())
+        .merge(models_availability::routes())
+        .merge(models_custom::routes())
         .merge(oauth::routes())
         .merge(media_providers::routes())
         .merge(mitm_config::routes())
+        .merge(pricing::routes())
+        .merge(tags::routes())
+        .merge(translator::routes())
+        .merge(providers::routes())
+        .merge(usage::routes())
         // Dashboard API endpoints
         .route("/api/providers", get(list_providers_api))
         .route("/api/providers", post(create_provider_api))
@@ -53,6 +76,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/settings", put(update_settings_api))
         .route("/api/db/export", get(export_db_api))
         .route("/api/observability/logs", get(get_logs_api))
+        // Auth, shutdown, cli-tools APIs
+        .merge(auth::routes())
+        .merge(shutdown::routes())
+        .merge(cli_tools::routes())
 }
 
 async fn health() -> Json<HealthResponse> {
