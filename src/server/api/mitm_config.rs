@@ -230,7 +230,7 @@ async fn generate_cert(
     }
 
     let timestamp = chrono::Utc::now().timestamp();
-    let fingerprint = format!("{:016x}", timestamp.abs() as u64 ^ 0xDEADBEEFCAFEBABE);
+    let fingerprint = format!("{:016x}", timestamp.unsigned_abs() ^ 0xDEADBEEFCAFEBABE);
     let expires_at = chrono::Utc::now() + chrono::Duration::days(365);
     let expires_at_str = expires_at.to_rfc3339();
     let now_str = chrono::Utc::now().to_rfc3339();

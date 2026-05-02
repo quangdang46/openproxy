@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
@@ -11,9 +10,6 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
-use crate::core::executor::{
-    ExecutionRequest, ExecutorError, UpstreamResponse,
-};
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
 use crate::server::auth::require_api_key;
@@ -135,7 +131,7 @@ async fn execute_media_provider(
         }
     };
 
-    let executor = match crate::core::executor::DefaultExecutor::new(
+    let _executor = match crate::core::executor::DefaultExecutor::new(
         provider.to_string(),
         state.client_pool.clone(),
         snapshot.provider_nodes.iter().find(|n| n.id.as_str() == provider).cloned(),
@@ -204,7 +200,7 @@ fn connection_has_credentials(connection: &crate::types::ProviderConnection) -> 
             .is_some()
 }
 
-fn build_media_url(provider: &str, model: &str, route_kind: &str, connection: &crate::types::ProviderConnection) -> String {
+fn build_media_url(provider: &str, _model: &str, route_kind: &str, connection: &crate::types::ProviderConnection) -> String {
     let base_url = get_provider_base_url(provider, connection);
 
     match route_kind {
@@ -225,7 +221,7 @@ fn build_media_url(provider: &str, model: &str, route_kind: &str, connection: &c
             if provider == "google-tts" {
                 format!("{}/text:synthesize?key=", base_url.trim_end_matches('/'))
             } else if provider == "edge-tts" {
-                format!("{}", base_url.trim_end_matches('/'))
+                base_url.trim_end_matches('/').to_string()
             } else {
                 format!("{}/audio/speech", base_url.trim_end_matches('/'))
             }
@@ -256,7 +252,7 @@ fn build_media_url(provider: &str, model: &str, route_kind: &str, connection: &c
             } else if provider == "brave-search" {
                 format!("{}/search", base_url.trim_end_matches('/'))
             } else if provider == "serper" {
-                format!("{}", base_url.trim_end_matches('/'))
+                base_url.trim_end_matches('/').to_string()
             } else if provider == "exa" {
                 format!("{}/search", base_url.trim_end_matches('/'))
             } else {

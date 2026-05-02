@@ -20,6 +20,7 @@ impl MitmTarget {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub struct MitmRouteConfig {
     pub upstream_url: String,
     pub path_prefix: Option<String>,
@@ -27,16 +28,6 @@ pub struct MitmRouteConfig {
     pub response_transform: bool,
 }
 
-impl Default for MitmRouteConfig {
-    fn default() -> Self {
-        Self {
-            upstream_url: String::new(),
-            path_prefix: None,
-            request_transform: false,
-            response_transform: false,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct MitmState {

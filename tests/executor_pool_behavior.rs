@@ -11,7 +11,7 @@ use openproxy::core::executor::{
     ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError, TransportKind,
     CLIENT_POOL_IDLE_TIMEOUT, CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE,
 };
-use openproxy::core::proxy::{normalize_proxy_url, resolve_proxy_target, ProxyTarget};
+use openproxy::core::proxy::{normalize, resolve_proxy_target, ProxyTarget};
 use openproxy::types::{AppDb, ProviderConnection, ProviderNode, ProxyPool, Settings};
 use serde_json::json;
 use tokio::sync::oneshot;
@@ -672,6 +672,8 @@ async fn default_executor_execute_uses_reqwest_when_proxy_present() {
                 no_proxy: "127.0.0.1,localhost".into(),
                 strict_proxy: false,
                 pool_id: Some("proxy-a".into()),
+                label: None,
+                rtt_ms: None,
             }),
         })
         .await
@@ -831,6 +833,8 @@ fn client_pool_reuses_same_provider_key_and_splits_by_proxy_fingerprint() {
                 no_proxy: String::new(),
                 strict_proxy: false,
                 pool_id: None,
+                label: None,
+                rtt_ms: None,
             }),
         )
         .expect("proxied client");
@@ -844,6 +848,8 @@ fn client_pool_reuses_same_provider_key_and_splits_by_proxy_fingerprint() {
                 no_proxy: String::new(),
                 strict_proxy: false,
                 pool_id: None,
+                label: None,
+                rtt_ms: None,
             }),
         )
         .expect("proxied client again");
@@ -857,6 +863,8 @@ fn client_pool_reuses_same_provider_key_and_splits_by_proxy_fingerprint() {
                 no_proxy: "localhost".into(),
                 strict_proxy: false,
                 pool_id: None,
+                label: None,
+                rtt_ms: None,
             }),
         )
         .expect("proxied client with no_proxy");
@@ -966,6 +974,8 @@ fn client_pool_isolates_concurrent_provider_and_proxy_keys() {
                     no_proxy: "localhost".into(),
                     strict_proxy: false,
                     pool_id: Some("pool-a".into()),
+                    label: None,
+                    rtt_ms: None,
                 }),
             )
             .expect("proxied openai client")
@@ -1008,6 +1018,8 @@ fn client_pool_fingerprint_includes_strict_proxy_and_pool_id() {
                 no_proxy: String::new(),
                 strict_proxy: false,
                 pool_id: None,
+                label: None,
+                rtt_ms: None,
             }),
         )
         .expect("strict false client");
@@ -1019,6 +1031,8 @@ fn client_pool_fingerprint_includes_strict_proxy_and_pool_id() {
                 no_proxy: String::new(),
                 strict_proxy: true,
                 pool_id: None,
+                label: None,
+                rtt_ms: None,
             }),
         )
         .expect("strict true client");
@@ -1030,6 +1044,8 @@ fn client_pool_fingerprint_includes_strict_proxy_and_pool_id() {
                 no_proxy: String::new(),
                 strict_proxy: false,
                 pool_id: Some("pool-a".into()),
+                label: None,
+                rtt_ms: None,
             }),
         )
         .expect("pool A client");
@@ -1041,6 +1057,8 @@ fn client_pool_fingerprint_includes_strict_proxy_and_pool_id() {
                 no_proxy: String::new(),
                 strict_proxy: false,
                 pool_id: Some("pool-b".into()),
+                label: None,
+                rtt_ms: None,
             }),
         )
         .expect("pool B client");
@@ -1059,6 +1077,8 @@ fn client_pool_keeps_proxied_providers_isolated_even_with_same_proxy() {
         no_proxy: "localhost".into(),
         strict_proxy: false,
         pool_id: Some("shared-proxy".into()),
+        label: None,
+        rtt_ms: None,
     };
 
     let openai = pool.get("openai", Some(&proxy)).expect("openai client");
@@ -1357,6 +1377,10 @@ fn proxy_resolution_prefers_connection_override_then_pool_then_settings() {
         test_status: None,
         last_tested_at: None,
         last_error: None,
+        success_rate: None,
+        rtt_ms: None,
+        total_requests: None,
+        failed_requests: None,
         created_at: None,
         updated_at: None,
         extra: BTreeMap::new(),
@@ -1369,6 +1393,7 @@ fn proxy_resolution_prefers_connection_override_then_pool_then_settings() {
     };
 
     let mut conn = connection("openai");
+    conn.use_connection_proxy = Some(true);
     conn.provider_specific_data.insert(
         "connectionProxyEnabled".into(),
         serde_json::Value::Bool(true),
@@ -1393,6 +1418,7 @@ fn proxy_resolution_prefers_connection_override_then_pool_then_settings() {
     assert_eq!(resolved.pool_id.as_deref(), Some("pool-1"));
 
     let mut legacy_conn = connection("openai");
+    legacy_conn.use_connection_proxy = Some(true);
     legacy_conn.provider_specific_data.insert(
         "connectionProxyEnabled".into(),
         serde_json::Value::Bool(true),
@@ -1414,9 +1440,9 @@ fn proxy_resolution_prefers_connection_override_then_pool_then_settings() {
 
 #[test]
 fn proxy_url_normalization_adds_scheme_when_missing() {
-    assert_eq!(normalize_proxy_url("host:8080"), "http://host:8080");
+    assert_eq!(normalize("host:8080"), "http://host:8080");
     assert_eq!(
-        normalize_proxy_url("https://host:8080"),
+        normalize("https://host:8080"),
         "https://host:8080"
     );
 }
@@ -1435,12 +1461,17 @@ fn proxy_pool_type_drives_scheme_for_schemeless_urls() {
         test_status: None,
         last_tested_at: None,
         last_error: None,
+        success_rate: None,
+        rtt_ms: None,
+        total_requests: None,
+        failed_requests: None,
         created_at: None,
         updated_at: None,
         extra: BTreeMap::new(),
     });
 
     let mut conn = connection("openai");
+    conn.use_connection_proxy = Some(true);
     conn.provider_specific_data.insert(
         "connectionProxyEnabled".into(),
         serde_json::Value::Bool(true),
@@ -1465,6 +1496,8 @@ fn client_pool_accepts_socks_proxy_urls() {
             no_proxy: String::new(),
             strict_proxy: false,
             pool_id: None,
+            label: None,
+            rtt_ms: None,
         }),
     );
 
@@ -1493,6 +1526,8 @@ async fn no_proxy_bypasses_unreachable_proxy() {
                 no_proxy: "127.0.0.1,localhost".into(),
                 strict_proxy: false,
                 pool_id: None,
+                label: None,
+                rtt_ms: None,
             }),
         )
         .expect("client with no_proxy");

@@ -364,8 +364,10 @@ pub const DEFAULT_STICKY_DURATION_SECS: i64 = 300;
 
 /// Strategy type for provider account selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default)]
 pub enum StrategyType {
     /// Use account with most remaining quota first.
+    #[default]
     FillFirst,
     /// Rotate through accounts in round-robin fashion.
     RoundRobin,
@@ -375,11 +377,6 @@ pub enum StrategyType {
     LeastLoaded,
 }
 
-impl Default for StrategyType {
-    fn default() -> Self {
-        StrategyType::FillFirst
-    }
-}
 
 impl std::fmt::Display for StrategyType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -477,7 +474,7 @@ pub fn is_model_lock_active(connection: &ProviderConnection, model: &str, now: D
         .extra
         .get(&key)
         .and_then(|v| v.as_str())
-        .and_then(|s| parse_timestamp(s))
+        .and_then(parse_timestamp)
         .is_some_and(|until| until > now)
 }
 
@@ -536,7 +533,7 @@ pub fn filter_available_accounts<'a>(
             }
             // Must not be in excluded set
             if let Some(exclude) = exclude_id {
-                if &conn.id == exclude {
+                if conn.id == exclude {
                     return false;
                 }
             }

@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, Query, State, rejection::JsonRejection},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     response::Response,
@@ -175,20 +175,20 @@ async fn store_connection(
     redirect_uri: Option<&str>,
 ) -> anyhow::Result<()> {
     let provider_config = get_provider_config(provider);
-    let client_id = provider_config
+    let _client_id = provider_config
         .as_ref()
         .and_then(|c| c.extra_params.get("client_id"))
         .map(|v| v.as_str())
         .unwrap_or("openproxy")
         .to_string();
 
-    let now = now_secs();
+    let _now = now_secs();
     let expires_at = token_response.expires_in.map(|secs| {
         let expires = chrono::Utc::now() + chrono::Duration::seconds(secs);
         expires.to_rfc3339()
     });
 
-    let redirect_uri = redirect_uri.map(|s| s.to_string()).or_else(|| {
+    let _redirect_uri = redirect_uri.map(|s| s.to_string()).or_else(|| {
         provider_config.as_ref().and_then(|c| c.extra_params.get("redirect_uri"))
             .map(|v| v.as_str())
             .map(|s| s.to_string())
@@ -299,7 +299,7 @@ pub async fn start_oauth_flow(
         kiro_credentials: None,
     };
 
-    if let Err(_) = state.pending_flows.insert(flow) {
+    if state.pending_flows.insert(flow).is_err() {
         return make_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to store flow",
@@ -496,7 +496,7 @@ pub async fn start_device_code(
         }),
     };
 
-    if let Err(_) = state.pending_flows.insert(flow) {
+    if state.pending_flows.insert(flow).is_err() {
         return make_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Failed to store flow",
@@ -654,12 +654,12 @@ pub async fn poll_device_code(
 
             state.pending_flows.remove(&device_code);
 
-            return make_error_response(
+            make_error_response(
                 StatusCode::BAD_REQUEST,
                 &e.error_description.unwrap_or_else(|| e.error.clone()),
                 &e.error,
                 &provider,
-            );
+            )
         }
     }
 }

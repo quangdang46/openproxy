@@ -564,7 +564,7 @@ pub mod cursor_import {
         ).map_err(|e| format!("Failed to query: {}", e))?;
 
         let (access_token, refresh_token, expires_at_raw) = result;
-        let expires_at = expires_at_raw.map(|secs| expires_at_from_seconds(secs));
+        let expires_at = expires_at_raw.map(expires_at_from_seconds);
 
         Ok(CursorTokens {
             access_token,

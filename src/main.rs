@@ -4,7 +4,6 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use clap::Parser;
-use clap_complete::Shell;
 
 use openproxy::cli::{Cli, Command};
 use openproxy::db::Db;
@@ -121,7 +120,7 @@ async fn run_route(
         if let Some(content) = v["choices"][0]["message"]["content"].as_str() {
             println!("{}", content);
         } else {
-            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| text));
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or(text));
         }
     } else {
         println!("{}", text);

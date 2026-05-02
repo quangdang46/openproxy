@@ -1,11 +1,25 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand, CommandFactory};
-use clap_complete::{Generator, Shell};
-use crate::core::tunnel::{TunnelManager, TunnelProvider};
+use clap_complete::Shell;
+use futures_util::TryStreamExt;
+use http_body_util::BodyExt;
+use serde_json::Value;
 
+use crate::core::account_fallback::AccountRegistry;
+use crate::core::combo::{get_combo_models_from_data, ComboStrategy};
+use crate::core::executor::{
+    ClientPool, DefaultExecutor, ExecutionRequest,
+};
+use crate::core::model::get_model_info;
+use crate::core::proxy::resolve_proxy_target;
+use crate::core::rtk::apply_request_preprocessing;
 use crate::db::Db;
-use crate::types::{ProviderConnection, ApiKey, ProxyPool};
+use crate::types::{ProviderConnection, ApiKey, ProxyPool, AppDb};
+
+use crate::core::tunnel::{TunnelManager, TunnelProvider};
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "openproxy", about = "Local AI routing gateway")]
@@ -161,9 +175,8 @@ impl Cli {
                     rt.block_on(run_tunnel(cmd, db.clone()))
                 }
                 Command::Route { model, combo, prompt, stream, json } => {
-                    eprintln!("Route command placeholder");
-                    eprintln!("  model: {:?}, combo: {:?}", model, combo);
-                    eprintln!("  prompt: {}, stream: {}, json: {}", prompt, stream, json);
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(run_route(model, combo, prompt, stream, json))?;
                     Ok(())
                 }
                 Command::Completion { shell } => {
@@ -435,6 +448,408 @@ impl Cli {
                 println!("{}", serde_json::to_string_pretty(&DeleteOutput { deleted: name })?);
             } else {
                 println!("Pool '{}' deleted successfully", name);
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn run_route(
+    model: Option<String>,
+    combo: Option<String>,
+    prompt: String,
+    stream: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let pool = Arc::new(ClientPool::new());
+    let registry = AccountRegistry::default();
+
+    if let (Some(model_str), None) = (&model, &combo) {
+        run_direct_route(pool, registry, model_str, &prompt, stream, json).await
+    } else if let (None, Some(combo_name)) = (&model, &combo) {
+        run_combo_route(pool, registry, combo_name, &prompt, stream, json).await
+    } else if let (Some(_model_str), Some(combo_name)) = (&model, &combo) {
+        eprintln!("Warning: both --model and --combo specified, using --combo '{}'", combo_name);
+        run_combo_route(pool, registry, combo_name, &prompt, stream, json).await
+    } else {
+        eprintln!("Error: must specify either --model or --combo");
+        eprintln!("Usage: openproxy route --model cc/claude-opus-4-7 --prompt 'hello'");
+        eprintln!("   or: openproxy route --combo default --prompt 'hello'");
+        std::process::exit(1);
+    }
+}
+
+async fn run_direct_route(
+    pool: Arc<ClientPool>,
+    registry: AccountRegistry,
+    model_str: &str,
+    prompt: &str,
+    stream: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let snapshot = db_snapshot();
+    let resolved = get_model_info(model_str, &snapshot);
+
+    let Some(provider) = resolved.provider.clone() else {
+        eprintln!("Error: could not resolve provider from model '{}'", model_str);
+        std::process::exit(1);
+    };
+
+    let mut request_body = serde_json::json!({
+        "model": resolved.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": stream,
+    });
+
+    let _ = apply_request_preprocessing(&mut request_body, &snapshot.settings, &resolved.model);
+
+    let mut excluded = HashSet::new();
+    let mut last_error = None;
+
+    loop {
+        let snapshot = db_snapshot();
+        let connection = select_connection_cli(&snapshot, &provider, &resolved.model, &excluded);
+
+        let Some(connection) = connection else {
+            if let Some(error) = last_error {
+                eprintln!("Error: {}", error);
+                std::process::exit(1);
+            }
+            eprintln!("Error: no available credentials for provider '{}'", provider);
+            std::process::exit(1);
+        };
+
+        let provider_node = snapshot
+            .provider_nodes
+            .iter()
+            .find(|node| node.id == provider)
+            .cloned();
+
+        let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+
+        let (rate_limit_remaining, rate_limit_reset) = registry.rate_limit_info(&connection.id);
+        let slot = registry.acquire_slot(
+            &connection.id,
+            10,
+            rate_limit_remaining,
+            rate_limit_reset,
+        );
+
+        let Some(_slot) = slot else {
+            excluded.insert(connection.id.clone());
+            continue;
+        };
+
+        let executor = match DefaultExecutor::new(provider.clone(), pool.clone(), provider_node) {
+            Ok(ex) => ex,
+            Err(e) => {
+                eprintln!("Error creating executor: {:?}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let stream_flag = request_body
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let result = executor
+            .execute(ExecutionRequest {
+                model: resolved.model.clone(),
+                body: request_body.clone(),
+                stream: stream_flag,
+                credentials: connection.clone(),
+                proxy,
+            })
+            .await;
+
+        match result {
+            Ok(response) => {
+                if json {
+                    let body = response.transformed_body;
+                    println!("{}", serde_json::to_string_pretty(&body)?);
+                    return Ok(());
+                }
+
+                match response.response {
+                    crate::core::executor::UpstreamResponse::Reqwest(reqwest_resp) => {
+                        if stream_flag {
+                            print_stream_response(reqwest_resp).await?;
+                        } else {
+                            let text = reqwest_resp.text().await?;
+                            let parsed: Value = serde_json::from_str(&text)?;
+                            println!("{}", serde_json::to_string_pretty(&parsed)?);
+                        }
+                    }
+                    crate::core::executor::UpstreamResponse::Hyper(_) => {
+                        eprintln!("Hyper response not supported in CLI mode");
+                    }
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                let error_msg = format!("{:?}", e);
+                last_error = Some(error_msg.clone());
+                excluded.insert(connection.id.clone());
+                continue;
+            }
+        }
+    }
+}
+
+async fn run_combo_route(
+    pool: Arc<ClientPool>,
+    registry: AccountRegistry,
+    combo_name: &str,
+    prompt: &str,
+    stream: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let snapshot = db_snapshot();
+    let Some(combo_models) = get_combo_models_from_data(combo_name, &snapshot.combos) else {
+        eprintln!("Error: combo '{}' not found", combo_name);
+        std::process::exit(1);
+    };
+
+    let strategy = snapshot
+        .settings
+        .combo_strategies
+        .get(combo_name)
+        .map(String::as_str)
+        .unwrap_or(snapshot.settings.combo_strategy.as_str());
+
+    let _combo_strategy = if strategy.eq_ignore_ascii_case("round-robin") {
+        ComboStrategy::RoundRobin
+    } else {
+        ComboStrategy::Fallback
+    };
+
+    let model_str = combo_models.first().map(|m| m.as_str()).unwrap_or("gpt-4o-mini");
+    let resolved = get_model_info(model_str, &snapshot);
+
+    let Some(provider) = resolved.provider.clone() else {
+        eprintln!("Error: could not resolve provider from combo model '{}'", model_str);
+        std::process::exit(1);
+    };
+
+    let mut request_body = serde_json::json!({
+        "model": resolved.model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": stream,
+    });
+
+    let _ = apply_request_preprocessing(&mut request_body, &snapshot.settings, &resolved.model);
+
+    let mut excluded = HashSet::new();
+
+    loop {
+        let snapshot = db_snapshot();
+        let connection = select_connection_cli(&snapshot, &provider, &resolved.model, &excluded);
+
+        let Some(connection) = connection else {
+            eprintln!("Error: no available credentials for provider '{}'", provider);
+            std::process::exit(1);
+        };
+
+        let provider_node = snapshot
+            .provider_nodes
+            .iter()
+            .find(|node| node.id == provider)
+            .cloned();
+
+        let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+
+        let (rate_limit_remaining, rate_limit_reset) = registry.rate_limit_info(&connection.id);
+        let slot = registry.acquire_slot(
+            &connection.id,
+            10,
+            rate_limit_remaining,
+            rate_limit_reset,
+        );
+
+        let Some(_slot) = slot else {
+            excluded.insert(connection.id.clone());
+            continue;
+        };
+
+        let executor = match DefaultExecutor::new(provider.clone(), pool.clone(), provider_node) {
+            Ok(ex) => ex,
+            Err(e) => {
+                eprintln!("Error creating executor: {:?}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let stream_flag = request_body
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+
+        let result = executor
+            .execute(ExecutionRequest {
+                model: resolved.model.clone(),
+                body: request_body.clone(),
+                stream: stream_flag,
+                credentials: connection.clone(),
+                proxy,
+            })
+            .await;
+
+        match result {
+            Ok(response) => {
+                if json {
+                    let body = response.transformed_body;
+                    println!("{}", serde_json::to_string_pretty(&body)?);
+                    return Ok(());
+                }
+
+                match response.response {
+                    crate::core::executor::UpstreamResponse::Reqwest(reqwest_resp) => {
+                        if stream_flag {
+                            print_stream_response(reqwest_resp).await?;
+                        } else {
+                            let text = reqwest_resp.text().await?;
+                            let parsed: Value = serde_json::from_str(&text)?;
+                            println!("{}", serde_json::to_string_pretty(&parsed)?);
+                        }
+                    }
+                    crate::core::executor::UpstreamResponse::Hyper(_) => {
+                        eprintln!("Hyper response not supported in CLI mode");
+                    }
+                }
+                return Ok(());
+            }
+            Err(e) => {
+                let _error_msg = format!("{:?}", e);
+                excluded.insert(connection.id.clone());
+                continue;
+            }
+        }
+    }
+}
+
+fn db_snapshot() -> Arc<AppDb> {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let db = Db::load().await.expect("Failed to load database");
+        db.snapshot()
+    })
+}
+
+fn select_connection_cli(
+    snapshot: &Arc<AppDb>,
+    provider: &str,
+    model: &str,
+    excluded: &HashSet<String>,
+) -> Option<ProviderConnection> {
+    use chrono::Utc;
+    
+    
+
+    let now = Utc::now();
+    let mut candidates: Vec<_> = snapshot
+        .provider_connections
+        .iter()
+        .filter(|connection| {
+            connection.provider == provider
+                && connection.is_active()
+                && connection_has_credentials(connection)
+                && !excluded.contains(&connection.id)
+                && connection_supports_model(connection, model)
+                && !is_connection_rate_limited(connection, now)
+                && !is_model_locked(connection, model, now)
+        })
+        .cloned()
+        .collect();
+
+    candidates.sort_by_key(|connection| connection.priority.unwrap_or(999));
+    candidates.into_iter().next()
+}
+
+fn connection_has_credentials(connection: &ProviderConnection) -> bool {
+    connection
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_some()
+        || connection
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .is_some()
+}
+
+fn is_connection_rate_limited(connection: &ProviderConnection, now: chrono::DateTime<chrono::Utc>) -> bool {
+    connection
+        .rate_limited_until
+        .as_deref()
+        .and_then(parse_timestamp)
+        .is_some_and(|until| until > now)
+}
+
+fn is_model_locked(connection: &ProviderConnection, model: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+    [format!("modelLock_{model}"), "modelLock___all".to_string()]
+        .into_iter()
+        .filter_map(|key| connection.extra.get(&key))
+        .filter_map(Value::as_str)
+        .filter_map(parse_timestamp)
+        .any(|until| until > now)
+}
+
+fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+fn connection_supports_model(connection: &ProviderConnection, model: &str) -> bool {
+    let enabled_models: Vec<_> = connection
+        .provider_specific_data
+        .get("enabledModels")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
+
+    if !enabled_models.is_empty() {
+        return enabled_models
+            .iter()
+            .any(|value| model_ids_match(value, model));
+    }
+
+    connection
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none_or(|value| model_ids_match(value, model))
+}
+
+fn model_ids_match(advertised: &str, requested: &str) -> bool {
+    let advertised = advertised.trim();
+    let requested = requested.trim();
+
+    advertised == requested || advertised.ends_with(&format!("/{}", requested))
+}
+
+async fn print_stream_response(response: reqwest::Response) -> anyhow::Result<()> {
+    use futures_util::StreamExt;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => {
+                print!("{}", String::from_utf8_lossy(&bytes));
+                std::io::Write::flush(&mut std::io::stdout())?;
+            }
+            Err(e) => {
+                eprintln!("Stream error: {:?}", e);
+                break;
             }
         }
     }
