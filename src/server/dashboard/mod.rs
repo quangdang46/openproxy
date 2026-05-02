@@ -1,12 +1,14 @@
-use axum::{routing::get, Json, Router};
+use axum::{routing::get, Router};
+use axum::response::Html;
 
 use crate::server::state::AppState;
-use crate::types::HealthResponse;
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route("/dashboard/health", get(health))
+    Router::new()
+        .route("/", get(dashboard))
+        .route("/dashboard", get(dashboard))
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse::new("dashboard"))
+async fn dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
 }
