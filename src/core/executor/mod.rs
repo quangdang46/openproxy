@@ -6,6 +6,7 @@ mod default;
 mod grok_web;
 mod kiro;
 mod ollama;
+mod provider;
 mod vertex;
 
 pub use api_key::{
@@ -33,6 +34,12 @@ pub use grok_web::{
     GrokWebExecutor, GrokWebExecutorError, GrokWebExecutionRequest, GrokWebExecutorResponse,
     PerplexityWebExecutor, PerplexityWebExecutorError, PerplexityWebExecutionRequest,
     PerplexityWebExecutorResponse,
+};
+pub use provider::{
+    ProviderExecutionRequest, ProviderExecutionResponse, ProviderExecutorConfig,
+    ProviderExecutorError, ProviderFormat, UnifiedExecutor,
+    all_providers, get_api_key_providers, get_free_providers, get_oauth_providers,
+    get_provider_config, get_specialty_providers, is_supported_provider,
 };
 pub use kiro::{
     AwsCredentials, EventStreamDecoder, KiroExecutor, KiroExecutorError, KiroExecutorResponse,
