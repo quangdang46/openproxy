@@ -255,3 +255,168 @@ mod gitlab_extended_tests {
         assert_eq!(config.auth_url, "https://gitlab.example.com/oauth/authorize");
     }
 }
+
+mod kiro_device_flow_tests {
+    use crate::oauth::{DeviceCodeResponse, KiroDeviceFlow};
+
+    #[test]
+    fn test_kiro_device_flow_struct() {
+        let device = DeviceCodeResponse {
+            device_code: "kiro_dc_123".to_string(),
+            user_code: "KIRO-USER-123".to_string(),
+            verification_uri: "https://kiro.ai/activate".to_string(),
+            verification_uri_complete: None,
+            interval: 5,
+            expires_in: Some(1800),
+        };
+        let kiro_flow = KiroDeviceFlow {
+            device_code: device,
+            client_id: "client_abc".to_string(),
+            client_secret: "secret_xyz".to_string(),
+        };
+        assert_eq!(kiro_flow.device_code.device_code, "kiro_dc_123");
+        assert_eq!(kiro_flow.client_id, "client_abc");
+        assert_eq!(kiro_flow.client_secret, "secret_xyz");
+    }
+
+    #[test]
+    fn test_kiro_device_flow_with_complete_uri() {
+        let device = DeviceCodeResponse {
+            device_code: "dc_with_uri".to_string(),
+            user_code: "USER123".to_string(),
+            verification_uri: "https://kiro.ai/activate".to_string(),
+            verification_uri_complete: Some("https://kiro.ai/activate?code=USER123".to_string()),
+            interval: 10,
+            expires_in: None,
+        };
+        let kiro_flow = KiroDeviceFlow {
+            device_code: device,
+            client_id: "id".to_string(),
+            client_secret: "".to_string(),
+        };
+        assert!(kiro_flow.device_code.verification_uri_complete.is_some());
+    }
+}
+
+mod token_refresh_tests {
+    use crate::oauth::token_refresh;
+    use chrono::Utc;
+
+    #[test]
+    fn test_needs_refresh_none_expires_at() {
+        assert!(token_refresh::needs_refresh(&None));
+    }
+
+    #[test]
+    fn test_needs_refresh_expired() {
+        let past = "2020-01-01T00:00:00Z";
+        assert!(token_refresh::needs_refresh(&Some(past.to_string())));
+    }
+
+    #[test]
+    fn test_needs_refresh_not_expired() {
+        let future = "2099-12-31T23:59:59Z";
+        assert!(!token_refresh::needs_refresh(&Some(future.to_string())));
+    }
+
+    #[test]
+    fn test_needs_refresh_invalid_format() {
+        let invalid = "not-a-date";
+        assert!(token_refresh::needs_refresh(&Some(invalid.to_string())));
+    }
+
+    #[test]
+    fn test_needs_refresh_within_buffer() {
+        let now = Utc::now();
+        // Token that expired 4 minutes ago (within 5 minute buffer)
+        let nearly_expired = (now - chrono::Duration::minutes(4)).to_rfc3339();
+        assert!(token_refresh::needs_refresh(&Some(nearly_expired)));
+    }
+
+    #[test]
+    fn test_needs_refresh_far_future() {
+        let far_future = (Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
+        assert!(!token_refresh::needs_refresh(&Some(far_future)));
+    }
+}
+
+mod kiro_credentials_tests {
+    use crate::oauth::pending::KiroCredentials;
+
+    #[test]
+    fn test_kiro_credentials_create() {
+        let creds = KiroCredentials {
+            client_id: "test-client-id".to_string(),
+            client_secret: "test-client-secret".to_string(),
+        };
+        assert_eq!(creds.client_id, "test-client-id");
+        assert_eq!(creds.client_secret, "test-client-secret");
+    }
+
+    #[test]
+    fn test_kiro_credentials_empty_secret() {
+        let creds = KiroCredentials {
+            client_id: "test-id".to_string(),
+            client_secret: "".to_string(),
+        };
+        assert!(creds.client_secret.is_empty());
+    }
+}
+
+mod pending_oauth_flow_kiro_tests {
+    use crate::oauth::pending::{KiroCredentials, PendingOAuthFlow};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn create_kiro_flow(state: &str) -> PendingOAuthFlow {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        PendingOAuthFlow {
+            state: state.to_string(),
+            code_verifier: "test_verifier".to_string(),
+            provider: "kiro".to_string(),
+            account_id: "account_123".to_string(),
+            redirect_uri: None,
+            device_code: Some("kiro_dc_xyz".to_string()),
+            user_code: Some("KIRO-123".to_string()),
+            created_at: now,
+            expires_at: now + 900,
+            kiro_credentials: Some(KiroCredentials {
+                client_id: "registered_client_id".to_string(),
+                client_secret: "registered_client_secret".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn test_pending_flow_with_kiro_credentials() {
+        let flow = create_kiro_flow("kiro_state");
+        assert!(flow.kiro_credentials.is_some());
+        let creds = flow.kiro_credentials.unwrap();
+        assert_eq!(creds.client_id, "registered_client_id");
+        assert_eq!(creds.client_secret, "registered_client_secret");
+    }
+
+    #[test]
+    fn test_pending_flow_without_kiro_credentials() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let flow = PendingOAuthFlow {
+            state: "github_state".to_string(),
+            code_verifier: "verifier".to_string(),
+            provider: "github".to_string(),
+            account_id: "account_456".to_string(),
+            redirect_uri: None,
+            device_code: Some("gh_dc_123".to_string()),
+            user_code: Some("GH-USER".to_string()),
+            created_at: now,
+            expires_at: now + 900,
+            kiro_credentials: None,
+        };
+        assert!(flow.kiro_credentials.is_none());
+        assert_eq!(flow.provider, "github");
+    }
+}
