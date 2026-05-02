@@ -14,6 +14,8 @@ use url::form_urlencoded;
 pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 
 pub mod pending;
+#[cfg(test)]
+pub mod tests;
 
 pub enum OAuthFlowKind {
     AuthorizationCodePkce,
@@ -230,6 +232,16 @@ pub mod providers {
                 ("client_id".to_string(), "codebuddy-openproxy".to_string()),
             ]
             .into(),
+        }
+    }
+
+    pub fn gitlab_with_baseurl(base_url: &str) -> OAuthProviderConfig {
+        OAuthProviderConfig {
+            auth_url: format!("{}/oauth/authorize", base_url.trim_end_matches('/')),
+            token_url: format!("{}/oauth/token", base_url.trim_end_matches('/')),
+            scopes: vec!["api".to_string(), "read_user".to_string()],
+            uses_pkce: true,
+            extra_params: [("response_type".to_string(), "code".to_string())].into(),
         }
     }
 
@@ -498,332 +510,73 @@ pub fn expires_at_from_seconds(expires_in: i64) -> String {
     expires.to_rfc3339()
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
 
-    #[test]
-    fn test_pkce_generate() {
-        let (verifier, challenge) = pkce::generate_verifier_and_challenge();
-        assert_eq!(verifier.len(), 43);
-        assert!(!challenge.is_empty());
+// Cursor import module - for importing tokens from Cursor's SQLite config.db
+pub mod cursor_import {
+    use crate::oauth::{TokenResponse, expires_at_from_seconds};
 
-        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(&challenge)
-            .unwrap();
-        assert_eq!(decoded.len(), 32);
+    #[derive(Clone)]
+    pub struct CursorTokens {
+        pub access_token: String,
+        pub refresh_token: Option<String>,
+        pub expires_at: Option<String>,
     }
 
-    #[test]
-    fn test_needs_refresh() {
-        assert!(needs_refresh(&None));
+    /// Read tokens from Cursor's SQLite config.db
+    pub fn read_cursor_tokens(config_path: &str) -> Result<CursorTokens, String> {
+        let conn = rusqlite::Connection::open(config_path)
+            .map_err(|e| format!("Failed to open SQLite: {}", e))?;
 
-        let past = "2020-01-01T00:00:00Z";
-        assert!(needs_refresh(&Some(past.to_string())));
+        let result = conn.query_row(
+            "SELECT access_token, refresh_token, expires_at FROM user_authentication LIMIT 1",
+            [],
+            |row| {
+                let access_token: String = row.get(0)?;
+                let refresh_token: Option<String> = row.get(1)?;
+                let expires_at_raw: Option<i64> = row.get(2)?;
+                Ok((access_token, refresh_token, expires_at_raw))
+            },
+        ).map_err(|e| format!("Failed to query: {}", e))?;
 
-        let future = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
-        assert!(!needs_refresh(&Some(future)));
+        let (access_token, refresh_token, expires_at_raw) = result;
+        let expires_at = expires_at_raw.map(|secs| expires_at_from_seconds(secs));
 
-        let soon = (chrono::Utc::now() + chrono::Duration::minutes(3)).to_rfc3339();
-        assert!(needs_refresh(&Some(soon)));
+        Ok(CursorTokens {
+            access_token,
+            refresh_token,
+            expires_at,
+        })
+    }
+
+    /// Convert CursorTokens to TokenResponse
+    pub fn to_token_response(cursor: CursorTokens) -> TokenResponse {
+        TokenResponse {
+            access_token: cursor.access_token,
+            refresh_token: cursor.refresh_token,
+            expires_in: None,
+            id_token: None,
+            token_type: Some("Bearer".to_string()),
+            scope: None,
+        }
     }
 }
 
-#[cfg(test)]
-mod pkce_tests {
-    use super::*;
+// GitLab PAT (Personal Access Token) support
+pub mod gitlab_pat {
+    use crate::oauth::TokenResponse;
 
-    #[test]
-    fn test_code_verifier_length() {
-        let verifier = pkce::generate_code_verifier();
-        assert_eq!(verifier.len(), 43);
-    }
-
-    #[test]
-    fn test_code_verifier_chars() {
-        let verifier = pkce::generate_code_verifier();
-        assert!(verifier.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '~')));
-    }
-
-    #[test]
-    fn test_code_challenge_derivation() {
-        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-        let challenge = pkce::generate_code_challenge(verifier);
-        assert_eq!(challenge, "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
-    }
-
-    #[test]
-    fn test_code_challenge_is_deterministic() {
-        let verifier = pkce::generate_code_verifier();
-        let c1 = pkce::generate_code_challenge(&verifier);
-        let c2 = pkce::generate_code_challenge(&verifier);
-        assert_eq!(c1, c2);
-    }
-}
-
-#[cfg(test)]
-mod device_code_tests {
-    use super::*;
-
-    #[test]
-    fn test_device_code_response_deserialization() {
-        let json = r#"{
-            "device_code": "test_device_code_123",
-            "user_code": "USER-1234",
-            "verification_uri": "https://example.com/verify",
-            "interval": 5,
-            "expires_in": 900
-        }"#;
-
-        let resp: DeviceCodeResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.device_code, "test_device_code_123");
-        assert_eq!(resp.user_code, "USER-1234");
-        assert_eq!(resp.verification_uri, "https://example.com/verify");
-        assert_eq!(resp.interval, 5);
-        assert_eq!(resp.expires_in, Some(900));
-    }
-
-    #[test]
-    fn test_device_code_response_optional_fields() {
-        let json = r#"{
-            "device_code": "test_device_code_123",
-            "user_code": "USER-1234",
-            "verification_uri": "https://example.com/verify",
-            "verification_uri_complete": "https://example.com/verify?code=USER-1234",
-            "interval": 5
-        }"#;
-
-        let resp: DeviceCodeResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.device_code, "test_device_code_123");
-        assert_eq!(resp.verification_uri_complete, Some("https://example.com/verify?code=USER-1234".to_string()));
-        assert_eq!(resp.expires_in, None);
-    }
-
-    #[test]
-    fn test_oauth_error_deserialization() {
-        let json = r#"{
-            "error": "authorization_pending",
-            "error_description": "Authorization is pending"
-        }"#;
-
-        let err: OAuthError = serde_json::from_str(json).unwrap();
-        assert_eq!(err.error, "authorization_pending");
-        assert_eq!(err.error_description, Some("Authorization is pending".to_string()));
-    }
-
-    #[test]
-    fn test_oauth_error_minimal() {
-        let json = r#"{"error": "access_denied"}"#;
-
-        let err: OAuthError = serde_json::from_str(json).unwrap();
-        assert_eq!(err.error, "access_denied");
-        assert_eq!(err.error_description, None);
-    }
-
-    #[test]
-    fn test_token_response_deserialization() {
-        let json = r#"{
-            "access_token": "test_access_token",
-            "refresh_token": "test_refresh_token",
-            "expires_in": 3600,
-            "token_type": "Bearer",
-            "scope": "read write"
-        }"#;
-
-        let resp: TokenResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.access_token, "test_access_token");
-        assert_eq!(resp.refresh_token, Some("test_refresh_token".to_string()));
-        assert_eq!(resp.expires_in, Some(3600));
-        assert_eq!(resp.token_type, Some("Bearer".to_string()));
-        assert_eq!(resp.scope, Some("read write".to_string()));
-    }
-
-    #[test]
-    fn test_token_response_minimal() {
-        let json = r#"{"access_token": "test_access_token"}"#;
-
-        let resp: TokenResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.access_token, "test_access_token");
-        assert_eq!(resp.refresh_token, None);
-        assert_eq!(resp.expires_in, None);
-        assert_eq!(resp.token_type, None);
-        assert_eq!(resp.scope, None);
-    }
-
-    #[test]
-    fn test_token_response_with_id_token() {
-        let json = r#"{
-            "access_token": "test_access_token",
-            "id_token": "eyJhbGciOiJSUzI1NiJ9.test",
-            "expires_in": 3600
-        }"#;
-
-        let resp: TokenResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(resp.id_token, Some("eyJhbGciOiJSUzI1NiJ9.test".to_string()));
-    }
-
-    #[test]
-    fn test_github_provider_config() {
-        let config = providers::github();
-        assert!(!config.uses_pkce);
-        assert_eq!(config.auth_url, "https://github.com/login/device/code");
-        assert_eq!(config.token_url, "https://github.com/login/oauth/access_token");
-        assert!(config.scopes.contains(&"read:user".to_string()));
-        assert!(config.scopes.contains(&"repo".to_string()));
-    }
-
-    #[test]
-    fn test_kiro_provider_config() {
-        let config = providers::kiro();
-        assert!(!config.uses_pkce);
-        assert_eq!(config.auth_url, "https://kiro.ai/oauth/device/code");
-        assert_eq!(config.token_url, "https://kiro.ai/oauth/token");
-        assert!(config.scopes.contains(&"openid".to_string()));
-        assert!(config.scopes.contains(&"profile".to_string()));
-    }
-
-    #[test]
-    fn test_kimi_coding_provider_config() {
-        let config = providers::kimi_coding();
-        assert!(!config.uses_pkce);
-        assert_eq!(config.auth_url, "https://api.moonshot.cn/kimi-device/oauth/device/code");
-        assert_eq!(config.token_url, "https://api.moonshot.cn/kimi-device/oauth/token");
-        assert!(config.scopes.contains(&"kimi:read".to_string()));
-        assert_eq!(config.extra_params.get("client_id"), Some(&"kimi-coding-openproxy".to_string()));
-    }
-
-    #[test]
-    fn test_kilocode_provider_config() {
-        let config = providers::kilocode();
-        assert!(!config.uses_pkce);
-        assert_eq!(config.auth_url, "https://api.kilo.ai/oauth/device/code");
-        assert_eq!(config.token_url, "https://api.kilo.ai/oauth/token");
-        assert!(config.scopes.contains(&"read".to_string()));
-        assert_eq!(config.extra_params.get("client_id"), Some(&"kilocode-openproxy".to_string()));
-    }
-
-    #[test]
-    fn test_codebuddy_provider_config() {
-        let config = providers::codebuddy();
-        assert!(!config.uses_pkce);
-        assert_eq!(config.auth_url, "https://copilot.tencent.com/oauth/device/code");
-        assert_eq!(config.token_url, "https://copilot.tencent.com/oauth/token");
-        assert!(config.scopes.contains(&"read".to_string()));
-        assert_eq!(config.extra_params.get("client_id"), Some(&"codebuddy-openproxy".to_string()));
-    }
-
-    #[test]
-    fn test_device_code_providers_list() {
-        let device_providers = ["github", "kiro", "kimi-coding", "kilocode", "codebuddy"];
-        for provider in device_providers {
-            let config = providers::get_config(provider);
-            assert!(config.is_some(), "Provider {} should have config", provider);
-            let config = config.unwrap();
-            assert!(!config.uses_pkce, "{} should use device code flow", provider);
+    pub fn create_token_response(pat: &str) -> TokenResponse {
+        TokenResponse {
+            access_token: pat.to_string(),
+            refresh_token: None,
+            expires_in: None,
+            id_token: None,
+            token_type: Some("Bearer".to_string()),
+            scope: Some("api read_user".to_string()),
         }
     }
 
-    #[test]
-    fn test_get_config_unknown_provider() {
-        let config = providers::get_config("unknown_provider");
-        assert!(config.is_none());
-    }
-
-    #[test]
-    fn test_get_config_all_providers() {
-        let all_providers = ["claude", "codex", "gitlab", "github", "kiro", "kimi-coding", "kilocode", "codebuddy"];
-        for provider in all_providers {
-            let config = providers::get_config(provider);
-            assert!(config.is_some(), "Provider {} should have config", provider);
-        }
-    }
-
-    #[test]
-    fn test_oauth_provider_config_build_auth_url_github() {
-        let config = providers::github();
-        let url = config.build_auth_url(
-            "test_client",
-            "http://localhost:20128/oauth/callback",
-            "test_state",
-            "test_challenge",
-        );
-        assert!(url.contains("client_id=test_client"));
-        assert!(url.contains("redirect_uri="));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("state=test_state"));
-    }
-
-    #[test]
-    fn test_oauth_provider_config_build_auth_url_kiro() {
-        let config = providers::kiro();
-        let url = config.build_auth_url(
-            "test_client",
-            "http://localhost:20128/oauth/callback",
-            "test_state",
-            "test_challenge",
-        );
-        assert!(url.contains("client_id=test_client"));
-        assert!(url.contains("scope=openid+profile"));
-    }
-
-    #[test]
-    fn test_oauth_provider_config_build_auth_url_with_extra_params() {
-        let config = providers::kimi_coding();
-        let url = config.build_auth_url(
-            "test_client",
-            "http://localhost:20128/oauth/callback",
-            "test_state",
-            "test_challenge",
-        );
-        assert!(url.contains("client_id=kimi-coding-openproxy"));
-        assert!(url.contains("scope=kimi%3Aread"));
-    }
-
-    #[test]
-    fn test_expires_at_from_seconds() {
-        let expires_at = expires_at_from_seconds(3600);
-        let parsed = chrono::DateTime::parse_from_rfc3339(&expires_at);
-        assert!(parsed.is_ok());
-        let parsed = parsed.unwrap().with_timezone(&chrono::Utc);
-        let expected = chrono::Utc::now() + chrono::Duration::seconds(3600);
-        let diff = (parsed.timestamp() - expected.timestamp()).abs();
-        assert!(diff < 5);
-    }
-
-    #[test]
-    fn test_token_expiry_buffer() {
-        assert_eq!(TOKEN_EXPIRY_BUFFER_MS, 5 * 60 * 1000);
-    }
-
-    #[test]
-    fn test_oauth_flow_kind() {
-        let _ = OAuthFlowKind::AuthorizationCodePkce;
-        let _ = OAuthFlowKind::DeviceCode;
-        let _ = OAuthFlowKind::ImportToken;
-    }
-
-    #[test]
-    fn test_refresh_request_struct() {
-        let req = RefreshRequest {
-            refresh_token: "test_refresh".to_string(),
-            client_id: "test_client".to_string(),
-            client_secret: Some("secret".to_string()),
-            scopes: vec!["read".to_string(), "write".to_string()],
-        };
-        assert_eq!(req.refresh_token, "test_refresh");
-        assert_eq!(req.client_id, "test_client");
-        assert_eq!(req.client_secret, Some("secret".to_string()));
-        assert_eq!(req.scopes.len(), 2);
-    }
-
-    #[test]
-    fn test_refresh_request_without_secret() {
-        let req = RefreshRequest {
-            refresh_token: "test_refresh".to_string(),
-            client_id: "test_client".to_string(),
-            client_secret: None,
-            scopes: vec!["read".to_string()],
-        };
-        assert!(req.client_secret.is_none());
+    pub fn is_valid_pat(pat: &str) -> bool {
+        !pat.is_empty() && pat.len() >= 20
     }
 }

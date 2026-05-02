@@ -807,10 +807,10 @@ pub async fn oauth_status(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/oauth/:provider/start", get(start_oauth_flow))
-        .route("/api/oauth/:provider/callback", get(oauth_callback))
-        .route("/api/oauth/:provider/device_code", post(start_device_code))
-        .route("/api/oauth/:provider/poll", post(poll_device_code))
-        .route("/api/oauth/:provider/refresh", post(refresh_token))
-        .route("/api/oauth/:provider/status", get(oauth_status))
+        .route("/api/oauth/{provider}/start", get(start_oauth_flow))
+        .route("/api/oauth/{provider}/callback", get(oauth_callback))
+        .route("/api/oauth/{provider}/device_code", post(start_device_code))
+        .route("/api/oauth/{provider}/poll", post(poll_device_code))
+        .route("/api/oauth/{provider}/refresh", post(refresh_token))
+        .route("/api/oauth/{provider}/status", get(oauth_status))
 }
