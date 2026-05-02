@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::core::account_fallback::AccountRegistry;
 use crate::core::executor::ClientPool;
+use crate::core::usage::UsageTracker;
 use crate::db::Db;
 use crate::oauth::pending::PendingFlowStore;
 
@@ -21,5 +22,12 @@ impl AppState {
             pending_flows: PendingFlowStore::new(),
             account_registry: Arc::new(AccountRegistry::default()),
         }
+    }
+
+    /// Returns a UsageTracker for tracking request/response usage.
+    /// The tracker is created fresh each call to ensure it picks up
+    /// the latest pricing configuration from the database.
+    pub fn usage_tracker(&self) -> UsageTracker {
+        UsageTracker::new(self.db.clone())
     }
 }
