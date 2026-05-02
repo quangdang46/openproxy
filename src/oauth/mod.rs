@@ -2,7 +2,7 @@
 //!
 //! Supports:
 //! - PKCE Authorization Code Flow (claude, codex, gitlab)
-//! - Device Code Flow (github, kiro, kimi-coding, kilocode)
+//! - Device Code Flow (github, kiro, kimi-coding, kilocode, codebuddy)
 //! - Import Token (cursor)
 
 use base64::Engine;
@@ -192,6 +192,48 @@ pub mod providers {
         }
     }
 
+    pub fn kimi_coding() -> OAuthProviderConfig {
+        OAuthProviderConfig {
+            auth_url: "https://api.moonshot.cn/kimi-device/oauth/device/code".to_string(),
+            token_url: "https://api.moonshot.cn/kimi-device/oauth/token".to_string(),
+            scopes: vec!["kimi:read".to_string()],
+            uses_pkce: false,
+            extra_params: [
+                ("scope".to_string(), "kimi:read".to_string()),
+                ("client_id".to_string(), "kimi-coding-openproxy".to_string()),
+            ]
+            .into(),
+        }
+    }
+
+    pub fn kilocode() -> OAuthProviderConfig {
+        OAuthProviderConfig {
+            auth_url: "https://api.kilo.ai/oauth/device/code".to_string(),
+            token_url: "https://api.kilo.ai/oauth/token".to_string(),
+            scopes: vec!["read".to_string()],
+            uses_pkce: false,
+            extra_params: [
+                ("scope".to_string(), "read".to_string()),
+                ("client_id".to_string(), "kilocode-openproxy".to_string()),
+            ]
+            .into(),
+        }
+    }
+
+    pub fn codebuddy() -> OAuthProviderConfig {
+        OAuthProviderConfig {
+            auth_url: "https://copilot.tencent.com/oauth/device/code".to_string(),
+            token_url: "https://copilot.tencent.com/oauth/token".to_string(),
+            scopes: vec!["read".to_string()],
+            uses_pkce: false,
+            extra_params: [
+                ("scope".to_string(), "read".to_string()),
+                ("client_id".to_string(), "codebuddy-openproxy".to_string()),
+            ]
+            .into(),
+        }
+    }
+
     pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         match provider {
             "claude" => Some(claude()),
@@ -199,6 +241,9 @@ pub mod providers {
             "gitlab" => Some(gitlab()),
             "github" => Some(github()),
             "kiro" => Some(kiro()),
+            "kimi-coding" => Some(kimi_coding()),
+            "kilocode" => Some(kilocode()),
+            "codebuddy" => Some(codebuddy()),
             _ => None,
         }
     }
@@ -247,13 +292,14 @@ pub mod device_code {
         interval_secs: u64,
     ) -> Result<TokenResponse, OAuthError> {
         let client = reqwest::Client::new();
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        let mut current_interval = interval_secs;
 
         loop {
-            interval.tick().await;
+            tokio::time::sleep(std::time::Duration::from_secs(current_interval)).await;
+
             let params = [
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                ("client_id", "openproxy"),
+                ("client_id", provider_config.extra_params.get("client_id").map(|s| s.as_str()).unwrap_or("openproxy")),
                 ("device_code", device_code),
             ];
             let response = client
@@ -271,7 +317,10 @@ pub mod device_code {
 
             match error {
                 Some("authorization_pending") => continue,
-                Some("slow_down") => continue,
+                Some("slow_down") => {
+                    current_interval = (current_interval * 2).min(60);
+                    continue;
+                }
                 Some("access_denied") => {
                     return Err(OAuthError {
                         error: "access_denied".to_string(),
@@ -336,6 +385,88 @@ pub mod device_code {
             error: "parse_error".to_string(),
             error_description: Some(e.to_string()),
         })
+    }
+
+    /// GitHub Copilot special: exchange OAuth token for Copilot token
+    pub async fn exchange_github_copilot_token(oauth_token: &str) -> Result<TokenResponse, OAuthError> {
+        let client = reqwest::Client::new();
+        let response = client
+            .post("https://github.com/copilot_internal/v1/token")
+            .header("Authorization", format!("Bearer {}", oauth_token))
+            .send()
+            .await
+            .map_err(|e| OAuthError {
+                error: "request_failed".to_string(),
+                error_description: Some(e.to_string()),
+            })?;
+
+        if !response.status().is_success() {
+            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
+                error: "copilot_token_exchange_failed".to_string(),
+                error_description: None,
+            });
+            return Err(error);
+        }
+
+        response.json().await.map_err(|e| OAuthError {
+            error: "parse_error".to_string(),
+            error_description: Some(e.to_string()),
+        })
+    }
+
+    /// Kiro AWS SSO OIDC flow - register client first, then standard device code flow
+    pub async fn kiro_register_client() -> Result<(String, String), OAuthError> {
+        let client = reqwest::Client::new();
+        let client_id = format!("openproxy-{}", uuid::Uuid::new_v4());
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let expires_at = now_secs + 3600;
+
+        let registration = serde_json::json!({
+            "client_id": client_id,
+            "client_name": "OpenProxy Device Client",
+            "client_type": "public",
+            "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
+            "redirect_uris": ["http://localhost:20128/oauth/callback"],
+            "token_endpoint_auth_method": "none",
+            "expires_at": expires_at
+        });
+
+        let response = client
+            .post("https://kiro.ai/auth/oidc/register")
+            .json(&registration)
+            .send()
+            .await
+            .map_err(|e| OAuthError {
+                error: "request_failed".to_string(),
+                error_description: Some(e.to_string()),
+            })?;
+
+        if !response.status().is_success() {
+            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
+                error: "client_registration_failed".to_string(),
+                error_description: None,
+            });
+            return Err(error);
+        }
+
+        let resp_body: serde_json::Value = response.json().await.map_err(|e| OAuthError {
+            error: "parse_error".to_string(),
+            error_description: Some(e.to_string()),
+        })?;
+
+        let registered_client_id = resp_body.get("client_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&client_id)
+            .to_string();
+        let client_secret = resp_body.get("client_secret")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        Ok((registered_client_id, client_secret))
     }
 }
 

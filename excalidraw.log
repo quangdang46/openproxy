@@ -19,3 +19,26 @@
 2026-05-01 16:07:27.896 [debug] Connecting to stdio transport...
 2026-05-01 16:07:27.896 [info] Excalidraw MCP server running on stdio
 2026-05-01 16:07:28.748 [info] Listing available tools
+2026-05-01 21:46:18.051 [info] Diagram store initialized {"dbPath":"/home/quangdang/.excalidraw_mcp/excalidraw.sqlite"}
+2026-05-01 21:46:18.058 [info] MCP session initialized: excalidraw-mcp (session: mcp-persistent-session)
+2026-05-01 21:46:18.074 [info] Default diagram: default. Use create_diagram to create a named diagram.
+2026-05-01 21:46:18.103 [info] Starting Excalidraw MCP server...
+2026-05-01 21:46:18.103 [debug] Connecting to stdio transport...
+2026-05-01 21:46:18.104 [info] Excalidraw MCP server running on stdio
+2026-05-01 21:46:18.158 [info] Listing available tools
+2026-05-01 23:52:16.183 [info] Diagram store initialized {"dbPath":"/home/quangdang/.excalidraw_mcp/excalidraw.sqlite"}
+2026-05-01 23:52:16.326 [info] MCP session initialized: excalidraw-mcp (session: mcp-persistent-session)
+2026-05-01 23:52:16.327 [info] Default diagram: default. Use create_diagram to create a named diagram.
+2026-05-01 23:52:16.351 [info] Restored active diagram from session: mon2k9a5ikrcz66nuuq
+2026-05-01 23:52:16.453 [info] Starting Excalidraw MCP server...
+2026-05-01 23:52:16.471 [debug] Connecting to stdio transport...
+2026-05-01 23:52:16.473 [info] Excalidraw MCP server running on stdio
+2026-05-01 23:52:16.681 [info] Listing available tools
+2026-05-02 07:31:09.534 [info] Diagram store initialized {"dbPath":"/home/quangdang/.excalidraw_mcp/excalidraw.sqlite"}
+2026-05-02 07:31:09.620 [info] MCP session initialized: excalidraw-mcp (session: mcp-persistent-session)
+2026-05-02 07:31:09.626 [info] Default diagram: default. Use create_diagram to create a named diagram.
+2026-05-02 07:31:09.631 [info] Restored active diagram from session: mon2k9a5ikrcz66nuuq
+2026-05-02 07:31:09.640 [info] Starting Excalidraw MCP server...
+2026-05-02 07:31:09.642 [debug] Connecting to stdio transport...
+2026-05-02 07:31:09.645 [info] Excalidraw MCP server running on stdio
+2026-05-02 07:31:10.287 [info] Listing available tools
