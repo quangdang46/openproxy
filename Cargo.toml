@@ -20,6 +20,7 @@ reqwest = { version = "0.12", features = ["json", "cookies", "multipart", "gzip"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 
 # JSON - simd-json for parsing, serde_json for serialization
 simd-json = "0.14"

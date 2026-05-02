@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, CommandFactory};
+use clap_complete::{Generator, Shell};
 
 use crate::db::Db;
 use crate::types::{ProviderConnection, ApiKey, ProxyPool};
@@ -37,6 +38,10 @@ pub enum Command {
     Pool {
         #[command(subcommand)]
         cmd: PoolCmd,
+    },
+    Completion {
+        #[arg(value_enum)]
+        shell: Shell,
     },
 }
 
@@ -93,18 +98,37 @@ pub enum PoolCmd {
 }
 
 impl Cli {
-    pub async fn run(self) -> anyhow::Result<()> {
-        let db = Db::load().await?;
-        let db = std::sync::Arc::new(db);
-
+    pub fn run(self) -> anyhow::Result<()> {
+        let rt = tokio::runtime::Runtime::new()?;
         if let Some(cmd) = self.cmd {
             match cmd {
-                Command::Provider { cmd } => run_provider(cmd, &db).await?,
-                Command::Key { cmd } => run_key(cmd, &db).await?,
-                Command::Pool { cmd } => run_pool(cmd, &db).await?,
+                Command::Provider { cmd } => {
+                    let db = rt.block_on(Db::load())?;
+                    let db = std::sync::Arc::new(db);
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(run_provider(cmd, &db))
+                }
+                Command::Key { cmd } => {
+                    let db = rt.block_on(Db::load())?;
+                    let db = std::sync::Arc::new(db);
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(run_key(cmd, &db))
+                }
+                Command::Pool { cmd } => {
+                    let db = rt.block_on(Db::load())?;
+                    let db = std::sync::Arc::new(db);
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(run_pool(cmd, &db))
+                }
+                Command::Completion { shell } => {
+                    let mut cmd = Cli::command();
+                    clap_complete::generate(shell, &mut cmd, "openproxy", &mut std::io::stdout());
+                    Ok(())
+                }
             }
+        } else {
+            Ok(())
         }
-        Ok(())
     }
 }
 

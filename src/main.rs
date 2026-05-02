@@ -1,8 +1,9 @@
-use clap::Parser;
+use clap::{Parser, CommandFactory};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use clap_complete::Generator;
 
 use openproxy::cli::Cli;
 use openproxy::db::Db;
@@ -14,6 +15,12 @@ async fn main() -> anyhow::Result<()> {
 
     if let Some(data_dir) = &cli.data_dir {
         std::env::set_var("DATA_DIR", data_dir);
+    }
+
+    if let Some(openproxy::cli::Command::Completion { shell }) = &cli.cmd {
+        let mut cmd = Cli::command();
+        clap_complete::generate(*shell, &mut cmd, "openproxy", &mut std::io::stdout());
+        return Ok(());
     }
 
     // Init tracing
