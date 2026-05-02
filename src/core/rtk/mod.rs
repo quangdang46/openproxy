@@ -710,4 +710,43 @@ mod tests {
             CompressionLevel::Lite.prompt()
         );
     }
+
+    #[test]
+    fn should_auto_apply_caveman_short_content_stays_short() {
+        let body = json!({
+            "messages": [
+                { "role": "user", "content": "Hello world" }
+            ]
+        });
+        assert!(!should_auto_apply_caveman(&body, "gpt-4o-mini"));
+    }
+
+    #[test]
+    fn should_auto_apply_caveman_long_content_triggers() {
+        let body = json!({
+            "messages": [
+                { "role": "user", "content": "x".repeat(16000) }
+            ]
+        });
+        assert!(should_auto_apply_caveman(&body, "gpt-4o-mini"));
+    }
+
+    #[test]
+    fn compression_level_all_three_levels_have_different_prompts() {
+        let lite = CompressionLevel::Lite.prompt();
+        let full = CompressionLevel::Full.prompt();
+        let ultra = CompressionLevel::Ultra.prompt();
+        assert!(!lite.is_empty());
+        assert!(!full.is_empty());
+        assert!(!ultra.is_empty());
+        assert_ne!(lite, full);
+        assert_ne!(full, ultra);
+    }
+
+    #[test]
+    fn compression_level_as_str_returns_correct_strings() {
+        assert_eq!(CompressionLevel::Lite.as_str(), "lite");
+        assert_eq!(CompressionLevel::Full.as_str(), "full");
+        assert_eq!(CompressionLevel::Ultra.as_str(), "ultra");
+    }
 }
