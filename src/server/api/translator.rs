@@ -1,12 +1,18 @@
+use async_stream::stream;
+use axum::body::Body;
 use axum::extract::State;
 use axum::{
+    http::header,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
+use tokio::time::{self, Duration};
 
 use crate::core::translator::TranslationFormat;
+use crate::server::console_logs::ConsoleLogEvent;
 use crate::server::state::AppState;
 
 pub fn routes() -> Router<AppState> {
@@ -16,6 +22,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/translator/load", post(load_translations))
         .route("/api/translator/save", post(save_translations))
         .route("/api/translator/send", post(send_translated_log))
+        .route(
+            "/api/translator/console-logs",
+            get(get_console_logs).delete(delete_console_logs),
+        )
+        .route(
+            "/api/translator/console-logs/stream",
+            get(stream_console_logs),
+        )
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -147,7 +161,8 @@ async fn save_translations(
         .db
         .update(|db| {
             if let Ok(value) = serde_json::to_value(&req.translations) {
-                db.extra.insert("translator_translations".to_string(), value);
+                db.extra
+                    .insert("translator_translations".to_string(), value);
             }
         })
         .await;
@@ -158,10 +173,82 @@ async fn save_translations(
     }
 }
 
-async fn send_translated_log(Json(req): Json<SendLogRequest>) -> Json<SendLogResponse> {
-    let message_id = uuid::Uuid::new_v4().to_string();
+async fn get_console_logs(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let logs = state.console_logs.get_logs().await;
+    Json(serde_json::json!({ "success": true, "logs": logs }))
+}
 
-    // In a real implementation, this would send the log to a logging service
+async fn delete_console_logs(State(state): State<AppState>) -> Json<serde_json::Value> {
+    state.console_logs.clear().await;
+    Json(serde_json::json!({ "success": true }))
+}
+
+async fn stream_console_logs(State(state): State<AppState>) -> Response {
+    let initial_logs = state.console_logs.get_logs().await;
+    let mut receiver = state.console_logs.subscribe();
+
+    let body_stream = stream! {
+        if !initial_logs.is_empty() {
+            let payload = serde_json::json!({ "type": "init", "logs": initial_logs });
+            yield Ok::<_, std::convert::Infallible>(bytes::Bytes::from(format!("data: {}\n\n", payload)));
+        }
+
+        let mut keepalive = time::interval(Duration::from_secs(25));
+        keepalive.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                _ = keepalive.tick() => {
+                    yield Ok(bytes::Bytes::from_static(b": ping\n\n"));
+                }
+                event = receiver.recv() => {
+                    match event {
+                        Ok(ConsoleLogEvent::Line(line)) => {
+                            let payload = serde_json::json!({ "type": "line", "line": line });
+                            yield Ok(bytes::Bytes::from(format!("data: {}\n\n", payload)));
+                        }
+                        Ok(ConsoleLogEvent::Clear) => {
+                            let payload = serde_json::json!({ "type": "clear" });
+                            yield Ok(bytes::Bytes::from(format!("data: {}\n\n", payload)));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            let payload = serde_json::json!({
+                                "type": "init",
+                                "logs": state.console_logs.get_logs().await,
+                            });
+                            yield Ok(bytes::Bytes::from(format!("data: {}\n\n", payload)));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            }
+        }
+    };
+
+    (
+        [
+            (header::CONTENT_TYPE, "text/event-stream"),
+            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONNECTION, "keep-alive"),
+        ],
+        Body::from_stream(body_stream),
+    )
+        .into_response()
+}
+
+fn format_console_line(req: &SendLogRequest) -> String {
+    let source = req.source.as_deref().unwrap_or("Translator");
+    let level = req.level.as_deref().unwrap_or("info").to_ascii_uppercase();
+    format!("[{}] [{}] {}", source, level, req.message)
+}
+
+async fn send_translated_log(
+    State(state): State<AppState>,
+    Json(req): Json<SendLogRequest>,
+) -> Json<SendLogResponse> {
+    let message_id = uuid::Uuid::new_v4().to_string();
+    state.console_logs.append_line(format_console_line(&req)).await;
+
     Json(SendLogResponse {
         success: true,
         message_id,

@@ -5,7 +5,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     response::Response,
-    routing::{post, get},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -46,10 +46,7 @@ fn now_secs() -> i64 {
 
 /// GET /api/shutdown/status
 /// Get current shutdown status
-pub async fn shutdown_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn shutdown_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
     // Require authentication for status check
     if let Err(e) = require_api_key(&headers, &state.db) {
         return crate::server::api::auth_error_response(e);
@@ -59,7 +56,7 @@ pub async fn shutdown_status(
 
     Json(ShutdownStatus {
         running: true,
-        uptime_secs: 0, // Would need to track server start time
+        uptime_secs: 0,      // Would need to track server start time
         pending_requests: 0, // Would need request tracking
     })
     .into_response()

@@ -6,18 +6,18 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use std::str;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::str;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
+use crate::oauth::device_code;
 use crate::oauth::pending::PendingOAuthFlow;
 use crate::oauth::providers;
-use crate::oauth::device_code;
 use crate::oauth::{OAuthProviderConfig, TokenResponse};
 use crate::server::auth::require_api_key;
 use crate::server::state::AppState;
@@ -159,12 +159,17 @@ fn is_pkce_provider(provider: &str) -> bool {
 }
 
 fn is_device_code_provider(provider: &str) -> bool {
-    matches!(provider, "github" | "kiro" | "kimi-coding" | "kilocode" | "codebuddy")
+    matches!(
+        provider,
+        "github" | "kiro" | "kimi-coding" | "kilocode" | "codebuddy"
+    )
 }
 
 fn now_secs() -> i64 {
     SystemTime::now()
-        .duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 async fn store_connection(
@@ -188,22 +193,32 @@ async fn store_connection(
         expires.to_rfc3339()
     });
 
-    let _redirect_uri = redirect_uri.map(|s| s.to_string()).or_else(|| {
-        provider_config.as_ref().and_then(|c| c.extra_params.get("redirect_uri"))
-            .map(|v| v.as_str())
-            .map(|s| s.to_string())
-    }).unwrap_or_else(|| "http://localhost:20128/oauth/callback".to_string());
+    let _redirect_uri = redirect_uri
+        .map(|s| s.to_string())
+        .or_else(|| {
+            provider_config
+                .as_ref()
+                .and_then(|c| c.extra_params.get("redirect_uri"))
+                .map(|v| v.as_str())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| "http://localhost:4623/oauth/callback".to_string());
 
     db.update(|db| {
         let snapshot = db;
-        if let Some(conn_idx) = snapshot.provider_connections.iter().position(|conn| {
-            conn.provider == provider && conn.id.contains(account_id)
-        }) {
-            snapshot.provider_connections[conn_idx].access_token = Some(token_response.access_token.clone());
-            snapshot.provider_connections[conn_idx].refresh_token = token_response.refresh_token.clone();
+        if let Some(conn_idx) = snapshot
+            .provider_connections
+            .iter()
+            .position(|conn| conn.provider == provider && conn.id.contains(account_id))
+        {
+            snapshot.provider_connections[conn_idx].access_token =
+                Some(token_response.access_token.clone());
+            snapshot.provider_connections[conn_idx].refresh_token =
+                token_response.refresh_token.clone();
             snapshot.provider_connections[conn_idx].expires_at = expires_at;
             snapshot.provider_connections[conn_idx].scope = token_response.scope.clone();
-            snapshot.provider_connections[conn_idx].updated_at = Some(chrono::Utc::now().to_rfc3339());
+            snapshot.provider_connections[conn_idx].updated_at =
+                Some(chrono::Utc::now().to_rfc3339());
         } else {
             let connection_id = format!("{}-{}", account_id, Uuid::new_v4());
             let connection = ProviderConnection {
@@ -245,7 +260,8 @@ async fn store_connection(
             };
             snapshot.provider_connections.push(connection);
         }
-    }).await?;
+    })
+    .await?;
     Ok(())
 }
 
@@ -264,26 +280,27 @@ pub async fn start_oauth_flow(
 
     let provider_config = match get_provider_config(&provider) {
         Some(config) => config,
-        None => return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Unknown provider",
-            "unknown_provider",
-            &provider,
-        ),
+        None => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Unknown provider",
+                "unknown_provider",
+                &provider,
+            )
+        }
     };
 
     let code_verifier = generate_code_verifier();
     let code_challenge = generate_code_challenge(&code_verifier);
     let state_value = generate_state();
 
-    let redirect_uri = query.redirect_uri.as_deref().unwrap_or("http://localhost:20128/oauth/callback");
+    let redirect_uri = query
+        .redirect_uri
+        .as_deref()
+        .unwrap_or("http://localhost:4623/oauth/callback");
 
-    let auth_url = provider_config.build_auth_url(
-        "openproxy",
-        redirect_uri,
-        &state_value,
-        &code_challenge,
-    );
+    let auth_url =
+        provider_config.build_auth_url("openproxy", redirect_uri, &state_value, &code_challenge);
 
     let now = now_secs();
     let flow = PendingOAuthFlow {
@@ -325,55 +342,61 @@ pub async fn oauth_callback(
 ) -> Response {
     if let Some(error) = &query.error {
         let desc = query.error_description.as_deref().unwrap_or(error);
-        return make_error_response(
-            StatusCode::BAD_REQUEST,
-            desc,
-            error,
-            &provider,
-        );
+        return make_error_response(StatusCode::BAD_REQUEST, desc, error, &provider);
     }
 
     let state_param = match &query.state {
         Some(s) => s,
-        None => return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Missing state parameter",
-            "missing_state",
-            &provider,
-        ),
+        None => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Missing state parameter",
+                "missing_state",
+                &provider,
+            )
+        }
     };
 
     let code = match &query.code {
         Some(c) => c,
-        None => return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Missing code parameter",
-            "missing_code",
-            &provider,
-        ),
+        None => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Missing code parameter",
+                "missing_code",
+                &provider,
+            )
+        }
     };
 
     let flow = match state.pending_flows.remove(state_param) {
         Some(f) => f,
-        None => return make_error_response(
-            StatusCode::NOT_FOUND,
-            "Flow not found or expired",
-            "flow_not_found",
-            &provider,
-        ),
+        None => {
+            return make_error_response(
+                StatusCode::NOT_FOUND,
+                "Flow not found or expired",
+                "flow_not_found",
+                &provider,
+            )
+        }
     };
 
     let provider_config = match get_provider_config(&provider) {
         Some(config) => config,
-        None => return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Unknown provider",
-            "unknown_provider",
-            &provider,
-        ),
+        None => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Unknown provider",
+                "unknown_provider",
+                &provider,
+            )
+        }
     };
 
-    let redirect_uri = flow.redirect_uri.as_deref().unwrap_or("http://localhost:20128/oauth/callback");
+    let redirect_uri = flow
+        .redirect_uri
+        .as_deref()
+        .unwrap_or("http://localhost:4623/oauth/callback");
 
     let token_response = match device_code::exchange_code_for_token(
         &provider_config,
@@ -395,7 +418,15 @@ pub async fn oauth_callback(
         }
     };
 
-    if let Err(e) = store_connection(&state.db, &flow.account_id, &provider, &token_response, Some(redirect_uri)).await {
+    if let Err(e) = store_connection(
+        &state.db,
+        &flow.account_id,
+        &provider,
+        &token_response,
+        Some(redirect_uri),
+    )
+    .await
+    {
         return make_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Failed to store connection: {}", e),
@@ -436,12 +467,14 @@ pub async fn start_device_code(
 
     let provider_config = match get_provider_config(&provider) {
         Some(config) => config,
-        None => return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Unknown provider",
-            "unknown_provider",
-            &provider,
-        ),
+        None => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Unknown provider",
+                "unknown_provider",
+                &provider,
+            )
+        }
     };
 
     // Kiro uses a special combined flow: register client + start device code
@@ -462,7 +495,8 @@ pub async fn start_device_code(
         }
     } else {
         let client_id = provider_config
-            .extra_params.get("client_id")
+            .extra_params
+            .get("client_id")
             .map(|v| v.as_str())
             .unwrap_or("openproxy")
             .to_string();
@@ -492,7 +526,10 @@ pub async fn start_device_code(
         created_at: now,
         expires_at: now + DEVICE_FLOW_TTL_SECS,
         kiro_credentials: kiro_credentials.map(|(id, secret)| {
-            crate::oauth::pending::KiroCredentials { client_id: id, client_secret: secret }
+            crate::oauth::pending::KiroCredentials {
+                client_id: id,
+                client_secret: secret,
+            }
         }),
     };
 
@@ -579,17 +616,20 @@ pub async fn poll_device_code(
 
     let provider_config = match get_provider_config(&provider) {
         Some(config) => config,
-        None => return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Unknown provider",
-            "unknown_provider",
-            &provider,
-        ),
+        None => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Unknown provider",
+                "unknown_provider",
+                &provider,
+            )
+        }
     };
 
     let user_code = flow.user_code.clone().unwrap_or_default();
     let interval = provider_config
-        .extra_params.get("interval")
+        .extra_params
+        .get("interval")
         .map(|v| v.as_str())
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(5);
@@ -600,12 +640,16 @@ pub async fn poll_device_code(
 
             // GitHub special: exchange OAuth token for Copilot token
             let final_token_response = if provider == "github" {
-                match device_code::exchange_github_copilot_token(&token_response.access_token).await {
+                match device_code::exchange_github_copilot_token(&token_response.access_token).await
+                {
                     Ok(copilot_token) => copilot_token,
                     Err(e) => {
                         return make_error_response(
                             StatusCode::BAD_REQUEST,
-                            &format!("Copilot token exchange failed: {}", e.error_description.unwrap_or_else(|| e.error.clone())),
+                            &format!(
+                                "Copilot token exchange failed: {}",
+                                e.error_description.unwrap_or_else(|| e.error.clone())
+                            ),
                             "copilot_exchange_failed",
                             &provider,
                         );
@@ -615,7 +659,15 @@ pub async fn poll_device_code(
                 token_response
             };
 
-            if let Err(e) = store_connection(&state.db, &flow.account_id, &provider, &final_token_response, None).await {
+            if let Err(e) = store_connection(
+                &state.db,
+                &flow.account_id,
+                &provider,
+                &final_token_response,
+                None,
+            )
+            .await
+            {
                 return make_error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     &format!("Failed to store connection: {}", e),
@@ -637,7 +689,8 @@ pub async fn poll_device_code(
         Err(e) => {
             if e.error == "authorization_pending" || e.error == "slow_down" {
                 let retry_after = provider_config
-                    .extra_params.get("interval")
+                    .extra_params
+                    .get("interval")
                     .map(|v| v.as_str())
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(5);
@@ -701,9 +754,10 @@ pub async fn refresh_token(
     };
 
     let snapshot = state.db.snapshot();
-    let connection = snapshot.provider_connections.iter().find(|conn| {
-        conn.provider == provider && conn.id.contains(&account_id)
-    });
+    let connection = snapshot
+        .provider_connections
+        .iter()
+        .find(|conn| conn.provider == provider && conn.id.contains(&account_id));
 
     let refresh_token = match body.refresh_token {
         Some(ref token) => token.clone(),
@@ -723,12 +777,14 @@ pub async fn refresh_token(
 
     let provider_config = match get_provider_config(&provider) {
         Some(config) => config,
-        None => return make_error_response(
-            StatusCode::BAD_REQUEST,
-            "Unknown provider",
-            "unknown_provider",
-            &provider,
-        ),
+        None => {
+            return make_error_response(
+                StatusCode::BAD_REQUEST,
+                "Unknown provider",
+                "unknown_provider",
+                &provider,
+            )
+        }
     };
 
     let client = reqwest::Client::new();
@@ -767,7 +823,8 @@ pub async fn refresh_token(
         }
     };
 
-    if let Err(e) = store_connection(&state.db, &account_id, &provider, &token_response, None).await {
+    if let Err(e) = store_connection(&state.db, &account_id, &provider, &token_response, None).await
+    {
         return make_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("Failed to store connection: {}", e),
@@ -798,9 +855,10 @@ pub async fn oauth_status(
     let account_id = api_key.id;
 
     let snapshot = state.db.snapshot();
-    let connection = snapshot.provider_connections.iter().find(|conn| {
-        conn.provider == provider && conn.id.contains(&account_id)
-    });
+    let connection = snapshot
+        .provider_connections
+        .iter()
+        .find(|conn| conn.provider == provider && conn.id.contains(&account_id));
 
     match connection {
         Some(conn) => {

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use crate::server::auth::require_api_key;
 use crate::server::state::AppState;
 
-// ── GET /api/mitm/config ──────────────────────────────────────────────
+// ── GET /api/mitm-config ──────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,10 +64,7 @@ async fn get_config(
     let mut per_tool_settings = BTreeMap::new();
 
     for (name, config_map) in mitm_alias {
-        let upstream_url = config_map
-            .get("upstreamUrl")
-            .cloned()
-            .unwrap_or_default();
+        let upstream_url = config_map.get("upstreamUrl").cloned().unwrap_or_default();
         let path_prefix = config_map.get("pathPrefix").cloned();
         let request_transform = config_map
             .get("requestTransform")
@@ -107,13 +104,22 @@ async fn get_config(
     }
 
     let (cert_generated, cert_expires, cert_fingerprint) = {
-        let cert_data = snapshot.provider_nodes.iter().find(|n| {
-            n.extra.get("type").and_then(Value::as_str) == Some("mitm-cert")
-        });
+        let cert_data = snapshot
+            .provider_nodes
+            .iter()
+            .find(|n| n.extra.get("type").and_then(Value::as_str) == Some("mitm-cert"));
         match cert_data {
             Some(node) => {
-                let expires = node.extra.get("expiresAt").and_then(Value::as_str).map(String::from);
-                let fingerprint = node.extra.get("fingerprint").and_then(Value::as_str).map(String::from);
+                let expires = node
+                    .extra
+                    .get("expiresAt")
+                    .and_then(Value::as_str)
+                    .map(String::from);
+                let fingerprint = node
+                    .extra
+                    .get("fingerprint")
+                    .and_then(Value::as_str)
+                    .map(String::from);
                 (true, expires, fingerprint)
             }
             None => (false, None, None),
@@ -134,7 +140,7 @@ async fn get_config(
     .into_response()
 }
 
-// ── PUT /api/mitm/config ──────────────────────────────────────────────
+// ── PUT /api/mitm-config ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -238,14 +244,19 @@ async fn generate_cert(
     match state
         .db
         .update(|db| {
-            db.provider_nodes.retain(|n| {
-                n.extra.get("type").and_then(Value::as_str) != Some("mitm-cert")
-            });
+            db.provider_nodes
+                .retain(|n| n.extra.get("type").and_then(Value::as_str) != Some("mitm-cert"));
 
             let mut extra = BTreeMap::new();
             extra.insert("type".to_string(), Value::String("mitm-cert".to_string()));
-            extra.insert("expiresAt".to_string(), Value::String(expires_at_str.clone()));
-            extra.insert("fingerprint".to_string(), Value::String(fingerprint.clone()));
+            extra.insert(
+                "expiresAt".to_string(),
+                Value::String(expires_at_str.clone()),
+            );
+            extra.insert(
+                "fingerprint".to_string(),
+                Value::String(fingerprint.clone()),
+            );
             extra.insert("generatedAt".to_string(), Value::String(now_str.clone()));
 
             db.provider_nodes.push(crate::types::ProviderNode {
@@ -299,7 +310,7 @@ async fn start_mitm(
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": "No MITM routes configured. Add routes via PUT /api/mitm/config first."
+                "error": "No MITM routes configured. Add routes via PUT /api/mitm-config first."
             })),
         )
             .into_response();
@@ -374,12 +385,12 @@ async fn vercel_deploy(
     let project_name = body
         .project_name
         .unwrap_or_else(|| "openproxy-relay".to_string());
-    let regions = body.regions.unwrap_or_else(|| {
-        vec!["iad1".to_string(), "sfo1".to_string(), "lhr1".to_string()]
-    });
+    let regions = body
+        .regions
+        .unwrap_or_else(|| vec!["iad1".to_string(), "sfo1".to_string(), "lhr1".to_string()]);
     let target_urls = body
         .target_urls
-        .unwrap_or_else(|| vec!["http://localhost:20128".to_string()]);
+        .unwrap_or_else(|| vec!["http://localhost:4623".to_string()]);
 
     let vercel_function = generate_vercel_function(&target_urls);
 
@@ -462,12 +473,189 @@ export const config = {{
     )
 }
 
+// ── POST /api/proxy-pools/{id}/test ────────────────────────────────────
+
+async fn test_pool(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Path(pool_id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    if let Err(e) = require_api_key(&headers, &state.db) {
+        return crate::server::api::auth_error_response(e);
+    }
+
+    let snapshot = state.db.snapshot();
+    let pool = snapshot.proxy_pools.iter().find(|p| p.id == pool_id);
+
+    match pool {
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Proxy pool not found"
+            })),
+        )
+            .into_response(),
+        Some(pool) => {
+            let test_result = test_proxy_url(&pool.proxy_url, &pool.r#type).await;
+            let now = chrono::Utc::now().to_rfc3339();
+
+            let _ = state
+                .db
+                .update(|db| {
+                    if let Some(p) = db.proxy_pools.iter_mut().find(|p| p.id == pool_id) {
+                        p.test_status = Some(test_result.status.clone());
+                        p.last_tested_at = Some(now.clone());
+                        p.last_error = test_result.error.clone();
+                        p.rtt_ms = Some(test_result.rtt_ms);
+                    }
+                })
+                .await;
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": test_result.success,
+                    "status": test_result.status,
+                    "rttMs": test_result.rtt_ms,
+                    "error": test_result.error,
+                    "testedAt": now
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Debug)]
+struct TestResult {
+    success: bool,
+    status: String,
+    rtt_ms: u64,
+    error: Option<String>,
+}
+
+async fn test_proxy_url(proxy_url: &str, proxy_type: &str) -> TestResult {
+    let start = std::time::Instant::now();
+
+    // Parse the proxy URL
+    let _ = match reqwest::Url::parse(proxy_url) {
+        Ok(url) => url,
+        Err(e) => {
+            return TestResult {
+                success: false,
+                status: "invalid_url".to_string(),
+                rtt_ms: 0,
+                error: Some(format!("Invalid URL: {}", e)),
+            };
+        }
+    };
+
+    // Build the test request - try to connect to the proxy
+    let client = match proxy_type {
+        "socks5" | "socks5h" => {
+            let proxy = match reqwest::Proxy::all(proxy_url) {
+                Ok(p) => p,
+                Err(e) => {
+                    return TestResult {
+                        success: false,
+                        status: "invalid_proxy".to_string(),
+                        rtt_ms: 0,
+                        error: Some(format!("Invalid SOCKS5 proxy: {}", e)),
+                    };
+                }
+            };
+            reqwest::Client::builder()
+                .proxy(proxy)
+                .timeout(std::time::Duration::from_secs(10))
+                .build()
+        }
+        _ => reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build(),
+    };
+
+    match client {
+        Ok(client) => {
+            // Try a simple HEAD request to a known reliable endpoint through the proxy
+            let test_url = "https://www.google.com/favicon.ico";
+            match client.head(test_url).send().await {
+                Ok(response) => {
+                    let rtt_ms = start.elapsed().as_millis() as u64;
+                    let success =
+                        response.status().is_success() || response.status().is_redirection();
+                    TestResult {
+                        success,
+                        status: if success {
+                            "ok".to_string()
+                        } else {
+                            "error".to_string()
+                        },
+                        rtt_ms,
+                        error: if success {
+                            None
+                        } else {
+                            Some(format!("HTTP {}", response.status()))
+                        },
+                    }
+                }
+                Err(e) => {
+                    let rtt_ms = start.elapsed().as_millis() as u64;
+                    let error_msg = e.to_string();
+                    let (status, success) = if error_msg.contains("timeout") {
+                        ("timeout", false)
+                    } else if error_msg.contains("connection refused") {
+                        ("connection_refused", false)
+                    } else if error_msg.contains("ssl") || error_msg.contains("tls") {
+                        ("ssl_error", false)
+                    } else {
+                        ("error", false)
+                    };
+                    TestResult {
+                        success,
+                        status: status.to_string(),
+                        rtt_ms,
+                        error: Some(error_msg),
+                    }
+                }
+            }
+        }
+        Err(e) => TestResult {
+            success: false,
+            status: "client_error".to_string(),
+            rtt_ms: 0,
+            error: Some(format!("Failed to build client: {}", e)),
+        },
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/mitm/config", get(get_config))
-        .route("/api/mitm/config", put(update_config))
+        .route("/api/mitm-config", get(get_config))
+        .route("/api/mitm-config", put(update_config))
         .route("/api/mitm/cert/generate", post(generate_cert))
         .route("/api/mitm/start", post(start_mitm))
         .route("/api/mitm/stop", post(stop_mitm))
         .route("/api/proxy-pools/vercel-deploy", post(vercel_deploy))
+        .route("/api/proxy-pools/{id}/test", post(test_pool))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_proxy_url_invalid_url() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(test_proxy_url("not-a-valid-url", "http"));
+        assert!(!result.success);
+        assert_eq!(result.status, "invalid_url");
+    }
+
+    #[test]
+    fn test_proxy_url_nonexistent_host() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let result = rt.block_on(test_proxy_url("http://192.0.2.1:12345", "http"));
+        assert!(!result.success);
+        assert_eq!(result.status, "connection_refused");
+    }
 }

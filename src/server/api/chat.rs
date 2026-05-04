@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
@@ -20,9 +20,10 @@ use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
-use crate::server::auth::require_api_key;
+use crate::core::translator::response_transform::{transform_sse_stream, transformer_for_provider};
+use crate::server::auth::{extract_api_key, require_api_key};
 use crate::server::state::AppState;
-use crate::types::{AppDb, ProviderConnection};
+use crate::types::{AppDb, ProviderConnection, TokenUsage};
 
 use super::auth_error_response;
 
@@ -31,8 +32,125 @@ pub async fn chat_completions(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    if let Err(error) = require_api_key(&headers, &state.db) {
-        return auth_error_response(error);
+    chat_completions_for_endpoint(state, headers, body, Some("/v1/chat/completions")).await
+}
+
+pub async fn dashboard_chat_completions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let body = normalize_dashboard_chat_request_body(&state, body);
+
+    chat_completions_impl(
+        state,
+        headers,
+        body,
+        Some("/api/dashboard/chat/completions"),
+        false,
+    )
+    .await
+}
+
+fn normalize_dashboard_chat_request_body(
+    state: &AppState,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Json<Value>, JsonRejection> {
+    let Ok(Json(mut value)) = body else {
+        return body;
+    };
+
+    let dashboard_stream = value
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if dashboard_stream {
+        if let Some(fields) = value.as_object_mut() {
+            fields.insert("stream".into(), Value::Bool(false));
+            fields.insert("__dashboard_stream".into(), Value::Bool(true));
+        }
+    }
+
+    let Some(model) = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    else {
+        return Ok(Json(value));
+    };
+
+    if model.contains('/') {
+        return Ok(Json(value));
+    }
+
+    let snapshot = state.db.snapshot();
+    if snapshot.combos.iter().any(|combo| combo.name == model) {
+        return Ok(Json(value));
+    }
+    if snapshot.model_aliases.contains_key(model) {
+        return Ok(Json(value));
+    }
+
+    let mut matches = snapshot
+        .provider_connections
+        .iter()
+        .filter(|connection| connection.is_active.unwrap_or(true))
+        .filter(|connection| provider_connection_supports_model(connection, model))
+        .map(|connection| format!("{}/{}", connection.provider, model));
+
+    let Some(rewritten_model) = matches.next() else {
+        return Ok(Json(value));
+    };
+    if matches.next().is_some() {
+        return Ok(Json(value));
+    }
+
+    if let Some(fields) = value.as_object_mut() {
+        fields.insert("model".into(), Value::String(rewritten_model));
+    }
+
+    Ok(Json(value))
+}
+
+fn provider_connection_supports_model(connection: &ProviderConnection, model: &str) -> bool {
+    if connection.default_model.as_deref() == Some(model) {
+        return true;
+    }
+
+    connection
+        .provider_specific_data
+        .get("enabledModels")
+        .and_then(Value::as_array)
+        .is_some_and(|models| models.iter().filter_map(Value::as_str).any(|item| item == model))
+}
+
+pub async fn chat_completions_for_endpoint(
+    state: AppState,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+    endpoint: Option<&'static str>,
+) -> Response {
+    chat_completions_impl(state, headers, body, endpoint, true).await
+}
+
+async fn chat_completions_impl(
+    state: AppState,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+    endpoint: Option<&'static str>,
+    require_api_key_auth: bool,
+) -> Response {
+    let presented_api_key = extract_api_key(&headers);
+    if require_api_key_auth {
+        if let Err(error) = require_api_key(&headers, &state.db) {
+            return auth_error_response(error);
+        }
     }
 
     let Json(body) = match body {
@@ -63,6 +181,7 @@ pub async fn chat_completions(
             let strategy = combo_strategy_for(&snapshot, &combo_name);
             let combo_body = body.clone();
             let combo_state = state.clone();
+            let combo_api_key = presented_api_key.clone();
             match execute_combo_strategy(
                 &combo_models,
                 Some(&combo_name),
@@ -71,7 +190,17 @@ pub async fn chat_completions(
                     let state = combo_state.clone();
                     let body = combo_body.clone();
                     let combo_model = combo_model.to_string();
-                    async move { execute_single_model(&state, &body, &combo_model).await }
+                    let api_key = combo_api_key.clone();
+                    async move {
+                        execute_single_model(
+                            &state,
+                            &body,
+                            &combo_model,
+                            api_key.as_deref(),
+                            endpoint,
+                        )
+                        .await
+                    }
                 },
             )
             .await
@@ -80,10 +209,20 @@ pub async fn chat_completions(
                 Err(error) => combo_error_response(error),
             }
         }
-        ModelRouteKind::Direct => match execute_single_model(&state, &body, model_str).await {
-            Ok(response) => response,
-            Err(error) => attempt_error_response(error),
-        },
+        ModelRouteKind::Direct => {
+            match execute_single_model(
+                &state,
+                &body,
+                model_str,
+                presented_api_key.as_deref(),
+                endpoint,
+            )
+            .await
+            {
+                Ok(response) => response,
+                Err(error) => attempt_error_response(error),
+            }
+        }
     }
 }
 
@@ -91,6 +230,8 @@ async fn execute_single_model(
     state: &AppState,
     request_body: &Value,
     model_str: &str,
+    api_key: Option<&str>,
+    endpoint: Option<&'static str>,
 ) -> Result<Response, ComboAttemptError> {
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(model_str, &snapshot);
@@ -115,14 +256,17 @@ async fn execute_single_model(
 
     let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &resolved.model);
 
-    forward_with_provider_fallback(state, &provider, &resolved.model, body).await
+    forward_with_provider_fallback(state, &provider, &resolved.model, body, api_key, endpoint)
+        .await
 }
 
 async fn forward_with_provider_fallback(
     state: &AppState,
     provider: &str,
     model: &str,
-    request_body: Value,
+    mut request_body: Value,
+    api_key: Option<&str>,
+    endpoint: Option<&'static str>,
 ) -> Result<Response, ComboAttemptError> {
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
@@ -157,157 +301,180 @@ async fn forward_with_provider_fallback(
             .cloned();
         let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
 
-        let (rate_limit_remaining, rate_limit_reset) =
-            registry.rate_limit_info(&connection.id);
-        let slot = registry.acquire_slot(
-            &connection.id,
-            10,
-            rate_limit_remaining,
-            rate_limit_reset,
-        );
+        let (rate_limit_remaining, rate_limit_reset) = registry.rate_limit_info(&connection.id);
+        let slot =
+            registry.acquire_slot(&connection.id, 10, rate_limit_remaining, rate_limit_reset);
 
         let Some(_slot) = slot else {
             excluded.insert(connection.id.clone());
             continue;
         };
 
+        let dashboard_stream = request_body
+            .get("__dashboard_stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if let Some(fields) = request_body.as_object_mut() {
+            fields.remove("__dashboard_stream");
+        }
+
         let stream = request_body
             .get("stream")
             .and_then(Value::as_bool)
             .unwrap_or(false);
 
-use crate::core::executor::{
-            CodexExecutor, CodexExecutionRequest, CursorExecutor,
-            CursorExecutionRequest, DefaultExecutor,
-            ExecutionRequest, KiroExecutor, KiroExecutionRequest, KiroExecutorResponse,
-            VertexExecutor, VertexExecutionRequest,
+        state
+            .usage_live
+            .start_request(model, provider, Some(connection.id.as_str()))
+            .await;
+
+        use crate::core::executor::{
+            CodexExecutionRequest, CodexExecutor, CursorExecutionRequest, CursorExecutor,
+            DefaultExecutor, ExecutionRequest, KiroExecutionRequest, KiroExecutor,
+            KiroExecutorResponse, VertexExecutionRequest, VertexExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/");
         let is_cursor_model = model.starts_with("cursor/");
-        let executor_result: Result<KiroExecutorResponse, ComboAttemptError> = if provider == "kiro" {
-            let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Kiro executor creation failed: {:?}", e),
-                    retry_after: None,
-                })?;
-            executor.execute_request(KiroExecutionRequest {
-                model: model.to_string(),
-                body: request_body.clone(),
-                stream,
-                credentials: connection.clone(),
-                proxy,
-            }).await
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Kiro execution failed: {:?}", e),
-                    retry_after: None,
+        let executor_result: Result<KiroExecutorResponse, ComboAttemptError> =
+            if provider == "kiro" {
+                let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Kiro executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                executor
+                    .execute_request(KiroExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Kiro execution failed: {:?}", e),
+                        retry_after: None,
+                    })
+            } else if provider == "vertex" {
+                let executor = VertexExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Vertex executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(VertexExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Vertex execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
                 })
-        } else if provider == "vertex" {
-            let executor = VertexExecutor::new(state.client_pool.clone(), provider_node)
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Vertex executor creation failed: {:?}", e),
-                    retry_after: None,
-                })?;
-            let result = executor.execute_request(VertexExecutionRequest {
-                model: model.to_string(),
-                body: request_body.clone(),
-                stream,
-                credentials: connection.clone(),
-                proxy,
-            }).await
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Vertex execution failed: {:?}", e),
-                    retry_after: None,
-                })?;
-            Ok(KiroExecutorResponse {
-                response: result.response,
-                url: result.url,
-                headers: result.headers,
-                transformed_body: result.transformed_body,
-                transport: result.transport,
-            })
-        } else if is_codex_model {
-            let executor = CodexExecutor::new(state.client_pool.clone(), provider_node)
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Codex executor creation failed: {:?}", e),
-                    retry_after: None,
-                })?;
-            let result = executor.execute(CodexExecutionRequest {
-                model: model.to_string(),
-                body: request_body.clone(),
-                stream,
-                credentials: connection.clone(),
-                proxy,
-            }).await
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Codex execution failed: {:?}", e),
-                    retry_after: None,
-                })?;
-            Ok(KiroExecutorResponse {
-                response: result.response,
-                url: result.url,
-                headers: result.headers,
-                transformed_body: result.transformed_body,
-                transport: result.transport,
-            })
-        } else if is_cursor_model {
-            let executor = CursorExecutor::new(state.client_pool.clone(), provider_node)
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Cursor executor creation failed: {:?}", e),
-                    retry_after: None,
-                })?;
-            let result = executor.execute(CursorExecutionRequest {
-                model: model.to_string(),
-                body: request_body.clone(),
-                stream,
-                credentials: connection.clone(),
-                proxy,
-            }).await
-                .map_err(|e| ComboAttemptError {
-                    status: 500,
-                    message: format!("Cursor execution failed: {:?}", e),
-                    retry_after: None,
-                })?;
-            Ok(KiroExecutorResponse {
-                response: result.response,
-                url: result.url,
-                headers: result.headers,
-                transformed_body: result.transformed_body,
-                transport: result.transport,
-            })
-        } else {
-            let executor = DefaultExecutor::new(provider.to_string(), state.client_pool.clone(), provider_node)
+            } else if is_codex_model {
+                let executor = CodexExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Codex executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute(CodexExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Codex execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if is_cursor_model {
+                let executor = CursorExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Cursor executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute(CursorExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Cursor execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else {
+                let executor = DefaultExecutor::new(
+                    provider.to_string(),
+                    state.client_pool.clone(),
+                    provider_node,
+                )
                 .map_err(|e| ComboAttemptError {
                     status: 500,
                     message: format!("Default executor creation failed: {:?}", e),
                     retry_after: None,
                 })?;
-            let result = executor.execute(ExecutionRequest {
-                model: model.to_string(),
-                body: request_body.clone(),
-                stream,
-                credentials: connection.clone(),
-                proxy,
-            }).await.map_err(|err| ComboAttemptError {
-                status: 500,
-                message: format!("Execution failed: {:?}", err),
-                retry_after: None,
-            })?;
-            Ok(KiroExecutorResponse {
-                response: result.response,
-                url: result.url,
-                headers: result.headers,
-                transformed_body: result.transformed_body,
-                transport: result.transport,
-            })
-        };
+                let result = executor
+                    .execute(ExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|err| ComboAttemptError {
+                        status: 500,
+                        message: format!("Execution failed: {:?}", err),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            };
 
         let execution = executor_result;
 
@@ -321,11 +488,55 @@ use crate::core::executor::{
                         registry.update_rate_limit(&connection.id, remaining, reset);
                     }
                     clear_connection_error(state, &connection.id).await;
-                    return Ok(proxy_response(result.response));
+                    if dashboard_stream {
+                        return Ok(
+                            proxy_dashboard_sse_with_usage_tracking(
+                                result.response,
+                                state,
+                                provider,
+                                model,
+                                Some(connection.id.as_str()),
+                                api_key,
+                                endpoint,
+                            )
+                            .await,
+                        );
+                    }
+                    if !stream {
+                        return Ok(
+                            proxy_response_with_usage_tracking(
+                                result.response,
+                                state,
+                                provider,
+                                model,
+                                Some(connection.id.as_str()),
+                                api_key,
+                                endpoint,
+                            )
+                            .await,
+                        );
+                    }
+                    let normalize_for_dashboard =
+                        endpoint == Some("/api/dashboard/chat/completions");
+                    return Ok(
+                        proxy_response_with_pending_tracking(
+                            result.response,
+                            state.clone(),
+                            provider.to_string(),
+                            model.to_string(),
+                            Some(connection.id.clone()),
+                            normalize_for_dashboard,
+                        )
+                        .await,
+                    );
                 }
 
                 let retry_after = retry_after_from_headers(result.response.headers());
                 let message = extract_error_message(result.response).await;
+                state
+                    .usage_live
+                    .finish_request(model, provider, Some(connection.id.as_str()), true)
+                    .await;
                 let current_backoff = connection.backoff_level.unwrap_or(0);
                 let decision = check_fallback_error(status.as_u16(), &message, current_backoff);
                 let cooldown = retry_after
@@ -356,6 +567,10 @@ use crate::core::executor::{
             }
             Err(error) => {
                 let message = format!("{:?}", error);
+                state
+                    .usage_live
+                    .finish_request(model, provider, Some(connection.id.as_str()), true)
+                    .await;
                 let current_backoff = connection.backoff_level.unwrap_or(0);
                 let decision = check_fallback_error(502, &message, current_backoff);
                 last_error = Some(error);
@@ -379,6 +594,48 @@ use crate::core::executor::{
             }
         }
     }
+}
+
+async fn proxy_dashboard_sse_with_usage_tracking(
+    response: UpstreamResponse,
+    state: &AppState,
+    provider: &str,
+    model: &str,
+    connection_id: Option<&str>,
+    api_key: Option<&str>,
+    endpoint: Option<&str>,
+) -> Response {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
+
+    let token_usage = if body_complete {
+        let usage = extract_token_usage_from_bytes(&body_bytes);
+        state
+            .usage_tracker()
+            .track_request(
+                provider,
+                model,
+                usage.as_ref(),
+                connection_id,
+                api_key,
+                endpoint,
+            )
+            .await;
+        state.usage_live.notify_update();
+        usage
+    } else {
+        None
+    };
+
+    state
+        .usage_live
+        .finish_request(model, provider, connection_id, false)
+        .await;
+
+    let text = extract_dashboard_assistant_text_from_bytes(&body_bytes);
+    let sse_body = build_dashboard_sse_body(text.as_deref(), token_usage.as_ref());
+    build_dashboard_sse_response(status, &headers, sse_body)
 }
 
 fn select_connection(
@@ -589,24 +846,320 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
         .await;
 }
 
-fn proxy_response(response: UpstreamResponse) -> Response {
+async fn proxy_response_with_usage_tracking(
+    response: UpstreamResponse,
+    state: &AppState,
+    provider: &str,
+    model: &str,
+    connection_id: Option<&str>,
+    api_key: Option<&str>,
+    endpoint: Option<&str>,
+) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
+    let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
+
+    if body_complete {
+        let token_usage = extract_token_usage_from_bytes(&body_bytes);
+        state
+            .usage_tracker()
+            .track_request(
+                provider,
+                model,
+                token_usage.as_ref(),
+                connection_id,
+                api_key,
+                endpoint,
+            )
+            .await;
+        state.usage_live.notify_update();
+    }
+
+    state
+        .usage_live
+        .finish_request(model, provider, connection_id, false)
+        .await;
+
+    build_proxied_response(status, &headers, Body::from(body_bytes))
+}
+
+async fn proxy_response_with_pending_tracking(
+    response: UpstreamResponse,
+    state: AppState,
+    provider: String,
+    model: String,
+    connection_id: Option<String>,
+    normalize_for_dashboard: bool,
+) -> Response {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let transformer = normalize_for_dashboard.then(|| transformer_for_provider(&provider)).flatten();
     let body = match response {
         UpstreamResponse::Reqwest(response) => {
-            let stream = response.bytes_stream().map_ok(|b: Bytes| b);
+            let state = state.clone();
+            let provider = provider.clone();
+            let model = model.clone();
+            let connection_id = connection_id.clone();
+            let mut transformer = transformer;
+            let mut pending_text = String::new();
+            let stream = async_stream::stream! {
+                let mut upstream = response.bytes_stream();
+                loop {
+                    match upstream.try_next().await {
+                        Ok(Some(chunk)) => {
+                            if let Some(transformer) = transformer.as_mut() {
+                                for line in transform_dashboard_sse_chunk(&chunk, transformer.as_mut(), &mut pending_text) {
+                                    if let Some(frame) = sse_frame_for_dashboard(&line) {
+                                        yield Ok::<Bytes, std::io::Error>(frame);
+                                    }
+                                }
+                            } else {
+                                yield Ok::<Bytes, std::io::Error>(chunk);
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(_) => {
+                            state
+                                .usage_live
+                                .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                .await;
+                            return;
+                        }
+                    }
+                }
+                if let Some(transformer) = transformer.as_mut() {
+                    for line in flush_dashboard_sse_chunk(transformer.as_mut(), &mut pending_text) {
+                        if let Some(frame) = sse_frame_for_dashboard(&line) {
+                            yield Ok::<Bytes, std::io::Error>(frame);
+                        }
+                    }
+                }
+                state
+                    .usage_live
+                    .finish_request(&model, &provider, connection_id.as_deref(), false)
+                    .await;
+            };
             Body::from_stream(stream)
         }
         UpstreamResponse::Hyper(response) => {
-            let (_, body) = response.into_parts();
-            Body::new(body)
+            let (_, mut body) = response.into_parts();
+            let state = state.clone();
+            let provider = provider.clone();
+            let model = model.clone();
+            let connection_id = connection_id.clone();
+            let mut transformer = transformer;
+            let mut pending_text = String::new();
+            let stream = async_stream::stream! {
+                while let Some(frame_result) = body.frame().await {
+                    match frame_result {
+                        Ok(frame) => {
+                            if let Ok(data) = frame.into_data() {
+                                if let Some(transformer) = transformer.as_mut() {
+                                    for line in transform_dashboard_sse_chunk(&data, transformer.as_mut(), &mut pending_text) {
+                                        if let Some(frame) = sse_frame_for_dashboard(&line) {
+                                            yield Ok::<Bytes, std::io::Error>(frame);
+                                        }
+                                    }
+                                } else {
+                                    yield Ok::<Bytes, std::io::Error>(data);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            state
+                                .usage_live
+                                .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                .await;
+                            return;
+                        }
+                    }
+                }
+                if let Some(transformer) = transformer.as_mut() {
+                    for line in flush_dashboard_sse_chunk(transformer.as_mut(), &mut pending_text) {
+                        if let Some(frame) = sse_frame_for_dashboard(&line) {
+                            yield Ok::<Bytes, std::io::Error>(frame);
+                        }
+                    }
+                }
+                state
+                    .usage_live
+                    .finish_request(&model, &provider, connection_id.as_deref(), false)
+                    .await;
+            };
+            Body::from_stream(stream)
         }
     };
+
+    build_proxied_response(status, &headers, body)
+}
+
+fn sse_frame_for_dashboard(line: &str) -> Option<Bytes> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let framed = if trimmed.starts_with(':') || trimmed.starts_with("data:") {
+        format!("{trimmed}\n\n")
+    } else {
+        format!("data: {trimmed}\n\n")
+    };
+
+    Some(Bytes::from(framed))
+}
+
+fn build_dashboard_sse_body(text: Option<&str>, usage: Option<&TokenUsage>) -> Bytes {
+    let mut frames = String::new();
+
+    if let Some(text) = text.filter(|text| !text.is_empty()) {
+        let escaped = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string());
+        frames.push_str("data: {\"choices\":[{\"delta\":{\"content\":");
+        frames.push_str(&escaped);
+        frames.push_str("},\"finish_reason\":null}]}\n\n");
+    }
+
+    frames.push_str("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]");
+    if let Some(usage) = usage {
+        let usage_json = serde_json::to_string(usage).unwrap_or_else(|_| "{}".to_string());
+        frames.push_str(",\"usage\":");
+        frames.push_str(&usage_json);
+    }
+    frames.push_str("}\n\n");
+    frames.push_str("data: [DONE]\n\n");
+
+    Bytes::from(frames)
+}
+
+fn build_dashboard_sse_response(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Bytes,
+) -> Response {
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+
+    for (name, value) in headers {
+        if should_preserve_dashboard_sse_header(name.as_str()) {
+            response.headers_mut().insert(name, value.clone());
+        }
+    }
+
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
+    response
+}
+
+fn should_preserve_dashboard_sse_header(name: &str) -> bool {
+    let lowered = name.to_ascii_lowercase();
+    lowered == "trace-id"
+        || lowered.starts_with("x-")
+        || lowered.ends_with("-request-id")
+        || lowered == "alb_receive_time"
+        || lowered == "alb_request_id"
+}
+
+fn extract_dashboard_assistant_text_from_bytes(body: &[u8]) -> Option<String> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+
+    if let Some(text) = value.get("output_text").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        return Some(text.to_string());
+    }
+    if let Some(text) = value
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+    {
+        return Some(text.to_string());
+    }
+
+    let content = value.get("content")?.as_array()?;
+    let mut text_parts = Vec::new();
+    let mut thinking_parts = Vec::new();
+    for item in content {
+        if let Some(text) = item.get("text").and_then(Value::as_str) {
+            if !text.is_empty() {
+                text_parts.push(text.to_string());
+            }
+            continue;
+        }
+        if let Some(thinking) = item.get("thinking").and_then(Value::as_str) {
+            if !thinking.is_empty() {
+                thinking_parts.push(thinking.to_string());
+            }
+        }
+    }
+
+    if !text_parts.is_empty() {
+        return Some(text_parts.join(""));
+    }
+
+    if thinking_parts.is_empty() {
+        None
+    } else {
+        Some(thinking_parts.join("\n"))
+    }
+}
+
+fn transform_dashboard_sse_chunk(
+    chunk: &Bytes,
+    transformer: &mut dyn crate::core::translator::response_transform::StreamingTransformer,
+    pending_text: &mut String,
+) -> Vec<String> {
+    pending_text.push_str(&String::from_utf8_lossy(chunk));
+    let mut ready_lines = Vec::new();
+
+    while let Some(newline_index) = pending_text.find('\n') {
+        let mut line = pending_text[..newline_index].to_string();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        pending_text.drain(..=newline_index);
+        if line.is_empty() {
+            continue;
+        }
+        ready_lines.extend(transform_sse_stream(&Bytes::from(line), transformer));
+    }
+
+    ready_lines
+}
+
+fn flush_dashboard_sse_chunk(
+    transformer: &mut dyn crate::core::translator::response_transform::StreamingTransformer,
+    pending_text: &mut String,
+) -> Vec<String> {
+    if pending_text.trim().is_empty() {
+        pending_text.clear();
+        return Vec::new();
+    }
+    let mut line = std::mem::take(pending_text);
+    if line.ends_with('\r') {
+        line.pop();
+    }
+    transform_sse_stream(&Bytes::from(line), transformer)
+}
+
+fn build_proxied_response(
+    status: StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Body,
+) -> Response {
     let mut proxied = Response::new(body);
     *proxied.status_mut() = status;
     let connection_tokens = connection_header_tokens(&headers);
 
-    for (name, value) in &headers {
+    for (name, value) in headers {
         if is_hop_by_hop_header(name.as_str())
             || connection_tokens.contains(&name.as_str().to_ascii_lowercase())
         {
@@ -618,7 +1171,75 @@ fn proxy_response(response: UpstreamResponse) -> Response {
     proxied
 }
 
+async fn collect_upstream_response_bytes(response: UpstreamResponse) -> (Bytes, bool) {
+    match response {
+        UpstreamResponse::Reqwest(response) => {
+            let mut stream = response.bytes_stream();
+            let mut collected = Vec::new();
+            let mut complete = true;
 
+            loop {
+                match stream.try_next().await {
+                    Ok(Some(chunk)) => collected.extend_from_slice(&chunk),
+                    Ok(None) => break,
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+
+            (Bytes::from(collected), complete)
+        }
+        UpstreamResponse::Hyper(response) => {
+            let (_, mut body) = response.into_parts();
+            let mut collected = Vec::new();
+            let mut complete = true;
+
+            while let Some(frame_result) = body.frame().await {
+                match frame_result {
+                    Ok(frame) => {
+                        if let Ok(data) = frame.into_data() {
+                            collected.extend_from_slice(&data);
+                        }
+                    }
+                    Err(_) => {
+                        complete = false;
+                        break;
+                    }
+                }
+            }
+
+            (Bytes::from(collected), complete)
+        }
+    }
+}
+
+fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let usage = value.get("usage")?.as_object()?;
+
+    let known_fields = [
+        "prompt_tokens",
+        "input_tokens",
+        "completion_tokens",
+        "output_tokens",
+        "total_tokens",
+    ];
+
+    Some(TokenUsage {
+        prompt_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
+        completion_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
+        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+        extra: usage
+            .iter()
+            .filter(|(key, _)| !known_fields.contains(&key.as_str()))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<BTreeMap<_, _>>(),
+    })
+}
 
 async fn extract_error_message(response: UpstreamResponse) -> String {
     let status = response.status();
@@ -758,10 +1379,16 @@ fn json_error_response(status: StatusCode, message: &str) -> Response {
 mod tests {
     use std::collections::{BTreeMap, HashSet};
 
+    use axum::http::StatusCode;
+    use bytes::Bytes;
     use chrono::{Duration as ChronoDuration, Utc};
+    use http_body_util::BodyExt;
     use serde_json::{json, Value};
 
-    use super::{earliest_retry_after, select_connection};
+    use super::{
+        build_dashboard_sse_response, build_proxied_response, earliest_retry_after,
+        select_connection,
+    };
     use crate::types::{AppDb, ProviderConnection};
 
     fn connection(id: &str, priority: u32) -> ProviderConnection {
@@ -880,10 +1507,9 @@ mod tests {
     fn select_connection_respects_model_locks_for_specific_model() {
         let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
         let mut locked = connection("locked-model", 1);
-        locked.extra.insert(
-            "modelLock_gpt-4.1".into(),
-            Value::String(future),
-        );
+        locked
+            .extra
+            .insert("modelLock_gpt-4.1".into(), Value::String(future));
 
         let available = connection("available", 2);
 
@@ -902,7 +1528,9 @@ mod tests {
     fn select_connection_skips_account_level_lock() {
         let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
         let mut all_locked = connection("all-locked", 1);
-        all_locked.extra.insert("modelLock___all".into(), Value::String(future));
+        all_locked
+            .extra
+            .insert("modelLock___all".into(), Value::String(future));
 
         let available = connection("available", 2);
 
@@ -1011,7 +1639,10 @@ mod tests {
 
         let selected = select_connection(&snapshot, "openai", "gpt-4.1", &excluded);
 
-        assert!(selected.is_none(), "should return None when all accounts excluded");
+        assert!(
+            selected.is_none(),
+            "should return None when all accounts excluded"
+        );
     }
 
     #[test]
@@ -1020,7 +1651,10 @@ mod tests {
 
         let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new());
 
-        assert!(selected.is_none(), "should return None when no connections exist");
+        assert!(
+            selected.is_none(),
+            "should return None when no connections exist"
+        );
     }
 
     #[test]
@@ -1074,7 +1708,8 @@ mod tests {
     fn is_model_locked_checks_account_level_all_key() {
         let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
         let mut conn = connection("conn", 1);
-        conn.extra.insert("modelLock___all".into(), Value::String(future));
+        conn.extra
+            .insert("modelLock___all".into(), Value::String(future));
 
         assert!(
             super::is_model_locked(&conn, "any-model", Utc::now()),
@@ -1086,11 +1721,58 @@ mod tests {
     fn is_model_locked_expired_lock_allows_connection() {
         let past = (Utc::now() - ChronoDuration::seconds(10)).to_rfc3339();
         let mut conn = connection("conn", 1);
-        conn.extra.insert("modelLock_gpt-4.1".into(), Value::String(past));
+        conn.extra
+            .insert("modelLock_gpt-4.1".into(), Value::String(past));
 
         assert!(
             !super::is_model_locked(&conn, "gpt-4.1", Utc::now()),
             "expired model lock should not block"
         );
+    }
+
+    #[tokio::test]
+    async fn build_dashboard_sse_response_returns_collectable_sse_body() {
+        let body = Bytes::from_static(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+        let response = build_dashboard_sse_response(
+            StatusCode::OK,
+            &reqwest::header::HeaderMap::new(),
+            body.clone(),
+        );
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "text/event-stream; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers()[axum::http::header::CACHE_CONTROL],
+            "no-cache"
+        );
+
+        let collected = response
+            .into_body()
+            .collect()
+            .await
+            .expect("dashboard SSE body should collect");
+
+        assert_eq!(collected.to_bytes(), body);
+    }
+
+    #[tokio::test]
+    async fn build_proxied_response_preserves_plain_body_roundtrip() {
+        let body = Bytes::from_static(b"hello world");
+        let response = build_proxied_response(
+            StatusCode::OK,
+            &reqwest::header::HeaderMap::new(),
+            axum::body::Body::from(body.clone()),
+        );
+
+        let collected = response
+            .into_body()
+            .collect()
+            .await
+            .expect("plain proxied body should collect");
+
+        assert_eq!(collected.to_bytes(), body);
     }
 }

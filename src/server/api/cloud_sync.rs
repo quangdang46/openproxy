@@ -1,13 +1,18 @@
 use axum::{
     extract::State,
+    http::HeaderMap,
     http::StatusCode,
-    response::IntoResponse,
+    response::{IntoResponse, Response},
     routing::{delete, get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::server::state::AppState;
+
+fn require_management_access(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
+    super::require_management_api_key(headers, state)
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -24,7 +29,11 @@ struct InitResponse {
     setup_required: bool,
 }
 
-async fn get_init(State(state): State<AppState>) -> Json<InitResponse> {
+async fn get_init(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let snapshot = state.db.snapshot();
     let settings = &snapshot.settings;
 
@@ -41,6 +50,7 @@ async fn get_init(State(state): State<AppState>) -> Json<InitResponse> {
         url,
         setup_required,
     })
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,8 +61,13 @@ struct InitRequest {
 
 async fn post_init(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<InitRequest>,
 ) -> impl IntoResponse {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let url = body.url.trim().to_string();
     if url.is_empty() {
         return (
@@ -96,7 +111,11 @@ async fn post_init(
     }
 }
 
-async fn delete_init(State(state): State<AppState>) -> impl IntoResponse {
+async fn delete_init(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let result = state
         .db
         .update(|db| {

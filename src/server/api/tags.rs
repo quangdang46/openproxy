@@ -2,17 +2,26 @@ use std::collections::BTreeMap;
 
 use axum::extract::State;
 use axum::{
-    routing::{delete, get, post, put},
+    http::HeaderMap,
+    response::{IntoResponse, Response},
+    routing::get,
     Json, Router,
 };
 use uuid::Uuid;
 
 use crate::server::state::AppState;
 
+fn require_management_access(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
+    super::require_management_api_key(headers, state)
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/tags", get(list_tags).post(create_tag))
-        .route("/api/tags/{id}", get(get_tag).put(update_tag).delete(delete_tag))
+        .route(
+            "/api/tags/{id}",
+            get(get_tag).put(update_tag).delete(delete_tag),
+        )
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -64,25 +73,39 @@ fn save_tags_to_db(db: &mut crate::types::AppDb, tags: &TagsStore) {
     }
 }
 
-async fn list_tags(State(state): State<AppState>) -> Json<Vec<Tag>> {
+async fn list_tags(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let snapshot = state.db.snapshot();
     let tags = get_tags_from_db(&snapshot);
-    Json(tags.into_values().collect())
+    Json(tags.into_values().collect::<Vec<_>>()).into_response()
 }
 
 async fn get_tag(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Json<Option<Tag>> {
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let snapshot = state.db.snapshot();
     let tags = get_tags_from_db(&snapshot);
-    Json(tags.get(&id).cloned())
+    Json(tags.get(&id).cloned()).into_response()
 }
 
 async fn create_tag(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<CreateTagRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let mut tag = Tag::new(req.name);
     tag.color = req.color;
 
@@ -96,16 +119,23 @@ async fn create_tag(
         .await;
 
     match result {
-        Ok(_) => Json(serde_json::json!({ "success": true, "tag": tag })),
-        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+        Ok(_) => Json(serde_json::json!({ "success": true, "tag": tag })).into_response(),
+        Err(e) => {
+            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
+        }
     }
 }
 
 async fn update_tag(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(req): Json<UpdateTagRequest>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let result = state
         .db
         .update(|db| {
@@ -123,15 +153,22 @@ async fn update_tag(
         .await;
 
     match result {
-        Ok(_) => Json(serde_json::json!({ "success": true })),
-        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+        Ok(_) => Json(serde_json::json!({ "success": true })).into_response(),
+        Err(e) => {
+            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
+        }
     }
 }
 
 async fn delete_tag(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let result = state
         .db
         .update(|db| {
@@ -142,7 +179,9 @@ async fn delete_tag(
         .await;
 
     match result {
-        Ok(_) => Json(serde_json::json!({ "success": true })),
-        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+        Ok(_) => Json(serde_json::json!({ "success": true })).into_response(),
+        Err(e) => {
+            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
+        }
     }
 }

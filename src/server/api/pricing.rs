@@ -1,6 +1,8 @@
 use axum::extract::State;
 use axum::{
-    routing::{delete, get, patch},
+    http::HeaderMap,
+    response::{IntoResponse, Response},
+    routing::get,
     Json, Router,
 };
 use std::collections::BTreeMap;
@@ -9,9 +11,16 @@ use crate::server::state::AppState;
 
 pub type PricingTable = BTreeMap<String, BTreeMap<String, f64>>;
 
+fn require_management_access(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
+    super::require_management_api_key(headers, state)
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/api/pricing", get(get_pricing).patch(update_pricing).delete(reset_pricing))
+        .route(
+            "/api/pricing",
+            get(get_pricing).patch(update_pricing).delete(reset_pricing),
+        )
         .route("/api/pricing/defaults", get(get_default_pricing_handler))
 }
 
@@ -48,7 +57,11 @@ fn get_default_pricing() -> PricingTable {
     pricing
 }
 
-async fn get_pricing(State(state): State<AppState>) -> Json<BTreeMap<String, BTreeMap<String, f64>>> {
+async fn get_pricing(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let snapshot = state.db.snapshot();
     // Convert from the types::PricingTable (BTreeMap<String, BTreeMap<String, Value>>) to our simpler type
     let pricing: BTreeMap<String, BTreeMap<String, f64>> = snapshot
@@ -62,21 +75,28 @@ async fn get_pricing(State(state): State<AppState>) -> Json<BTreeMap<String, BTr
             (provider.clone(), converted)
         })
         .collect();
-    Json(pricing)
+    Json(pricing).into_response()
 }
 
 async fn update_pricing(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<BTreeMap<String, BTreeMap<String, f64>>>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let result = state
         .db
         .update(|db| {
             db.pricing = req
                 .into_iter()
                 .map(|(k, v)| {
-                    let converted: BTreeMap<String, serde_json::Value> =
-                        v.into_iter().map(|(kk, vv)| (kk, serde_json::json!(vv))).collect();
+                    let converted: BTreeMap<String, serde_json::Value> = v
+                        .into_iter()
+                        .map(|(kk, vv)| (kk, serde_json::json!(vv)))
+                        .collect();
                     (k, converted)
                 })
                 .collect();
@@ -84,8 +104,10 @@ async fn update_pricing(
         .await;
 
     match result {
-        Ok(_) => Json(serde_json::json!({ "success": true })),
-        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+        Ok(_) => Json(serde_json::json!({ "success": true })).into_response(),
+        Err(e) => {
+            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
+        }
     }
 }
 
@@ -97,8 +119,13 @@ pub struct ResetPricingQuery {
 
 async fn reset_pricing(
     State(state): State<AppState>,
+    headers: HeaderMap,
     axum::extract::Query(params): axum::extract::Query<ResetPricingQuery>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
     let result = state
         .db
         .update(|db| {
@@ -114,8 +141,10 @@ async fn reset_pricing(
                 db.pricing = get_default_pricing()
                     .into_iter()
                     .map(|(k, v)| {
-                        let converted: BTreeMap<String, serde_json::Value> =
-                            v.into_iter().map(|(kk, vv)| (kk, serde_json::json!(vv))).collect();
+                        let converted: BTreeMap<String, serde_json::Value> = v
+                            .into_iter()
+                            .map(|(kk, vv)| (kk, serde_json::json!(vv)))
+                            .collect();
                         (k, converted)
                     })
                     .collect();
@@ -124,11 +153,20 @@ async fn reset_pricing(
         .await;
 
     match result {
-        Ok(_) => Json(serde_json::json!({ "success": true })),
-        Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+        Ok(_) => Json(serde_json::json!({ "success": true })).into_response(),
+        Err(e) => {
+            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
+        }
     }
 }
 
-async fn get_default_pricing_handler() -> Json<PricingTable> {
-    Json(get_default_pricing())
+async fn get_default_pricing_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+
+    Json(get_default_pricing()).into_response()
 }
