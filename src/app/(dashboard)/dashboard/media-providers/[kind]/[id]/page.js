@@ -16,9 +16,9 @@ import { getTtsVoicesForModel } from "open-sse/config/ttsModels.js";
 // Shared row layout — defined outside components to avoid re-mount on re-render
 function Row({ label, children }) {
   return (
-    <div className="flex items-center gap-3">
-      <span className="text-xs text-text-muted w-20 shrink-0">{label}</span>
-      <div className="flex-1">{children}</div>
+    <div className="flex min-w-0 flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+      <span className="w-full text-xs font-medium text-text-muted sm:w-20 sm:shrink-0">{label}</span>
+      <div className="w-full min-w-0 flex-1">{children}</div>
     </div>
   );
 }
@@ -230,11 +230,11 @@ function EmbeddingExampleCard({ providerId, customAlias }) {
 
         {/* Endpoint */}
         <Row label="Endpoint">
-          <div className="flex items-center gap-2">
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
             <input
               value={endpoint}
               onChange={(e) => useTunnel ? setTunnelEndpoint(e.target.value) : setLocalEndpoint(e.target.value)}
-              className="flex-1 px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary font-mono"
+              className="w-full min-w-0 flex-1 px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary font-mono"
               placeholder="http://localhost:3000"
             />
             {/* Tunnel toggle — only show if tunnel URL is available */}
@@ -298,12 +298,12 @@ function EmbeddingExampleCard({ providerId, customAlias }) {
 
         {/* Curl + Run */}
         <div className="mt-1">
-          <div className="flex items-center justify-between mb-1.5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-1.5">
             <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">Request</span>
-            <div className="flex items-center gap-2">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
               <button
                 onClick={() => copyCurl(curlSnippet)}
-                className="flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+                className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
               >
                 <span className="material-symbols-outlined text-[14px]">{copiedCurl ? "check" : "content_copy"}</span>
                 {copiedCurl ? "Copied" : "Copy"}
@@ -311,7 +311,7 @@ function EmbeddingExampleCard({ providerId, customAlias }) {
               <button
                 onClick={handleRun}
                 disabled={running || !input.trim() || !modelFull}
-                className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex w-full sm:w-auto items-center justify-center gap-1.5 px-3 py-1 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <span className="material-symbols-outlined text-[14px]" style={running ? { animation: "spin 1s linear infinite" } : undefined}>
                   play_arrow
@@ -320,7 +320,7 @@ function EmbeddingExampleCard({ providerId, customAlias }) {
               </button>
             </div>
           </div>
-          <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre">{curlSnippet}</pre>
+          <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all">{curlSnippet}</pre>
         </div>
 
         {/* Error */}
@@ -328,21 +328,21 @@ function EmbeddingExampleCard({ providerId, customAlias }) {
 
         {/* Response — default example or real result */}
         <div>
-          <div className="flex items-center justify-between mb-1.5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-1.5">
             <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
               Response {result && <span className="font-normal normal-case">&#9889; {result.latencyMs}ms</span>}
             </span>
             {result && (
               <button
                 onClick={() => copyRes(resultJson)}
-                className="flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+                className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
               >
                 <span className="material-symbols-outlined text-[14px]">{copiedRes ? "check" : "content_copy"}</span>
                 {copiedRes ? "Copied" : "Copy"}
               </button>
             )}
           </div>
-          <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre opacity-70">
+          <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all opacity-70">
             {formatResultJson(result?.data)}
           </pre>
         </div>
@@ -567,8 +567,8 @@ function TtsExampleCard({ providerId }) {
         <div className="flex flex-col gap-2.5">
           {/* Endpoint + API Key as read-only text */}
           <Row label="Endpoint">
-            <div className="flex items-center gap-2">
-              <span className="flex-1 px-3 py-1.5 text-sm font-mono text-text-main bg-sidebar rounded-lg truncate">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+              <span className="w-full min-w-0 flex-1 px-3 py-1.5 text-sm font-mono text-text-main bg-sidebar rounded-lg truncate">
                 {endpoint}/v1/audio/speech
               </span>
               {tunnelEndpoint && (
@@ -611,10 +611,10 @@ function TtsExampleCard({ providerId }) {
           {/* Language row + Browse button (edge-tts, local-device, elevenlabs) */}
           {config.hasBrowseButton && (
             <Row label="Language">
-              <div className="flex items-center gap-2">
+              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
                 <button
                   onClick={openModal}
-                  className="flex-1 px-3 py-1.5 text-sm border border-border rounded-lg bg-background font-mono truncate text-left hover:border-primary/40 transition-colors"
+                  className="w-full min-w-0 flex-1 px-3 py-1.5 text-sm border border-border rounded-lg bg-background font-mono truncate text-left hover:border-primary/40 transition-colors"
                 >
                   {selectedLang
                     ? <span className="text-text-main">{languages.find((l) => l.code === selectedLang)?.name || selectedLang}</span>
@@ -622,7 +622,7 @@ function TtsExampleCard({ providerId }) {
                 </button>
                 <button
                   onClick={openModal}
-                  className="flex items-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border border-border text-text-muted hover:text-primary hover:border-primary/40 transition-colors shrink-0"
+                  className="flex w-full items-center justify-center gap-1 text-xs px-2.5 py-1.5 rounded-lg border border-border text-text-muted hover:text-primary hover:border-primary/40 transition-colors sm:w-auto sm:shrink-0"
                 >
                   <span className="material-symbols-outlined text-[14px]">language</span>
                   Select language
@@ -743,12 +743,12 @@ function TtsExampleCard({ providerId }) {
 
           {/* Curl + Run */}
           <div className="mt-1">
-            <div className="flex items-center justify-between mb-1.5">
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-1.5">
               <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">Request</span>
-              <div className="flex items-center gap-2">
+              <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
                 <button
                   onClick={() => copyCurl(curlSnippet)}
-                  className="flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+                  className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
                 >
                   <span className="material-symbols-outlined text-[14px]">{copiedCurl ? "check" : "content_copy"}</span>
                   {copiedCurl ? "Copied" : "Copy"}
@@ -756,7 +756,7 @@ function TtsExampleCard({ providerId }) {
                 <button
                   onClick={handleRun}
                   disabled={running || !input.trim() || !modelFull}
-                  className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="flex w-full sm:w-auto items-center justify-center gap-1.5 px-3 py-1 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span className="material-symbols-outlined text-[14px]" style={running ? { animation: "spin 1s linear infinite" } : undefined}>
                     play_arrow
@@ -765,7 +765,7 @@ function TtsExampleCard({ providerId }) {
                 </button>
               </div>
             </div>
-            <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre">{curlSnippet}</pre>
+            <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all">{curlSnippet}</pre>
           </div>
 
           {error && <p className="text-xs text-red-500 break-words">{error}</p>}
@@ -773,11 +773,11 @@ function TtsExampleCard({ providerId }) {
           {/* Audio player */}
           {audioUrl ? (
             <div>
-              <div className="flex items-center justify-between mb-1.5">
+              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-1.5">
                 <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
                   Response {latency && <span className="font-normal normal-case">&#9889; {latency}ms</span>}
                 </span>
-                <a href={audioUrl} download="speech.mp3" className="flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors">
+                <a href={audioUrl} download="speech.mp3" className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors">
                   <span className="material-symbols-outlined text-[14px]">download</span>
                   Download
                 </a>
@@ -787,7 +787,7 @@ function TtsExampleCard({ providerId }) {
               {/* JSON Response (if format is json) */}
               {jsonResponse && (
                 <div className="mt-3">
-                  <div className="flex items-center justify-between mb-1.5">
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-1.5">
                     <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">JSON Response</span>
                   </div>
                   <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all">
@@ -802,7 +802,7 @@ function TtsExampleCard({ providerId }) {
           ) : (
             <div>
             <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">Response</span>
-            <pre className="mt-1.5 bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre opacity-50">{DEFAULT_TTS_RESPONSE_EXAMPLE}</pre>
+            <pre className="mt-1.5 bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all opacity-50">{DEFAULT_TTS_RESPONSE_EXAMPLE}</pre>
           </div>
           )}
         </div>
@@ -811,7 +811,7 @@ function TtsExampleCard({ providerId }) {
       {/* Country Picker Modal */}
       {modalOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center"
+          className="fixed inset-0 z-50 flex items-end justify-center sm:items-center"
           style={{ backgroundColor: "rgba(0,0,0,0.6)", backdropFilter: "blur(2px)" }}
           onClick={() => setModalOpen(false)}
         >
@@ -885,6 +885,10 @@ function GenericExampleCard({ providerId, kind }) {
 
   // Get models for this kind (e.g., type="image")
   const kindModels = getModelsByProviderId(providerId).filter((m) => m.type === kind);
+  // Kinds that need a model identifier in the request (image/video/music)
+  const KIND_NEEDS_MODEL = new Set(["image", "video", "music", "stt", "imageToText"]);
+  const needsModel = KIND_NEEDS_MODEL.has(kind);
+  const allowManualModel = needsModel && kindModels.length === 0;
   const [selectedModel, setSelectedModel] = useState(kindModels[0]?.id ?? "");
   const selectedModelObj = kindModels.find((m) => m.id === selectedModel);
   const supportsEdit = !!selectedModelObj?.capabilities?.includes("edit");
@@ -935,8 +939,10 @@ function GenericExampleCard({ providerId, kind }) {
 
   const endpoint = useTunnel ? tunnelEndpoint : localEndpoint;
   const apiPath = kindConfig.endpoint.path;
-  // For kinds without model concept (webSearch/webFetch), use providerAlias directly
-  const modelFull = kindModels.length === 0 ? providerAlias : (selectedModel ? `${providerAlias}/${selectedModel}` : "");
+  // webSearch/webFetch: use providerAlias only. Other kinds: append model when present.
+  const modelFull = !needsModel
+    ? providerAlias
+    : (selectedModel ? `${providerAlias}/${selectedModel}` : (allowManualModel ? "" : providerAlias));
 
   // Build request body with optional extra fields (only non-empty values)
   const extraBodyFromFields = Object.entries(extraValues).reduce((acc, [k, v]) => {
@@ -1060,8 +1066,8 @@ function GenericExampleCard({ providerId, kind }) {
     <Card>
       <h2 className="text-lg font-semibold mb-4">Example</h2>
       <div className="flex flex-col gap-2.5">
-        {/* Model selector - only show if models available */}
-        {kindModels.length > 0 && (
+        {/* Model selector — dropdown if presets exist, else manual input for media kinds */}
+        {kindModels.length > 0 ? (
           <Row label="Model">
             <select
               value={selectedModel}
@@ -1073,12 +1079,21 @@ function GenericExampleCard({ providerId, kind }) {
               ))}
             </select>
           </Row>
-        )}
+        ) : allowManualModel ? (
+          <Row label="Model">
+            <input
+              value={selectedModel}
+              onChange={(e) => setSelectedModel(e.target.value)}
+              placeholder="Enter model id (provider-specific)"
+              className="w-full px-3 py-1.5 text-sm border border-border rounded-lg bg-background focus:outline-none focus:border-primary font-mono"
+            />
+          </Row>
+        ) : null}
 
         {/* Endpoint */}
         <Row label="Endpoint">
-          <div className="flex items-center gap-2">
-            <span className="flex-1 px-3 py-1.5 text-sm font-mono text-text-main bg-sidebar rounded-lg truncate">
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <span className="w-full min-w-0 flex-1 px-3 py-1.5 text-sm font-mono text-text-main bg-sidebar rounded-lg truncate">
               {endpoint}{apiPath}
             </span>
             {tunnelEndpoint && (
@@ -1232,12 +1247,12 @@ function GenericExampleCard({ providerId, kind }) {
 
         {/* Curl + Run */}
         <div className="mt-1">
-          <div className="flex items-center justify-between mb-1.5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-1.5">
             <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">Request</span>
-            <div className="flex items-center gap-2">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
               <button
                 onClick={() => copyCurl(curlSnippet)}
-                className="flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+                className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
               >
                 <span className="material-symbols-outlined text-[14px]">{copiedCurl ? "check" : "content_copy"}</span>
                 {copiedCurl ? "Copied" : "Copy"}
@@ -1245,7 +1260,7 @@ function GenericExampleCard({ providerId, kind }) {
             <button
               onClick={handleRun}
               disabled={running || !input.trim() || !modelFull}
-              className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex w-full sm:w-auto items-center justify-center gap-1.5 px-3 py-1 rounded-lg bg-primary text-white text-xs font-medium hover:bg-primary/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
                 <span className="material-symbols-outlined text-[14px]" style={running ? { animation: "spin 1s linear infinite" } : undefined}>
                   play_arrow
@@ -1254,12 +1269,12 @@ function GenericExampleCard({ providerId, kind }) {
               </button>
             </div>
           </div>
-          <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre">{curlSnippet}</pre>
+          <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all">{curlSnippet}</pre>
         </div>
 
         {/* Streaming progress */}
         {(running || progress) && useStreaming && (
-          <div className="flex items-center gap-3 px-3 py-2 rounded-lg bg-sidebar border border-border">
+          <div className="flex flex-col gap-2 px-3 py-2 rounded-lg bg-sidebar border border-border sm:flex-row sm:items-center sm:gap-3">
             <span className="material-symbols-outlined text-[16px] text-primary" style={running ? { animation: "spin 1s linear infinite" } : undefined}>
               {running ? "progress_activity" : "check_circle"}
             </span>
@@ -1287,21 +1302,21 @@ function GenericExampleCard({ providerId, kind }) {
 
         {/* Response */}
         <div>
-          <div className="flex items-center justify-between mb-1.5">
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between mb-1.5">
             <span className="text-xs font-semibold text-text-muted uppercase tracking-wider">
               Response {result && <span className="font-normal normal-case">&#9889; {result.latencyMs}ms</span>}
             </span>
             {result && (
               <button
                 onClick={() => copyRes(resultJson)}
-                className="flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+                className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
               >
                 <span className="material-symbols-outlined text-[14px]">{copiedRes ? "check" : "content_copy"}</span>
                 {copiedRes ? "Copied" : "Copy"}
               </button>
             )}
           </div>
-          <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre opacity-70">
+          <pre className="bg-sidebar rounded-lg px-3 py-2.5 text-xs font-mono text-text-main overflow-x-auto whitespace-pre-wrap break-all opacity-70">
             {result ? resultJson : exConfig.defaultResponse}
           </pre>
           {kind === "image" && (binaryImageUrl || result?.data?.data?.[0]) && (
@@ -1310,7 +1325,7 @@ function GenericExampleCard({ providerId, kind }) {
                 <a
                   href={binaryImageUrl || (result?.data?.data?.[0]?.b64_json ? `data:image/png;base64,${result.data.data[0].b64_json}` : result?.data?.data?.[0]?.url || "")}
                   download="image.png"
-                  className="flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
+                  className="inline-flex items-center gap-1 text-xs text-text-muted hover:text-primary transition-colors"
                 >
                   <span className="material-symbols-outlined text-[14px]">download</span>
                   Download
@@ -1396,7 +1411,7 @@ export default function MediaProviderDetailPage() {
         </Link>
 
         {/* Header */}
-        <div className="flex items-center gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
           <div className="size-12 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: `${provider.color}15` }}>
             <ProviderIcon
               src={`/providers/${provider.id}.png`}
@@ -1408,7 +1423,20 @@ export default function MediaProviderDetailPage() {
             />
           </div>
           <div className="flex-1">
-            <h1 className="text-3xl font-semibold tracking-tight">{provider.name}</h1>
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+              <h1 className="text-3xl font-semibold tracking-tight">{provider.name}</h1>
+              {!isCustom && provider.notice?.apiKeyUrl && (
+                <a
+                  href={provider.notice.apiKeyUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-primary hover:underline inline-flex items-center gap-1"
+                >
+                  <span className="material-symbols-outlined text-sm">open_in_new</span>
+                  Get API Key
+                </a>
+              )}
+            </div>
             <div className="flex items-center gap-1.5 mt-1 flex-wrap">
               {isCustom && <Badge variant="default" size="sm">Custom · {customNode?.prefix}</Badge>}
               {kinds.map((k) => (
@@ -1419,7 +1447,7 @@ export default function MediaProviderDetailPage() {
             </div>
           </div>
           {isCustom && (
-            <div className="flex items-center gap-2">
+            <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
               <Button size="sm" variant="secondary" icon="edit" onClick={() => setShowEditModal(true)}>
                 Edit
               </Button>
@@ -1436,6 +1464,24 @@ export default function MediaProviderDetailPage() {
         <div className="flex items-start gap-3 px-4 py-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-400">
           <span className="material-symbols-outlined text-[20px] mt-0.5">warning</span>
           <p className="text-sm">{provider.kindNotice[kind]}</p>
+        </div>
+      )}
+
+      {/* Provider notice text (only when there's actual text content) */}
+      {!isCustom && provider.notice?.text && !provider.deprecated && (
+        <div className="flex flex-col gap-2 rounded-lg border border-blue-500/30 bg-blue-500/10 px-3 py-2 sm:flex-row sm:items-center">
+          <span className="material-symbols-outlined text-[16px] text-blue-500 shrink-0">info</span>
+          <p className="min-w-0 flex-1 text-xs leading-relaxed text-blue-600 dark:text-blue-400">{provider.notice.text}</p>
+          {provider.notice.apiKeyUrl && (
+            <a
+              href={provider.notice.apiKeyUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex justify-center rounded bg-blue-500 px-2 py-1 text-xs font-medium text-white transition-colors hover:bg-blue-600 sm:py-0.5"
+            >
+              Get API Key →
+            </a>
+          )}
         </div>
       )}
 

@@ -7,10 +7,9 @@ import lockfile from "proper-lockfile";
 import { DATA_DIR } from "@/lib/dataDir.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
-const isCloud = typeof caches !== 'undefined' || typeof caches === 'object';
-const DB_FILE = isCloud ? null : path.join(DATA_DIR, "db.json");
+const DB_FILE = path.join(DATA_DIR, "db.json");
 
-if (!isCloud && !fs.existsSync(DATA_DIR)) {
+if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
@@ -24,6 +23,7 @@ const DEFAULT_SETTINGS = {
   stickyRoundRobinLimit: 3,
   providerStrategies: {},
   comboStrategy: "fallback",
+  comboStickyRoundRobinLimit: 1,
   comboStrategies: {},
   requireLogin: true,
   tunnelDashboardAccess: true,
@@ -36,6 +36,7 @@ const DEFAULT_SETTINGS = {
   outboundProxyUrl: "",
   outboundNoProxy: "",
   mitmRouterBaseUrl: DEFAULT_MITM_ROUTER_BASE,
+  dnsToolEnabled: {},
   rtkEnabled: true,
   cavemanEnabled: false,
   cavemanLevel: "full",
@@ -56,7 +57,7 @@ function cloneDefaultData() {
   };
 }
 
-if (!isCloud && DB_FILE && !fs.existsSync(DB_FILE)) {
+if (!fs.existsSync(DB_FILE)) {
   fs.writeFileSync(DB_FILE, JSON.stringify(cloneDefaultData(), null, 2));
 }
 
@@ -143,11 +144,6 @@ class LocalMutex {
 const localMutex = new LocalMutex();
 
 async function withFileLock(db, operation) {
-  if (isCloud) {
-    await operation();
-    return;
-  }
-
   const releaseLocal = await localMutex.acquire();
   let release = null;
   try {
@@ -175,15 +171,6 @@ async function safeWrite(db) {
 }
 
 export async function getDb() {
-  if (isCloud) {
-    if (!dbInstance) {
-      const data = cloneDefaultData();
-      dbInstance = new Low({ read: async () => { }, write: async () => { } }, data);
-      dbInstance.data = data;
-    }
-    return dbInstance;
-  }
-
   if (!dbInstance) {
     dbInstance = new Low(new JSONFile(DB_FILE), cloneDefaultData());
   }
@@ -429,7 +416,7 @@ export async function createProviderConnection(data) {
   const optionalFields = [
     "displayName", "email", "globalPriority", "defaultModel",
     "accessToken", "refreshToken", "expiresAt", "tokenType",
-    "scope", "idToken", "projectId", "apiKey", "testStatus",
+    "scope", "projectId", "apiKey", "testStatus",
     "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn", "errorCode",
     "consecutiveUseCount"
   ];
@@ -695,7 +682,7 @@ export async function cleanupProviderConnections() {
   const fieldsToCheck = [
     "displayName", "email", "globalPriority", "defaultModel",
     "accessToken", "refreshToken", "expiresAt", "tokenType",
-    "scope", "idToken", "projectId", "apiKey", "testStatus",
+    "scope", "projectId", "apiKey", "testStatus",
     "lastTested", "lastError", "lastErrorAt", "rateLimitedUntil", "expiresIn",
     "consecutiveUseCount"
   ];

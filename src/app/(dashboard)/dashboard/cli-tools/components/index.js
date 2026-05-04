@@ -10,4 +10,4 @@ export { default as CopilotToolCard } from "./CopilotToolCard";
 export { default as MitmServerCard } from "./MitmServerCard";
 export { default as MitmToolCard } from "./MitmToolCard";
 export { default as MitmLinkCard } from "./MitmLinkCard";
-
+export { default as EndpointPresetControl } from "./EndpointPresetControl";

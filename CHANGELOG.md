@@ -1,3 +1,59 @@
+# v0.4.16 (2026-05-04)
+
+## Features
+- Skills system: manage and execute custom AI skills
+
+## Fixes
+- Fix input fields in tool cards
+
+# v0.4.14 (2026-05-03)
+
+## Improvements
+- Token refresh: in-flight request caching to prevent race conditions & reduce duplicate API calls
+- Token refresh: handle unrecoverable errors with token reuse/invalidation
+- MITM server: handle port 443 conflicts (kill occupying process before start)
+- Better UX feedback in MitmServerCard for port conflicts & admin privileges
+- Refactor ComboList for streamlined media provider combos display
+
+# v0.4.13 (2026-05-03)
+
+## Features
+- Add Azure OpenAI as dedicated provider (endpoint/deployment/API version/organization config)
+- Add browser-local endpoint presets for CLI tools (Claude, Codex, OpenCode, Droid, OpenClaw, Hermes, Copilot)
+- Add Codex review model quota support
+- Add DNS tool state persistence in MITM manager
+
+## Improvements
+- New brand color palette with better light/dark theme consistency
+- Improve mobile layouts and restore Cloudflare provider
+- Improve zh-CN translations
+- Better admin privilege feedback in MitmServerCard
+- Refined APIPageClient layout
+- Filter LLM combos to show only relevant data
+
+## Fixes
+- Include alias-backed models in /v1/models listing
+- Improve cloudflared exit code error messages
+- Redirect ~/.9router to DATA_DIR in Docker (persist usage across updates)
+- Prevent SSE listener leak in console-logs stream
+- Gate MITM sudo prompts on server platform
+- Fix Azure validation and persistence (providerSpecificData, Organization required)
+
+# v0.4.12 (2026-05-01)
+
+## Features
+- Add Xiaomi MiMo provider support
+- Add sticky round-robin strategy for combos
+
+## Improvements
+- Refactor proxyFetch and enhance MediaProviderDetailPage layout
+- Improve dashboard responsive layouts
+- Update provider models list
+
+## Fixes
+- Fix custom provider prefix conflicts with built-in alias
+- Strip output_config for MiniMax requests
+
 # v0.4.11 (2026-04-30)
 
 ## Features

@@ -63,6 +63,27 @@ const ALIAS_TO_PROVIDER_ID = {
   "grok-web": "grok-web",
   pw: "perplexity-web",
   "perplexity-web": "perplexity-web",
+  mimo: "xiaomi-mimo",
+  "xiaomi-mimo": "xiaomi-mimo",
+  cf: "cloudflare-ai",
+  "cloudflare-ai": "cloudflare-ai",
+  // Image/video providers
+  fal: "fal-ai",
+  "fal-ai": "fal-ai",
+  stability: "stability-ai",
+  "stability-ai": "stability-ai",
+  bfl: "black-forest-labs",
+  "black-forest-labs": "black-forest-labs",
+  recraft: "recraft",
+  topaz: "topaz",
+  runway: "runwayml",
+  runwayml: "runwayml",
+  // Embedding/rerank
+  jina: "jina-ai",
+  "jina-ai": "jina-ai",
+  // TTS
+  polly: "aws-polly",
+  "aws-polly": "aws-polly",
 };
 
 /**

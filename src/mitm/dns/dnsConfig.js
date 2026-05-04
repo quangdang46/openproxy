@@ -23,6 +23,20 @@ function isSudoAvailable() {
   }
 }
 
+function canRunSudoWithoutPassword() {
+  if (IS_WIN || !isSudoAvailable()) return true;
+  try {
+    execSync("sudo -n true", { stdio: "ignore", windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isSudoPasswordRequired() {
+  return !IS_WIN && isSudoAvailable() && !canRunSudoWithoutPassword();
+}
+
 /**
  * Execute command with sudo password via stdin (macOS/Linux only).
  * Without sudo in PATH (containers), runs via sh — same user, no elevation.
@@ -49,6 +63,14 @@ function execWithPassword(command, password) {
       child.stdin.end();
     }
   });
+}
+
+/**
+ * Trim trailing blank lines/whitespace, ensure file ends with exactly one newline.
+ */
+function normalizeHostsContent(content) {
+  const eol = IS_WIN ? "\r\n" : "\n";
+  return content.replace(/[\r\n\s]+$/g, "") + eol;
 }
 
 /**
@@ -106,19 +128,26 @@ async function addDNSEntry(tool, sudoPassword) {
     return;
   }
 
-  const entries = entriesToAdd.map(h => `127.0.0.1 ${h}`).join("\n");
-
   try {
     if (IS_WIN) {
-      const toAppend = entriesToAdd.map(h => `127.0.0.1 ${h}`).join("`r`n");
-      // Single elevated script: append to hosts + flush DNS (1 UAC popup, or zero if admin)
+      // Read → trim → append → write (avoids stacked blank lines from Add-Content)
+      const current = fs.readFileSync(HOSTS_FILE, "utf8");
+      const trimmed = current.replace(/[\r\n\s]+$/g, "");
+      const toAppend = entriesToAdd.map(h => `127.0.0.1 ${h}`).join("\r\n");
+      const next = `${trimmed}\r\n${toAppend}\r\n`;
       const script = `
-        Add-Content -LiteralPath ${quotePs(HOSTS_FILE)} -Value ${quotePs(toAppend)}
+        Set-Content -LiteralPath ${quotePs(HOSTS_FILE)} -Value ${quotePs(next)} -NoNewline
         ipconfig /flushdns | Out-Null
       `;
       await runElevatedPowerShell(script);
     } else {
-      await execWithPassword(`echo "${entries}" >> ${HOSTS_FILE}`, sudoPassword);
+      const current = fs.readFileSync(HOSTS_FILE, "utf8");
+      const trimmed = current.replace(/[\r\n\s]+$/g, "");
+      const toAppend = entriesToAdd.map(h => `127.0.0.1 ${h}`).join("\n");
+      const next = `${trimmed}\n${toAppend}\n`;
+      // Use tee via sudo to overwrite atomically — escape single quotes in content
+      const escaped = next.replace(/'/g, "'\\''");
+      await execWithPassword(`printf '%s' '${escaped}' | tee ${HOSTS_FILE} > /dev/null`, sudoPassword);
       await flushDNS(sudoPassword);
     }
     log(`🌐 DNS ${tool}: ✅ added ${entriesToAdd.join(", ")}`);
@@ -143,26 +172,20 @@ async function removeDNSEntry(tool, sudoPassword) {
 
   try {
     if (IS_WIN) {
-      // Build PowerShell list literal of hosts to strip
-      const hostsList = entriesToRemove.map(quotePs).join(",");
+      const current = fs.readFileSync(HOSTS_FILE, "utf8");
+      const filtered = current.split(/\r?\n/).filter(l => !entriesToRemove.some(h => l.includes(h))).join("\r\n");
+      const next = filtered.replace(/[\r\n\s]+$/g, "") + "\r\n";
       const script = `
-        $hosts = @(${hostsList})
-        $lines = Get-Content -LiteralPath ${quotePs(HOSTS_FILE)}
-        $filtered = $lines | Where-Object {
-          $line = $_
-          -not ($hosts | Where-Object { $line -match [regex]::Escape($_) })
-        }
-        Set-Content -LiteralPath ${quotePs(HOSTS_FILE)} -Value $filtered
+        Set-Content -LiteralPath ${quotePs(HOSTS_FILE)} -Value ${quotePs(next)} -NoNewline
         ipconfig /flushdns | Out-Null
       `;
       await runElevatedPowerShell(script);
     } else {
-      for (const host of entriesToRemove) {
-        const sedCmd = IS_MAC
-          ? `sed -i '' '/${host}/d' ${HOSTS_FILE}`
-          : `sed -i '/${host}/d' ${HOSTS_FILE}`;
-        await execWithPassword(sedCmd, sudoPassword);
-      }
+      const current = fs.readFileSync(HOSTS_FILE, "utf8");
+      const filtered = current.split(/\r?\n/).filter(l => !entriesToRemove.some(h => l.includes(h))).join("\n");
+      const next = filtered.replace(/[\r\n\s]+$/g, "") + "\n";
+      const escaped = next.replace(/'/g, "'\\''");
+      await execWithPassword(`printf '%s' '${escaped}' | tee ${HOSTS_FILE} > /dev/null`, sudoPassword);
       await flushDNS(sudoPassword);
     }
     log(`🌐 DNS ${tool}: ✅ removed ${entriesToRemove.join(", ")}`);
@@ -196,8 +219,9 @@ function removeAllDNSEntriesSync() {
     const content = fs.readFileSync(HOSTS_FILE, "utf8");
     const eol = IS_WIN ? "\r\n" : "\n";
     const filtered = content.split(/\r?\n/).filter(l => !allHosts.some(h => l.includes(h))).join(eol);
-    if (filtered === content) return;
-    fs.writeFileSync(HOSTS_FILE, filtered, "utf8");
+    const next = filtered.replace(/[\r\n\s]+$/g, "") + eol;
+    if (next === content) return;
+    fs.writeFileSync(HOSTS_FILE, next, "utf8");
     if (IS_WIN) {
       try { execSync("ipconfig /flushdns", { windowsHide: true, stdio: "ignore" }); } catch { /* ignore */ }
     } else if (IS_MAC) {
@@ -216,6 +240,8 @@ module.exports = {
   removeAllDNSEntriesSync,
   execWithPassword,
   isSudoAvailable,
+  canRunSudoWithoutPassword,
+  isSudoPasswordRequired,
   checkDNSEntry,
   checkAllDNSStatus,
 };
