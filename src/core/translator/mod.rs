@@ -5,4 +5,5 @@ pub enum TranslationFormat {
     Gemini,
 }
 
+pub mod registry;
 pub mod response_transform;

@@ -9,3 +9,5 @@ pub mod rtk;
 pub mod translator;
 pub mod tunnel;
 pub mod usage;
+
+pub mod chat;
