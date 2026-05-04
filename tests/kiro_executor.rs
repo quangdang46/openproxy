@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openproxy::core::executor::{ClientPool, KiroExecutor, KiroExecutionRequest, AwsCredentials};
+use openproxy::core::executor::{AwsCredentials, ClientPool, KiroExecutionRequest, KiroExecutor};
 use openproxy::types::{ProviderConnection, ProviderNode};
 use serde_json::json;
 use wiremock::matchers::{header, method, path};
@@ -323,8 +323,11 @@ async fn kiro_executor_sign_request_with_session_token() {
     let pool = Arc::new(ClientPool::new());
     let executor = KiroExecutor::new(pool, None).expect("kiro executor");
 
-    let credentials =
-        kiro_connection_with_session_token("AKIAIOSFODNN7EXAMPLE", "secret123", "test-session-token");
+    let credentials = kiro_connection_with_session_token(
+        "AKIAIOSFODNN7EXAMPLE",
+        "secret123",
+        "test-session-token",
+    );
 
     let request = KiroExecutionRequest {
         model: "claude-sonnet-4.5".to_string(),
@@ -459,8 +462,8 @@ fn event_stream_decoder_ignores_non_prelude_bytes() {
     use openproxy::core::executor::EventStreamDecoder;
 
     // First 4 bytes are NOT 0xFF, so decoder should skip them
-let non_prelude = vec![0x00, 0x01, 0x02, 0x03];
-    
+    let non_prelude = vec![0x00, 0x01, 0x02, 0x03];
+
     let payload = b"data: test\n\n";
     let length: u32 = payload.len() as u32;
     let mut chunk = non_prelude;
@@ -516,8 +519,14 @@ async fn kiro_executor_execute_request_success() {
         .await
         .expect("request should succeed");
 
-    assert_eq!(response.url, format!("{}/v1/claude-sonnet-4.5/invoke", mock_server.uri()));
-    assert_eq!(response.transport, openproxy::core::executor::TransportKind::Reqwest);
+    assert_eq!(
+        response.url,
+        format!("{}/v1/claude-sonnet-4.5/invoke", mock_server.uri())
+    );
+    assert_eq!(
+        response.transport,
+        openproxy::core::executor::TransportKind::Reqwest
+    );
 }
 
 #[tokio::test]

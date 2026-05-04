@@ -20,17 +20,20 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         // Cloud credentials management
         .route("/api/cloud/credentials", get(get_cloud_credentials))
-        .route("/api/cloud/credentials/update", put(update_cloud_credentials))
+        .route(
+            "/api/cloud/credentials/update",
+            put(update_cloud_credentials),
+        )
         // Model resolution for cloud
         .route("/api/cloud/model/resolve", post(resolve_cloud_model))
         // Cloud model aliases
-        .route("/api/cloud/models/alias", get(get_cloud_model_aliases).put(set_cloud_model_alias))
+        .route(
+            "/api/cloud/models/alias",
+            get(get_cloud_model_aliases).put(set_cloud_model_alias),
+        )
 }
 
-async fn get_cloud_credentials(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn get_cloud_credentials(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(error) = require_api_key(&headers, &state.db) {
         return auth_error_response(error);
     }
@@ -121,7 +124,8 @@ async fn update_cloud_credentials(
 
     // Find active connection for provider
     let snapshot = state.db.snapshot();
-    let connection_id = snapshot.provider_connections
+    let connection_id = snapshot
+        .provider_connections
         .iter()
         .find(|conn| conn.provider == provider && conn.is_active())
         .map(|conn| conn.id.clone());
@@ -132,12 +136,14 @@ async fn update_cloud_credentials(
             return Json(json!({
                 "success": false,
                 "error": format!("No active connection found for provider: {}", provider)
-            })).into_response();
+            }))
+            .into_response();
         }
     };
 
     // Build update data
-    let expires_at = credentials.expires_in
+    let expires_at = credentials
+        .expires_in
         .map(|seconds| {
             chrono::Utc::now()
                 .checked_add_signed(chrono::Duration::seconds(seconds))
@@ -148,7 +154,11 @@ async fn update_cloud_credentials(
     let result = state
         .db
         .update(|db| {
-            if let Some(conn) = db.provider_connections.iter_mut().find(|c| c.id == connection_id) {
+            if let Some(conn) = db
+                .provider_connections
+                .iter_mut()
+                .find(|c| c.id == connection_id)
+            {
                 if let Some(token) = credentials.access_token {
                     conn.access_token = Some(token);
                 }
@@ -166,11 +176,13 @@ async fn update_cloud_credentials(
         Ok(_) => Json(json!({
             "success": true,
             "message": format!("Credentials updated for provider: {}", provider)
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => Json(json!({
             "success": false,
             "error": e.to_string()
-        })).into_response(),
+        }))
+        .into_response(),
     }
 }
 
@@ -209,14 +221,16 @@ async fn resolve_cloud_model(
                 "alias": req.alias,
                 "provider": provider,
                 "model": model
-            })).into_response()
+            }))
+            .into_response()
         }
         None => (
             StatusCode::NOT_FOUND,
             Json(json!({
                 "error": "Alias not found"
             })),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -227,10 +241,7 @@ struct SetAliasRequest {
     alias: String,
 }
 
-async fn get_cloud_model_aliases(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn get_cloud_model_aliases(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(error) = require_api_key(&headers, &state.db) {
         return auth_error_response(error);
     }
@@ -252,7 +263,8 @@ async fn get_cloud_model_aliases(
 
     Json(json!({
         "aliases": aliases
-    })).into_response()
+    }))
+    .into_response()
 }
 
 async fn set_cloud_model_alias(
@@ -289,13 +301,14 @@ async fn set_cloud_model_alias(
             } else {
                 ("unknown".to_string(), req.model.clone())
             };
-            db.model_aliases.insert(req.alias.clone(), ModelAliasTarget::Mapping(
-                crate::types::ProviderModelRef {
+            db.model_aliases.insert(
+                req.alias.clone(),
+                ModelAliasTarget::Mapping(crate::types::ProviderModelRef {
                     provider,
                     model: model_str,
                     extra: Default::default(),
-                }
-            ));
+                }),
+            );
         })
         .await;
 
@@ -305,10 +318,12 @@ async fn set_cloud_model_alias(
             "model": req.model,
             "alias": req.alias,
             "message": format!("Alias '{}' set for model '{}'", req.alias, req.model)
-        })).into_response(),
+        }))
+        .into_response(),
         Err(e) => Json(json!({
             "success": false,
             "error": e.to_string()
-        })).into_response(),
+        }))
+        .into_response(),
     }
 }

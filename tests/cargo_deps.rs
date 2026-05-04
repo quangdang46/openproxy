@@ -73,10 +73,7 @@ fn http_dependencies_have_required_features() {
         .get("features")
         .and_then(|v| v.as_array())
         .expect("hyper features should be an array");
-    let hyper_feature_strs: Vec<&str> = hyper_features
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let hyper_feature_strs: Vec<&str> = hyper_features.iter().filter_map(|v| v.as_str()).collect();
     assert!(
         hyper_feature_strs.contains(&"client"),
         "hyper should have client feature"
@@ -123,10 +120,8 @@ fn http_dependencies_have_required_features() {
         .get("features")
         .and_then(|v| v.as_array())
         .expect("reqwest features should be an array");
-    let reqwest_feature_strs: Vec<&str> = reqwest_features
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let reqwest_feature_strs: Vec<&str> =
+        reqwest_features.iter().filter_map(|v| v.as_str()).collect();
     assert!(
         reqwest_feature_strs.contains(&"json"),
         "reqwest should have json feature"
@@ -167,10 +162,7 @@ fn clap_has_required_features() {
         .get("features")
         .and_then(|v| v.as_array())
         .expect("clap features should be an array");
-    let clap_feature_strs: Vec<&str> = clap_features
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let clap_feature_strs: Vec<&str> = clap_features.iter().filter_map(|v| v.as_str()).collect();
     assert!(
         clap_feature_strs.contains(&"derive"),
         "clap should have derive feature"
@@ -199,10 +191,7 @@ fn serde_has_derive_feature() {
         .get("features")
         .and_then(|v| v.as_array())
         .expect("serde features should be an array");
-    let serde_feature_strs: Vec<&str> = serde_features
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let serde_feature_strs: Vec<&str> = serde_features.iter().filter_map(|v| v.as_str()).collect();
     assert!(
         serde_feature_strs.contains(&"derive"),
         "serde should have derive feature"
@@ -227,10 +216,7 @@ fn uuid_has_required_features() {
         .get("features")
         .and_then(|v| v.as_array())
         .expect("uuid features should be an array");
-    let uuid_feature_strs: Vec<&str> = uuid_features
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let uuid_feature_strs: Vec<&str> = uuid_features.iter().filter_map(|v| v.as_str()).collect();
     assert!(
         uuid_feature_strs.contains(&"v4"),
         "uuid should have v4 feature"
@@ -259,10 +245,8 @@ fn chrono_has_serde_feature() {
         .get("features")
         .and_then(|v| v.as_array())
         .expect("chrono features should be an array");
-    let chrono_feature_strs: Vec<&str> = chrono_features
-        .iter()
-        .filter_map(|v| v.as_str())
-        .collect();
+    let chrono_feature_strs: Vec<&str> =
+        chrono_features.iter().filter_map(|v| v.as_str()).collect();
     assert!(
         chrono_feature_strs.contains(&"serde"),
         "chrono should have serde feature"

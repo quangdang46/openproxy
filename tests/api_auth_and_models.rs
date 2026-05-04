@@ -428,3 +428,79 @@ async fn models_endpoint_returns_empty_list_when_no_models_exist() {
     assert_eq!(json["object"], "list");
     assert_eq!(json["data"], serde_json::Value::Array(Vec::new()));
 }
+
+#[tokio::test]
+async fn models_availability_get_returns_list() {
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/models/availability")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["object"], "list");
+    let data = json["data"].as_array().unwrap();
+    assert!(!data.is_empty());
+    // Check that llama3 is present (hardcoded model)
+    assert!(data.iter().any(|m| m["id"] == "llama3"));
+}
+
+#[tokio::test]
+async fn models_availability_check_post_returns_available_for_existing_model() {
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/availability/check")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"llama3"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["available"], true);
+    assert_eq!(json["model"], "llama3");
+}
+
+#[tokio::test]
+async fn models_availability_check_post_returns_not_available_for_unknown_model() {
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/availability/check")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"model":"unknown-model"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["available"], false);
+    assert_eq!(json["model"], "unknown-model");
+}

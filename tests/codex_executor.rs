@@ -9,7 +9,7 @@ use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use openproxy::core::executor::{
-    CodexExecutor, CodexExecutorError, CodexExecutionRequest, convert_openai_sse_to_standard,
+    convert_openai_sse_to_standard, CodexExecutionRequest, CodexExecutor, CodexExecutorError,
 };
 
 fn connection(provider: &str) -> ProviderConnection {
@@ -92,10 +92,16 @@ fn codex_executor_new_succeeds_with_provider_node() {
 #[test]
 fn codex_executor_parse_codex_model_with_codex_prefix() {
     assert_eq!(CodexExecutor::parse_codex_model("codex/o4-mini"), "o4-mini");
-    assert_eq!(CodexExecutor::parse_codex_model("codex/o4-mini-high"), "o4-mini-high");
+    assert_eq!(
+        CodexExecutor::parse_codex_model("codex/o4-mini-high"),
+        "o4-mini-high"
+    );
     assert_eq!(CodexExecutor::parse_codex_model("codex/o3"), "o3");
     assert_eq!(CodexExecutor::parse_codex_model("codex/o3-mini"), "o3-mini");
-    assert_eq!(CodexExecutor::parse_codex_model("codex/gpt-4-turbo"), "gpt-4-turbo");
+    assert_eq!(
+        CodexExecutor::parse_codex_model("codex/gpt-4-turbo"),
+        "gpt-4-turbo"
+    );
 }
 
 #[test]
@@ -103,7 +109,10 @@ fn codex_executor_parse_codex_model_without_prefix() {
     assert_eq!(CodexExecutor::parse_codex_model("o4-mini"), "o4-mini");
     assert_eq!(CodexExecutor::parse_codex_model("o3"), "o3");
     assert_eq!(CodexExecutor::parse_codex_model("gpt-4"), "gpt-4");
-    assert_eq!(CodexExecutor::parse_codex_model("gpt-4-turbo"), "gpt-4-turbo");
+    assert_eq!(
+        CodexExecutor::parse_codex_model("gpt-4-turbo"),
+        "gpt-4-turbo"
+    );
 }
 
 #[test]
@@ -113,7 +122,9 @@ fn codex_sse_conversion_standard_format() {
     let result = convert_openai_sse_to_standard(openai_sse);
     let result_str = String::from_utf8(result).unwrap();
 
-    assert!(result_str.contains("data: {\"type\":\"content.delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}"));
+    assert!(result_str.contains(
+        "data: {\"type\":\"content.delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}"
+    ));
     assert!(result_str.contains("data: {\"type\":\"content.delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\" World\"}}"));
     assert!(result_str.contains("data: {\"type\":\"response.done\"}"));
     assert!(result_str.contains("\n\n"));
@@ -241,9 +252,28 @@ async fn codex_executor_execute_returns_correct_headers() {
     };
 
     let response = executor.execute(req).await.expect("execute request");
-    assert_eq!(response.headers.get("authorization").unwrap().to_str().unwrap(), "Bearer sk-test-codex-key");
-    assert_eq!(response.headers.get("content-type").unwrap().to_str().unwrap(), "application/json");
-    assert_eq!(response.headers.get("accept").unwrap().to_str().unwrap(), "text/event-stream");
+    assert_eq!(
+        response
+            .headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Bearer sk-test-codex-key"
+    );
+    assert_eq!(
+        response
+            .headers
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "application/json"
+    );
+    assert_eq!(
+        response.headers.get("accept").unwrap().to_str().unwrap(),
+        "text/event-stream"
+    );
 }
 
 #[tokio::test]
@@ -262,7 +292,15 @@ async fn codex_executor_execute_access_token_preferred() {
     };
 
     let response = executor.execute(req).await.expect("execute request");
-    assert_eq!(response.headers.get("authorization").unwrap().to_str().unwrap(), "Bearer oauth-token-preferred");
+    assert_eq!(
+        response
+            .headers
+            .get("authorization")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "Bearer oauth-token-preferred"
+    );
 }
 
 #[tokio::test]
@@ -362,7 +400,10 @@ async fn codex_executor_execute_empty_messages_fails() {
 
     let result = executor.execute(req).await;
     assert!(result.is_err());
-    assert!(matches!(result.unwrap_err(), CodexExecutorError::UnsupportedFormat(_)));
+    assert!(matches!(
+        result.unwrap_err(),
+        CodexExecutorError::UnsupportedFormat(_)
+    ));
 }
 
 #[tokio::test]

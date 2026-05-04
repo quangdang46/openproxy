@@ -1,8 +1,5 @@
 use axum::extract::State;
-use axum::{
-    routing::post,
-    Json, Router,
-};
+use axum::{routing::post, Json, Router};
 
 use crate::server::state::AppState;
 
@@ -24,11 +21,16 @@ pub struct LocaleResponse {
 
 // Supported locales
 const SUPPORTED_LOCALES: &[&str] = &[
-    "en", "en-US", "zh", "zh-CN", "zh-TW", "ja", "ko", "es", "fr", "de", "pt", "ru", "ar", "hi", "vi",
+    "en", "en-US", "zh", "zh-CN", "zh-TW", "ja", "ko", "es", "fr", "de", "pt", "ru", "ar", "hi",
+    "vi",
 ];
 
 fn is_supported_locale(locale: &str) -> bool {
-    SUPPORTED_LOCALES.contains(&locale) || locale.starts_with("en") || locale.starts_with("zh") || locale.starts_with("ja") || locale.starts_with("ko")
+    SUPPORTED_LOCALES.contains(&locale)
+        || locale.starts_with("en")
+        || locale.starts_with("zh")
+        || locale.starts_with("ja")
+        || locale.starts_with("ko")
 }
 
 fn normalize_locale(locale: &str) -> String {

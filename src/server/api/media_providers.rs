@@ -83,7 +83,11 @@ fn detect_media_type(connection: &ProviderConnection) -> Option<String> {
 
     // Check provider_specific_data for type info
     for key in &["mediaType", "media_type", "type"] {
-        if let Some(v) = connection.provider_specific_data.get(*key).and_then(Value::as_str) {
+        if let Some(v) = connection
+            .provider_specific_data
+            .get(*key)
+            .and_then(Value::as_str)
+        {
             match v {
                 "tts" | "stt" | "embedding" | "image" | "search" => return Some(v.to_string()),
                 _ => {}
@@ -97,10 +101,7 @@ fn detect_media_type(connection: &ProviderConnection) -> Option<String> {
 fn to_summary(conn: &ProviderConnection) -> ProviderSummary {
     ProviderSummary {
         id: conn.id.clone(),
-        name: conn
-            .name
-            .clone()
-            .unwrap_or_else(|| conn.provider.clone()),
+        name: conn.name.clone().unwrap_or_else(|| conn.provider.clone()),
         provider: conn.provider.clone(),
         is_active: conn.is_active(),
         display_name: conn.display_name.clone(),
@@ -122,7 +123,11 @@ async fn list_media_providers(
     let mut image = Vec::new();
     let mut search = Vec::new();
 
-    for conn in snapshot.provider_connections.iter().filter(|c| c.is_active()) {
+    for conn in snapshot
+        .provider_connections
+        .iter()
+        .filter(|c| c.is_active())
+    {
         let summary = to_summary(conn);
         match detect_media_type(conn).as_deref() {
             Some("tts") => tts.push(summary),
@@ -237,10 +242,7 @@ async fn delete_media_provider(
     }
 
     let snapshot = state.db.snapshot();
-    let exists = snapshot
-        .provider_connections
-        .iter()
-        .any(|c| c.id == id);
+    let exists = snapshot.provider_connections.iter().any(|c| c.id == id);
     if !exists {
         return (
             StatusCode::NOT_FOUND,

@@ -1441,10 +1441,7 @@ fn proxy_resolution_prefers_connection_override_then_pool_then_settings() {
 #[test]
 fn proxy_url_normalization_adds_scheme_when_missing() {
     assert_eq!(normalize("host:8080"), "http://host:8080");
-    assert_eq!(
-        normalize("https://host:8080"),
-        "https://host:8080"
-    );
+    assert_eq!(normalize("https://host:8080"), "https://host:8080");
 }
 
 #[test]

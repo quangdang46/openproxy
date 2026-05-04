@@ -1,4 +1,3 @@
-
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
@@ -86,15 +85,19 @@ async fn generic_media_handler(
     let resolved = get_model_info(model_str, &snapshot);
 
     match resolved.route_kind {
-        ModelRouteKind::Combo => {
-            json_error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Combos not supported for {}", route_kind),
-            )
-        }
+        ModelRouteKind::Combo => json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Combos not supported for {}", route_kind),
+        ),
         ModelRouteKind::Direct => {
-            execute_media_provider(&state, &body, &resolved.provider, &resolved.model, route_kind)
-                .await
+            execute_media_provider(
+                &state,
+                &body,
+                &resolved.provider,
+                &resolved.model,
+                route_kind,
+            )
+            .await
         }
     }
 }
@@ -108,16 +111,17 @@ async fn execute_media_provider(
 ) -> Response {
     let provider = match provider {
         Some(p) => p,
-        None => {
-            return json_error_response(StatusCode::BAD_REQUEST, "Invalid model format")
-        }
+        None => return json_error_response(StatusCode::BAD_REQUEST, "Invalid model format"),
     };
 
     let snapshot = state.db.snapshot();
     let connection = match select_media_connection(&snapshot, provider, model) {
         Some(conn) => conn,
         None => {
-            return json_error_response(StatusCode::BAD_REQUEST, &format!("No credentials for provider: {}", provider))
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("No credentials for provider: {}", provider),
+            )
         }
     };
 
@@ -134,11 +138,18 @@ async fn execute_media_provider(
     let _executor = match crate::core::executor::DefaultExecutor::new(
         provider.to_string(),
         state.client_pool.clone(),
-        snapshot.provider_nodes.iter().find(|n| n.id.as_str() == provider).cloned(),
+        snapshot
+            .provider_nodes
+            .iter()
+            .find(|n| n.id.as_str() == provider)
+            .cloned(),
     ) {
         Ok(ex) => ex,
         Err(e) => {
-            return json_error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Executor error: {:?}", e))
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Executor error: {:?}", e),
+            )
         }
     };
 
@@ -147,18 +158,30 @@ async fn execute_media_provider(
     let body_bytes = match serde_json::to_vec(&transformed_body) {
         Ok(b) => b,
         Err(e) => {
-            return json_error_response(StatusCode::BAD_REQUEST, &format!("Serialization error: {}", e))
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Serialization error: {}", e),
+            )
         }
     };
 
     let client = match state.client_pool.get(provider, proxy.as_ref()) {
         Ok(c) => c,
         Err(e) => {
-            return json_error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("Client error: {:?}", e))
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Client error: {:?}", e),
+            )
         }
     };
 
-    let response = match client.post(&url).headers(headers.clone()).body(body_bytes).send().await {
+    let response = match client
+        .post(&url)
+        .headers(headers.clone())
+        .body(body_bytes)
+        .send()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             return json_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e))
@@ -200,7 +223,12 @@ fn connection_has_credentials(connection: &crate::types::ProviderConnection) -> 
             .is_some()
 }
 
-fn build_media_url(provider: &str, _model: &str, route_kind: &str, connection: &crate::types::ProviderConnection) -> String {
+fn build_media_url(
+    provider: &str,
+    _model: &str,
+    route_kind: &str,
+    connection: &crate::types::ProviderConnection,
+) -> String {
     let base_url = get_provider_base_url(provider, connection);
 
     match route_kind {
@@ -241,7 +269,10 @@ fn build_media_url(provider: &str, _model: &str, route_kind: &str, connection: &
             if provider == "dalle" {
                 format!("{}/images/generations", base_url.trim_end_matches('/'))
             } else if provider == "stable-diffusion" {
-                format!("{}/generation/image-synthesis", base_url.trim_end_matches('/'))
+                format!(
+                    "{}/generation/image-synthesis",
+                    base_url.trim_end_matches('/')
+                )
             } else {
                 format!("{}/images/generations", base_url.trim_end_matches('/'))
             }
@@ -264,7 +295,11 @@ fn build_media_url(provider: &str, _model: &str, route_kind: &str, connection: &
 }
 
 fn get_provider_base_url(provider: &str, connection: &crate::types::ProviderConnection) -> String {
-    if let Some(base_url) = connection.provider_specific_data.get("baseUrl").and_then(Value::as_str) {
+    if let Some(base_url) = connection
+        .provider_specific_data
+        .get("baseUrl")
+        .and_then(Value::as_str)
+    {
         return base_url.to_string();
     }
 
@@ -330,7 +365,9 @@ fn transform_media_request(provider: &str, route_kind: &str, body: &Value) -> Va
     match (provider, route_kind) {
         ("deepgram", "audio/transcriptions") => {
             if let Some(obj) = transformed.as_object_mut() {
-                let model_opt = obj.get("model").and_then(|v| v.as_str().map(|s| s.to_string()));
+                let model_opt = obj
+                    .get("model")
+                    .and_then(|v| v.as_str().map(|s| s.to_string()));
                 if let Some(model) = model_opt {
                     obj.insert("version".to_string(), json!("2024-06-20"));
                     obj.insert("punctuate".to_string(), json!(true));
@@ -369,7 +406,12 @@ async fn proxy_upstream_response(response: reqwest::Response, _headers: HeaderMa
     let status = response.status();
     let resp_headers = response.headers().clone();
 
-    let body = if status == 200 && resp_headers.get("content-type").map(|v| v.to_str().unwrap_or("").contains("audio")).unwrap_or(false) {
+    let body = if status == 200
+        && resp_headers
+            .get("content-type")
+            .map(|v| v.to_str().unwrap_or("").contains("audio"))
+            .unwrap_or(false)
+    {
         let bytes = response.bytes().await.unwrap_or_default();
         Body::from(bytes)
     } else {

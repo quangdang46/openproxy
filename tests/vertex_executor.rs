@@ -73,184 +73,213 @@ fn vertex_executor_new_succeeds_with_provider_node() {
 
 #[tokio::test]
 async fn vertex_executor_execute_request_missing_credentials() {
-    let executor = openproxy::core::executor::VertexExecutor::new(
-        Arc::new(ClientPool::new()),
-        None,
-    ).expect("vertex executor");
+    let executor =
+        openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
+            .expect("vertex executor");
 
     let mut conn = connection("vertex");
     conn.access_token = None;
 
     let body = json!({"contents": []});
 
-    let result = executor.execute_request(openproxy::core::executor::VertexExecutionRequest {
-        model: "vertex/gemini-2.5-flash".to_string(),
-        body,
-        stream: false,
-        credentials: conn,
-        proxy: None,
-    }).await;
+    let result = executor
+        .execute_request(openproxy::core::executor::VertexExecutionRequest {
+            model: "vertex/gemini-2.5-flash".to_string(),
+            body,
+            stream: false,
+            credentials: conn,
+            proxy: None,
+        })
+        .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, openproxy::core::executor::VertexExecutorError::MissingCredentials(_)));
+    assert!(matches!(
+        err,
+        openproxy::core::executor::VertexExecutorError::MissingCredentials(_)
+    ));
 }
 
 #[tokio::test]
 async fn vertex_executor_execute_request_invalid_service_account_json() {
-    let executor = openproxy::core::executor::VertexExecutor::new(
-        Arc::new(ClientPool::new()),
-        None,
-    ).expect("vertex executor");
+    let executor =
+        openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
+            .expect("vertex executor");
 
     let mut conn = connection("vertex");
     conn.access_token = Some("not valid json".to_string());
 
     let body = json!({"contents": []});
 
-    let result = executor.execute_request(openproxy::core::executor::VertexExecutionRequest {
-        model: "vertex/gemini-2.5-flash".to_string(),
-        body,
-        stream: false,
-        credentials: conn,
-        proxy: None,
-    }).await;
+    let result = executor
+        .execute_request(openproxy::core::executor::VertexExecutionRequest {
+            model: "vertex/gemini-2.5-flash".to_string(),
+            body,
+            stream: false,
+            credentials: conn,
+            proxy: None,
+        })
+        .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)));
+    assert!(matches!(
+        err,
+        openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)
+    ));
 }
 
 #[tokio::test]
 async fn vertex_executor_execute_request_wrong_service_account_type() {
-    let executor = openproxy::core::executor::VertexExecutor::new(
-        Arc::new(ClientPool::new()),
-        None,
-    ).expect("vertex executor");
+    let executor =
+        openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
+            .expect("vertex executor");
 
     let mut conn = connection("vertex");
     conn.access_token = Some(r#"{"type":"wrong","client_email":"test@test.com","private_key":"key","token_uri":"https://oauth2.googleapis.com/token"}"#.to_string());
 
     let body = json!({"contents": []});
 
-    let result = executor.execute_request(openproxy::core::executor::VertexExecutionRequest {
-        model: "vertex/gemini-2.5-flash".to_string(),
-        body,
-        stream: false,
-        credentials: conn,
-        proxy: None,
-    }).await;
+    let result = executor
+        .execute_request(openproxy::core::executor::VertexExecutionRequest {
+            model: "vertex/gemini-2.5-flash".to_string(),
+            body,
+            stream: false,
+            credentials: conn,
+            proxy: None,
+        })
+        .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)));
+    assert!(matches!(
+        err,
+        openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)
+    ));
 }
 
 #[tokio::test]
 async fn vertex_executor_execute_request_empty_private_key() {
-    let executor = openproxy::core::executor::VertexExecutor::new(
-        Arc::new(ClientPool::new()),
-        None,
-    ).expect("vertex executor");
+    let executor =
+        openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
+            .expect("vertex executor");
 
     let mut conn = connection("vertex");
     conn.access_token = Some(r#"{"type":"service_account","client_email":"test@test.com","private_key":"","token_uri":"https://oauth2.googleapis.com/token"}"#.to_string());
 
     let body = json!({"contents": []});
 
-    let result = executor.execute_request(openproxy::core::executor::VertexExecutionRequest {
-        model: "vertex/gemini-2.5-flash".to_string(),
-        body,
-        stream: false,
-        credentials: conn,
-        proxy: None,
-    }).await;
+    let result = executor
+        .execute_request(openproxy::core::executor::VertexExecutionRequest {
+            model: "vertex/gemini-2.5-flash".to_string(),
+            body,
+            stream: false,
+            credentials: conn,
+            proxy: None,
+        })
+        .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)));
+    assert!(matches!(
+        err,
+        openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)
+    ));
 }
 
 #[tokio::test]
 async fn vertex_executor_execute_request_empty_client_email() {
-    let executor = openproxy::core::executor::VertexExecutor::new(
-        Arc::new(ClientPool::new()),
-        None,
-    ).expect("vertex executor");
+    let executor =
+        openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
+            .expect("vertex executor");
 
     let mut conn = connection("vertex");
     conn.access_token = Some(r#"{"type":"service_account","client_email":"","private_key":"key","token_uri":"https://oauth2.googleapis.com/token"}"#.to_string());
 
     let body = json!({"contents": []});
 
-    let result = executor.execute_request(openproxy::core::executor::VertexExecutionRequest {
-        model: "vertex/gemini-2.5-flash".to_string(),
-        body,
-        stream: false,
-        credentials: conn,
-        proxy: None,
-    }).await;
+    let result = executor
+        .execute_request(openproxy::core::executor::VertexExecutionRequest {
+            model: "vertex/gemini-2.5-flash".to_string(),
+            body,
+            stream: false,
+            credentials: conn,
+            proxy: None,
+        })
+        .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)));
+    assert!(matches!(
+        err,
+        openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)
+    ));
 }
 
 #[tokio::test]
 async fn vertex_executor_execute_request_empty_token_uri() {
-    let executor = openproxy::core::executor::VertexExecutor::new(
-        Arc::new(ClientPool::new()),
-        None,
-    ).expect("vertex executor");
+    let executor =
+        openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
+            .expect("vertex executor");
 
     let mut conn = connection("vertex");
     conn.access_token = Some(r#"{"type":"service_account","client_email":"test@test.com","private_key":"key","token_uri":""}"#.to_string());
 
     let body = json!({"contents": []});
 
-    let result = executor.execute_request(openproxy::core::executor::VertexExecutionRequest {
-        model: "vertex/gemini-2.5-flash".to_string(),
-        body,
-        stream: false,
-        credentials: conn,
-        proxy: None,
-    }).await;
+    let result = executor
+        .execute_request(openproxy::core::executor::VertexExecutionRequest {
+            model: "vertex/gemini-2.5-flash".to_string(),
+            body,
+            stream: false,
+            credentials: conn,
+            proxy: None,
+        })
+        .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
-    assert!(matches!(err, openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)));
+    assert!(matches!(
+        err,
+        openproxy::core::executor::VertexExecutorError::MissingServiceAccountJson(_)
+    ));
 }
 
 #[tokio::test]
 async fn vertex_executor_execute_request_network_error() {
-    let executor = openproxy::core::executor::VertexExecutor::new(
-        Arc::new(ClientPool::new()),
-        None,
-    ).expect("vertex executor");
+    let executor =
+        openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
+            .expect("vertex executor");
 
     let mut conn = connection("vertex");
     conn.access_token = Some(r#"{"type":"service_account","client_email":"test@project.iam.gserviceaccounts.com","private_key":"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0FFDcEPQ8gNLzmRszKzX9f\ndkKNOHKFxkC3hY8m6xM6FGBvA9wWVRqSvh7x8nGJhPxwLlpYD9wQ/E8qOj8dL0\nj6pW1N5zT3mJ8w5qZkJpF4e3pJPhNPLkZP5m8vPjx4c7F6b4L8pVS8mN7xZhJ6\nqF1yF2kP5p0T3mJ8w5qZkJpF4e3pJPhNPLkZP5m8vPjx4c7F6b4L8pVS8mN7x\n-----END RSA PRIVATE KEY-----","token_uri":"http://localhost:99999/nonexistent"}"#.to_string());
 
     let body = json!({"contents": []});
 
-    let result = executor.execute_request(openproxy::core::executor::VertexExecutionRequest {
-        model: "vertex/gemini-2.5-flash".to_string(),
-        body,
-        stream: false,
-        credentials: conn,
-        proxy: None,
-    }).await;
+    let result = executor
+        .execute_request(openproxy::core::executor::VertexExecutionRequest {
+            model: "vertex/gemini-2.5-flash".to_string(),
+            body,
+            stream: false,
+            credentials: conn,
+            proxy: None,
+        })
+        .await;
 
     assert!(result.is_err());
 }
 
 #[test]
 fn vertex_executor_error_display() {
-    let err = openproxy::core::executor::VertexExecutorError::MissingCredentials("test message".to_string());
+    let err = openproxy::core::executor::VertexExecutorError::MissingCredentials(
+        "test message".to_string(),
+    );
     let debug_fmt = format!("{:?}", err);
     assert!(debug_fmt.contains("MissingCredentials"));
 
-    let err2 = openproxy::core::executor::VertexExecutorError::JwtGenerationFailed("jwt failed".to_string());
+    let err2 = openproxy::core::executor::VertexExecutorError::JwtGenerationFailed(
+        "jwt failed".to_string(),
+    );
     let debug_fmt2 = format!("{:?}", err2);
     assert!(debug_fmt2.contains("JwtGenerationFailed"));
 
@@ -258,7 +287,8 @@ fn vertex_executor_error_display() {
     let debug_fmt3 = format!("{:?}", err3);
     assert!(debug_fmt3.contains("RequestFailed"));
 
-    let err4 = openproxy::core::executor::VertexExecutorError::RsaPemParse("parse error".to_string());
+    let err4 =
+        openproxy::core::executor::VertexExecutorError::RsaPemParse("parse error".to_string());
     let debug_fmt4 = format!("{:?}", err4);
     assert!(debug_fmt4.contains("RsaPemParse"));
 
