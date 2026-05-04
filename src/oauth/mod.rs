@@ -61,7 +61,13 @@ impl OAuthProviderConfig {
 
         let query_string = pairs
             .iter()
-            .map(|(k, v)| format!("{}={}", k, form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()))
+            .map(|(k, v)| {
+                format!(
+                    "{}={}",
+                    k,
+                    form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()
+                )
+            })
             .collect::<Vec<_>>()
             .join("&");
 
@@ -159,7 +165,11 @@ pub mod providers {
         OAuthProviderConfig {
             auth_url: "https://codex.ai/oauth/authorize".to_string(),
             token_url: "https://codex.ai/oauth/token".to_string(),
-            scopes: vec!["openid".to_string(), "profile".to_string(), "email".to_string()],
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ],
             uses_pkce: true,
             extra_params: [
                 ("response_type".to_string(), "code".to_string()),
@@ -209,10 +219,7 @@ pub mod providers {
             token_url: "https://api.moonshot.cn/kimi-device/oauth/token".to_string(),
             scopes: vec!["kimi:read".to_string()],
             uses_pkce: false,
-            extra_params: [
-                ("client_id".to_string(), "kimi-coding-openproxy".to_string()),
-            ]
-            .into(),
+            extra_params: [("client_id".to_string(), "kimi-coding-openproxy".to_string())].into(),
         }
     }
 
@@ -319,7 +326,14 @@ pub mod device_code {
 
             let params = [
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
-                ("client_id", provider_config.extra_params.get("client_id").map(|s| s.as_str()).unwrap_or("openproxy")),
+                (
+                    "client_id",
+                    provider_config
+                        .extra_params
+                        .get("client_id")
+                        .map(|s| s.as_str())
+                        .unwrap_or("openproxy"),
+                ),
                 ("device_code", device_code),
             ];
             let response = client
@@ -344,7 +358,9 @@ pub mod device_code {
                 Some("access_denied") => {
                     return Err(OAuthError {
                         error: "access_denied".to_string(),
-                        error_description: Some("User denied the authorization request".to_string()),
+                        error_description: Some(
+                            "User denied the authorization request".to_string(),
+                        ),
                     });
                 }
                 Some("expired_token") => {
@@ -355,10 +371,11 @@ pub mod device_code {
                 }
                 _ => {
                     if body.get("access_token").is_some() {
-                        let token_response: TokenResponse = serde_json::from_value(body).map_err(|e| OAuthError {
-                            error: "parse_error".to_string(),
-                            error_description: Some(e.to_string()),
-                        })?;
+                        let token_response: TokenResponse =
+                            serde_json::from_value(body).map_err(|e| OAuthError {
+                                error: "parse_error".to_string(),
+                                error_description: Some(e.to_string()),
+                            })?;
                         return Ok(token_response);
                     }
                     continue;
@@ -408,7 +425,9 @@ pub mod device_code {
     }
 
     /// GitHub Copilot special: exchange OAuth token for Copilot token
-    pub async fn exchange_github_copilot_token(oauth_token: &str) -> Result<TokenResponse, OAuthError> {
+    pub async fn exchange_github_copilot_token(
+        oauth_token: &str,
+    ) -> Result<TokenResponse, OAuthError> {
         let client = reqwest::Client::new();
         let response = client
             .post("https://github.com/copilot_internal/v1/token")
@@ -465,7 +484,7 @@ pub mod device_code {
             "client_name": "OpenProxy Device Client",
             "client_type": "public",
             "grant_types": ["urn:ietf:params:oauth:grant-type:device_code"],
-            "redirect_uris": ["http://localhost:20128/oauth/callback"],
+            "redirect_uris": ["http://localhost:4623/oauth/callback"],
             "token_endpoint_auth_method": "none",
             "expires_at": expires_at
         });
@@ -493,11 +512,13 @@ pub mod device_code {
             error_description: Some(e.to_string()),
         })?;
 
-        let registered_client_id = resp_body.get("client_id")
+        let registered_client_id = resp_body
+            .get("client_id")
             .and_then(|v| v.as_str())
             .unwrap_or(&client_id)
             .to_string();
-        let client_secret = resp_body.get("client_secret")
+        let client_secret = resp_body
+            .get("client_secret")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_default();
@@ -535,10 +556,9 @@ pub fn expires_at_from_seconds(expires_in: i64) -> String {
     expires.to_rfc3339()
 }
 
-
 // Cursor import module - for importing tokens from Cursor's SQLite config.db
 pub mod cursor_import {
-    use crate::oauth::{TokenResponse, expires_at_from_seconds};
+    use crate::oauth::{expires_at_from_seconds, TokenResponse};
 
     #[derive(Clone)]
     pub struct CursorTokens {
@@ -552,16 +572,18 @@ pub mod cursor_import {
         let conn = rusqlite::Connection::open(config_path)
             .map_err(|e| format!("Failed to open SQLite: {}", e))?;
 
-        let result = conn.query_row(
-            "SELECT access_token, refresh_token, expires_at FROM user_authentication LIMIT 1",
-            [],
-            |row| {
-                let access_token: String = row.get(0)?;
-                let refresh_token: Option<String> = row.get(1)?;
-                let expires_at_raw: Option<i64> = row.get(2)?;
-                Ok((access_token, refresh_token, expires_at_raw))
-            },
-        ).map_err(|e| format!("Failed to query: {}", e))?;
+        let result = conn
+            .query_row(
+                "SELECT access_token, refresh_token, expires_at FROM user_authentication LIMIT 1",
+                [],
+                |row| {
+                    let access_token: String = row.get(0)?;
+                    let refresh_token: Option<String> = row.get(1)?;
+                    let expires_at_raw: Option<i64> = row.get(2)?;
+                    Ok((access_token, refresh_token, expires_at_raw))
+                },
+            )
+            .map_err(|e| format!("Failed to query: {}", e))?;
 
         let (access_token, refresh_token, expires_at_raw) = result;
         let expires_at = expires_at_raw.map(expires_at_from_seconds);

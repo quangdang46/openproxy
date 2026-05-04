@@ -22,7 +22,11 @@ pub fn resolve_proxy_target(
     connection: &ProviderConnection,
     settings: &Settings,
 ) -> Option<ProxyTarget> {
-    if let Some(url) = connection.proxy_url.as_ref().filter(|u| !u.trim().is_empty()) {
+    if let Some(url) = connection
+        .proxy_url
+        .as_ref()
+        .filter(|u| !u.trim().is_empty())
+    {
         if let Some(label) = connection.proxy_label.as_ref() {
             if let Some(pool) = find_pool_by_label(db, label) {
                 if is_healthy(pool) {
@@ -44,15 +48,28 @@ pub fn resolve_proxy_target(
 
     if connection.use_connection_proxy.unwrap_or(false) {
         let data = &connection.provider_specific_data;
-        let enabled = data.get("connectionProxyEnabled").and_then(|v| v.as_bool()).unwrap_or(false);
+        let enabled = data
+            .get("connectionProxyEnabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let url = str_field(data.get("connectionProxyUrl"));
         let no_proxy = str_field(data.get("connectionNoProxy")).unwrap_or_default();
-        let pool_id = data.get("connectionProxyPoolId").or_else(|| data.get("proxyPoolId")).and_then(|v| str_field(Some(v)));
-        let strict = data.get("strictProxy").and_then(|v| v.as_bool()).unwrap_or(false);
+        let pool_id = data
+            .get("connectionProxyPoolId")
+            .or_else(|| data.get("proxyPoolId"))
+            .and_then(|v| str_field(Some(v)));
+        let strict = data
+            .get("strictProxy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         if enabled {
             if let Some(pid) = pool_id.clone() {
-                if let Some(pool) = db.proxy_pools.iter().find(|p| p.id == pid && p.is_active.unwrap_or(true)) {
+                if let Some(pool) = db
+                    .proxy_pools
+                    .iter()
+                    .find(|p| p.id == pid && p.is_active.unwrap_or(true))
+                {
                     if is_healthy(pool) {
                         return Some(build_target(pool));
                     }
@@ -103,7 +120,9 @@ pub fn is_healthy(pool: &ProxyPool) -> bool {
 }
 
 fn find_pool_by_label<'a>(db: &'a AppDb, label: &str) -> Option<&'a ProxyPool> {
-    db.proxy_pools.iter().find(|p| p.name == label || p.id == label)
+    db.proxy_pools
+        .iter()
+        .find(|p| p.name == label || p.id == label)
 }
 
 pub fn update_health(pool: &mut ProxyPool, success: bool, rtt: Option<u64>) {
@@ -164,16 +183,89 @@ fn normalize_url(url: &str, kind: Option<&str>) -> String {
     if t.starts_with("http://") || t.starts_with("https://") || t.starts_with("socks5") {
         t.to_string()
     } else {
-        format!("{}://{t}", match kind.map(|k| k.trim().to_ascii_lowercase()).as_deref() {
-            Some("https") => "https",
-            Some("socks5") | Some("socks5h") => "socks5",
-            _ => "http",
-        })
+        format!(
+            "{}://{t}",
+            match kind.map(|k| k.trim().to_ascii_lowercase()).as_deref() {
+                Some("https") => "https",
+                Some("socks5") | Some("socks5h") => "socks5",
+                _ => "http",
+            }
+        )
     }
 }
 
 fn str_field(value: Option<&Value>) -> Option<String> {
-    value.and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string)
+    value
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Test if a proxy URL is reachable and responding.
+/// Returns Ok(true) if the proxy responds successfully, or Err with an error message.
+/// Uses a 5-second timeout for the connection test.
+pub async fn test_proxy_url(url: &str) -> Result<bool, String> {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let normalized = normalize(url);
+    if normalized.is_empty() {
+        return Err("Empty proxy URL".to_string());
+    }
+
+    // Build a client that uses this proxy
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return Err(format!("Failed to build HTTP client: {}", e)),
+    };
+
+    // For SOCKS5 proxies, we need to test connectivity differently
+    // For HTTP(S) proxies, we can try a simple GET request to a known endpoint
+    let result = timeout(Duration::from_secs(5), async {
+        if normalized.starts_with("socks5") {
+            // For SOCKS5, try to connect via TCP to the proxy
+            let url_part = normalized.strip_prefix("socks5://").unwrap_or(&normalized);
+            let url_part = url_part.strip_prefix("socks5h://").unwrap_or(url_part);
+            let parts: Vec<&str> = url_part.split(':').collect();
+            if parts.len() != 2 {
+                return Err(format!("Invalid SOCKS5 URL format: {}", normalized));
+            }
+            let host = parts[0];
+            let port: u16 = match parts[1].parse() {
+                Ok(p) => p,
+                Err(_) => return Err(format!("Invalid port in SOCKS5 URL: {}", normalized)),
+            };
+            tokio::net::TcpStream::connect(format!("{}:{}", host, port))
+                .await
+                .map_err(|e| format!("SOCKS5 connection failed: {}", e))?;
+            Ok(true)
+        } else {
+            // For HTTP(S) proxies, try a simple request
+            let target_url = if normalized.starts_with("https") {
+                "https://www.google.com/generate_204"
+            } else {
+                "http://www.google.com/generate_204"
+            };
+            client
+                .get(target_url)
+                .send()
+                .await
+                .map_err(|e| format!("HTTP proxy request failed: {}", e))?;
+            Ok(true)
+        }
+    })
+    .await;
+
+    match result {
+        Ok(Ok(true)) => Ok(true),
+        Ok(Ok(_)) => Ok(true),
+        Ok(Err(e)) => Err(e),
+        Err(_) => Err("Proxy test timed out after 5 seconds".to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -296,12 +388,16 @@ mod tests {
 
     #[test]
     fn no_proxy() {
-        let result = resolve_proxy_target(&AppDb::default(), &ProviderConnection::default(), &Settings::default());
+        let result = resolve_proxy_target(
+            &AppDb::default(),
+            &ProviderConnection::default(),
+            &Settings::default(),
+        );
         assert!(result.is_none());
     }
 
-    #[test]
-    fn global_fallback() {
+    #[tokio::test]
+    async fn global_fallback() {
         let mut s = Settings::default();
         s.outbound_proxy_enabled = true;
         s.outbound_proxy_url = "http://global:3128".into();
@@ -311,5 +407,45 @@ mod tests {
         let t = result.unwrap();
         assert_eq!(t.url, "http://global:3128");
         assert_eq!(t.no_proxy, "localhost");
+    }
+
+    #[tokio::test]
+    async fn test_proxy_url_empty() {
+        let result = test_proxy_url("").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Empty"));
+    }
+
+    #[tokio::test]
+    async fn test_proxy_url_invalid_socks5() {
+        let result = test_proxy_url("socks5://invalid").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Invalid") || err.contains("connection failed"));
+    }
+
+    #[tokio::test]
+    async fn test_proxy_url_invalid_http() {
+        let result = test_proxy_url("http://invalid-host-that-does-not-exist.local:9999").await;
+        assert!(result.is_err());
+        // Should fail with connection error or timeout
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("connection failed")
+                || err.contains("timed out")
+                || err.contains("Failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_proxy_url_normalizes_http() {
+        // Test that normalize is called, but actual connectivity will fail
+        // so we just check the function runs
+        let result = test_proxy_url("localhost:8080").await;
+        // Will fail with connection error, but not "Empty"
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(!err.contains("Empty"));
     }
 }

@@ -24,7 +24,7 @@ impl UsageTracker {
         Self { db, pricing }
     }
 
-    pub fn track_request(
+    pub async fn track_request(
         &self,
         provider: &str,
         model: &str,
@@ -40,7 +40,9 @@ impl UsageTracker {
             .and_then(|t| t.completion_tokens.or(t.output_tokens))
             .unwrap_or(0);
 
-        let cost = self.pricing.calculate_cost(provider, model, prompt_tokens, completion_tokens);
+        let cost = self
+            .pricing
+            .calculate_cost(provider, model, prompt_tokens, completion_tokens);
 
         let entry = UsageEntry {
             timestamp: Some(Utc::now().to_rfc3339()),
@@ -60,7 +62,7 @@ impl UsageTracker {
             if db.total_requests_lifetime < db.history.len() as u64 {
                 db.total_requests_lifetime = db.history.len() as u64;
             }
-        });
+        }).await;
     }
 
     pub fn get_usage_db(&self) -> Arc<UsageDb> {
@@ -110,7 +112,10 @@ impl UsageTracker {
         for entry in &usage_db.history {
             if let Some(tokens) = &entry.tokens {
                 total_prompt += tokens.prompt_tokens.or(tokens.input_tokens).unwrap_or(0);
-                total_completion += tokens.completion_tokens.or(tokens.output_tokens).unwrap_or(0);
+                total_completion += tokens
+                    .completion_tokens
+                    .or(tokens.output_tokens)
+                    .unwrap_or(0);
             }
             total_cost += entry.cost.unwrap_or(0.0);
         }

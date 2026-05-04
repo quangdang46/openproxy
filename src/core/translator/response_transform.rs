@@ -101,7 +101,7 @@ impl StreamingTransformer for OpenAiTransformer {
 
         for line in text.lines() {
             let line = line.trim();
-if let Some(data) = line.strip_prefix("data: ") {
+            if let Some(data) = line.strip_prefix("data: ") {
                 let data = data.trim();
 
                 if data == "[DONE]" {
@@ -153,7 +153,7 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
         for line in text.lines() {
             let line = line.trim();
 
-if let Some(data) = line.strip_prefix("data: ") {
+            if let Some(data) = line.strip_prefix("data: ") {
                 let data = data.trim();
 
                 if data == "[DONE]" {
@@ -163,7 +163,7 @@ if let Some(data) = line.strip_prefix("data: ") {
 
                 // Parse event
                 if let Ok(event) = serde_json::from_str::<AnthropicSSEEvent>(data) {
-// Convert message_start
+                    // Convert message_start
                     if let Some(msg_start) = event.message_start {
                         let id = msg_start.id.as_deref().unwrap_or("anonymous");
                         let model = msg_start.model.as_deref().unwrap_or("");
@@ -189,8 +189,16 @@ if let Some(data) = line.strip_prefix("data: ") {
 
                     // Convert content_block_delta
                     if let Some(delta) = event.content_block_delta {
-                        let delta_type = delta.delta.get("type").and_then(|t| t.as_str()).unwrap_or("text");
-                        let text = delta.delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        let delta_type = delta
+                            .delta
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("text");
+                        let text = delta
+                            .delta
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
                         let index = delta.index;
 
                         match delta_type {
@@ -210,7 +218,9 @@ if let Some(data) = line.strip_prefix("data: ") {
                             }
                             "cache_control_delta" => {
                                 // Emit cache_lookahead metadata
-                                if let Some(param) = delta.delta.get("cache_control").and_then(|c| c.get("type")) {
+                                if let Some(param) =
+                                    delta.delta.get("cache_control").and_then(|c| c.get("type"))
+                                {
                                     if param == "cache_control_lookahead" {
                                         output_lines.push(format!(
                                             r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"cache_lookahead":true}},"logprobs":null,"finish_reason":null}}]}}"#,
@@ -567,7 +577,10 @@ pub struct OllamaFunction {
 }
 
 /// Transform a complete SSE stream from bytes to lines
-pub fn transform_sse_stream(chunk: &Bytes, transformer: &mut dyn StreamingTransformer) -> Vec<String> {
+pub fn transform_sse_stream(
+    chunk: &Bytes,
+    transformer: &mut dyn StreamingTransformer,
+) -> Vec<String> {
     transformer.transform_chunk(chunk)
 }
 
@@ -622,13 +635,19 @@ mod tests {
         assert!(!lines.is_empty());
     }
 
-#[test]
+    #[test]
     fn test_anthropic_to_openai_transformer() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         // Simulate Anthropic SSE - format: data: {"type":"message_start","message_start":{...}}
-        let chunk = Bytes::from(r#"data: {"type":"message_start","message_start":{"id":"test","model":"claude-3","type":"message_start","created_at":1234567890}}"#);
+        let chunk = Bytes::from(
+            r#"data: {"type":"message_start","message_start":{"id":"test","model":"claude-3","type":"message_start","created_at":1234567890}}"#,
+        );
         let lines = transformer.transform_chunk(&chunk);
-        assert!(!lines.is_empty(), "Expected non-empty output lines, got: {:?}", lines);
+        assert!(
+            !lines.is_empty(),
+            "Expected non-empty output lines, got: {:?}",
+            lines
+        );
     }
 
     #[test]
@@ -832,12 +851,10 @@ mod tests {
     #[test]
     fn test_gemini_multiple_parts_increment_index() {
         let mut transformer = GeminiToOpenAiTransformer::new();
-        let chunk1 = Bytes::from(
-            r#"data: {"candidates":[{"content":{"parts":[{"text":"First"}]}}]}"#,
-        );
-        let chunk2 = Bytes::from(
-            r#"data: {"candidates":[{"content":{"parts":[{"text":"Second"}]}}]}"#,
-        );
+        let chunk1 =
+            Bytes::from(r#"data: {"candidates":[{"content":{"parts":[{"text":"First"}]}}]}"#);
+        let chunk2 =
+            Bytes::from(r#"data: {"candidates":[{"content":{"parts":[{"text":"Second"}]}}]}"#);
         let lines1 = transformer.transform_chunk(&chunk1);
         let lines2 = transformer.transform_chunk(&chunk2);
         // Each chunk should have consistent part indices
@@ -874,9 +891,7 @@ mod tests {
     #[test]
     fn test_ollama_done_signal() {
         let mut transformer = OllamaToOpenAiTransformer::new();
-        let chunk = Bytes::from(
-            r#"data: {"model":"llama3","done":true}"#,
-        );
+        let chunk = Bytes::from(r#"data: {"model":"llama3","done":true}"#);
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
         assert!(lines.iter().any(|l| l == "data: [DONE]"));
@@ -1004,7 +1019,9 @@ mod tests {
     #[test]
     fn test_ollama_null_content_handled() {
         let mut transformer = OllamaToOpenAiTransformer::new();
-        let chunk = Bytes::from(r#"data: {"model":"llama3","message":{"role":"assistant","content":null},"done":false}"#);
+        let chunk = Bytes::from(
+            r#"data: {"model":"llama3","message":{"role":"assistant","content":null},"done":false}"#,
+        );
         let lines = transformer.transform_chunk(&chunk);
         assert!(lines.is_empty()); // No content to emit
     }
@@ -1012,7 +1029,9 @@ mod tests {
     #[test]
     fn test_ollama_empty_content_skipped() {
         let mut transformer = OllamaToOpenAiTransformer::new();
-        let chunk = Bytes::from(r#"data: {"model":"llama3","message":{"role":"assistant","content":""},"done":false}"#);
+        let chunk = Bytes::from(
+            r#"data: {"model":"llama3","message":{"role":"assistant","content":""},"done":false}"#,
+        );
         let lines = transformer.transform_chunk(&chunk);
         assert!(lines.is_empty());
     }
@@ -1123,7 +1142,8 @@ mod tests {
 
     #[test]
     fn test_bytes_from_static() {
-        let bytes = Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"static\"}}]}\n");
+        let bytes =
+            Bytes::from_static(b"data: {\"choices\":[{\"delta\":{\"content\":\"static\"}}]}\n");
         let mut transformer = OpenAiTransformer::new();
         let lines = transformer.transform_chunk(&bytes);
         assert!(!lines.is_empty());

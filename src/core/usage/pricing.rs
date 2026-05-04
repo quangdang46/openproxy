@@ -121,25 +121,46 @@ impl Pricing {
         rates.insert(
             "glm".to_string(),
             BTreeMap::from([
-                ("glm-5.1".to_string(), ModelPricing::per_token("glm-5.1", "glm", 0.6)),
-                ("glm-5".to_string(), ModelPricing::per_token("glm-5", "glm", 0.6)),
-                ("glm-4.7".to_string(), ModelPricing::per_token("glm-4.7", "glm", 0.6)),
+                (
+                    "glm-5.1".to_string(),
+                    ModelPricing::per_token("glm-5.1", "glm", 0.6),
+                ),
+                (
+                    "glm-5".to_string(),
+                    ModelPricing::per_token("glm-5", "glm", 0.6),
+                ),
+                (
+                    "glm-4.7".to_string(),
+                    ModelPricing::per_token("glm-4.7", "glm", 0.6),
+                ),
             ]),
         );
 
         rates.insert(
             "minimax".to_string(),
             BTreeMap::from([
-                ("MiniMax-M2.7".to_string(), ModelPricing::per_token("MiniMax-M2.7", "minimax", 0.2)),
-                ("MiniMax-M2.5".to_string(), ModelPricing::per_token("MiniMax-M2.5", "minimax", 0.2)),
+                (
+                    "MiniMax-M2.7".to_string(),
+                    ModelPricing::per_token("MiniMax-M2.7", "minimax", 0.2),
+                ),
+                (
+                    "MiniMax-M2.5".to_string(),
+                    ModelPricing::per_token("MiniMax-M2.5", "minimax", 0.2),
+                ),
             ]),
         );
 
         rates.insert(
             "kimi".to_string(),
             BTreeMap::from([
-                ("kimi-k2.5".to_string(), ModelPricing::flat_monthly("kimi-k2.5", "kimi", 9.0)),
-                ("kimi-k2.5-thinking".to_string(), ModelPricing::flat_monthly("kimi-k2.5-thinking", "kimi", 9.0)),
+                (
+                    "kimi-k2.5".to_string(),
+                    ModelPricing::flat_monthly("kimi-k2.5", "kimi", 9.0),
+                ),
+                (
+                    "kimi-k2.5-thinking".to_string(),
+                    ModelPricing::flat_monthly("kimi-k2.5-thinking", "kimi", 9.0),
+                ),
             ]),
         );
 
@@ -155,7 +176,10 @@ impl Pricing {
 
         rates.insert(
             "vertex".to_string(),
-            BTreeMap::from([("all".to_string(), ModelPricing::credits("all", "vertex", 300.0))]),
+            BTreeMap::from([(
+                "all".to_string(),
+                ModelPricing::credits("all", "vertex", 300.0),
+            )]),
         );
 
         Self { rates }
@@ -192,7 +216,13 @@ impl Pricing {
         None
     }
 
-    pub fn calculate_cost(&self, provider: &str, model: &str, prompt_tokens: u64, completion_tokens: u64) -> f64 {
+    pub fn calculate_cost(
+        &self,
+        provider: &str,
+        model: &str,
+        prompt_tokens: u64,
+        completion_tokens: u64,
+    ) -> f64 {
         self.get(provider, model)
             .map(|p| p.calculate_cost(prompt_tokens, completion_tokens))
             .unwrap_or(0.0)
@@ -207,22 +237,23 @@ impl Default for Pricing {
 
 fn parse_model_pricing(provider: &str, model: &str, value: &Value) -> ModelPricing {
     if let Some(obj) = value.as_object() {
-        let cost_model = obj.get("costModel")
+        let cost_model = obj
+            .get("costModel")
             .and_then(Value::as_str)
             .map(CostModel::from_str)
             .unwrap_or(CostModel::PerToken);
 
-        let price_per_million = obj.get("pricePerMillion")
+        let price_per_million = obj
+            .get("pricePerMillion")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
 
-        let flat_monthly_price = obj.get("flatMonthlyPrice")
+        let flat_monthly_price = obj
+            .get("flatMonthlyPrice")
             .and_then(Value::as_f64)
             .unwrap_or(0.0);
 
-        let credits = obj.get("credits")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0);
+        let credits = obj.get("credits").and_then(Value::as_f64).unwrap_or(0.0);
 
         return ModelPricing {
             model: model.to_string(),
@@ -304,12 +335,18 @@ mod tests {
     #[test]
     fn test_free_model_returns_zero() {
         let pricing = Pricing::new();
-        assert_eq!(pricing.calculate_cost("kiro", "claude-sonnet-4.5", 100_000_000, 50_000_000), 0.0);
+        assert_eq!(
+            pricing.calculate_cost("kiro", "claude-sonnet-4.5", 100_000_000, 50_000_000),
+            0.0
+        );
     }
 
     #[test]
     fn test_unknown_model_returns_zero() {
         let pricing = Pricing::new();
-        assert_eq!(pricing.calculate_cost("unknown", "unknown-model", 1_000_000, 1_000_000), 0.0);
+        assert_eq!(
+            pricing.calculate_cost("unknown", "unknown-model", 1_000_000, 1_000_000),
+            0.0
+        );
     }
 }

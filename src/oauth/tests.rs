@@ -76,14 +76,18 @@ mod device_code_extended_tests {
         assert_eq!(resp.device_code, "dc_123");
         assert_eq!(resp.user_code, "ABCD-EFGH");
         assert_eq!(resp.verification_uri, "https://github.com/login/device");
-        assert_eq!(resp.verification_uri_complete, Some("https://github.com/login/device?code=ABCD-EFGH".to_string()));
+        assert_eq!(
+            resp.verification_uri_complete,
+            Some("https://github.com/login/device?code=ABCD-EFGH".to_string())
+        );
         assert_eq!(resp.interval, 5);
         assert_eq!(resp.expires_in, Some(1800));
     }
 
     #[test]
     fn test_device_code_response_minimal() {
-        let json = r#"{"device_code":"d","user_code":"U","verification_uri":"https://x","interval":10}"#;
+        let json =
+            r#"{"device_code":"d","user_code":"U","verification_uri":"https://x","interval":10}"#;
         let resp: DeviceCodeResponse = serde_json::from_str(json).unwrap();
         assert!(resp.verification_uri_complete.is_none());
         assert!(resp.expires_in.is_none());
@@ -218,7 +222,7 @@ mod gitlab_extended_tests {
         let config = crate::oauth::providers::gitlab();
         let url = config.build_auth_url(
             "openproxy",
-            "http://localhost:20128/oauth/callback",
+            "http://localhost:4623/oauth/callback",
             "state123",
             "challenge456",
         );
@@ -231,7 +235,10 @@ mod gitlab_extended_tests {
     #[test]
     fn test_gitlab_self_hosted_config() {
         let config = crate::oauth::providers::gitlab_with_baseurl("https://gitlab.example.com");
-        assert_eq!(config.auth_url, "https://gitlab.example.com/oauth/authorize");
+        assert_eq!(
+            config.auth_url,
+            "https://gitlab.example.com/oauth/authorize"
+        );
         assert_eq!(config.token_url, "https://gitlab.example.com/oauth/token");
         assert!(config.uses_pkce);
     }
@@ -241,7 +248,7 @@ mod gitlab_extended_tests {
         let config = crate::oauth::providers::gitlab_with_baseurl("https://gitlab.example.com/");
         let url = config.build_auth_url(
             "openproxy",
-            "http://localhost:20128/oauth/callback",
+            "http://localhost:4623/oauth/callback",
             "state",
             "challenge",
         );
@@ -252,7 +259,10 @@ mod gitlab_extended_tests {
     #[test]
     fn test_gitlab_self_hosted_trailing_slash() {
         let config = crate::oauth::providers::gitlab_with_baseurl("https://gitlab.example.com/");
-        assert_eq!(config.auth_url, "https://gitlab.example.com/oauth/authorize");
+        assert_eq!(
+            config.auth_url,
+            "https://gitlab.example.com/oauth/authorize"
+        );
     }
 }
 

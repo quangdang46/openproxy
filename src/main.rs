@@ -1,12 +1,13 @@
-use std::sync::Arc;
 use clap::CommandFactory;
+use clap::Parser;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use clap::Parser;
 
 use openproxy::cli::{Cli, Command};
 use openproxy::db::Db;
+use openproxy::server::console_logs::{shared_console_log_buffer, ConsoleLogMakeWriter};
 use openproxy::server::state::AppState;
 
 #[tokio::main]
@@ -39,10 +40,24 @@ async fn main() -> anyhow::Result<()> {
                 openproxy::cli::run_tunnel(cmd.clone(), db).await?;
                 return Ok(());
             }
-            Command::Route { model, combo, prompt, stream, json } => {
+            Command::Route {
+                model,
+                combo,
+                prompt,
+                stream,
+                json,
+            } => {
                 let db = Db::load().await?;
                 let db = Arc::new(db);
-                return run_route(model.clone(), combo.clone(), prompt.clone(), *stream, *json, &db).await;
+                return run_route(
+                    model.clone(),
+                    combo.clone(),
+                    prompt.clone(),
+                    *stream,
+                    *json,
+                    &db,
+                )
+                .await;
             }
             Command::Completion { shell } => {
                 let mut cmd = Cli::command();
@@ -56,9 +71,15 @@ async fn main() -> anyhow::Result<()> {
         std::env::set_var("DATA_DIR", data_dir);
     }
 
+    let console_log_writer = ConsoleLogMakeWriter::new(shared_console_log_buffer());
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(cli.log_filter.clone()))
-        .with(tracing_subscriber::fmt::layer())
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(console_log_writer),
+        )
         .init();
 
     let db = Db::load().await?;
@@ -80,16 +101,23 @@ async fn run_route(
     json: bool,
     db: &Arc<Db>,
 ) -> anyhow::Result<()> {
-    let model_id = model.or_else(|| combo.map(|c| format!("combo/{}", c)))
+    let model_id = model
+        .or_else(|| combo.map(|c| format!("combo/{}", c)))
         .ok_or_else(|| anyhow::anyhow!("--model or --combo required"))?;
 
     let snapshot = db.snapshot();
-    let api_key = snapshot.api_keys.iter()
+    let api_key = snapshot
+        .api_keys
+        .iter()
         .find(|k| k.is_active())
         .map(|k| k.key.clone())
-        .ok_or_else(|| anyhow::anyhow!("No active API key. Add one: openproxy key add <name> <key>"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("No active API key. Add one: openproxy key add <name> <key>")
+        })?;
 
-    let port = std::env::var("PORT").ok().unwrap_or_else(|| "20128".to_string());
+    let port = std::env::var("PORT")
+        .ok()
+        .unwrap_or_else(|| "4623".to_string());
     let url = format!("http://127.0.0.1:{}/v1/chat/completions", port);
 
     let body = serde_json::json!({
@@ -99,7 +127,8 @@ async fn run_route(
     });
 
     let client = reqwest::Client::new();
-    let resp = client.post(&url)
+    let resp = client
+        .post(&url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
         .json(&body)

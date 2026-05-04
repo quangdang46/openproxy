@@ -63,22 +63,18 @@ impl TunnelManager {
         self.stop().await.ok();
 
         let mut child = match provider {
-            TunnelProvider::Cloudflare => {
-                tokio::process::Command::new("cloudflared")
-                    .args(["tunnel", "--url", &format!("http://localhost:{}", port)])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .context("Failed to spawn cloudflared. Is cloudflared installed?")?
-            }
-            TunnelProvider::Tailscale => {
-                tokio::process::Command::new("tailscale")
-                    .args(["funnel", &port.to_string()])
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .spawn()
-                    .context("Failed to spawn tailscale. Is tailscale installed?")?
-            }
+            TunnelProvider::Cloudflare => tokio::process::Command::new("cloudflared")
+                .args(["tunnel", "--url", &format!("http://localhost:{}", port)])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("Failed to spawn cloudflared. Is cloudflared installed?")?,
+            TunnelProvider::Tailscale => tokio::process::Command::new("tailscale")
+                .args(["funnel", &port.to_string()])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context("Failed to spawn tailscale. Is tailscale installed?")?,
         };
 
         let pid = child.id();
@@ -159,8 +155,13 @@ impl TunnelManager {
 
 fn extract_url(line: &str) -> Option<String> {
     for part in line.split_whitespace() {
-        if part.starts_with("https://") && (part.contains("trycloudflare.com") || part.contains("cloudflare.com")) {
-            return Some(part.trim_end_matches(|c: char| !c.is_alphanumeric()).to_string());
+        if part.starts_with("https://")
+            && (part.contains("trycloudflare.com") || part.contains("cloudflare.com"))
+        {
+            return Some(
+                part.trim_end_matches(|c: char| !c.is_alphanumeric())
+                    .to_string(),
+            );
         }
     }
     None

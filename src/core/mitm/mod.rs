@@ -19,15 +19,13 @@ impl MitmTarget {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct MitmRouteConfig {
     pub upstream_url: String,
     pub path_prefix: Option<String>,
     pub request_transform: bool,
     pub response_transform: bool,
 }
-
 
 #[derive(Debug, Clone, Default)]
 pub struct MitmState {
@@ -48,12 +46,13 @@ impl MitmState {
         let mut active_targets: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for (target_name, config_map) in mitm_alias {
-            let upstream_url = config_map
-                .get("upstreamUrl")
-                .cloned()
-                .unwrap_or_else(|| {
-                    format!("{}/{}", settings.mitm_router_base_url.trim_end_matches('/'), target_name)
-                });
+            let upstream_url = config_map.get("upstreamUrl").cloned().unwrap_or_else(|| {
+                format!(
+                    "{}/{}",
+                    settings.mitm_router_base_url.trim_end_matches('/'),
+                    target_name
+                )
+            });
 
             let path_prefix = config_map.get("pathPrefix").cloned();
             let request_transform = config_map
@@ -129,18 +128,18 @@ fn detect_provider_from_target(target_name: &str) -> String {
     } else if lower.contains("kiro") || lower.contains("kr") {
         "kiro".to_string()
     } else {
-        target_name.split('-').next().unwrap_or(target_name).to_string()
+        target_name
+            .split('-')
+            .next()
+            .unwrap_or(target_name)
+            .to_string()
     }
 }
 
 pub struct MitmInterceptor;
 
 impl MitmInterceptor {
-    pub fn transform_request(
-        target: &str,
-        body: &mut Value,
-        config: &MitmRouteConfig,
-    ) {
+    pub fn transform_request(target: &str, body: &mut Value, config: &MitmRouteConfig) {
         if !config.request_transform {
             return;
         }
@@ -153,11 +152,7 @@ impl MitmInterceptor {
         let _ = target;
     }
 
-    pub fn transform_response(
-        target: &str,
-        body: &mut Value,
-        config: &MitmRouteConfig,
-    ) {
+    pub fn transform_response(target: &str, body: &mut Value, config: &MitmRouteConfig) {
         if !config.response_transform {
             return;
         }
@@ -165,10 +160,16 @@ impl MitmInterceptor {
         let _ = body;
     }
 
-    pub fn build_forward_url(_target: &str, config: &MitmRouteConfig, original_path: &str) -> String {
+    pub fn build_forward_url(
+        _target: &str,
+        config: &MitmRouteConfig,
+        original_path: &str,
+    ) -> String {
         let base = &config.upstream_url;
         match config.path_prefix {
-            Some(ref prefix) => format!("{}{}{}", base.trim_end_matches('/'), prefix, original_path),
+            Some(ref prefix) => {
+                format!("{}{}{}", base.trim_end_matches('/'), prefix, original_path)
+            }
             None => format!("{}{}", base.trim_end_matches('/'), original_path),
         }
     }
@@ -193,7 +194,10 @@ mod tests {
 
     #[test]
     fn detect_provider_from_target_name() {
-        assert_eq!(detect_provider_from_target("antigravity-main"), "antigravity");
+        assert_eq!(
+            detect_provider_from_target("antigravity-main"),
+            "antigravity"
+        );
         assert_eq!(detect_provider_from_target("copilot-proxy"), "github");
         assert_eq!(detect_provider_from_target("kiro-east"), "kiro");
     }
@@ -212,7 +216,10 @@ mod tests {
         alias.insert(
             "antigravity-main".to_string(),
             BTreeMap::from([
-                ("upstreamUrl".to_string(), "https://api.antigravity.ai/v1".to_string()),
+                (
+                    "upstreamUrl".to_string(),
+                    "https://api.antigravity.ai/v1".to_string(),
+                ),
                 ("requestTransform".to_string(), "true".to_string()),
             ]),
         );

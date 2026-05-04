@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use clap::{Parser, Subcommand, CommandFactory};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
 use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
@@ -10,14 +10,12 @@ use serde_json::Value;
 
 use crate::core::account_fallback::AccountRegistry;
 use crate::core::combo::{get_combo_models_from_data, ComboStrategy};
-use crate::core::executor::{
-    ClientPool, DefaultExecutor, ExecutionRequest,
-};
+use crate::core::executor::{ClientPool, DefaultExecutor, ExecutionRequest};
 use crate::core::model::get_model_info;
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
 use crate::db::Db;
-use crate::types::{ProviderConnection, ApiKey, ProxyPool, AppDb};
+use crate::types::{ApiKey, AppDb, ProviderConnection, ProxyPool};
 
 use crate::core::tunnel::{TunnelManager, TunnelProvider};
 
@@ -27,7 +25,7 @@ pub struct Cli {
     #[arg(long, env = "HOST", default_value = "0.0.0.0")]
     pub host: String,
 
-    #[arg(long, env = "PORT", default_value_t = 20128)]
+    #[arg(long, env = "PORT", default_value_t = 4623)]
     pub port: u16,
 
     #[arg(long, env = "RUST_LOG", default_value = "info")]
@@ -138,7 +136,7 @@ pub enum TunnelCmd {
     Start {
         #[arg(long, default_value = "cloudflare")]
         provider: String,
-        #[arg(long, default_value_t = 20128)]
+        #[arg(long, default_value_t = 4623)]
         port: u16,
     },
     Stop,
@@ -174,7 +172,13 @@ impl Cli {
                     let rt = tokio::runtime::Runtime::new()?;
                     rt.block_on(run_tunnel(cmd, db.clone()))
                 }
-                Command::Route { model, combo, prompt, stream, json } => {
+                Command::Route {
+                    model,
+                    combo,
+                    prompt,
+                    stream,
+                    json,
+                } => {
                     let rt = tokio::runtime::Runtime::new()?;
                     rt.block_on(run_route(model, combo, prompt, stream, json))?;
                     Ok(())
@@ -191,10 +195,11 @@ impl Cli {
     }
 }
 
- pub async fn run_provider(cmd: ProviderCmd, db: &Db) -> anyhow::Result<()> {
+pub async fn run_provider(cmd: ProviderCmd, db: &Db) -> anyhow::Result<()> {
     match cmd {
         ProviderCmd::List { json } => {
-            let connections = db.provider_connections(crate::db::ProviderConnectionFilter::default());
+            let connections =
+                db.provider_connections(crate::db::ProviderConnectionFilter::default());
             let nodes = db.provider_nodes(None);
 
             if json {
@@ -253,14 +258,14 @@ impl Cli {
     }
     Ok(())
 }
- pub async fn run_tunnel(cmd: TunnelCmd, db: std::sync::Arc<Db>) -> anyhow::Result<()> {
+pub async fn run_tunnel(cmd: TunnelCmd, db: std::sync::Arc<Db>) -> anyhow::Result<()> {
     let tunnel_manager = TunnelManager::new((db).clone());
 
     match cmd {
         TunnelCmd::Start { provider, port } => {
-            let provider = provider.parse::<TunnelProvider>().map_err(|e| {
-                anyhow::anyhow!("{}", e)
-            })?;
+            let provider = provider
+                .parse::<TunnelProvider>()
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
 
             println!("Starting {} tunnel on port {}...", provider, port);
             tunnel_manager.start(provider, port).await?;
@@ -308,7 +313,7 @@ impl Cli {
     Ok(())
 }
 
- pub async fn run_key(cmd: KeyCmd, db: &Db) -> anyhow::Result<()> {
+pub async fn run_key(cmd: KeyCmd, db: &Db) -> anyhow::Result<()> {
     match cmd {
         KeyCmd::List { json } => {
             let snapshot = db.snapshot();
@@ -355,7 +360,7 @@ impl Cli {
     Ok(())
 }
 
- pub async fn run_pool(cmd: PoolCmd, db: &Db) -> anyhow::Result<()> {
+pub async fn run_pool(cmd: PoolCmd, db: &Db) -> anyhow::Result<()> {
     match cmd {
         PoolCmd::List { json } => {
             let snapshot = db.snapshot();
@@ -383,7 +388,10 @@ impl Cli {
                         println!("Pool: {}", pool.name);
                         println!("  Type: {}", pool.r#type);
                         println!("  URL: {}", pool.proxy_url);
-                        println!("  Status: {:?}", pool.test_status.as_deref().unwrap_or("unknown"));
+                        println!(
+                            "  Status: {:?}",
+                            pool.test_status.as_deref().unwrap_or("unknown")
+                        );
                         println!("  Success Rate: {:?}", pool.success_rate);
                         println!("  RTT (ms): {:?}", pool.rtt_ms);
                     }
@@ -394,7 +402,11 @@ impl Cli {
                 }
             }
         }
-        PoolCmd::Create { name, proxy_url, json } => {
+        PoolCmd::Create {
+            name,
+            proxy_url,
+            json,
+        } => {
             let new_pool = ProxyPool {
                 id: uuid::Uuid::new_v4().to_string(),
                 name: name.clone(),
@@ -445,7 +457,10 @@ impl Cli {
                 struct DeleteOutput {
                     deleted: String,
                 }
-                println!("{}", serde_json::to_string_pretty(&DeleteOutput { deleted: name })?);
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&DeleteOutput { deleted: name })?
+                );
             } else {
                 println!("Pool '{}' deleted successfully", name);
             }
@@ -469,7 +484,10 @@ async fn run_route(
     } else if let (None, Some(combo_name)) = (&model, &combo) {
         run_combo_route(pool, registry, combo_name, &prompt, stream, json).await
     } else if let (Some(_model_str), Some(combo_name)) = (&model, &combo) {
-        eprintln!("Warning: both --model and --combo specified, using --combo '{}'", combo_name);
+        eprintln!(
+            "Warning: both --model and --combo specified, using --combo '{}'",
+            combo_name
+        );
         run_combo_route(pool, registry, combo_name, &prompt, stream, json).await
     } else {
         eprintln!("Error: must specify either --model or --combo");
@@ -491,7 +509,10 @@ async fn run_direct_route(
     let resolved = get_model_info(model_str, &snapshot);
 
     let Some(provider) = resolved.provider.clone() else {
-        eprintln!("Error: could not resolve provider from model '{}'", model_str);
+        eprintln!(
+            "Error: could not resolve provider from model '{}'",
+            model_str
+        );
         std::process::exit(1);
     };
 
@@ -515,7 +536,10 @@ async fn run_direct_route(
                 eprintln!("Error: {}", error);
                 std::process::exit(1);
             }
-            eprintln!("Error: no available credentials for provider '{}'", provider);
+            eprintln!(
+                "Error: no available credentials for provider '{}'",
+                provider
+            );
             std::process::exit(1);
         };
 
@@ -528,12 +552,8 @@ async fn run_direct_route(
         let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
 
         let (rate_limit_remaining, rate_limit_reset) = registry.rate_limit_info(&connection.id);
-        let slot = registry.acquire_slot(
-            &connection.id,
-            10,
-            rate_limit_remaining,
-            rate_limit_reset,
-        );
+        let slot =
+            registry.acquire_slot(&connection.id, 10, rate_limit_remaining, rate_limit_reset);
 
         let Some(_slot) = slot else {
             excluded.insert(connection.id.clone());
@@ -624,11 +644,17 @@ async fn run_combo_route(
         ComboStrategy::Fallback
     };
 
-    let model_str = combo_models.first().map(|m| m.as_str()).unwrap_or("gpt-4o-mini");
+    let model_str = combo_models
+        .first()
+        .map(|m| m.as_str())
+        .unwrap_or("gpt-4o-mini");
     let resolved = get_model_info(model_str, &snapshot);
 
     let Some(provider) = resolved.provider.clone() else {
-        eprintln!("Error: could not resolve provider from combo model '{}'", model_str);
+        eprintln!(
+            "Error: could not resolve provider from combo model '{}'",
+            model_str
+        );
         std::process::exit(1);
     };
 
@@ -647,7 +673,10 @@ async fn run_combo_route(
         let connection = select_connection_cli(&snapshot, &provider, &resolved.model, &excluded);
 
         let Some(connection) = connection else {
-            eprintln!("Error: no available credentials for provider '{}'", provider);
+            eprintln!(
+                "Error: no available credentials for provider '{}'",
+                provider
+            );
             std::process::exit(1);
         };
 
@@ -660,12 +689,8 @@ async fn run_combo_route(
         let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
 
         let (rate_limit_remaining, rate_limit_reset) = registry.rate_limit_info(&connection.id);
-        let slot = registry.acquire_slot(
-            &connection.id,
-            10,
-            rate_limit_remaining,
-            rate_limit_reset,
-        );
+        let slot =
+            registry.acquire_slot(&connection.id, 10, rate_limit_remaining, rate_limit_reset);
 
         let Some(_slot) = slot else {
             excluded.insert(connection.id.clone());
@@ -743,8 +768,6 @@ fn select_connection_cli(
     excluded: &HashSet<String>,
 ) -> Option<ProviderConnection> {
     use chrono::Utc;
-    
-    
 
     let now = Utc::now();
     let mut candidates: Vec<_> = snapshot
@@ -781,7 +804,10 @@ fn connection_has_credentials(connection: &ProviderConnection) -> bool {
             .is_some()
 }
 
-fn is_connection_rate_limited(connection: &ProviderConnection, now: chrono::DateTime<chrono::Utc>) -> bool {
+fn is_connection_rate_limited(
+    connection: &ProviderConnection,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
     connection
         .rate_limited_until
         .as_deref()
@@ -789,7 +815,11 @@ fn is_connection_rate_limited(connection: &ProviderConnection, now: chrono::Date
         .is_some_and(|until| until > now)
 }
 
-fn is_model_locked(connection: &ProviderConnection, model: &str, now: chrono::DateTime<chrono::Utc>) -> bool {
+fn is_model_locked(
+    connection: &ProviderConnection,
+    model: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
     [format!("modelLock_{model}"), "modelLock___all".to_string()]
         .into_iter()
         .filter_map(|key| connection.extra.get(&key))

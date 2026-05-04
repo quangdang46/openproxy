@@ -100,9 +100,7 @@ impl AccountRegistry {
         max_in_flight: usize,
     ) -> Option<AccountSlotGuard<'_>> {
         let mut states = self.states.write();
-        let state = states
-            .entry(account_id.to_string())
-            .or_default();
+        let state = states.entry(account_id.to_string()).or_default();
 
         if state.in_flight >= max_in_flight {
             return None;
@@ -117,9 +115,7 @@ impl AccountRegistry {
 
     pub fn update_rate_limit(&self, account_id: &str, remaining: i64, reset: i64) {
         let mut states = self.states.write();
-        let state = states
-            .entry(account_id.to_string())
-            .or_default();
+        let state = states.entry(account_id.to_string()).or_default();
         state.rate_limit_remaining = remaining;
         state.rate_limit_reset = reset;
     }
@@ -159,12 +155,7 @@ impl AccountRegistry {
         })
     }
 
-    pub fn set_sticky_session(
-        &self,
-        combo_id: &str,
-        account_id: &str,
-        duration_secs: i64,
-    ) {
+    pub fn set_sticky_session(&self, combo_id: &str, account_id: &str, duration_secs: i64) {
         let mut locks = self.model_locks.write();
         let key = format!("sticky_{}", combo_id);
         let now = Utc::now().timestamp();
@@ -196,13 +187,11 @@ impl AccountRegistry {
         }
 
         match strategy {
-            StrategyType::FillFirst => {
-                available
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|(_, conn)| self.get_state(&conn.id).rate_limit_remaining)
-                    .map(|(i, _)| i)
-            }
+            StrategyType::FillFirst => available
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, conn)| self.get_state(&conn.id).rate_limit_remaining)
+                .map(|(i, _)| i),
             StrategyType::RoundRobin => {
                 let combo_id = combo_id?;
                 let mut rotation = self.combo_rotation.write();
@@ -232,13 +221,11 @@ impl AccountRegistry {
                 }
                 Some(idx)
             }
-            StrategyType::LeastLoaded => {
-                available
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, conn)| self.in_flight_count(&conn.id))
-                    .map(|(i, _)| i)
-            }
+            StrategyType::LeastLoaded => available
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, conn)| self.in_flight_count(&conn.id))
+                .map(|(i, _)| i),
         }
     }
 
@@ -301,11 +288,7 @@ impl AccountRegistry {
         })
     }
 
-    pub fn next_in_combo(
-        &self,
-        combo_id: &str,
-        accounts: &[String],
-    ) -> Option<(usize, String)> {
+    pub fn next_in_combo(&self, combo_id: &str, accounts: &[String]) -> Option<(usize, String)> {
         if accounts.is_empty() {
             return None;
         }
@@ -328,10 +311,7 @@ impl AccountRegistry {
     }
 
     pub fn get_combo_stats(&self, combo_id: &str) -> Option<ComboRotationState> {
-        self.combo_rotation
-            .read()
-            .get(combo_id)
-            .cloned()
+        self.combo_rotation.read().get(combo_id).cloned()
     }
 }
 
@@ -363,8 +343,7 @@ pub const SHORT_COOLDOWN_SECS: i64 = 5;
 pub const DEFAULT_STICKY_DURATION_SECS: i64 = 300;
 
 /// Strategy type for provider account selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StrategyType {
     /// Use account with most remaining quota first.
     #[default]
@@ -376,7 +355,6 @@ pub enum StrategyType {
     /// Always pick account with fewest in-flight requests.
     LeastLoaded,
 }
-
 
 impl std::fmt::Display for StrategyType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -429,7 +407,11 @@ impl Default for ProviderStrategySettings {
 
 impl ProviderStrategySettings {
     /// Parse strategy settings from a string value (e.g., from config).
-    pub fn from_config_value(value: Option<&str>, fallback_enabled: bool, max_fallback_attempts: usize) -> Self {
+    pub fn from_config_value(
+        value: Option<&str>,
+        fallback_enabled: bool,
+        max_fallback_attempts: usize,
+    ) -> Self {
         match value.and_then(|v| v.parse().ok()) {
             Some(strategy) => Self {
                 strategy,
@@ -468,7 +450,11 @@ pub fn get_model_lock_key(model: &str) -> String {
 
 /// Check if a model lock on a connection is still active.
 /// Reads flat field `modelLock_${model}` (or `modelLock___all` when model="").
-pub fn is_model_lock_active(connection: &ProviderConnection, model: &str, now: DateTime<Utc>) -> bool {
+pub fn is_model_lock_active(
+    connection: &ProviderConnection,
+    model: &str,
+    now: DateTime<Utc>,
+) -> bool {
     let key = get_model_lock_key(model);
     connection
         .extra
@@ -574,16 +560,14 @@ pub fn calculate_account_health(connection: &ProviderConnection, now: DateTime<U
 
 /// Get the earliest rateLimitedUntil from a list of connections.
 /// Returns the earliest future rate-limit expiry, or None if none are rate-limited.
-pub fn get_earliest_rate_limited_until(connections: &[ProviderConnection]) -> Option<DateTime<Utc>> {
+pub fn get_earliest_rate_limited_until(
+    connections: &[ProviderConnection],
+) -> Option<DateTime<Utc>> {
     let now = Utc::now();
     let mut earliest: Option<DateTime<Utc>> = None;
 
     for conn in connections {
-        let Some(until) = conn
-            .rate_limited_until
-            .as_deref()
-            .and_then(parse_timestamp)
-        else {
+        let Some(until) = conn.rate_limited_until.as_deref().and_then(parse_timestamp) else {
             continue;
         };
         if until <= now {
@@ -627,9 +611,8 @@ pub fn apply_error_state(
         current_backoff
     };
 
-    connection.rate_limited_until = Some(
-        (Utc::now() + chrono::Duration::seconds(cooldown_seconds)).to_rfc3339(),
-    );
+    connection.rate_limited_until =
+        Some((Utc::now() + chrono::Duration::seconds(cooldown_seconds)).to_rfc3339());
     connection.backoff_level = Some(new_backoff);
     connection.consecutive_errors = Some(current_errors.saturating_add(1));
     connection.last_error = Some(error_text.chars().take(200).collect());
@@ -664,8 +647,8 @@ mod tests {
     use super::*;
 
     fn make_connection(id: &str) -> ProviderConnection {
-        use std::collections::BTreeMap;
         use serde_json::Value;
+        use std::collections::BTreeMap;
 
         ProviderConnection {
             id: id.to_string(),
@@ -844,16 +827,46 @@ mod tests {
 
     #[test]
     fn test_strategy_type_from_str() {
-        assert_eq!("fillFirst".parse::<StrategyType>().unwrap(), StrategyType::FillFirst);
-        assert_eq!("fill-first".parse::<StrategyType>().unwrap(), StrategyType::FillFirst);
-        assert_eq!("fill_first".parse::<StrategyType>().unwrap(), StrategyType::FillFirst);
-        assert_eq!("roundRobin".parse::<StrategyType>().unwrap(), StrategyType::RoundRobin);
-        assert_eq!("round-robin".parse::<StrategyType>().unwrap(), StrategyType::RoundRobin);
-        assert_eq!("round_robin".parse::<StrategyType>().unwrap(), StrategyType::RoundRobin);
-        assert_eq!("sticky".parse::<StrategyType>().unwrap(), StrategyType::Sticky);
-        assert_eq!("leastLoaded".parse::<StrategyType>().unwrap(), StrategyType::LeastLoaded);
-        assert_eq!("least-loaded".parse::<StrategyType>().unwrap(), StrategyType::LeastLoaded);
-        assert_eq!("least_loaded".parse::<StrategyType>().unwrap(), StrategyType::LeastLoaded);
+        assert_eq!(
+            "fillFirst".parse::<StrategyType>().unwrap(),
+            StrategyType::FillFirst
+        );
+        assert_eq!(
+            "fill-first".parse::<StrategyType>().unwrap(),
+            StrategyType::FillFirst
+        );
+        assert_eq!(
+            "fill_first".parse::<StrategyType>().unwrap(),
+            StrategyType::FillFirst
+        );
+        assert_eq!(
+            "roundRobin".parse::<StrategyType>().unwrap(),
+            StrategyType::RoundRobin
+        );
+        assert_eq!(
+            "round-robin".parse::<StrategyType>().unwrap(),
+            StrategyType::RoundRobin
+        );
+        assert_eq!(
+            "round_robin".parse::<StrategyType>().unwrap(),
+            StrategyType::RoundRobin
+        );
+        assert_eq!(
+            "sticky".parse::<StrategyType>().unwrap(),
+            StrategyType::Sticky
+        );
+        assert_eq!(
+            "leastLoaded".parse::<StrategyType>().unwrap(),
+            StrategyType::LeastLoaded
+        );
+        assert_eq!(
+            "least-loaded".parse::<StrategyType>().unwrap(),
+            StrategyType::LeastLoaded
+        );
+        assert_eq!(
+            "least_loaded".parse::<StrategyType>().unwrap(),
+            StrategyType::LeastLoaded
+        );
         assert!("invalid".parse::<StrategyType>().is_err());
     }
 
@@ -909,12 +922,8 @@ mod tests {
         let conn3 = make_connection("acc3");
         let available = vec![&conn1, &conn2, &conn3];
 
-        let idx = registry.select_account_by_strategy(
-            &available,
-            StrategyType::FillFirst,
-            None,
-            300,
-        );
+        let idx =
+            registry.select_account_by_strategy(&available, StrategyType::FillFirst, None, 300);
         assert_eq!(idx, Some(1)); // acc2 has highest rate_limit_remaining
     }
 
@@ -924,9 +933,30 @@ mod tests {
         // Direct state manipulation for testing
         {
             let mut states = registry.states.write();
-            states.insert("acc1".to_string(), AccountLockState { in_flight: 2, rate_limit_remaining: 100, rate_limit_reset: 0 });
-            states.insert("acc2".to_string(), AccountLockState { in_flight: 1, rate_limit_remaining: 100, rate_limit_reset: 0 });
-            states.insert("acc3".to_string(), AccountLockState { in_flight: 3, rate_limit_remaining: 100, rate_limit_reset: 0 });
+            states.insert(
+                "acc1".to_string(),
+                AccountLockState {
+                    in_flight: 2,
+                    rate_limit_remaining: 100,
+                    rate_limit_reset: 0,
+                },
+            );
+            states.insert(
+                "acc2".to_string(),
+                AccountLockState {
+                    in_flight: 1,
+                    rate_limit_remaining: 100,
+                    rate_limit_reset: 0,
+                },
+            );
+            states.insert(
+                "acc3".to_string(),
+                AccountLockState {
+                    in_flight: 3,
+                    rate_limit_remaining: 100,
+                    rate_limit_reset: 0,
+                },
+            );
         }
 
         let conn1 = make_connection("acc1");
@@ -934,12 +964,8 @@ mod tests {
         let conn3 = make_connection("acc3");
         let available = vec![&conn1, &conn2, &conn3];
 
-        let idx = registry.select_account_by_strategy(
-            &available,
-            StrategyType::LeastLoaded,
-            None,
-            300,
-        );
+        let idx =
+            registry.select_account_by_strategy(&available, StrategyType::LeastLoaded, None, 300);
         assert_eq!(idx, Some(1)); // acc2 has 1 in_flight (least)
     }
 

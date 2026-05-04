@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
-pub const DEFAULT_MITM_ROUTER_BASE: &str = "http://localhost:20128";
+pub const DEFAULT_MITM_ROUTER_BASE: &str = "http://localhost:4623";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
