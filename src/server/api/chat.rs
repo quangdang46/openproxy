@@ -20,6 +20,8 @@ use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
+use crate::core::chat::RequestPlan;
+use crate::core::translator::registry::{self, Format};
 use crate::core::translator::response_transform::{transform_sse_stream, transformer_for_provider};
 use crate::server::auth::{extract_api_key, require_api_key};
 use crate::server::state::AppState;
@@ -191,6 +193,10 @@ async fn chat_completions_impl(
                     let body = combo_body.clone();
                     let combo_model = combo_model.to_string();
                     let api_key = combo_api_key.clone();
+                    // Build plan for this combo model
+                    let combo_provider_str = resolved.provider.as_deref().unwrap_or("unknown");
+                    let combo_plan = RequestPlan::new(endpoint, &body, combo_provider_str, &combo_model);
+                    let plan_for_combo = combo_plan.clone();
                     async move {
                         execute_single_model(
                             &state,
@@ -198,6 +204,7 @@ async fn chat_completions_impl(
                             &combo_model,
                             api_key.as_deref(),
                             endpoint,
+                            &plan_for_combo,
                         )
                         .await
                     }
@@ -210,12 +217,14 @@ async fn chat_completions_impl(
             }
         }
         ModelRouteKind::Direct => {
+            let plan = RequestPlan::new(endpoint, &body, resolved.provider.as_deref().unwrap_or(model_str), &resolved.model);
             match execute_single_model(
                 &state,
                 &body,
                 model_str,
                 presented_api_key.as_deref(),
                 endpoint,
+                &plan,
             )
             .await
             {
@@ -232,20 +241,13 @@ async fn execute_single_model(
     model_str: &str,
     api_key: Option<&str>,
     endpoint: Option<&'static str>,
+    plan: &RequestPlan,
 ) -> Result<Response, ComboAttemptError> {
     let snapshot = state.db.snapshot();
-    let resolved = get_model_info(model_str, &snapshot);
-    let Some(provider) = resolved.provider else {
-        return Err(ComboAttemptError {
-            status: 400,
-            message: "Invalid model format".into(),
-            retry_after: None,
-        });
-    };
 
     let mut body = request_body.clone();
     if let Some(fields) = body.as_object_mut() {
-        fields.insert("model".into(), Value::String(resolved.model.clone()));
+        fields.insert("model".into(), Value::String(plan.model.clone()));
     } else {
         return Err(ComboAttemptError {
             status: 400,
@@ -254,9 +256,19 @@ async fn execute_single_model(
         });
     }
 
-    let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &resolved.model);
+    let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
 
-    forward_with_provider_fallback(state, &provider, &resolved.model, body, api_key, endpoint)
+    tracing::debug!(
+        "PLAN provider={} model={} source={:?} target={:?} stream={} translate={}",
+        plan.provider,
+        plan.model,
+        plan.source_format,
+        plan.target_format,
+        plan.stream,
+        plan.needs_translation(),
+    );
+
+    forward_with_provider_fallback(state, &plan.provider, &plan.model, body, api_key, endpoint, plan)
         .await
 }
 
@@ -267,6 +279,7 @@ async fn forward_with_provider_fallback(
     mut request_body: Value,
     api_key: Option<&str>,
     endpoint: Option<&'static str>,
+    plan: &RequestPlan,
 ) -> Result<Response, ComboAttemptError> {
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
