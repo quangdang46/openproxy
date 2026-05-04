@@ -29,6 +29,7 @@ serde_json = "1"
 
 # JWT auth
 jsonwebtoken = "9"
+bcrypt = "0.15"
 
 # Streaming / bytes
 bytes = "1"
@@ -90,6 +91,9 @@ async-stream = "0.3"
 # RSA for JWT signing
 rsa = "0.9"
 time = "0.3"
+
+# Client identity
+whoami = "1"
 
 [dev-dependencies]
 toml = "0.8"
