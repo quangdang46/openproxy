@@ -119,6 +119,7 @@ function normalizeStaticModel(model, connection) {
     id: `${connection.provider}/${model.id}`,
     requestModel: `${connection.provider}/${model.id}`,
     name: model.name || model.id,
+    type: model.type || null,
     providerId: connection.provider,
     providerName: getProviderLabel(connection),
     source: "static",
@@ -143,10 +144,15 @@ function normalizeLiveModel(model, connection) {
     id: requestModel,
     requestModel,
     name: displayName,
+    type: typeof model === "object" && model ? model.type || null : null,
     providerId: connection.provider,
     providerName: getProviderLabel(connection),
     source: "live",
   };
+}
+
+function isChatCapableModel(model) {
+  return !model?.type || model.type === "llm";
 }
 
 function parseProviderModelsPayload(data) {
@@ -164,6 +170,22 @@ function dedupeModels(models) {
     if (!map.has(model.id)) map.set(model.id, model);
   }
   return Array.from(map.values());
+}
+
+function pickPreferredModel(group) {
+  const models = Array.isArray(group?.models) ? group.models : [];
+  if (models.length === 0) return null;
+
+  const defaultModel = group?.connections?.find((connection) => connection?.defaultModel)?.defaultModel;
+  if (!defaultModel) return models[0];
+
+  const providerQualified = `${group.providerId}/${defaultModel}`;
+  return models.find((model) => model.requestModel === providerQualified)
+    || models.find((model) => model.id === providerQualified)
+    || models.find((model) => model.requestModel === defaultModel)
+    || models.find((model) => model.id === defaultModel)
+    || models.find((model) => model.name === defaultModel)
+    || models[0];
 }
 
 export default function BasicChatPageClient() {
@@ -255,7 +277,7 @@ export default function BasicChatPageClient() {
 
           const staticModels = getModelsByProviderId(providerId)
             .map((model) => normalizeStaticModel(model, connection))
-            .filter(Boolean);
+            .filter((model) => isChatCapableModel(model));
           group.models.push(...staticModels);
         }
 
@@ -267,7 +289,7 @@ export default function BasicChatPageClient() {
               if (!response.ok) return { connection, models: [] };
               const models = parseProviderModelsPayload(data)
                 .map((model) => normalizeLiveModel(model, connection))
-                .filter(Boolean);
+                .filter((model) => isChatCapableModel(model));
               return { connection, models };
             } catch {
               return { connection, models: [] };
@@ -350,7 +372,7 @@ export default function BasicChatPageClient() {
       const session = sessions.find((item) => item.id === activeSessionId);
       if (session?.modelId && modelIndex.has(session.modelId)) return modelIndex.get(session.modelId);
     }
-    return activeProviderGroup?.models?.[0] || null;
+    return pickPreferredModel(activeProviderGroup) || null;
   }, [activeModelId, modelIndex, activeProviderGroup, sessions, activeSessionId]);
 
   const currentSession = useMemo(() => sessions.find((session) => session.id === activeSessionId) || null, [sessions, activeSessionId]);
@@ -377,7 +399,7 @@ export default function BasicChatPageClient() {
     const savedProvider = providerGroups.find((group) => group.providerId === activeProviderId) || providerGroups[0];
     const savedModel = activeModelId && modelIndex.has(activeModelId)
       ? modelIndex.get(activeModelId)
-      : savedProvider.models[0];
+      : pickPreferredModel(savedProvider);
 
     if (sessions.length > 0) {
       const session = sessions.find((item) => item.id === activeSessionId) || sessions[0];
@@ -471,7 +493,8 @@ export default function BasicChatPageClient() {
   const handleSelectProvider = (providerId) => {
     const group = providerGroups.find((item) => item.providerId === providerId);
     if (!group || group.models.length === 0) return;
-    const nextModel = group.models[0];
+    const nextModel = pickPreferredModel(group);
+    if (!nextModel) return;
 
     const current = sessions.find((session) => session.id === activeSessionId);
     if (current && current.messages.length > 0) {
@@ -566,7 +589,7 @@ export default function BasicChatPageClient() {
   };
 
   const sendMessage = async () => {
-    const model = activeModel || activeProviderGroup?.models?.[0] || null;
+    const model = activeModel || pickPreferredModel(activeProviderGroup) || null;
     if (!model) return;
 
     const userText = draft.trim();

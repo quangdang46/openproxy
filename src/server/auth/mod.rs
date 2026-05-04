@@ -1,4 +1,6 @@
 use axum::http::HeaderMap;
+use jsonwebtoken::{decode, DecodingKey, Validation};
+use serde::{Deserialize, Serialize};
 
 use crate::core::auth::{parse_api_key, CLI_TOKEN_HEADER};
 use crate::db::Db;
@@ -6,6 +8,7 @@ use crate::types::ApiKey;
 
 pub const API_KEY_HEADER: &str = "x-api-key";
 pub const AUTHORIZATION_HEADER: &str = "authorization";
+pub const AUTH_COOKIE_NAME: &str = "auth_token";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PresentedKeySource {
@@ -27,6 +30,27 @@ pub enum AuthError {
     Inactive,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DashboardAuthError {
+    Missing,
+    Invalid,
+}
+
+impl DashboardAuthError {
+    pub fn message(&self) -> &'static str {
+        match self {
+            DashboardAuthError::Missing => "Missing auth token",
+            DashboardAuthError::Invalid => "Invalid auth token",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardClaims {
+    pub authenticated: bool,
+    pub exp: usize,
+}
+
 impl AuthError {
     pub fn message(&self) -> &'static str {
         match self {
@@ -39,6 +63,45 @@ impl AuthError {
 
 pub fn extract_api_key(headers: &HeaderMap) -> Option<String> {
     extract_presented_key(headers).map(|presented| presented.key)
+}
+
+pub fn extract_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
+    let cookie_header = headers.get(axum::http::header::COOKIE)?.to_str().ok()?;
+    cookie_header.split(';').find_map(|segment| {
+        let mut parts = segment.trim().splitn(2, '=');
+        let key = parts.next()?.trim();
+        let value = parts.next()?.trim();
+        (key == name && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
+pub fn extract_auth_token(headers: &HeaderMap) -> Option<String> {
+    extract_cookie(headers, AUTH_COOKIE_NAME)
+}
+
+pub fn require_dashboard_session(headers: &HeaderMap, db: &Db) -> Result<DashboardClaims, DashboardAuthError> {
+    let snapshot = db.snapshot();
+    if snapshot.settings.require_login == false {
+        return Ok(DashboardClaims {
+            authenticated: true,
+            exp: usize::MAX,
+        });
+    }
+
+    let token = extract_auth_token(headers).ok_or(DashboardAuthError::Missing)?;
+    let secret = std::env::var("JWT_SECRET")
+        .unwrap_or_else(|_| "9router-default-secret-change-me".to_string());
+    let validation = Validation::default();
+    let decoded = decode::<DashboardClaims>(
+        &token,
+        &DecodingKey::from_secret(secret.as_bytes()),
+        &validation,
+    )
+    .map_err(|_| DashboardAuthError::Invalid)?;
+    if !decoded.claims.authenticated {
+        return Err(DashboardAuthError::Invalid);
+    }
+    Ok(decoded.claims)
 }
 
 fn extract_presented_key(headers: &HeaderMap) -> Option<PresentedKey> {

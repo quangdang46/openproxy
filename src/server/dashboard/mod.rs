@@ -1,70 +1,174 @@
-//! Dashboard module - serves static dashboard files from the dashboard/ directory.
+//! Dashboard module.
 
 use axum::{
     body::Body,
-    extract::Path,
-    http::{header, StatusCode},
-    response::IntoResponse,
-    routing::get,
+    extract::State,
+    http::{header::HeaderName, HeaderMap, Method, Request, StatusCode, Uri},
+    response::{IntoResponse, Response},
     Router,
 };
-use std::path::PathBuf;
+use bytes::Bytes;
+use futures_util::TryStreamExt;
+use reqwest::Client;
 
 use crate::server::state::AppState;
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/", get(index_handler))
-        .route("/page.js", get(index_handler))
-        .route("/dashboard/{*path}", get(static_handler))
+    Router::new().fallback(proxy_dashboard_request)
 }
 
-async fn index_handler() -> impl IntoResponse {
-    let index_path = PathBuf::from("dashboard/page.js");
-    match tokio::fs::read_to_string(&index_path).await {
-        Ok(content) => axum::response::Html(content).into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "Dashboard not found").into_response(),
+async fn proxy_dashboard_request(
+    State(_state): State<AppState>,
+    request: Request<Body>,
+) -> Response {
+    let path = request.uri().path().to_string();
+    if is_rust_owned_path(&path) {
+        return (StatusCode::NOT_FOUND, "Not Found").into_response();
     }
-}
 
-async fn static_handler(
-    Path(path): Path<String>,
-) -> impl IntoResponse {
-    let file_path = PathBuf::from("dashboard").join(&path);
+    let Some(target_uri) = build_target_uri(request.uri()) else {
+        return (
+            StatusCode::BAD_GATEWAY,
+            "Dashboard sidecar target URL is invalid.",
+        )
+            .into_response();
+    };
 
-    if file_path.exists() && file_path.is_file() {
-        match tokio::fs::read(&file_path).await {
-            Ok(content) => {
-                let mime = get_mime_type(&path);
-                axum::response::Response::builder()
-                    .status(StatusCode::OK)
-                    .header(header::CONTENT_TYPE, mime)
-                    .body(Body::from(content))
-                    .unwrap_or_else(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Failed").into_response())
-            }
-            Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Failed to read file").into_response(),
+    let method = request.method().clone();
+    let headers = request.headers().clone();
+    let body_bytes = match axum::body::to_bytes(request.into_body(), usize::MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Failed to read dashboard proxy request body.",
+            )
+                .into_response();
         }
-    } else {
-        (StatusCode::NOT_FOUND, "File not found").into_response()
+    };
+
+    let client = Client::new();
+    let mut upstream = client.request(method.clone(), target_uri);
+    upstream = copy_request_headers(upstream, &headers, &method);
+    if !body_bytes.is_empty() {
+        upstream = upstream.body(body_bytes);
     }
+
+    let response = match upstream.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                format!("Dashboard sidecar request failed: {error}"),
+            )
+                .into_response();
+        }
+    };
+
+    proxy_response(response)
 }
 
-fn get_mime_type(path: &str) -> &'static str {
-    if path.ends_with(".js") {
-        "application/javascript"
-    } else if path.ends_with(".css") {
-        "text/css"
-    } else if path.ends_with(".html") {
-        "text/html"
-    } else if path.ends_with(".json") {
-        "application/json"
-    } else if path.ends_with(".svg") {
-        "image/svg+xml"
-    } else if path.ends_with(".png") {
-        "image/png"
-    } else if path.ends_with(".jpg") || path.ends_with(".jpeg") {
-        "image/jpeg"
-    } else {
-        "text/plain"
+fn is_rust_owned_path(path: &str) -> bool {
+    path == "/api"
+        || path.starts_with("/api/")
+        || path == "/v1"
+        || path.starts_with("/v1/")
+        || path == "/codex"
+        || path.starts_with("/codex/")
+}
+
+fn dashboard_sidecar_origin() -> String {
+    std::env::var("DASHBOARD_SIDECAR_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "http://127.0.0.1:20128".to_string())
+}
+
+fn build_target_uri(uri: &Uri) -> Option<String> {
+    let origin = dashboard_sidecar_origin();
+    let path_and_query = uri
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/");
+    Some(format!("{}{}", origin.trim_end_matches('/'), path_and_query))
+}
+
+fn copy_request_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: &HeaderMap,
+    method: &Method,
+) -> reqwest::RequestBuilder {
+    let hop_headers = connection_header_tokens(headers);
+    for (name, value) in headers {
+        if should_skip_header(name, &hop_headers, method) {
+            continue;
+        }
+        builder = builder.header(name, value);
     }
+    builder
+}
+
+fn should_skip_header(name: &HeaderName, hop_headers: &[String], method: &Method) -> bool {
+    let lower = name.as_str().to_ascii_lowercase();
+    if hop_headers.iter().any(|token| token == &lower) {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailers"
+            | "transfer-encoding"
+            | "upgrade"
+            | "host"
+            | "content-length"
+    ) || (*method == Method::GET && lower == "content-type")
+}
+
+fn proxy_response(response: reqwest::Response) -> Response {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = Body::from_stream(response.bytes_stream().map_ok(|bytes: Bytes| bytes));
+
+    let mut proxied = Response::new(body);
+    *proxied.status_mut() = status;
+    let hop_headers = connection_header_tokens(&headers);
+    for (name, value) in &headers {
+        if hop_headers
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case(name.as_str()))
+        {
+            continue;
+        }
+        if matches!(
+            name.as_str().to_ascii_lowercase().as_str(),
+            "connection"
+                | "keep-alive"
+                | "proxy-authenticate"
+                | "proxy-authorization"
+                | "te"
+                | "trailers"
+                | "transfer-encoding"
+                | "upgrade"
+                | "content-length"
+        ) {
+            continue;
+        }
+        proxied.headers_mut().insert(name, value.clone());
+    }
+    proxied
+}
+
+fn connection_header_tokens(headers: &HeaderMap) -> Vec<String> {
+    headers
+        .get_all("connection")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(|token| token.trim().to_ascii_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect()
 }
