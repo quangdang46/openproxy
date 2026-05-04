@@ -113,12 +113,16 @@ impl KiroExecutor {
         pool: Arc<ClientPool>,
         provider_node: Option<ProviderNode>,
     ) -> Result<Self, KiroExecutorError> {
-        Ok(Self { pool, provider_node })
+        Ok(Self {
+            pool,
+            provider_node,
+        })
     }
 
     pub fn parse_aws_credentials(access_token: &str) -> Result<AwsCredentials, KiroExecutorError> {
-        let credentials: AwsCredentials = serde_json::from_str(access_token)
-            .map_err(|e| KiroExecutorError::InvalidCredentials(format!("JSON parse error: {}", e)))?;
+        let credentials: AwsCredentials = serde_json::from_str(access_token).map_err(|e| {
+            KiroExecutorError::InvalidCredentials(format!("JSON parse error: {}", e))
+        })?;
 
         if credentials.access_key.is_empty() || credentials.secret_key.is_empty() {
             return Err(KiroExecutorError::InvalidCredentials(
@@ -131,7 +135,10 @@ impl KiroExecutor {
 
     pub fn build_url(&self, model: &str, stream: bool) -> String {
         let action = if stream { "stream" } else { "invoke" };
-        format!("{}/{model}/{action}", KIRO_API_ENDPOINT.trim_end_matches('/'))
+        format!(
+            "{}/{model}/{action}",
+            KIRO_API_ENDPOINT.trim_end_matches('/')
+        )
     }
 
     pub async fn execute_request(
@@ -217,7 +224,8 @@ impl KiroExecutor {
         }
 
         let method = "POST";
-        let parsed_url = url::Url::parse(url).map_err(|e| KiroExecutorError::SigningError(e.to_string()))?;
+        let parsed_url =
+            url::Url::parse(url).map_err(|e| KiroExecutorError::SigningError(e.to_string()))?;
         let path = parsed_url.path();
         let query = parsed_url.query().unwrap_or("");
 
@@ -234,16 +242,14 @@ impl KiroExecutor {
         );
 
         let signed_headers_str = "accept;content-type;host;x-amz-date;x-amz-nonce";
-        let credential_scope = format!("{}/{}/{}/{}/aws4_request", date_stamp, region, service, "aws4_request");
+        let credential_scope = format!(
+            "{}/{}/{}/{}/aws4_request",
+            date_stamp, region, service, "aws4_request"
+        );
 
         let canonical_request = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
-            method,
-            path,
-            query,
-            canonical_headers,
-            signed_headers_str,
-            content_hash
+            method, path, query, canonical_headers, signed_headers_str, content_hash
         );
 
         let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
@@ -253,9 +259,9 @@ impl KiroExecutor {
             date_time, credential_scope, canonical_request_hash, canonical_request_hash
         );
 
-        let mut k_date = HmacSha256::new_from_slice(
-            format!("AWS4{}", credentials.secret_key).as_bytes(),
-        ).expect("HMAC key length is valid");
+        let mut k_date =
+            HmacSha256::new_from_slice(format!("AWS4{}", credentials.secret_key).as_bytes())
+                .expect("HMAC key length is valid");
         k_date.update(date_stamp.as_bytes());
         let k_date = k_date.finalize().into_bytes();
 
@@ -263,15 +269,18 @@ impl KiroExecutor {
         k_region.update(region.as_bytes());
         let k_region = k_region.finalize().into_bytes();
 
-        let mut k_service = HmacSha256::new_from_slice(&k_region).expect("HMAC key length is valid");
+        let mut k_service =
+            HmacSha256::new_from_slice(&k_region).expect("HMAC key length is valid");
         k_service.update(service.as_bytes());
         let k_service = k_service.finalize().into_bytes();
 
-        let mut k_signing = HmacSha256::new_from_slice(&k_service).expect("HMAC key length is valid");
+        let mut k_signing =
+            HmacSha256::new_from_slice(&k_service).expect("HMAC key length is valid");
         k_signing.update(b"aws4_request");
         let k_signing = k_signing.finalize().into_bytes();
 
-        let mut signature = HmacSha256::new_from_slice(&k_signing).expect("HMAC key length is valid");
+        let mut signature =
+            HmacSha256::new_from_slice(&k_signing).expect("HMAC key length is valid");
         signature.update(string_to_sign.as_bytes());
         let signature = hex::encode(signature.finalize().into_bytes());
 

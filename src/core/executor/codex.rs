@@ -108,7 +108,10 @@ impl CodexExecutor {
         pool: Arc<ClientPool>,
         provider_node: Option<ProviderNode>,
     ) -> Result<Self, CodexExecutorError> {
-        Ok(Self { pool, provider_node })
+        Ok(Self {
+            pool,
+            provider_node,
+        })
     }
 
     pub fn pool(&self) -> &Arc<ClientPool> {
@@ -133,7 +136,10 @@ impl CodexExecutor {
 
     /// Build the URL for OpenAI Responses API.
     fn build_url(&self, _model: &str) -> String {
-        format!("{}/responses", OPENAI_RESPONSES_API_BASE.trim_end_matches('/'))
+        format!(
+            "{}/responses",
+            OPENAI_RESPONSES_API_BASE.trim_end_matches('/')
+        )
     }
 
     /// Build request headers for OpenAI Responses API.
@@ -147,10 +153,7 @@ impl CodexExecutor {
         );
 
         if stream {
-            headers.insert(
-                "Accept",
-                HeaderValue::from_static("text/event-stream"),
-            );
+            headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
         }
 
         Ok(headers)
@@ -160,7 +163,11 @@ impl CodexExecutor {
     ///
     /// The Responses API uses `input` instead of `messages`.
     /// Input can be a string or an array of content parts.
-    fn transform_request_body(&self, body: &Value, actual_model: &str) -> Result<Value, CodexExecutorError> {
+    fn transform_request_body(
+        &self,
+        body: &Value,
+        actual_model: &str,
+    ) -> Result<Value, CodexExecutorError> {
         // Extract the prompt from the messages array
         let input_text = Self::extract_input_from_body(body)?;
 
@@ -214,7 +221,9 @@ impl CodexExecutor {
         let messages = body
             .get("messages")
             .and_then(Value::as_array)
-            .ok_or_else(|| CodexExecutorError::UnsupportedFormat("Missing messages array".to_string()))?;
+            .ok_or_else(|| {
+                CodexExecutorError::UnsupportedFormat("Missing messages array".to_string())
+            })?;
 
         let mut input_parts = Vec::new();
 
@@ -255,7 +264,9 @@ impl CodexExecutor {
             .api_key
             .as_deref()
             .or(request.credentials.access_token.as_deref())
-            .ok_or_else(|| CodexExecutorError::MissingCredentials("API key required".to_string()))?;
+            .ok_or_else(|| {
+                CodexExecutorError::MissingCredentials("API key required".to_string())
+            })?;
 
         let headers = self.build_headers(api_key, request.stream)?;
         let transformed_body = self.transform_request_body(&request.body, &actual_model)?;
@@ -316,7 +327,10 @@ mod tests {
     #[test]
     fn test_parse_codex_model_with_prefix() {
         assert_eq!(CodexExecutor::parse_codex_model("codex/o4-mini"), "o4-mini");
-        assert_eq!(CodexExecutor::parse_codex_model("codex/o4-mini-high"), "o4-mini-high");
+        assert_eq!(
+            CodexExecutor::parse_codex_model("codex/o4-mini-high"),
+            "o4-mini-high"
+        );
         assert_eq!(CodexExecutor::parse_codex_model("codex/o3"), "o3");
         assert_eq!(CodexExecutor::parse_codex_model("codex/o3-mini"), "o3-mini");
     }
@@ -340,7 +354,9 @@ mod tests {
             "temperature": 0.7
         });
 
-        let result = executor.transform_request_body(&chat_body, "o4-mini").unwrap();
+        let result = executor
+            .transform_request_body(&chat_body, "o4-mini")
+            .unwrap();
 
         assert_eq!(result["model"], "o4-mini");
         assert_eq!(result["input"], "Hello, world!");
@@ -361,7 +377,9 @@ mod tests {
             ]
         });
 
-        let result = executor.transform_request_body(&chat_body, "o4-mini").unwrap();
+        let result = executor
+            .transform_request_body(&chat_body, "o4-mini")
+            .unwrap();
 
         assert_eq!(result["input"], "Hello\nHi there!\nHow are you?");
     }
@@ -378,7 +396,9 @@ mod tests {
             ]
         });
 
-        let result = executor.transform_request_body(&chat_body, "o4-mini").unwrap();
+        let result = executor
+            .transform_request_body(&chat_body, "o4-mini")
+            .unwrap();
 
         assert_eq!(result["input"], "Hello!");
     }

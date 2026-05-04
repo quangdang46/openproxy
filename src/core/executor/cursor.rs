@@ -10,7 +10,8 @@ use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
-const CURSOR_API_ENDPOINT: &str = "https://agentn.api5.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools";
+const CURSOR_API_ENDPOINT: &str =
+    "https://agentn.api5.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools";
 
 // ==================== TYPES ====================
 
@@ -344,8 +345,16 @@ fn parse_tool_id(id: &str) -> (String, Option<String>) {
 /// Encode MCP result
 fn encode_mcp_result(selected_tool: &str, result_content: &str) -> Vec<u8> {
     concat_arrays(&[
-        &encode_field_len(proto_fields::FLD_MCPR_SELECTED_TOOL, proto_fields::WIRE_LEN, selected_tool.as_bytes()),
-        &encode_field_len(proto_fields::FLD_MCPR_RESULT, proto_fields::WIRE_LEN, result_content.as_bytes()),
+        &encode_field_len(
+            proto_fields::FLD_MCPR_SELECTED_TOOL,
+            proto_fields::WIRE_LEN,
+            selected_tool.as_bytes(),
+        ),
+        &encode_field_len(
+            proto_fields::FLD_MCPR_RESULT,
+            proto_fields::WIRE_LEN,
+            result_content.as_bytes(),
+        ),
     ])
 }
 
@@ -444,14 +453,36 @@ fn encode_tool_result(tool_result: &Value) -> Vec<u8> {
     let name_bytes = formatted_name.as_bytes();
 
     concat_arrays(&[
-        &encode_field_len(proto_fields::FLD_TOOL_RESULT_CALL_ID, proto_fields::WIRE_LEN, tc_id.as_bytes()),
-        &encode_field_len(proto_fields::FLD_TOOL_RESULT_NAME, proto_fields::WIRE_LEN, name_bytes),
-        &encode_field_varint(proto_fields::FLD_TOOL_RESULT_INDEX, proto_fields::WIRE_VARINT, tool_index),
-        &encode_field_len(proto_fields::FLD_TOOL_RESULT_RAW_ARGS, proto_fields::WIRE_LEN, raw_args.as_bytes()),
+        &encode_field_len(
+            proto_fields::FLD_TOOL_RESULT_CALL_ID,
+            proto_fields::WIRE_LEN,
+            tc_id.as_bytes(),
+        ),
+        &encode_field_len(
+            proto_fields::FLD_TOOL_RESULT_NAME,
+            proto_fields::WIRE_LEN,
+            name_bytes,
+        ),
+        &encode_field_varint(
+            proto_fields::FLD_TOOL_RESULT_INDEX,
+            proto_fields::WIRE_VARINT,
+            tool_index,
+        ),
+        &encode_field_len(
+            proto_fields::FLD_TOOL_RESULT_RAW_ARGS,
+            proto_fields::WIRE_LEN,
+            raw_args.as_bytes(),
+        ),
         &encode_field_len(
             proto_fields::FLD_TOOL_RESULT_RESULT,
             proto_fields::WIRE_LEN,
-            &encode_client_side_tool_v2_result(&tc_id, mc_id.as_deref(), &selected_tool, result_content, tool_index),
+            &encode_client_side_tool_v2_result(
+                &tc_id,
+                mc_id.as_deref(),
+                &selected_tool,
+                result_content,
+                tool_index,
+            ),
         ),
     ])
 }
@@ -459,11 +490,27 @@ fn encode_tool_result(tool_result: &Value) -> Vec<u8> {
 /// Encode MCP params for tool call
 fn encode_mcp_params_for_call(tool_name: &str, raw_args: &str, server_name: &str) -> Vec<u8> {
     let tool = concat_arrays(&[
-        &encode_field_len(proto_fields::FLD_MCP_TOOL_NAME, proto_fields::WIRE_LEN, tool_name.as_bytes()),
-        &encode_field_len(proto_fields::FLD_MCP_TOOL_PARAMS, proto_fields::WIRE_LEN, raw_args.as_bytes()),
-        &encode_field_len(proto_fields::FLD_MCP_TOOL_SERVER, proto_fields::WIRE_LEN, server_name.as_bytes()),
+        &encode_field_len(
+            proto_fields::FLD_MCP_TOOL_NAME,
+            proto_fields::WIRE_LEN,
+            tool_name.as_bytes(),
+        ),
+        &encode_field_len(
+            proto_fields::FLD_MCP_TOOL_PARAMS,
+            proto_fields::WIRE_LEN,
+            raw_args.as_bytes(),
+        ),
+        &encode_field_len(
+            proto_fields::FLD_MCP_TOOL_SERVER,
+            proto_fields::WIRE_LEN,
+            server_name.as_bytes(),
+        ),
     ]);
-    encode_field_len(proto_fields::FLD_MCP_TOOLS_LIST, proto_fields::WIRE_LEN, &tool)
+    encode_field_len(
+        proto_fields::FLD_MCP_TOOLS_LIST,
+        proto_fields::WIRE_LEN,
+        &tool,
+    )
 }
 
 /// Encode ClientSideToolV2Call
@@ -633,8 +680,16 @@ fn encode_model(model_name: &str) -> Vec<u8> {
 /// Encode cursor setting
 fn encode_cursor_setting() -> Vec<u8> {
     let unknown6 = concat_arrays(&[
-        &encode_field_len(proto_fields::FLD_SETTING6_FIELD_1, proto_fields::WIRE_LEN, &[]),
-        &encode_field_len(proto_fields::FLD_SETTING6_FIELD_2, proto_fields::WIRE_LEN, &[]),
+        &encode_field_len(
+            proto_fields::FLD_SETTING6_FIELD_1,
+            proto_fields::WIRE_LEN,
+            &[],
+        ),
+        &encode_field_len(
+            proto_fields::FLD_SETTING6_FIELD_2,
+            proto_fields::WIRE_LEN,
+            &[],
+        ),
     ]);
 
     concat_arrays(&[
@@ -643,10 +698,26 @@ fn encode_cursor_setting() -> Vec<u8> {
             proto_fields::WIRE_LEN,
             b"cursor\\aisettings",
         ),
-        &encode_field_len(proto_fields::FLD_SETTING_UNKNOWN_3, proto_fields::WIRE_LEN, &[]),
-        &encode_field_len(proto_fields::FLD_SETTING_UNKNOWN_6, proto_fields::WIRE_LEN, &unknown6),
-        &encode_field_varint(proto_fields::FLD_SETTING_UNKNOWN_8, proto_fields::WIRE_VARINT, 1),
-        &encode_field_varint(proto_fields::FLD_SETTING_UNKNOWN_9, proto_fields::WIRE_VARINT, 1),
+        &encode_field_len(
+            proto_fields::FLD_SETTING_UNKNOWN_3,
+            proto_fields::WIRE_LEN,
+            &[],
+        ),
+        &encode_field_len(
+            proto_fields::FLD_SETTING_UNKNOWN_6,
+            proto_fields::WIRE_LEN,
+            &unknown6,
+        ),
+        &encode_field_varint(
+            proto_fields::FLD_SETTING_UNKNOWN_8,
+            proto_fields::WIRE_VARINT,
+            1,
+        ),
+        &encode_field_varint(
+            proto_fields::FLD_SETTING_UNKNOWN_9,
+            proto_fields::WIRE_VARINT,
+            1,
+        ),
     ])
 }
 
@@ -656,9 +727,17 @@ fn encode_metadata() -> Vec<u8> {
     let arch = std::env::consts::ARCH.as_bytes();
 
     concat_arrays(&[
-        &encode_field_len(proto_fields::FLD_META_PLATFORM, proto_fields::WIRE_LEN, platform),
+        &encode_field_len(
+            proto_fields::FLD_META_PLATFORM,
+            proto_fields::WIRE_LEN,
+            platform,
+        ),
         &encode_field_len(proto_fields::FLD_META_ARCH, proto_fields::WIRE_LEN, arch),
-        &encode_field_len(proto_fields::FLD_META_VERSION, proto_fields::WIRE_LEN, b"v20.0.0"),
+        &encode_field_len(
+            proto_fields::FLD_META_VERSION,
+            proto_fields::WIRE_LEN,
+            b"v20.0.0",
+        ),
         &encode_field_len(proto_fields::FLD_META_CWD, proto_fields::WIRE_LEN, b"/"),
         &encode_field_len(
             proto_fields::FLD_META_TIMESTAMP,
@@ -671,8 +750,16 @@ fn encode_metadata() -> Vec<u8> {
 /// Encode message ID
 fn encode_message_id(message_id: &str, role: u32) -> Vec<u8> {
     concat_arrays(&[
-        &encode_field_len(proto_fields::FLD_MSGID_ID, proto_fields::WIRE_LEN, message_id.as_bytes()),
-        &encode_field_varint(proto_fields::FLD_MSGID_ROLE, proto_fields::WIRE_VARINT, role),
+        &encode_field_len(
+            proto_fields::FLD_MSGID_ID,
+            proto_fields::WIRE_LEN,
+            message_id.as_bytes(),
+        ),
+        &encode_field_varint(
+            proto_fields::FLD_MSGID_ROLE,
+            proto_fields::WIRE_VARINT,
+            role,
+        ),
     ])
 }
 
@@ -748,7 +835,10 @@ fn build_chat_request(
         let tool_results = msg.get("tool_results").and_then(|v| v.as_array());
 
         let has_tc = tool_calls.as_ref().map(|a| !a.is_empty()).unwrap_or(false);
-        let has_tr = tool_results.as_ref().map(|a| !a.is_empty()).unwrap_or(false);
+        let has_tr = tool_results
+            .as_ref()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false);
 
         if role == "assistant" && has_tc && has_tr {
             // Keep assistant tool call without results
@@ -789,7 +879,8 @@ fn build_chat_request(
         let content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
         let tool_results = msg
             .get("tool_results")
-            .and_then(|v| v.as_array()).cloned()
+            .and_then(|v| v.as_array())
+            .cloned()
             .unwrap_or_default();
 
         formatted_messages.push((content.to_string(), role, is_last, tool_results));
@@ -811,31 +902,58 @@ fn build_chat_request(
         result.extend_from_slice(&encode_field_len(
             proto_fields::FLD_MESSAGES,
             proto_fields::WIRE_LEN,
-            &encode_message(content, *role, &message_ids[i].0, *is_last, has_tools, tool_results),
+            &encode_message(
+                content,
+                *role,
+                &message_ids[i].0,
+                *is_last,
+                has_tools,
+                tool_results,
+            ),
         ));
     }
 
     // Static fields
-    result.extend_from_slice(&encode_field_varint(proto_fields::FLD_UNKNOWN_2, proto_fields::WIRE_VARINT, 1));
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_UNKNOWN_2,
+        proto_fields::WIRE_VARINT,
+        1,
+    ));
     result.extend_from_slice(&encode_field_len(
         proto_fields::FLD_INSTRUCTION,
         proto_fields::WIRE_LEN,
         &encode_instruction(""),
     ));
-    result.extend_from_slice(&encode_field_varint(proto_fields::FLD_UNKNOWN_4, proto_fields::WIRE_VARINT, 1));
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_UNKNOWN_4,
+        proto_fields::WIRE_VARINT,
+        1,
+    ));
     result.extend_from_slice(&encode_field_len(
         proto_fields::FLD_MODEL,
         proto_fields::WIRE_LEN,
         &encode_model(model_name),
     ));
-    result.extend_from_slice(&encode_field_len(proto_fields::FLD_WEB_TOOL, proto_fields::WIRE_LEN, b""));
-    result.extend_from_slice(&encode_field_varint(proto_fields::FLD_UNKNOWN_13, proto_fields::WIRE_VARINT, 1));
+    result.extend_from_slice(&encode_field_len(
+        proto_fields::FLD_WEB_TOOL,
+        proto_fields::WIRE_LEN,
+        b"",
+    ));
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_UNKNOWN_13,
+        proto_fields::WIRE_VARINT,
+        1,
+    ));
     result.extend_from_slice(&encode_field_len(
         proto_fields::FLD_CURSOR_SETTING,
         proto_fields::WIRE_LEN,
         &encode_cursor_setting(),
     ));
-    result.extend_from_slice(&encode_field_varint(proto_fields::FLD_UNKNOWN_19, proto_fields::WIRE_VARINT, 1));
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_UNKNOWN_19,
+        proto_fields::WIRE_VARINT,
+        1,
+    ));
     result.extend_from_slice(&encode_field_len(
         proto_fields::FLD_CONVERSATION_ID,
         proto_fields::WIRE_LEN,
@@ -880,8 +998,16 @@ fn build_chat_request(
     }
 
     // Mode fields
-    result.extend_from_slice(&encode_field_varint(proto_fields::FLD_LARGE_CONTEXT, proto_fields::WIRE_VARINT, 0));
-    result.extend_from_slice(&encode_field_varint(proto_fields::FLD_UNKNOWN_38, proto_fields::WIRE_VARINT, 0));
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_LARGE_CONTEXT,
+        proto_fields::WIRE_VARINT,
+        0,
+    ));
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_UNKNOWN_38,
+        proto_fields::WIRE_VARINT,
+        0,
+    ));
     result.extend_from_slice(&encode_field_varint(
         proto_fields::FLD_UNIFIED_MODE,
         proto_fields::WIRE_VARINT,
@@ -891,7 +1017,11 @@ fn build_chat_request(
             proto_fields::UNIFIED_MODE_CHAT
         },
     ));
-    result.extend_from_slice(&encode_field_len(proto_fields::FLD_UNKNOWN_47, proto_fields::WIRE_LEN, b""));
+    result.extend_from_slice(&encode_field_len(
+        proto_fields::FLD_UNKNOWN_47,
+        proto_fields::WIRE_LEN,
+        b"",
+    ));
     result.extend_from_slice(&encode_field_varint(
         proto_fields::FLD_SHOULD_DISABLE_TOOLS,
         proto_fields::WIRE_VARINT,
@@ -902,8 +1032,16 @@ fn build_chat_request(
         proto_fields::WIRE_VARINT,
         thinking_level,
     ));
-    result.extend_from_slice(&encode_field_varint(proto_fields::FLD_UNKNOWN_51, proto_fields::WIRE_VARINT, 0));
-    result.extend_from_slice(&encode_field_varint(proto_fields::FLD_UNKNOWN_53, proto_fields::WIRE_VARINT, 1));
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_UNKNOWN_51,
+        proto_fields::WIRE_VARINT,
+        0,
+    ));
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_UNKNOWN_53,
+        proto_fields::WIRE_VARINT,
+        1,
+    ));
     result.extend_from_slice(&encode_field_len(
         proto_fields::FLD_UNIFIED_MODE_NAME,
         proto_fields::WIRE_LEN,
@@ -936,17 +1074,19 @@ fn generate_cursor_checksum(machine_id: &str) -> String {
         .as_micros() as u64;
 
     // Create byte array from timestamp (6 bytes, big-endian)
-    let mut byte_array = [((timestamp >> 40) & 0xFF) as u8,
+    let mut byte_array = [
+        ((timestamp >> 40) & 0xFF) as u8,
         ((timestamp >> 32) & 0xFF) as u8,
         ((timestamp >> 24) & 0xFF) as u8,
         ((timestamp >> 16) & 0xFF) as u8,
         ((timestamp >> 8) & 0xFF) as u8,
-        (timestamp & 0xFF) as u8];
+        (timestamp & 0xFF) as u8,
+    ];
 
     // Jyh cipher obfuscation
     let mut t: u8 = 165;
     for i in 0..byte_array.len() {
-        byte_array[i] = (byte_array[i] ^ t).wrapping_add(i as u8  ) ;
+        byte_array[i] = (byte_array[i] ^ t).wrapping_add(i as u8);
         t = byte_array[i];
     }
 
@@ -1032,24 +1172,55 @@ fn build_cursor_headers(access_token: &str) -> Result<HeaderMap, CursorExecutorE
 
     let mut headers = HeaderMap::new();
 
-    headers.insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", clean_token)).map_err(CursorExecutorError::InvalidHeader)?);
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", clean_token))
+            .map_err(CursorExecutorError::InvalidHeader)?,
+    );
     headers.insert("connect-accept-encoding", HeaderValue::from_static("gzip"));
     headers.insert("connect-protocol-version", HeaderValue::from_static("1"));
-    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/connect+proto"));
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/connect+proto"),
+    );
     headers.insert("user-agent", HeaderValue::from_static("connect-es/1.6.1"));
-    headers.insert("x-amzn-trace-id", HeaderValue::from_str(&format!("Root={}", uuid::Uuid::new_v4())).map_err(CursorExecutorError::InvalidHeader)?);
-    headers.insert("x-client-key", HeaderValue::from_str(&client_key).map_err(CursorExecutorError::InvalidHeader)?);
-    headers.insert("x-cursor-checksum", HeaderValue::from_str(&checksum).map_err(CursorExecutorError::InvalidHeader)?);
+    headers.insert(
+        "x-amzn-trace-id",
+        HeaderValue::from_str(&format!("Root={}", uuid::Uuid::new_v4()))
+            .map_err(CursorExecutorError::InvalidHeader)?,
+    );
+    headers.insert(
+        "x-client-key",
+        HeaderValue::from_str(&client_key).map_err(CursorExecutorError::InvalidHeader)?,
+    );
+    headers.insert(
+        "x-cursor-checksum",
+        HeaderValue::from_str(&checksum).map_err(CursorExecutorError::InvalidHeader)?,
+    );
     headers.insert("x-cursor-client-version", HeaderValue::from_static("3.1.0"));
     headers.insert("x-cursor-client-type", HeaderValue::from_static("ide"));
     headers.insert("x-cursor-client-os", HeaderValue::from_static(os));
     headers.insert("x-cursor-client-arch", HeaderValue::from_static(arch));
-    headers.insert("x-cursor-client-device-type", HeaderValue::from_static("desktop"));
-    headers.insert("x-cursor-config-version", HeaderValue::from_str(&uuid::Uuid::new_v4().to_string()).map_err(CursorExecutorError::InvalidHeader)?);
+    headers.insert(
+        "x-cursor-client-device-type",
+        HeaderValue::from_static("desktop"),
+    );
+    headers.insert(
+        "x-cursor-config-version",
+        HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
+            .map_err(CursorExecutorError::InvalidHeader)?,
+    );
     headers.insert("x-cursor-timezone", HeaderValue::from_static("UTC"));
     headers.insert("x-ghost-mode", HeaderValue::from_static("true"));
-    headers.insert("x-request-id", HeaderValue::from_str(&uuid::Uuid::new_v4().to_string()).map_err(CursorExecutorError::InvalidHeader)?);
-    headers.insert("x-session-id", HeaderValue::from_str(&session_id).map_err(CursorExecutorError::InvalidHeader)?);
+    headers.insert(
+        "x-request-id",
+        HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
+            .map_err(CursorExecutorError::InvalidHeader)?,
+    );
+    headers.insert(
+        "x-session-id",
+        HeaderValue::from_str(&session_id).map_err(CursorExecutorError::InvalidHeader)?,
+    );
 
     Ok(headers)
 }
@@ -1075,7 +1246,10 @@ fn decode_varint(buffer: &[u8], offset: &mut usize) -> Result<u32, CursorExecuto
 }
 
 /// Decode a protobuf field
-fn decode_field(buffer: &[u8], offset: &mut usize) -> Result<Option<(u32, u8, Vec<u8>)>, CursorExecutorError> {
+fn decode_field(
+    buffer: &[u8],
+    offset: &mut usize,
+) -> Result<Option<(u32, u8, Vec<u8>)>, CursorExecutorError> {
     if *offset >= buffer.len() {
         return Ok(None);
     }
@@ -1092,24 +1266,33 @@ fn decode_field(buffer: &[u8], offset: &mut usize) -> Result<Option<(u32, u8, Ve
         proto_fields::WIRE_LEN => {
             let len = decode_varint(buffer, offset)? as usize;
             if *offset + len > buffer.len() {
-                return Err(CursorExecutorError::ProtobufDecode("Unexpected end of buffer".to_string()));
+                return Err(CursorExecutorError::ProtobufDecode(
+                    "Unexpected end of buffer".to_string(),
+                ));
             }
             buffer[*offset..*offset + len].to_vec()
         }
         proto_fields::WIRE_FIXED64 => {
             if *offset + 8 > buffer.len() {
-                return Err(CursorExecutorError::ProtobufDecode("Unexpected end of buffer".to_string()));
+                return Err(CursorExecutorError::ProtobufDecode(
+                    "Unexpected end of buffer".to_string(),
+                ));
             }
             buffer[*offset..*offset + 8].to_vec()
         }
         proto_fields::WIRE_FIXED32 => {
             if *offset + 4 > buffer.len() {
-                return Err(CursorExecutorError::ProtobufDecode("Unexpected end of buffer".to_string()));
+                return Err(CursorExecutorError::ProtobufDecode(
+                    "Unexpected end of buffer".to_string(),
+                ));
             }
             buffer[*offset..*offset + 4].to_vec()
         }
         _ => {
-            return Err(CursorExecutorError::ProtobufDecode(format!("Unknown wire type: {}", wire_type)));
+            return Err(CursorExecutorError::ProtobufDecode(format!(
+                "Unknown wire type: {}",
+                wire_type
+            )));
         }
     };
 
@@ -1117,7 +1300,9 @@ fn decode_field(buffer: &[u8], offset: &mut usize) -> Result<Option<(u32, u8, Ve
 }
 
 /// Decode a message into a map of field_num -> list of values
-fn decode_message(data: &[u8]) -> Result<std::collections::HashMap<u32, Vec<Vec<u8>>>, CursorExecutorError> {
+fn decode_message(
+    data: &[u8],
+) -> Result<std::collections::HashMap<u32, Vec<Vec<u8>>>, CursorExecutorError> {
     let mut fields: std::collections::HashMap<u32, Vec<Vec<u8>>> = std::collections::HashMap::new();
     let mut offset = 0;
 
@@ -1158,7 +1343,10 @@ impl CursorExecutor {
         pool: Arc<ClientPool>,
         provider_node: Option<ProviderNode>,
     ) -> Result<Self, CursorExecutorError> {
-        Ok(Self { pool, provider_node })
+        Ok(Self {
+            pool,
+            provider_node,
+        })
     }
 
     pub fn pool(&self) -> &Arc<ClientPool> {
@@ -1184,7 +1372,9 @@ impl CursorExecutor {
         let messages = body
             .get("messages")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| CursorExecutorError::UnsupportedFormat("Missing messages array".to_string()))?
+            .ok_or_else(|| {
+                CursorExecutorError::UnsupportedFormat("Missing messages array".to_string())
+            })?
             .clone();
         Ok(messages)
     }
@@ -1205,12 +1395,22 @@ impl CursorExecutor {
     }
 
     /// Transform the request body to Cursor protobuf format
-    fn transform_request_body(&self, body: &Value, actual_model: &str) -> Result<Vec<u8>, CursorExecutorError> {
+    fn transform_request_body(
+        &self,
+        body: &Value,
+        actual_model: &str,
+    ) -> Result<Vec<u8>, CursorExecutorError> {
         let messages = Self::extract_messages(body)?;
         let tools = Self::extract_tools(body);
         let reasoning_effort = Self::extract_reasoning_effort(body);
 
-        let protobuf = build_chat_request(&messages, actual_model, &tools, reasoning_effort.as_deref(), false);
+        let protobuf = build_chat_request(
+            &messages,
+            actual_model,
+            &tools,
+            reasoning_effort.as_deref(),
+            false,
+        );
         let framed = wrap_connect_rpc_frame(&protobuf, false);
 
         Ok(framed)
@@ -1223,11 +1423,9 @@ impl CursorExecutor {
         let actual_model = Self::parse_cursor_model(&request.model);
 
         // Get access token from credentials
-        let access_token = request
-            .credentials
-            .access_token
-            .as_deref()
-            .ok_or_else(|| CursorExecutorError::MissingCredentials("Cursor access token required".to_string()))?;
+        let access_token = request.credentials.access_token.as_deref().ok_or_else(|| {
+            CursorExecutorError::MissingCredentials("Cursor access token required".to_string())
+        })?;
 
         let headers = build_cursor_headers(access_token)?;
         let body_bytes = self.transform_request_body(&request.body, &actual_model)?;
@@ -1253,7 +1451,9 @@ impl CursorExecutor {
 // ==================== DECODING HELPERS ====================
 
 /// Extract text and tool call from a response payload
-fn extract_from_response(payload: &[u8]) -> Result<Option<(String, Option<Value>)>, CursorExecutorError> {
+fn extract_from_response(
+    payload: &[u8],
+) -> Result<Option<(String, Option<Value>)>, CursorExecutorError> {
     let fields = decode_message(payload)?;
 
     // Field 1: ClientSideToolV2Call (tool call)
@@ -1266,7 +1466,12 @@ fn extract_from_response(payload: &[u8]) -> Result<Option<(String, Option<Value>
             if let Some(ids) = tool_call_fields.get(&proto_fields::FLD_TOOL_ID) {
                 if let Some(id_data) = ids.first() {
                     if let Ok(id_str) = std::str::from_utf8(id_data) {
-                        tool_call_json.insert("id".to_string(), serde_json::Value::String(id_str.split('\n').next().unwrap_or("").to_string()));
+                        tool_call_json.insert(
+                            "id".to_string(),
+                            serde_json::Value::String(
+                                id_str.split('\n').next().unwrap_or("").to_string(),
+                            ),
+                        );
                     }
                 }
             }
@@ -1275,7 +1480,10 @@ fn extract_from_response(payload: &[u8]) -> Result<Option<(String, Option<Value>
             if let Some(names) = tool_call_fields.get(&proto_fields::FLD_TOOL_NAME) {
                 if let Some(name_data) = names.first() {
                     if let Ok(name_str) = std::str::from_utf8(name_data) {
-                        tool_call_json.insert("name".to_string(), serde_json::Value::String(name_str.to_string()));
+                        tool_call_json.insert(
+                            "name".to_string(),
+                            serde_json::Value::String(name_str.to_string()),
+                        );
                     }
                 }
             }
@@ -1292,20 +1500,34 @@ fn extract_from_response(payload: &[u8]) -> Result<Option<(String, Option<Value>
             if let Some(params) = tool_call_fields.get(&proto_fields::FLD_TOOL_MCP_PARAMS) {
                 if let Some(params_data) = params.first() {
                     if let Ok(mcp_fields) = decode_message(params_data) {
-                        if let Some(tools_list) = mcp_fields.get(&proto_fields::FLD_MCP_TOOLS_LIST) {
+                        if let Some(tools_list) = mcp_fields.get(&proto_fields::FLD_MCP_TOOLS_LIST)
+                        {
                             if let Some(tool_data) = tools_list.first() {
                                 if let Ok(tool_fields) = decode_message(tool_data) {
-                                    if let Some(nested_names) = tool_fields.get(&proto_fields::FLD_MCP_NESTED_NAME) {
+                                    if let Some(nested_names) =
+                                        tool_fields.get(&proto_fields::FLD_MCP_NESTED_NAME)
+                                    {
                                         if let Some(name_data) = nested_names.first() {
                                             if let Ok(name_str) = std::str::from_utf8(name_data) {
-                                                tool_call_json.insert("name".to_string(), serde_json::Value::String(name_str.to_string()));
+                                                tool_call_json.insert(
+                                                    "name".to_string(),
+                                                    serde_json::Value::String(name_str.to_string()),
+                                                );
                                             }
                                         }
                                     }
-                                    if let Some(nested_params) = tool_fields.get(&proto_fields::FLD_MCP_NESTED_PARAMS) {
+                                    if let Some(nested_params) =
+                                        tool_fields.get(&proto_fields::FLD_MCP_NESTED_PARAMS)
+                                    {
                                         if let Some(params_data) = nested_params.first() {
-                                            if let Ok(params_str) = std::str::from_utf8(params_data) {
-                                                tool_call_json.insert("arguments".to_string(), serde_json::Value::String(params_str.to_string()));
+                                            if let Ok(params_str) = std::str::from_utf8(params_data)
+                                            {
+                                                tool_call_json.insert(
+                                                    "arguments".to_string(),
+                                                    serde_json::Value::String(
+                                                        params_str.to_string(),
+                                                    ),
+                                                );
                                             }
                                         }
                                     }
@@ -1321,7 +1543,10 @@ fn extract_from_response(payload: &[u8]) -> Result<Option<(String, Option<Value>
                 if let Some(args_data) = args_list.first() {
                     if let Ok(args_str) = std::str::from_utf8(args_data) {
                         if !tool_call_json.contains_key("arguments") {
-                            tool_call_json.insert("arguments".to_string(), serde_json::Value::String(args_str.to_string()));
+                            tool_call_json.insert(
+                                "arguments".to_string(),
+                                serde_json::Value::String(args_str.to_string()),
+                            );
                         }
                     }
                 }
@@ -1382,7 +1607,12 @@ pub fn parse_cursor_sse_events(data: &[u8]) -> Result<Vec<SseEvent>, CursorExecu
                         events.push(SseEvent::ToolCall(tc));
                     }
                 }
-                offset += 5 + u32::from_be_bytes([data[offset + 1], data[offset + 2], data[offset + 3], data[offset + 4]]) as usize;
+                offset += 5 + u32::from_be_bytes([
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                    data[offset + 4],
+                ]) as usize;
             }
             None => {
                 // Try regular SSE parsing
@@ -1446,7 +1676,10 @@ mod tests {
 
         assert_eq!(framed.len(), 5 + payload.len());
         assert_eq!(framed[0], 0x00); // flags
-        assert_eq!(u32::from_be_bytes([framed[1], framed[2], framed[3], framed[4]]), payload.len() as u32);
+        assert_eq!(
+            u32::from_be_bytes([framed[1], framed[2], framed[3], framed[4]]),
+            payload.len() as u32
+        );
         assert_eq!(&framed[5..], payload);
     }
 
@@ -1488,15 +1721,30 @@ mod tests {
 
     #[test]
     fn test_parse_cursor_model_with_prefix() {
-        assert_eq!(CursorExecutor::parse_cursor_model("cursor/claude-4.6-opus-max"), "claude-4.6-opus-max");
-        assert_eq!(CursorExecutor::parse_cursor_model("cursor/gpt-5.3-codex"), "gpt-5.3-codex");
-        assert_eq!(CursorExecutor::parse_cursor_model("cursor/kimi-k2.5"), "kimi-k2.5");
+        assert_eq!(
+            CursorExecutor::parse_cursor_model("cursor/claude-4.6-opus-max"),
+            "claude-4.6-opus-max"
+        );
+        assert_eq!(
+            CursorExecutor::parse_cursor_model("cursor/gpt-5.3-codex"),
+            "gpt-5.3-codex"
+        );
+        assert_eq!(
+            CursorExecutor::parse_cursor_model("cursor/kimi-k2.5"),
+            "kimi-k2.5"
+        );
     }
 
     #[test]
     fn test_parse_cursor_model_without_prefix() {
-        assert_eq!(CursorExecutor::parse_cursor_model("claude-4.6-opus-max"), "claude-4.6-opus-max");
-        assert_eq!(CursorExecutor::parse_cursor_model("gpt-5.3-codex"), "gpt-5.3-codex");
+        assert_eq!(
+            CursorExecutor::parse_cursor_model("claude-4.6-opus-max"),
+            "claude-4.6-opus-max"
+        );
+        assert_eq!(
+            CursorExecutor::parse_cursor_model("gpt-5.3-codex"),
+            "gpt-5.3-codex"
+        );
     }
 
     #[test]
@@ -1649,14 +1897,23 @@ mod tests {
         let body_with = serde_json::json!({"reasoning_effort": "high"});
         let body_without = serde_json::json!({});
 
-        assert_eq!(CursorExecutor::extract_reasoning_effort(&body_with), Some("high".to_string()));
-        assert_eq!(CursorExecutor::extract_reasoning_effort(&body_without), None);
+        assert_eq!(
+            CursorExecutor::extract_reasoning_effort(&body_with),
+            Some("high".to_string())
+        );
+        assert_eq!(
+            CursorExecutor::extract_reasoning_effort(&body_without),
+            None
+        );
     }
 
     #[test]
     fn test_cursor_executor_error_from_io() {
         let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
         let executor_err: CursorExecutorError = io_err.into();
-        assert!(matches!(executor_err, CursorExecutorError::HyperClientInit(_)));
+        assert!(matches!(
+            executor_err,
+            CursorExecutorError::HyperClientInit(_)
+        ));
     }
 }

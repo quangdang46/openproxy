@@ -33,6 +33,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::anthropic("https://api.anthropic.com/v1/messages"),
         ),
         (
+            "claude",
+            ProviderConfig::anthropic("https://api.anthropic.com/v1/messages"),
+        ),
+        (
             "gemini",
             ProviderConfig::gemini("https://generativelanguage.googleapis.com/v1beta/models"),
         ),

@@ -143,10 +143,7 @@ impl OllamaExecutor {
     }
 
     fn build_url(&self, _model: &str, stream: bool) -> String {
-        format!(
-            "http://localhost:11434/api/chat?stream={}",
-            stream
-        )
+        format!("http://localhost:11434/api/chat?stream={}", stream)
     }
 
     fn build_headers(&self) -> Result<HeaderMap, OllamaExecutorError> {
@@ -159,7 +156,10 @@ impl OllamaExecutor {
     fn transform_request(&self, body: &Value) -> Result<Value, OllamaExecutorError> {
         let mut transformed = body.clone();
 
-        if let Some(messages) = transformed.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        if let Some(messages) = transformed
+            .get_mut("messages")
+            .and_then(|m| m.as_array_mut())
+        {
             for message in messages {
                 if let Some(content) = message.get_mut("content").and_then(|c| c.as_str()) {
                     if let Some(extracted) = self.extract_images_from_content(content) {

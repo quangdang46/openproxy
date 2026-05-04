@@ -159,26 +159,31 @@ impl VertexExecutor {
         pool: Arc<ClientPool>,
         provider_node: Option<ProviderNode>,
     ) -> Result<Self, VertexExecutorError> {
-        Ok(Self { pool, provider_node })
+        Ok(Self {
+            pool,
+            provider_node,
+        })
     }
 
     pub fn pool(&self) -> &Arc<ClientPool> {
         &self.pool
     }
 
-    fn parse_service_account_json(json_str: &str) -> Result<ServiceAccountJson, VertexExecutorError> {
-        let parsed: ServiceAccountJson =
-            serde_json::from_str(json_str).map_err(|e| {
-                VertexExecutorError::MissingServiceAccountJson(format!(
-                    "Failed to parse service account JSON: {}",
-                    e
-                ))
-            })?;
+    fn parse_service_account_json(
+        json_str: &str,
+    ) -> Result<ServiceAccountJson, VertexExecutorError> {
+        let parsed: ServiceAccountJson = serde_json::from_str(json_str).map_err(|e| {
+            VertexExecutorError::MissingServiceAccountJson(format!(
+                "Failed to parse service account JSON: {}",
+                e
+            ))
+        })?;
 
         if parsed.account_type != "service_account" {
-            return Err(VertexExecutorError::MissingServiceAccountJson(
-                format!("Expected type 'service_account', got '{}'", parsed.account_type),
-            ));
+            return Err(VertexExecutorError::MissingServiceAccountJson(format!(
+                "Expected type 'service_account', got '{}'",
+                parsed.account_type
+            )));
         }
 
         if parsed.client_email.is_empty() {
@@ -242,7 +247,9 @@ impl VertexExecutor {
             .form(&params)
             .send()
             .await
-            .map_err(|e| VertexExecutorError::RequestFailed(format!("Token exchange request failed: {}", e)))?;
+            .map_err(|e| {
+                VertexExecutorError::RequestFailed(format!("Token exchange request failed: {}", e))
+            })?;
 
         #[derive(Deserialize)]
         struct TokenResponse {
@@ -250,10 +257,9 @@ impl VertexExecutor {
             expires_in: u64,
         }
 
-        let token_resp: TokenResponse = response
-            .json()
-            .await
-            .map_err(|e| VertexExecutorError::InvalidToken(format!("Failed to parse token response: {}", e)))?;
+        let token_resp: TokenResponse = response.json().await.map_err(|e| {
+            VertexExecutorError::InvalidToken(format!("Failed to parse token response: {}", e))
+        })?;
 
         let expires_at =
             time::OffsetDateTime::now_utc() + Duration::seconds(token_resp.expires_in as i64);
@@ -279,7 +285,12 @@ impl VertexExecutor {
             format!("models/{}", model_stripped)
         };
 
-        (VERTEX_DEFAULT_LOCATION.to_string(), "".to_string(), actual_model, is_partner)
+        (
+            VERTEX_DEFAULT_LOCATION.to_string(),
+            "".to_string(),
+            actual_model,
+            is_partner,
+        )
     }
 
     fn build_vertex_request_body(
@@ -297,7 +308,9 @@ impl VertexExecutor {
 
         let mut generation_config = Value::Null;
         if let Some(temp) = body.get("temperature") {
-            let max_tokens = body.get("maxOutputTokens").or_else(|| body.get("max_tokens"));
+            let max_tokens = body
+                .get("maxOutputTokens")
+                .or_else(|| body.get("max_tokens"));
             let top_p = body.get("topP").or_else(|| body.get("top_p"));
 
             generation_config = json!({
@@ -350,15 +363,11 @@ impl VertexExecutor {
         &self,
         request: VertexExecutionRequest,
     ) -> Result<VertexExecutorResponse, VertexExecutorError> {
-        let credentials_json = request
-            .credentials
-            .access_token
-            .as_deref()
-            .ok_or_else(|| {
-                VertexExecutorError::MissingCredentials(
-                    "access_token (service account JSON) is required for Vertex AI".to_string(),
-                )
-            })?;
+        let credentials_json = request.credentials.access_token.as_deref().ok_or_else(|| {
+            VertexExecutorError::MissingCredentials(
+                "access_token (service account JSON) is required for Vertex AI".to_string(),
+            )
+        })?;
 
         let service_account = Self::parse_service_account_json(credentials_json)?;
         let jwt = Self::create_rs256_jwt(&service_account)?;
@@ -367,7 +376,8 @@ impl VertexExecutor {
         let (location, project_id, _, is_partner) = Self::parse_vertex_model(&request.model);
         let url = Self::build_vertex_url(&request.model, &project_id, &location, is_partner);
 
-        let transformed_body = Self::build_vertex_request_body(&request.body, &request.model, request.stream)?;
+        let transformed_body =
+            Self::build_vertex_request_body(&request.body, &request.model, request.stream)?;
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));

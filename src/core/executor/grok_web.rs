@@ -314,10 +314,9 @@ impl PerplexityWebExecutor {
         headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
 
         if let Some(cookie) = &credentials.access_token {
-            let cookie_value =
-                HeaderValue::from_str(cookie).map_err(|_| {
-                    PerplexityWebExecutorError::CookieParse("Invalid cookie".to_string())
-                })?;
+            let cookie_value = HeaderValue::from_str(cookie).map_err(|_| {
+                PerplexityWebExecutorError::CookieParse("Invalid cookie".to_string())
+            })?;
             headers.insert(COOKIE, cookie_value);
         }
 

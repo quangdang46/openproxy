@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
 use serde_json::Value;
-use once_cell::sync::Lazy;
 
 use crate::core::proxy::ProxyTarget;
 use crate::types::ProviderConnection;
@@ -127,7 +127,12 @@ impl ApiKeyExecutor {
         }
     }
 
-    pub fn with_pool(provider: &str, base_url: &str, api_key_header: &str, pool: Arc<ClientPool>) -> Self {
+    pub fn with_pool(
+        provider: &str,
+        base_url: &str,
+        api_key_header: &str,
+        pool: Arc<ClientPool>,
+    ) -> Self {
         Self {
             provider: provider.to_string(),
             base_url: base_url.to_string(),
@@ -187,10 +192,18 @@ impl ApiKeyExecutor {
             .ok_or_else(|| ApiKeyExecutorError::MissingCredentials(self.provider.clone()))?;
 
         let header_name = reqwest::header::HeaderName::from_bytes(self.api_key_header.as_bytes())
-            .map_err(|_| ApiKeyExecutorError::InvalidHeader(format!("invalid header name: {}", self.api_key_header)))?;
+            .map_err(|_| {
+            ApiKeyExecutorError::InvalidHeader(format!(
+                "invalid header name: {}",
+                self.api_key_header
+            ))
+        })?;
 
         if self.api_key_header == "Authorization" {
-            headers.insert(header_name, HeaderValue::from_str(&format!("Bearer {token}"))?);
+            headers.insert(
+                header_name,
+                HeaderValue::from_str(&format!("Bearer {token}"))?,
+            );
         } else {
             headers.insert(header_name, HeaderValue::from_str(token)?);
         }
@@ -207,51 +220,127 @@ impl ApiKeyExecutor {
     }
 }
 
-static API_KEY_PROVIDERS: Lazy<BTreeMap<&'static str, (&'static str, &'static str)>> = Lazy::new(|| {
-    BTreeMap::from([
-        ("openai", ("https://api.openai.com/v1", "Authorization")),
-        ("anthropic", ("https://api.anthropic.com/v1", "x-api-key")),
-        ("deepseek", ("https://api.deepseek.com/v1", "Authorization")),
-        ("mistral", ("https://api.mistral.ai/v1", "Authorization")),
-        ("cohere", ("https://api.cohere.ai/v1", "Authorization")),
-        ("fireworks", ("https://api.fireworks.ai/inference/v1", "Authorization")),
-        ("together", ("https://api.together.xyz/v1", "Authorization")),
-        ("perplexity", ("https://api.perplexity.ai", "Authorization")),
-        ("nebius", ("https://api.studio.nebius.ai/v1", "Authorization")),
-        ("xai", ("https://api.x.ai/v1", "Authorization")),
-        ("ai21", ("https://api.ai21.com/v1", "Authorization")),
-        ("stability-ai", ("https://api.stability.ai/v1", "Authorization")),
-        ("replicate", ("https://api.replicate.com/v1", "Authorization")),
-        ("lepton", ("https://api.lepton.ai/v1", "Authorization")),
-        ("novita", ("https://api.novita.ai/v1", "Authorization")),
-        ("deepinfra", ("https://api.deepinfra.com/v1", "Authorization")),
-        ("focus", ("https://api.focusforce.io/v1", "Authorization")),
-        ("navigators", ("https://api.navigators.ai/v1", "Authorization")),
-        ("polyscale", ("https://api.polyscale.ai/v1", "Authorization")),
-        ("rampt", ("https://api.rampt.ai/v1", "Authorization")),
-        ("skip", ("https://api.skip.cloud/v1", "Authorization")),
-        ("unbound", ("https://api.unbound.ai/v1", "Authorization")),
-        ("workers", ("https://api.cloudflare.ai/v1", "Authorization")),
-        ("zerogpt", ("https://api.zerogpt.com/v1", "Authorization")),
-        ("groq", ("https://api.groq.com/openai/v1", "Authorization")),
-        ("cerebras", ("https://api.cerebras.ai/v1", "Authorization")),
-        ("siliconflow", ("https://api.siliconflow.cn/v1", "Authorization")),
-        ("hyperbolic", ("https://api.hyperbolic.xyz/v1", "Authorization")),
-        ("chutes", ("https://llm.chutes.ai/v1", "Authorization")),
-        ("nanobanana", ("https://api.nanobananaapi.ai/v1", "Authorization")),
-        ("nvidia", ("https://integrate.api.nvidia.com/v1", "Authorization")),
-        ("cloudflare-ai", ("https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1", "Authorization")),
-        ("blackbox", ("https://api.blackbox.ai/api", "Authorization")),
-        ("gitlab", ("https://gitlab.com/api/v4/chat/completions", "Authorization")),
-        ("codebuddy", ("https://copilot.tencent.com/v1", "Authorization")),
-        ("kilocode", ("https://api.kilo.ai/api/openrouter/v1", "Authorization")),
-        ("alicode", ("https://coding.dashscope.aliyuncs.com/v1", "Authorization")),
-        ("alicode-intl", ("https://coding-intl.dashscope.aliyuncs.com/v1", "Authorization")),
-        ("volcengine-ark", ("https://ark.cn-beijing.volces.com/api/coding/v3", "Authorization")),
-        ("byteplus", ("https://ark.ap-southeast.bytepluses.com/api/coding/v3", "Authorization")),
-        ("ollama-cloud", ("https://api.ollama.com/v1", "Authorization")),
-    ])
-});
+static API_KEY_PROVIDERS: Lazy<BTreeMap<&'static str, (&'static str, &'static str)>> =
+    Lazy::new(|| {
+        BTreeMap::from([
+            ("openai", ("https://api.openai.com/v1", "Authorization")),
+            ("anthropic", ("https://api.anthropic.com/v1", "x-api-key")),
+            ("deepseek", ("https://api.deepseek.com/v1", "Authorization")),
+            ("mistral", ("https://api.mistral.ai/v1", "Authorization")),
+            ("cohere", ("https://api.cohere.ai/v1", "Authorization")),
+            (
+                "fireworks",
+                ("https://api.fireworks.ai/inference/v1", "Authorization"),
+            ),
+            ("together", ("https://api.together.xyz/v1", "Authorization")),
+            ("perplexity", ("https://api.perplexity.ai", "Authorization")),
+            (
+                "nebius",
+                ("https://api.studio.nebius.ai/v1", "Authorization"),
+            ),
+            ("xai", ("https://api.x.ai/v1", "Authorization")),
+            ("ai21", ("https://api.ai21.com/v1", "Authorization")),
+            (
+                "stability-ai",
+                ("https://api.stability.ai/v1", "Authorization"),
+            ),
+            (
+                "replicate",
+                ("https://api.replicate.com/v1", "Authorization"),
+            ),
+            ("lepton", ("https://api.lepton.ai/v1", "Authorization")),
+            ("novita", ("https://api.novita.ai/v1", "Authorization")),
+            (
+                "deepinfra",
+                ("https://api.deepinfra.com/v1", "Authorization"),
+            ),
+            ("focus", ("https://api.focusforce.io/v1", "Authorization")),
+            (
+                "navigators",
+                ("https://api.navigators.ai/v1", "Authorization"),
+            ),
+            (
+                "polyscale",
+                ("https://api.polyscale.ai/v1", "Authorization"),
+            ),
+            ("rampt", ("https://api.rampt.ai/v1", "Authorization")),
+            ("skip", ("https://api.skip.cloud/v1", "Authorization")),
+            ("unbound", ("https://api.unbound.ai/v1", "Authorization")),
+            ("workers", ("https://api.cloudflare.ai/v1", "Authorization")),
+            ("zerogpt", ("https://api.zerogpt.com/v1", "Authorization")),
+            ("groq", ("https://api.groq.com/openai/v1", "Authorization")),
+            ("cerebras", ("https://api.cerebras.ai/v1", "Authorization")),
+            (
+                "siliconflow",
+                ("https://api.siliconflow.cn/v1", "Authorization"),
+            ),
+            (
+                "hyperbolic",
+                ("https://api.hyperbolic.xyz/v1", "Authorization"),
+            ),
+            ("chutes", ("https://llm.chutes.ai/v1", "Authorization")),
+            (
+                "nanobanana",
+                ("https://api.nanobananaapi.ai/v1", "Authorization"),
+            ),
+            (
+                "nvidia",
+                ("https://integrate.api.nvidia.com/v1", "Authorization"),
+            ),
+            (
+                "cloudflare-ai",
+                (
+                    "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1",
+                    "Authorization",
+                ),
+            ),
+            ("blackbox", ("https://api.blackbox.ai/api", "Authorization")),
+            (
+                "gitlab",
+                (
+                    "https://gitlab.com/api/v4/chat/completions",
+                    "Authorization",
+                ),
+            ),
+            (
+                "codebuddy",
+                ("https://copilot.tencent.com/v1", "Authorization"),
+            ),
+            (
+                "kilocode",
+                ("https://api.kilo.ai/api/openrouter/v1", "Authorization"),
+            ),
+            (
+                "alicode",
+                ("https://coding.dashscope.aliyuncs.com/v1", "Authorization"),
+            ),
+            (
+                "alicode-intl",
+                (
+                    "https://coding-intl.dashscope.aliyuncs.com/v1",
+                    "Authorization",
+                ),
+            ),
+            (
+                "volcengine-ark",
+                (
+                    "https://ark.cn-beijing.volces.com/api/coding/v3",
+                    "Authorization",
+                ),
+            ),
+            (
+                "byteplus",
+                (
+                    "https://ark.ap-southeast.bytepluses.com/api/coding/v3",
+                    "Authorization",
+                ),
+            ),
+            (
+                "ollama-cloud",
+                ("https://api.ollama.com/v1", "Authorization"),
+            ),
+        ])
+    });
 
 pub fn get_api_key_provider_config(provider: &str) -> Option<(&'static str, &'static str)> {
     API_KEY_PROVIDERS.get(provider).copied()
