@@ -10,6 +10,10 @@ use openproxy::types::{ApiKey, ProviderConnection};
 use serde_json::json;
 use tempfile::tempdir;
 use tower::util::ServiceExt;
+use wiremock::{
+    matchers::{header, method, path},
+    Mock, MockServer, ResponseTemplate,
+};
 
 const TEST_KEY: &str = "providers-api-test-key";
 
@@ -186,6 +190,146 @@ async fn test_kilo_free_models_has_pricing_info() {
         models_with_pricing > 0,
         "At least some models should have pricing info"
     );
+}
+
+#[tokio::test]
+async fn provider_models_route_fetches_openai_compatible_models_from_remote_models_endpoint() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("authorization", "Bearer compat-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "gpt-4.1-mini", "name": "GPT 4.1 Mini" },
+                { "id": "gpt-5.2", "name": "GPT 5.2" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connection = connection_with_id("openai-compatible-local", "compat-1");
+    connection.api_key = Some("compat-key".to_string());
+    connection.provider_specific_data.insert(
+        "baseUrl".to_string(),
+        serde_json::Value::String(server.uri()),
+    );
+
+    let state = test_state(vec![connection]).await;
+    let app = providers::routes().with_state(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/providers/compat-1/models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["provider"], "openai-compatible-local");
+    assert_eq!(json["connectionId"], "compat-1");
+    assert_eq!(json["models"][0]["id"], "gpt-4.1-mini");
+    assert_eq!(json["models"][0]["name"], "GPT 4.1 Mini");
+}
+
+#[tokio::test]
+async fn provider_models_route_normalizes_anthropic_compatible_messages_base_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("x-api-key", "anthropic-key"))
+        .and(header("authorization", "Bearer anthropic-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "claude-sonnet-4-5", "display_name": "Claude Sonnet 4.5" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connection = connection_with_id("anthropic-compatible-local", "anthropic-1");
+    connection.api_key = Some("anthropic-key".to_string());
+    connection.provider_specific_data.insert(
+        "baseUrl".to_string(),
+        serde_json::Value::String(format!("{}/messages", server.uri())),
+    );
+
+    let state = test_state(vec![connection]).await;
+    let app = providers::routes().with_state(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/providers/anthropic-1/models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["provider"], "anthropic-compatible-local");
+    assert_eq!(json["models"][0]["id"], "claude-sonnet-4-5");
+    assert_eq!(json["models"][0]["name"], "Claude Sonnet 4.5");
+}
+
+#[tokio::test]
+async fn provider_models_route_fetches_ollama_local_tags_from_connection_base_url() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                { "name": "llama3.1:8b" },
+                { "name": "qwen2.5-coder:7b" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connection = connection_with_id("ollama-local", "ollama-1");
+    connection.provider_specific_data.insert(
+        "baseUrl".to_string(),
+        serde_json::Value::String(server.uri()),
+    );
+
+    let state = test_state(vec![connection]).await;
+    let app = providers::routes().with_state(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/providers/ollama-1/models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["provider"], "ollama-local");
+    assert_eq!(json["models"][0]["id"], "llama3.1:8b");
+    assert_eq!(json["models"][1]["id"], "qwen2.5-coder:7b");
 }
 
 // ============================================================
