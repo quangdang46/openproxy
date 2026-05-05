@@ -150,14 +150,14 @@ fn cli_parsing_supports_env_backed_flags() {
         "--host",
         "127.0.0.1",
         "--port",
-        "20128",
+        "4623",
         "--log-filter",
         "debug",
     ])
     .expect("cli parses");
 
     assert_eq!(cli.host, "127.0.0.1");
-    assert_eq!(cli.port, 20128);
+    assert_eq!(cli.port, 4623);
     assert_eq!(cli.log_filter, "debug");
 }
 
