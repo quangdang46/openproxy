@@ -444,6 +444,163 @@ async fn test_test_batch_multiple_providers() {
     assert_eq!(json["results"].as_array().unwrap().len(), 3);
 }
 
+#[tokio::test]
+async fn provider_test_route_returns_exact_missing_connection_payload() {
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/missing-conn/test")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json, json!({ "error": "Connection not found" }));
+    assert!(json.get("valid").is_none());
+}
+
+#[tokio::test]
+async fn provider_test_route_matches_9router_payload_and_updates_connection_status() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("authorization", "Bearer compat-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "id": "gpt-4.1-mini" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connection = connection_with_id("openai-compatible-local", "compat-test");
+    connection.auth_type = "apikey".to_string();
+    connection.api_key = Some("compat-key".to_string());
+    connection.provider_specific_data.insert(
+        "baseUrl".to_string(),
+        serde_json::Value::String(server.uri()),
+    );
+
+    let state = test_state(vec![connection]).await;
+    let app = providers::routes().with_state(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/compat-test/test")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(
+        json,
+        json!({
+            "valid": true,
+            "error": null,
+            "refreshed": false
+        })
+    );
+    assert!(json.get("latencyMs").is_none());
+
+    let snapshot = state.db.snapshot();
+    let connection = snapshot
+        .provider_connections
+        .iter()
+        .find(|connection| connection.id == "compat-test")
+        .expect("connection should exist");
+    assert_eq!(connection.test_status.as_deref(), Some("active"));
+    assert_eq!(connection.last_error, None);
+}
+
+#[tokio::test]
+async fn provider_test_route_honors_legacy_proxy_settings_without_use_connection_proxy_flag() {
+    let server = MockServer::start().await;
+
+    let mut connection = connection_with_id("openai-compatible-local", "legacy-proxy");
+    connection.auth_type = "apikey".to_string();
+    connection.api_key = Some("compat-key".to_string());
+    connection.provider_specific_data.insert(
+        "baseUrl".to_string(),
+        serde_json::Value::String(server.uri()),
+    );
+    connection.provider_specific_data.insert(
+        "connectionProxyEnabled".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    connection.provider_specific_data.insert(
+        "connectionProxyUrl".to_string(),
+        serde_json::Value::String("://bad-proxy".to_string()),
+    );
+
+    let state = test_state(vec![connection]).await;
+    let app = providers::routes().with_state(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/legacy-proxy/test")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["valid"], false);
+    assert_eq!(json["refreshed"], false);
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Invalid proxy URL")
+    );
+
+    let snapshot = state.db.snapshot();
+    let connection = snapshot
+        .provider_connections
+        .iter()
+        .find(|connection| connection.id == "legacy-proxy")
+        .expect("connection should exist");
+    assert_eq!(connection.test_status.as_deref(), Some("error"));
+    assert!(
+        connection
+            .last_error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Invalid proxy URL")
+    );
+}
+
 // ============================================================
 // Tests for GET /api/providers/client
 // ============================================================

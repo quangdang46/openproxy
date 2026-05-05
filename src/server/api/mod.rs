@@ -14,6 +14,7 @@ pub mod models_availability;
 pub mod models_custom;
 pub mod oauth;
 pub mod pricing;
+mod provider_connection_test;
 mod provider_models;
 pub mod provider_nodes;
 pub mod providers;
