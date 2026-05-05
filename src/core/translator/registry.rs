@@ -446,13 +446,21 @@ static REGISTRY: OnceLock<TranslationRegistry> = OnceLock::new();
 /// Get the global translation registry.
 /// Initializes with all registered transforms on first call.
 pub fn global_registry() -> &'static TranslationRegistry {
+    use crate::core::translator::request::openai_to_claude::openai_to_claude_request;
+    use crate::core::translator::request::claude_to_openai::claude_to_openai_request;
+
     REGISTRY.get_or_init(|| {
         let mut reg = TranslationRegistry::new();
-        // Phase 2 beads will register transforms here.
-        // Example registration (filled by br-3fu, br-2t9, br-1mw):
-        // reg.register_request(Format::OpenAi, Format::Claude, openai_to_claude_transform);
-        // reg.register_request(Format::Claude, Format::OpenAi, claude_to_openai_transform);
-        // ...
+        reg.register_request(
+            Format::OpenAi,
+            Format::Claude,
+            openai_to_claude_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::Claude,
+            Format::OpenAi,
+            claude_to_openai_request as RequestTransformFn,
+        );
         reg
     })
 }

@@ -7,3 +7,4 @@ pub enum TranslationFormat {
 
 pub mod registry;
 pub mod response_transform;
+pub mod request;

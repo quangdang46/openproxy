@@ -4,6 +4,15 @@ use serde_json::{json, Map, Value};
 
 use crate::types::Settings;
 
+pub mod apply_filter;
+pub mod autodetect;
+pub mod constants;
+pub mod filters;
+
+use apply_filter::{safe_apply, RtkHit, RtkStats};
+use autodetect::{auto_detect_filter, FilterFn};
+use constants::*;
+
 const PROMPT_SEPARATOR: &str = "\n\n";
 const CHARS_PER_TOKEN: usize = 4;
 const MIN_TRIGGER_TOKENS: usize = 512;
@@ -455,6 +464,127 @@ fn part_text(value: &Value) -> Option<&str> {
         .get("text")
         .and_then(Value::as_str)
         .or_else(|| value.get("content").and_then(Value::as_str))
+}
+
+pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
+    if !enabled {
+        return None;
+    }
+
+    let items = {
+        let fields = body.as_object()?;
+        let arr = fields.get("messages").and_then(Value::as_array);
+        let input = fields.get("input").and_then(Value::as_array);
+        arr.or(input)?.clone()
+    };
+
+    let mut stats = RtkStats {
+        bytes_before: 0,
+        bytes_after: 0,
+        hits: Vec::new(),
+    };
+
+    for msg in items.iter() {
+        let msg_fields = msg.as_object()?;
+        let role = msg_fields.get("role").and_then(Value::as_str);
+
+        if role == Some("tool") {
+            if let Some(content) = msg_fields.get("content").and_then(Value::as_str) {
+                compress_tool_text(content, &mut stats, "openai-tool", |text| {
+                    auto_detect_filter(text).map(|f| f.filter_fn)
+                });
+            } else if let Some(parts) = msg_fields.get("content").and_then(Value::as_array) {
+                for part in parts.iter() {
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        compress_tool_text(text, &mut stats, "openai-tool-array", |text| {
+                            auto_detect_filter(text).map(|f| f.filter_fn)
+                        });
+                    }
+                }
+            }
+        } else if msg_fields.get("type").and_then(Value::as_str) == Some("function_call_output") {
+            if let Some(output) = msg_fields.get("output") {
+                if let Some(text) = output.as_str() {
+                    compress_tool_text(text, &mut stats, "openai-responses-string", |text| {
+                        auto_detect_filter(text).map(|f| f.filter_fn)
+                    });
+                } else if let Some(arr) = output.as_array() {
+                    for part in arr.iter() {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            compress_tool_text(text, &mut stats, "openai-responses-array", |text| {
+                                auto_detect_filter(text).map(|f| f.filter_fn)
+                            });
+                        }
+                    }
+                }
+            }
+        } else if let Some(content) = msg_fields.get("content").and_then(Value::as_array) {
+            for block in content.iter() {
+                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+                    continue;
+                }
+                if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                    continue;
+                }
+                if let Some(text) = block.get("content").and_then(Value::as_str) {
+                    compress_tool_text(text, &mut stats, "claude-string", |text| {
+                        auto_detect_filter(text).map(|f| f.filter_fn)
+                    });
+                } else if let Some(parts) = block.get("content").and_then(Value::as_array) {
+                    for part in parts.iter() {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            compress_tool_text(text, &mut stats, "claude-array", |text| {
+                                auto_detect_filter(text).map(|f| f.filter_fn)
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(stats)
+}
+
+fn compress_tool_text<F>(text: &str, stats: &mut RtkStats, shape: &str, detect_fn: F)
+where
+    F: Fn(&str) -> Option<FilterFn>,
+{
+    let bytes_in = text.len();
+    stats.bytes_before += bytes_in;
+
+    if bytes_in < MIN_COMPRESS_SIZE || bytes_in > RAW_CAP {
+        stats.bytes_after += bytes_in;
+        return;
+    }
+
+    let filter_fn = match detect_fn(text) {
+        Some(f) => f,
+        None => {
+            stats.bytes_after += bytes_in;
+            return;
+        }
+    };
+
+    let filter_name = auto_detect_filter(text)
+        .map(|f| f.filter_name)
+        .unwrap_or("unknown");
+
+    let out = safe_apply(filter_fn, text, filter_name);
+
+    if out.is_empty() || out.len() >= bytes_in {
+        stats.bytes_after += bytes_in;
+        return;
+    }
+
+    stats.bytes_after += out.len();
+    stats.hits.push(RtkHit {
+        shape: shape.to_string(),
+        filter: filter_name.to_string(),
+        saved: bytes_in - out.len(),
+    });
+
+    let _ = out;
 }
 
 #[cfg(test)]
