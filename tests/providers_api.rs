@@ -1,17 +1,18 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use openproxy::db::Db;
 use openproxy::server::api::providers;
 use openproxy::server::state::AppState;
-use openproxy::types::{ApiKey, ProviderConnection};
+use openproxy::types::{ApiKey, ProviderConnection, ProviderNode};
 use serde_json::json;
 use tempfile::tempdir;
 use tower::util::ServiceExt;
 use wiremock::{
-    matchers::{header, method, path},
+    matchers::{body_partial_json, header, method, path},
     Mock, MockServer, ResponseTemplate,
 };
 
@@ -60,6 +61,20 @@ fn connection_with_id(provider: &str, id: &str) -> ProviderConnection {
         proxy_label: None,
         use_connection_proxy: None,
         provider_specific_data,
+        extra: BTreeMap::new(),
+    }
+}
+
+fn compatible_provider_node(id: &str, base_url: &str) -> ProviderNode {
+    ProviderNode {
+        id: id.to_string(),
+        r#type: "openai-compatible".to_string(),
+        name: "Compatible Provider".to_string(),
+        prefix: Some(id.to_string()),
+        api_type: Some("chat".to_string()),
+        base_url: Some(base_url.to_string()),
+        created_at: None,
+        updated_at: None,
         extra: BTreeMap::new(),
     }
 }
@@ -578,12 +593,10 @@ async fn provider_test_route_honors_legacy_proxy_settings_without_use_connection
 
     assert_eq!(json["valid"], false);
     assert_eq!(json["refreshed"], false);
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("Invalid proxy URL")
-    );
+    assert!(json["error"]
+        .as_str()
+        .unwrap_or_default()
+        .contains("Invalid proxy URL"));
 
     let snapshot = state.db.snapshot();
     let connection = snapshot
@@ -592,13 +605,172 @@ async fn provider_test_route_honors_legacy_proxy_settings_without_use_connection
         .find(|connection| connection.id == "legacy-proxy")
         .expect("connection should exist");
     assert_eq!(connection.test_status.as_deref(), Some("error"));
-    assert!(
-        connection
-            .last_error
-            .as_deref()
-            .unwrap_or_default()
-            .contains("Invalid proxy URL")
+    assert!(connection
+        .last_error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Invalid proxy URL"));
+}
+
+#[tokio::test]
+async fn provider_test_models_route_returns_exact_missing_connection_payload() {
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/missing-conn/test-models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json, json!({ "error": "Connection not found" }));
+    assert!(json.get("results").is_none());
+}
+
+#[tokio::test]
+async fn provider_test_models_route_fetches_live_compatible_models_and_warms_first_request() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("authorization", "Bearer compat-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "gpt-4.1-mini", "name": "GPT 4.1 Mini" },
+                { "id": "gpt-5.2", "name": "GPT 5.2" }
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer compat-key"))
+        .and(body_partial_json(json!({ "model": "gpt-4.1-mini" })))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(200))
+                .set_body_json(json!({
+                    "id": "chatcmpl-first",
+                    "object": "chat.completion",
+                    "choices": [{
+                        "index": 0,
+                        "message": { "role": "assistant", "content": "ok" },
+                        "finish_reason": "stop"
+                    }]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer compat-key"))
+        .and(body_partial_json(json!({ "model": "gpt-5.2" })))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_delay(Duration::from_millis(200))
+                .set_body_json(json!({
+                    "error": { "message": "unsupported for chat" }
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut connection = connection_with_id("openai-compatible-local", "compat-model-test");
+    connection.auth_type = "apikey".to_string();
+    connection.api_key = Some("compat-key".to_string());
+    connection.provider_specific_data.insert(
+        "baseUrl".to_string(),
+        serde_json::Value::String(server.uri()),
     );
+    connection.provider_specific_data.insert(
+        "enabledModels".to_string(),
+        json!(["gpt-4.1-mini", "gpt-5.2"]),
+    );
+
+    let state = test_state(vec![connection]).await;
+    state
+        .db
+        .update(|db| {
+            db.provider_nodes.push(compatible_provider_node(
+                "openai-compatible-local",
+                &server.uri(),
+            ));
+        })
+        .await
+        .expect("seed provider node");
+
+    let app = providers::routes().with_state(state);
+    let started = Instant::now();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/compat-model-test/test-models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        elapsed >= Duration::from_millis(300),
+        "route should warm the first model before parallelizing the rest; elapsed={elapsed:?}"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["provider"], "openai-compatible-local");
+    assert_eq!(json["connectionId"], "compat-model-test");
+    assert_eq!(json["results"].as_array().map(Vec::len), Some(2));
+    assert_eq!(json["results"][0]["modelId"], "gpt-4.1-mini");
+    assert_eq!(json["results"][0]["name"], "GPT 4.1 Mini");
+    assert_eq!(json["results"][0]["ok"], true);
+    assert_eq!(json["results"][0]["error"], serde_json::Value::Null);
+    assert_eq!(json["results"][1]["modelId"], "gpt-5.2");
+    assert_eq!(json["results"][1]["name"], "GPT 5.2");
+    assert_eq!(json["results"][1]["ok"], true);
+    assert_eq!(json["results"][1]["error"], serde_json::Value::Null);
+    assert!(json["results"][0]["latencyMs"].as_u64().unwrap_or_default() >= 150);
+    assert!(json["results"][1]["latencyMs"].as_u64().unwrap_or_default() >= 150);
+
+    let requests = server.received_requests().await.expect("received requests");
+    let chat_models: Vec<String> = requests
+        .iter()
+        .filter(|request| request.url.path() == "/chat/completions")
+        .map(|request| {
+            request
+                .body_json::<serde_json::Value>()
+                .expect("chat body")
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(chat_models, vec!["gpt-4.1-mini", "gpt-5.2"]);
 }
 
 // ============================================================

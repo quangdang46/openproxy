@@ -1,3 +1,5 @@
+pub mod catalog;
+
 use std::collections::{BTreeMap, HashMap};
 
 use once_cell::sync::Lazy;

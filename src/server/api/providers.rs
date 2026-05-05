@@ -1029,6 +1029,11 @@ pub fn routes() -> Router<AppState> {
             "/api/providers/{id}/models",
             get(super::provider_models::list_provider_models),
         )
+        // Provider model tests - POST /api/providers/{id}/test-models
+        .route(
+            "/api/providers/{id}/test-models",
+            post(super::provider_model_tests::test_provider_models),
+        )
         // Provider test - POST /api/providers/{id}/test
         .route(
             "/api/providers/{id}/test",

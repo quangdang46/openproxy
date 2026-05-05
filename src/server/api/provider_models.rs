@@ -99,6 +99,16 @@ pub(super) async fn fetch_compatible_model_ids(connection: &ProviderConnection) 
     )
 }
 
+pub(super) async fn fetch_models_for_connection(
+    state: &AppState,
+    connection: &ProviderConnection,
+) -> Result<Vec<ProviderModel>, (StatusCode, String)> {
+    fetch_provider_models_response(state, connection)
+        .await
+        .map(|payload| payload.models)
+        .map_err(|error| (error.status, error.message))
+}
+
 #[derive(Debug)]
 struct RouteError {
     status: StatusCode,
