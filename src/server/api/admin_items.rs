@@ -9,6 +9,7 @@ use chrono::Utc;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::core::combo::reset_combo_rotation;
 use crate::server::state::AppState;
 use crate::types::ProxyPool;
 
@@ -288,14 +289,15 @@ async fn update_combo(
     };
 
     if let Some(name) = req.name.as_deref() {
-        if !valid_combo_name(name) {
+        if !name.is_empty() && !valid_combo_name(name) {
             return bad_request("Name can only contain letters, numbers, -, _ and .");
         }
 
-        if snapshot
-            .combos
-            .iter()
-            .any(|combo| combo.id != id && combo.name == name)
+        if !name.is_empty()
+            && snapshot
+                .combos
+                .iter()
+                .any(|combo| combo.id != id && combo.name == name)
         {
             return bad_request("Combo name already exists");
         }
@@ -323,6 +325,12 @@ async fn update_combo(
             let Some(combo) = snapshot.combos.iter().find(|combo| combo.id == existing.id) else {
                 return not_found("Combo not found");
             };
+
+            reset_combo_rotation(Some(existing.name.as_str()));
+            if combo.name != existing.name {
+                reset_combo_rotation(Some(combo.name.as_str()));
+            }
+
             Json(combo).into_response()
         }
         Err(error) => internal_error(error),
@@ -339,9 +347,9 @@ async fn delete_combo(
     }
 
     let snapshot = state.db.snapshot();
-    if !snapshot.combos.iter().any(|combo| combo.id == id) {
+    let Some(existing) = snapshot.combos.iter().find(|combo| combo.id == id).cloned() else {
         return not_found("Combo not found");
-    }
+    };
 
     match state
         .db
@@ -350,7 +358,10 @@ async fn delete_combo(
         })
         .await
     {
-        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Ok(_) => {
+            reset_combo_rotation(Some(existing.name.as_str()));
+            Json(json!({ "success": true })).into_response()
+        }
         Err(error) => internal_error(error),
     }
 }
@@ -683,7 +694,7 @@ fn normalize_proxy_pool_update(
     })
 }
 
-fn valid_combo_name(name: &str) -> bool {
+pub(crate) fn valid_combo_name(name: &str) -> bool {
     !name.trim().is_empty()
         && name
             .chars()

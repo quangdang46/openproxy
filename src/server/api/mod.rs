@@ -509,7 +509,8 @@ async fn list_combos_api(State(state): State<AppState>, headers: HeaderMap) -> R
 
 #[derive(Debug, Deserialize)]
 struct CreateComboRequest {
-    name: String,
+    name: Option<String>,
+    #[serde(default)]
     models: Vec<String>,
     kind: Option<String>,
 }
@@ -525,14 +526,52 @@ async fn create_combo_api(
 
     use crate::types::Combo;
 
+    let Some(name) = req.name.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Name is required" })),
+        )
+            .into_response();
+    };
+
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Name is required" })),
+        )
+            .into_response();
+    }
+
+    if !admin_items::valid_combo_name(name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Name can only contain letters, numbers, -, _ and ." })),
+        )
+            .into_response();
+    }
+
+    if state
+        .db
+        .snapshot()
+        .combos
+        .iter()
+        .any(|combo| combo.name == name)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Combo name already exists" })),
+        )
+            .into_response();
+    }
+
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
     let combo = Combo {
         id,
-        name: req.name,
+        name: name.to_string(),
         models: req.models,
-        kind: req.kind.or_else(|| Some("ensemble".to_string())),
+        kind: req.kind.filter(|kind| !kind.is_empty()),
         created_at: Some(now.clone()),
         updated_at: Some(now),
         extra: std::collections::BTreeMap::new(),
@@ -546,11 +585,7 @@ async fn create_combo_api(
         .await;
 
     match result {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(json!({ "success": true, "combo": combo })),
-        )
-            .into_response(),
+        Ok(_) => (StatusCode::CREATED, Json(combo)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "error": e.to_string() })),
