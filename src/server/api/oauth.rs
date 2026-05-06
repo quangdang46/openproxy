@@ -9,6 +9,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::str;
 
@@ -165,6 +166,15 @@ fn is_device_code_provider(provider: &str) -> bool {
     )
 }
 
+fn iflow_api_base_url() -> String {
+    std::env::var("OPENPROXY_IFLOW_API_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://platform.iflow.cn".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -263,6 +273,245 @@ async fn store_connection(
     })
     .await?;
     Ok(())
+}
+
+fn internal_error_response(message: String) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": message })),
+    )
+        .into_response()
+}
+
+async fn iflow_cookie_auth(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let Some(cookie) = body.get("cookie").and_then(Value::as_str) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Cookie is required" })),
+        )
+            .into_response();
+    };
+
+    let trimmed = cookie.trim();
+    if !trimmed.contains("BXAuth=") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Cookie must contain BXAuth field" })),
+        )
+            .into_response();
+    }
+
+    let mut normalized_cookie = trimmed.to_string();
+    if !normalized_cookie.ends_with(';') {
+        normalized_cookie.push(';');
+    }
+
+    let base_url = iflow_api_base_url();
+    let client = reqwest::Client::new();
+
+    let get_response = match client
+        .get(format!("{base_url}/api/openapi/apikey"))
+        .header("Cookie", normalized_cookie.clone())
+        .header("Accept", "application/json, text/plain, */*")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        )
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Accept-Encoding", "gzip, deflate, br")
+        .header("Connection", "keep-alive")
+        .header("Sec-Fetch-Dest", "empty")
+        .header("Sec-Fetch-Mode", "cors")
+        .header("Sec-Fetch-Site", "same-origin")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    if !get_response.status().is_success() {
+        let status = get_response.status();
+        let error_text = get_response.text().await.unwrap_or_default();
+        return (
+            status,
+            Json(json!({
+                "error": format!("Failed to fetch API key info: {}", error_text)
+            })),
+        )
+            .into_response();
+    }
+
+    let get_result: Value = match get_response.json().await {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    if get_result.get("success").and_then(Value::as_bool) != Some(true) {
+        let message = get_result
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("API key fetch failed: {message}")
+            })),
+        )
+            .into_response();
+    }
+
+    let key_data = get_result.get("data").cloned().unwrap_or(Value::Null);
+    let Some(key_name) = key_data.get("name").and_then(Value::as_str) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing name in API key info" })),
+        )
+            .into_response();
+    };
+
+    let post_response = match client
+        .post(format!("{base_url}/api/openapi/apikey"))
+        .header("Cookie", normalized_cookie.clone())
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/plain, */*")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        )
+        .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+        .header("Accept-Encoding", "gzip, deflate, br")
+        .header("Connection", "keep-alive")
+        .header("Origin", base_url.clone())
+        .header("Referer", format!("{base_url}/"))
+        .json(&json!({ "name": key_name }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    if !post_response.status().is_success() {
+        let status = post_response.status();
+        let error_text = post_response.text().await.unwrap_or_default();
+        return (
+            status,
+            Json(json!({
+                "error": format!("Failed to refresh API key: {}", error_text)
+            })),
+        )
+            .into_response();
+    }
+
+    let post_result: Value = match post_response.json().await {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    if post_result.get("success").and_then(Value::as_bool) != Some(true) {
+        let message = post_result
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("API key refresh failed: {message}")
+            })),
+        )
+            .into_response();
+    }
+
+    let refreshed_key = post_result.get("data").cloned().unwrap_or(Value::Null);
+    let Some(refreshed_api_key) = refreshed_key.get("apiKey").and_then(Value::as_str) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing API key in response" })),
+        )
+            .into_response();
+    };
+
+    let bx_auth = normalized_cookie
+        .split(';')
+        .find_map(|segment| segment.trim().strip_prefix("BXAuth="))
+        .unwrap_or("");
+    let cookie_to_save = if bx_auth.is_empty() {
+        String::new()
+    } else {
+        format!("BXAuth={bx_auth};")
+    };
+
+    let connection_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let connection_name = refreshed_key
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(key_name)
+        .to_string();
+    let expire_time = refreshed_key
+        .get("expireTime")
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let result = state
+        .db
+        .update(|db| {
+            let mut provider_specific_data = std::collections::BTreeMap::new();
+            provider_specific_data
+                .insert("cookie".to_string(), Value::String(cookie_to_save.clone()));
+            provider_specific_data.insert("expireTime".to_string(), expire_time.clone());
+
+            db.provider_connections.push(ProviderConnection {
+                id: connection_id.clone(),
+                provider: "iflow".to_string(),
+                auth_type: "cookie".to_string(),
+                name: Some(connection_name.clone()),
+                is_active: Some(true),
+                created_at: Some(now.clone()),
+                updated_at: Some(now.clone()),
+                email: Some(connection_name.clone()),
+                api_key: Some(refreshed_api_key.to_string()),
+                test_status: Some("active".to_string()),
+                provider_specific_data,
+                ..Default::default()
+            });
+        })
+        .await;
+
+    if let Err(error) = result {
+        return internal_error_response(error.to_string());
+    }
+
+    let masked_api_key = format!(
+        "{}...",
+        refreshed_api_key.chars().take(10).collect::<String>()
+    );
+
+    Json(json!({
+        "success": true,
+        "connection": {
+            "id": connection_id,
+            "provider": "iflow",
+            "email": connection_name,
+            "apiKey": masked_api_key,
+            "expireTime": expire_time
+        }
+    }))
+    .into_response()
 }
 
 // GET /api/oauth/:provider/start
@@ -887,6 +1136,7 @@ pub async fn oauth_status(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route("/api/oauth/iflow/cookie", post(iflow_cookie_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))
         .route("/api/oauth/{provider}/callback", get(oauth_callback))
         .route("/api/oauth/{provider}/device_code", post(start_device_code))
