@@ -522,6 +522,10 @@ fn cursor_is_installed() -> bool {
         .is_file()
 }
 
+fn kiro_sso_cache_path() -> PathBuf {
+    cursor_home_dir().join(".aws").join("sso").join("cache")
+}
+
 fn cursor_import_instructions() -> Value {
     json!({
         "provider": "cursor",
@@ -1109,6 +1113,79 @@ async fn cursor_auto_import_route() -> Response {
         "dbPath": db_path.to_string_lossy().to_string()
     }))
     .into_response()
+}
+
+async fn kiro_auto_import_route() -> Response {
+    let cache_path = kiro_sso_cache_path();
+    let files = match std::fs::read_dir(&cache_path) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect::<Vec<_>>(),
+        Err(_) => {
+            return Json(json!({
+                "found": false,
+                "error": "AWS SSO cache not found. Please login to Kiro IDE first."
+            }))
+            .into_response()
+        }
+    };
+
+    let mut refresh_token = None;
+    let mut found_file = None;
+    let kiro_token_file = "kiro-auth-token.json";
+
+    if files.iter().any(|file| file == kiro_token_file) {
+        let path = cache_path.join(kiro_token_file);
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(data) = serde_json::from_str::<Value>(&content) {
+                if let Some(token) = data.get("refreshToken").and_then(Value::as_str) {
+                    if token.starts_with("aorAAAAAG") {
+                        refresh_token = Some(token.to_string());
+                        found_file = Some(kiro_token_file.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if refresh_token.is_none() {
+        for file in &files {
+            if !file.ends_with(".json") {
+                continue;
+            }
+
+            let path = cache_path.join(file);
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(data) = serde_json::from_str::<Value>(&content) else {
+                continue;
+            };
+            let Some(token) = data.get("refreshToken").and_then(Value::as_str) else {
+                continue;
+            };
+            if token.starts_with("aorAAAAAG") {
+                refresh_token = Some(token.to_string());
+                found_file = Some(file.clone());
+                break;
+            }
+        }
+    }
+
+    match refresh_token {
+        Some(refresh_token) => Json(json!({
+            "found": true,
+            "refreshToken": refresh_token,
+            "source": found_file
+        }))
+        .into_response(),
+        None => Json(json!({
+            "found": false,
+            "error": "Kiro token not found in AWS SSO cache. Please login to Kiro IDE first."
+        }))
+        .into_response(),
+    }
 }
 
 // GET /api/oauth/:provider/start
@@ -1741,6 +1818,7 @@ pub fn routes() -> Router<AppState> {
             "/api/oauth/cursor/import",
             get(cursor_import_instructions_route).post(cursor_import_auth),
         )
+        .route("/api/oauth/kiro/auto-import", get(kiro_auto_import_route))
         .route("/api/oauth/iflow/cookie", post(iflow_cookie_auth))
         .route("/api/oauth/gitlab/pat", post(gitlab_pat_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))
