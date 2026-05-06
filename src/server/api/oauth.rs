@@ -6,7 +6,10 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{
+    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+    Engine,
+};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -283,6 +286,178 @@ fn internal_error_response(message: String) -> Response {
         Json(json!({ "error": message })),
     )
         .into_response()
+}
+
+fn next_provider_priority(connections: &[ProviderConnection], provider: &str) -> u32 {
+    connections
+        .iter()
+        .filter(|connection| connection.provider == provider)
+        .map(|connection| connection.priority.unwrap_or(0))
+        .max()
+        .unwrap_or(0)
+        + 1
+}
+
+async fn create_imported_oauth_connection(
+    db: &crate::db::Db,
+    mut connection: ProviderConnection,
+) -> anyhow::Result<ProviderConnection> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let provider = connection.provider.clone();
+    let email_for_upsert = connection
+        .email
+        .as_deref()
+        .filter(|email| !email.is_empty())
+        .map(str::to_string);
+    let mut saved = None;
+
+    db.update(|db| {
+        if let Some(email) = email_for_upsert.as_deref() {
+            if let Some(existing) = db.provider_connections.iter_mut().find(|candidate| {
+                candidate.provider == provider
+                    && candidate.auth_type == "oauth"
+                    && candidate.email.as_deref() == Some(email)
+            }) {
+                existing.display_name = connection.display_name.clone();
+                existing.email = connection.email.clone();
+                existing.access_token = connection.access_token.clone();
+                existing.refresh_token = connection.refresh_token.clone();
+                existing.expires_at = connection.expires_at.clone();
+                existing.test_status = connection.test_status.clone();
+                existing.token_type = connection.token_type.clone();
+                existing.scope = connection.scope.clone();
+                existing.id_token = connection.id_token.clone();
+                existing.provider_specific_data = connection.provider_specific_data.clone();
+                existing.updated_at = Some(now.clone());
+                saved = Some(existing.clone());
+                return;
+            }
+        }
+
+        if connection.name.is_none() {
+            connection.name = Some(
+                connection
+                    .email
+                    .as_deref()
+                    .filter(|email| !email.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Account {}",
+                            db.provider_connections
+                                .iter()
+                                .filter(|candidate| candidate.provider == provider)
+                                .count()
+                                + 1
+                        )
+                    }),
+            );
+        }
+
+        if connection.priority.is_none() {
+            connection.priority = Some(next_provider_priority(&db.provider_connections, &provider));
+        }
+        if connection.id.is_empty() {
+            connection.id = Uuid::new_v4().to_string();
+        }
+        if connection.is_active.is_none() {
+            connection.is_active = Some(true);
+        }
+        if connection.created_at.is_none() {
+            connection.created_at = Some(now.clone());
+        }
+        connection.updated_at = Some(now.clone());
+
+        db.provider_connections.push(connection.clone());
+        saved = Some(connection.clone());
+    })
+    .await?;
+
+    saved.ok_or_else(|| anyhow::anyhow!("Failed to save provider connection"))
+}
+
+fn decode_cursor_jwt_claims(access_token: &str) -> Option<Value> {
+    let mut parts = access_token.split('.');
+    let _header = parts.next()?;
+    let payload = parts.next()?;
+    let _signature = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+
+    let mut padded = payload.to_string();
+    while padded.len() % 4 != 0 {
+        padded.push('=');
+    }
+
+    let decoded = URL_SAFE.decode(padded).ok()?;
+    serde_json::from_slice(&decoded).ok()
+}
+
+fn cursor_import_instructions() -> Value {
+    json!({
+        "provider": "cursor",
+        "method": "import_token",
+        "instructions": {
+            "title": "How to get your Cursor token",
+            "steps": [
+                "1. Open Cursor IDE and make sure you're logged in",
+                "2. Find the state.vscdb file:",
+                "   - Linux: ~/.config/Cursor/User/globalStorage/state.vscdb",
+                "   - macOS: /Users/<user>/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
+                "   - Windows: %APPDATA%\\Cursor\\User\\globalStorage\\state.vscdb",
+                "3. Open the database with SQLite browser or CLI:",
+                "   sqlite3 state.vscdb \"SELECT value FROM itemTable WHERE key='cursorAuth/accessToken'\"",
+                "4. Also get the machine ID:",
+                "   sqlite3 state.vscdb \"SELECT value FROM itemTable WHERE key='storage.serviceMachineId'\"",
+                "5. Paste both values in the form below"
+            ],
+            "alternativeMethod": [
+                "Or use this one-liner to get both values:",
+                "sqlite3 state.vscdb \"SELECT key, value FROM itemTable WHERE key IN ('cursorAuth/accessToken', 'storage.serviceMachineId')\""
+            ]
+        },
+        "requiredFields": [
+            {
+                "name": "accessToken",
+                "label": "Access Token",
+                "description": "From cursorAuth/accessToken in state.vscdb",
+                "type": "textarea"
+            },
+            {
+                "name": "machineId",
+                "label": "Machine ID",
+                "description": "From storage.serviceMachineId in state.vscdb",
+                "type": "text"
+            }
+        ]
+    })
+}
+
+fn validate_cursor_import_token(
+    access_token: &str,
+    machine_id: &str,
+) -> Result<(String, String), String> {
+    if access_token.is_empty() {
+        return Err("Access token is required".to_string());
+    }
+    if machine_id.is_empty() {
+        return Err("Machine ID is required".to_string());
+    }
+    if access_token.len() < 50 {
+        return Err("Invalid token format. Token appears too short.".to_string());
+    }
+
+    let normalized_machine_id = machine_id.replace('-', "");
+    if normalized_machine_id.len() < 32
+        || !normalized_machine_id
+            .chars()
+            .all(|ch| ch.is_ascii_hexdigit())
+    {
+        return Err("Invalid machine ID format. Expected UUID format.".to_string());
+    }
+
+    Ok((access_token.to_string(), machine_id.to_string()))
 }
 
 async fn iflow_cookie_auth(
@@ -605,12 +780,8 @@ async fn gitlab_pat_auth(
         .to_string();
 
     let connection = ProviderConnection {
-        id: Uuid::new_v4().to_string(),
         provider: "gitlab".to_string(),
         auth_type: "oauth".to_string(),
-        is_active: Some(true),
-        created_at: Some(chrono::Utc::now().to_rfc3339()),
-        updated_at: Some(chrono::Utc::now().to_rfc3339()),
         display_name: Some(display_name),
         email: Some(email.clone()),
         access_token: Some(token),
@@ -644,15 +815,122 @@ async fn gitlab_pat_auth(
         ..Default::default()
     };
 
-    let result = state
-        .db
-        .update(|db| {
-            db.provider_connections.push(connection);
-        })
-        .await;
-
-    match result {
+    match create_imported_oauth_connection(&state.db, connection).await {
         Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
+async fn cursor_import_instructions_route() -> Response {
+    Json(cursor_import_instructions()).into_response()
+}
+
+async fn cursor_import_auth(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let Some(access_token_raw) = body.get("accessToken").and_then(Value::as_str) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Access token is required" })),
+        )
+            .into_response();
+    };
+    if access_token_raw.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Access token is required" })),
+        )
+            .into_response();
+    }
+
+    let Some(machine_id_raw) = body.get("machineId").and_then(Value::as_str) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Machine ID is required" })),
+        )
+            .into_response();
+    };
+    if machine_id_raw.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Machine ID is required" })),
+        )
+            .into_response();
+    }
+
+    let access_token = access_token_raw.trim();
+    let machine_id = machine_id_raw.trim();
+    let (validated_access_token, validated_machine_id) =
+        match validate_cursor_import_token(access_token, machine_id) {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error),
+        };
+
+    let claims = decode_cursor_jwt_claims(&validated_access_token);
+    let email = claims
+        .as_ref()
+        .and_then(|value| value.get("email"))
+        .or_else(|| claims.as_ref().and_then(|value| value.get("sub")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let user_id = claims
+        .as_ref()
+        .and_then(|value| value.get("sub"))
+        .or_else(|| claims.as_ref().and_then(|value| value.get("user_id")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let mut provider_specific_data = std::collections::BTreeMap::from([
+        (
+            "machineId".to_string(),
+            Value::String(validated_machine_id.clone()),
+        ),
+        (
+            "authMethod".to_string(),
+            Value::String("imported".to_string()),
+        ),
+        (
+            "provider".to_string(),
+            Value::String("Imported".to_string()),
+        ),
+    ]);
+    if let Some(user_id) = user_id {
+        provider_specific_data.insert("userId".to_string(), Value::String(user_id));
+    }
+
+    let connection = ProviderConnection {
+        provider: "cursor".to_string(),
+        auth_type: "oauth".to_string(),
+        email: email.clone(),
+        access_token: Some(validated_access_token),
+        refresh_token: None,
+        expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(86_400)).to_rfc3339()),
+        test_status: Some("active".to_string()),
+        provider_specific_data,
+        ..Default::default()
+    };
+
+    match create_imported_oauth_connection(&state.db, connection).await {
+        Ok(connection) => Json(json!({
+            "success": true,
+            "connection": {
+                "id": connection.id,
+                "provider": connection.provider,
+                "email": connection.email
+            }
+        }))
+        .into_response(),
         Err(error) => internal_error_response(error.to_string()),
     }
 }
@@ -1279,6 +1557,10 @@ pub async fn oauth_status(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/oauth/cursor/import",
+            get(cursor_import_instructions_route).post(cursor_import_auth),
+        )
         .route("/api/oauth/iflow/cookie", post(iflow_cookie_auth))
         .route("/api/oauth/gitlab/pat", post(gitlab_pat_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))

@@ -70,6 +70,7 @@ async fn gitlab_pat_route_matches_9router_success_flow() {
     let connection = &snapshot.provider_connections[0];
     assert_eq!(connection.provider, "gitlab");
     assert_eq!(connection.auth_type, "oauth");
+    assert_eq!(connection.name.as_deref(), Some("me@example.com"));
     assert_eq!(connection.access_token.as_deref(), Some("glpat-secret"));
     assert_eq!(connection.email.as_deref(), Some("me@example.com"));
     assert_eq!(connection.display_name.as_deref(), Some("GitLab User"));
@@ -86,6 +87,74 @@ async fn gitlab_pat_route_matches_9router_success_flow() {
         connection.provider_specific_data.get("username"),
         Some(&json!("gitlab-user"))
     );
+}
+
+#[tokio::test]
+async fn gitlab_pat_route_upserts_existing_oauth_connection_by_provider_and_email() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/user"))
+        .and(header("private-token", "glpat-updated"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "email": "me@example.com",
+            "username": "gitlab-user",
+            "name": "GitLab User"
+        })))
+        .mount(&server)
+        .await;
+
+    let state = app_state().await;
+    state
+        .db
+        .update(|db| {
+            db.provider_connections
+                .push(openproxy::types::ProviderConnection {
+                    id: "existing-connection".to_string(),
+                    provider: "gitlab".to_string(),
+                    auth_type: "oauth".to_string(),
+                    name: Some("Pinned Name".to_string()),
+                    priority: Some(7),
+                    is_active: Some(false),
+                    created_at: Some("2020-01-01T00:00:00Z".to_string()),
+                    updated_at: Some("2020-01-01T00:00:00Z".to_string()),
+                    email: Some("me@example.com".to_string()),
+                    access_token: Some("old-token".to_string()),
+                    refresh_token: Some("old-refresh".to_string()),
+                    ..Default::default()
+                });
+        })
+        .await
+        .unwrap();
+
+    let app = openproxy::build_app(state.clone());
+    let response = app
+        .oneshot(request(Body::from(
+            json!({
+                "token": "glpat-updated",
+                "baseUrl": server.uri()
+            })
+            .to_string(),
+        )))
+        .await
+        .unwrap();
+
+    let (status, json) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json, json!({ "success": true }));
+
+    let snapshot = state.db.snapshot();
+    assert_eq!(snapshot.provider_connections.len(), 1);
+    let connection = &snapshot.provider_connections[0];
+    assert_eq!(connection.id, "existing-connection");
+    assert_eq!(connection.name.as_deref(), Some("Pinned Name"));
+    assert_eq!(connection.priority, Some(7));
+    assert_eq!(connection.is_active, Some(false));
+    assert_eq!(
+        connection.created_at.as_deref(),
+        Some("2020-01-01T00:00:00Z")
+    );
+    assert_eq!(connection.access_token.as_deref(), Some("glpat-updated"));
+    assert_eq!(connection.refresh_token, None);
 }
 
 #[tokio::test]
