@@ -430,8 +430,35 @@ async fn models_endpoint_returns_empty_list_when_no_models_exist() {
 }
 
 #[tokio::test]
-async fn models_availability_get_returns_list() {
-    let app = openproxy::build_app(app_state().await);
+async fn models_availability_get_matches_js_issue_payload() {
+    let state = app_state().await;
+    let future = (chrono::Utc::now() + chrono::Duration::seconds(120)).to_rfc3339();
+    state
+        .db
+        .update(|db| {
+            let mut cooldown = connection("openai", Some("gpt-4o"), &[], true);
+            cooldown.id = "cooldown-conn".into();
+            cooldown.priority = Some(2);
+            cooldown.name = Some("OpenAI Primary".into());
+            cooldown.extra.insert(
+                "modelLock_gpt-4o-mini".into(),
+                serde_json::Value::String(future.clone()),
+            );
+
+            let mut unavailable = connection("anthropic", Some("claude"), &[], true);
+            unavailable.id = "unavailable-conn".into();
+            unavailable.priority = Some(1);
+            unavailable.name = None;
+            unavailable.email = Some("anthropic@example.com".into());
+            unavailable.test_status = Some("unavailable".into());
+            unavailable.last_error = Some("Provider offline".into());
+
+            db.provider_connections = vec![cooldown, unavailable];
+        })
+        .await
+        .unwrap();
+
+    let app = openproxy::build_app(state);
     let response = app
         .oneshot(
             Request::builder()
@@ -448,23 +475,68 @@ async fn models_availability_get_returns_list() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["object"], "list");
-    let data = json["data"].as_array().unwrap();
-    assert!(!data.is_empty());
-    // Check that llama3 is present (hardcoded model)
-    assert!(data.iter().any(|m| m["id"] == "llama3"));
+    assert_eq!(json["unavailableCount"], 2);
+    let models = json["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0]["provider"], "anthropic");
+    assert_eq!(models[0]["model"], "__all");
+    assert_eq!(models[0]["status"], "unavailable");
+    assert!(models[0].get("until").is_none());
+    assert_eq!(models[0]["connectionId"], "unavailable-conn");
+    assert_eq!(models[0]["connectionName"], "anthropic@example.com");
+    assert_eq!(models[0]["lastError"], "Provider offline");
+
+    assert_eq!(models[1]["provider"], "openai");
+    assert_eq!(models[1]["model"], "gpt-4o-mini");
+    assert_eq!(models[1]["status"], "cooldown");
+    assert_eq!(models[1]["until"], future);
+    assert_eq!(models[1]["connectionId"], "cooldown-conn");
+    assert_eq!(models[1]["connectionName"], "OpenAI Primary");
+    assert_eq!(models[1]["lastError"], serde_json::Value::Null);
 }
 
 #[tokio::test]
-async fn models_availability_check_post_returns_available_for_existing_model() {
-    let app = openproxy::build_app(app_state().await);
+async fn models_availability_post_clears_cooldown_like_js() {
+    let state = app_state().await;
+    state
+        .db
+        .update(|db| {
+            let mut locked = connection("openai", Some("gpt-4o"), &[], true);
+            locked.id = "locked-conn".into();
+            locked.test_status = Some("unavailable".into());
+            locked.last_error = Some("temporary failure".into());
+            locked.last_error_at = Some("2026-05-06T10:00:00Z".into());
+            locked.backoff_level = Some(3);
+            locked.extra.insert(
+                "modelLock_gpt-4o-mini".into(),
+                serde_json::Value::String("2026-05-06T12:00:00Z".into()),
+            );
+
+            let mut untouched = connection("openai", Some("gpt-4o"), &[], true);
+            untouched.id = "untouched-conn".into();
+            untouched.test_status = Some("unavailable".into());
+            untouched.last_error = Some("still locked".into());
+
+            db.provider_connections = vec![locked, untouched];
+        })
+        .await
+        .unwrap();
+
+    let app = openproxy::build_app(state.clone());
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/models/availability/check")
+                .uri("/api/models/availability")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"model":"llama3"}"#))
+                .body(Body::from(
+                    json!({
+                        "action": "clearCooldown",
+                        "provider": "openai",
+                        "model": "gpt-4o-mini"
+                    })
+                    .to_string(),
+                ))
                 .unwrap(),
         )
         .await
@@ -475,32 +547,54 @@ async fn models_availability_check_post_returns_available_for_existing_model() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json, json!({ "ok": true }));
 
-    assert_eq!(json["available"], true);
-    assert_eq!(json["model"], "llama3");
+    let snapshot = state.db.snapshot();
+    let locked = snapshot
+        .provider_connections
+        .iter()
+        .find(|connection| connection.id == "locked-conn")
+        .unwrap();
+    assert_eq!(
+        locked.extra.get("modelLock_gpt-4o-mini"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(locked.test_status.as_deref(), Some("active"));
+    assert_eq!(locked.last_error, None);
+    assert_eq!(locked.last_error_at, None);
+    assert_eq!(locked.backoff_level, Some(0));
+    assert!(locked.updated_at.as_deref().is_some());
+
+    let untouched = snapshot
+        .provider_connections
+        .iter()
+        .find(|connection| connection.id == "untouched-conn")
+        .unwrap();
+    assert_eq!(untouched.test_status.as_deref(), Some("unavailable"));
+    assert_eq!(untouched.last_error.as_deref(), Some("still locked"));
+    assert!(untouched.extra.get("modelLock_gpt-4o-mini").is_none());
 }
 
 #[tokio::test]
-async fn models_availability_check_post_returns_not_available_for_unknown_model() {
+async fn models_availability_post_rejects_invalid_request() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/api/models/availability/check")
+                .uri("/api/models/availability")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"model":"unknown-model"}"#))
+                .body(Body::from(json!({ "action": "wrong" }).to_string()))
                 .unwrap(),
         )
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["available"], false);
-    assert_eq!(json["model"], "unknown-model");
+    assert_eq!(json, json!({ "error": "Invalid request" }));
 }
