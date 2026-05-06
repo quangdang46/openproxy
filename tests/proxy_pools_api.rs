@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
+use once_cell::sync::Lazy;
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
 use openproxy::types::{ApiKey, ProviderConnection, ProxyPool};
@@ -13,11 +14,71 @@ use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::util::ServiceExt;
 use wiremock::{
-    matchers::{header, method, path},
+    matchers::{body_json, header, method, path},
     Mock, MockServer, ResponseTemplate,
 };
 
 const TEST_KEY: &str = "proxy-pools-api-test-key";
+const VERCEL_RELAY_FUNCTION_CODE: &str = r#"
+export const config = { runtime: "edge" };
+
+export default async function handler(req) {
+  const target = req.headers.get("x-relay-target");
+  const relayPath = req.headers.get("x-relay-path") || "/";
+  if (!target) {
+    return new Response(JSON.stringify({ error: "Missing x-relay-target header" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  const targetUrl = target.replace(/\/$/, "") + relayPath;
+
+  const headers = new Headers(req.headers);
+  headers.delete("x-relay-target");
+  headers.delete("x-relay-path");
+  headers.delete("host");
+
+  const response = await fetch(targetUrl, {
+    method: req.method,
+    headers,
+    body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
+    duplex: "half",
+  });
+
+  return new Response(response.body, {
+    status: response.status,
+    headers: response.headers,
+  });
+}
+"#;
+static VERCEL_API_ENV_LOCK: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
+
+struct VercelApiEnvGuard {
+    previous: Option<String>,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for VercelApiEnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_deref() {
+            std::env::set_var("OPENPROXY_VERCEL_API_BASE_URL", previous);
+        } else {
+            std::env::remove_var("OPENPROXY_VERCEL_API_BASE_URL");
+        }
+    }
+}
+
+async fn set_vercel_api_base_url(base_url: &str) -> VercelApiEnvGuard {
+    let lock = VERCEL_API_ENV_LOCK.lock().await;
+    let previous = std::env::var("OPENPROXY_VERCEL_API_BASE_URL").ok();
+    std::env::set_var("OPENPROXY_VERCEL_API_BASE_URL", base_url);
+    VercelApiEnvGuard {
+        previous,
+        _lock: lock,
+    }
+}
 
 fn active_key() -> ApiKey {
     ApiKey {
@@ -348,7 +409,11 @@ async fn test_proxy_pool_vercel_matches_js_payload_and_dashboard_cookie_auth() {
     assert!(json["testedAt"].as_str().is_some());
 
     let snapshot = state.db.snapshot();
-    let pool = snapshot.proxy_pools.iter().find(|pool| pool.id == "pool-1").unwrap();
+    let pool = snapshot
+        .proxy_pools
+        .iter()
+        .find(|pool| pool.id == "pool-1")
+        .unwrap();
     assert_eq!(pool.test_status.as_deref(), Some("active"));
     assert_eq!(pool.last_error, None);
     assert_eq!(pool.is_active, Some(true));
@@ -383,14 +448,177 @@ async fn test_proxy_pool_failure_matches_js_response_shape_and_updates_db() {
     assert_eq!(json["ok"], false);
     assert_eq!(json["status"], 500);
     assert_eq!(json["statusText"], Value::Null);
-    assert!(json["error"].as_str().is_some_and(|value| !value.is_empty()));
+    assert!(json["error"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
     assert_eq!(json["elapsedMs"], 0);
     assert!(json["testedAt"].as_str().is_some());
 
     let snapshot = state.db.snapshot();
-    let pool = snapshot.proxy_pools.iter().find(|pool| pool.id == "pool-1").unwrap();
+    let pool = snapshot
+        .proxy_pools
+        .iter()
+        .find(|pool| pool.id == "pool-1")
+        .unwrap();
     assert_eq!(pool.test_status.as_deref(), Some("error"));
     assert_eq!(pool.is_active, Some(false));
     assert_eq!(pool.last_tested_at.as_deref(), json["testedAt"].as_str());
     assert_eq!(pool.last_error.as_deref(), json["error"].as_str());
+}
+
+#[tokio::test]
+async fn vercel_deploy_matches_js_flow_and_dashboard_cookie_auth() {
+    let vercel = MockServer::start().await;
+    let _guard = set_vercel_api_base_url(&vercel.uri()).await;
+
+    Mock::given(method("POST"))
+        .and(path("/v13/deployments"))
+        .and(header("authorization", "Bearer vercel-token"))
+        .and(body_json(json!({
+            "name": "vercel-relay",
+            "files": [
+                {
+                    "file": "api/relay.js",
+                    "data": VERCEL_RELAY_FUNCTION_CODE
+                },
+                {
+                    "file": "package.json",
+                    "data": "{\"name\":\"vercel-relay\",\"version\":\"1.0.0\"}"
+                },
+                {
+                    "file": "vercel.json",
+                    "data": "{\"rewrites\":[{\"source\":\"/(.*)\",\"destination\":\"/api/relay\"}]}"
+                }
+            ],
+            "projectSettings": {
+                "framework": Value::Null
+            },
+            "target": "production"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "uid": "dep_123"
+        })))
+        .mount(&vercel)
+        .await;
+
+    Mock::given(method("PATCH"))
+        .and(path("/v9/projects/vercel-relay"))
+        .and(header("authorization", "Bearer vercel-token"))
+        .and(body_json(json!({
+            "ssoProtection": Value::Null
+        })))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&vercel)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v13/deployments/dep_123"))
+        .and(header("authorization", "Bearer vercel-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "readyState": "READY",
+            "url": "vercel-relay.example.vercel.app"
+        })))
+        .mount(&vercel)
+        .await;
+
+    let state = app_state_with_login(vec![], vec![], true).await;
+    let app = openproxy::build_app(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/proxy-pools/vercel-deploy")
+                .header("cookie", dashboard_cookie())
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "vercelToken": "vercel-token",
+                        "projectName": " vercel-relay "
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["deployUrl"], "https://vercel-relay.example.vercel.app");
+    assert_eq!(json["proxyPool"]["name"], "vercel-relay");
+    assert_eq!(
+        json["proxyPool"]["proxyUrl"],
+        "https://vercel-relay.example.vercel.app"
+    );
+    assert_eq!(json["proxyPool"]["type"], "vercel");
+    assert_eq!(json["proxyPool"]["noProxy"], "");
+    assert_eq!(json["proxyPool"]["isActive"], true);
+    assert_eq!(json["proxyPool"]["strictProxy"], false);
+    assert_eq!(json["proxyPool"]["testStatus"], "unknown");
+    assert!(json["proxyPool"]["createdAt"].as_str().is_some());
+    assert!(json["proxyPool"]["updatedAt"].as_str().is_some());
+
+    let snapshot = state.db.snapshot();
+    assert_eq!(snapshot.proxy_pools.len(), 1);
+    let pool = &snapshot.proxy_pools[0];
+    assert_eq!(pool.name, "vercel-relay");
+    assert_eq!(pool.proxy_url, "https://vercel-relay.example.vercel.app");
+    assert_eq!(pool.r#type, "vercel");
+    assert_eq!(pool.no_proxy, "");
+    assert_eq!(pool.is_active, Some(true));
+    assert_eq!(pool.strict_proxy, Some(false));
+    assert_eq!(pool.test_status.as_deref(), Some("unknown"));
+}
+
+#[tokio::test]
+async fn vercel_deploy_returns_upstream_error_shape_without_creating_pool() {
+    let vercel = MockServer::start().await;
+    let _guard = set_vercel_api_base_url(&vercel.uri()).await;
+
+    Mock::given(method("POST"))
+        .and(path("/v13/deployments"))
+        .and(header("authorization", "Bearer bad-token"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": {
+                "message": "Unauthorized"
+            }
+        })))
+        .mount(&vercel)
+        .await;
+
+    let state = app_state(vec![], vec![]).await;
+    let app = openproxy::build_app(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/proxy-pools/vercel-deploy")
+                .header("authorization", format!("Bearer {TEST_KEY}"))
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "vercelToken": "bad-token",
+                        "projectName": "vercel-relay"
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["error"], "Unauthorized");
+    assert!(state.db.snapshot().proxy_pools.is_empty());
 }
