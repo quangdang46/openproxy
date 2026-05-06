@@ -1,187 +1,89 @@
-use std::collections::BTreeMap;
-
-use axum::extract::State;
 use axum::{
-    http::HeaderMap,
+    http::{header, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Router,
 };
-use uuid::Uuid;
+use serde_json::json;
 
 use crate::server::state::AppState;
 
-fn require_management_access(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
-    super::require_management_api_key(headers, state)
+const CORS_ALLOW_ORIGIN: &str = "*";
+const CORS_ALLOW_METHODS: &str = "GET, OPTIONS";
+const CORS_ALLOW_HEADERS: &str = "*";
+
+fn cors_response(
+    status: StatusCode,
+    body: Option<&'static str>,
+    content_type: Option<&str>,
+) -> Response {
+    let mut response = match body {
+        Some(body) => (status, body).into_response(),
+        None => status.into_response(),
+    };
+
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static(CORS_ALLOW_ORIGIN),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static(CORS_ALLOW_METHODS),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static(CORS_ALLOW_HEADERS),
+    );
+
+    if let Some(content_type) = content_type {
+        if let Ok(value) = HeaderValue::from_str(content_type) {
+            headers.insert(header::CONTENT_TYPE, value);
+        }
+    }
+
+    response
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
-        .route("/api/tags", get(list_tags).post(create_tag))
-        .route(
-            "/api/tags/{id}",
-            get(get_tag).put(update_tag).delete(delete_tag),
-        )
+    Router::new().route("/api/tags", get(get_tags).options(options_tags))
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct Tag {
-    pub id: String,
-    pub name: String,
-    pub color: Option<String>,
-    pub created_at: Option<String>,
+async fn options_tags() -> Response {
+    cors_response(StatusCode::OK, None, None)
 }
 
-impl Tag {
-    pub fn new(name: String) -> Self {
-        Self {
-            id: Uuid::new_v4().to_string(),
-            name,
-            color: None,
-            created_at: Some(chrono::Utc::now().to_rfc3339()),
-        }
-    }
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateTagRequest {
-    pub name: String,
-    pub color: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UpdateTagRequest {
-    pub name: Option<String>,
-    pub color: Option<String>,
-}
-
-type TagsStore = BTreeMap<String, Tag>;
-
-fn get_tags_from_db(db: &crate::types::AppDb) -> TagsStore {
-    db.extra
-        .get("tags")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default()
-}
-
-fn save_tags_to_db(db: &mut crate::types::AppDb, tags: &TagsStore) {
-    if let Ok(value) = serde_json::to_value(tags) {
-        db.extra.insert("tags".to_string(), value);
-    }
-}
-
-async fn list_tags(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_management_access(&headers, &state) {
-        return response;
-    }
-
-    let snapshot = state.db.snapshot();
-    let tags = get_tags_from_db(&snapshot);
-    Json(tags.into_values().collect::<Vec<_>>()).into_response()
-}
-
-async fn get_tag(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> Response {
-    if let Err(response) = require_management_access(&headers, &state) {
-        return response;
-    }
-
-    let snapshot = state.db.snapshot();
-    let tags = get_tags_from_db(&snapshot);
-    Json(tags.get(&id).cloned()).into_response()
-}
-
-async fn create_tag(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<CreateTagRequest>,
-) -> Response {
-    if let Err(response) = require_management_access(&headers, &state) {
-        return response;
-    }
-
-    let mut tag = Tag::new(req.name);
-    tag.color = req.color;
-
-    let result = state
-        .db
-        .update(|db| {
-            let mut tags = get_tags_from_db(db);
-            tags.insert(tag.id.clone(), tag.clone());
-            save_tags_to_db(db, &tags);
-        })
-        .await;
-
-    match result {
-        Ok(_) => Json(serde_json::json!({ "success": true, "tag": tag })).into_response(),
-        Err(e) => {
-            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
-        }
-    }
-}
-
-async fn update_tag(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    axum::extract::Path(id): axum::extract::Path<String>,
-    Json(req): Json<UpdateTagRequest>,
-) -> Response {
-    if let Err(response) = require_management_access(&headers, &state) {
-        return response;
-    }
-
-    let result = state
-        .db
-        .update(|db| {
-            let mut tags = get_tags_from_db(db);
-            if let Some(tag) = tags.get_mut(&id) {
-                if let Some(name) = req.name {
-                    tag.name = name;
+async fn get_tags() -> Response {
+    let body = json!({
+        "models": [
+            {
+                "name": "llama3.2",
+                "modified_at": "2025-12-26T00:00:00Z",
+                "size": 2000000000_u64,
+                "digest": "abc123def456",
+                "details": {
+                    "format": "gguf",
+                    "family": "llama",
+                    "parameter_size": "3B",
+                    "quantization_level": "Q4_K_M"
                 }
-                if let Some(color) = req.color {
-                    tag.color = Some(color);
+            },
+            {
+                "name": "qwen2.5",
+                "modified_at": "2025-12-26T00:00:00Z",
+                "size": 4000000000_u64,
+                "digest": "def456abc123",
+                "details": {
+                    "format": "gguf",
+                    "family": "qwen",
+                    "parameter_size": "7B",
+                    "quantization_level": "Q4_K_M"
                 }
             }
-            save_tags_to_db(db, &tags);
-        })
-        .await;
+        ]
+    })
+    .to_string();
 
-    match result {
-        Ok(_) => Json(serde_json::json!({ "success": true })).into_response(),
-        Err(e) => {
-            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
-        }
-    }
-}
-
-async fn delete_tag(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> Response {
-    if let Err(response) = require_management_access(&headers, &state) {
-        return response;
-    }
-
-    let result = state
-        .db
-        .update(|db| {
-            let mut tags = get_tags_from_db(db);
-            tags.remove(&id);
-            save_tags_to_db(db, &tags);
-        })
-        .await;
-
-    match result {
-        Ok(_) => Json(serde_json::json!({ "success": true })).into_response(),
-        Err(e) => {
-            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
-        }
-    }
+    let leaked = Box::leak(body.into_boxed_str());
+    cors_response(StatusCode::OK, Some(leaked), Some("application/json"))
 }
