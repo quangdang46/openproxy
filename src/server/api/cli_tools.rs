@@ -609,6 +609,169 @@ async fn delete_droid_settings(State(state): State<AppState>, headers: HeaderMap
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// OpenCode Settings Endpoints
+// GET/POST/PATCH/DELETE /api/cli-tools/opencode-settings
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenCodeSettingsRequest {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub models: Option<Vec<String>>,
+    pub active_model: Option<String>,
+    pub subagent_model: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PatchOpenCodeSettingsRequest {
+    pub clear_active_model: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeleteOpenCodeSettingsQuery {
+    pub model: Option<String>,
+}
+
+async fn get_opencode_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let installed = check_opencode_installed().await;
+    if !installed {
+        return Json(json!({
+            "installed": false,
+            "config": Value::Null,
+            "message": "OpenCode CLI is not installed",
+        }))
+        .into_response();
+    }
+
+    match read_opencode_config().await {
+        Ok(config) => {
+            let provider_config = config
+                .as_ref()
+                .and_then(|config| config.get("provider"))
+                .and_then(|provider| provider.get("9router"));
+            let model_map = provider_config.and_then(|provider| provider.get("models"));
+            let models = model_map
+                .and_then(Value::as_object)
+                .map(|models| {
+                    models
+                        .keys()
+                        .map(|model| Value::String(model.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            Json(json!({
+                "installed": true,
+                "config": config,
+                "has9Router": provider_config.is_some(),
+                "configPath": opencode_config_path().to_string_lossy().to_string(),
+                "opencode": {
+                    "models": models,
+                    "activeModel": config
+                        .as_ref()
+                        .and_then(|config| config.get("model"))
+                        .and_then(Value::as_str)
+                        .and_then(|model| model.strip_prefix("9router/")),
+                    "baseURL": provider_config
+                        .and_then(|provider| provider.get("options"))
+                        .and_then(|options| options.get("baseURL"))
+                        .and_then(Value::as_str),
+                },
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to check opencode settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn save_opencode_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<OpenCodeSettingsRequest>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let models = req.models.clone().unwrap_or_else(|| {
+        req.model
+            .clone()
+            .map(|model| vec![model])
+            .unwrap_or_default()
+    });
+    if req.base_url.trim().is_empty() || models.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "baseUrl and at least one model are required" })),
+        )
+            .into_response();
+    }
+
+    match write_opencode_settings(&req, &models).await {
+        Ok(config_path) => Json(json!({
+            "success": true,
+            "message": "OpenCode settings applied successfully!",
+            "configPath": config_path,
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to apply settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn patch_opencode_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PatchOpenCodeSettingsRequest>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    match patch_opencode_config(&req).await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to patch settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_opencode_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<DeleteOpenCodeSettingsQuery>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    match reset_opencode_settings(params.model).await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to reset opencode settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
 async fn check_codex_installed() -> bool {
     command_exists("codex", true).await || fs::metadata(codex_config_path()).await.is_ok()
 }
@@ -849,6 +1012,14 @@ async fn read_droid_settings() -> anyhow::Result<Option<Value>> {
     read_json_optional(&droid_settings_path()).await
 }
 
+async fn check_opencode_installed() -> bool {
+    command_exists("opencode", true).await || fs::metadata(opencode_config_path()).await.is_ok()
+}
+
+async fn read_opencode_config() -> anyhow::Result<Option<Value>> {
+    read_json_optional(&opencode_config_path()).await
+}
+
 async fn write_copilot_settings(req: &CopilotSettingsRequest) -> anyhow::Result<String> {
     let config_path = copilot_config_path();
     if let Some(parent) = config_path.parent() {
@@ -1064,6 +1235,261 @@ async fn reset_droid_settings() -> anyhow::Result<Value> {
     }))
 }
 
+async fn write_opencode_settings(
+    req: &OpenCodeSettingsRequest,
+    models: &[String],
+) -> anyhow::Result<String> {
+    let config_path = opencode_config_path();
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+
+    let mut config = match fs::read_to_string(&config_path).await {
+        Ok(existing) => parse_json_object_or_default(&existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(error.into()),
+    };
+
+    let normalized_base_url = normalize_v1_base_url(&req.base_url);
+    let api_key = req
+        .api_key
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "sk_9router".to_string());
+    let effective_subagent_model = req
+        .subagent_model
+        .clone()
+        .unwrap_or_else(|| models[0].clone());
+
+    let provider = config
+        .entry("provider".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !provider.is_object() {
+        *provider = Value::Object(serde_json::Map::new());
+    }
+    let provider_map = provider
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("provider must be an object"))?;
+
+    let existing_provider = provider_map
+        .entry("9router".to_string())
+        .or_insert_with(|| {
+            json!({
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {},
+                "models": {},
+            })
+        });
+    if !existing_provider.is_object() {
+        *existing_provider = json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {},
+            "models": {},
+        });
+    }
+    let existing_provider_map = existing_provider
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("provider.9router must be an object"))?;
+
+    let options = existing_provider_map
+        .entry("options".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !options.is_object() {
+        *options = Value::Object(serde_json::Map::new());
+    }
+    let options_map = options
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("provider.9router.options must be an object"))?;
+    options_map.insert("baseURL".to_string(), Value::String(normalized_base_url));
+    options_map.insert("apiKey".to_string(), Value::String(api_key));
+
+    let existing_models = existing_provider_map
+        .entry("models".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !existing_models.is_object() {
+        *existing_models = Value::Object(serde_json::Map::new());
+    }
+    let existing_models_map = existing_models
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("provider.9router.models must be an object"))?;
+    for model in models {
+        if model.is_empty() {
+            continue;
+        }
+        existing_models_map.insert(model.clone(), json!({ "name": model }));
+    }
+
+    match req.active_model.as_deref() {
+        Some("") => {
+            config.insert("model".to_string(), Value::String(String::new()));
+        }
+        _ => {
+            let final_active = req
+                .active_model
+                .clone()
+                .filter(|model| !model.is_empty())
+                .unwrap_or_else(|| models[0].clone());
+            config.insert(
+                "model".to_string(),
+                Value::String(format!("9router/{final_active}")),
+            );
+        }
+    }
+
+    let agent = config
+        .entry("agent".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !agent.is_object() {
+        *agent = Value::Object(serde_json::Map::new());
+    }
+    let agent_map = agent
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("agent must be an object"))?;
+    agent_map.insert(
+        "explorer".to_string(),
+        json!({
+            "description": "Fast explorer subagent for codebase exploration",
+            "mode": "subagent",
+            "model": format!("9router/{effective_subagent_model}"),
+        }),
+    );
+
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&Value::Object(config))?,
+    )
+    .await?;
+    Ok(config_path.to_string_lossy().to_string())
+}
+
+async fn patch_opencode_config(req: &PatchOpenCodeSettingsRequest) -> anyhow::Result<Value> {
+    let config_path = opencode_config_path();
+    let mut config = match fs::read_to_string(&config_path).await {
+        Ok(existing) => parse_json_object_required(&existing)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "success": true,
+                "message": "No config file found",
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if req.clear_active_model
+        && config
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| model.starts_with("9router/"))
+    {
+        config.insert("model".to_string(), Value::String(String::new()));
+    }
+
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&Value::Object(config))?,
+    )
+    .await?;
+    Ok(json!({
+        "success": true,
+        "message": "Settings updated",
+    }))
+}
+
+async fn reset_opencode_settings(model_to_remove: Option<String>) -> anyhow::Result<Value> {
+    let config_path = opencode_config_path();
+    let mut config = match fs::read_to_string(&config_path).await {
+        Ok(existing) => parse_json_object_required(&existing)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "success": true,
+                "message": "No config file to reset",
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if let Some(model_to_remove) = model_to_remove.clone() {
+        let active_model_matches = config
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| model == format!("9router/{model_to_remove}"));
+        let mut remove_provider = false;
+        let mut next_model = None;
+        if let Some(models_map) = config
+            .get_mut("provider")
+            .and_then(Value::as_object_mut)
+            .and_then(|provider| provider.get_mut("9router"))
+            .and_then(Value::as_object_mut)
+            .and_then(|provider| provider.get_mut("models"))
+            .and_then(Value::as_object_mut)
+        {
+            models_map.remove(&model_to_remove);
+            if models_map.is_empty() {
+                remove_provider = true;
+            } else if active_model_matches {
+                next_model = models_map.keys().next().cloned();
+            }
+        }
+        if remove_provider {
+            if let Some(provider) = config.get_mut("provider").and_then(Value::as_object_mut) {
+                provider.remove("9router");
+            }
+            if config
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| model.starts_with("9router/"))
+            {
+                config.remove("model");
+            }
+        } else if let Some(next_model) = next_model {
+            config.insert(
+                "model".to_string(),
+                Value::String(format!("9router/{next_model}")),
+            );
+        }
+    } else {
+        if let Some(provider) = config.get_mut("provider").and_then(Value::as_object_mut) {
+            provider.remove("9router");
+        }
+        if config
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(|model| model.starts_with("9router/"))
+        {
+            config.remove("model");
+        }
+    }
+
+    let should_remove_explorer = config
+        .get("agent")
+        .and_then(Value::as_object)
+        .and_then(|agent| agent.get("explorer"))
+        .and_then(Value::as_object)
+        .and_then(|explorer| explorer.get("model"))
+        .and_then(Value::as_str)
+        .is_some_and(|model| model.starts_with("9router/"));
+    if should_remove_explorer {
+        if let Some(agent) = config.get_mut("agent").and_then(Value::as_object_mut) {
+            agent.remove("explorer");
+            if agent.is_empty() {
+                config.remove("agent");
+            }
+        }
+    }
+
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&Value::Object(config))?,
+    )
+    .await?;
+    Ok(json!({
+        "success": true,
+        "message": model_to_remove
+            .map(|model| Value::String(format!("Model \"{model}\" removed")))
+            .unwrap_or_else(|| Value::String("9Router settings removed from OpenCode".to_string())),
+    }))
+}
+
 async fn read_json_optional(path: &FsPath) -> anyhow::Result<Option<Value>> {
     match fs::read_to_string(path).await {
         Ok(content) => Ok(Some(serde_json::from_str(&content)?)),
@@ -1083,6 +1509,13 @@ fn parse_json_object_or_default(content: &str) -> serde_json::Map<String, Value>
     match serde_json::from_str::<Value>(content) {
         Ok(Value::Object(object)) => object,
         _ => serde_json::Map::new(),
+    }
+}
+
+fn parse_json_object_required(content: &str) -> anyhow::Result<serde_json::Map<String, Value>> {
+    match serde_json::from_str::<Value>(content)? {
+        Value::Object(object) => Ok(object),
+        _ => Err(anyhow::anyhow!("Expected JSON object")),
     }
 }
 
@@ -1137,6 +1570,13 @@ fn copilot_config_path() -> PathBuf {
 
 fn droid_settings_path() -> PathBuf {
     home_dir().join(".factory").join("settings.json")
+}
+
+fn opencode_config_path() -> PathBuf {
+    home_dir()
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json")
 }
 
 fn home_dir() -> PathBuf {
@@ -1501,10 +1941,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/cli-tools/opencode-settings",
-            get(proxy_cli_tool_settings)
-                .post(proxy_cli_tool_settings)
-                .patch(proxy_cli_tool_settings)
-                .delete(proxy_cli_tool_settings),
+            get(get_opencode_settings)
+                .post(save_opencode_settings)
+                .patch(patch_opencode_settings)
+                .delete(delete_opencode_settings),
         )
         .route(
             "/api/cli-tools/droid-settings",

@@ -110,6 +110,10 @@ fn droid_settings_path(home: &Path) -> PathBuf {
     home.join(".factory").join("settings.json")
 }
 
+fn opencode_config_path(home: &Path) -> PathBuf {
+    home.join(".config").join("opencode").join("opencode.json")
+}
+
 #[tokio::test]
 async fn claude_settings_get_reports_not_installed_without_binary_or_config() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -815,4 +819,243 @@ async fn droid_settings_post_get_and_delete_match_9router_file_behavior() {
             ]
         })
     );
+}
+
+#[tokio::test]
+async fn opencode_settings_get_reports_not_installed_without_binary_or_config() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/opencode-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let (status, json) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "installed": false,
+            "config": null,
+            "message": "OpenCode CLI is not installed"
+        })
+    );
+}
+
+#[tokio::test]
+async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let config_path = opencode_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!({
+            "provider": {
+                "other": { "keep": true },
+                "9router": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "region": "keep",
+                        "baseURL": "https://old.example.com/v1",
+                        "apiKey": "old-key"
+                    },
+                    "models": {
+                        "old/model": { "name": "old/model" }
+                    }
+                }
+            },
+            "model": "other/model",
+            "agent": {
+                "keep": { "still": true },
+                "explorer": {
+                    "description": "legacy",
+                    "mode": "subagent",
+                    "model": "other/model"
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+    let post = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/opencode-settings",
+            Body::from(
+                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-9router","models":["oa/gpt-4.1","oa/gpt-4.1-mini"],"activeModel":"oa/gpt-4.1-mini","subagentModel":"oa/gpt-4.1-nano"}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(post).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "OpenCode settings applied successfully!",
+            "configPath": config_path.to_string_lossy().to_string()
+        })
+    );
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(saved["provider"]["other"]["keep"], true);
+    assert_eq!(
+        saved["provider"]["9router"]["npm"],
+        "@ai-sdk/openai-compatible"
+    );
+    assert_eq!(saved["provider"]["9router"]["options"]["region"], "keep");
+    assert_eq!(
+        saved["provider"]["9router"]["options"]["baseURL"],
+        "https://proxy.example.com/v1"
+    );
+    assert_eq!(
+        saved["provider"]["9router"]["options"]["apiKey"],
+        "sk-9router"
+    );
+    assert_eq!(
+        saved["provider"]["9router"]["models"]["old/model"]["name"],
+        "old/model"
+    );
+    assert_eq!(
+        saved["provider"]["9router"]["models"]["oa/gpt-4.1"]["name"],
+        "oa/gpt-4.1"
+    );
+    assert_eq!(
+        saved["provider"]["9router"]["models"]["oa/gpt-4.1-mini"]["name"],
+        "oa/gpt-4.1-mini"
+    );
+    assert_eq!(saved["model"], "9router/oa/gpt-4.1-mini");
+    assert_eq!(saved["agent"]["keep"]["still"], true);
+    assert_eq!(
+        saved["agent"]["explorer"]["model"],
+        "9router/oa/gpt-4.1-nano"
+    );
+
+    let get = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/opencode-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(get).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["installed"], true);
+    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["config"], saved);
+    assert_eq!(
+        json["configPath"],
+        config_path.to_string_lossy().to_string()
+    );
+    let models = json["opencode"]["models"].as_array().unwrap();
+    assert_eq!(models.len(), 3);
+    assert!(models.contains(&json!("old/model")));
+    assert!(models.contains(&json!("oa/gpt-4.1")));
+    assert!(models.contains(&json!("oa/gpt-4.1-mini")));
+    assert_eq!(json["opencode"]["activeModel"], "oa/gpt-4.1-mini");
+    assert_eq!(json["opencode"]["baseURL"], "https://proxy.example.com/v1");
+
+    let patch = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::PATCH,
+            "/api/cli-tools/opencode-settings",
+            Body::from(r#"{"clearActiveModel":true}"#),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(patch).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "Settings updated"
+        })
+    );
+
+    let patched: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(patched["model"], "");
+
+    let delete_one = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::DELETE,
+            "/api/cli-tools/opencode-settings?model=oa/gpt-4.1",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(delete_one).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "Model \"oa/gpt-4.1\" removed"
+        })
+    );
+
+    let deleted_one: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert!(deleted_one["provider"]["9router"]["models"]
+        .get("oa/gpt-4.1")
+        .is_none());
+    assert!(deleted_one["provider"]["9router"]["models"]
+        .get("old/model")
+        .is_some());
+    assert!(deleted_one["provider"]["9router"]["models"]
+        .get("oa/gpt-4.1-mini")
+        .is_some());
+    assert!(deleted_one["agent"].get("explorer").is_none());
+    assert_eq!(deleted_one["agent"]["keep"]["still"], true);
+    assert_eq!(deleted_one["model"], "");
+
+    let delete_all = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::DELETE,
+            "/api/cli-tools/opencode-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(delete_all).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "9Router settings removed from OpenCode"
+        })
+    );
+
+    let reset: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert!(reset["provider"].get("9router").is_none());
+    assert_eq!(reset["provider"]["other"]["keep"], true);
+    assert_eq!(reset["agent"]["keep"]["still"], true);
+    assert_eq!(reset["model"], "");
 }
