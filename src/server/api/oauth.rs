@@ -181,6 +181,15 @@ fn iflow_api_base_url() -> String {
         .to_string()
 }
 
+fn kiro_auth_service_base_url() -> String {
+    std::env::var("OPENPROXY_KIRO_AUTH_SERVICE_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://prod.us-east-1.auth.desktop.kiro.dev".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
 const GITLAB_DEFAULT_BASE: &str = "https://gitlab.com";
 const CURSOR_ACCESS_TOKEN_KEYS: &[&str] = &["cursorAuth/accessToken", "cursorAuth/token"];
 const CURSOR_MACHINE_ID_KEYS: &[&str] = &[
@@ -1188,6 +1197,150 @@ async fn kiro_auto_import_route() -> Response {
     }
 }
 
+async fn kiro_import_auth(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let Some(refresh_token_raw) = body.get("refreshToken").and_then(Value::as_str) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Refresh token is required" })),
+        )
+            .into_response();
+    };
+    if refresh_token_raw.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Refresh token is required" })),
+        )
+            .into_response();
+    }
+
+    let refresh_token = refresh_token_raw.trim();
+    if !refresh_token.starts_with("aorAAAAAG") {
+        return internal_error_response(
+            "Invalid token format. Token should start with aorAAAAAG...".to_string(),
+        );
+    }
+
+    let response = match reqwest::Client::new()
+        .post(format!("{}/refreshToken", kiro_auth_service_base_url()))
+        .header("Content-Type", "application/json")
+        .json(&json!({ "refreshToken": refresh_token }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return internal_error_response(format!("Token validation failed: {}", error))
+        }
+    };
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return internal_error_response(format!(
+            "Token validation failed: Token refresh failed: {}",
+            error
+        ));
+    }
+
+    let payload: Value = match response.json().await {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let Some(access_token) = payload
+        .get("accessToken")
+        .or_else(|| payload.get("access_token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    else {
+        return internal_error_response(
+            "Token validation failed: Kiro refresh response did not include access token"
+                .to_string(),
+        );
+    };
+
+    let saved_refresh_token = payload
+        .get("refreshToken")
+        .or_else(|| payload.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| refresh_token.to_string());
+    let profile_arn = payload
+        .get("profileArn")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let expires_in = payload
+        .get("expiresIn")
+        .or_else(|| payload.get("expires_in"))
+        .and_then(Value::as_i64)
+        .unwrap_or(3600);
+
+    let claims = decode_cursor_jwt_claims(access_token);
+    let email = claims
+        .as_ref()
+        .and_then(|value| value.get("email"))
+        .or_else(|| {
+            claims
+                .as_ref()
+                .and_then(|value| value.get("preferred_username"))
+        })
+        .or_else(|| claims.as_ref().and_then(|value| value.get("sub")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let mut provider_specific_data = std::collections::BTreeMap::from([
+        (
+            "authMethod".to_string(),
+            Value::String("imported".to_string()),
+        ),
+        (
+            "provider".to_string(),
+            Value::String("Imported".to_string()),
+        ),
+    ]);
+    if let Some(profile_arn) = profile_arn {
+        provider_specific_data.insert("profileArn".to_string(), Value::String(profile_arn));
+    }
+
+    let connection = ProviderConnection {
+        provider: "kiro".to_string(),
+        auth_type: "oauth".to_string(),
+        email: email.clone(),
+        access_token: Some(access_token.to_string()),
+        refresh_token: Some(saved_refresh_token),
+        expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339()),
+        test_status: Some("active".to_string()),
+        provider_specific_data,
+        ..Default::default()
+    };
+
+    match create_imported_oauth_connection(&state.db, connection).await {
+        Ok(connection) => Json(json!({
+            "success": true,
+            "connection": {
+                "id": connection.id,
+                "provider": connection.provider,
+                "email": connection.email
+            }
+        }))
+        .into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
 // GET /api/oauth/:provider/start
 pub async fn start_oauth_flow(
     State(state): State<AppState>,
@@ -1819,6 +1972,7 @@ pub fn routes() -> Router<AppState> {
             get(cursor_import_instructions_route).post(cursor_import_auth),
         )
         .route("/api/oauth/kiro/auto-import", get(kiro_auto_import_route))
+        .route("/api/oauth/kiro/import", post(kiro_import_auth))
         .route("/api/oauth/iflow/cookie", post(iflow_cookie_auth))
         .route("/api/oauth/gitlab/pat", post(gitlab_pat_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))
