@@ -9,6 +9,7 @@ use crate::core::tunnel::TunnelManager;
 use crate::core::usage::UsageTracker;
 use crate::db::Db;
 use crate::oauth::pending::PendingFlowStore;
+use crate::server::api::oauth::CodexProxyState;
 use crate::server::console_logs::{shared_console_log_buffer, ConsoleLogBuffer};
 use crate::server::usage_live::UsageLiveState;
 
@@ -31,6 +32,7 @@ pub struct AppState {
     pub console_logs: Arc<ConsoleLogBuffer>,
     pub usage_live: Arc<UsageLiveState>,
     pub sessions: Arc<RwLock<HashMap<String, SessionInfo>>>,
+    pub codex_proxy: Arc<CodexProxyState>,
 }
 
 impl AppState {
@@ -44,6 +46,7 @@ impl AppState {
             console_logs: shared_console_log_buffer(),
             usage_live: Arc::new(UsageLiveState::new()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            codex_proxy: Arc::new(CodexProxyState::new()),
         }
     }
 

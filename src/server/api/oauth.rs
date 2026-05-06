@@ -15,11 +15,16 @@ use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::str;
-
+use std::sync::Arc;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+use tokio::sync::{oneshot, Mutex};
 use uuid::Uuid;
 
 use crate::oauth::device_code;
@@ -90,6 +95,173 @@ const KIRO_GRANT_TYPES: &[&str] = &[
     "urn:ietf:params:oauth:grant-type:device_code",
     "refresh_token",
 ];
+const CODEX_PROXY_TIMEOUT_MS: u64 = 300_000;
+
+#[derive(Clone, Default)]
+pub struct CodexProxyState {
+    inner: Arc<Mutex<CodexProxyInner>>,
+}
+
+#[derive(Default)]
+struct CodexProxyInner {
+    server: Option<CodexProxyServer>,
+    sessions: HashMap<String, CodexPendingExchange>,
+}
+
+struct CodexProxyServer {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexPendingExchange {
+    code_verifier: String,
+    redirect_uri: String,
+    status: String,
+    created_at: i64,
+    connection_id: Option<String>,
+    email: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexProxyStartResult {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+impl CodexProxyState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn start(&self, state: AppState, app_port: u16) -> CodexProxyStartResult {
+        let mut inner = self.inner.lock().await;
+        if inner.server.is_some() {
+            return CodexProxyStartResult {
+                success: true,
+                reason: None,
+            };
+        }
+
+        let listener = match TcpListener::bind(("127.0.0.1", CODEX_FIXED_PORT as u16)).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                return CodexProxyStartResult {
+                    success: false,
+                    reason: Some("port_busy".to_string()),
+                };
+            }
+            Err(error) => {
+                return CodexProxyStartResult {
+                    success: false,
+                    reason: Some(error.to_string()),
+                };
+            }
+        };
+
+        let proxy_state = self.clone();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept_result = listener.accept() => {
+                        let (mut stream, _) = match accept_result {
+                            Ok(pair) => pair,
+                            Err(_) => break,
+                        };
+                        let proxy_state = proxy_state.clone();
+                        let app_state = state.clone();
+                        tokio::spawn(async move {
+                            handle_codex_proxy_connection(proxy_state, app_state, app_port, &mut stream).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        let proxy_state = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(CODEX_PROXY_TIMEOUT_MS)).await;
+            proxy_state.stop().await;
+        });
+
+        inner.server = Some(CodexProxyServer {
+            shutdown_tx: Some(shutdown_tx),
+        });
+        CodexProxyStartResult {
+            success: true,
+            reason: None,
+        }
+    }
+
+    async fn stop(&self) {
+        let server = {
+            let mut inner = self.inner.lock().await;
+            inner.server.take()
+        };
+        if let Some(mut server) = server {
+            if let Some(shutdown_tx) = server.shutdown_tx.take() {
+                let _ = shutdown_tx.send(());
+            }
+        }
+    }
+
+    async fn register_session(&self, state: &str, code_verifier: &str, redirect_uri: &str) -> bool {
+        if state.trim().is_empty()
+            || code_verifier.trim().is_empty()
+            || redirect_uri.trim().is_empty()
+        {
+            return false;
+        }
+
+        let mut inner = self.inner.lock().await;
+        inner.sessions.insert(
+            state.to_string(),
+            CodexPendingExchange {
+                code_verifier: code_verifier.to_string(),
+                redirect_uri: redirect_uri.to_string(),
+                status: "pending".to_string(),
+                created_at: chrono::Utc::now().timestamp_millis(),
+                connection_id: None,
+                email: None,
+                error: None,
+            },
+        );
+        true
+    }
+
+    async fn get_session(&self, state: &str) -> Option<CodexPendingExchange> {
+        let inner = self.inner.lock().await;
+        inner.sessions.get(state).cloned()
+    }
+
+    async fn clear_session(&self, state: &str) {
+        let mut inner = self.inner.lock().await;
+        inner.sessions.remove(state);
+    }
+
+    async fn set_session_done(&self, state: &str, connection_id: String, email: Option<String>) {
+        let mut inner = self.inner.lock().await;
+        if let Some(session) = inner.sessions.get_mut(state) {
+            session.status = "done".to_string();
+            session.connection_id = Some(connection_id);
+            session.email = email;
+            session.error = None;
+        }
+    }
+
+    async fn set_session_error(&self, state: &str, error: String) {
+        let mut inner = self.inner.lock().await;
+        if let Some(session) = inner.sessions.get_mut(state) {
+            session.status = "error".to_string();
+            session.error = Some(error);
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct StartQuery {
@@ -129,6 +301,21 @@ struct OAuthExchangeCompatBody {
     code_verifier: Option<String>,
     state: Option<String>,
     meta: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CodexStartProxyQuery {
+    app_port: Option<u16>,
+    state: Option<String>,
+    code_verifier: Option<String>,
+    redirect_uri: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+struct CodexPollStatusQuery {
+    state: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -653,6 +840,180 @@ fn now_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn render_codex_result_page(success: bool, message: &str) -> String {
+    let color = if success { "#22c55e" } else { "#ef4444" };
+    let icon = if success { "&#10003;" } else { "&#10007;" };
+    let title = if success {
+        "Authentication Successful"
+    } else {
+        "Authentication Failed"
+    };
+
+    format!(
+        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{title}</title><style>body{{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#f5f5f5}}.c{{text-align:center;padding:2rem;background:#fff;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.1)}}.i{{color:{color};font-size:3rem}}h1{{margin:1rem 0}}p{{color:#666}}</style></head><body><div class=\"c\"><div class=\"i\">{icon}</div><h1>{title}</h1><p>{message}</p><p>Closing in <span id=\"cd\">3</span>s...</p><script>let n=3;const c=document.getElementById(\"cd\");const t=setInterval(()=>{{n--;c.textContent=n;if(n<=0){{clearInterval(t);window.close();}}}},1000);</script></div></body></html>"
+    )
+}
+
+async fn write_http_response(
+    stream: &mut tokio::net::TcpStream,
+    status_line: &str,
+    headers: &[(&str, String)],
+    body: &str,
+) {
+    let mut response = format!("HTTP/1.1 {status_line}\r\n");
+    for (key, value) in headers {
+        response.push_str(key);
+        response.push_str(": ");
+        response.push_str(value);
+        response.push_str("\r\n");
+    }
+    response.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    response.push_str("Connection: close\r\n\r\n");
+    response.push_str(body);
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.shutdown().await;
+}
+
+async fn handle_codex_proxy_connection(
+    proxy_state: CodexProxyState,
+    state: AppState,
+    app_port: u16,
+    stream: &mut tokio::net::TcpStream,
+) {
+    let mut buffer = vec![0u8; 16 * 1024];
+    let bytes_read = match stream.read(&mut buffer).await {
+        Ok(bytes_read) if bytes_read > 0 => bytes_read,
+        _ => return,
+    };
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    let parsed = match url::Url::parse(&format!("http://localhost{target}")) {
+        Ok(url) => url,
+        Err(_) => {
+            write_http_response(
+                stream,
+                "400 Bad Request",
+                &[("Content-Type", "text/plain; charset=utf-8".to_string())],
+                "Invalid callback URL",
+            )
+            .await;
+            return;
+        }
+    };
+
+    if parsed.path() != "/callback" && parsed.path() != "/auth/callback" {
+        write_http_response(
+            stream,
+            "404 Not Found",
+            &[("Content-Type", "text/plain; charset=utf-8".to_string())],
+            "Not found",
+        )
+        .await;
+        return;
+    }
+
+    let code = parsed.query_pairs().find_map(|(key, value)| {
+        if key == "code" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    });
+    let state_param = parsed.query_pairs().find_map(|(key, value)| {
+        if key == "state" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    });
+    let error_param = parsed.query_pairs().find_map(|(key, value)| {
+        if key == "error" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    });
+    let error_description = parsed.query_pairs().find_map(|(key, value)| {
+        if key == "error_description" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    });
+
+    if let Some(state_value) = state_param.as_deref() {
+        if let Some(session) = proxy_state.get_session(state_value).await {
+            let response_page = if let Some(error) = error_param {
+                let message = error_description.unwrap_or(error);
+                proxy_state
+                    .set_session_error(state_value, message.clone())
+                    .await;
+                render_codex_result_page(false, &message)
+            } else if let Some(code) = code {
+                match exchange_codex_compat(&code, &session.redirect_uri, &session.code_verifier)
+                    .await
+                {
+                    Ok(connection) => {
+                        match create_imported_oauth_connection(&state.db, connection).await {
+                            Ok(saved) => {
+                                proxy_state
+                                    .set_session_done(
+                                        state_value,
+                                        saved.id.clone(),
+                                        saved.email.clone(),
+                                    )
+                                    .await;
+                                render_codex_result_page(true, "You can close this window.")
+                            }
+                            Err(error) => {
+                                let message = error.to_string();
+                                proxy_state
+                                    .set_session_error(state_value, message.clone())
+                                    .await;
+                                render_codex_result_page(false, &message)
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        proxy_state
+                            .set_session_error(state_value, error.clone())
+                            .await;
+                        render_codex_result_page(false, &error)
+                    }
+                }
+            } else {
+                let message = "No authorization code received".to_string();
+                proxy_state
+                    .set_session_error(state_value, message.clone())
+                    .await;
+                render_codex_result_page(false, &message)
+            };
+
+            write_http_response(
+                stream,
+                "200 OK",
+                &[("Content-Type", "text/html; charset=utf-8".to_string())],
+                &response_page,
+            )
+            .await;
+            proxy_state.stop().await;
+            return;
+        }
+    }
+
+    let redirect_suffix = parsed
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let redirect_url = format!("http://localhost:{app_port}/callback{redirect_suffix}");
+    write_http_response(stream, "302 Found", &[("Location", redirect_url)], "").await;
+    proxy_state.stop().await;
 }
 
 async fn store_connection(
@@ -2340,6 +2701,111 @@ fn build_auth_compat_response(
     Json(Value::Object(payload)).into_response()
 }
 
+async fn codex_start_proxy_compat(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Query(query): Query<CodexStartProxyQuery>,
+) -> Response {
+    if provider != "codex" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Proxy only supported for codex" })),
+        )
+            .into_response();
+    }
+
+    let Some(app_port) = query.app_port else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing app_port" })),
+        )
+            .into_response();
+    };
+
+    let result = state.codex_proxy.start(state.clone(), app_port).await;
+    let mut response =
+        serde_json::Map::from_iter([("success".to_string(), Value::Bool(result.success))]);
+    if let Some(reason) = result.reason {
+        response.insert("reason".to_string(), Value::String(reason));
+    }
+
+    let server_side = if result.success {
+        match (
+            query.state.as_deref(),
+            query.code_verifier.as_deref(),
+            query.redirect_uri.as_deref(),
+        ) {
+            (Some(state_value), Some(code_verifier), Some(redirect_uri)) => {
+                state
+                    .codex_proxy
+                    .register_session(state_value, code_verifier, redirect_uri)
+                    .await
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    response.insert("serverSide".to_string(), Value::Bool(server_side));
+    Json(Value::Object(response)).into_response()
+}
+
+async fn codex_poll_status_compat(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    Query(query): Query<CodexPollStatusQuery>,
+) -> Response {
+    if provider != "codex" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Poll only supported for codex" })),
+        )
+            .into_response();
+    }
+
+    let Some(state_param) = query
+        .state
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing state" })),
+        )
+            .into_response();
+    };
+
+    let Some(session) = state.codex_proxy.get_session(state_param).await else {
+        return Json(json!({ "status": "unknown" })).into_response();
+    };
+
+    if session.status == "done" || session.status == "error" {
+        let payload =
+            serde_json::to_value(&session).unwrap_or_else(|_| json!({ "status": session.status }));
+        state.codex_proxy.clear_session(state_param).await;
+        Json(payload).into_response()
+    } else {
+        Json(json!({ "status": session.status })).into_response()
+    }
+}
+
+async fn codex_stop_proxy_compat(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+) -> Response {
+    if provider != "codex" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Proxy only supported for codex" })),
+        )
+            .into_response();
+    }
+
+    state.codex_proxy.stop().await;
+    Json(json!({ "success": true })).into_response()
+}
+
 async fn authorize_oauth_compat(
     Path(provider): Path<String>,
     Query(params): Query<std::collections::BTreeMap<String, String>>,
@@ -3929,6 +4395,18 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oauth/gitlab/pat", post(gitlab_pat_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))
         .route("/api/oauth/{provider}/callback", get(oauth_callback))
+        .route(
+            "/api/oauth/{provider}/start-proxy",
+            get(codex_start_proxy_compat),
+        )
+        .route(
+            "/api/oauth/{provider}/poll-status",
+            get(codex_poll_status_compat),
+        )
+        .route(
+            "/api/oauth/{provider}/stop-proxy",
+            get(codex_stop_proxy_compat),
+        )
         .route(
             "/api/oauth/{provider}/authorize",
             get(authorize_oauth_compat),
