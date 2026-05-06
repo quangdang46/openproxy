@@ -2033,6 +2033,27 @@ fn build_codex_auth_url(redirect_uri: &str, state: &str, code_challenge: &str) -
     format!("{}?{query_string}", codex_authorize_url())
 }
 
+fn build_gitlab_auth_url(
+    base_url: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    code_challenge: &str,
+) -> String {
+    build_query_url(
+        &format!("{}/oauth/authorize", base_url.trim_end_matches('/')),
+        &[
+            ("client_id", client_id.to_string()),
+            ("redirect_uri", redirect_uri.to_string()),
+            ("response_type", "code".to_string()),
+            ("state", state.to_string()),
+            ("scope", "api read_user".to_string()),
+            ("code_challenge", code_challenge.to_string()),
+            ("code_challenge_method", "S256".to_string()),
+        ],
+    )
+}
+
 fn build_auth_compat_response(
     provider: &str,
     auth_url: String,
@@ -2092,6 +2113,27 @@ async fn authorize_oauth_compat(
         "codex" => build_auth_compat_response(
             &provider,
             build_codex_auth_url(&redirect_uri, &state, &code_challenge),
+            state,
+            code_verifier,
+            code_challenge,
+            redirect_uri,
+        ),
+        "gitlab" => build_auth_compat_response(
+            &provider,
+            build_gitlab_auth_url(
+                params
+                    .get("baseUrl")
+                    .map(String::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or(GITLAB_DEFAULT_BASE),
+                params
+                    .get("clientId")
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                &redirect_uri,
+                &state,
+                &code_challenge,
+            ),
             state,
             code_verifier,
             code_challenge,
@@ -2243,6 +2285,128 @@ async fn exchange_codex_compat(
     })
 }
 
+fn exchange_meta_string(meta: Option<&Value>, key: &str) -> Option<String> {
+    meta.and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+async fn exchange_gitlab_compat(
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+    meta: Option<&Value>,
+) -> Result<ProviderConnection, String> {
+    let base_url = exchange_meta_string(meta, "baseUrl")
+        .unwrap_or_else(|| GITLAB_DEFAULT_BASE.to_string())
+        .trim_end_matches('/')
+        .to_string();
+    let client_id = exchange_meta_string(meta, "clientId").unwrap_or_default();
+    let client_secret = exchange_meta_string(meta, "clientSecret").unwrap_or_default();
+
+    let mut body = vec![
+        ("client_id", client_id.clone()),
+        ("grant_type", "authorization_code".to_string()),
+        ("code", code.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("code_verifier", code_verifier.to_string()),
+    ];
+    if !client_secret.is_empty() {
+        body.push(("client_secret", client_secret));
+    }
+
+    let response = reqwest::Client::new()
+        .post(format!("{base_url}/oauth/token"))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .form(&body)
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return Err(format!("GitLab token exchange failed: {error}"));
+    }
+
+    let tokens: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("GitLab token exchange failed: {error}"))?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refresh_token = tokens
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let expires_in = tokens.get("expires_in").and_then(Value::as_i64);
+    let scope = tokens
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let user = match reqwest::Client::new()
+        .get(format!("{base_url}/api/v4/user"))
+        .header("Authorization", format!("Bearer {access_token}"))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            response.json().await.unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    };
+
+    Ok(ProviderConnection {
+        provider: "gitlab".to_string(),
+        auth_type: "oauth".to_string(),
+        access_token: Some(access_token),
+        refresh_token,
+        expires_at: expires_in.map(crate::oauth::expires_at_from_seconds),
+        scope,
+        test_status: Some("active".to_string()),
+        provider_specific_data: std::collections::BTreeMap::from([
+            (
+                "username".to_string(),
+                Value::String(
+                    user.get("username")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            ),
+            (
+                "email".to_string(),
+                Value::String(
+                    user.get("email")
+                        .or_else(|| user.get("public_email"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            ),
+            (
+                "name".to_string(),
+                Value::String(
+                    user.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string(),
+                ),
+            ),
+            ("baseUrl".to_string(), Value::String(base_url)),
+            ("clientId".to_string(), Value::String(client_id)),
+            ("authKind".to_string(), Value::String("oauth".to_string())),
+        ]),
+        ..Default::default()
+    })
+}
+
 async fn exchange_oauth_compat(
     State(state): State<AppState>,
     Path(provider): Path<String>,
@@ -2281,7 +2445,7 @@ async fn exchange_oauth_compat(
         .as_deref()
         .map(str::trim)
         .unwrap_or_default();
-    let _meta = body.meta;
+    let meta = body.meta.as_ref();
 
     if code.is_empty() || redirect_uri.is_empty() || code_verifier.is_empty() {
         return (
@@ -2301,6 +2465,10 @@ async fn exchange_oauth_compat(
             }
         }
         "codex" => match exchange_codex_compat(code, redirect_uri, code_verifier).await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error),
+        },
+        "gitlab" => match exchange_gitlab_compat(code, redirect_uri, code_verifier, meta).await {
             Ok(value) => value,
             Err(error) => return internal_error_response(error),
         },
