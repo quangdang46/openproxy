@@ -175,6 +175,8 @@ fn iflow_api_base_url() -> String {
         .to_string()
 }
 
+const GITLAB_DEFAULT_BASE: &str = "https://gitlab.com";
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -512,6 +514,147 @@ async fn iflow_cookie_auth(
         }
     }))
     .into_response()
+}
+
+async fn gitlab_pat_auth(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid request body" })),
+            )
+                .into_response()
+        }
+    };
+
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid request body" })),
+            )
+                .into_response()
+        }
+    };
+
+    let token = body
+        .get("token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_string();
+    if token.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Personal Access Token is required" })),
+        )
+            .into_response();
+    }
+
+    let base = body
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(GITLAB_DEFAULT_BASE)
+        .trim_end_matches('/')
+        .to_string();
+
+    let user_response = match reqwest::Client::new()
+        .get(format!("{base}/api/v4/user"))
+        .header("Private-Token", token.clone())
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    if !user_response.status().is_success() {
+        let err = user_response.text().await.unwrap_or_default();
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": format!("GitLab token verification failed: {err}")
+            })),
+        )
+            .into_response();
+    }
+
+    let user: Value = match user_response.json().await {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let email = user
+        .get("email")
+        .and_then(Value::as_str)
+        .or_else(|| user.get("public_email").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+    let display_name = user
+        .get("name")
+        .and_then(Value::as_str)
+        .or_else(|| user.get("username").and_then(Value::as_str))
+        .unwrap_or(email.as_str())
+        .to_string();
+
+    let connection = ProviderConnection {
+        id: Uuid::new_v4().to_string(),
+        provider: "gitlab".to_string(),
+        auth_type: "oauth".to_string(),
+        is_active: Some(true),
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+        updated_at: Some(chrono::Utc::now().to_rfc3339()),
+        display_name: Some(display_name),
+        email: Some(email.clone()),
+        access_token: Some(token),
+        test_status: Some("active".to_string()),
+        provider_specific_data: std::collections::BTreeMap::from([
+            (
+                "username".to_string(),
+                Value::String(
+                    user.get("username")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+            ),
+            ("email".to_string(), Value::String(email)),
+            (
+                "name".to_string(),
+                Value::String(
+                    user.get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                ),
+            ),
+            ("baseUrl".to_string(), Value::String(base.clone())),
+            (
+                "authKind".to_string(),
+                Value::String("personal_access_token".to_string()),
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    let result = state
+        .db
+        .update(|db| {
+            db.provider_connections.push(connection);
+        })
+        .await;
+
+    match result {
+        Ok(_) => Json(json!({ "success": true })).into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
 }
 
 // GET /api/oauth/:provider/start
@@ -1137,6 +1280,7 @@ pub async fn oauth_status(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/oauth/iflow/cookie", post(iflow_cookie_auth))
+        .route("/api/oauth/gitlab/pat", post(gitlab_pat_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))
         .route("/api/oauth/{provider}/callback", get(oauth_callback))
         .route("/api/oauth/{provider}/device_code", post(start_device_code))
