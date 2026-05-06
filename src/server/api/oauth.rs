@@ -32,6 +32,8 @@ use crate::types::ProviderConnection;
 
 const PKCE_FLOW_TTL_SECS: i64 = 600;
 const DEVICE_FLOW_TTL_SECS: i64 = 900;
+const KIRO_SOCIAL_REDIRECT_URI: &str = "kiro://kiro.kiroAgent/authenticate-success";
+const KIRO_SOCIAL_REDIRECT_URI_ENCODED: &str = "kiro%3A%2F%2Fkiro.kiroAgent%2Fauthenticate-success";
 
 #[derive(Debug, Deserialize)]
 pub struct StartQuery {
@@ -54,6 +56,11 @@ pub struct DeviceCodeBody {
 #[derive(Debug, Deserialize)]
 pub struct RefreshBody {
     pub refresh_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KiroSocialAuthorizeQuery {
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,11 +144,7 @@ fn make_error_response(status: StatusCode, message: &str, code: &str, provider: 
 fn generate_code_verifier() -> String {
     let mut random_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut random_bytes);
-    let charset = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
-    random_bytes
-        .iter()
-        .map(|&b| charset[(b as usize) % charset.len()] as char)
-        .collect()
+    URL_SAFE_NO_PAD.encode(random_bytes)
 }
 
 fn generate_code_challenge(verifier: &str) -> String {
@@ -152,7 +155,7 @@ fn generate_code_challenge(verifier: &str) -> String {
 }
 
 fn generate_state() -> String {
-    let mut random_bytes = [0u8; 16];
+    let mut random_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut random_bytes);
     URL_SAFE_NO_PAD.encode(random_bytes)
 }
@@ -188,6 +191,34 @@ fn kiro_auth_service_base_url() -> String {
         .unwrap_or_else(|| "https://prod.us-east-1.auth.desktop.kiro.dev".to_string())
         .trim_end_matches('/')
         .to_string()
+}
+
+fn capitalize_ascii_first(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+fn kiro_social_idp(provider: &str) -> Option<&'static str> {
+    match provider {
+        "google" => Some("Google"),
+        "github" => Some("Github"),
+        _ => None,
+    }
+}
+
+fn build_kiro_social_login_url(
+    provider: &str,
+    code_challenge: &str,
+    state: &str,
+) -> Option<String> {
+    let idp = kiro_social_idp(provider)?;
+    Some(format!(
+        "{}/login?idp={idp}&redirect_uri={KIRO_SOCIAL_REDIRECT_URI_ENCODED}&code_challenge={code_challenge}&code_challenge_method=S256&state={state}&prompt=select_account",
+        kiro_auth_service_base_url()
+    ))
 }
 
 const GITLAB_DEFAULT_BASE: &str = "https://gitlab.com";
@@ -394,7 +425,7 @@ async fn create_imported_oauth_connection(
     saved.ok_or_else(|| anyhow::anyhow!("Failed to save provider connection"))
 }
 
-fn decode_cursor_jwt_claims(access_token: &str) -> Option<Value> {
+fn decode_jwt_claims(access_token: &str) -> Option<Value> {
     let mut parts = access_token.split('.');
     let _header = parts.next()?;
     let payload = parts.next()?;
@@ -1018,7 +1049,7 @@ async fn cursor_import_auth(
             Err(error) => return internal_error_response(error),
         };
 
-    let claims = decode_cursor_jwt_claims(&validated_access_token);
+    let claims = decode_jwt_claims(&validated_access_token);
     let email = claims
         .as_ref()
         .and_then(|value| value.get("email"))
@@ -1288,7 +1319,7 @@ async fn kiro_import_auth(
         .and_then(Value::as_i64)
         .unwrap_or(3600);
 
-    let claims = decode_cursor_jwt_claims(access_token);
+    let claims = decode_jwt_claims(access_token);
     let email = claims
         .as_ref()
         .and_then(|value| value.get("email"))
@@ -1322,6 +1353,189 @@ async fn kiro_import_auth(
         access_token: Some(access_token.to_string()),
         refresh_token: Some(saved_refresh_token),
         expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339()),
+        test_status: Some("active".to_string()),
+        provider_specific_data,
+        ..Default::default()
+    };
+
+    match create_imported_oauth_connection(&state.db, connection).await {
+        Ok(connection) => Json(json!({
+            "success": true,
+            "connection": {
+                "id": connection.id,
+                "provider": connection.provider,
+                "email": connection.email
+            }
+        }))
+        .into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
+async fn kiro_social_authorize(Query(query): Query<KiroSocialAuthorizeQuery>) -> Response {
+    let provider = match query.provider.as_deref() {
+        Some("google") => "google",
+        Some("github") => "github",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid provider. Use 'google' or 'github'" })),
+            )
+                .into_response()
+        }
+    };
+
+    let code_verifier = generate_code_verifier();
+    let code_challenge = generate_code_challenge(&code_verifier);
+    let state = generate_state();
+    let auth_url = match build_kiro_social_login_url(provider, &code_challenge, &state) {
+        Some(url) => url,
+        None => {
+            return internal_error_response(
+                "Invalid provider. Use 'google' or 'github'".to_string(),
+            )
+        }
+    };
+
+    Json(json!({
+        "authUrl": auth_url,
+        "state": state,
+        "codeVerifier": code_verifier,
+        "codeChallenge": code_challenge,
+        "provider": provider,
+    }))
+    .into_response()
+}
+
+async fn kiro_social_exchange(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let code = body.get("code").and_then(Value::as_str).unwrap_or_default();
+    let code_verifier = body
+        .get("codeVerifier")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if code.is_empty() || code_verifier.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing required fields" })),
+        )
+            .into_response();
+    }
+
+    let provider = body
+        .get("provider")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !matches!(provider, "google" | "github") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid provider" })),
+        )
+            .into_response();
+    }
+
+    let response = match reqwest::Client::new()
+        .post(format!("{}/oauth/token", kiro_auth_service_base_url()))
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "code": code,
+            "code_verifier": code_verifier,
+            "redirect_uri": KIRO_SOCIAL_REDIRECT_URI,
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return internal_error_response(format!("Token exchange failed: {error}"));
+    }
+
+    let payload: Value = match response.json().await {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let Some(access_token) = payload
+        .get("accessToken")
+        .or_else(|| payload.get("access_token"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
+        return internal_error_response(
+            "Token exchange failed: missing access token in response".to_string(),
+        );
+    };
+
+    let refresh_token = payload
+        .get("refreshToken")
+        .or_else(|| payload.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let profile_arn = payload
+        .get("profileArn")
+        .or_else(|| payload.get("profile_arn"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let expires_in = payload
+        .get("expiresIn")
+        .or_else(|| payload.get("expires_in"))
+        .and_then(|value| {
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.parse::<i64>().ok())
+        })
+        .unwrap_or(3600);
+
+    let claims = decode_jwt_claims(&access_token);
+    let email = claims
+        .as_ref()
+        .and_then(|value| value.get("email"))
+        .or_else(|| {
+            claims
+                .as_ref()
+                .and_then(|value| value.get("preferred_username"))
+        })
+        .or_else(|| claims.as_ref().and_then(|value| value.get("sub")))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let mut provider_specific_data = std::collections::BTreeMap::from([
+        (
+            "authMethod".to_string(),
+            Value::String(provider.to_string()),
+        ),
+        (
+            "provider".to_string(),
+            Value::String(capitalize_ascii_first(provider)),
+        ),
+    ]);
+    if let Some(profile_arn) = profile_arn {
+        provider_specific_data.insert("profileArn".to_string(), Value::String(profile_arn));
+    }
+
+    let connection = ProviderConnection {
+        provider: "kiro".to_string(),
+        auth_type: "oauth".to_string(),
+        access_token: Some(access_token),
+        refresh_token,
+        expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(expires_in)).to_rfc3339()),
+        email: email.clone(),
         test_status: Some("active".to_string()),
         provider_specific_data,
         ..Default::default()
@@ -1973,6 +2187,14 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/oauth/kiro/auto-import", get(kiro_auto_import_route))
         .route("/api/oauth/kiro/import", post(kiro_import_auth))
+        .route(
+            "/api/oauth/kiro/social-authorize",
+            get(kiro_social_authorize),
+        )
+        .route(
+            "/api/oauth/kiro/social-exchange",
+            post(kiro_social_exchange),
+        )
         .route("/api/oauth/iflow/cookie", post(iflow_cookie_auth))
         .route("/api/oauth/gitlab/pat", post(gitlab_pat_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))
