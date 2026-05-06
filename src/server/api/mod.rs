@@ -606,7 +606,7 @@ async fn list_keys_api(State(state): State<AppState>, headers: HeaderMap) -> Res
 
 #[derive(Debug, Deserialize)]
 struct CreateKeyRequest {
-    name: String,
+    name: Option<String>,
 }
 
 async fn create_key_api(
@@ -622,15 +622,32 @@ async fn create_key_api(
 
     use crate::types::ApiKey;
 
+    let Some(name) = req.name.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Name is required" })),
+        )
+            .into_response();
+    };
+
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Name is required" })),
+        )
+            .into_response();
+    }
+
     let id = Uuid::new_v4().to_string();
-    let key = format!("sk-op-{}", Uuid::new_v4().to_string().replace("-", ""));
+    let machine_id = consistent_machine_id();
+    let key = crate::core::auth::generate_api_key_with_machine(&machine_id);
     let now = chrono::Utc::now().to_rfc3339();
 
     let api_key = ApiKey {
         id,
-        name: req.name,
+        name: name.to_string(),
         key,
-        machine_id: None,
+        machine_id: Some(machine_id),
         is_active: Some(true),
         created_at: Some(now),
         extra: std::collections::BTreeMap::new(),
@@ -647,13 +664,10 @@ async fn create_key_api(
         Ok(_) => (
             StatusCode::CREATED,
             Json(json!({
-                "success": true,
                 "key": api_key.key,
                 "name": api_key.name,
                 "id": api_key.id,
                 "machineId": api_key.machine_id,
-                "isActive": api_key.is_active,
-                "createdAt": api_key.created_at,
             })),
         )
             .into_response(),
@@ -663,6 +677,31 @@ async fn create_key_api(
         )
             .into_response(),
     }
+}
+
+fn consistent_machine_id() -> String {
+    let salt =
+        std::env::var("MACHINE_ID_SALT").unwrap_or_else(|_| "endpoint-proxy-salt".to_string());
+
+    match raw_machine_id() {
+        Some(raw_machine_id) => {
+            use sha2::Digest;
+
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(raw_machine_id.as_bytes());
+            hasher.update(salt.as_bytes());
+            hex::encode(hasher.finalize())[..16].to_string()
+        }
+        None => Uuid::new_v4().to_string(),
+    }
+}
+
+fn raw_machine_id() -> Option<String> {
+    ["/etc/machine-id", "/var/lib/dbus/machine-id"]
+        .iter()
+        .find_map(|path| std::fs::read_to_string(path).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 // Proxy Pool CRUD API

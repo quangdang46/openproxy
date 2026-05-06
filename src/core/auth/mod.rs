@@ -1,4 +1,5 @@
 use hmac::{Hmac, Mac};
+use rand::Rng;
 use sha2::Sha256;
 
 pub const API_KEY_SECRET: &str = "endpoint-proxy-api-key-secret";
@@ -52,6 +53,21 @@ pub fn parse_api_key(api_key: &str) -> Option<ParsedApiKey> {
     None
 }
 
+pub fn generate_api_key_with_machine(machine_id: &str) -> String {
+    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+
+    let mut rng = rand::thread_rng();
+    let key_id: String = (0..6)
+        .map(|_| {
+            let index = rng.gen_range(0..CHARS.len());
+            CHARS[index] as char
+        })
+        .collect();
+    let crc = generate_crc(machine_id, &key_id);
+
+    format!("sk-{machine_id}-{key_id}-{crc}")
+}
+
 fn generate_crc(machine_id: &str, key_id: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(API_KEY_SECRET.as_bytes()).expect("static HMAC key");
     mac.update(machine_id.as_bytes());
@@ -61,7 +77,7 @@ fn generate_crc(machine_id: &str, key_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{generate_crc, parse_api_key};
+    use super::{generate_api_key_with_machine, generate_crc, parse_api_key};
 
     #[test]
     fn parse_api_key_accepts_new_and_old_formats() {
@@ -92,5 +108,18 @@ mod tests {
         assert!(parse_api_key("sk-machine-key01-deadbeef").is_none());
         assert!(parse_api_key("not-a-key").is_none());
         assert!(parse_api_key("sk-too-many-parts-extra-here").is_none());
+    }
+
+    #[test]
+    fn generate_api_key_with_machine_matches_parser() {
+        let key = generate_api_key_with_machine("machine1");
+        let parsed = parse_api_key(&key).expect("generated key should parse");
+
+        assert_eq!(parsed.machine_id.as_deref(), Some("machine1"));
+        assert_eq!(parsed.key_id.len(), 6);
+        assert!(parsed
+            .key_id
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit()));
     }
 }
