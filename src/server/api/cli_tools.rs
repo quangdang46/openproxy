@@ -1,3 +1,5 @@
+mod cowork_settings;
+
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -807,6 +809,7 @@ async fn delete_mitm_alias(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .merge(cowork_settings::routes())
         .route("/api/cli-tools", get(list_tools))
         .route("/api/cli-tools/execute", post(execute_command))
         .route("/api/cli-tools/run/{tool_name}", post(run_tool))
