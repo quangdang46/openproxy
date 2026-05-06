@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
 };
 use base64::{
-    engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
+    engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine,
 };
 use rand::RngCore;
@@ -42,6 +42,38 @@ const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_SCOPE: &str = "openid profile email offline_access";
 const CODEX_FIXED_PORT: u64 = 1455;
 const CODEX_CALLBACK_PATH: &str = "/auth/callback";
+const GEMINI_CLIENT_ID: &str =
+    "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
+const GEMINI_CLIENT_SECRET: &str = "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";
+const GEMINI_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const GEMINI_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const GEMINI_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";
+const GEMINI_LOAD_CODE_ASSIST_ENDPOINT: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const GEMINI_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
+const ANTIGRAVITY_CLIENT_ID: &str =
+    "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
+const ANTIGRAVITY_CLIENT_SECRET: &str = "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";
+const ANTIGRAVITY_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+const ANTIGRAVITY_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";
+const ANTIGRAVITY_LOAD_CODE_ASSIST_ENDPOINT: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist";
+const ANTIGRAVITY_ONBOARD_USER_ENDPOINT: &str =
+    "https://cloudcode-pa.googleapis.com/v1internal:onboardUser";
+const ANTIGRAVITY_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/cclog https://www.googleapis.com/auth/experimentsandconfigs";
+const ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT: &str = "google-api-nodejs-client/9.15.1";
+const ANTIGRAVITY_LOAD_CODE_ASSIST_API_CLIENT: &str =
+    "google-cloud-sdk vscode_cloudshelleditor/0.1";
+const ANTIGRAVITY_LOAD_CODE_ASSIST_CLIENT_METADATA: &str =
+    "{\"ideType\":\"IDE_UNSPECIFIED\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}";
+const IFLOW_CLIENT_ID: &str = "10009311001";
+const IFLOW_CLIENT_SECRET: &str = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW";
+const IFLOW_AUTHORIZE_URL: &str = "https://iflow.cn/oauth";
+const IFLOW_TOKEN_URL: &str = "https://iflow.cn/oauth/token";
+const IFLOW_USER_INFO_URL: &str = "https://iflow.cn/api/oauth/getUserInfo";
+const CLINE_AUTHORIZE_URL: &str = "https://api.cline.bot/api/v1/auth/authorize";
+const CLINE_TOKEN_URL: &str = "https://api.cline.bot/api/v1/auth/token";
 const KIRO_SOCIAL_REDIRECT_URI: &str = "kiro://kiro.kiroAgent/authenticate-success";
 const KIRO_SOCIAL_REDIRECT_URI_ENCODED: &str = "kiro%3A%2F%2Fkiro.kiroAgent%2Fauthenticate-success";
 const KIRO_DEFAULT_START_URL: &str = "https://view.awsapps.com/start";
@@ -340,6 +372,55 @@ fn codex_token_url() -> String {
         .unwrap_or_else(|| CODEX_TOKEN_URL.to_string())
 }
 
+fn gemini_token_url() -> String {
+    std::env::var("OPENPROXY_GEMINI_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| GEMINI_TOKEN_URL.to_string())
+}
+
+fn gemini_user_info_url() -> String {
+    std::env::var("OPENPROXY_GEMINI_USER_INFO_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| GEMINI_USER_INFO_URL.to_string())
+}
+
+fn gemini_load_code_assist_endpoint() -> String {
+    std::env::var("OPENPROXY_GEMINI_LOAD_CODE_ASSIST_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| GEMINI_LOAD_CODE_ASSIST_ENDPOINT.to_string())
+}
+
+fn antigravity_token_url() -> String {
+    std::env::var("OPENPROXY_ANTIGRAVITY_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| ANTIGRAVITY_TOKEN_URL.to_string())
+}
+
+fn antigravity_user_info_url() -> String {
+    std::env::var("OPENPROXY_ANTIGRAVITY_USER_INFO_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| ANTIGRAVITY_USER_INFO_URL.to_string())
+}
+
+fn antigravity_load_code_assist_endpoint() -> String {
+    std::env::var("OPENPROXY_ANTIGRAVITY_LOAD_CODE_ASSIST_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| ANTIGRAVITY_LOAD_CODE_ASSIST_ENDPOINT.to_string())
+}
+
+fn antigravity_onboard_user_endpoint() -> String {
+    std::env::var("OPENPROXY_ANTIGRAVITY_ONBOARD_USER_ENDPOINT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| ANTIGRAVITY_ONBOARD_USER_ENDPOINT.to_string())
+}
+
 fn kiro_auth_service_base_url() -> String {
     std::env::var("OPENPROXY_KIRO_AUTH_SERVICE_BASE_URL")
         .ok()
@@ -393,6 +474,27 @@ fn encode_component_value(value: &str) -> String {
     encode_query_value(value).replace('+', "%20")
 }
 
+fn iflow_token_url() -> String {
+    std::env::var("OPENPROXY_IFLOW_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| IFLOW_TOKEN_URL.to_string())
+}
+
+fn iflow_user_info_url() -> String {
+    std::env::var("OPENPROXY_IFLOW_USER_INFO_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| IFLOW_USER_INFO_URL.to_string())
+}
+
+fn cline_token_url() -> String {
+    std::env::var("OPENPROXY_CLINE_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| CLINE_TOKEN_URL.to_string())
+}
+
 fn build_query_url(base: &str, params: &[(&str, String)]) -> String {
     let query_string = params
         .iter()
@@ -416,6 +518,114 @@ fn kiro_social_idp(provider: &str) -> Option<&'static str> {
         "github" => Some("Github"),
         _ => None,
     }
+}
+
+fn google_oauth_platform_enum() -> i64 {
+    let is_arm64 = matches!(std::env::consts::ARCH, "aarch64" | "arm64");
+    match std::env::consts::OS {
+        "macos" => {
+            if is_arm64 {
+                2
+            } else {
+                1
+            }
+        }
+        "linux" => {
+            if is_arm64 {
+                4
+            } else {
+                3
+            }
+        }
+        "windows" => 5,
+        _ => 0,
+    }
+}
+
+fn google_oauth_client_metadata() -> Value {
+    json!({
+        "ideType": 9,
+        "platform": google_oauth_platform_enum(),
+        "pluginType": 2,
+    })
+}
+
+fn antigravity_load_metadata() -> Value {
+    json!({
+        "ideType": "IDE_UNSPECIFIED",
+        "platform": "PLATFORM_UNSPECIFIED",
+        "pluginType": "GEMINI",
+    })
+}
+
+fn extract_google_project_id(payload: &Value) -> Option<String> {
+    let project = payload.get("cloudaicompanionProject")?;
+    project
+        .get("id")
+        .and_then(Value::as_str)
+        .or_else(|| project.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn first_nonempty_str<'a>(value: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| value.get(*key).and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn cline_expires_in(expires_at: Option<&str>) -> Option<i64> {
+    let expires_at = expires_at.map(str::trim).filter(|value| !value.is_empty());
+    match expires_at {
+        Some(value) => chrono::DateTime::parse_from_rfc3339(value)
+            .ok()
+            .map(|parsed| (parsed.with_timezone(&chrono::Utc) - chrono::Utc::now()).num_seconds()),
+        None => Some(3600),
+    }
+}
+
+fn decode_cline_exchange_code(code: &str) -> Option<Value> {
+    let mut padded = code.to_string();
+    let padding = 4 - (padded.len() % 4);
+    if padding != 4 {
+        padded.push_str(&"=".repeat(padding));
+    }
+
+    let decoded = STANDARD.decode(padded).ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+    let last_brace = decoded.rfind('}')?;
+    let parsed: Value = serde_json::from_str(decoded[..=last_brace].trim()).ok()?;
+    Some(json!({
+        "access_token": parsed
+            .get("accessToken")
+            .or_else(|| parsed.get("access_token"))
+            .cloned()
+            .unwrap_or(Value::String(String::new())),
+        "refresh_token": parsed
+            .get("refreshToken")
+            .or_else(|| parsed.get("refresh_token"))
+            .cloned()
+            .unwrap_or(Value::Null),
+        "email": parsed
+            .get("email")
+            .cloned()
+            .unwrap_or(Value::String(String::new())),
+        "firstName": parsed
+            .get("firstName")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "lastName": parsed
+            .get("lastName")
+            .cloned()
+            .unwrap_or(Value::Null),
+        "expires_at": parsed
+            .get("expiresAt")
+            .or_else(|| parsed.get("expires_at"))
+            .cloned()
+            .unwrap_or(Value::Null),
+    }))
 }
 
 fn build_kiro_social_login_url(
@@ -2054,8 +2264,54 @@ fn build_gitlab_auth_url(
     )
 }
 
+fn build_google_auth_url(
+    authorize_url: &str,
+    client_id: &str,
+    scope: &str,
+    redirect_uri: &str,
+    state: &str,
+) -> String {
+    build_query_url(
+        authorize_url,
+        &[
+            ("client_id", client_id.to_string()),
+            ("response_type", "code".to_string()),
+            ("redirect_uri", redirect_uri.to_string()),
+            ("scope", scope.to_string()),
+            ("state", state.to_string()),
+            ("access_type", "offline".to_string()),
+            ("prompt", "consent".to_string()),
+        ],
+    )
+}
+
+fn build_iflow_auth_url(redirect_uri: &str, state: &str) -> String {
+    build_query_url(
+        IFLOW_AUTHORIZE_URL,
+        &[
+            ("loginMethod", "phone".to_string()),
+            ("type", "phone".to_string()),
+            ("redirect", redirect_uri.to_string()),
+            ("state", state.to_string()),
+            ("client_id", IFLOW_CLIENT_ID.to_string()),
+        ],
+    )
+}
+
+fn build_cline_auth_url(redirect_uri: &str) -> String {
+    build_query_url(
+        CLINE_AUTHORIZE_URL,
+        &[
+            ("client_type", "extension".to_string()),
+            ("callback_url", redirect_uri.to_string()),
+            ("redirect_uri", redirect_uri.to_string()),
+        ],
+    )
+}
+
 fn build_auth_compat_response(
     provider: &str,
+    flow_type: &str,
     auth_url: String,
     state: String,
     code_verifier: String,
@@ -2068,10 +2324,7 @@ fn build_auth_compat_response(
         ("codeVerifier".to_string(), Value::String(code_verifier)),
         ("codeChallenge".to_string(), Value::String(code_challenge)),
         ("redirectUri".to_string(), Value::String(redirect_uri)),
-        (
-            "flowType".to_string(),
-            Value::String("authorization_code_pkce".to_string()),
-        ),
+        ("flowType".to_string(), Value::String(flow_type.to_string())),
         (
             "callbackPath".to_string(),
             Value::String(if provider == "codex" {
@@ -2104,6 +2357,7 @@ async fn authorize_oauth_compat(
     match provider.as_str() {
         "claude" => build_auth_compat_response(
             &provider,
+            "authorization_code_pkce",
             build_claude_auth_url(&redirect_uri, &state, &code_challenge),
             state,
             code_verifier,
@@ -2112,6 +2366,7 @@ async fn authorize_oauth_compat(
         ),
         "codex" => build_auth_compat_response(
             &provider,
+            "authorization_code_pkce",
             build_codex_auth_url(&redirect_uri, &state, &code_challenge),
             state,
             code_verifier,
@@ -2120,6 +2375,7 @@ async fn authorize_oauth_compat(
         ),
         "gitlab" => build_auth_compat_response(
             &provider,
+            "authorization_code_pkce",
             build_gitlab_auth_url(
                 params
                     .get("baseUrl")
@@ -2134,6 +2390,54 @@ async fn authorize_oauth_compat(
                 &state,
                 &code_challenge,
             ),
+            state,
+            code_verifier,
+            code_challenge,
+            redirect_uri,
+        ),
+        "gemini-cli" => build_auth_compat_response(
+            &provider,
+            "authorization_code",
+            build_google_auth_url(
+                GEMINI_AUTHORIZE_URL,
+                GEMINI_CLIENT_ID,
+                GEMINI_SCOPE,
+                &redirect_uri,
+                &state,
+            ),
+            state,
+            code_verifier,
+            code_challenge,
+            redirect_uri,
+        ),
+        "antigravity" => build_auth_compat_response(
+            &provider,
+            "authorization_code",
+            build_google_auth_url(
+                ANTIGRAVITY_AUTHORIZE_URL,
+                ANTIGRAVITY_CLIENT_ID,
+                ANTIGRAVITY_SCOPE,
+                &redirect_uri,
+                &state,
+            ),
+            state,
+            code_verifier,
+            code_challenge,
+            redirect_uri,
+        ),
+        "iflow" => build_auth_compat_response(
+            &provider,
+            "authorization_code",
+            build_iflow_auth_url(&redirect_uri, &state),
+            state,
+            code_verifier,
+            code_challenge,
+            redirect_uri,
+        ),
+        "cline" => build_auth_compat_response(
+            &provider,
+            "authorization_code",
+            build_cline_auth_url(&redirect_uri),
             state,
             code_verifier,
             code_challenge,
@@ -2293,6 +2597,254 @@ fn exchange_meta_string(meta: Option<&Value>, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+async fn exchange_google_token(
+    client_id: &str,
+    client_secret: &str,
+    token_url: String,
+    code: &str,
+    redirect_uri: &str,
+) -> Result<Value, String> {
+    let response = reqwest::Client::new()
+        .post(token_url)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+        ])
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return Err(format!("Token exchange failed: {error}"));
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|error| format!("Token exchange failed: {error}"))
+}
+
+async fn exchange_gemini_compat(
+    code: &str,
+    redirect_uri: &str,
+) -> Result<ProviderConnection, String> {
+    let tokens = exchange_google_token(
+        GEMINI_CLIENT_ID,
+        GEMINI_CLIENT_SECRET,
+        gemini_token_url(),
+        code,
+        redirect_uri,
+    )
+    .await?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refresh_token = tokens
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let expires_in = tokens.get("expires_in").and_then(Value::as_i64);
+    let scope = tokens
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let user_info = match reqwest::Client::new()
+        .get(format!("{}?alt=json", gemini_user_info_url()))
+        .header("Authorization", format!("Bearer {access_token}"))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            response.json().await.unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    };
+
+    let mut project_id = None;
+    if let Ok(response) = reqwest::Client::new()
+        .post(gemini_load_code_assist_endpoint())
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Content-Type", "application/json")
+        .json(&json!({
+            "metadata": google_oauth_client_metadata(),
+            "mode": 1,
+        }))
+        .send()
+        .await
+    {
+        if response.status().is_success() {
+            let payload = response.json().await.unwrap_or(Value::Null);
+            project_id = extract_google_project_id(&payload);
+        }
+    }
+
+    Ok(ProviderConnection {
+        provider: "gemini-cli".to_string(),
+        auth_type: "oauth".to_string(),
+        email: user_info
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        access_token: Some(access_token),
+        refresh_token,
+        expires_at: expires_in.map(crate::oauth::expires_at_from_seconds),
+        scope,
+        project_id,
+        test_status: Some("active".to_string()),
+        ..Default::default()
+    })
+}
+
+async fn exchange_antigravity_compat(
+    code: &str,
+    redirect_uri: &str,
+) -> Result<ProviderConnection, String> {
+    let tokens = exchange_google_token(
+        ANTIGRAVITY_CLIENT_ID,
+        ANTIGRAVITY_CLIENT_SECRET,
+        antigravity_token_url(),
+        code,
+        redirect_uri,
+    )
+    .await?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refresh_token = tokens
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let expires_in = tokens.get("expires_in").and_then(Value::as_i64);
+    let scope = tokens
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let user_info = match reqwest::Client::new()
+        .get(format!("{}?alt=json", antigravity_user_info_url()))
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("x-request-source", "local")
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            response.json().await.unwrap_or(Value::Null)
+        }
+        _ => Value::Null,
+    };
+
+    let mut project_id = None;
+    let mut tier_id = "legacy-tier".to_string();
+    if let Ok(response) = reqwest::Client::new()
+        .post(antigravity_load_code_assist_endpoint())
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("Content-Type", "application/json")
+        .header("User-Agent", ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT)
+        .header("X-Goog-Api-Client", ANTIGRAVITY_LOAD_CODE_ASSIST_API_CLIENT)
+        .header(
+            "Client-Metadata",
+            ANTIGRAVITY_LOAD_CODE_ASSIST_CLIENT_METADATA,
+        )
+        .header("x-request-source", "local")
+        .json(&json!({ "metadata": antigravity_load_metadata() }))
+        .send()
+        .await
+    {
+        if response.status().is_success() {
+            let payload = response.json().await.unwrap_or(Value::Null);
+            project_id = extract_google_project_id(&payload);
+            if let Some(default_tier) = payload
+                .get("allowedTiers")
+                .and_then(Value::as_array)
+                .and_then(|tiers| {
+                    tiers.iter().find_map(|tier| {
+                        if tier.get("isDefault").and_then(Value::as_bool) == Some(true) {
+                            tier.get("id")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_string)
+                        } else {
+                            None
+                        }
+                    })
+                })
+            {
+                tier_id = default_tier;
+            }
+        }
+    }
+
+    if project_id.is_some() {
+        let access_token = access_token.clone();
+        let tier_id = tier_id.clone();
+        let onboard_url = antigravity_onboard_user_endpoint();
+        tokio::spawn(async move {
+            let metadata = antigravity_load_metadata();
+            let client = reqwest::Client::new();
+            for _ in 0..10 {
+                let response = match client
+                    .post(&onboard_url)
+                    .header("Authorization", format!("Bearer {access_token}"))
+                    .header("Content-Type", "application/json")
+                    .header("User-Agent", ANTIGRAVITY_LOAD_CODE_ASSIST_USER_AGENT)
+                    .header("X-Goog-Api-Client", ANTIGRAVITY_LOAD_CODE_ASSIST_API_CLIENT)
+                    .header(
+                        "Client-Metadata",
+                        ANTIGRAVITY_LOAD_CODE_ASSIST_CLIENT_METADATA,
+                    )
+                    .header("x-request-source", "local")
+                    .json(&json!({
+                        "tierId": tier_id,
+                        "metadata": metadata,
+                    }))
+                    .send()
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(_) => break,
+                };
+
+                if response.status().is_success() {
+                    let result = response.json::<Value>().await.unwrap_or(Value::Null);
+                    if result.get("done").and_then(Value::as_bool) == Some(true) {
+                        break;
+                    }
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+
+    Ok(ProviderConnection {
+        provider: "antigravity".to_string(),
+        auth_type: "oauth".to_string(),
+        email: user_info
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        access_token: Some(access_token),
+        refresh_token,
+        expires_at: expires_in.map(crate::oauth::expires_at_from_seconds),
+        scope,
+        project_id,
+        test_status: Some("active".to_string()),
+        ..Default::default()
+    })
+}
+
 async fn exchange_gitlab_compat(
     code: &str,
     redirect_uri: &str,
@@ -2407,6 +2959,207 @@ async fn exchange_gitlab_compat(
     })
 }
 
+async fn exchange_iflow_compat(
+    code: &str,
+    redirect_uri: &str,
+) -> Result<ProviderConnection, String> {
+    let basic_auth = STANDARD.encode(format!("{IFLOW_CLIENT_ID}:{IFLOW_CLIENT_SECRET}"));
+    let response = reqwest::Client::new()
+        .post(iflow_token_url())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Basic {basic_auth}"))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("client_id", IFLOW_CLIENT_ID),
+            ("client_secret", IFLOW_CLIENT_SECRET),
+        ])
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return Err(format!("Token exchange failed: {error}"));
+    }
+
+    let tokens: Value = response
+        .json()
+        .await
+        .map_err(|error| format!("Token exchange failed: {error}"))?;
+    let access_token = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refresh_token = tokens
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let expires_in = tokens.get("expires_in").and_then(Value::as_i64);
+
+    let user_info_response = reqwest::Client::new()
+        .get(format!(
+            "{}?accessToken={}",
+            iflow_user_info_url(),
+            encode_component_value(&access_token)
+        ))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !user_info_response.status().is_success() {
+        let error = user_info_response.text().await.unwrap_or_default();
+        return Err(format!("Failed to fetch user info: {error}"));
+    }
+
+    let result: Value = user_info_response
+        .json()
+        .await
+        .map_err(|error| error.to_string())?;
+    if result.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err(format!(
+            "User info request failed: {}",
+            result
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Unknown error")
+        ));
+    }
+
+    let user_info = result.get("data").cloned().unwrap_or(Value::Null);
+    let api_key = user_info
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| "Empty API key returned from iFlow".to_string())?;
+    let email = first_nonempty_str(&user_info, &["email", "phone"])
+        .map(str::to_string)
+        .ok_or_else(|| "Missing account email/phone in user info".to_string())?;
+    let display_name = first_nonempty_str(&user_info, &["nickname", "name"]).map(str::to_string);
+
+    Ok(ProviderConnection {
+        provider: "iflow".to_string(),
+        auth_type: "oauth".to_string(),
+        display_name,
+        email: Some(email),
+        access_token: Some(access_token),
+        refresh_token,
+        expires_at: expires_in.map(crate::oauth::expires_at_from_seconds),
+        api_key: Some(api_key),
+        test_status: Some("active".to_string()),
+        ..Default::default()
+    })
+}
+
+async fn exchange_cline_compat(
+    code: &str,
+    redirect_uri: &str,
+) -> Result<ProviderConnection, String> {
+    let tokens = if let Some(decoded) = decode_cline_exchange_code(code) {
+        decoded
+    } else {
+        let response = reqwest::Client::new()
+            .post(cline_token_url())
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json")
+            .json(&json!({
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_type": "extension",
+                "redirect_uri": redirect_uri,
+            }))
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            let error = response.text().await.unwrap_or_default();
+            return Err(format!("Cline token exchange failed: {error}"));
+        }
+        let data: Value = response
+            .json()
+            .await
+            .map_err(|error| format!("Cline token exchange failed: {error}"))?;
+        json!({
+            "access_token": data
+                .get("data")
+                .and_then(|value| value.get("accessToken"))
+                .or_else(|| data.get("accessToken"))
+                .cloned()
+                .unwrap_or(Value::String(String::new())),
+            "refresh_token": data
+                .get("data")
+                .and_then(|value| value.get("refreshToken"))
+                .or_else(|| data.get("refreshToken"))
+                .cloned()
+                .unwrap_or(Value::Null),
+            "email": data
+                .get("data")
+                .and_then(|value| value.get("userInfo"))
+                .and_then(|value| value.get("email"))
+                .cloned()
+                .unwrap_or(Value::String(String::new())),
+            "expires_at": data
+                .get("data")
+                .and_then(|value| value.get("expiresAt"))
+                .or_else(|| data.get("expiresAt"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        })
+    };
+
+    let access_token = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let refresh_token = tokens
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let email = tokens
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mut provider_specific_data = std::collections::BTreeMap::new();
+    if let Some(first_name) = tokens
+        .get("firstName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        provider_specific_data.insert(
+            "firstName".to_string(),
+            Value::String(first_name.to_string()),
+        );
+    }
+    if let Some(last_name) = tokens
+        .get("lastName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        provider_specific_data.insert("lastName".to_string(), Value::String(last_name.to_string()));
+    }
+
+    Ok(ProviderConnection {
+        provider: "cline".to_string(),
+        auth_type: "oauth".to_string(),
+        email,
+        access_token: Some(access_token),
+        refresh_token,
+        expires_at: cline_expires_in(tokens.get("expires_at").and_then(Value::as_str))
+            .map(crate::oauth::expires_at_from_seconds),
+        test_status: Some("active".to_string()),
+        provider_specific_data,
+        ..Default::default()
+    })
+}
+
 async fn exchange_oauth_compat(
     State(state): State<AppState>,
     Path(provider): Path<String>,
@@ -2447,7 +3200,10 @@ async fn exchange_oauth_compat(
         .unwrap_or_default();
     let meta = body.meta.as_ref();
 
-    if code.is_empty() || redirect_uri.is_empty() || code_verifier.is_empty() {
+    if code.is_empty()
+        || redirect_uri.is_empty()
+        || (code_verifier.is_empty() && provider != "cline")
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Missing required fields" })),
@@ -2469,6 +3225,22 @@ async fn exchange_oauth_compat(
             Err(error) => return internal_error_response(error),
         },
         "gitlab" => match exchange_gitlab_compat(code, redirect_uri, code_verifier, meta).await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error),
+        },
+        "gemini-cli" => match exchange_gemini_compat(code, redirect_uri).await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error),
+        },
+        "antigravity" => match exchange_antigravity_compat(code, redirect_uri).await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error),
+        },
+        "iflow" => match exchange_iflow_compat(code, redirect_uri).await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error),
+        },
+        "cline" => match exchange_cline_compat(code, redirect_uri).await {
             Ok(value) => value,
             Err(error) => return internal_error_response(error),
         },
