@@ -26,7 +26,7 @@ use crate::oauth::device_code;
 use crate::oauth::pending::PendingOAuthFlow;
 use crate::oauth::providers;
 use crate::oauth::{OAuthProviderConfig, TokenResponse};
-use crate::server::auth::require_api_key;
+use crate::server::auth::{extract_api_key, require_api_key};
 use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
@@ -34,6 +34,20 @@ const PKCE_FLOW_TTL_SECS: i64 = 600;
 const DEVICE_FLOW_TTL_SECS: i64 = 900;
 const KIRO_SOCIAL_REDIRECT_URI: &str = "kiro://kiro.kiroAgent/authenticate-success";
 const KIRO_SOCIAL_REDIRECT_URI_ENCODED: &str = "kiro%3A%2F%2Fkiro.kiroAgent%2Fauthenticate-success";
+const KIRO_DEFAULT_START_URL: &str = "https://view.awsapps.com/start";
+const KIRO_ISSUER_URL: &str = "https://identitycenter.amazonaws.com/ssoins-722374e8c3c8e6c6";
+const KIRO_CLIENT_NAME: &str = "kiro-oauth-client";
+const KIRO_CLIENT_TYPE: &str = "public";
+const KIRO_DEFAULT_REGION: &str = "us-east-1";
+const KIRO_SCOPES: &[&str] = &[
+    "codewhisperer:completions",
+    "codewhisperer:analysis",
+    "codewhisperer:conversations",
+];
+const KIRO_GRANT_TYPES: &[&str] = &[
+    "urn:ietf:params:oauth:grant-type:device_code",
+    "refresh_token",
+];
 
 #[derive(Debug, Deserialize)]
 pub struct StartQuery {
@@ -56,6 +70,100 @@ pub struct DeviceCodeBody {
 #[derive(Debug, Deserialize)]
 pub struct RefreshBody {
     pub refresh_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeviceCodeCompatQuery {
+    pub start_url: Option<String>,
+    pub region: Option<String>,
+    pub auth_method: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KiroCompatPollBody {
+    #[serde(alias = "device_code")]
+    device_code: Option<String>,
+    #[allow(dead_code)]
+    code_verifier: Option<String>,
+    extra_data: Option<KiroCompatExtraData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct KiroCompatExtraData {
+    #[serde(rename = "_clientId")]
+    client_id: Option<String>,
+    #[serde(rename = "_clientSecret")]
+    client_secret: Option<String>,
+    #[serde(rename = "_region")]
+    region: Option<String>,
+    #[serde(rename = "_authMethod")]
+    auth_method: Option<String>,
+    #[serde(rename = "_startUrl")]
+    start_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KiroClientRegistrationResponse {
+    client_id: String,
+    client_secret: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KiroDeviceAuthorizationResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    #[serde(default)]
+    verification_uri_complete: Option<String>,
+    #[serde(default)]
+    expires_in: Option<i64>,
+    #[serde(default)]
+    interval: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct KiroTokenPollResponse {
+    #[serde(default)]
+    access_token: Option<String>,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(default)]
+    expires_in: Option<i64>,
+    #[serde(default)]
+    profile_arn: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default, alias = "error_description", alias = "errorDescription")]
+    error_description: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct KiroCompatDeviceCodeResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    verification_uri_complete: Option<String>,
+    expires_in: u64,
+    interval: u64,
+    #[serde(rename = "_clientId")]
+    client_id: String,
+    #[serde(rename = "_clientSecret")]
+    client_secret: String,
+    #[serde(rename = "_region")]
+    region: String,
+    #[serde(rename = "_authMethod")]
+    auth_method: String,
+    #[serde(rename = "_startUrl")]
+    start_url: String,
+    #[serde(rename = "codeVerifier")]
+    code_verifier: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -191,6 +299,42 @@ fn kiro_auth_service_base_url() -> String {
         .unwrap_or_else(|| "https://prod.us-east-1.auth.desktop.kiro.dev".to_string())
         .trim_end_matches('/')
         .to_string()
+}
+
+fn kiro_oidc_base_url(region: &str) -> String {
+    std::env::var("OPENPROXY_KIRO_OIDC_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("https://oidc.{region}.amazonaws.com"))
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn normalize_kiro_region(region: Option<&str>) -> String {
+    region
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(KIRO_DEFAULT_REGION)
+        .to_string()
+}
+
+fn normalize_kiro_start_url(start_url: Option<&str>) -> String {
+    start_url
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(KIRO_DEFAULT_START_URL)
+        .to_string()
+}
+
+fn normalize_kiro_auth_method(auth_method: Option<&str>) -> String {
+    if auth_method
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case("idc"))
+    {
+        "idc".to_string()
+    } else {
+        "builder-id".to_string()
+    }
 }
 
 fn capitalize_ascii_first(value: &str) -> String {
@@ -1555,6 +1699,238 @@ async fn kiro_social_exchange(
     }
 }
 
+async fn start_device_code_compat(
+    Path(provider): Path<String>,
+    Query(query): Query<DeviceCodeCompatQuery>,
+) -> Response {
+    if provider != "kiro" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Provider does not support device code flow" })),
+        )
+            .into_response();
+    }
+
+    let region = normalize_kiro_region(query.region.as_deref());
+    let start_url = normalize_kiro_start_url(query.start_url.as_deref());
+    let auth_method = normalize_kiro_auth_method(query.auth_method.as_deref());
+    let oidc_base_url = kiro_oidc_base_url(&region);
+    let client = reqwest::Client::new();
+
+    let register_response = match client
+        .post(format!("{oidc_base_url}/client/register"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&json!({
+            "clientName": KIRO_CLIENT_NAME,
+            "clientType": KIRO_CLIENT_TYPE,
+            "scopes": KIRO_SCOPES,
+            "grantTypes": KIRO_GRANT_TYPES,
+            "issuerUrl": KIRO_ISSUER_URL,
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return internal_error_response(format!("Client registration failed: {error}"))
+        }
+    };
+
+    if !register_response.status().is_success() {
+        let error = register_response.text().await.unwrap_or_default();
+        return internal_error_response(format!("Client registration failed: {error}"));
+    }
+
+    let client_info: KiroClientRegistrationResponse = match register_response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return internal_error_response(format!("Client registration failed: {error}"))
+        }
+    };
+
+    let device_response = match client
+        .post(format!("{oidc_base_url}/device_authorization"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&json!({
+            "clientId": client_info.client_id,
+            "clientSecret": client_info.client_secret,
+            "startUrl": start_url,
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return internal_error_response(format!("Device authorization failed: {error}"))
+        }
+    };
+
+    if !device_response.status().is_success() {
+        let error = device_response.text().await.unwrap_or_default();
+        return internal_error_response(format!("Device authorization failed: {error}"));
+    }
+
+    let device_data: KiroDeviceAuthorizationResponse = match device_response.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return internal_error_response(format!("Device authorization failed: {error}"))
+        }
+    };
+
+    Json(KiroCompatDeviceCodeResponse {
+        device_code: device_data.device_code,
+        user_code: device_data.user_code,
+        verification_uri: device_data.verification_uri,
+        verification_uri_complete: device_data.verification_uri_complete,
+        expires_in: device_data.expires_in.unwrap_or(DEVICE_FLOW_TTL_SECS) as u64,
+        interval: device_data.interval.unwrap_or(5),
+        client_id: client_info.client_id,
+        client_secret: client_info.client_secret,
+        region,
+        auth_method,
+        start_url,
+        code_verifier: generate_code_verifier(),
+    })
+    .into_response()
+}
+
+async fn poll_kiro_device_code_compat(state: &AppState, body: Value) -> Response {
+    let body: KiroCompatPollBody = match serde_json::from_value(body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid or empty request body" })),
+            )
+                .into_response()
+        }
+    };
+
+    let Some(device_code) = body
+        .device_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing device code" })),
+        )
+            .into_response();
+    };
+
+    let extra_data = body.extra_data.unwrap_or(KiroCompatExtraData {
+        client_id: None,
+        client_secret: None,
+        region: None,
+        auth_method: None,
+        start_url: None,
+    });
+    let region = normalize_kiro_region(extra_data.region.as_deref());
+    let auth_method = normalize_kiro_auth_method(extra_data.auth_method.as_deref());
+    let start_url = normalize_kiro_start_url(extra_data.start_url.as_deref());
+
+    let response = match reqwest::Client::new()
+        .post(format!("{}/token", kiro_oidc_base_url(&region)))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&json!({
+            "clientId": extra_data.client_id,
+            "clientSecret": extra_data.client_secret,
+            "deviceCode": device_code,
+            "grantType": "urn:ietf:params:oauth:grant-type:device_code",
+        }))
+        .send()
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let poll_response: KiroTokenPollResponse = match response.json().await {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    if let Some(access_token) = poll_response.access_token.clone() {
+        let claims = decode_jwt_claims(&access_token);
+        let email = claims
+            .as_ref()
+            .and_then(|value| value.get("email"))
+            .or_else(|| {
+                claims
+                    .as_ref()
+                    .and_then(|value| value.get("preferred_username"))
+            })
+            .or_else(|| claims.as_ref().and_then(|value| value.get("sub")))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        let mut provider_specific_data = std::collections::BTreeMap::new();
+        provider_specific_data.insert(
+            "profileArn".to_string(),
+            poll_response
+                .profile_arn
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        if let Some(client_id) = extra_data.client_id.clone() {
+            provider_specific_data.insert("clientId".to_string(), Value::String(client_id));
+        }
+        if let Some(client_secret) = extra_data.client_secret.clone() {
+            provider_specific_data.insert("clientSecret".to_string(), Value::String(client_secret));
+        }
+        provider_specific_data.insert("region".to_string(), Value::String(region.clone()));
+        provider_specific_data.insert("authMethod".to_string(), Value::String(auth_method.clone()));
+        provider_specific_data.insert("startUrl".to_string(), Value::String(start_url));
+
+        let connection = ProviderConnection {
+            provider: "kiro".to_string(),
+            auth_type: "oauth".to_string(),
+            email,
+            access_token: Some(access_token),
+            refresh_token: poll_response.refresh_token.clone(),
+            expires_at: poll_response
+                .expires_in
+                .map(crate::oauth::expires_at_from_seconds),
+            test_status: Some("active".to_string()),
+            provider_specific_data,
+            ..Default::default()
+        };
+
+        let saved = match create_imported_oauth_connection(&state.db, connection).await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error.to_string()),
+        };
+
+        return Json(json!({
+            "success": true,
+            "connection": {
+                "id": saved.id,
+                "provider": saved.provider,
+            }
+        }))
+        .into_response();
+    }
+
+    let error = poll_response
+        .error
+        .unwrap_or_else(|| "authorization_pending".to_string());
+    let pending = error == "authorization_pending" || error == "slow_down";
+
+    Json(json!({
+        "success": false,
+        "error": error,
+        "errorDescription": poll_response.error_description.or(poll_response.message),
+        "pending": pending,
+    }))
+    .into_response()
+}
+
 // GET /api/oauth/:provider/start
 pub async fn start_oauth_flow(
     State(state): State<AppState>,
@@ -1848,14 +2224,11 @@ pub async fn poll_device_code(
     Path(provider): Path<String>,
     request: axum::extract::Request,
 ) -> Response {
-    let headers = request.headers();
-    let api_key = match require_api_key(headers, &state.db) {
-        Ok(key) => key,
-        Err(e) => return crate::server::api::auth_error_response(e),
-    };
-    let account_id = api_key.id;
+    let (parts, body_stream) = request.into_parts();
+    let headers = parts.headers;
+    let presented_api_key = extract_api_key(&headers);
 
-    let body = match axum::body::to_bytes(request.into_body(), 1024).await {
+    let body = match axum::body::to_bytes(body_stream, 8 * 1024).await {
         Ok(bytes) => bytes,
         Err(_) => {
             return make_error_response(
@@ -1869,6 +2242,13 @@ pub async fn poll_device_code(
     let body: serde_json::Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
         Err(_) => {
+            if provider == "kiro" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Invalid or empty request body" })),
+                )
+                    .into_response();
+            }
             return make_error_response(
                 StatusCode::BAD_REQUEST,
                 "Invalid JSON body",
@@ -1877,6 +2257,17 @@ pub async fn poll_device_code(
             );
         }
     };
+
+    if provider == "kiro" && (body.get("deviceCode").is_some() || presented_api_key.is_none()) {
+        return poll_kiro_device_code_compat(&state, body).await;
+    }
+
+    let api_key = match require_api_key(&headers, &state.db) {
+        Ok(key) => key,
+        Err(e) => return crate::server::api::auth_error_response(e),
+    };
+    let account_id = api_key.id;
+
     let device_code = match body.get("device_code").and_then(|v| v.as_str()) {
         Some(code) => code.trim().to_string(),
         None => {
@@ -2199,6 +2590,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oauth/gitlab/pat", post(gitlab_pat_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))
         .route("/api/oauth/{provider}/callback", get(oauth_callback))
+        .route(
+            "/api/oauth/{provider}/device-code",
+            get(start_device_code_compat),
+        )
         .route("/api/oauth/{provider}/device_code", post(start_device_code))
         .route("/api/oauth/{provider}/poll", post(poll_device_code))
         .route("/api/oauth/{provider}/refresh", post(refresh_token))
