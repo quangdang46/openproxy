@@ -11,9 +11,12 @@ use base64::{
     Engine,
 };
 use rand::RngCore;
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::path::PathBuf;
+use std::process::Command;
 use std::str;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -179,6 +182,12 @@ fn iflow_api_base_url() -> String {
 }
 
 const GITLAB_DEFAULT_BASE: &str = "https://gitlab.com";
+const CURSOR_ACCESS_TOKEN_KEYS: &[&str] = &["cursorAuth/accessToken", "cursorAuth/token"];
+const CURSOR_MACHINE_ID_KEYS: &[&str] = &[
+    "storage.serviceMachineId",
+    "storage.machineId",
+    "telemetry.machineId",
+];
 
 fn now_secs() -> i64 {
     SystemTime::now()
@@ -392,6 +401,125 @@ fn decode_cursor_jwt_claims(access_token: &str) -> Option<Value> {
 
     let decoded = URL_SAFE.decode(padded).ok()?;
     serde_json::from_slice(&decoded).ok()
+}
+
+fn cursor_home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn cursor_candidate_paths() -> Vec<PathBuf> {
+    let home = cursor_home_dir();
+    match std::env::consts::OS {
+        "macos" => vec![
+            home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"),
+            home.join(
+                "Library/Application Support/Cursor - Insiders/User/globalStorage/state.vscdb",
+            ),
+        ],
+        "windows" => {
+            let app_data = std::env::var_os("APPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("AppData").join("Roaming"));
+            let local_app_data = std::env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| home.join("AppData").join("Local"));
+            vec![
+                app_data
+                    .join("Cursor")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+                app_data
+                    .join("Cursor - Insiders")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+                local_app_data
+                    .join("Cursor")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+                local_app_data
+                    .join("Programs")
+                    .join("Cursor")
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+            ]
+        }
+        _ => vec![
+            home.join(".config")
+                .join("Cursor")
+                .join("User")
+                .join("globalStorage")
+                .join("state.vscdb"),
+            home.join(".config")
+                .join("cursor")
+                .join("User")
+                .join("globalStorage")
+                .join("state.vscdb"),
+        ],
+    }
+}
+
+fn normalize_cursor_db_value(value: &str) -> String {
+    match serde_json::from_str::<Value>(value) {
+        Ok(Value::String(parsed)) => parsed,
+        _ => value.to_string(),
+    }
+}
+
+fn extract_cursor_tokens_from_db(
+    db_path: &std::path::Path,
+) -> Result<(Option<String>, Option<String>), rusqlite::Error> {
+    let connection =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+
+    let query = |keys: &[&str]| -> Result<Option<String>, rusqlite::Error> {
+        for key in keys {
+            let value: Option<String> = connection
+                .query_row(
+                    "SELECT value FROM itemTable WHERE key=? LIMIT 1",
+                    [key],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(value) = value {
+                return Ok(Some(normalize_cursor_db_value(&value)));
+            }
+        }
+        Ok(None)
+    };
+
+    Ok((
+        query(CURSOR_ACCESS_TOKEN_KEYS)?,
+        query(CURSOR_MACHINE_ID_KEYS)?,
+    ))
+}
+
+fn cursor_is_installed() -> bool {
+    if std::env::consts::OS != "linux" {
+        return true;
+    }
+
+    if Command::new("which")
+        .arg("cursor")
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+
+    cursor_home_dir()
+        .join(".local")
+        .join("share")
+        .join("applications")
+        .join("cursor.desktop")
+        .is_file()
 }
 
 fn cursor_import_instructions() -> Value {
@@ -933,6 +1061,54 @@ async fn cursor_import_auth(
         .into_response(),
         Err(error) => internal_error_response(error.to_string()),
     }
+}
+
+async fn cursor_auto_import_route() -> Response {
+    let candidates = cursor_candidate_paths();
+    let db_path = candidates
+        .iter()
+        .find(|candidate| std::fs::File::open(candidate).is_ok())
+        .cloned();
+
+    let Some(db_path) = db_path else {
+        let checked_locations = candidates
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Json(json!({
+            "found": false,
+            "error": format!(
+                "Cursor database not found. Checked locations:\n{}\n\nMake sure Cursor IDE is installed and opened at least once.",
+                checked_locations
+            )
+        }))
+        .into_response();
+    };
+
+    if std::env::consts::OS == "linux" && !cursor_is_installed() {
+        return Json(json!({
+            "found": false,
+            "error": "Cursor config files found but Cursor IDE does not appear to be installed. Skipping auto-import."
+        }))
+        .into_response();
+    }
+
+    if let Ok((Some(access_token), Some(machine_id))) = extract_cursor_tokens_from_db(&db_path) {
+        return Json(json!({
+            "found": true,
+            "accessToken": access_token,
+            "machineId": machine_id
+        }))
+        .into_response();
+    }
+
+    Json(json!({
+        "found": false,
+        "windowsManual": true,
+        "dbPath": db_path.to_string_lossy().to_string()
+    }))
+    .into_response()
 }
 
 // GET /api/oauth/:provider/start
@@ -1557,6 +1733,10 @@ pub async fn oauth_status(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/oauth/cursor/auto-import",
+            get(cursor_auto_import_route),
+        )
         .route(
             "/api/oauth/cursor/import",
             get(cursor_import_instructions_route).post(cursor_import_auth),
