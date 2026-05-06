@@ -31,7 +31,7 @@ pub mod web_fetch;
 use std::collections::{BTreeMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{
@@ -704,22 +704,89 @@ fn raw_machine_id() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn parse_bool_query(value: Option<&str>) -> Option<bool> {
+    match value {
+        Some("true") => Some(true),
+        Some("false") => Some(false),
+        _ => None,
+    }
+}
+
 // Proxy Pool CRUD API
-async fn list_pools_api(State(state): State<AppState>, headers: HeaderMap) -> Response {
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ListPoolsQuery {
+    is_active: Option<String>,
+    include_usage: Option<String>,
+}
+
+async fn list_pools_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListPoolsQuery>,
+) -> Response {
     if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }
 
     let snapshot = state.db.snapshot();
-    Json(json!({ "proxyPools": snapshot.proxy_pools.clone() })).into_response()
+    let mut proxy_pools = snapshot.proxy_pools.clone();
+
+    if let Some(is_active) = parse_bool_query(query.is_active.as_deref()) {
+        proxy_pools.retain(|proxy_pool| proxy_pool.is_active == Some(is_active));
+    }
+
+    proxy_pools.sort_by(|a, b| {
+        b.updated_at
+            .as_deref()
+            .unwrap_or("")
+            .cmp(a.updated_at.as_deref().unwrap_or(""))
+    });
+
+    if parse_bool_query(query.include_usage.as_deref()) == Some(true) {
+        let usage_map = snapshot.provider_connections.iter().fold(
+            std::collections::BTreeMap::<String, u64>::new(),
+            |mut map, connection| {
+                if let Some(proxy_pool_id) = connection
+                    .provider_specific_data
+                    .get("proxyPoolId")
+                    .and_then(Value::as_str)
+                {
+                    *map.entry(proxy_pool_id.to_string()).or_insert(0) += 1;
+                }
+                map
+            },
+        );
+
+        let proxy_pools = proxy_pools
+            .into_iter()
+            .map(|proxy_pool| {
+                let mut value = serde_json::to_value(&proxy_pool).unwrap_or_else(|_| json!({}));
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "boundConnectionCount".to_string(),
+                        json!(usage_map.get(&proxy_pool.id).copied().unwrap_or(0)),
+                    );
+                }
+                value
+            })
+            .collect::<Vec<_>>();
+
+        return Json(json!({ "proxyPools": proxy_pools })).into_response();
+    }
+
+    Json(json!({ "proxyPools": proxy_pools })).into_response()
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreatePoolRequest {
-    name: String,
-    proxy_url: String,
-    pool_type: Option<String>,
+    name: Option<String>,
+    proxy_url: Option<String>,
+    no_proxy: Option<String>,
+    is_active: Option<bool>,
+    strict_proxy: Option<bool>,
+    r#type: Option<String>,
 }
 
 async fn create_pool_api(
@@ -734,13 +801,47 @@ async fn create_pool_api(
     use crate::types::ProxyPool;
 
     let id = Uuid::new_v4().to_string();
+    let Some(name) = req
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Name is required" })),
+        )
+            .into_response();
+    };
+
+    let Some(proxy_url) = req
+        .proxy_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Proxy URL is required" })),
+        )
+            .into_response();
+    };
+
     let now = chrono::Utc::now().to_rfc3339();
     let mut pool = ProxyPool::default();
     pool.id = id;
-    pool.name = req.name;
-    pool.proxy_url = req.proxy_url;
-    pool.r#type = req.pool_type.unwrap_or_else(|| "http".to_string());
-    pool.is_active = Some(true);
+    pool.name = name.to_string();
+    pool.proxy_url = proxy_url.to_string();
+    pool.no_proxy = req.no_proxy.unwrap_or_default().trim().to_string();
+    pool.r#type = match req.r#type.as_deref() {
+        Some("http" | "vercel") => req.r#type.unwrap(),
+        _ => "http".to_string(),
+    };
+    pool.is_active = Some(req.is_active.unwrap_or(true));
+    pool.strict_proxy = Some(req.strict_proxy.unwrap_or(false));
+    pool.test_status = Some("unknown".to_string());
+    pool.last_tested_at = None;
+    pool.last_error = None;
     pool.created_at = Some(now.clone());
     pool.updated_at = Some(now);
 
@@ -752,11 +853,7 @@ async fn create_pool_api(
         .await;
 
     match result {
-        Ok(_) => (
-            StatusCode::CREATED,
-            Json(json!({ "success": true, "proxyPool": pool })),
-        )
-            .into_response(),
+        Ok(_) => (StatusCode::CREATED, Json(json!({ "proxyPool": pool }))).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "error": e.to_string() })),
