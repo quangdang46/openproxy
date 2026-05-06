@@ -1882,6 +1882,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "rand",
+ "regex",
  "reqwest",
  "rsa",
  "rusqlite",
