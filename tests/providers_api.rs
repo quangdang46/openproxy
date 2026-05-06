@@ -1019,3 +1019,137 @@ async fn test_model_route_returns_500_for_transport_errors() {
     assert_eq!(json["ok"], false);
     assert!(json["error"].as_str().is_some_and(|value| !value.is_empty()));
 }
+
+// ============================================================
+// Tests for GET /api/providers/suggested-models
+// ============================================================
+
+#[tokio::test]
+async fn suggested_models_route_requires_url_and_type() {
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/providers/suggested-models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json, json!({ "error": "Missing url or type" }));
+}
+
+#[tokio::test]
+async fn suggested_models_route_matches_openrouter_free_filter_and_sort() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                {
+                    "id": "provider/high-free",
+                    "name": "High Free",
+                    "pricing": { "prompt": "0", "completion": "0" },
+                    "context_length": 400000
+                },
+                {
+                    "id": "provider/paid",
+                    "name": "Paid",
+                    "pricing": { "prompt": "1", "completion": "0" },
+                    "context_length": 500000
+                },
+                {
+                    "id": "provider/low-context",
+                    "name": "Low Context",
+                    "pricing": { "prompt": "0", "completion": "0" },
+                    "context_length": 120000
+                },
+                {
+                    "id": "provider/mid-free",
+                    "name": "Mid Free",
+                    "pricing": { "prompt": "0", "completion": "0" },
+                    "context_length": 220000
+                }
+            ]
+        })))
+        .mount(&mock)
+        .await;
+
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("url", &format!("{}/models", mock.uri()))
+        .append_pair("type", "openrouter-free")
+        .finish();
+
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/providers/suggested-models?{query}"))
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let data = json["data"].as_array().expect("data array");
+
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0]["id"], "provider/high-free");
+    assert_eq!(data[0]["contextLength"], 400000);
+    assert_eq!(data[1]["id"], "provider/mid-free");
+    assert_eq!(data[1]["contextLength"], 220000);
+}
+
+#[tokio::test]
+async fn suggested_models_route_returns_empty_data_on_upstream_failure() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&mock)
+        .await;
+
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("url", &format!("{}/models", mock.uri()))
+        .append_pair("type", "opencode-free")
+        .finish();
+
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/providers/suggested-models?{query}"))
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json, json!({ "data": [] }));
+}

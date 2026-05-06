@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::HeaderMap,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -17,124 +17,132 @@ fn require_management_access(headers: &HeaderMap, state: &AppState) -> Result<()
     super::require_dashboard_or_management_api_key(headers, state)
 }
 
-// ============================================================
-// Provider Models API - /api/providers/:id/models
-// ============================================================
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderModel {
-    pub id: String,
-    pub name: String,
+#[derive(Debug, Deserialize)]
+struct SuggestedModelsQuery {
+    url: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ProviderModelsResponse {
-    pub models: Vec<ProviderModel>,
+fn value_as_u64(value: Option<&Value>) -> Option<u64> {
+    match value {
+        Some(Value::Number(number)) => number.as_u64(),
+        Some(Value::String(text)) => text.parse().ok(),
+        _ => None,
+    }
 }
 
-async fn list_provider_models(
+fn filter_suggested_models(kind: &str, values: &[Value]) -> Result<Vec<Value>, String> {
+    match kind {
+        "openrouter-free" => {
+            let mut filtered = values
+                .iter()
+                .filter_map(|value| {
+                    let pricing = value.get("pricing")?;
+                    let prompt = pricing.get("prompt")?.as_str()?;
+                    let completion = pricing.get("completion")?.as_str()?;
+                    let context_length = value_as_u64(value.get("context_length"))?;
+                    if prompt != "0" || completion != "0" || context_length < 200_000 {
+                        return None;
+                    }
+
+                    Some(json!({
+                        "id": value.get("id").and_then(Value::as_str).unwrap_or_default(),
+                        "name": value.get("name").and_then(Value::as_str),
+                        "contextLength": context_length,
+                    }))
+                })
+                .collect::<Vec<_>>();
+
+            filtered.sort_by(|a, b| {
+                value_as_u64(b.get("contextLength")).cmp(&value_as_u64(a.get("contextLength")))
+            });
+            Ok(filtered)
+        }
+        "opencode-free" => Ok(values
+            .iter()
+            .filter_map(|value| {
+                let id = value.get("id").and_then(Value::as_str)?;
+                id.ends_with("-free").then(|| {
+                    json!({
+                        "id": id,
+                        "name": id,
+                    })
+                })
+            })
+            .collect()),
+        _ => Err("Unknown filter type".to_string()),
+    }
+}
+
+async fn get_suggested_models(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(id): Path<String>,
+    Query(query): Query<SuggestedModelsQuery>,
 ) -> Response {
     if let Err(response) = require_management_access(&headers, &state) {
         return response;
     }
 
-    let snapshot = state.db.snapshot();
-
-    // Find the provider connection
-    let connection = snapshot.provider_connections.iter().find(|c| c.id == id);
-
-    let models = match connection {
-        Some(conn) => {
-            // Get enabled models from provider_specific_data
-            if let Some(models_array) = conn
-                .provider_specific_data
-                .get("enabledModels")
-                .and_then(Value::as_array)
-            {
-                models_array
-                    .iter()
-                    .filter_map(Value::as_str)
-                    .map(|s| ProviderModel {
-                        id: s.to_string(),
-                        name: s.to_string(),
-                    })
-                    .collect()
-            } else if let Some(default_model) = conn.default_model.as_deref() {
-                vec![ProviderModel {
-                    id: default_model.to_string(),
-                    name: default_model.to_string(),
-                }]
-            } else {
-                vec![]
-            }
-        }
-        None => vec![],
+    let Some(url) = query
+        .url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing url or type" })),
+        )
+            .into_response();
+    };
+    let Some(kind) = query
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing url or type" })),
+        )
+            .into_response();
     };
 
-    Json(ProviderModelsResponse { models }).into_response()
-}
-
-// ============================================================
-// Provider Test API - /api/providers/:id/test
-// ============================================================
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProviderTestResponse {
-    pub valid: bool,
-    pub error: Option<String>,
-    pub refreshed: bool,
-    pub latency_ms: Option<u64>,
-}
-
-async fn test_provider_connection(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(response) = require_management_access(&headers, &state) {
-        return response;
+    if filter_suggested_models(kind, &[]).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Unknown filter type" })),
+        )
+            .into_response();
     }
 
-    let snapshot = state.db.snapshot();
-
-    let connection = match snapshot.provider_connections.iter().find(|c| c.id == id) {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({
-                    "error": "Connection not found",
-                    "valid": false
-                })),
-            )
-                .into_response();
-        }
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return Json(json!({ "data": [] })).into_response(),
     };
 
-    let provider = connection.provider.as_str();
-    let api_key = connection.api_key.as_deref();
-    let base_url = connection
-        .provider_specific_data
-        .get("baseUrl")
-        .and_then(Value::as_str)
-        .map(String::from);
+    let response = match client.get(url).send().await {
+        Ok(response) if response.status().is_success() => response,
+        Ok(_) | Err(_) => return Json(json!({ "data": [] })).into_response(),
+    };
 
-    // Test based on provider type
-    let (valid, error, latency_ms) =
-        test_provider_api(provider, api_key, base_url.as_deref()).await;
+    let payload = match response.json::<Value>().await {
+        Ok(payload) => payload,
+        Err(_) => return Json(json!({ "data": [] })).into_response(),
+    };
 
-    Json(ProviderTestResponse {
-        valid,
-        error,
-        refreshed: false,
-        latency_ms,
-    })
-    .into_response()
+    let raw = payload
+        .get("data")
+        .or_else(|| payload.get("models"))
+        .unwrap_or(&payload);
+    let items = raw.as_array().cloned().unwrap_or_default();
+    let data = filter_suggested_models(kind, &items).unwrap_or_default();
+
+    Json(json!({ "data": data })).into_response()
 }
 
 // ============================================================
@@ -1073,6 +1081,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         // Kilo free models - GET /api/providers/kilo/free-models
         .route("/api/providers/kilo/free-models", get(get_kilo_free_models))
+        .route("/api/providers/suggested-models", get(get_suggested_models))
         // Test batch - POST /api/providers/test-batch
         .route("/api/providers/test-batch", post(test_provider_batch))
         // Client info - GET /api/providers/client
