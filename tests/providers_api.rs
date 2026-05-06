@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use once_cell::sync::Lazy;
 use openproxy::db::Db;
 use openproxy::server::api::providers;
 use openproxy::server::state::AppState;
@@ -17,6 +18,33 @@ use wiremock::{
 };
 
 const TEST_KEY: &str = "providers-api-test-key";
+static PORT_ENV_LOCK: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
+
+struct PortEnvGuard {
+    previous: Option<String>,
+    _lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl Drop for PortEnvGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.as_deref() {
+            std::env::set_var("PORT", previous);
+        } else {
+            std::env::remove_var("PORT");
+        }
+    }
+}
+
+async fn set_port_env(port: u16) -> PortEnvGuard {
+    let lock = PORT_ENV_LOCK.lock().await;
+    let previous = std::env::var("PORT").ok();
+    std::env::set_var("PORT", port.to_string());
+    PortEnvGuard {
+        previous,
+        _lock: lock,
+    }
+}
 
 // Helper to create a test AppState with provider connections
 fn connection_with_id(provider: &str, id: &str) -> ProviderConnection {
@@ -851,4 +879,143 @@ async fn test_client_info_provider_from_settings() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(json["provider"], "cloudflare");
+}
+
+// ============================================================
+// Tests for POST /api/models/test
+// ============================================================
+
+#[tokio::test]
+async fn test_model_route_requires_model_field_with_js_error_shape() {
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/test")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({ "kind": "chat" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json, json!({ "error": "Model required" }));
+}
+
+#[tokio::test]
+async fn test_model_route_keeps_provider_error_payload_from_success_response() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(body_partial_json(json!({ "model": "openai/bad-model" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "error": { "message": "Bad model from provider" }
+        })))
+        .mount(&mock)
+        .await;
+
+    let _port = set_port_env(mock.address().port()).await;
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/test")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(
+                    json!({ "model": "openai/bad-model", "kind": "chat" }).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["status"], 200);
+    assert_eq!(json["error"], "Bad model from provider");
+}
+
+#[tokio::test]
+async fn test_model_route_formats_empty_http_errors_like_next_route() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(500).set_body_string(""))
+        .mount(&mock)
+        .await;
+
+    let _port = set_port_env(mock.address().port()).await;
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/test")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({ "model": "openai/gpt-4.1" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["status"], 500);
+    assert_eq!(json["error"], "HTTP 500");
+}
+
+#[tokio::test]
+async fn test_model_route_returns_500_for_transport_errors() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+
+    let _port = set_port_env(port).await;
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/models/test")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .header("Content-Type", "application/json")
+                .body(Body::from(json!({ "model": "openai/gpt-4.1" }).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ok"], false);
+    assert!(json["error"].as_str().is_some_and(|value| !value.is_empty()));
 }

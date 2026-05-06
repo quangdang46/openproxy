@@ -321,7 +321,7 @@ async fn validate_provider_node(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TestModelRequest {
-    model: String,
+    model: Option<String>,
     kind: Option<String>,
 }
 
@@ -334,16 +334,35 @@ pub struct TestModelResponse {
     pub status: Option<u16>,
 }
 
+fn truncate_test_model_detail(detail: &str) -> String {
+    detail.chars().take(240).collect()
+}
+
+fn format_test_model_http_error(status: u16, detail: Option<&str>) -> String {
+    match detail {
+        Some(detail) if !detail.is_empty() => {
+            format!("HTTP {status}: {}", truncate_test_model_detail(detail))
+        }
+        _ => format!("HTTP {status}"),
+    }
+}
+
 async fn test_model(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<TestModelRequest>,
-) -> impl IntoResponse {
+) -> Response {
     if let Err(response) = require_management_access(&headers, &state) {
         return response;
     }
 
-    let model = req.model;
+    let Some(model) = req.model.filter(|model| !model.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Model required" })),
+        )
+            .into_response();
+    };
     let kind = req.kind.as_deref().unwrap_or("chat");
 
     // Route to appropriate internal endpoint
@@ -388,20 +407,22 @@ async fn test_model(
     }
 
     match timeout(Duration::from_secs(15), request.send()).await {
-        Err(_) => Json(TestModelResponse {
-            ok: false,
-            latency_ms: Some(start.elapsed().as_millis() as u64),
-            error: Some("Request timed out".to_string()),
-            status: None,
-        })
-        .into_response(),
-        Ok(Err(error)) => Json(TestModelResponse {
-            ok: false,
-            latency_ms: Some(start.elapsed().as_millis() as u64),
-            error: Some(error.to_string()),
-            status: None,
-        })
-        .into_response(),
+        Err(_) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "ok": false,
+                "error": "Request timed out",
+            })),
+        )
+            .into_response(),
+        Ok(Err(error)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "ok": false,
+                "error": error.to_string(),
+            })),
+        )
+            .into_response(),
         Ok(Ok(response)) => {
             let latency_ms = start.elapsed().as_millis() as u64;
             let status = response.status().as_u16();
@@ -410,33 +431,46 @@ async fn test_model(
             let parsed: Option<Value> = serde_json::from_str(&raw_text).ok();
 
             if !ok_status {
-                let detail = parsed
-                    .as_ref()
-                    .and_then(|value| value.get("error"))
-                    .and_then(|value| {
-                        value
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .or_else(|| value.as_str())
-                    })
-                    .or_else(|| {
-                        parsed
-                            .as_ref()
-                            .and_then(|value| value.get("msg"))
-                            .and_then(Value::as_str)
-                    })
-                    .or_else(|| {
-                        parsed
-                            .as_ref()
-                            .and_then(|value| value.get("message"))
-                            .and_then(Value::as_str)
-                    })
-                    .unwrap_or(raw_text.as_str());
+                let detail = if kind == "embedding" {
+                    parsed
+                        .as_ref()
+                        .and_then(|value| value.get("error"))
+                        .and_then(|value| {
+                            value
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .or_else(|| value.as_str())
+                        })
+                        .or_else(|| (!raw_text.is_empty()).then_some(raw_text.as_str()))
+                } else {
+                    parsed
+                        .as_ref()
+                        .and_then(|value| value.get("error"))
+                        .and_then(|value| {
+                            value
+                                .get("message")
+                                .and_then(Value::as_str)
+                                .or_else(|| value.as_str())
+                        })
+                        .or_else(|| {
+                            parsed
+                                .as_ref()
+                                .and_then(|value| value.get("msg"))
+                                .and_then(Value::as_str)
+                        })
+                        .or_else(|| {
+                            parsed
+                                .as_ref()
+                                .and_then(|value| value.get("message"))
+                                .and_then(Value::as_str)
+                        })
+                        .or_else(|| (!raw_text.is_empty()).then_some(raw_text.as_str()))
+                };
 
                 return Json(TestModelResponse {
                     ok: false,
                     latency_ms: Some(latency_ms),
-                    error: Some(format!("HTTP {}: {}", status, detail)),
+                    error: Some(format_test_model_http_error(status, detail)),
                     status: Some(status),
                 })
                 .into_response();
@@ -494,6 +528,25 @@ async fn test_model(
                     })
                     .into_response();
                 }
+            }
+
+            if let Some(provider_error) = parsed
+                .as_ref()
+                .and_then(|value| value.get("error"))
+                .and_then(|value| {
+                    value
+                        .get("message")
+                        .and_then(Value::as_str)
+                        .or_else(|| value.as_str())
+                })
+            {
+                return Json(TestModelResponse {
+                    ok: false,
+                    latency_ms: Some(latency_ms),
+                    error: Some(truncate_test_model_detail(provider_error)),
+                    status: Some(status),
+                })
+                .into_response();
             }
 
             let has_choices = parsed
