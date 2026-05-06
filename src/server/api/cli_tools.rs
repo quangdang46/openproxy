@@ -8,16 +8,13 @@ use std::path::{Path as FsPath, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    body::Body,
     extract::{Path, Query, State},
-    http::{HeaderMap, Method, Request, StatusCode},
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     response::Response,
     routing::{delete, get, patch, post, put},
     Json, Router,
 };
-use bytes::Bytes;
-use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{fs, process::Command};
@@ -772,6 +769,129 @@ async fn delete_opencode_settings(
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// OpenClaw Settings Endpoints
+// GET/POST/DELETE /api/cli-tools/openclaw-settings
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OpenClawSettingsRequest {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: String,
+    #[serde(default)]
+    pub agent_models: BTreeMap<String, String>,
+}
+
+async fn get_openclaw_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let installed = check_openclaw_installed().await;
+    if !installed {
+        return Json(json!({
+            "installed": false,
+            "settings": Value::Null,
+            "message": "Open Claw CLI is not installed",
+        }))
+        .into_response();
+    }
+
+    match read_openclaw_settings().await {
+        Ok(settings) => {
+            let agent_list = settings
+                .as_ref()
+                .and_then(|settings| settings.get("agents"))
+                .and_then(|agents| agents.get("list"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut enriched_agents = Vec::with_capacity(agent_list.len());
+            for agent in agent_list {
+                let mut agent = agent;
+                let current_model =
+                    if let Some(agent_dir) = agent.get("agentDir").and_then(Value::as_str) {
+                        read_openclaw_agent_model(&PathBuf::from(agent_dir)).await
+                    } else {
+                        None
+                    };
+                if let Some(agent_object) = agent.as_object_mut() {
+                    agent_object.insert(
+                        "currentModel".to_string(),
+                        current_model.map(Value::String).unwrap_or(Value::Null),
+                    );
+                }
+                enriched_agents.push(agent);
+            }
+
+            Json(json!({
+                "installed": true,
+                "settings": settings,
+                "agents": enriched_agents,
+                "has9Router": settings
+                    .as_ref()
+                    .is_some_and(has_9router_openclaw_settings),
+                "settingsPath": openclaw_settings_path().to_string_lossy().to_string(),
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to check openclaw settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn save_openclaw_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<OpenClawSettingsRequest>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    if req.base_url.trim().is_empty() || req.model.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "baseUrl and model are required" })),
+        )
+            .into_response();
+    }
+
+    match write_openclaw_settings(&req).await {
+        Ok(settings_path) => Json(json!({
+            "success": true,
+            "message": "Open Claw settings applied successfully!",
+            "settingsPath": settings_path,
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to update openclaw settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_openclaw_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    match reset_openclaw_settings().await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to reset openclaw settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
 async fn check_codex_installed() -> bool {
     command_exists("codex", true).await || fs::metadata(codex_config_path()).await.is_ok()
 }
@@ -1018,6 +1138,14 @@ async fn check_opencode_installed() -> bool {
 
 async fn read_opencode_config() -> anyhow::Result<Option<Value>> {
     read_json_optional(&opencode_config_path()).await
+}
+
+async fn check_openclaw_installed() -> bool {
+    command_exists("openclaw", true).await || fs::metadata(openclaw_settings_path()).await.is_ok()
+}
+
+async fn read_openclaw_settings() -> anyhow::Result<Option<Value>> {
+    read_json_optional(&openclaw_settings_path()).await
 }
 
 async fn write_copilot_settings(req: &CopilotSettingsRequest) -> anyhow::Result<String> {
@@ -1490,6 +1618,249 @@ async fn reset_opencode_settings(model_to_remove: Option<String>) -> anyhow::Res
     }))
 }
 
+async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Result<String> {
+    let settings_path = openclaw_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+
+    let mut settings = match fs::read_to_string(&settings_path).await {
+        Ok(existing) => parse_json_object_or_default(&existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(error.into()),
+    };
+
+    ensure_object_path(&mut settings, &["agents", "defaults", "model"])?;
+    ensure_object_path(&mut settings, &["agents", "defaults", "models"])?;
+    ensure_object_path(&mut settings, &["models", "providers"])?;
+
+    let normalized_base_url = normalize_v1_base_url(&req.base_url);
+    let full_model_id = format!("9router/{}", req.model);
+
+    if let Some(default_models) =
+        get_nested_object_mut(&mut settings, &["agents", "defaults", "models"])
+    {
+        let keys_to_remove = default_models
+            .keys()
+            .filter(|key| key.starts_with("9router/"))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys_to_remove {
+            default_models.remove(&key);
+        }
+    }
+
+    if let Some(default_model) =
+        get_nested_object_mut(&mut settings, &["agents", "defaults", "model"])
+    {
+        default_model.insert("primary".to_string(), Value::String(full_model_id));
+    }
+
+    let mut all_model_ids = vec![req.model.clone()];
+    for model in req.agent_models.values() {
+        if !model.is_empty() && !all_model_ids.contains(model) {
+            all_model_ids.push(model.clone());
+        }
+    }
+
+    if let Some(default_models) =
+        get_nested_object_mut(&mut settings, &["agents", "defaults", "models"])
+    {
+        for model in &all_model_ids {
+            default_models.insert(format!("9router/{model}"), json!({}));
+        }
+    }
+
+    if let Some(agents_list) = get_nested_array_mut(&mut settings, &["agents", "list"]) {
+        for agent in agents_list.iter_mut() {
+            if agent
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(|model| model.starts_with("9router/"))
+            {
+                if let Some(agent_object) = agent.as_object_mut() {
+                    agent_object.remove("model");
+                }
+            }
+        }
+    }
+
+    if let Some(providers) = get_nested_object_mut(&mut settings, &["models", "providers"]) {
+        providers.insert(
+            "9router".to_string(),
+            json!({
+                "baseUrl": normalized_base_url,
+                "apiKey": req.api_key.clone().unwrap_or_else(|| "your_api_key".to_string()),
+                "api": "openai-completions",
+                "models": all_model_ids.iter().map(|model| {
+                    json!({
+                        "id": model,
+                        "name": model.rsplit('/').next().unwrap_or(model),
+                    })
+                }).collect::<Vec<_>>(),
+            }),
+        );
+    }
+
+    if let Some(agents_list) = get_nested_array_mut(&mut settings, &["agents", "list"]) {
+        for agent in agents_list.iter_mut() {
+            let agent_id = agent.get("id").and_then(Value::as_str).map(str::to_string);
+            if let Some(agent_id) = agent_id {
+                if let Some(agent_model) = req.agent_models.get(&agent_id) {
+                    if let Some(agent_object) = agent.as_object_mut() {
+                        agent_object.insert(
+                            "model".to_string(),
+                            Value::String(format!("9router/{agent_model}")),
+                        );
+                    }
+                }
+            }
+        }
+
+        for agent in agents_list.iter() {
+            let Some(agent_dir) = agent.get("agentDir").and_then(Value::as_str) else {
+                continue;
+            };
+            let agent_id = agent.get("id").and_then(Value::as_str).unwrap_or_default();
+            let model_to_write = req
+                .agent_models
+                .get(agent_id)
+                .cloned()
+                .unwrap_or_else(|| req.model.clone());
+            write_openclaw_agent_models(
+                PathBuf::from(agent_dir),
+                &model_to_write,
+                &normalized_base_url,
+                req.api_key.as_deref(),
+            )
+            .await?;
+        }
+    }
+
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&Value::Object(settings))?,
+    )
+    .await?;
+    Ok(settings_path.to_string_lossy().to_string())
+}
+
+async fn reset_openclaw_settings() -> anyhow::Result<Value> {
+    let settings_path = openclaw_settings_path();
+    let mut settings = match fs::read_to_string(&settings_path).await {
+        Ok(existing) => parse_json_object_required(&existing)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "success": true,
+                "message": "No settings file to reset",
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if let Some(providers) = get_nested_object_mut(&mut settings, &["models", "providers"]) {
+        providers.remove("9router");
+        if providers.is_empty() {
+            remove_nested_key(&mut settings, &["models", "providers"]);
+        }
+    }
+
+    if let Some(default_models) =
+        get_nested_object_mut(&mut settings, &["agents", "defaults", "models"])
+    {
+        let keys_to_remove = default_models
+            .keys()
+            .filter(|key| key.starts_with("9router/"))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys_to_remove {
+            default_models.remove(&key);
+        }
+        if default_models.is_empty() {
+            remove_nested_key(&mut settings, &["agents", "defaults", "models"]);
+        }
+    }
+
+    if settings
+        .get("agents")
+        .and_then(|agents| agents.get("defaults"))
+        .and_then(|defaults| defaults.get("model"))
+        .and_then(|model| model.get("primary"))
+        .and_then(Value::as_str)
+        .is_some_and(|model| model.starts_with("9router/"))
+    {
+        remove_nested_key(&mut settings, &["agents", "defaults", "model", "primary"]);
+    }
+
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&Value::Object(settings))?,
+    )
+    .await?;
+    Ok(json!({
+        "success": true,
+        "message": "9Router settings removed successfully",
+    }))
+}
+
+async fn read_openclaw_agent_model(agent_dir: &PathBuf) -> Option<String> {
+    let models_path = agent_dir.join("models.json");
+    let content = fs::read_to_string(models_path).await.ok()?;
+    let data = serde_json::from_str::<Value>(&content).ok()?;
+    data.get("providers")
+        .and_then(|providers| providers.get("9router"))
+        .and_then(|provider| provider.get("models"))
+        .and_then(Value::as_array)
+        .and_then(|models| models.first())
+        .and_then(|model| model.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+async fn write_openclaw_agent_models(
+    agent_dir: PathBuf,
+    model: &str,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> anyhow::Result<()> {
+    fs::create_dir_all(&agent_dir).await?;
+    let models_path = agent_dir.join("models.json");
+    let mut existing = match fs::read_to_string(&models_path).await {
+        Ok(content) => parse_json_object_or_default(&content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(error.into()),
+    };
+
+    let providers = existing
+        .entry("providers".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if !providers.is_object() {
+        *providers = Value::Object(serde_json::Map::new());
+    }
+    let providers_map = providers
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("providers must be an object"))?;
+    providers_map.insert(
+        "9router".to_string(),
+        json!({
+            "baseUrl": base_url,
+            "apiKey": api_key.unwrap_or("your_api_key"),
+            "api": "openai-completions",
+            "models": [{
+                "id": model,
+                "name": model.rsplit('/').next().unwrap_or(model),
+            }],
+        }),
+    );
+
+    fs::write(
+        models_path,
+        serde_json::to_vec_pretty(&Value::Object(existing))?,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn read_json_optional(path: &FsPath) -> anyhow::Result<Option<Value>> {
     match fs::read_to_string(path).await {
         Ok(content) => Ok(Some(serde_json::from_str(&content)?)),
@@ -1519,6 +1890,67 @@ fn parse_json_object_required(content: &str) -> anyhow::Result<serde_json::Map<S
     }
 }
 
+fn ensure_object_path(
+    root: &mut serde_json::Map<String, Value>,
+    path: &[&str],
+) -> anyhow::Result<()> {
+    if path.is_empty() {
+        return Ok(());
+    }
+    let mut current = root;
+    for key in path {
+        let entry = current
+            .entry((*key).to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if !entry.is_object() {
+            *entry = Value::Object(serde_json::Map::new());
+        }
+        current = entry
+            .as_object_mut()
+            .ok_or_else(|| anyhow::anyhow!("Expected object at path segment {key}"))?;
+    }
+    Ok(())
+}
+
+fn get_nested_object_mut<'a>(
+    root: &'a mut serde_json::Map<String, Value>,
+    path: &[&str],
+) -> Option<&'a mut serde_json::Map<String, Value>> {
+    let (first, rest) = path.split_first()?;
+    let value = root.get_mut(*first)?;
+    if rest.is_empty() {
+        return value.as_object_mut();
+    }
+    let next = value.as_object_mut()?;
+    get_nested_object_mut(next, rest)
+}
+
+fn get_nested_array_mut<'a>(
+    root: &'a mut serde_json::Map<String, Value>,
+    path: &[&str],
+) -> Option<&'a mut Vec<Value>> {
+    let (first, rest) = path.split_first()?;
+    let value = root.get_mut(*first)?;
+    if rest.is_empty() {
+        return value.as_array_mut();
+    }
+    let next = value.as_object_mut()?;
+    get_nested_array_mut(next, rest)
+}
+
+fn remove_nested_key(root: &mut serde_json::Map<String, Value>, path: &[&str]) {
+    let Some((first, rest)) = path.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        root.remove(*first);
+        return;
+    }
+    if let Some(next) = root.get_mut(*first).and_then(Value::as_object_mut) {
+        remove_nested_key(next, rest);
+    }
+}
+
 fn has_9router_copilot_config(config: &Value) -> bool {
     get_9router_copilot_entry(config).is_some()
 }
@@ -1535,6 +1967,14 @@ fn has_9router_droid_settings(settings: &Value) -> bool {
                     .is_some_and(|id| id.starts_with("custom:9Router"))
             })
         })
+}
+
+fn has_9router_openclaw_settings(settings: &Value) -> bool {
+    settings
+        .get("models")
+        .and_then(|models| models.get("providers"))
+        .and_then(|providers| providers.get("9router"))
+        .is_some()
 }
 
 fn get_9router_copilot_entry(config: &Value) -> Option<&Value> {
@@ -1577,6 +2017,10 @@ fn opencode_config_path() -> PathBuf {
         .join(".config")
         .join("opencode")
         .join("opencode.json")
+}
+
+fn openclaw_settings_path() -> PathBuf {
+    home_dir().join(".openclaw").join("openclaw.json")
 }
 
 fn home_dir() -> PathBuf {
@@ -1954,9 +2398,9 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/cli-tools/openclaw-settings",
-            get(proxy_cli_tool_settings)
-                .post(proxy_cli_tool_settings)
-                .delete(proxy_cli_tool_settings),
+            get(get_openclaw_settings)
+                .post(save_openclaw_settings)
+                .delete(delete_openclaw_settings),
         )
         // Antigravity MITM
         .route("/api/cli-tools/antigravity-mitm", get(get_antigravity_mitm))
@@ -1982,124 +2426,6 @@ pub fn routes() -> Router<AppState> {
             "/api/cli-tools/antigravity-mitm/alias",
             delete(delete_mitm_alias),
         )
-}
-
-async fn proxy_cli_tool_settings(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Request<Body>,
-) -> Response {
-    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
-        return response;
-    }
-
-    let method = request.method().clone();
-    let uri = request.uri().clone();
-    let target = format!("{}{}", dashboard_sidecar_origin(), uri);
-    let body_bytes = match axum::body::to_bytes(request.into_body(), usize::MAX).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(json!({"error": format!("Failed to read proxied request body: {error}")})),
-            )
-                .into_response()
-        }
-    };
-
-    let client = reqwest::Client::new();
-    let mut builder = client.request(method.clone(), target);
-    for (name, value) in &headers {
-        if should_skip_proxy_request_header(&method, name.as_str()) {
-            continue;
-        }
-        builder = builder.header(name, value);
-    }
-    if !body_bytes.is_empty() {
-        builder = builder.body(body_bytes.to_vec());
-    }
-
-    match builder.send().await {
-        Ok(response) => proxy_reqwest_response(response),
-        Err(error) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": format!("CLI settings sidecar proxy failed: {error}")})),
-        )
-            .into_response(),
-    }
-}
-
-fn dashboard_sidecar_origin() -> String {
-    std::env::var("DASHBOARD_SIDECAR_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:4624".to_string())
-}
-
-fn should_skip_proxy_request_header(method: &Method, header_name: &str) -> bool {
-    let lower = header_name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "host"
-            | "content-length"
-    ) || (method == Method::GET && lower == "content-type")
-}
-
-fn proxy_reqwest_response(response: reqwest::Response) -> Response {
-    let status = response.status();
-    let headers = response.headers().clone();
-    let connection_tokens = connection_header_tokens(&headers);
-    let body = Body::from_stream(response.bytes_stream().map_ok(|chunk: Bytes| chunk));
-    let mut proxied = body.into_response();
-    *proxied.status_mut() = status;
-    let target_headers = proxied.headers_mut();
-    for (name, value) in &headers {
-        if should_skip_proxy_response_header(name.as_str(), &connection_tokens) {
-            continue;
-        }
-        target_headers.insert(name.clone(), value.clone());
-    }
-    proxied
-}
-
-fn should_skip_proxy_response_header(header_name: &str, connection_tokens: &[String]) -> bool {
-    let lower = header_name.to_ascii_lowercase();
-    matches!(
-        lower.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-            | "content-length"
-    ) || connection_tokens
-        .iter()
-        .any(|token| token.eq_ignore_ascii_case(&lower))
-}
-
-fn connection_header_tokens(headers: &reqwest::header::HeaderMap) -> Vec<String> {
-    headers
-        .get(reqwest::header::CONNECTION)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| {
-            value
-                .split(',')
-                .map(|part| part.trim().to_ascii_lowercase())
-                .filter(|part| !part.is_empty())
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

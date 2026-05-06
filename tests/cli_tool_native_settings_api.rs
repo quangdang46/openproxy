@@ -8,7 +8,7 @@ use once_cell::sync::Lazy;
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
 use openproxy::types::ApiKey;
-use serde_json::json;
+use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::util::ServiceExt;
 
@@ -112,6 +112,10 @@ fn droid_settings_path(home: &Path) -> PathBuf {
 
 fn opencode_config_path(home: &Path) -> PathBuf {
     home.join(".config").join("opencode").join("opencode.json")
+}
+
+fn openclaw_settings_path(home: &Path) -> PathBuf {
+    home.join(".openclaw").join("openclaw.json")
 }
 
 #[tokio::test]
@@ -1058,4 +1062,260 @@ async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
     assert_eq!(reset["provider"]["other"]["keep"], true);
     assert_eq!(reset["agent"]["keep"]["still"], true);
     assert_eq!(reset["model"], "");
+}
+
+#[tokio::test]
+async fn openclaw_settings_get_reports_not_installed_without_binary_or_config() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/openclaw-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let (status, json) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "installed": false,
+            "settings": null,
+            "message": "Open Claw CLI is not installed"
+        })
+    );
+}
+
+#[tokio::test]
+async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let settings_path = openclaw_settings_path(home.path());
+    let agent_a_dir = home.path().join("agents").join("agent-a");
+    let agent_b_dir = home.path().join("agents").join("agent-b");
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(&agent_a_dir).unwrap();
+    std::fs::write(
+        agent_a_dir.join("models.json"),
+        serde_json::to_vec_pretty(&json!({
+            "providers": {
+                "other": { "keep": true }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&json!({
+            "agents": {
+                "defaults": {
+                    "model": {
+                        "primary": "other/default"
+                    },
+                    "models": {
+                        "other/model": {},
+                        "9router/old-model": {}
+                    }
+                },
+                "list": [
+                    {
+                        "id": "agent-a",
+                        "name": "Agent A",
+                        "agentDir": agent_a_dir.to_string_lossy().to_string(),
+                        "model": "9router/old-model"
+                    },
+                    {
+                        "id": "agent-b",
+                        "name": "Agent B",
+                        "agentDir": agent_b_dir.to_string_lossy().to_string()
+                    },
+                    {
+                        "id": "agent-c",
+                        "name": "Agent C"
+                    }
+                ]
+            },
+            "models": {
+                "providers": {
+                    "other": { "keep": true }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+    let post = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/openclaw-settings",
+            Body::from(
+                format!(
+                    r#"{{"baseUrl":"https://proxy.example.com","apiKey":"sk-9router","model":"oa/gpt-4.1","agentModels":{{"agent-a":"oa/gpt-4.1-mini"}}}}"#
+                ),
+            ),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(post).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "Open Claw settings applied successfully!",
+            "settingsPath": settings_path.to_string_lossy().to_string()
+        })
+    );
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert_eq!(
+        saved["agents"]["defaults"]["model"]["primary"],
+        "9router/oa/gpt-4.1"
+    );
+    assert!(saved["agents"]["defaults"]["models"]
+        .get("9router/old-model")
+        .is_none());
+    assert!(saved["agents"]["defaults"]["models"]
+        .get("other/model")
+        .is_some());
+    assert!(saved["agents"]["defaults"]["models"]
+        .get("9router/oa/gpt-4.1")
+        .is_some());
+    assert!(saved["agents"]["defaults"]["models"]
+        .get("9router/oa/gpt-4.1-mini")
+        .is_some());
+    assert_eq!(
+        saved["models"]["providers"]["9router"]["baseUrl"],
+        "https://proxy.example.com/v1"
+    );
+    assert_eq!(
+        saved["models"]["providers"]["9router"]["apiKey"],
+        "sk-9router"
+    );
+    assert_eq!(
+        saved["models"]["providers"]["9router"]["api"],
+        "openai-completions"
+    );
+    let provider_models = saved["models"]["providers"]["9router"]["models"]
+        .as_array()
+        .unwrap();
+    assert_eq!(provider_models.len(), 2);
+    assert_eq!(provider_models[0]["id"], "oa/gpt-4.1");
+    assert_eq!(provider_models[1]["id"], "oa/gpt-4.1-mini");
+    let agent_list = saved["agents"]["list"].as_array().unwrap();
+    assert_eq!(agent_list[0]["model"], "9router/oa/gpt-4.1-mini");
+    assert!(agent_list[1].get("model").is_none());
+    assert!(agent_list[2].get("model").is_none());
+
+    let agent_a_models: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(agent_a_dir.join("models.json")).unwrap())
+            .unwrap();
+    assert_eq!(agent_a_models["providers"]["other"]["keep"], true);
+    assert_eq!(
+        agent_a_models["providers"]["9router"]["models"][0]["id"],
+        "oa/gpt-4.1-mini"
+    );
+    let agent_b_models: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(agent_b_dir.join("models.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        agent_b_models["providers"]["9router"]["models"][0]["id"],
+        "oa/gpt-4.1"
+    );
+
+    let get = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/openclaw-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(get).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["installed"], true);
+    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["settings"], saved);
+    assert_eq!(
+        json["settingsPath"],
+        settings_path.to_string_lossy().to_string()
+    );
+    let agents = json["agents"].as_array().unwrap();
+    assert_eq!(agents[0]["currentModel"], "oa/gpt-4.1-mini");
+    assert_eq!(agents[1]["currentModel"], "oa/gpt-4.1");
+    assert_eq!(agents[2]["currentModel"], Value::Null);
+
+    let delete = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::DELETE,
+            "/api/cli-tools/openclaw-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(delete).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "9Router settings removed successfully"
+        })
+    );
+
+    let reset: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert!(reset["models"]["providers"].get("9router").is_none());
+    assert_eq!(reset["models"]["providers"]["other"]["keep"], true);
+    assert!(reset["agents"]["defaults"]["models"]
+        .get("9router/oa/gpt-4.1")
+        .is_none());
+    assert!(reset["agents"]["defaults"]["models"]
+        .get("9router/oa/gpt-4.1-mini")
+        .is_none());
+    assert!(reset["agents"]["defaults"]["models"]
+        .get("other/model")
+        .is_some());
+    assert!(reset["agents"]["defaults"]["model"]
+        .get("primary")
+        .is_none());
+    assert_eq!(
+        reset["agents"]["list"][0]["model"],
+        "9router/oa/gpt-4.1-mini"
+    );
+
+    let get_after_delete = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/openclaw-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(get_after_delete).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["has9Router"], false);
+    let agents = json["agents"].as_array().unwrap();
+    assert_eq!(agents[0]["currentModel"], "oa/gpt-4.1-mini");
+    assert_eq!(agents[1]["currentModel"], "oa/gpt-4.1");
 }
