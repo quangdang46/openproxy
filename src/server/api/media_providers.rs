@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{delete, get, post},
@@ -278,9 +278,254 @@ async fn delete_media_provider(
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TtsVoicesQuery {
+    lang: Option<String>,
+}
+
+async fn get_deepgram_voices(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<TtsVoicesQuery>,
+) -> axum::response::Response {
+    if let Err(e) = require_api_key(&headers, &state.db) {
+        return crate::server::api::auth_error_response(e);
+    }
+    let snapshot = state.db.snapshot();
+    let api_key = snapshot
+        .provider_connections
+        .iter()
+        .find(|c| c.provider == "deepgram" && c.is_active())
+        .and_then(|c| c.api_key.as_ref());
+    let Some(api_key) = api_key else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No Deepgram connection found" })),
+        )
+            .into_response();
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    let resp = match client
+        .get("https://api.deepgram.com/v1/models")
+        .header("Authorization", format!("Token {api_key}"))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("Deepgram API failed: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Deepgram API {status}: {text}") })),
+        )
+            .into_response();
+    }
+    let data: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("Parse error: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let tts_models = data
+        .get("tts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut by_lang: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for m in &tts_models {
+        let canonical = m
+            .get("canonical_name")
+            .or_else(|| m.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("en");
+        let name = m.get("name").and_then(Value::as_str).unwrap_or(canonical);
+        let gender = m
+            .get("metadata")
+            .and_then(Value::as_object)
+            .and_then(|md| md.get("tags"))
+            .and_then(Value::as_array)
+            .and_then(|tags| {
+                tags.iter().find_map(|t| {
+                    let s = t.as_str()?;
+                    (s == "masculine" || s == "feminine").then_some(s.to_string())
+                })
+            })
+            .unwrap_or_default();
+        let codes: Vec<String> = m
+            .get("languages")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![canonical.rsplit('-').next().unwrap_or("en").to_string()]);
+        for code in &codes {
+            let entry = by_lang
+                .entry(code.clone())
+                .or_insert_with(|| serde_json::json!({"code": code, "name": code, "voices": []}));
+            let list = entry
+                .as_object_mut()
+                .unwrap()
+                .get_mut("voices")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            if !list
+                .iter()
+                .any(|v| v.get("id") == Some(&serde_json::json!(canonical)))
+            {
+                list.push(serde_json::json!({"id": canonical, "name": name, "gender": gender, "lang": code}));
+            }
+        }
+    }
+    if let Some(lang) = query.lang.as_deref() {
+        return Json(serde_json::json!({"voices": by_lang.get(lang).and_then(|v| v.get("voices")).cloned().unwrap_or(serde_json::json!([]))})).into_response();
+    }
+    let languages: Vec<serde_json::Value> = by_lang
+        .iter()
+        .map(|(code, _)| serde_json::json!({"code": code, "name": code}))
+        .collect();
+    Json(serde_json::json!({"languages": languages, "byLang": by_lang})).into_response()
+}
+
+async fn get_inworld_voices(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<TtsVoicesQuery>,
+) -> axum::response::Response {
+    if let Err(e) = require_api_key(&headers, &state.db) {
+        return crate::server::api::auth_error_response(e);
+    }
+    let snapshot = state.db.snapshot();
+    let api_key = snapshot
+        .provider_connections
+        .iter()
+        .find(|c| c.provider == "inworld" && c.is_active())
+        .and_then(|c| c.api_key.as_ref());
+    let Some(api_key) = api_key else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No Inworld connection found" })),
+        )
+            .into_response();
+    };
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    let resp = match client
+        .get("https://api.inworld.ai/tts/v1/voices")
+        .header("Authorization", format!("Basic {api_key}"))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("Inworld API failed: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("Inworld API {status}: {text}") })),
+        )
+            .into_response();
+    }
+    let data: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("Parse error: {e}") })),
+            )
+                .into_response()
+        }
+    };
+    let voices = data
+        .get("voices")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut by_lang: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for v in &voices {
+        let vid = v.get("voiceId").and_then(Value::as_str).unwrap_or_default();
+        let dname = v.get("displayName").and_then(Value::as_str).unwrap_or(vid);
+        let gender = v.get("gender").and_then(Value::as_str).unwrap_or("");
+        let codes: Vec<String> = v
+            .get("languages")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|l| l.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec!["en".to_string()]);
+        for code in &codes {
+            let entry = by_lang
+                .entry(code.clone())
+                .or_insert_with(|| serde_json::json!({"code": code, "name": code, "voices": []}));
+            let list = entry
+                .as_object_mut()
+                .unwrap()
+                .get_mut("voices")
+                .unwrap()
+                .as_array_mut()
+                .unwrap();
+            if !list
+                .iter()
+                .any(|vv| vv.get("id") == Some(&serde_json::json!(vid)))
+            {
+                list.push(
+                    serde_json::json!({"id": vid, "name": dname, "gender": gender, "lang": code}),
+                );
+            }
+        }
+    }
+    if let Some(lang) = query.lang.as_deref() {
+        return Json(serde_json::json!({"voices": by_lang.get(lang).and_then(|v| v.get("voices")).cloned().unwrap_or(serde_json::json!([]))})).into_response();
+    }
+    let languages: Vec<serde_json::Value> = by_lang
+        .iter()
+        .map(|(code, _)| serde_json::json!({"code": code, "name": code}))
+        .collect();
+    Json(serde_json::json!({"languages": languages, "byLang": by_lang})).into_response()
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/media-providers", get(list_media_providers))
         .route("/api/media-providers", post(add_media_provider))
         .route("/api/media-providers/{id}", delete(delete_media_provider))
+        .route(
+            "/api/media-providers/tts/deepgram/voices",
+            get(get_deepgram_voices),
+        )
+        .route(
+            "/api/media-providers/tts/inworld/voices",
+            get(get_inworld_voices),
+        )
 }
