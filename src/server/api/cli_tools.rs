@@ -3,6 +3,8 @@ mod cowork_settings;
 mod hermes_settings;
 
 use std::collections::BTreeMap;
+use std::env;
+use std::path::{Path as FsPath, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -18,7 +20,8 @@ use bytes::Bytes;
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::process::Command;
+use tokio::{fs, process::Command};
+use toml::{map::Map as TomlMap, Value as TomlValue};
 
 use crate::server::state::AppState;
 
@@ -319,56 +322,33 @@ async fn get_codex_settings(State(state): State<AppState>, headers: HeaderMap) -
         return response;
     }
 
-    let snapshot = state.db.snapshot();
+    let installed = check_codex_installed().await;
+    if !installed {
+        return Json(json!({
+            "installed": false,
+            "config": Value::Null,
+            "message": "Codex CLI is not installed",
+        }))
+        .into_response();
+    }
 
-    // Check if codex executable exists locally
-    let installed = std::path::Path::new("/usr/local/bin/codex").exists()
-        || std::path::Path::new("/usr/bin/codex").exists();
-
-    // Look for saved config in provider_specific_data of a special provider node
-    let codex_config = snapshot
-        .provider_nodes
-        .iter()
-        .find(|n| n.extra.get("type").and_then(Value::as_str) == Some("codex-settings"))
-        .and_then(|node| {
-            let config_str = node.extra.get("config")?.as_str()?;
-            serde_json::from_str::<CodexSettings>(config_str).ok()
-        })
-        .unwrap_or_default();
-
-    Json(json!({
-        "installed": installed,
-        "config": codex_config.base_url.is_some() || codex_config.api_key.is_some(),
-        "baseUrl": codex_config.base_url,
-        "apiKey": codex_config.api_key,
-        "model": codex_config.model,
-        "subagentModel": codex_config.subagent_model,
-        "configContent": build_codex_config_string(&codex_config, &snapshot.settings.mitm_router_base_url)
-    }))
-    .into_response()
-}
-
-fn build_codex_config_string(settings: &CodexSettings, base_url: &str) -> Option<String> {
-    let base_url = settings.base_url.as_ref()?;
-    let model = settings.model.as_ref()?;
-
-    let subagent_model = settings.subagent_model.as_ref().unwrap_or(model);
-
-    Some(format!(
-        r#"# 9Router Configuration for Codex CLI
-model = "{}"
-model_provider = "9router"
-
-[model_providers.9router]
-name = "9Router"
-base_url = "{}"
-wire_api = "responses"
-
-[agents.subagent]
-model = "{}"
-"#,
-        model, base_url, subagent_model
-    ))
+    match read_codex_config().await {
+        Ok(config) => {
+            let has_9router = config.as_deref().is_some_and(has_9router_codex_config);
+            Json(json!({
+                "installed": true,
+                "config": config,
+                "has9Router": has_9router,
+                "configPath": codex_config_path().to_string_lossy().to_string(),
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to check codex settings: {error}") })),
+        )
+            .into_response(),
+    }
 }
 
 /// POST /api/cli-tools/codex-settings
@@ -391,63 +371,23 @@ async fn save_codex_settings(
         return response;
     }
 
-    let codex_settings = CodexSettings {
+    match write_codex_settings(&CodexSettings {
         base_url: Some(req.base_url),
         api_key: Some(req.api_key),
         model: Some(req.model),
         subagent_model: req.subagent_model,
-    };
-
-    let config_json = match serde_json::to_string(&codex_settings) {
-        Ok(j) => j,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Failed to serialize settings"})),
-            )
-                .into_response()
-        }
-    };
-
-    let now = chrono::Utc::now().to_rfc3339();
-
-    match state
-        .db
-        .update(|db| {
-            // Remove old codex settings
-            db.provider_nodes
-                .retain(|n| n.extra.get("type").and_then(Value::as_str) != Some("codex-settings"));
-
-            // Add new codex settings node
-            let mut extra = BTreeMap::new();
-            extra.insert(
-                "type".to_string(),
-                Value::String("codex-settings".to_string()),
-            );
-            extra.insert("config".to_string(), Value::String(config_json));
-
-            db.provider_nodes.push(crate::types::ProviderNode {
-                id: "codex-settings".to_string(),
-                r#type: "codex-settings".to_string(),
-                name: "Codex CLI Settings".to_string(),
-                prefix: None,
-                api_type: None,
-                base_url: None,
-                created_at: Some(now.clone()),
-                updated_at: Some(now),
-                extra,
-            });
-        })
-        .await
+    })
+    .await
     {
-        Ok(_) => Json(json!({
+        Ok(config_path) => Json(json!({
             "success": true,
-            "message": "Codex settings saved"
+            "message": "Codex settings applied successfully!",
+            "configPath": config_path,
         }))
         .into_response(),
-        Err(e) => (
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
+            Json(json!({ "error": format!("Failed to update codex settings: {error}") })),
         )
             .into_response(),
     }
@@ -460,25 +400,249 @@ async fn delete_codex_settings(State(state): State<AppState>, headers: HeaderMap
         return response;
     }
 
-    match state
-        .db
-        .update(|db| {
-            db.provider_nodes
-                .retain(|n| n.extra.get("type").and_then(Value::as_str) != Some("codex-settings"));
-        })
-        .await
-    {
-        Ok(_) => Json(json!({
-            "success": true,
-            "message": "Codex settings reset"
-        }))
-        .into_response(),
-        Err(e) => (
+    match reset_codex_settings().await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": e.to_string()})),
+            Json(json!({ "error": format!("Failed to reset codex settings: {error}") })),
         )
             .into_response(),
     }
+}
+
+async fn check_codex_installed() -> bool {
+    command_exists("codex", true).await || fs::metadata(codex_config_path()).await.is_ok()
+}
+
+async fn read_codex_config() -> anyhow::Result<Option<String>> {
+    read_string_optional(&codex_config_path()).await
+}
+
+async fn write_codex_settings(settings: &CodexSettings) -> anyhow::Result<String> {
+    let config_path = codex_config_path();
+    let auth_path = codex_auth_path();
+    fs::create_dir_all(codex_dir()).await?;
+
+    let mut parsed = match fs::read_to_string(&config_path).await {
+        Ok(existing_config) => parse_toml_table(&existing_config).unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => TomlMap::new(),
+        Err(error) => return Err(error.into()),
+    };
+
+    let base_url = settings.base_url.clone().unwrap_or_default();
+    let api_key = settings.api_key.clone().unwrap_or_default();
+    let model = settings.model.clone().unwrap_or_default();
+    let subagent_model = settings
+        .subagent_model
+        .clone()
+        .unwrap_or_else(|| model.clone());
+
+    parsed.insert("model".to_string(), TomlValue::String(model));
+    parsed.insert(
+        "model_provider".to_string(),
+        TomlValue::String("9router".to_string()),
+    );
+    set_toml_section(
+        &mut parsed,
+        &["model_providers", "9router"],
+        TomlValue::Table(TomlMap::from_iter([
+            ("name".to_string(), TomlValue::String("9Router".to_string())),
+            (
+                "base_url".to_string(),
+                TomlValue::String(normalize_v1_base_url(&base_url)),
+            ),
+            (
+                "wire_api".to_string(),
+                TomlValue::String("responses".to_string()),
+            ),
+        ])),
+    );
+    set_toml_section(
+        &mut parsed,
+        &["agents", "subagent"],
+        TomlValue::Table(TomlMap::from_iter([(
+            "model".to_string(),
+            TomlValue::String(subagent_model),
+        )])),
+    );
+
+    let config_content = toml::to_string_pretty(&TomlValue::Table(parsed))?;
+    fs::write(&config_path, config_content).await?;
+
+    let mut auth_data = match fs::read_to_string(&auth_path).await {
+        Ok(existing_auth) => serde_json::from_str::<serde_json::Map<String, Value>>(&existing_auth)
+            .unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(error.into()),
+    };
+    auth_data.insert("OPENAI_API_KEY".to_string(), Value::String(api_key));
+    auth_data.insert("auth_mode".to_string(), Value::String("apikey".to_string()));
+    fs::write(
+        &auth_path,
+        serde_json::to_vec_pretty(&Value::Object(auth_data))?,
+    )
+    .await?;
+
+    Ok(config_path.to_string_lossy().to_string())
+}
+
+async fn reset_codex_settings() -> anyhow::Result<Value> {
+    let config_path = codex_config_path();
+    let existing_config = match fs::read_to_string(&config_path).await {
+        Ok(existing_config) => existing_config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "success": true,
+                "message": "No config file to reset",
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut parsed = parse_toml_table(&existing_config)?;
+    if parsed.get("model_provider").and_then(TomlValue::as_str) == Some("9router") {
+        parsed.remove("model");
+        parsed.remove("model_provider");
+    }
+    delete_toml_section(&mut parsed, &["model_providers", "9router"]);
+    delete_toml_section(&mut parsed, &["agents", "subagent"]);
+
+    let config_content = toml::to_string_pretty(&TomlValue::Table(parsed))?;
+    fs::write(&config_path, config_content).await?;
+
+    let auth_path = codex_auth_path();
+    match fs::read_to_string(&auth_path).await {
+        Ok(existing_auth) => {
+            if let Ok(mut auth_data) =
+                serde_json::from_str::<serde_json::Map<String, Value>>(&existing_auth)
+            {
+                auth_data.remove("OPENAI_API_KEY");
+                auth_data.remove("auth_mode");
+                if auth_data.is_empty() {
+                    let _ = fs::remove_file(&auth_path).await;
+                } else {
+                    fs::write(
+                        &auth_path,
+                        serde_json::to_vec_pretty(&Value::Object(auth_data))?,
+                    )
+                    .await?;
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    Ok(json!({
+        "success": true,
+        "message": "9Router settings removed successfully",
+    }))
+}
+
+async fn read_string_optional(path: &FsPath) -> anyhow::Result<Option<String>> {
+    match fs::read_to_string(path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn has_9router_codex_config(config: &str) -> bool {
+    config.contains("model_provider = \"9router\"") || config.contains("[model_providers.9router]")
+}
+
+fn parse_toml_table(content: &str) -> anyhow::Result<TomlMap<String, TomlValue>> {
+    match toml::from_str::<TomlValue>(content)? {
+        TomlValue::Table(table) => Ok(table),
+        _ => Ok(TomlMap::new()),
+    }
+}
+
+fn set_toml_section(table: &mut TomlMap<String, TomlValue>, path: &[&str], value: TomlValue) {
+    if path.is_empty() {
+        return;
+    }
+    if path.len() == 1 {
+        table.insert(path[0].to_string(), value);
+        return;
+    }
+
+    let entry = table
+        .entry(path[0].to_string())
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    if !entry.is_table() {
+        *entry = TomlValue::Table(TomlMap::new());
+    }
+    if let TomlValue::Table(next) = entry {
+        set_toml_section(next, &path[1..], value);
+    }
+}
+
+fn delete_toml_section(table: &mut TomlMap<String, TomlValue>, path: &[&str]) {
+    if path.is_empty() {
+        return;
+    }
+    if path.len() == 1 {
+        table.remove(path[0]);
+        return;
+    }
+    if let Some(TomlValue::Table(next)) = table.get_mut(path[0]) {
+        delete_toml_section(next, &path[1..]);
+    }
+}
+
+fn normalize_v1_base_url(base_url: &str) -> String {
+    if base_url.ends_with("/v1") {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/v1")
+    }
+}
+
+async fn command_exists(program: &str, inject_windows_npm_path: bool) -> bool {
+    let finder = if cfg!(windows) { "where" } else { "which" };
+    let mut command = Command::new(finder);
+    command.arg(program);
+    if cfg!(windows) && inject_windows_npm_path {
+        if let Some(path) = windows_npm_augmented_path() {
+            command.env("PATH", path);
+        }
+    }
+    command
+        .status()
+        .await
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn windows_npm_augmented_path() -> Option<String> {
+    let appdata = env::var_os("APPDATA")?;
+    let current_path = env::var_os("PATH").unwrap_or_default();
+    let npm_dir = PathBuf::from(appdata).join("npm");
+    Some(format!(
+        "{};{}",
+        npm_dir.to_string_lossy(),
+        PathBuf::from(current_path).to_string_lossy()
+    ))
+}
+
+fn codex_dir() -> PathBuf {
+    home_dir().join(".codex")
+}
+
+fn codex_config_path() -> PathBuf {
+    codex_dir().join("config.toml")
+}
+
+fn codex_auth_path() -> PathBuf {
+    codex_dir().join("auth.json")
+}
+
+fn home_dir() -> PathBuf {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("/"))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1036,30 +1200,6 @@ mod tests {
         assert!(!status.cert_exists);
         assert!(!status.dns_configured);
         assert!(!status.has_cached_password);
-    }
-
-    #[test]
-    fn test_build_codex_config_string() {
-        let settings = CodexSettings {
-            base_url: Some("http://localhost:4623/v1".to_string()),
-            api_key: Some("sk-test".to_string()),
-            model: Some("openai/gpt-4".to_string()),
-            subagent_model: Some("openai/gpt-4o".to_string()),
-        };
-
-        let config = build_codex_config_string(&settings, "http://localhost:4623");
-        assert!(config.is_some());
-        let config_str = config.unwrap();
-        assert!(config_str.contains("model = \"openai/gpt-4\""));
-        assert!(config_str.contains("base_url = \"http://localhost:4623/v1\""));
-        assert!(config_str.contains("subagent"));
-    }
-
-    #[test]
-    fn test_build_codex_config_string_missing_fields() {
-        let settings = CodexSettings::default();
-        let config = build_codex_config_string(&settings, "http://localhost:4623");
-        assert!(config.is_none());
     }
 
     #[test]

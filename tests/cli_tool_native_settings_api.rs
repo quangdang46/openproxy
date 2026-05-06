@@ -91,6 +91,14 @@ fn hermes_env_path(home: &Path) -> PathBuf {
     home.join(".hermes").join(".env")
 }
 
+fn codex_config_path(home: &Path) -> PathBuf {
+    home.join(".codex").join("config.toml")
+}
+
+fn codex_auth_path(home: &Path) -> PathBuf {
+    home.join(".codex").join("auth.json")
+}
+
 #[tokio::test]
 async fn claude_settings_get_reports_not_installed_without_binary_or_config() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -342,4 +350,151 @@ async fn hermes_settings_post_get_and_delete_preserve_other_files() {
         std::fs::read_to_string(hermes_env_path(home.path())).unwrap(),
         "OPENAI_API_KEY=sk-test\n"
     );
+}
+
+#[tokio::test]
+async fn codex_settings_get_reports_not_installed_without_binary_or_config() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/codex-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let (status, json) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "installed": false,
+            "config": null,
+            "message": "Codex CLI is not installed"
+        })
+    );
+}
+
+#[tokio::test]
+async fn codex_settings_post_get_and_delete_match_9router_file_behavior() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let config_path = codex_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        "[existing]\nvalue = \"keep\"\nmodel = \"other\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        codex_auth_path(home.path()),
+        serde_json::to_vec_pretty(&json!({
+            "refresh_token": "keep-me",
+            "auth_mode": "chatgpt"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+    let post = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/codex-settings",
+            Body::from(
+                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-9router","model":"oa/gpt-4.1","subagentModel":"oa/gpt-4.1-mini"}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(post).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "Codex settings applied successfully!",
+            "configPath": config_path.to_string_lossy().to_string()
+        })
+    );
+
+    let saved_config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(saved_config.contains("model = \"oa/gpt-4.1\""));
+    assert!(saved_config.contains("model_provider = \"9router\""));
+    assert!(saved_config.contains("[model_providers.9router]"));
+    assert!(saved_config.contains("base_url = \"https://proxy.example.com/v1\""));
+    assert!(saved_config.contains("wire_api = \"responses\""));
+    assert!(saved_config.contains("[agents.subagent]"));
+    assert!(saved_config.contains("model = \"oa/gpt-4.1-mini\""));
+    assert!(saved_config.contains("[existing]"));
+
+    let saved_auth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(codex_auth_path(home.path())).unwrap())
+            .unwrap();
+    assert_eq!(saved_auth["OPENAI_API_KEY"], "sk-9router");
+    assert_eq!(saved_auth["auth_mode"], "apikey");
+    assert_eq!(saved_auth["refresh_token"], "keep-me");
+
+    let get = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/codex-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(get).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["installed"], true);
+    assert_eq!(json["has9Router"], true);
+    assert_eq!(
+        json["configPath"],
+        config_path.to_string_lossy().to_string()
+    );
+    assert_eq!(json["config"], saved_config);
+
+    let delete = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::DELETE,
+            "/api/cli-tools/codex-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(delete).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "9Router settings removed successfully"
+        })
+    );
+
+    let reset_config = std::fs::read_to_string(&config_path).unwrap();
+    assert!(!reset_config.contains("model_provider = \"9router\""));
+    assert!(!reset_config.contains("[model_providers.9router]"));
+    assert!(!reset_config.contains("[agents.subagent]"));
+    assert!(reset_config.contains("[existing]"));
+
+    let reset_auth: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(codex_auth_path(home.path())).unwrap())
+            .unwrap();
+    assert!(reset_auth.get("OPENAI_API_KEY").is_none());
+    assert!(reset_auth.get("auth_mode").is_none());
+    assert_eq!(reset_auth["refresh_token"], "keep-me");
 }
