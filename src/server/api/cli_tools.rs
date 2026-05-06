@@ -410,6 +410,103 @@ async fn delete_codex_settings(State(state): State<AppState>, headers: HeaderMap
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Copilot Settings Endpoints
+// GET/POST/DELETE /api/cli-tools/copilot-settings
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CopilotSettingsRequest {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub models: Vec<String>,
+}
+
+async fn get_copilot_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    match read_copilot_config().await {
+        Ok(config) => {
+            let has_9router = config.as_ref().is_some_and(has_9router_copilot_config);
+            let entry = config.as_ref().and_then(get_9router_copilot_entry);
+            Json(json!({
+                "installed": true,
+                "config": config,
+                "has9Router": has_9router,
+                "configPath": copilot_config_path().to_string_lossy().to_string(),
+                "currentModel": entry
+                    .and_then(|entry| entry.get("models"))
+                    .and_then(Value::as_array)
+                    .and_then(|models| models.first())
+                    .and_then(|model| model.get("id"))
+                    .and_then(Value::as_str),
+                "currentUrl": entry
+                    .and_then(|entry| entry.get("models"))
+                    .and_then(Value::as_array)
+                    .and_then(|models| models.first())
+                    .and_then(|model| model.get("url"))
+                    .and_then(Value::as_str),
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to check copilot settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn save_copilot_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CopilotSettingsRequest>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    if req.base_url.trim().is_empty() || req.models.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "baseUrl and models are required" })),
+        )
+            .into_response();
+    }
+
+    match write_copilot_settings(&req).await {
+        Ok(config_path) => Json(json!({
+            "success": true,
+            "message": "Copilot settings applied! Reload VS Code to take effect.",
+            "configPath": config_path,
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to update copilot settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_copilot_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    match reset_copilot_settings().await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to reset copilot settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
 async fn check_codex_installed() -> bool {
     command_exists("codex", true).await || fs::metadata(codex_config_path()).await.is_ok()
 }
@@ -636,6 +733,145 @@ fn codex_config_path() -> PathBuf {
 
 fn codex_auth_path() -> PathBuf {
     codex_dir().join("auth.json")
+}
+
+async fn read_copilot_config() -> anyhow::Result<Option<Value>> {
+    read_json_optional(&copilot_config_path()).await
+}
+
+async fn write_copilot_settings(req: &CopilotSettingsRequest) -> anyhow::Result<String> {
+    let config_path = copilot_config_path();
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+
+    let mut config = match fs::read_to_string(&config_path).await {
+        Ok(existing) => parse_json_array_or_default(&existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => return Err(error.into()),
+    };
+
+    let endpoint_url = format!("{}/chat/completions#models.ai.azure.com", req.base_url);
+    let api_key = req
+        .api_key
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "sk_9router".to_string());
+    let new_entry = json!({
+        "name": "9Router",
+        "vendor": "azure",
+        "apiKey": api_key,
+        "models": req.models.iter().map(|id| {
+            json!({
+                "id": id,
+                "name": id,
+                "url": endpoint_url,
+                "toolCalling": true,
+                "vision": false,
+                "maxInputTokens": 128000,
+                "maxOutputTokens": 16000,
+            })
+        }).collect::<Vec<_>>(),
+    });
+
+    if let Some(index) = config.iter().position(|entry| {
+        entry
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name == "9Router")
+    }) {
+        config[index] = new_entry;
+    } else {
+        config.push(new_entry);
+    }
+
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&Value::Array(config))?,
+    )
+    .await?;
+    Ok(config_path.to_string_lossy().to_string())
+}
+
+async fn reset_copilot_settings() -> anyhow::Result<Value> {
+    let config_path = copilot_config_path();
+    let mut config = match fs::read_to_string(&config_path).await {
+        Ok(existing) => parse_json_array_or_default(&existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "success": true,
+                "message": "No config file to reset",
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    config.retain(|entry| {
+        entry
+            .get("name")
+            .and_then(Value::as_str)
+            .is_none_or(|name| name != "9Router")
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&Value::Array(config))?,
+    )
+    .await?;
+
+    Ok(json!({
+        "success": true,
+        "message": "9Router removed from Copilot config",
+    }))
+}
+
+async fn read_json_optional(path: &FsPath) -> anyhow::Result<Option<Value>> {
+    match fs::read_to_string(path).await {
+        Ok(content) => Ok(Some(serde_json::from_str(&content)?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn parse_json_array_or_default(content: &str) -> Vec<Value> {
+    match serde_json::from_str::<Value>(content) {
+        Ok(Value::Array(entries)) => entries,
+        _ => Vec::new(),
+    }
+}
+
+fn has_9router_copilot_config(config: &Value) -> bool {
+    get_9router_copilot_entry(config).is_some()
+}
+
+fn get_9router_copilot_entry(config: &Value) -> Option<&Value> {
+    config
+        .as_array()?
+        .iter()
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some("9Router"))
+}
+
+fn copilot_config_path() -> PathBuf {
+    if cfg!(windows) {
+        let base = env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(home_dir);
+        base.join("Code")
+            .join("User")
+            .join("chatLanguageModels.json")
+    } else if cfg!(target_os = "macos") {
+        home_dir()
+            .join("Library")
+            .join("Application Support")
+            .join("Code")
+            .join("User")
+            .join("chatLanguageModels.json")
+    } else {
+        home_dir()
+            .join(".config")
+            .join("Code")
+            .join("User")
+            .join("chatLanguageModels.json")
+    }
 }
 
 fn home_dir() -> PathBuf {
@@ -989,6 +1225,15 @@ pub fn routes() -> Router<AppState> {
             "/api/cli-tools/codex-settings",
             delete(delete_codex_settings),
         )
+        .route("/api/cli-tools/copilot-settings", get(get_copilot_settings))
+        .route(
+            "/api/cli-tools/copilot-settings",
+            post(save_copilot_settings),
+        )
+        .route(
+            "/api/cli-tools/copilot-settings",
+            delete(delete_copilot_settings),
+        )
         .route(
             "/api/cli-tools/opencode-settings",
             get(proxy_cli_tool_settings)
@@ -1004,12 +1249,6 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/cli-tools/openclaw-settings",
-            get(proxy_cli_tool_settings)
-                .post(proxy_cli_tool_settings)
-                .delete(proxy_cli_tool_settings),
-        )
-        .route(
-            "/api/cli-tools/copilot-settings",
             get(proxy_cli_tool_settings)
                 .post(proxy_cli_tool_settings)
                 .delete(proxy_cli_tool_settings),

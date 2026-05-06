@@ -99,6 +99,13 @@ fn codex_auth_path(home: &Path) -> PathBuf {
     home.join(".codex").join("auth.json")
 }
 
+fn copilot_config_path(home: &Path) -> PathBuf {
+    home.join(".config")
+        .join("Code")
+        .join("User")
+        .join("chatLanguageModels.json")
+}
+
 #[tokio::test]
 async fn claude_settings_get_reports_not_installed_without_binary_or_config() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -497,4 +504,157 @@ async fn codex_settings_post_get_and_delete_match_9router_file_behavior() {
     assert!(reset_auth.get("OPENAI_API_KEY").is_none());
     assert!(reset_auth.get("auth_mode").is_none());
     assert_eq!(reset_auth["refresh_token"], "keep-me");
+}
+
+#[tokio::test]
+async fn copilot_settings_get_reports_installed_without_existing_config() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/copilot-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let (status, json) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "installed": true,
+            "config": null,
+            "has9Router": false,
+            "configPath": copilot_config_path(home.path()).to_string_lossy().to_string(),
+            "currentModel": null,
+            "currentUrl": null
+        })
+    );
+}
+
+#[tokio::test]
+async fn copilot_settings_post_get_and_delete_match_9router_file_behavior() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+
+    let config_path = copilot_config_path(home.path());
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!([
+            {
+                "name": "Other",
+                "vendor": "other",
+                "models": [{ "id": "other/model" }]
+            },
+            {
+                "name": "9Router",
+                "vendor": "azure",
+                "models": [{ "id": "old/model", "url": "https://old.example.com/chat/completions#models.ai.azure.com" }]
+            }
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+    let post = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/copilot-settings",
+            Body::from(
+                r#"{"baseUrl":"https://proxy.example.com/v1","apiKey":"sk-9router","models":["oa/gpt-4.1","oa/gpt-4.1-mini"]}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(post).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "Copilot settings applied! Reload VS Code to take effect.",
+            "configPath": config_path.to_string_lossy().to_string(),
+        })
+    );
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    let saved_array = saved.as_array().unwrap();
+    assert_eq!(saved_array.len(), 2);
+    assert_eq!(saved_array[0]["name"], "Other");
+    assert_eq!(saved_array[1]["name"], "9Router");
+    assert_eq!(saved_array[1]["vendor"], "azure");
+    assert_eq!(saved_array[1]["apiKey"], "sk-9router");
+    assert_eq!(saved_array[1]["models"][0]["id"], "oa/gpt-4.1");
+    assert_eq!(saved_array[1]["models"][0]["name"], "oa/gpt-4.1");
+    assert_eq!(
+        saved_array[1]["models"][0]["url"],
+        "https://proxy.example.com/v1/chat/completions#models.ai.azure.com"
+    );
+    assert_eq!(saved_array[1]["models"][0]["toolCalling"], true);
+    assert_eq!(saved_array[1]["models"][0]["vision"], false);
+    assert_eq!(saved_array[1]["models"][0]["maxInputTokens"], 128000);
+    assert_eq!(saved_array[1]["models"][0]["maxOutputTokens"], 16000);
+    assert_eq!(saved_array[1]["models"][1]["id"], "oa/gpt-4.1-mini");
+
+    let get = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/copilot-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(get).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["installed"], true);
+    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["config"], saved);
+    assert_eq!(json["currentModel"], "oa/gpt-4.1");
+    assert_eq!(
+        json["currentUrl"],
+        "https://proxy.example.com/v1/chat/completions#models.ai.azure.com"
+    );
+
+    let delete = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::DELETE,
+            "/api/cli-tools/copilot-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(delete).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "9Router removed from Copilot config"
+        })
+    );
+
+    let reset: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(
+        reset,
+        json!([
+            {
+                "name": "Other",
+                "vendor": "other",
+                "models": [{ "id": "other/model" }]
+            }
+        ])
+    );
 }
