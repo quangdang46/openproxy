@@ -32,6 +32,16 @@ use crate::types::ProviderConnection;
 
 const PKCE_FLOW_TTL_SECS: i64 = 600;
 const DEVICE_FLOW_TTL_SECS: i64 = 900;
+const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const CLAUDE_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
+const CLAUDE_TOKEN_URL: &str = "https://api.anthropic.com/v1/oauth/token";
+const CLAUDE_SCOPE: &str = "org:create_api_key user:profile user:inference";
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const CODEX_SCOPE: &str = "openid profile email offline_access";
+const CODEX_FIXED_PORT: u64 = 1455;
+const CODEX_CALLBACK_PATH: &str = "/auth/callback";
 const KIRO_SOCIAL_REDIRECT_URI: &str = "kiro://kiro.kiroAgent/authenticate-success";
 const KIRO_SOCIAL_REDIRECT_URI_ENCODED: &str = "kiro%3A%2F%2Fkiro.kiroAgent%2Fauthenticate-success";
 const KIRO_DEFAULT_START_URL: &str = "https://view.awsapps.com/start";
@@ -77,6 +87,16 @@ pub struct DeviceCodeCompatQuery {
     pub start_url: Option<String>,
     pub region: Option<String>,
     pub auth_method: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OAuthExchangeCompatBody {
+    code: Option<String>,
+    redirect_uri: Option<String>,
+    code_verifier: Option<String>,
+    state: Option<String>,
+    meta: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -292,6 +312,34 @@ fn iflow_api_base_url() -> String {
         .to_string()
 }
 
+fn claude_authorize_url() -> String {
+    std::env::var("OPENPROXY_CLAUDE_AUTHORIZE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| CLAUDE_AUTHORIZE_URL.to_string())
+}
+
+fn claude_token_url() -> String {
+    std::env::var("OPENPROXY_CLAUDE_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| CLAUDE_TOKEN_URL.to_string())
+}
+
+fn codex_authorize_url() -> String {
+    std::env::var("OPENPROXY_CODEX_AUTHORIZE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| CODEX_AUTHORIZE_URL.to_string())
+}
+
+fn codex_token_url() -> String {
+    std::env::var("OPENPROXY_CODEX_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| CODEX_TOKEN_URL.to_string())
+}
+
 fn kiro_auth_service_base_url() -> String {
     std::env::var("OPENPROXY_KIRO_AUTH_SERVICE_BASE_URL")
         .ok()
@@ -335,6 +383,23 @@ fn normalize_kiro_auth_method(auth_method: Option<&str>) -> String {
     } else {
         "builder-id".to_string()
     }
+}
+
+fn encode_query_value(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+}
+
+fn encode_component_value(value: &str) -> String {
+    encode_query_value(value).replace('+', "%20")
+}
+
+fn build_query_url(base: &str, params: &[(&str, String)]) -> String {
+    let query_string = params
+        .iter()
+        .map(|(key, value)| format!("{key}={}", encode_query_value(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{base}?{query_string}")
 }
 
 fn capitalize_ascii_first(value: &str) -> String {
@@ -1931,6 +1996,340 @@ async fn poll_kiro_device_code_compat(state: &AppState, body: Value) -> Response
     .into_response()
 }
 
+fn build_claude_auth_url(redirect_uri: &str, state: &str, code_challenge: &str) -> String {
+    build_query_url(
+        &claude_authorize_url(),
+        &[
+            ("code", "true".to_string()),
+            ("client_id", CLAUDE_CLIENT_ID.to_string()),
+            ("response_type", "code".to_string()),
+            ("redirect_uri", redirect_uri.to_string()),
+            ("scope", CLAUDE_SCOPE.to_string()),
+            ("code_challenge", code_challenge.to_string()),
+            ("code_challenge_method", "S256".to_string()),
+            ("state", state.to_string()),
+        ],
+    )
+}
+
+fn build_codex_auth_url(redirect_uri: &str, state: &str, code_challenge: &str) -> String {
+    let params = [
+        ("response_type", "code".to_string()),
+        ("client_id", CODEX_CLIENT_ID.to_string()),
+        ("redirect_uri", redirect_uri.to_string()),
+        ("scope", CODEX_SCOPE.to_string()),
+        ("code_challenge", code_challenge.to_string()),
+        ("code_challenge_method", "S256".to_string()),
+        ("id_token_add_organizations", "true".to_string()),
+        ("codex_cli_simplified_flow", "true".to_string()),
+        ("originator", "codex_cli_rs".to_string()),
+        ("state", state.to_string()),
+    ];
+    let query_string = params
+        .iter()
+        .map(|(key, value)| format!("{key}={}", encode_component_value(value)))
+        .collect::<Vec<_>>()
+        .join("&");
+    format!("{}?{query_string}", codex_authorize_url())
+}
+
+fn build_auth_compat_response(
+    provider: &str,
+    auth_url: String,
+    state: String,
+    code_verifier: String,
+    code_challenge: String,
+    redirect_uri: String,
+) -> Response {
+    let mut payload = serde_json::Map::from_iter([
+        ("authUrl".to_string(), Value::String(auth_url)),
+        ("state".to_string(), Value::String(state)),
+        ("codeVerifier".to_string(), Value::String(code_verifier)),
+        ("codeChallenge".to_string(), Value::String(code_challenge)),
+        ("redirectUri".to_string(), Value::String(redirect_uri)),
+        (
+            "flowType".to_string(),
+            Value::String("authorization_code_pkce".to_string()),
+        ),
+        (
+            "callbackPath".to_string(),
+            Value::String(if provider == "codex" {
+                CODEX_CALLBACK_PATH.to_string()
+            } else {
+                "/callback".to_string()
+            }),
+        ),
+    ]);
+    if provider == "codex" {
+        payload.insert("fixedPort".to_string(), Value::from(CODEX_FIXED_PORT));
+    }
+    Json(Value::Object(payload)).into_response()
+}
+
+async fn authorize_oauth_compat(
+    Path(provider): Path<String>,
+    Query(params): Query<std::collections::BTreeMap<String, String>>,
+) -> Response {
+    let redirect_uri = params
+        .get("redirect_uri")
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("http://localhost:8080/callback")
+        .to_string();
+    let code_verifier = generate_code_verifier();
+    let code_challenge = generate_code_challenge(&code_verifier);
+    let state = generate_state();
+
+    match provider.as_str() {
+        "claude" => build_auth_compat_response(
+            &provider,
+            build_claude_auth_url(&redirect_uri, &state, &code_challenge),
+            state,
+            code_verifier,
+            code_challenge,
+            redirect_uri,
+        ),
+        "codex" => build_auth_compat_response(
+            &provider,
+            build_codex_auth_url(&redirect_uri, &state, &code_challenge),
+            state,
+            code_verifier,
+            code_challenge,
+            redirect_uri,
+        ),
+        _ => internal_error_response(format!("Unknown provider: {provider}")),
+    }
+}
+
+async fn exchange_claude_compat(
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+    state: Option<&str>,
+) -> Result<ProviderConnection, String> {
+    let (auth_code, code_state) = if let Some((before, after)) = code.split_once('#') {
+        (before, after)
+    } else {
+        (code, "")
+    };
+
+    let response = reqwest::Client::new()
+        .post(claude_token_url())
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&json!({
+            "code": auth_code,
+            "state": if code_state.is_empty() { state.unwrap_or_default() } else { code_state },
+            "grant_type": "authorization_code",
+            "client_id": CLAUDE_CLIENT_ID,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        }))
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return Err(format!("Token exchange failed: {error}"));
+    }
+
+    let token_response: TokenResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("Token exchange failed: {error}"))?;
+
+    Ok(ProviderConnection {
+        provider: "claude".to_string(),
+        auth_type: "oauth".to_string(),
+        access_token: Some(token_response.access_token),
+        refresh_token: token_response.refresh_token,
+        expires_at: token_response
+            .expires_in
+            .map(crate::oauth::expires_at_from_seconds),
+        scope: token_response.scope,
+        test_status: Some("active".to_string()),
+        ..Default::default()
+    })
+}
+
+fn extract_codex_account_info(
+    id_token: Option<&str>,
+) -> (Option<String>, serde_json::Map<String, Value>) {
+    let mut provider_specific_data = serde_json::Map::new();
+    let Some(id_token) = id_token else {
+        return (None, provider_specific_data);
+    };
+
+    let claims = decode_jwt_claims(id_token);
+    let email = claims
+        .as_ref()
+        .and_then(|value| value.get("email"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let openai_auth = claims
+        .as_ref()
+        .and_then(|value| value.get("https://api.openai.com/auth"))
+        .and_then(Value::as_object);
+
+    if let Some(account_id) = openai_auth
+        .and_then(|value| value.get("chatgpt_account_id"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        provider_specific_data.insert(
+            "chatgptAccountId".to_string(),
+            Value::String(account_id.to_string()),
+        );
+    }
+    if let Some(plan_type) = openai_auth
+        .and_then(|value| value.get("chatgpt_plan_type"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+    {
+        provider_specific_data.insert(
+            "chatgptPlanType".to_string(),
+            Value::String(plan_type.to_string()),
+        );
+    }
+
+    (email, provider_specific_data)
+}
+
+async fn exchange_codex_compat(
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<ProviderConnection, String> {
+    let response = reqwest::Client::new()
+        .post(codex_token_url())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", CODEX_CLIENT_ID),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", code_verifier),
+        ])
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return Err(format!("Token exchange failed: {error}"));
+    }
+
+    let token_response: TokenResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("Token exchange failed: {error}"))?;
+    let (email, provider_specific_data) =
+        extract_codex_account_info(token_response.id_token.as_deref());
+
+    Ok(ProviderConnection {
+        provider: "codex".to_string(),
+        auth_type: "oauth".to_string(),
+        email,
+        access_token: Some(token_response.access_token),
+        refresh_token: token_response.refresh_token,
+        expires_at: token_response
+            .expires_in
+            .map(crate::oauth::expires_at_from_seconds),
+        test_status: Some("active".to_string()),
+        provider_specific_data: provider_specific_data.into_iter().collect(),
+        ..Default::default()
+    })
+}
+
+async fn exchange_oauth_compat(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid or empty request body" })),
+            )
+                .into_response()
+        }
+    };
+
+    let body: OAuthExchangeCompatBody = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Invalid or empty request body" })),
+            )
+                .into_response()
+        }
+    };
+
+    let code = body.code.as_deref().map(str::trim).unwrap_or_default();
+    let redirect_uri = body
+        .redirect_uri
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    let code_verifier = body
+        .code_verifier
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or_default();
+    let _meta = body.meta;
+
+    if code.is_empty() || redirect_uri.is_empty() || code_verifier.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing required fields" })),
+        )
+            .into_response();
+    }
+
+    let connection = match provider.as_str() {
+        "claude" => {
+            match exchange_claude_compat(code, redirect_uri, code_verifier, body.state.as_deref())
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return internal_error_response(error),
+            }
+        }
+        "codex" => match exchange_codex_compat(code, redirect_uri, code_verifier).await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error),
+        },
+        _ => return internal_error_response(format!("Unknown provider: {provider}")),
+    };
+
+    let saved = match create_imported_oauth_connection(&state.db, connection).await {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let mut response_connection = serde_json::Map::from_iter([
+        ("id".to_string(), Value::String(saved.id)),
+        ("provider".to_string(), Value::String(saved.provider)),
+    ]);
+    if let Some(email) = saved.email {
+        response_connection.insert("email".to_string(), Value::String(email));
+    }
+    if let Some(display_name) = saved.display_name {
+        response_connection.insert("displayName".to_string(), Value::String(display_name));
+    }
+
+    Json(json!({
+        "success": true,
+        "connection": Value::Object(response_connection),
+    }))
+    .into_response()
+}
+
 // GET /api/oauth/:provider/start
 pub async fn start_oauth_flow(
     State(state): State<AppState>,
@@ -2590,6 +2989,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oauth/gitlab/pat", post(gitlab_pat_auth))
         .route("/api/oauth/{provider}/start", get(start_oauth_flow))
         .route("/api/oauth/{provider}/callback", get(oauth_callback))
+        .route(
+            "/api/oauth/{provider}/authorize",
+            get(authorize_oauth_compat),
+        )
+        .route(
+            "/api/oauth/{provider}/exchange",
+            post(exchange_oauth_compat),
+        )
         .route(
             "/api/oauth/{provider}/device-code",
             get(start_device_code_compat),
