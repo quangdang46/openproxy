@@ -1,4 +1,6 @@
+mod claude_settings;
 mod cowork_settings;
+mod hermes_settings;
 
 use std::collections::BTreeMap;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -809,7 +811,9 @@ async fn delete_mitm_alias(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .merge(claude_settings::routes())
         .merge(cowork_settings::routes())
+        .merge(hermes_settings::routes())
         .route("/api/cli-tools", get(list_tools))
         .route("/api/cli-tools/execute", post(execute_command))
         .route("/api/cli-tools/run/{tool_name}", post(run_tool))
@@ -822,12 +826,6 @@ pub fn routes() -> Router<AppState> {
             delete(delete_codex_settings),
         )
         .route(
-            "/api/cli-tools/claude-settings",
-            get(proxy_cli_tool_settings)
-                .post(proxy_cli_tool_settings)
-                .delete(proxy_cli_tool_settings),
-        )
-        .route(
             "/api/cli-tools/opencode-settings",
             get(proxy_cli_tool_settings)
                 .post(proxy_cli_tool_settings)
@@ -836,12 +834,6 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/cli-tools/droid-settings",
-            get(proxy_cli_tool_settings)
-                .post(proxy_cli_tool_settings)
-                .delete(proxy_cli_tool_settings),
-        )
-        .route(
-            "/api/cli-tools/hermes-settings",
             get(proxy_cli_tool_settings)
                 .post(proxy_cli_tool_settings)
                 .delete(proxy_cli_tool_settings),
@@ -933,7 +925,7 @@ fn dashboard_sidecar_origin() -> String {
     std::env::var("DASHBOARD_SIDECAR_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:20128".to_string())
+        .unwrap_or_else(|| "http://127.0.0.1:4624".to_string())
 }
 
 fn should_skip_proxy_request_header(method: &Method, header_name: &str) -> bool {
@@ -983,7 +975,9 @@ fn should_skip_proxy_response_header(header_name: &str, connection_tokens: &[Str
             | "transfer-encoding"
             | "upgrade"
             | "content-length"
-    ) || connection_tokens.iter().any(|token| token.eq_ignore_ascii_case(&lower))
+    ) || connection_tokens
+        .iter()
+        .any(|token| token.eq_ignore_ascii_case(&lower))
 }
 
 fn connection_header_tokens(headers: &reqwest::header::HeaderMap) -> Vec<String> {
