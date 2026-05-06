@@ -480,8 +480,8 @@ async fn test_pool(
     headers: axum::http::HeaderMap,
     axum::extract::Path(pool_id): axum::extract::Path<String>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
-        return crate::server::api::auth_error_response(e);
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
     }
 
     let snapshot = state.db.snapshot();
@@ -496,28 +496,55 @@ async fn test_pool(
         )
             .into_response(),
         Some(pool) => {
-            let test_result = test_proxy_url(&pool.proxy_url, &pool.r#type).await;
+            let test_result = if pool.r#type == "vercel" {
+                test_vercel_relay(&pool.proxy_url, 10_000).await
+            } else {
+                test_proxy_url(&pool.proxy_url, None, None).await
+            };
             let now = chrono::Utc::now().to_rfc3339();
 
-            let _ = state
+            let last_error = if test_result.ok {
+                None
+            } else {
+                Some(test_result.error.clone().unwrap_or_else(|| {
+                    format!("Proxy test failed with status {}", test_result.status)
+                }))
+            };
+
+            let update_result = state
                 .db
                 .update(|db| {
                     if let Some(p) = db.proxy_pools.iter_mut().find(|p| p.id == pool_id) {
-                        p.test_status = Some(test_result.status.clone());
+                        p.test_status = Some(if test_result.ok {
+                            "active".to_string()
+                        } else {
+                            "error".to_string()
+                        });
                         p.last_tested_at = Some(now.clone());
-                        p.last_error = test_result.error.clone();
-                        p.rtt_ms = Some(test_result.rtt_ms);
+                        p.last_error = last_error.clone();
+                        p.is_active = Some(test_result.ok);
                     }
                 })
                 .await;
 
+            if update_result.is_err() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "Failed to test proxy pool"
+                    })),
+                )
+                    .into_response();
+            }
+
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
-                    "success": test_result.success,
+                    "ok": test_result.ok,
                     "status": test_result.status,
-                    "rttMs": test_result.rtt_ms,
+                    "statusText": test_result.status_text,
                     "error": test_result.error,
+                    "elapsedMs": test_result.elapsed_ms.unwrap_or(0),
                     "testedAt": now
                 })),
             )
@@ -528,102 +555,158 @@ async fn test_pool(
 
 #[derive(Debug)]
 struct TestResult {
-    success: bool,
-    status: String,
-    rtt_ms: u64,
+    ok: bool,
+    status: u16,
+    status_text: Option<String>,
+    elapsed_ms: Option<u64>,
     error: Option<String>,
 }
 
-async fn test_proxy_url(proxy_url: &str, proxy_type: &str) -> TestResult {
-    let start = std::time::Instant::now();
+fn normalize_string(value: Option<&str>) -> String {
+    value.unwrap_or_default().trim().to_string()
+}
 
-    // Parse the proxy URL
-    let _ = match reqwest::Url::parse(proxy_url) {
-        Ok(url) => url,
-        Err(e) => {
+fn status_text(status: reqwest::StatusCode) -> Option<String> {
+    status.canonical_reason().map(str::to_string)
+}
+
+async fn test_vercel_relay(relay_url: &str, timeout_ms: u64) -> TestResult {
+    let started_at = std::time::Instant::now();
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
             return TestResult {
-                success: false,
-                status: "invalid_url".to_string(),
-                rtt_ms: 0,
-                error: Some(format!("Invalid URL: {}", e)),
-            };
-        }
-    };
-
-    // Build the test request - try to connect to the proxy
-    let client = match proxy_type {
-        "socks5" | "socks5h" => {
-            let proxy = match reqwest::Proxy::all(proxy_url) {
-                Ok(p) => p,
-                Err(e) => {
-                    return TestResult {
-                        success: false,
-                        status: "invalid_proxy".to_string(),
-                        rtt_ms: 0,
-                        error: Some(format!("Invalid SOCKS5 proxy: {}", e)),
-                    };
-                }
-            };
-            reqwest::Client::builder()
-                .proxy(proxy)
-                .timeout(std::time::Duration::from_secs(10))
-                .build()
-        }
-        _ => reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build(),
-    };
-
-    match client {
-        Ok(client) => {
-            // Try a simple HEAD request to a known reliable endpoint through the proxy
-            let test_url = "https://www.google.com/favicon.ico";
-            match client.head(test_url).send().await {
-                Ok(response) => {
-                    let rtt_ms = start.elapsed().as_millis() as u64;
-                    let success =
-                        response.status().is_success() || response.status().is_redirection();
-                    TestResult {
-                        success,
-                        status: if success {
-                            "ok".to_string()
-                        } else {
-                            "error".to_string()
-                        },
-                        rtt_ms,
-                        error: if success {
-                            None
-                        } else {
-                            Some(format!("HTTP {}", response.status()))
-                        },
-                    }
-                }
-                Err(e) => {
-                    let rtt_ms = start.elapsed().as_millis() as u64;
-                    let error_msg = e.to_string();
-                    let (status, success) = if error_msg.contains("timeout") {
-                        ("timeout", false)
-                    } else if error_msg.contains("connection refused") {
-                        ("connection_refused", false)
-                    } else if error_msg.contains("ssl") || error_msg.contains("tls") {
-                        ("ssl_error", false)
-                    } else {
-                        ("error", false)
-                    };
-                    TestResult {
-                        success,
-                        status: status.to_string(),
-                        rtt_ms,
-                        error: Some(error_msg),
-                    }
-                }
+                ok: false,
+                status: 500,
+                status_text: None,
+                elapsed_ms: None,
+                error: Some(error.to_string()),
             }
         }
-        Err(e) => TestResult {
-            success: false,
-            status: "client_error".to_string(),
-            rtt_ms: 0,
-            error: Some(format!("Failed to build client: {}", e)),
+    };
+
+    match client
+        .get(relay_url)
+        .header("x-relay-target", "https://httpbin.org")
+        .header("x-relay-path", "/get")
+        .send()
+        .await
+    {
+        Ok(response) => TestResult {
+            ok: response.status().is_success(),
+            status: response.status().as_u16(),
+            status_text: status_text(response.status()),
+            elapsed_ms: Some(started_at.elapsed().as_millis() as u64),
+            error: None,
+        },
+        Err(error) => TestResult {
+            ok: false,
+            status: 500,
+            status_text: None,
+            elapsed_ms: None,
+            error: Some(if error.is_timeout() {
+                "Relay test timed out".to_string()
+            } else {
+                error.to_string()
+            }),
+        },
+    }
+}
+
+async fn test_proxy_url(
+    proxy_url: &str,
+    test_url: Option<&str>,
+    timeout_ms: Option<u64>,
+) -> TestResult {
+    const DEFAULT_TEST_URL: &str = "https://google.com/";
+    const DEFAULT_TIMEOUT_MS: u64 = 8_000;
+
+    let normalized_proxy_url = normalize_string(Some(proxy_url));
+    if normalized_proxy_url.is_empty() {
+        return TestResult {
+            ok: false,
+            status: 400,
+            status_text: None,
+            elapsed_ms: None,
+            error: Some("proxyUrl is required".to_string()),
+        };
+    }
+
+    if let Err(error) = reqwest::Url::parse(&normalized_proxy_url) {
+        return TestResult {
+            ok: false,
+            status: 400,
+            status_text: None,
+            elapsed_ms: None,
+            error: Some(format!("Invalid proxy URL: {error}")),
+        };
+    }
+
+    let normalized_test_url =
+        normalize_string(test_url).chars().collect::<String>();
+    let normalized_test_url = if normalized_test_url.is_empty() {
+        DEFAULT_TEST_URL.to_string()
+    } else {
+        normalized_test_url
+    };
+    let normalized_timeout_ms = timeout_ms
+        .filter(|value| *value > 0)
+        .map(|value| value.min(30_000))
+        .unwrap_or(DEFAULT_TIMEOUT_MS);
+
+    let proxy = match reqwest::Proxy::all(&normalized_proxy_url) {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            return TestResult {
+                ok: false,
+                status: 400,
+                status_text: None,
+                elapsed_ms: None,
+                error: Some(format!("Invalid proxy URL: {error}")),
+            }
+        }
+    };
+
+    let client = match reqwest::Client::builder()
+        .proxy(proxy)
+        .timeout(std::time::Duration::from_millis(normalized_timeout_ms))
+        .user_agent("9Router")
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return TestResult {
+                ok: false,
+                status: 500,
+                status_text: None,
+                elapsed_ms: None,
+                error: Some(error.to_string()),
+            }
+        }
+    };
+
+    let started_at = std::time::Instant::now();
+    match client.head(&normalized_test_url).send().await {
+        Ok(response) => TestResult {
+            ok: response.status().is_success(),
+            status: response.status().as_u16(),
+            status_text: status_text(response.status()),
+            elapsed_ms: Some(started_at.elapsed().as_millis() as u64),
+            error: None,
+        },
+        Err(error) => TestResult {
+            ok: false,
+            status: 500,
+            status_text: None,
+            elapsed_ms: None,
+            error: Some(if error.is_timeout() {
+                "Proxy test timed out".to_string()
+            } else {
+                error.to_string()
+            }),
         },
     }
 }
@@ -646,16 +729,24 @@ mod tests {
     #[test]
     fn test_proxy_url_invalid_url() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(test_proxy_url("not-a-valid-url", "http"));
-        assert!(!result.success);
-        assert_eq!(result.status, "invalid_url");
+        let result = rt.block_on(test_proxy_url("not-a-valid-url", None, None));
+        assert!(!result.ok);
+        assert_eq!(result.status, 400);
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .starts_with("Invalid proxy URL: ")
+        );
     }
 
     #[test]
     fn test_proxy_url_nonexistent_host() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let result = rt.block_on(test_proxy_url("http://192.0.2.1:12345", "http"));
-        assert!(!result.success);
-        assert_eq!(result.status, "connection_refused");
+        let result = rt.block_on(test_proxy_url("http://192.0.2.1:12345", None, Some(100)));
+        assert!(!result.ok);
+        assert_eq!(result.status, 500);
+        assert!(result.error.is_some());
     }
 }

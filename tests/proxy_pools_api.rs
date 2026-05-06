@@ -1,14 +1,21 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
 use openproxy::types::{ApiKey, ProviderConnection, ProxyPool};
+use serde::Serialize;
 use serde_json::{json, Value};
 use tempfile::tempdir;
 use tower::util::ServiceExt;
+use wiremock::{
+    matchers::{header, method, path},
+    Mock, MockServer, ResponseTemplate,
+};
 
 const TEST_KEY: &str = "proxy-pools-api-test-key";
 
@@ -89,6 +96,29 @@ fn proxy_pool(id: &str, name: &str, is_active: bool, updated_at: &str) -> ProxyP
     }
 }
 
+#[derive(Debug, Serialize)]
+struct DashboardClaims {
+    authenticated: bool,
+    exp: usize,
+}
+
+fn dashboard_cookie() -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as usize;
+    let token = encode(
+        &JwtHeader::default(),
+        &DashboardClaims {
+            authenticated: true,
+            exp: now + 3600,
+        },
+        &EncodingKey::from_secret(b"9router-default-secret-change-me"),
+    )
+    .expect("dashboard token");
+    format!("auth_token={token}")
+}
+
 async fn app_state(proxy_pools: Vec<ProxyPool>, connections: Vec<ProviderConnection>) -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
@@ -96,6 +126,24 @@ async fn app_state(proxy_pools: Vec<ProxyPool>, connections: Vec<ProviderConnect
         state.api_keys = vec![active_key()];
         state.proxy_pools = proxy_pools;
         state.provider_connections = connections;
+    })
+    .await
+    .expect("seed db");
+    AppState::new(db)
+}
+
+async fn app_state_with_login(
+    proxy_pools: Vec<ProxyPool>,
+    connections: Vec<ProviderConnection>,
+    require_login: bool,
+) -> AppState {
+    let temp = tempdir().expect("tempdir");
+    let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
+    db.update(|state| {
+        state.api_keys = vec![active_key()];
+        state.proxy_pools = proxy_pools;
+        state.provider_connections = connections;
+        state.settings.require_login = require_login;
     })
     .await
     .expect("seed db");
@@ -255,4 +303,94 @@ async fn update_proxy_pool_matches_js_normalization() {
         "http://renamed.proxy.test:8080"
     );
     assert_eq!(snapshot.proxy_pools[0].r#type, "http");
+}
+
+#[tokio::test]
+async fn test_proxy_pool_vercel_matches_js_payload_and_dashboard_cookie_auth() {
+    let relay = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .and(header("x-relay-target", "https://httpbin.org"))
+        .and(header("x-relay-path", "/get"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&relay)
+        .await;
+
+    let mut pool = proxy_pool("pool-1", "Relay", false, "2026-05-05T10:00:00Z");
+    pool.r#type = "vercel".into();
+    pool.proxy_url = relay.uri();
+    let state = app_state_with_login(vec![pool], vec![], true).await;
+    let app = openproxy::build_app(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/proxy-pools/pool-1/test")
+                .header("cookie", dashboard_cookie())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["ok"], true);
+    assert_eq!(json["status"], 200);
+    assert_eq!(json["statusText"], "OK");
+    assert_eq!(json["error"], Value::Null);
+    assert!(json["elapsedMs"].as_u64().is_some());
+    assert!(json["testedAt"].as_str().is_some());
+
+    let snapshot = state.db.snapshot();
+    let pool = snapshot.proxy_pools.iter().find(|pool| pool.id == "pool-1").unwrap();
+    assert_eq!(pool.test_status.as_deref(), Some("active"));
+    assert_eq!(pool.last_error, None);
+    assert_eq!(pool.is_active, Some(true));
+    assert_eq!(pool.last_tested_at.as_deref(), json["testedAt"].as_str());
+}
+
+#[tokio::test]
+async fn test_proxy_pool_failure_matches_js_response_shape_and_updates_db() {
+    let mut pool = proxy_pool("pool-1", "Broken", true, "2026-05-05T10:00:00Z");
+    pool.proxy_url = "http://127.0.0.1:1".into();
+    let state = app_state(vec![pool], vec![]).await;
+    let app = openproxy::build_app(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/proxy-pools/pool-1/test")
+                .header("authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["status"], 500);
+    assert_eq!(json["statusText"], Value::Null);
+    assert!(json["error"].as_str().is_some_and(|value| !value.is_empty()));
+    assert_eq!(json["elapsedMs"], 0);
+    assert!(json["testedAt"].as_str().is_some());
+
+    let snapshot = state.db.snapshot();
+    let pool = snapshot.proxy_pools.iter().find(|pool| pool.id == "pool-1").unwrap();
+    assert_eq!(pool.test_status.as_deref(), Some("error"));
+    assert_eq!(pool.is_active, Some(false));
+    assert_eq!(pool.last_tested_at.as_deref(), json["testedAt"].as_str());
+    assert_eq!(pool.last_error.as_deref(), json["error"].as_str());
 }
