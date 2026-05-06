@@ -106,6 +106,10 @@ fn copilot_config_path(home: &Path) -> PathBuf {
         .join("chatLanguageModels.json")
 }
 
+fn droid_settings_path(home: &Path) -> PathBuf {
+    home.join(".factory").join("settings.json")
+}
+
 #[tokio::test]
 async fn claude_settings_get_reports_not_installed_without_binary_or_config() {
     let _lock = ENV_LOCK.lock().unwrap();
@@ -656,5 +660,159 @@ async fn copilot_settings_post_get_and_delete_match_9router_file_behavior() {
                 "models": [{ "id": "other/model" }]
             }
         ])
+    );
+}
+
+#[tokio::test]
+async fn droid_settings_get_reports_not_installed_without_binary_or_config() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/droid-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+
+    let (status, json) = response_json(response).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "installed": false,
+            "settings": null,
+            "message": "Factory Droid CLI is not installed"
+        })
+    );
+}
+
+#[tokio::test]
+async fn droid_settings_post_get_and_delete_match_9router_file_behavior() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    let home = tempdir().unwrap();
+    let path = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let _path = EnvVarGuard::set_path("PATH", path.path());
+
+    let settings_path = droid_settings_path(home.path());
+    std::fs::create_dir_all(settings_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&json!({
+            "theme": "keep",
+            "customModels": [
+                {
+                    "id": "custom:other-0",
+                    "model": "other/model",
+                    "index": 99
+                },
+                {
+                    "id": "custom:9Router-old",
+                    "model": "old/model"
+                }
+            ]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let app = openproxy::build_app(app_state().await);
+    let post = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::POST,
+            "/api/cli-tools/droid-settings",
+            Body::from(
+                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-9router","models":["oa/gpt-4.1","oa/gpt-4.1-mini"],"activeModel":"oa/gpt-4.1-mini"}"#,
+            ),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(post).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "Factory Droid settings applied successfully!",
+            "settingsPath": settings_path.to_string_lossy().to_string()
+        })
+    );
+
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert_eq!(saved["theme"], "keep");
+    let custom_models = saved["customModels"].as_array().unwrap();
+    assert_eq!(custom_models.len(), 3);
+    assert_eq!(custom_models[0]["id"], "custom:9Router-0");
+    assert_eq!(custom_models[0]["model"], "oa/gpt-4.1");
+    assert_eq!(custom_models[0]["index"], 0);
+    assert_eq!(custom_models[0]["baseUrl"], "https://proxy.example.com/v1");
+    assert_eq!(custom_models[0]["apiKey"], "sk-9router");
+    assert_eq!(custom_models[1]["id"], "custom:other-0");
+    assert_eq!(custom_models[1]["index"], 1);
+    assert_eq!(custom_models[2]["id"], "custom:9Router-1");
+    assert_eq!(custom_models[2]["model"], "oa/gpt-4.1-mini");
+    assert_eq!(custom_models[2]["index"], 2);
+
+    let get = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::GET,
+            "/api/cli-tools/droid-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(get).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["installed"], true);
+    assert_eq!(json["has9Router"], true);
+    assert_eq!(
+        json["settingsPath"],
+        settings_path.to_string_lossy().to_string()
+    );
+    assert_eq!(json["settings"], saved);
+
+    let delete = app
+        .clone()
+        .oneshot(authorized_request(
+            Method::DELETE,
+            "/api/cli-tools/droid-settings",
+            Body::empty(),
+        ))
+        .await
+        .unwrap();
+    let (status, json) = response_json(delete).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json,
+        json!({
+            "success": true,
+            "message": "9Router settings removed successfully"
+        })
+    );
+
+    let reset: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
+    assert_eq!(
+        reset,
+        json!({
+            "theme": "keep",
+            "customModels": [
+                {
+                    "id": "custom:other-0",
+                    "model": "other/model",
+                    "index": 1
+                }
+            ]
+        })
     );
 }
