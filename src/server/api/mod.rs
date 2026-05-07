@@ -192,7 +192,7 @@ async fn version_update_api() -> Response {
 }
 
 fn dashboard_package_version() -> &'static str {
-    static PACKAGE_JSON: &str = include_str!("../../../package.json");
+    static PACKAGE_JSON: &str = include_str!("../../../web/package.json");
     serde_json::from_str::<Value>(PACKAGE_JSON)
         .ok()
         .and_then(|value| {

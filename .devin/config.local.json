@@ -9,7 +9,13 @@
       "Exec(cargo build)",
       "Exec(git status)",
       "Exec(git diff)",
-      "Exec(git add)"
+      "Exec(git add)",
+      "Exec(git commit)",
+      "Exec(mkdir)",
+      "Exec(mv)",
+      "Exec(npm run)",
+      "Exec(kill)",
+      "Exec(killall gitstatusd)"
     ]
   }
 }
