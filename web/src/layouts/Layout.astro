@@ -1,0 +1,36 @@
+---
+import { ThemeProvider } from '@/shared/components/ThemeProvider';
+import { RuntimeI18nProvider } from '@/i18n/RuntimeI18nProvider';
+import '@/lib/consoleLogBuffer';
+import '@/shared/components/styles/global.css';
+
+// Hook console immediately at module load time (server-side only, runs once)
+import { initConsoleLogCapture } from '@/lib/consoleLogBuffer';
+initConsoleLogCapture();
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const { title: pageTitle = 'OpenProxy - AI Infrastructure Management' } = Astro.props;
+---
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={'One endpoint for all your AI providers. Manage keys, monitor usage, and scale efficiently.'} />
+    <meta name="generator" content={Astro.generator} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="theme-color" content="#0a0a0a" />
+    <title>{pageTitle}</title>
+  </head>
+  <body class="font-sans antialiased">
+    <ThemeProvider client:load>
+      <RuntimeI18nProvider client:load>
+        <slot />
+      </RuntimeI18nProvider>
+    </ThemeProvider>
+  </body>
+</html>

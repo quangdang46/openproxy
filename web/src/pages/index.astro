@@ -1,0 +1,8 @@
+---
+import { redirect } from 'astro/redirect';
+---
+<script set:html={false}>
+  window.location.href = '/dashboard';
+</script>
+<meta http-equiv="refresh" content="0;url=/dashboard" />
+<p>Redirecting to <a href="/dashboard">/dashboard</a>...</p>

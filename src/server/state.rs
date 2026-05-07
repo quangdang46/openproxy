@@ -33,6 +33,7 @@ pub struct AppState {
     pub usage_live: Arc<UsageLiveState>,
     pub sessions: Arc<RwLock<HashMap<String, SessionInfo>>>,
     pub codex_proxy: Arc<CodexProxyState>,
+    pub dashboard_client: Arc<reqwest::Client>,
 }
 
 impl AppState {
@@ -47,6 +48,7 @@ impl AppState {
             usage_live: Arc::new(UsageLiveState::new()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             codex_proxy: Arc::new(CodexProxyState::new()),
+            dashboard_client: Arc::new(reqwest::Client::new()),
         }
     }
 

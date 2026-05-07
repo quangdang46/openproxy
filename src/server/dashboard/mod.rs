@@ -9,7 +9,6 @@ use axum::{
 };
 use bytes::Bytes;
 use futures_util::TryStreamExt;
-use reqwest::Client;
 
 use crate::server::state::AppState;
 
@@ -18,7 +17,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn proxy_dashboard_request(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     request: Request<Body>,
 ) -> Response {
     let path = request.uri().path().to_string();
@@ -47,7 +46,7 @@ async fn proxy_dashboard_request(
         }
     };
 
-    let client = Client::new();
+    let client = state.dashboard_client.as_ref().clone();
     let mut upstream = client.request(method.clone(), target_uri);
     upstream = copy_request_headers(upstream, &headers, &method);
     if !body_bytes.is_empty() {

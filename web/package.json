@@ -1,0 +1,60 @@
+{
+  "name": "openproxy",
+  "version": "0.4.16",
+  "description": "OpenProxy Astro dashboard sidecar",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev --port 4624",
+    "dev:stack": "node scripts/run-source-stack.mjs",
+    "build": "NODE_ENV=production astro build",
+    "preview": "NODE_ENV=production astro preview",
+    "dev:bun": "bun --bun astro dev --port 4624",
+    "build:bun": "NODE_ENV=production bun --bun astro build",
+    "preview:bun": "NODE_ENV=production bun --bun astro preview",
+    "package:npm": "node scripts/build-npm-package.mjs",
+    "dist:npm": "cargo build --release && npm run build && node scripts/build-npm-package.mjs",
+    "verify:npm": "node scripts/verify-npm-package.mjs"
+  },
+  "dependencies": {
+    "@astrojs/react": "^4.2.1",
+    "@astrojs/tailwind": "^5.1.4",
+    "@monaco-editor/react": "^4.7.0",
+    "@xyflow/react": "^12.10.1",
+    "astro": "^4.16.18",
+    "bcryptjs": "^3.0.3",
+    "confbox": "^0.2.4",
+    "express": "^5.2.1",
+    "fs": "^0.0.1-security",
+    "http-proxy-middleware": "^3.0.5",
+    "jose": "^6.1.3",
+    "lowdb": "^7.0.1",
+    "marked": "^18.0.1",
+    "monaco-editor": "^0.55.1",
+    "node-forge": "^1.3.3",
+    "node-machine-id": "^1.1.12",
+    "open": "^11.0.0",
+    "ora": "^9.1.0",
+    "prop-types": "^15.8.1",
+    "proper-lockfile": "^4.1.2",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "react-is": "^16.13.1",
+    "recharts": "^3.7.0",
+    "selfsigned": "^5.5.0",
+    "socks-proxy-agent": "^8.0.5",
+    "sql.js": "^1.14.1",
+    "undici": "^7.19.2",
+    "uuid": "^13.0.0",
+    "zustand": "^5.0.10"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.6.2"
+  },
+  "devDependencies": {
+    "autoprefixer": "^10.4.20",
+    "eslint": "^9",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^3.4.17",
+    "terser": "^5.47.1"
+  }
+}
