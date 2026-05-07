@@ -305,7 +305,7 @@ pub(super) fn redact_provider_connection(connection: &ProviderConnection) -> Pro
 fn safe_settings_payload(settings: &crate::types::Settings) -> Value {
     let mut value = serde_json::to_value(settings).unwrap_or_else(|_| json!({}));
     if let Some(fields) = value.as_object_mut() {
-        let has_password = fields.remove("password").is_some();
+        fields.remove("password");
         fields.insert(
             "enableRequestLogs".to_string(),
             Value::Bool(std::env::var("ENABLE_REQUEST_LOGS").ok().as_deref() == Some("true")),
@@ -314,7 +314,7 @@ fn safe_settings_payload(settings: &crate::types::Settings) -> Value {
             "enableTranslator".to_string(),
             Value::Bool(std::env::var("ENABLE_TRANSLATOR").ok().as_deref() == Some("true")),
         );
-        fields.insert("hasPassword".to_string(), Value::Bool(has_password));
+        fields.insert("hasPassword".to_string(), Value::Bool(settings.password.is_some()));
     }
 
     value

@@ -1104,11 +1104,6 @@ pub fn routes() -> Router<AppState> {
             "/api/providers/{id}/test",
             post(super::provider_connection_test::test_provider_connection),
         )
-        // Provider validate - POST /api/providers/validate
-        .route(
-            "/api/providers/validate",
-            post(validate_provider_credentials),
-        )
         // Provider-node validate - POST /api/provider-nodes/validate
         .route("/api/provider-nodes/validate", post(validate_provider_node))
         // Model test - POST /api/models/test
