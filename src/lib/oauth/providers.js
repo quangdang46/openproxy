@@ -4,7 +4,7 @@
  */
 
 // Ensure outbound fetch respects HTTP(S)_PROXY/ALL_PROXY in Node runtime
-import "open-sse/index.js";
+// open-sse/index.js removed - only config is needed for frontend
 
 import { generatePKCE, generateState } from "./utils/pkce";
 import {
