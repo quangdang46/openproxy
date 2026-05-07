@@ -60,6 +60,7 @@ sha256 = "1.6"
 
 # URL / query
 url = "2"
+urlencoding = "2"
 serde_urlencoded = "0.7"
 
 # Time

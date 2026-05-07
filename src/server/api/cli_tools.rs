@@ -2423,9 +2423,79 @@ pub fn routes() -> Router<AppState> {
             put(save_mitm_alias),
         )
         .route(
+            "/api/cli-tools/cowork-mcp-registry",
+            get(get_cowork_mcp_registry),
+        )
+        .route(
             "/api/cli-tools/antigravity-mitm/alias",
             delete(delete_mitm_alias),
         )
+}
+
+
+
+// GET /api/cli-tools/cowork-mcp-registry
+// Fetches MCP server registry from Anthropic + GitHub plugins
+async fn get_cowork_mcp_registry() -> Response {
+    use tokio::sync::OnceCell;
+    static CACHE: OnceCell<(std::time::Instant, Vec<Value>)> = OnceCell::const_new();
+
+    let now = std::time::Instant::now();
+    if let Some((ts, data)) = CACHE.get() {
+        if now.duration_since(*ts).as_millis() < 3_600_000 {
+            return Json(json!({ "servers": data })).into_response();
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+
+    let mut servers = Vec::new();
+
+    // Fetch Anthropic MCP registry
+    let mut cursor = String::new();
+    for _ in 0..20 {
+        let url = format!(
+            "https://api.anthropic.com/mcp-registry/v0/servers?limit=500&visibility=commercial,gsuite,gsuite-google{}",
+            if cursor.is_empty() { String::new() } else { format!("&cursor={}", urlencoding::encode(&cursor)) }
+        );
+        match client.get(&url).header("accept", "application/json").send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<Value>().await {
+                    Ok(j) => {
+                        for item in j.get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
+                            let s = item.get("server").cloned().unwrap_or_default();
+                            let remote = s.get("remotes").and_then(|r| r.as_array()).and_then(|a| a.first());
+                            let url = remote.and_then(|r| r.get("url")).and_then(Value::as_str).unwrap_or("");
+                            if url.is_empty() { continue; }
+                            let transport = remote.and_then(|r| r.get("type")).and_then(Value::as_str);
+                            let transport = match transport {
+                                Some("streamable-http") => "http",
+                                Some("sse") => "sse",
+                                _ => "http",
+                            };
+                            servers.push(json!({
+                                "source": "registry",
+                                "name": s.get("name").and_then(Value::as_str).unwrap_or(""),
+                                "title": s.get("title").or(s.get("name")).and_then(Value::as_str).unwrap_or(""),
+                                "description": s.get("description").and_then(Value::as_str).unwrap_or(""),
+                                "url": url,
+                                "transport": transport,
+                            }));
+                        }
+                        cursor = j.get("metadata").and_then(|m| m.get("nextCursor")).and_then(Value::as_str).unwrap_or("").to_string();
+                        if cursor.is_empty() { break; }
+                    }
+                    Err(_) => break,
+                }
+            }
+            _ => break,
+        }
+    }
+
+    Json(json!({ "servers": servers })).into_response()
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -51,6 +51,111 @@ pub async fn images_generations(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     with_cors_response(generic_media_handler(state, headers, body, "images/generations").await)
+}
+
+
+/// GET /v1/audio/voices?provider={p}[&lang=xx]
+/// Returns OpenAI-style voice list for TTS providers.
+async fn audio_voices(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if let Err(e) = require_api_key(&headers, &state.db) {
+        return auth_error_response(e);
+    }
+
+    let provider = params.get("provider").map(String::as_str).unwrap_or("");
+    let lang = params.get("lang").map(String::as_str);
+
+    // Fetch from internal TTS voices endpoint
+    let internal_url = match provider {
+        "elevenlabs" => "/api/media-providers/tts/elevenlabs/voices",
+        "deepgram" => "/api/media-providers/tts/deepgram/voices",
+        "inworld" => "/api/media-providers/tts/inworld/voices",
+        "edge-tts" => "/api/media-providers/tts/voices?provider=edge-tts",
+        "local-device" => "/api/media-providers/tts/voices?provider=local-device",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": format!("provider must be one of: elevenlabs, deepgram, inworld, edge-tts, local-device"),
+                        "type": "invalid_request_error"
+                    }
+                })),
+            ).into_response();
+        }
+    };
+
+    // Build URL with optional lang param
+    let url = if let Some(l) = lang {
+        format!("{}{}lang={}", internal_url, if internal_url.contains('?') { "&" } else { "?" }, urlencoding::encode(l))
+    } else {
+        internal_url.to_string()
+    };
+
+    // Proxy to our own internal endpoint using reqwest
+    let port = std::env::var("PORT").unwrap_or_else(|_| "4623".to_string());
+    let full_url = format!("http://127.0.0.1:{}{}", port, url);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    match client.get(&full_url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            match resp.json::<Value>().await {
+                Ok(data) => {
+                    if !status.is_success() || data.get("error").is_some() {
+                        return Json(json!({
+                            "error": {
+                                "message": data.get("error").and_then(|e| e.as_str()).unwrap_or("Upstream error"),
+                                "type": "server_error"
+                            }
+                        })).into_response();
+                    }
+
+                    // Extract voices from either format
+                    let voices: Vec<Value> = if lang.is_some() {
+                        data.get("voices").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+                    } else {
+                        let mut v = Vec::new();
+                        if let Some(by_lang) = data.get("byLang").and_then(|b| b.as_object()) {
+                            for (_, lang_data) in by_lang {
+                                if let Some(lang_voices) = lang_data.get("voices").and_then(|v| v.as_array()) {
+                                    v.extend(lang_voices.clone());
+                                }
+                            }
+                        }
+                        v
+                    };
+
+                    // Map to OpenAI-style
+                    let alias = match provider {
+                        "elevenlabs" => "el",
+                        "deepgram" => "dg",
+                        _ => provider,
+                    };
+                    let data_out: Vec<Value> = voices.iter().map(|v| {
+                        json!({
+                            "id": v.get("id").unwrap_or(&json!("")),
+                            "name": v.get("name").unwrap_or(&json!("")),
+                            "lang": v.get("lang").unwrap_or(&json!("")),
+                            "gender": v.get("gender").unwrap_or(&json!("")),
+                            "model": format!("{}/{}", alias, v.get("id").unwrap_or(&json!("")).as_str().unwrap_or(""))
+                        })
+                    }).collect();
+
+                    Json(json!({ "object": "list", "data": data_out })).into_response()
+                }
+                Err(e) => Json(json!({ "error": { "message": e.to_string(), "type": "server_error" } })).into_response(),
+            }
+        }
+        Err(e) => Json(json!({ "error": { "message": e.to_string(), "type": "server_error" } })).into_response(),
+    }
 }
 
 pub async fn search(

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
@@ -33,6 +33,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/v1/models/{kind}",
             get(list_models_by_kind).options(cors_options),
+        )
+        .route(
+            "/v1/models/info",
+            get(models_info).options(cors_options),
         )
 }
 
@@ -566,4 +570,29 @@ struct ModelCard {
     parent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
+}
+
+/// GET /v1/models/info?model={model_id}
+async fn models_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    use crate::core::model::get_model_info;
+    let model_str = params.get("model").map(String::as_str).unwrap_or("");
+    if model_str.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": { "message": "model parameter required", "type": "invalid_request_error" } })),
+        ).into_response();
+    }
+    let snapshot = state.db.snapshot();
+    let resolved = get_model_info(model_str, &snapshot);
+    let info = json!({
+        "id": model_str,
+        "provider": resolved.provider,
+        "model": resolved.model,
+        "routeKind": format!("{:?}", resolved.route_kind),
+    });
+    Json(json!({ "object": "model.info", "data": info })).into_response()
 }
