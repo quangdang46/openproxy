@@ -10,7 +10,10 @@ const DEFAULT_MIN_TOKENS: u64 = 32000;
 /// Adjust max_tokens based on request context.
 /// Mirrors the logic in open-sse/translator/helpers/maxTokensHelper.js
 fn adjust_max_tokens(body: &serde_json::Map<String, Value>) -> Option<u64> {
-    let max_tokens = body.get("max_tokens")?.as_u64().unwrap_or(DEFAULT_MAX_TOKENS);
+    let max_tokens = body
+        .get("max_tokens")?
+        .as_u64()
+        .unwrap_or(DEFAULT_MAX_TOKENS);
 
     // Auto-increase for tool calling to prevent truncated arguments
     let max_tokens = if let Some(tools) = body.get("tools").and_then(|v| v.as_array()) {
@@ -60,8 +63,12 @@ fn fix_missing_tool_responses(messages: &mut Vec<Value>) {
                     while j < messages.len() {
                         let next_msg = messages.get(j).unwrap();
                         let next_role = next_msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
-                        if next_role == "tool" || (next_role == "user" && next_msg.get("tool_call_id").is_some()) {
-                            if let Some(tc_id) = next_msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                        if next_role == "tool"
+                            || (next_role == "user" && next_msg.get("tool_call_id").is_some())
+                        {
+                            if let Some(tc_id) =
+                                next_msg.get("tool_call_id").and_then(|v| v.as_str())
+                            {
                                 responded_ids.insert(tc_id.to_string());
                                 insert_position = j + 1;
                             }
@@ -111,7 +118,11 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
     } else {
         "assistant"
     };
-    let final_role = if role == "tool" { "tool" } else { converted_role };
+    let final_role = if role == "tool" {
+        "tool"
+    } else {
+        converted_role
+    };
 
     // Simple string content
     if let Some(Value::String(content_str)) = msg.get("content") {
@@ -138,9 +149,9 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
         let mut tool_results: Vec<Value> = Vec::new();
 
         for block in content_arr {
-    let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    match block_type {
-        "text" => {
+            let block_type = block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            match block_type {
+                "text" => {
                     if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
                         parts.push(serde_json::json!({
                             "type": "text",
@@ -152,7 +163,10 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
                     if let Some(source) = block.get("source") {
                         let source_type = source.get("type").and_then(|v| v.as_str()).unwrap_or("");
                         if source_type == "base64" {
-                            let media_type = source.get("media_type").and_then(|v| v.as_str()).unwrap_or("image/png");
+                            let media_type = source
+                                .get("media_type")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("image/png");
                             let data = source.get("data").and_then(|v| v.as_str()).unwrap_or("");
                             parts.push(serde_json::json!({
                                 "type": "image_url",
@@ -182,7 +196,10 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
                     }));
                 }
                 "tool_result" => {
-                    let tool_use_id = block.get("tool_use_id").and_then(|v| v.as_str()).unwrap_or("");
+                    let tool_use_id = block
+                        .get("tool_use_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let mut result_content = String::new();
 
                     if let Some(content_val) = block.get("content") {
@@ -195,7 +212,8 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
                                 .collect::<Vec<_>>()
                                 .join("\n");
                             if result_content.is_empty() {
-                                result_content = serde_json::to_string(content_val).unwrap_or_default();
+                                result_content =
+                                    serde_json::to_string(content_val).unwrap_or_default();
                             }
                         } else if !content_val.is_null() {
                             result_content = serde_json::to_string(content_val).unwrap_or_default();
@@ -216,7 +234,11 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
         if !tool_results.is_empty() {
             if !parts.is_empty() {
                 let text_content = if parts.len() == 1 {
-                    parts[0].get("text").and_then(|v| v.as_str()).unwrap_or("").to_string()
+                    parts[0]
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
                 } else {
                     serde_json::to_string(&parts).unwrap_or_default()
                 };
@@ -383,8 +405,14 @@ pub fn claude_to_openai_request(
             .iter()
             .filter_map(|tool| {
                 let name = tool.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                let description = tool.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                let input_schema = tool.get("input_schema").cloned().unwrap_or(serde_json::json!({}));
+                let description = tool
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let input_schema = tool
+                    .get("input_schema")
+                    .cloned()
+                    .unwrap_or(serde_json::json!({}));
                 Some(serde_json::json!({
                     "type": "function",
                     "function": {
@@ -413,12 +441,15 @@ mod tests {
 
     #[test]
     fn test_basic_message_translation() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [
                 {"role": "user", "content": "Hello"}
             ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
@@ -428,39 +459,55 @@ mod tests {
 
     #[test]
     fn test_system_array_to_string() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "system": [
                 {"type": "text", "text": "System prompt 1"},
                 {"type": "text", "text": "System prompt 2"}
             ],
             "messages": [{"role": "user", "content": "Hello"}]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
         let messages = body.get("messages").unwrap().as_array().unwrap();
-        let system_msg = messages.iter().find(|m| m.get("role").unwrap().as_str().unwrap() == "system");
+        let system_msg = messages
+            .iter()
+            .find(|m| m.get("role").unwrap().as_str().unwrap() == "system");
         assert!(system_msg.is_some());
-        let content = system_msg.unwrap().get("content").unwrap().as_str().unwrap();
+        let content = system_msg
+            .unwrap()
+            .get("content")
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert!(content.contains("System prompt 1"));
         assert!(content.contains("System prompt 2"));
     }
 
     #[test]
     fn test_claude_content_blocks_to_openai() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [
                 {"role": "user", "content": [{"type": "text", "text": "Hello world"}]}
             ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
         let messages = body.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages[0].get("role").unwrap().as_str().unwrap(), "user");
-        assert_eq!(messages[0].get("content").unwrap().as_str().unwrap(), "Hello world");
+        assert_eq!(
+            messages[0].get("content").unwrap().as_str().unwrap(),
+            "Hello world"
+        );
     }
 
     #[test]
@@ -478,8 +525,17 @@ mod tests {
 
         let messages = body.get("messages").unwrap().as_array().unwrap();
         let content = messages[0].get("content").unwrap().as_array().unwrap();
-        assert_eq!(content[0].get("type").unwrap().as_str().unwrap(), "image_url");
-        let url = content[0].get("image_url").unwrap().get("url").unwrap().as_str().unwrap();
+        assert_eq!(
+            content[0].get("type").unwrap().as_str().unwrap(),
+            "image_url"
+        );
+        let url = content[0]
+            .get("image_url")
+            .unwrap()
+            .get("url")
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert!(url.starts_with("data:image/png;base64,abc123"));
     }
 
@@ -501,49 +557,88 @@ mod tests {
         assert_eq!(msg.get("role").unwrap().as_str().unwrap(), "assistant");
         let tool_calls = msg.get("tool_calls").unwrap().as_array().unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].get("id").unwrap().as_str().unwrap(), "tool_123");
-        assert_eq!(tool_calls[0].get("function").unwrap().get("name").unwrap().as_str().unwrap(), "test_tool");
+        assert_eq!(
+            tool_calls[0].get("id").unwrap().as_str().unwrap(),
+            "tool_123"
+        );
+        assert_eq!(
+            tool_calls[0]
+                .get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "test_tool"
+        );
     }
 
     #[test]
     fn test_tool_result_conversion() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [
                 {"role": "tool", "tool_call_id": "tool_123", "content": "tool result content"}
             ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
         let messages = body.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages[0].get("role").unwrap().as_str().unwrap(), "tool");
-        assert_eq!(messages[0].get("tool_call_id").unwrap().as_str().unwrap(), "tool_123");
-        assert_eq!(messages[0].get("content").unwrap().as_str().unwrap(), "tool result content");
+        assert_eq!(
+            messages[0].get("tool_call_id").unwrap().as_str().unwrap(),
+            "tool_123"
+        );
+        assert_eq!(
+            messages[0].get("content").unwrap().as_str().unwrap(),
+            "tool result content"
+        );
     }
 
     #[test]
     fn test_tool_choice_conversion() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [{"role": "user", "content": "Hello"}],
             "tool_choice": {"type": "tool", "name": "my_tool"}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
         let tool_choice = body.get("tool_choice").unwrap();
-        assert_eq!(tool_choice.get("type").unwrap().as_str().unwrap(), "function");
-        assert_eq!(tool_choice.get("function").unwrap().get("name").unwrap().as_str().unwrap(), "my_tool");
+        assert_eq!(
+            tool_choice.get("type").unwrap().as_str().unwrap(),
+            "function"
+        );
+        assert_eq!(
+            tool_choice
+                .get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "my_tool"
+        );
     }
 
     #[test]
     fn test_tool_choice_auto() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [{"role": "user", "content": "Hello"}],
             "tool_choice": {"type": "auto"}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
@@ -553,11 +648,14 @@ mod tests {
 
     #[test]
     fn test_tool_choice_any_to_required() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [{"role": "user", "content": "Hello"}],
             "tool_choice": {"type": "any"}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
@@ -567,11 +665,14 @@ mod tests {
 
     #[test]
     fn test_max_tokens_adjustment() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 1000
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
@@ -582,12 +683,15 @@ mod tests {
 
     #[test]
     fn test_max_tokens_adjustment_with_tools() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 1000,
             "tools": [{"name": "test_tool", "description": "A test tool"}]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
@@ -611,8 +715,26 @@ mod tests {
         let tools = body.get("tools").unwrap().as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].get("type").unwrap().as_str().unwrap(), "function");
-        assert_eq!(tools[0].get("function").unwrap().get("name").unwrap().as_str().unwrap(), "test_tool");
-assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str().unwrap(), "A test tool");
+        assert_eq!(
+            tools[0]
+                .get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "test_tool"
+        );
+        assert_eq!(
+            tools[0]
+                .get("function")
+                .unwrap()
+                .get("description")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "A test tool"
+        );
     }
 
     #[test]
@@ -629,7 +751,10 @@ assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str(
 
         // Both tool_call has response, no missing response should be added
         let messages = body.get("messages").unwrap().as_array().unwrap();
-        let tool_count = messages.iter().filter(|m| m.get("role").unwrap().as_str().unwrap() == "tool").count();
+        let tool_count = messages
+            .iter()
+            .filter(|m| m.get("role").unwrap().as_str().unwrap() == "tool")
+            .count();
         assert_eq!(tool_count, 1); // Only the original, no missing inserted
     }
 
@@ -650,20 +775,32 @@ assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str(
 
         // call_2 is missing response - should be inserted
         let messages = body.get("messages").unwrap().as_array().unwrap();
-        let tool_messages: Vec<&Value> = messages.iter().filter(|m| m.get("role").unwrap().as_str().unwrap() == "tool").collect();
+        let tool_messages: Vec<&Value> = messages
+            .iter()
+            .filter(|m| m.get("role").unwrap().as_str().unwrap() == "tool")
+            .collect();
         assert_eq!(tool_messages.len(), 2); // Original + inserted missing
 
         // Check the inserted missing response
-        let missing_resp = tool_messages.iter().find(|m| m.get("content").unwrap().as_str().unwrap() == "[No response received]").unwrap();
-        assert_eq!(missing_resp.get("tool_call_id").unwrap().as_str().unwrap(), "call_2");
+        let missing_resp = tool_messages
+            .iter()
+            .find(|m| m.get("content").unwrap().as_str().unwrap() == "[No response received]")
+            .unwrap();
+        assert_eq!(
+            missing_resp.get("tool_call_id").unwrap().as_str().unwrap(),
+            "call_2"
+        );
     }
 
     #[test]
     fn test_stream_parameter() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [{"role": "user", "content": "Hello"}]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, true, None);
 
@@ -672,11 +809,14 @@ assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str(
 
     #[test]
     fn test_temperature_preserved() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [{"role": "user", "content": "Hello"}],
             "temperature": 0.7
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
@@ -685,12 +825,15 @@ assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str(
 
     #[test]
     fn test_thinking_budget_tokens_adjustment() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 1000,
             "thinking": {"budget_tokens": 10000}
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
@@ -701,12 +844,15 @@ assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str(
 
     #[test]
     fn test_empty_content_array() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [
                 {"role": "assistant", "content": []}
             ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
@@ -716,21 +862,27 @@ assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str(
 
     #[test]
     fn test_multiple_messages_with_mixed_content() {
-        let mut body: Value = serde_json::from_str(r#"{
+        let mut body: Value = serde_json::from_str(
+            r#"{
             "model": "claude-3",
             "messages": [
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Hi there!"},
                 {"role": "user", "content": "How are you?"}
             ]
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         claude_to_openai_request("gpt-4", &mut body, false, None);
 
         let messages = body.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].get("role").unwrap().as_str().unwrap(), "user");
-        assert_eq!(messages[1].get("role").unwrap().as_str().unwrap(), "assistant");
+        assert_eq!(
+            messages[1].get("role").unwrap().as_str().unwrap(),
+            "assistant"
+        );
         assert_eq!(messages[2].get("role").unwrap().as_str().unwrap(), "user");
     }
 
@@ -753,8 +905,7 @@ assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str(
         let messages = body.get("messages").unwrap().as_array().unwrap();
         // Should have the tool result converted to user message with text content
         let has_content = messages.iter().any(|m| {
-            m.get("content").is_some() &&
-            m.get("role").unwrap().as_str().unwrap() == "user"
+            m.get("content").is_some() && m.get("role").unwrap().as_str().unwrap() == "user"
         });
         assert!(has_content);
     }
@@ -775,12 +926,24 @@ assert_eq!(tools[0].get("function").unwrap().get("description").unwrap().as_str(
 
         let messages = body.get("messages").unwrap().as_array().unwrap();
         let assistant_msg = &messages[0];
-        assert_eq!(assistant_msg.get("role").unwrap().as_str().unwrap(), "assistant");
+        assert_eq!(
+            assistant_msg.get("role").unwrap().as_str().unwrap(),
+            "assistant"
+        );
         // Should have both content and tool_calls
         assert!(assistant_msg.get("content").is_some());
         assert!(assistant_msg.get("tool_calls").is_some());
         let tool_calls = assistant_msg.get("tool_calls").unwrap().as_array().unwrap();
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].get("function").unwrap().get("name").unwrap().as_str().unwrap(), "get_weather");
+        assert_eq!(
+            tool_calls[0]
+                .get("function")
+                .unwrap()
+                .get("name")
+                .unwrap()
+                .as_str()
+                .unwrap(),
+            "get_weather"
+        );
     }
 }

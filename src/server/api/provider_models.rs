@@ -207,121 +207,132 @@ async fn fetch_provider_models_response(
                 .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
             fetch_github_models(connection, &token).await
         }
-        "openai" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.openai.com/v1/models",
-        )
-        .await,
-        "openrouter" => fetch_first_party_openai_style_models(
-            connection,
-            "https://openrouter.ai/api/v1/models",
-        )
-        .await,
-        "alicode" => fetch_first_party_openai_style_models(
-            connection,
-            "https://coding.dashscope.aliyuncs.com/v1/models",
-        )
-        .await,
-        "alicode-intl" => fetch_first_party_openai_style_models(
-            connection,
-            "https://coding-intl.dashscope.aliyuncs.com/v1/models",
-        )
-        .await,
-        "volcengine-ark" => fetch_first_party_openai_style_models(
-            connection,
-            "https://ark.cn-beijing.volces.com/api/coding/v3/models",
-        )
-        .await,
-        "byteplus" => fetch_first_party_openai_style_models(
-            connection,
-            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/models",
-        )
-        .await,
-        "deepseek" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.deepseek.com/models",
-        )
-        .await,
-        "groq" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.groq.com/openai/v1/models",
-        )
-        .await,
-        "xai" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.x.ai/v1/models",
-        )
-        .await,
-        "mistral" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.mistral.ai/v1/models",
-        )
-        .await,
-        "perplexity" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.perplexity.ai/models",
-        )
-        .await,
-        "together" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.together.xyz/v1/models",
-        )
-        .await,
-        "fireworks" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.fireworks.ai/inference/v1/models",
-        )
-        .await,
-        "cerebras" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.cerebras.ai/v1/models",
-        )
-        .await,
-        "cohere" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.cohere.ai/v1/models",
-        )
-        .await,
-        "nebius" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.studio.nebius.ai/v1/models",
-        )
-        .await,
-        "siliconflow" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.siliconflow.cn/v1/models",
-        )
-        .await,
-        "hyperbolic" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.hyperbolic.xyz/v1/models",
-        )
-        .await,
-        "ollama" => fetch_first_party_openai_style_models(
-            connection,
-            "https://ollama.com/api/tags",
-        )
-        .await,
-        "nanobanana" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.nanobananaapi.ai/v1/models",
-        )
-        .await,
-        "chutes" => fetch_first_party_openai_style_models(
-            connection,
-            "https://llm.chutes.ai/v1/models",
-        )
-        .await,
-        "nvidia" => fetch_first_party_openai_style_models(
-            connection,
-            "https://integrate.api.nvidia.com/v1/models",
-        )
-        .await,
-        "assemblyai" => fetch_first_party_openai_style_models(
-            connection,
-            "https://api.assemblyai.com/v1/models",
-        )
-        .await,
+        "openai" => {
+            fetch_first_party_openai_style_models(connection, "https://api.openai.com/v1/models")
+                .await
+        }
+        "openrouter" => {
+            fetch_first_party_openai_style_models(connection, "https://openrouter.ai/api/v1/models")
+                .await
+        }
+        "alicode" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://coding.dashscope.aliyuncs.com/v1/models",
+            )
+            .await
+        }
+        "alicode-intl" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://coding-intl.dashscope.aliyuncs.com/v1/models",
+            )
+            .await
+        }
+        "volcengine-ark" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://ark.cn-beijing.volces.com/api/coding/v3/models",
+            )
+            .await
+        }
+        "byteplus" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://ark.ap-southeast.bytepluses.com/api/coding/v3/models",
+            )
+            .await
+        }
+        "deepseek" => {
+            fetch_first_party_openai_style_models(connection, "https://api.deepseek.com/models")
+                .await
+        }
+        "groq" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.groq.com/openai/v1/models",
+            )
+            .await
+        }
+        "xai" => {
+            fetch_first_party_openai_style_models(connection, "https://api.x.ai/v1/models").await
+        }
+        "mistral" => {
+            fetch_first_party_openai_style_models(connection, "https://api.mistral.ai/v1/models")
+                .await
+        }
+        "perplexity" => {
+            fetch_first_party_openai_style_models(connection, "https://api.perplexity.ai/models")
+                .await
+        }
+        "together" => {
+            fetch_first_party_openai_style_models(connection, "https://api.together.xyz/v1/models")
+                .await
+        }
+        "fireworks" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.fireworks.ai/inference/v1/models",
+            )
+            .await
+        }
+        "cerebras" => {
+            fetch_first_party_openai_style_models(connection, "https://api.cerebras.ai/v1/models")
+                .await
+        }
+        "cohere" => {
+            fetch_first_party_openai_style_models(connection, "https://api.cohere.ai/v1/models")
+                .await
+        }
+        "nebius" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.studio.nebius.ai/v1/models",
+            )
+            .await
+        }
+        "siliconflow" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.siliconflow.cn/v1/models",
+            )
+            .await
+        }
+        "hyperbolic" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.hyperbolic.xyz/v1/models",
+            )
+            .await
+        }
+        "ollama" => {
+            fetch_first_party_openai_style_models(connection, "https://ollama.com/api/tags").await
+        }
+        "nanobanana" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.nanobananaapi.ai/v1/models",
+            )
+            .await
+        }
+        "chutes" => {
+            fetch_first_party_openai_style_models(connection, "https://llm.chutes.ai/v1/models")
+                .await
+        }
+        "nvidia" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://integrate.api.nvidia.com/v1/models",
+            )
+            .await
+        }
+        "assemblyai" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.assemblyai.com/v1/models",
+            )
+            .await
+        }
         other => Err(RouteError::bad_request(format!(
             "Provider {other} does not support models listing"
         ))),
@@ -332,8 +343,8 @@ async fn fetch_first_party_openai_style_models(
     connection: &ProviderConnection,
     url: &str,
 ) -> Result<ProviderModelsResponse, RouteError> {
-    let token =
-        primary_token(connection).ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
+    let token = primary_token(connection)
+        .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
     fetch_openai_style_models_with_bearer(connection, url, &token).await
 }
 
@@ -365,11 +376,13 @@ async fn fetch_openai_style_models_with_bearer(
     token: &str,
 ) -> Result<ProviderModelsResponse, RouteError> {
     let client = http_client()?;
-    let request = client.get(url).header(CONTENT_TYPE, "application/json").header(
-        AUTHORIZATION,
-        format!("Bearer {token}"),
-    );
-    let payload = fetch_json(request).await.map_err(map_upstream_route_error)?;
+    let request = client
+        .get(url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, format!("Bearer {token}"));
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
     Ok(response_with_models(
         connection,
         parse_openai_style_models(&payload),
@@ -392,7 +405,9 @@ async fn fetch_anthropic_models(
     if let Some(version) = version {
         request = request.header("anthropic-version", version);
     }
-    let payload = fetch_json(request).await.map_err(map_upstream_route_error)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
     Ok(response_with_models(
         connection,
         parse_array_models(payload.get("data").or_else(|| payload.get("models"))),
@@ -409,7 +424,9 @@ async fn fetch_gemini_api_models(
         .get("https://generativelanguage.googleapis.com/v1beta/models")
         .query(&[("key", token)])
         .header(CONTENT_TYPE, "application/json");
-    let payload = fetch_json(request).await.map_err(map_upstream_route_error)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
     Ok(response_with_models(
         connection,
         parse_array_models(payload.get("models")),
@@ -427,7 +444,9 @@ async fn fetch_codex_models(
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
         .header(AUTHORIZATION, format!("Bearer {token}"));
-    let payload = fetch_json(request).await.map_err(map_upstream_route_error)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
     Ok(response_with_models(
         connection,
         append_codex_review_models(parse_openai_style_models(&payload)),
@@ -445,7 +464,9 @@ async fn fetch_antigravity_models(
         .header(CONTENT_TYPE, "application/json")
         .header(AUTHORIZATION, format!("Bearer {token}"))
         .json(&json!({}));
-    let payload = fetch_json(request).await.map_err(map_upstream_route_error)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
     Ok(response_with_models(
         connection,
         parse_array_models(payload.get("models")),
@@ -466,7 +487,9 @@ async fn fetch_github_models(
         .header("editor-plugin-version", "copilot-chat/0.26.7")
         .header("user-agent", "GitHubCopilotChat/0.26.7")
         .header(AUTHORIZATION, format!("Bearer {token}"));
-    let payload = fetch_json(request).await.map_err(map_upstream_route_error)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
     let models = payload
         .get("data")
         .and_then(Value::as_array)
@@ -539,7 +562,8 @@ async fn fetch_kiro_models_with_fallback(
                         refresh_kiro_token(refresh_token, &connection.provider_specific_data).await
                     {
                         persist_refreshed_credentials(state, connection, &refreshed).await;
-                        if let Ok(models) = fetch_kiro_models(&refreshed.access_token, &profile_arn).await
+                        if let Ok(models) =
+                            fetch_kiro_models(&refreshed.access_token, &profile_arn).await
                         {
                             return Ok(response_with_models(connection, models, None));
                         }
@@ -599,13 +623,13 @@ async fn fetch_gemini_cli_models_with_fallback(
                 body
             )),
         )),
-        Err(FetchJsonError::Network(message)) | Err(FetchJsonError::Decode(message)) => Ok(
-            response_with_models(
+        Err(FetchJsonError::Network(message)) | Err(FetchJsonError::Decode(message)) => {
+            Ok(response_with_models(
                 connection,
                 Vec::new(),
                 Some(format!("Failed to fetch Gemini CLI models: {message}")),
-            ),
-        ),
+            ))
+        }
     }
 }
 
@@ -615,7 +639,9 @@ async fn fetch_ollama_local_models(
     let url = format!("{}/api/tags", resolve_ollama_local_host(connection));
     let client = http_client()?;
     let request = client.get(url).header(CONTENT_TYPE, "application/json");
-    let payload = fetch_json(request).await.map_err(map_upstream_route_error)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
     Ok(response_with_models(
         connection,
         parse_openai_style_models(&payload),
@@ -639,7 +665,9 @@ async fn fetch_kiro_models(
             "profileArn": profile_arn,
         }));
 
-    let payload = fetch_json(request).await.map_err(fetch_json_error_message)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(fetch_json_error_message)?;
     Ok(payload
         .get("models")
         .and_then(Value::as_array)
@@ -697,7 +725,10 @@ async fn send_gemini_cli_models_request(
         .header(CONTENT_TYPE, "application/json")
         .header(AUTHORIZATION, format!("Bearer {access_token}"))
         .header("User-Agent", "google-api-nodejs-client/9.15.1")
-        .header("X-Goog-Api-Client", "google-cloud-sdk vscode_cloudshelleditor/0.1")
+        .header(
+            "X-Goog-Api-Client",
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        )
         .json(&body);
     fetch_json(request).await
 }
@@ -719,7 +750,9 @@ async fn refresh_google_token(
             ("client_secret", client_secret),
         ]);
 
-    let payload = fetch_json(request).await.map_err(fetch_json_error_message)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(fetch_json_error_message)?;
     let access_token = payload
         .get("access_token")
         .and_then(Value::as_str)
@@ -777,7 +810,9 @@ async fn refresh_kiro_token(
             .json(&json!({ "refreshToken": refresh_token }))
     };
 
-    let payload = fetch_json(request).await.map_err(fetch_json_error_message)?;
+    let payload = fetch_json(request)
+        .await
+        .map_err(fetch_json_error_message)?;
     let access_token = payload
         .get("accessToken")
         .or_else(|| payload.get("access_token"))
@@ -935,12 +970,14 @@ fn append_codex_review_models(models: Vec<ProviderModel>) -> Vec<ProviderModel> 
             let mut review = model.clone();
             review.id = format!("{}-review", model.id);
             review.name = format!("{} Review", model.name);
-            review
-                .extra
-                .insert("upstreamModelId".to_string(), Value::String(model.id.clone()));
-            review
-                .extra
-                .insert("quotaFamily".to_string(), Value::String("review".to_string()));
+            review.extra.insert(
+                "upstreamModelId".to_string(),
+                Value::String(model.id.clone()),
+            );
+            review.extra.insert(
+                "quotaFamily".to_string(),
+                Value::String("review".to_string()),
+            );
             expanded.push(model);
             expanded.push(review);
         } else {
@@ -1105,9 +1142,10 @@ async fn fetch_json(request: reqwest::RequestBuilder) -> Result<Value, FetchJson
 
 fn map_upstream_route_error(error: FetchJsonError) -> RouteError {
     match error {
-        FetchJsonError::Http(status, _) => {
-            RouteError::new(status, format!("Failed to fetch models: {}", status.as_u16()))
-        }
+        FetchJsonError::Http(status, _) => RouteError::new(
+            status,
+            format!("Failed to fetch models: {}", status.as_u16()),
+        ),
         FetchJsonError::Network(_) | FetchJsonError::Decode(_) => {
             RouteError::internal("Failed to fetch models")
         }

@@ -81,7 +81,7 @@ fn dashboard_sidecar_origin() -> String {
     std::env::var("DASHBOARD_SIDECAR_URL")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "http://127.0.0.1:20128".to_string())
+        .unwrap_or_else(|| "http://127.0.0.1:4624".to_string())
 }
 
 fn build_target_uri(uri: &Uri) -> Option<String> {
@@ -90,7 +90,11 @@ fn build_target_uri(uri: &Uri) -> Option<String> {
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/");
-    Some(format!("{}{}", origin.trim_end_matches('/'), path_and_query))
+    Some(format!(
+        "{}{}",
+        origin.trim_end_matches('/'),
+        path_and_query
+    ))
 }
 
 fn copy_request_headers(

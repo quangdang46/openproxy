@@ -147,7 +147,10 @@ pub fn build_recent_requests(history: &[UsageEntry]) -> Vec<RecentRequest> {
             let timestamp = entry.timestamp.clone()?;
             let tokens = entry.tokens.as_ref()?;
             let prompt_tokens = tokens.prompt_tokens.or(tokens.input_tokens).unwrap_or(0);
-            let completion_tokens = tokens.completion_tokens.or(tokens.output_tokens).unwrap_or(0);
+            let completion_tokens = tokens
+                .completion_tokens
+                .or(tokens.output_tokens)
+                .unwrap_or(0);
             if prompt_tokens == 0 && completion_tokens == 0 {
                 return None;
             }
@@ -213,7 +216,8 @@ pub fn build_usage_stats(
         UsagePeriod::Last24Hours => {
             let cutoff = Utc::now() - ChronoDuration::hours(24);
             for entry in usage_db.history.iter().filter(|entry| {
-                entry.timestamp
+                entry
+                    .timestamp
                     .as_deref()
                     .and_then(parse_timestamp)
                     .is_some_and(|ts| ts >= cutoff)
@@ -254,7 +258,12 @@ pub fn build_usage_stats(
                 stats.total_cost += day.cost;
 
                 merge_by_provider(&mut stats.by_provider, &day.by_provider);
-                merge_by_model(&mut stats.by_model, &day.by_model, date_key, &provider_names);
+                merge_by_model(
+                    &mut stats.by_model,
+                    &day.by_model,
+                    date_key,
+                    &provider_names,
+                );
                 merge_by_account(
                     &mut stats.by_account,
                     &day.by_account,
@@ -277,12 +286,7 @@ pub fn build_usage_stats(
                 );
             }
 
-            overlay_precise_last_used(
-                &mut stats,
-                &usage_db.history,
-                max_days,
-                &connection_names,
-            );
+            overlay_precise_last_used(&mut stats, &usage_db.history, max_days, &connection_names);
         }
     }
 
@@ -367,9 +371,15 @@ fn aggregate_live_entry(
     update_last_used(&mut model_bucket.last_used, &timestamp);
 
     if let Some(connection_id) = &entry.connection_id {
-        let account_name = connection_names.get(connection_id).cloned().unwrap_or_else(|| {
-            format!("Account {}...", connection_id.chars().take(8).collect::<String>())
-        });
+        let account_name = connection_names
+            .get(connection_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "Account {}...",
+                    connection_id.chars().take(8).collect::<String>()
+                )
+            });
         let account_key = format!("{} ({} - {})", entry.model, provider, account_name);
         let account_bucket = stats.by_account.entry(account_key).or_default();
         account_bucket.requests += 1;
@@ -389,7 +399,11 @@ fn aggregate_live_entry(
             "{}|{}|{}",
             api_key,
             entry.model,
-            if provider.is_empty() { "unknown" } else { &provider }
+            if provider.is_empty() {
+                "unknown"
+            } else {
+                &provider
+            }
         )
     } else {
         "local-no-key".to_string()
@@ -414,12 +428,19 @@ fn aggregate_live_entry(
     api_key_bucket.api_key_key = api_key_value.unwrap_or_else(|| "local-no-key".to_string());
     update_last_used(&mut api_key_bucket.last_used, &timestamp);
 
-    let endpoint = entry.endpoint.clone().unwrap_or_else(|| "Unknown".to_string());
+    let endpoint = entry
+        .endpoint
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
     let endpoint_key = format!(
         "{}|{}|{}",
         endpoint,
         entry.model,
-        if provider.is_empty() { "unknown" } else { &provider }
+        if provider.is_empty() {
+            "unknown"
+        } else {
+            &provider
+        }
     );
     let endpoint_bucket = stats.by_endpoint.entry(endpoint_key).or_default();
     endpoint_bucket.requests += 1;
@@ -494,9 +515,15 @@ fn merge_by_account(
             .get(&provider)
             .cloned()
             .unwrap_or(provider.clone());
-        let account_name = connection_names.get(connection_id).cloned().unwrap_or_else(|| {
-            format!("Account {}...", connection_id.chars().take(8).collect::<String>())
-        });
+        let account_name = connection_names
+            .get(connection_id)
+            .cloned()
+            .unwrap_or_else(|| {
+                format!(
+                    "Account {}...",
+                    connection_id.chars().take(8).collect::<String>()
+                )
+            });
         let stats_key = format!("{} ({} - {})", raw_model, provider, account_name);
         let bucket = target.entry(stats_key).or_default();
         bucket.requests += counter.requests;
@@ -609,9 +636,15 @@ fn overlay_precise_last_used(
         }
 
         if let Some(connection_id) = &entry.connection_id {
-            let account_name = connection_names.get(connection_id).cloned().unwrap_or_else(|| {
-                format!("Account {}...", connection_id.chars().take(8).collect::<String>())
-            });
+            let account_name = connection_names
+                .get(connection_id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    format!(
+                        "Account {}...",
+                        connection_id.chars().take(8).collect::<String>()
+                    )
+                });
             let account_key = format!("{} ({} - {})", entry.model, provider, account_name);
             if let Some(account_bucket) = stats.by_account.get_mut(&account_key) {
                 update_last_used(&mut account_bucket.last_used, timestamp);
@@ -623,7 +656,11 @@ fn overlay_precise_last_used(
                 "{}|{}|{}",
                 api_key,
                 entry.model,
-                if provider.is_empty() { "unknown" } else { &provider }
+                if provider.is_empty() {
+                    "unknown"
+                } else {
+                    &provider
+                }
             )
         } else {
             "local-no-key".to_string()
@@ -632,12 +669,19 @@ fn overlay_precise_last_used(
             update_last_used(&mut api_key_bucket.last_used, timestamp);
         }
 
-        let endpoint = entry.endpoint.clone().unwrap_or_else(|| "Unknown".to_string());
+        let endpoint = entry
+            .endpoint
+            .clone()
+            .unwrap_or_else(|| "Unknown".to_string());
         let endpoint_key = format!(
             "{}|{}|{}",
             endpoint,
             entry.model,
-            if provider.is_empty() { "unknown" } else { &provider }
+            if provider.is_empty() {
+                "unknown"
+            } else {
+                &provider
+            }
         );
         if let Some(endpoint_bucket) = stats.by_endpoint.get_mut(&endpoint_key) {
             update_last_used(&mut endpoint_bucket.last_used, timestamp);

@@ -1,8 +1,8 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use crate::core::rtk::constants::*;
 use crate::core::rtk::apply_filter::safe_apply;
+use crate::core::rtk::constants::*;
 
 pub struct GitDiffFilter;
 impl GitDiffFilter {
@@ -293,7 +293,8 @@ pub fn grep_impl(input: &str) -> String {
 
         if line_num_str.chars().all(|c| c.is_ascii_digit()) {
             total += 1;
-            by_file.entry(file.to_string())
+            by_file
+                .entry(file.to_string())
                 .or_default()
                 .push((line_num_str.to_string(), content.trim().to_string()));
         }
@@ -346,7 +347,8 @@ pub fn find_impl(input: &str) -> String {
             None => (".", *path),
         };
         let dir_s = if dir.is_empty() { "/" } else { dir };
-        by_dir.entry(dir_s.to_string())
+        by_dir
+            .entry(dir_s.to_string())
             .or_default()
             .push(basename.to_string());
     }
@@ -366,10 +368,7 @@ pub fn find_impl(input: &str) -> String {
         out.push('\n');
     }
     if dirs.len() > FIND_TOTAL_DIR_MAX {
-        out.push_str(&format!(
-            "+{} more dirs\n",
-            dirs.len() - FIND_TOTAL_DIR_MAX
-        ));
+        out.push_str(&format!("+{} more dirs\n", dirs.len() - FIND_TOTAL_DIR_MAX));
     }
 
     out
@@ -427,7 +426,10 @@ impl LsFilter {
 }
 
 static LS_DATE_RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(\d{4}|\d{2}:\d{2})\s+").unwrap()
+    Regex::new(
+        r"\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2}\s+(\d{4}|\d{2}:\d{2})\s+",
+    )
+    .unwrap()
 });
 
 fn human_size(bytes: u64) -> String {
@@ -512,7 +514,8 @@ pub fn ls_impl(input: &str) -> String {
     if !by_ext.is_empty() {
         let mut ext: Vec<(String, usize)> = by_ext.iter().map(|(k, v)| (k.clone(), *v)).collect();
         ext.sort_by(|a, b| b.1.cmp(&a.1));
-        let parts: Vec<String> = ext.iter()
+        let parts: Vec<String> = ext
+            .iter()
             .take(LS_EXT_SUMMARY_TOP)
             .map(|(e, c)| format!("{} {}", c, e))
             .collect();
@@ -566,7 +569,8 @@ pub fn search_list_impl(input: &str) -> String {
             None => (".", p.as_str()),
         };
         let dir_s = if dir.is_empty() { "/" } else { dir };
-        by_dir.entry(dir_s.to_string())
+        by_dir
+            .entry(dir_s.to_string())
             .or_default()
             .push(name.to_string());
     }
@@ -607,8 +611,7 @@ impl ReadNumberedFilter {
     }
 }
 
-pub static READ_NUMBERED_LINE_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"^\s*\d+\|").unwrap());
+pub static READ_NUMBERED_LINE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"^\s*\d+\|").unwrap());
 
 pub fn read_numbered_impl(input: &str) -> String {
     let lines: Vec<&str> = input.lines().collect();
@@ -757,7 +760,8 @@ mod tests {
 
     #[test]
     fn test_search_list_header() {
-        let input = "Result of search in '/src' (total 3 files):\n- src/a.rs\n- src/b.rs\n- src/c.rs";
+        let input =
+            "Result of search in '/src' (total 3 files):\n- src/a.rs\n- src/b.rs\n- src/c.rs";
         let result = search_list_impl(input);
         assert!(result.contains("3 files"));
         assert!(result.contains("src/"));

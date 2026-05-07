@@ -2,8 +2,8 @@ import pkg from "../../../package.json" with { type: "json" };
 
 // App configuration
 export const APP_CONFIG = {
-  name: "OpenRouter proxy",
-  description: "AI Infrastructure Management",
+  name: "OpenProxy",
+  description: "OpenProxy dashboard",
   version: pkg.version,
 };
 
@@ -17,7 +17,7 @@ export const UPDATER_CONFIG = {
   npmPackageName: "openrouter",
   installCmd: "npm i -g openrouter",
   exitDelayMs: 500,
-  statusPort: 20129,
+  statusPort: 4625,
   statusPollIntervalMs: 1000,
   statusLogTailLines: 8,
   installRetries: 3,
@@ -26,7 +26,7 @@ export const UPDATER_CONFIG = {
   waitForExitMinMs: 3000,
   waitForExitMaxMs: 15000,
   waitForExitCheckMs: 500,
-  appPort: 20128,
+  appPort: 4623,
 };
 
 // Theme configuration

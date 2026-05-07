@@ -12,6 +12,7 @@ pub mod mitm_config;
 pub mod models_alias;
 pub mod models_availability;
 pub mod models_custom;
+pub mod models_disabled;
 pub mod oauth;
 pub mod pricing;
 mod provider_connection_test;
@@ -25,11 +26,11 @@ pub mod translator;
 pub mod tunnel;
 pub mod usage;
 pub mod v1_api_chat;
+pub mod v1_models;
 pub mod v1beta;
 pub mod web_fetch;
 
-use std::collections::{BTreeMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::collections::BTreeMap;
 
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -49,31 +50,60 @@ use crate::types::{AppDb, HealthResponse, ProviderConnection};
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
+        .route("/api/health", get(api_health))
         .route("/v1/health", get(health))
         .merge(v1_api_chat::routes())
+        .merge(v1_models::routes())
         .merge(v1beta::routes())
         .merge(web_fetch::routes())
-        .route("/v1/models", get(list_models))
-        .route("/v1/chat/completions", post(chat::chat_completions))
+        .route(
+            "/v1/chat/completions",
+            post(chat::chat_completions).options(chat::cors_options),
+        )
         .route(
             "/api/dashboard/chat/completions",
             post(chat::dashboard_chat_completions),
         )
-        .route("/v1/messages", post(compat::messages))
-        .route("/v1/messages/count_tokens", post(compat::count_tokens))
-        .route("/v1/responses", post(compat::responses))
-        .route("/v1/responses/compact", post(compat::responses_compact))
+        .route(
+            "/v1/messages",
+            post(compat::messages).options(compat::cors_options),
+        )
+        .route(
+            "/v1/messages/count_tokens",
+            post(compat::count_tokens).options(compat::cors_options),
+        )
+        .route(
+            "/v1/responses",
+            post(compat::responses).options(compat::cors_options),
+        )
+        .route(
+            "/v1/responses/compact",
+            post(compat::responses_compact).options(compat::cors_options),
+        )
         .route(
             "/v1/audio/transcriptions",
-            post(media::audio_transcriptions),
+            post(media::audio_transcriptions).options(media::cors_options),
         )
-        .route("/v1/audio/speech", post(media::audio_speech))
-        .route("/v1/embeddings", post(media::embeddings))
-        .route("/v1/images/generations", post(media::images_generations))
-        .route("/v1/search", post(media::search))
+        .route(
+            "/v1/audio/speech",
+            post(media::audio_speech).options(media::cors_options),
+        )
+        .route(
+            "/v1/embeddings",
+            post(media::embeddings).options(media::cors_options),
+        )
+        .route(
+            "/v1/images/generations",
+            post(media::images_generations).options(media::cors_options),
+        )
+        .route(
+            "/v1/search",
+            post(media::search).options(media::cors_options),
+        )
         .merge(cloud_sync::routes())
         .merge(cloud_credentials::routes())
         .merge(locale::routes())
+        .merge(models_disabled::routes())
         .merge(models_alias::routes())
         .merge(models_availability::routes())
         .merge(models_custom::routes())
@@ -105,6 +135,7 @@ pub fn routes() -> Router<AppState> {
                 .put(update_settings_api)
                 .patch(update_settings_api),
         )
+        .route("/api/settings/proxy-test", post(proxy_test_api))
         .route("/api/version", get(get_version_api))
         .route(
             "/api/settings/database",
@@ -121,6 +152,10 @@ pub fn routes() -> Router<AppState> {
 
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse::new("api"))
+}
+
+async fn api_health() -> Response {
+    Json(json!({ "ok": true })).into_response()
 }
 
 async fn get_version_api() -> Response {
@@ -143,7 +178,12 @@ fn dashboard_package_version() -> &'static str {
     static PACKAGE_JSON: &str = include_str!("../../../package.json");
     serde_json::from_str::<Value>(PACKAGE_JSON)
         .ok()
-        .and_then(|value| value.get("version").and_then(Value::as_str).map(str::to_string))
+        .and_then(|value| {
+            value
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .map(|version| Box::leak(version.into_boxed_str()) as &'static str)
         .unwrap_or(env!("CARGO_PKG_VERSION"))
 }
@@ -800,7 +840,6 @@ async fn create_pool_api(
 
     use crate::types::ProxyPool;
 
-    let id = Uuid::new_v4().to_string();
     let Some(name) = req
         .name
         .as_deref()
@@ -827,6 +866,7 @@ async fn create_pool_api(
             .into_response();
     };
 
+    let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
     let mut pool = ProxyPool::default();
     pool.id = id;
@@ -1091,21 +1131,39 @@ async fn settings_database_import_api(
 
 /// Merge settings field-by-field: only overwrite what the import explicitly provides.
 fn merge_settings(target: &mut crate::types::Settings, source: &crate::types::Settings) {
-    if source.cloud_enabled != target.cloud_enabled { target.cloud_enabled = source.cloud_enabled; }
-    if source.cloud_url != target.cloud_url { target.cloud_url = source.cloud_url.clone(); }
-    if source.tunnel_enabled != target.tunnel_enabled { target.tunnel_enabled = source.tunnel_enabled; }
-    if source.tunnel_url != target.tunnel_url { target.tunnel_url = source.tunnel_url.clone(); }
-    if source.tunnel_provider != target.tunnel_provider { target.tunnel_provider = source.tunnel_provider.clone(); }
-    if source.tailscale_enabled != target.tailscale_enabled { target.tailscale_enabled = source.tailscale_enabled; }
-    if source.tailscale_url != target.tailscale_url { target.tailscale_url = source.tailscale_url.clone(); }
-    if source.require_login != target.require_login { target.require_login = source.require_login; }
+    if source.cloud_enabled != target.cloud_enabled {
+        target.cloud_enabled = source.cloud_enabled;
+    }
+    if source.cloud_url != target.cloud_url {
+        target.cloud_url = source.cloud_url.clone();
+    }
+    if source.tunnel_enabled != target.tunnel_enabled {
+        target.tunnel_enabled = source.tunnel_enabled;
+    }
+    if source.tunnel_url != target.tunnel_url {
+        target.tunnel_url = source.tunnel_url.clone();
+    }
+    if source.tunnel_provider != target.tunnel_provider {
+        target.tunnel_provider = source.tunnel_provider.clone();
+    }
+    if source.tailscale_enabled != target.tailscale_enabled {
+        target.tailscale_enabled = source.tailscale_enabled;
+    }
+    if source.tailscale_url != target.tailscale_url {
+        target.tailscale_url = source.tailscale_url.clone();
+    }
+    if source.require_login != target.require_login {
+        target.require_login = source.require_login;
+    }
     if source.tunnel_dashboard_access != target.tunnel_dashboard_access {
         target.tunnel_dashboard_access = source.tunnel_dashboard_access;
     }
     if source.provider_strategies != target.provider_strategies {
         target.provider_strategies = source.provider_strategies.clone();
     }
-    if source.combo_strategy != target.combo_strategy { target.combo_strategy = source.combo_strategy.clone(); }
+    if source.combo_strategy != target.combo_strategy {
+        target.combo_strategy = source.combo_strategy.clone();
+    }
     if source.combo_strategies != target.combo_strategies {
         target.combo_strategies = source.combo_strategies.clone();
     }
@@ -1121,9 +1179,15 @@ fn merge_settings(target: &mut crate::types::Settings, source: &crate::types::Se
     if source.outbound_no_proxy != target.outbound_no_proxy {
         target.outbound_no_proxy = source.outbound_no_proxy.clone();
     }
-    if source.rtk_enabled != target.rtk_enabled { target.rtk_enabled = source.rtk_enabled; }
-    if source.caveman_enabled != target.caveman_enabled { target.caveman_enabled = source.caveman_enabled; }
-    if source.caveman_level != target.caveman_level { target.caveman_level = source.caveman_level.clone(); }
+    if source.rtk_enabled != target.rtk_enabled {
+        target.rtk_enabled = source.rtk_enabled;
+    }
+    if source.caveman_enabled != target.caveman_enabled {
+        target.caveman_enabled = source.caveman_enabled;
+    }
+    if source.caveman_level != target.caveman_level {
+        target.caveman_level = source.caveman_level.clone();
+    }
     if source.sticky_round_robin_limit != target.sticky_round_robin_limit {
         target.sticky_round_robin_limit = source.sticky_round_robin_limit;
     }
@@ -1149,6 +1213,99 @@ async fn get_require_login_api(State(state): State<AppState>, headers: HeaderMap
     .into_response()
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyTestRequest {
+    proxy_url: Option<String>,
+    test_url: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+async fn proxy_test_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ProxyTestRequest>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let Some(proxy_url) = req
+        .proxy_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "ok": false, "error": "proxyUrl is required" })),
+        )
+            .into_response();
+    };
+
+    let test_url = req
+        .test_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("https://google.com/");
+    let timeout_ms = req.timeout_ms.unwrap_or(8_000).clamp(1, 30_000);
+
+    let proxy = match reqwest::Proxy::all(proxy_url) {
+        Ok(proxy) => proxy,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "ok": false,
+                    "error": format!("Invalid proxy URL: {error}"),
+                })),
+            )
+                .into_response()
+        }
+    };
+
+    let client = match reqwest::Client::builder()
+        .proxy(proxy)
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .user_agent("openproxy")
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    };
+
+    let started_at = std::time::Instant::now();
+    match client.head(test_url).send().await {
+        Ok(response) => Json(json!({
+            "ok": response.status().is_success(),
+            "status": response.status().as_u16(),
+            "statusText": response.status().canonical_reason().unwrap_or(""),
+            "url": test_url,
+            "elapsedMs": started_at.elapsed().as_millis() as u64,
+        }))
+        .into_response(),
+        Err(error) => {
+            let message = if error.is_timeout() {
+                "Proxy test timed out".to_string()
+            } else {
+                error.to_string()
+            };
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": message })),
+            )
+                .into_response()
+        }
+    }
+}
+
 // Logs API (observability)
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1167,118 +1324,6 @@ async fn get_logs_api(State(state): State<AppState>, headers: HeaderMap) -> Resp
     }
 
     Json(Vec::<LogEntry>::new()).into_response()
-}
-
-// Original model listing endpoint
-async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key(&headers, &state.db) {
-        return auth_error_response(error);
-    }
-
-    let snapshot = state.db.snapshot();
-    let created = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let mut seen = HashSet::new();
-    let mut data = Vec::new();
-
-    for combo in &snapshot.combos {
-        push_model(
-            &mut seen,
-            &mut data,
-            combo.name.clone(),
-            "combo".into(),
-            created,
-        );
-    }
-
-    for connection in snapshot
-        .provider_connections
-        .iter()
-        .filter(|connection| connection.is_active())
-    {
-        for model_id in models_for_connection(connection) {
-            let (id, owned_by) = normalize_model_id(&connection.provider, &model_id);
-            push_model(&mut seen, &mut data, id, owned_by, created);
-        }
-    }
-
-    for model in snapshot
-        .custom_models
-        .iter()
-        .filter(|model| model.r#type.is_empty() || model.r#type == "llm")
-    {
-        let (id, owned_by) = normalize_model_id(&model.provider_alias, &model.id);
-        push_model(&mut seen, &mut data, id, owned_by, created);
-    }
-
-    Json(ModelListResponse {
-        object: "list",
-        data,
-    })
-    .into_response()
-}
-
-fn models_for_connection(connection: &ProviderConnection) -> Vec<String> {
-    if let Some(enabled_models) = connection
-        .provider_specific_data
-        .get("enabledModels")
-        .and_then(Value::as_array)
-    {
-        let models: Vec<_> = enabled_models
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-            .collect();
-
-        if !models.is_empty() {
-            return models;
-        }
-    }
-
-    connection
-        .default_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| vec![value.to_string()])
-        .unwrap_or_default()
-}
-
-fn normalize_model_id(provider: &str, model_id: &str) -> (String, String) {
-    if model_id.contains('/') {
-        let owned_by = model_id.split('/').next().unwrap_or(provider).to_string();
-        (model_id.to_string(), owned_by)
-    } else {
-        (format!("{provider}/{model_id}"), provider.to_string())
-    }
-}
-
-fn push_model(
-    seen: &mut HashSet<String>,
-    data: &mut Vec<ModelCard>,
-    id: String,
-    owned_by: String,
-    created: u64,
-) {
-    if !seen.insert(id.clone()) {
-        return;
-    }
-
-    let root = id.split('/').next_back().unwrap_or(&id).to_string();
-    data.push(ModelCard {
-        id,
-        object: "model",
-        created,
-        owned_by,
-        permission: Vec::new(),
-        root,
-        parent: None,
-    });
 }
 
 pub(super) fn auth_error_response(error: AuthError) -> Response {
@@ -1364,21 +1409,4 @@ fn normalize_create_provider_proxy_pool(
     }
 
     Ok(Some(raw.to_string()))
-}
-
-#[derive(Debug, Serialize)]
-struct ModelListResponse {
-    object: &'static str,
-    data: Vec<ModelCard>,
-}
-
-#[derive(Debug, Serialize)]
-struct ModelCard {
-    id: String,
-    object: &'static str,
-    created: u64,
-    owned_by: String,
-    permission: Vec<Value>,
-    root: String,
-    parent: Option<String>,
 }

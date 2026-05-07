@@ -620,7 +620,10 @@ fn is_safe_outbound_url(url: &str) -> Result<(), String> {
         || host_str.ends_with(".internal")
         || host_str.ends_with(".localhost")
     {
-        return Err("URLs pointing to private/internal networks are not allowed for provider validation".to_string());
+        return Err(
+            "URLs pointing to private/internal networks are not allowed for provider validation"
+                .to_string(),
+        );
     }
 
     Ok(())

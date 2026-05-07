@@ -79,7 +79,10 @@ pub fn extract_auth_token(headers: &HeaderMap) -> Option<String> {
     extract_cookie(headers, AUTH_COOKIE_NAME)
 }
 
-pub fn require_dashboard_session(headers: &HeaderMap, db: &Db) -> Result<DashboardClaims, DashboardAuthError> {
+pub fn require_dashboard_session(
+    headers: &HeaderMap,
+    db: &Db,
+) -> Result<DashboardClaims, DashboardAuthError> {
     let snapshot = db.snapshot();
     if snapshot.settings.require_login == false {
         return Ok(DashboardClaims {

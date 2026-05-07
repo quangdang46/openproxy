@@ -47,7 +47,7 @@
 │  Your CLI   │  (Claude Code, Codex, OpenClaw, Cursor, Cline...)
 │   Tool      │
 └──────┬──────┘
-       │ http://localhost:20128/v1
+       │ http://localhost:4623/v1
        ↓
 ┌─────────────────────────────────────────────┐
 │           9Router (Smart Router)            │
@@ -77,7 +77,7 @@ npm install -g 9router
 9router
 ```
 
-🎉 Dashboard opens at `http://localhost:20128`
+🎉 Dashboard opens at `http://localhost:4623`
 
 **2. Connect a FREE provider (no signup needed):**
 
@@ -87,33 +87,55 @@ Dashboard → Providers → Connect **Kiro AI** (free Claude unlimited) or **Ope
 
 ```
 Claude Code/Codex/OpenClaw/Cursor/Cline Settings:
-  Endpoint: http://localhost:20128/v1
+  Endpoint: http://localhost:4623/v1
   API Key: [copy from dashboard]
   Model: kr/claude-sonnet-4.5
 ```
 
 **That's it!** Start coding with FREE AI models.
 
-**Alternative: run from source (this repository):**
-
-This repository package is private (`9router-app`), so source/Docker execution is the expected local development path.
+**One-command source dev stack:**
 
 ```bash
 cp .env.example .env
 npm install
-PORT=20128 NEXT_PUBLIC_BASE_URL=http://localhost:20128 npm run dev
+npm run dev:stack
+```
+
+This starts the Rust API on `4623` and the Next.js sidecar on `4624` with the correct proxy wiring already set.
+
+**Build the npm-style launcher locally:**
+
+```bash
+npm install
+npm run verify:npm
+```
+
+That builds the Rust binary, builds the Next standalone sidecar, creates tarballs in `dist/npm/`, installs them into a temp prefix, and verifies `http://127.0.0.1:4623/health` plus `http://127.0.0.1:4623/landing`.
+
+**Alternative: run from source (this repository):**
+
+This repository package is private (`openproxy`), so source execution is expected to run the Next.js dashboard sidecar and the Rust backend together.
+
+```bash
+cp .env.example .env
+npm install
+NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 npm run dev
+DATA_DIR=/tmp/openproxy BASE_URL=http://127.0.0.1:4623 NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 DASHBOARD_SIDECAR_URL=http://127.0.0.1:4624 cargo run -- --port 4623
 ```
 
 Production mode:
 
 ```bash
 npm run build
-PORT=20128 HOSTNAME=0.0.0.0 NEXT_PUBLIC_BASE_URL=http://localhost:20128 npm run start
+PORT=4624 HOSTNAME=0.0.0.0 NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 npm run start
+DATA_DIR=/tmp/openproxy BASE_URL=http://127.0.0.1:4623 NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 DASHBOARD_SIDECAR_URL=http://127.0.0.1:4624 cargo run --release -- --port 4623
 ```
 
 Default URLs:
-- Dashboard: `http://localhost:20128/dashboard`
-- OpenAI-compatible API: `http://localhost:20128/v1`
+- Dashboard: `http://localhost:4623/dashboard`
+- OpenAI-compatible API: `http://localhost:4623/v1`
+- Next.js sidecar: `http://localhost:4624`
 
 ---
 
@@ -935,7 +957,7 @@ Cost: $0 forever (+ 20-40% token savings via RTK)!
 
 ```
 Settings → Models → Advanced:
-  OpenAI API Base URL: http://localhost:20128/v1
+  OpenAI API Base URL: http://localhost:4623/v1
   OpenAI API Key: [from 9router dashboard]
   Model: cc/claude-opus-4-7
 ```
@@ -948,7 +970,7 @@ Edit `~/.claude/config.json`:
 
 ```json
 {
-  "anthropic_api_base": "http://localhost:20128/v1",
+  "anthropic_api_base": "http://localhost:4623/v1",
   "anthropic_api_key": "your-9router-api-key"
 }
 ```
@@ -956,7 +978,7 @@ Edit `~/.claude/config.json`:
 ### Codex CLI
 
 ```bash
-export OPENAI_BASE_URL="http://localhost:20128"
+export OPENAI_BASE_URL="http://localhost:4623"
 export OPENAI_API_KEY="your-9router-api-key"
 
 codex "your prompt"
@@ -984,7 +1006,7 @@ Dashboard → CLI Tools → OpenClaw → Select Model → Apply
   "models": {
     "providers": {
       "9router": {
-        "baseUrl": "http://127.0.0.1:20128/v1",
+        "baseUrl": "http://127.0.0.1:4623/v1",
         "apiKey": "sk_9router",
         "api": "openai-completions",
         "models": [
@@ -1005,7 +1027,7 @@ Dashboard → CLI Tools → OpenClaw → Select Model → Apply
 
 ```
 Provider: OpenAI Compatible
-Base URL: http://localhost:20128/v1
+Base URL: http://localhost:4623/v1
 API Key: [from dashboard]
 Model: cc/claude-opus-4-7
 ```
@@ -1028,10 +1050,10 @@ npm run build
 export JWT_SECRET="your-secure-secret-change-this"
 export INITIAL_PASSWORD="your-password"
 export DATA_DIR="/var/lib/9router"
-export PORT="20128"
+export PORT="4623"
 export HOSTNAME="0.0.0.0"
 export NODE_ENV="production"
-export NEXT_PUBLIC_BASE_URL="http://localhost:20128"
+export NEXT_PUBLIC_BASE_URL="http://localhost:4623"
 export NEXT_PUBLIC_CLOUD_URL="https://9router.com"
 export API_KEY_SECRET="endpoint-proxy-api-key-secret"
 export MACHINE_ID_SALT="endpoint-proxy-salt"
@@ -1055,7 +1077,7 @@ docker build -t 9router .
 # Run container (command used in current setup)
 docker run -d \
   --name 9router \
-  -p 20128:20128 \
+  -p 4623:4623 \
   --env-file /root/dev/9router/.env \
   -v 9router-data:/app/data \
   -v 9router-usage:/root/.9router \
@@ -1067,7 +1089,7 @@ Portable command (if you are already at repository root):
 ```bash
 docker run -d \
   --name 9router \
-  -p 20128:20128 \
+  -p 4623:4623 \
   --env-file ./.env \
   -v 9router-data:/app/data \
   -v 9router-usage:/root/.9router \
@@ -1075,7 +1097,7 @@ docker run -d \
 ```
 
 Container defaults:
-- `PORT=20128`
+- `PORT=4623`
 - `HOSTNAME=0.0.0.0`
 
 Useful commands:
@@ -1093,10 +1115,10 @@ docker stop 9router && docker rm 9router
 | `JWT_SECRET` | `9router-default-secret-change-me` | JWT signing secret for dashboard auth cookie (**change in production**) |
 | `INITIAL_PASSWORD` | `123456` | First login password when no saved hash exists |
 | `DATA_DIR` | `~/.9router` | Main app database location (`db.json`) |
-| `PORT` | framework default | Service port (`20128` in examples) |
+| `PORT` | framework default | Service port (`4623` in examples) |
 | `HOSTNAME` | framework default | Bind host (Docker defaults to `0.0.0.0`) |
 | `NODE_ENV` | runtime default | Set `production` for deploy |
-| `BASE_URL` | `http://localhost:20128` | Server-side internal base URL used by cloud sync jobs |
+| `BASE_URL` | `http://localhost:4623` | Server-side internal base URL used by cloud sync jobs |
 | `CLOUD_URL` | `https://9router.com` | Server-side cloud sync endpoint base URL |
 | `NEXT_PUBLIC_BASE_URL` | `http://localhost:3000` | Backward-compatible/public base URL (prefer `BASE_URL` for server runtime) |
 | `NEXT_PUBLIC_CLOUD_URL` | `https://9router.com` | Backward-compatible/public cloud URL (prefer `CLOUD_URL` for server runtime) |
@@ -1212,7 +1234,7 @@ Notes:
 - Use free tier (Kiro, OpenCode Free, Vertex) for non-critical tasks
 
 **Dashboard opens on wrong port**
-- Set `PORT=20128` and `NEXT_PUBLIC_BASE_URL=http://localhost:20128`
+- Set `PORT=4623` and `NEXT_PUBLIC_BASE_URL=http://localhost:4623`
 
 **First login not working**
 - Check `INITIAL_PASSWORD` in `.env`
@@ -1239,7 +1261,7 @@ Notes:
 ### Chat Completions
 
 ```bash
-POST http://localhost:20128/v1/chat/completions
+POST http://localhost:4623/v1/chat/completions
 Authorization: Bearer your-api-key
 Content-Type: application/json
 
@@ -1255,7 +1277,7 @@ Content-Type: application/json
 ### List Models
 
 ```bash
-GET http://localhost:20128/v1/models
+GET http://localhost:4623/v1/models
 Authorization: Bearer your-api-key
 
 → Returns all models + combos in OpenAI format

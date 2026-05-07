@@ -24,8 +24,6 @@ fn active_key(key: &str) -> ApiKey {
     }
 }
 
-
-
 async fn seeded_state(
     keys: Vec<ApiKey>,
     connections: Vec<ProviderConnection>,
@@ -58,27 +56,35 @@ async fn web_fetch_options_exposes_cors_and_post_method() {
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
-        resp.headers().get("access-control-allow-origin").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("access-control-allow-origin")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "*"
     );
     assert_eq!(
-        resp.headers().get("access-control-allow-methods").unwrap().to_str().unwrap(),
+        resp.headers()
+            .get("access-control-allow-methods")
+            .unwrap()
+            .to_str()
+            .unwrap(),
         "POST, OPTIONS"
     );
 }
 
 #[tokio::test]
 async fn web_fetch_requires_auth_when_require_login_is_true() {
-    let app = openproxy::build_app(
-        seeded_state(vec![active_key("valid-key")], vec![], true).await,
-    );
+    let app = openproxy::build_app(seeded_state(vec![active_key("valid-key")], vec![], true).await);
     let resp = app
         .oneshot(
             Request::builder()
                 .method("POST")
                 .uri("/v1/web/fetch")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"provider":"firecrawl","url":"https://example.com"}"#))
+                .body(Body::from(
+                    r#"{"provider":"firecrawl","url":"https://example.com"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -95,7 +101,9 @@ async fn web_fetch_allows_no_auth_when_require_login_is_false() {
                 .method("POST")
                 .uri("/v1/web/fetch")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"provider":"firecrawl","url":"https://example.com"}"#))
+                .body(Body::from(
+                    r#"{"provider":"firecrawl","url":"https://example.com"}"#,
+                ))
                 .unwrap(),
         )
         .await
@@ -109,9 +117,7 @@ async fn web_fetch_allows_no_auth_when_require_login_is_false() {
 
 #[tokio::test]
 async fn web_fetch_rejects_missing_url() {
-    let app = openproxy::build_app(
-        seeded_state(vec![active_key("key")], vec![], true).await,
-    );
+    let app = openproxy::build_app(seeded_state(vec![active_key("key")], vec![], true).await);
     let resp = app
         .oneshot(
             Request::builder()
@@ -129,9 +135,7 @@ async fn web_fetch_rejects_missing_url() {
 
 #[tokio::test]
 async fn web_fetch_rejects_missing_provider() {
-    let app = openproxy::build_app(
-        seeded_state(vec![active_key("key")], vec![], true).await,
-    );
+    let app = openproxy::build_app(seeded_state(vec![active_key("key")], vec![], true).await);
     let resp = app
         .oneshot(
             Request::builder()
@@ -149,9 +153,7 @@ async fn web_fetch_rejects_missing_provider() {
 
 #[tokio::test]
 async fn web_fetch_rejects_invalid_url() {
-    let app = openproxy::build_app(
-        seeded_state(vec![active_key("key")], vec![], true).await,
-    );
+    let app = openproxy::build_app(seeded_state(vec![active_key("key")], vec![], true).await);
     let resp = app
         .oneshot(
             Request::builder()
@@ -172,9 +174,7 @@ async fn web_fetch_rejects_invalid_url() {
 
 #[tokio::test]
 async fn web_fetch_rejects_empty_provider() {
-    let app = openproxy::build_app(
-        seeded_state(vec![active_key("key")], vec![], true).await,
-    );
+    let app = openproxy::build_app(seeded_state(vec![active_key("key")], vec![], true).await);
     let resp = app
         .oneshot(
             Request::builder()
@@ -193,9 +193,7 @@ async fn web_fetch_rejects_empty_provider() {
 #[tokio::test]
 async fn web_fetch_model_alias_works_as_provider() {
     // UI sends "model" instead of "provider" — must work
-    let app = openproxy::build_app(
-        seeded_state(vec![active_key("key")], vec![], true).await,
-    );
+    let app = openproxy::build_app(seeded_state(vec![active_key("key")], vec![], true).await);
     let resp = app
         .oneshot(
             Request::builder()
@@ -203,7 +201,9 @@ async fn web_fetch_model_alias_works_as_provider() {
                 .uri("/v1/web/fetch")
                 .header("authorization", "Bearer key")
                 .header("content-type", "application/json")
-                .body(Body::from(r#"{"model":"firecrawl","url":"https://example.com"}"#))
+                .body(Body::from(
+                    r#"{"model":"firecrawl","url":"https://example.com"}"#,
+                ))
                 .unwrap(),
         )
         .await

@@ -1,15 +1,19 @@
 {
-  "name": "9router-app",
+  "name": "openproxy",
   "version": "0.4.16",
-  "description": "9Router web dashboard",
+  "description": "OpenProxy Next.js dashboard sidecar",
   "private": true,
   "scripts": {
-    "dev": "next dev --webpack --port 20128",
+    "dev": "next dev --webpack --port 4624",
+    "dev:stack": "node scripts/run-source-stack.mjs",
     "build": "NODE_ENV=production next build --webpack",
     "start": "NODE_ENV=production next start",
-    "dev:bun": "bun --bun next dev --webpack --port 20128",
+    "dev:bun": "bun --bun next dev --webpack --port 4624",
     "build:bun": "NODE_ENV=production bun --bun next build --webpack",
-    "start:bun": "NODE_ENV=production bun ./.next/standalone/server.js"
+    "start:bun": "NODE_ENV=production bun ./.next/standalone/server.js",
+    "package:npm": "node scripts/build-npm-package.mjs",
+    "dist:npm": "cargo build --release && npm run build && node scripts/build-npm-package.mjs",
+    "verify:npm": "node scripts/verify-npm-package.mjs"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

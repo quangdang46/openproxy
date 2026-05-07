@@ -18,8 +18,7 @@ use wiremock::{
 };
 
 const TEST_KEY: &str = "providers-api-test-key";
-static PORT_ENV_LOCK: Lazy<tokio::sync::Mutex<()>> =
-    Lazy::new(|| tokio::sync::Mutex::new(()));
+static PORT_ENV_LOCK: Lazy<tokio::sync::Mutex<()>> = Lazy::new(|| tokio::sync::Mutex::new(()));
 
 struct PortEnvGuard {
     previous: Option<String>,
@@ -1017,7 +1016,9 @@ async fn test_model_route_returns_500_for_transport_errors() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json["ok"], false);
-    assert!(json["error"].as_str().is_some_and(|value| !value.is_empty()));
+    assert!(json["error"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
 }
 
 // ============================================================

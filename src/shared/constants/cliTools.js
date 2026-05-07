@@ -114,6 +114,14 @@ export const CLI_TOOLS = {
     description: "OpenCode AI Terminal Assistant",
     configType: "custom",
   },
+  cowork: {
+    id: "cowork",
+    name: "Claude Cowork",
+    image: "/providers/claude.png",
+    color: "#D97757",
+    description: "Claude Desktop Cowork (third-party inference)",
+    configType: "custom",
+  },
   droid: {
     id: "droid",
     name: "Factory Droid",
@@ -254,4 +262,3 @@ export const getProviderModelsForMapping = (providers) => {
   });
   return result;
 };
-

@@ -16,6 +16,9 @@
 # next.js
 /.next/
 /out/
+/dist/
+.playwright-mcp/
+.sisyphus/
 product
 # production
 /build
@@ -30,6 +33,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
+excalidraw.log
 
 # env files (can opt-in for committing if needed)
 .env*

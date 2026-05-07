@@ -247,7 +247,10 @@ async fn send_translated_log(
     Json(req): Json<SendLogRequest>,
 ) -> Json<SendLogResponse> {
     let message_id = uuid::Uuid::new_v4().to_string();
-    state.console_logs.append_line(format_console_line(&req)).await;
+    state
+        .console_logs
+        .append_line(format_console_line(&req))
+        .await;
 
     Json(SendLogResponse {
         success: true,

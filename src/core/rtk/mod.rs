@@ -511,9 +511,12 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
                 } else if let Some(arr) = output.as_array() {
                     for part in arr.iter() {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            compress_tool_text(text, &mut stats, "openai-responses-array", |text| {
-                                auto_detect_filter(text).map(|f| f.filter_fn)
-                            });
+                            compress_tool_text(
+                                text,
+                                &mut stats,
+                                "openai-responses-array",
+                                |text| auto_detect_filter(text).map(|f| f.filter_fn),
+                            );
                         }
                     }
                 }

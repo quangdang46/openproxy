@@ -168,7 +168,8 @@ async fn persist_test_result(
                 return;
             };
 
-            connection.test_status = Some(if result.valid { "active" } else { "error" }.to_string());
+            connection.test_status =
+                Some(if result.valid { "active" } else { "error" }.to_string());
             connection.last_error = if result.valid { None } else { error.clone() };
             connection.last_error_at = if result.valid {
                 None
@@ -315,7 +316,8 @@ async fn test_oauth_connection(
         let request = oauth_probe_request(&connection.provider, &access_token);
         match request {
             Some(request) => {
-                let response = execute_request(state, &connection.provider, effective_proxy, request).await;
+                let response =
+                    execute_request(state, &connection.provider, effective_proxy, request).await;
                 let accepted = match response {
                     Ok(response) => response,
                     Err(error) => return invalid(&error),
@@ -408,260 +410,322 @@ async fn test_api_key_connection(
     let response = match connection.provider.as_str() {
         "cloudflare-ai" => test_cloudflare_ai_connection(state, connection, effective_proxy).await,
         "azure" => test_azure_connection(state, connection, effective_proxy).await,
-        "openai" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.openai.com/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "anthropic" => anthropic_first_party_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.anthropic.com/v1/messages",
-            "claude-3-haiku-20240307",
-        )
-        .await,
+        "openai" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.openai.com/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "anthropic" => {
+            anthropic_first_party_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.anthropic.com/v1/messages",
+                "claude-3-haiku-20240307",
+            )
+            .await
+        }
         "gemini" => test_gemini_api_key_connection(state, connection, effective_proxy).await,
-        "openrouter" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://openrouter.ai/api/v1/auth/key",
-            "Invalid API key",
-        )
-        .await,
-        "glm" => anthropic_like_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.z.ai/api/anthropic/v1/messages",
-            "glm-4.7",
-            "Invalid API key",
-        )
-        .await,
-        "glm-cn" => openai_chat_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
-            "glm-4.7",
-            "Invalid API key",
-        )
-        .await,
-        "minimax" => anthropic_like_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.minimax.io/anthropic/v1/messages",
-            "minimax-m2",
-            "Invalid API key",
-        )
-        .await,
-        "minimax-cn" => anthropic_like_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.minimaxi.com/anthropic/v1/messages",
-            "minimax-m2",
-            "Invalid API key",
-        )
-        .await,
-        "kimi" => anthropic_like_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.kimi.com/coding/v1/messages",
-            "kimi-latest",
-            "Invalid API key",
-        )
-        .await,
-        "alicode" => openai_chat_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
-            &default_catalog_model("alicode"),
-            "Invalid API key",
-        )
-        .await,
-        "alicode-intl" => openai_chat_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
-            &default_catalog_model("alicode-intl"),
-            "Invalid API key",
-        )
-        .await,
-        "volcengine-ark" => openai_chat_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
-            &default_catalog_model("volcengine-ark"),
-            "Invalid API key",
-        )
-        .await,
-        "byteplus" => openai_chat_status_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
-            &default_catalog_model("byteplus"),
-            "Invalid API key",
-        )
-        .await,
-        "deepseek" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.deepseek.com/models",
-            "Invalid API key",
-        )
-        .await,
-        "groq" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.groq.com/openai/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "mistral" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.mistral.ai/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "xai" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.x.ai/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "nvidia" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://integrate.api.nvidia.com/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "perplexity" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.perplexity.ai/models",
-            "Invalid API key",
-        )
-        .await,
-        "together" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.together.xyz/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "fireworks" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.fireworks.ai/inference/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "cerebras" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.cerebras.ai/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "cohere" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.cohere.ai/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "nebius" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.studio.nebius.ai/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "siliconflow" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.siliconflow.cn/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "hyperbolic" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.hyperbolic.xyz/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "ollama" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://ollama.com/api/tags",
-            "Invalid API key",
-        )
-        .await,
+        "openrouter" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://openrouter.ai/api/v1/auth/key",
+                "Invalid API key",
+            )
+            .await
+        }
+        "glm" => {
+            anthropic_like_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.z.ai/api/anthropic/v1/messages",
+                "glm-4.7",
+                "Invalid API key",
+            )
+            .await
+        }
+        "glm-cn" => {
+            openai_chat_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+                "glm-4.7",
+                "Invalid API key",
+            )
+            .await
+        }
+        "minimax" => {
+            anthropic_like_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.minimax.io/anthropic/v1/messages",
+                "minimax-m2",
+                "Invalid API key",
+            )
+            .await
+        }
+        "minimax-cn" => {
+            anthropic_like_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.minimaxi.com/anthropic/v1/messages",
+                "minimax-m2",
+                "Invalid API key",
+            )
+            .await
+        }
+        "kimi" => {
+            anthropic_like_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.kimi.com/coding/v1/messages",
+                "kimi-latest",
+                "Invalid API key",
+            )
+            .await
+        }
+        "alicode" => {
+            openai_chat_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+                &default_catalog_model("alicode"),
+                "Invalid API key",
+            )
+            .await
+        }
+        "alicode-intl" => {
+            openai_chat_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+                &default_catalog_model("alicode-intl"),
+                "Invalid API key",
+            )
+            .await
+        }
+        "volcengine-ark" => {
+            openai_chat_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+                &default_catalog_model("volcengine-ark"),
+                "Invalid API key",
+            )
+            .await
+        }
+        "byteplus" => {
+            openai_chat_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+                &default_catalog_model("byteplus"),
+                "Invalid API key",
+            )
+            .await
+        }
+        "deepseek" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.deepseek.com/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "groq" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.groq.com/openai/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "mistral" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.mistral.ai/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "xai" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.x.ai/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "nvidia" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://integrate.api.nvidia.com/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "perplexity" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.perplexity.ai/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "together" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.together.xyz/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "fireworks" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.fireworks.ai/inference/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "cerebras" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.cerebras.ai/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "cohere" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.cohere.ai/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "nebius" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.studio.nebius.ai/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "siliconflow" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.siliconflow.cn/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "hyperbolic" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.hyperbolic.xyz/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "ollama" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://ollama.com/api/tags",
+                "Invalid API key",
+            )
+            .await
+        }
         "ollama-local" => test_ollama_local_connection(state, connection, effective_proxy).await,
-        "deepgram" => simple_get_token_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.deepgram.com/v1/projects",
-            "Token",
-            "Invalid API key",
-        )
-        .await,
-        "assemblyai" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.assemblyai.com/v1/account",
-            "Invalid API key",
-        )
-        .await,
-        "nanobanana" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://api.nanobananaapi.ai/v1/models",
-            "Invalid API key",
-        )
-        .await,
-        "chutes" => simple_get_bearer_test(
-            state,
-            connection,
-            effective_proxy,
-            "https://llm.chutes.ai/v1/models",
-            "Invalid API key",
-        )
-        .await,
+        "deepgram" => {
+            simple_get_token_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.deepgram.com/v1/projects",
+                "Token",
+                "Invalid API key",
+            )
+            .await
+        }
+        "assemblyai" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.assemblyai.com/v1/account",
+                "Invalid API key",
+            )
+            .await
+        }
+        "nanobanana" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://api.nanobananaapi.ai/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
+        "chutes" => {
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://llm.chutes.ai/v1/models",
+                "Invalid API key",
+            )
+            .await
+        }
         "grok-web" => test_grok_web_connection(state, connection, effective_proxy).await,
-        "perplexity-web" => test_perplexity_web_connection(state, connection, effective_proxy).await,
+        "perplexity-web" => {
+            test_perplexity_web_connection(state, connection, effective_proxy).await
+        }
         _ => invalid("Provider test not supported"),
     };
 
@@ -751,8 +815,10 @@ async fn test_azure_connection(
 
     match execute_request(state, &connection.provider, effective_proxy, request).await {
         Ok(response) => {
-            let valid =
-                !matches!(response.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
+            let valid = !matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            );
             ConnectionTestResult {
                 valid,
                 error: if valid {
@@ -817,12 +883,18 @@ async fn test_ollama_local_connection(
             error: if response.status().is_success() {
                 None
             } else {
-                Some(format!("Ollama not reachable at {}", host.trim_end_matches('/')))
+                Some(format!(
+                    "Ollama not reachable at {}",
+                    host.trim_end_matches('/')
+                ))
             },
             refreshed: false,
             new_tokens: None,
         },
-        Err(_) => invalid(&format!("Ollama not reachable at {}", host.trim_end_matches('/'))),
+        Err(_) => invalid(&format!(
+            "Ollama not reachable at {}",
+            host.trim_end_matches('/')
+        )),
     }
 }
 
@@ -836,8 +908,8 @@ async fn test_grok_web_connection(
         token = value.to_string();
     }
 
-    let statsig_id = STANDARD
-        .encode("e:TypeError: Cannot read properties of null (reading 'children')");
+    let statsig_id =
+        STANDARD.encode("e:TypeError: Cannot read properties of null (reading 'children')");
     let request = PreparedRequest {
         method: Method::POST,
         url: "https://grok.com/rest/app-chat/conversations/new".to_string(),
@@ -872,8 +944,10 @@ async fn test_grok_web_connection(
 
     match execute_request(state, &connection.provider, effective_proxy, request).await {
         Ok(response) => {
-            let valid =
-                !matches!(response.status(), StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
+            let valid = !matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            );
             ConnectionTestResult {
                 valid,
                 error: if valid {
@@ -967,7 +1041,10 @@ async fn simple_get_token_test(
         url: url.to_string(),
         headers: vec![(
             "Authorization".to_string(),
-            format!("{auth_prefix} {}", connection.api_key.clone().unwrap_or_default()),
+            format!(
+                "{auth_prefix} {}",
+                connection.api_key.clone().unwrap_or_default()
+            ),
         )],
         body: None,
     };
@@ -1124,8 +1201,13 @@ async fn refresh_oauth_token(
 ) -> Result<RefreshResult, String> {
     match connection.provider.as_str() {
         "gemini-cli" => {
-            refresh_google_token(refresh_token, GEMINI_CLIENT_ID, GEMINI_CLIENT_SECRET, effective_proxy)
-                .await
+            refresh_google_token(
+                refresh_token,
+                GEMINI_CLIENT_ID,
+                GEMINI_CLIENT_SECRET,
+                effective_proxy,
+            )
+            .await
         }
         "antigravity" => {
             refresh_google_token(
@@ -1136,37 +1218,43 @@ async fn refresh_oauth_token(
             )
             .await
         }
-        "codex" => refresh_form_token(
-            CODEX_TOKEN_URL,
-            vec![
-                ("grant_type".to_string(), "refresh_token".to_string()),
-                ("client_id".to_string(), CODEX_CLIENT_ID.to_string()),
-                ("refresh_token".to_string(), refresh_token.to_string()),
-            ],
-            effective_proxy,
-        )
-        .await,
-        "claude" => refresh_json_token(
-            CLAUDE_TOKEN_URL,
-            json!({
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": CLAUDE_CLIENT_ID,
-            }),
-            effective_proxy,
-        )
-        .await,
+        "codex" => {
+            refresh_form_token(
+                CODEX_TOKEN_URL,
+                vec![
+                    ("grant_type".to_string(), "refresh_token".to_string()),
+                    ("client_id".to_string(), CODEX_CLIENT_ID.to_string()),
+                    ("refresh_token".to_string(), refresh_token.to_string()),
+                ],
+                effective_proxy,
+            )
+            .await
+        }
+        "claude" => {
+            refresh_json_token(
+                CLAUDE_TOKEN_URL,
+                json!({
+                    "grant_type": "refresh_token",
+                    "refresh_token": refresh_token,
+                    "client_id": CLAUDE_CLIENT_ID,
+                }),
+                effective_proxy,
+            )
+            .await
+        }
         "kiro" => refresh_kiro_token(connection, refresh_token, effective_proxy).await,
-        "qwen" => refresh_form_token(
-            QWEN_TOKEN_URL,
-            vec![
-                ("grant_type".to_string(), "refresh_token".to_string()),
-                ("refresh_token".to_string(), refresh_token.to_string()),
-                ("client_id".to_string(), QWEN_CLIENT_ID.to_string()),
-            ],
-            effective_proxy,
-        )
-        .await,
+        "qwen" => {
+            refresh_form_token(
+                QWEN_TOKEN_URL,
+                vec![
+                    ("grant_type".to_string(), "refresh_token".to_string()),
+                    ("refresh_token".to_string(), refresh_token.to_string()),
+                    ("client_id".to_string(), QWEN_CLIENT_ID.to_string()),
+                ],
+                effective_proxy,
+            )
+            .await
+        }
         "cline" => refresh_cline_token(refresh_token, effective_proxy).await,
         _ => Err("Provider refresh not supported".to_string()),
     }
@@ -1200,7 +1288,8 @@ async fn refresh_kiro_token(
         connection_value(connection, "clientId"),
         connection_value(connection, "clientSecret"),
     ) {
-        let region = connection_value(connection, "region").unwrap_or_else(|| "us-east-1".to_string());
+        let region =
+            connection_value(connection, "region").unwrap_or_else(|| "us-east-1".to_string());
         refresh_json_token(
             &format!("https://oidc.{region}.amazonaws.com/token"),
             json!({
@@ -1341,7 +1430,10 @@ async fn probe_cline_access_token(
     let request = PreparedRequest {
         method: Method::GET,
         url: CLINE_USERS_ME_URL.to_string(),
-        headers: cline_headers(access_token, vec![("Accept".to_string(), "application/json".to_string())]),
+        headers: cline_headers(
+            access_token,
+            vec![("Accept".to_string(), "application/json".to_string())],
+        ),
         body: None,
     };
 
@@ -1367,7 +1459,10 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
             method: Method::POST,
             url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
             headers: vec![
-                ("Authorization".to_string(), format!("Bearer {access_token}")),
+                (
+                    "Authorization".to_string(),
+                    format!("Bearer {access_token}"),
+                ),
                 ("Content-Type".to_string(), "application/json".to_string()),
                 ("originator".to_string(), "codex-cli".to_string()),
                 (
@@ -1385,16 +1480,25 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
         "gemini-cli" | "antigravity" => Some(PreparedRequest {
             method: Method::GET,
             url: "https://www.googleapis.com/oauth2/v1/userinfo?alt=json".to_string(),
-            headers: vec![("Authorization".to_string(), format!("Bearer {access_token}"))],
+            headers: vec![(
+                "Authorization".to_string(),
+                format!("Bearer {access_token}"),
+            )],
             body: None,
         }),
         "github" => Some(PreparedRequest {
             method: Method::GET,
             url: "https://api.github.com/user".to_string(),
             headers: vec![
-                ("Authorization".to_string(), format!("Bearer {access_token}")),
+                (
+                    "Authorization".to_string(),
+                    format!("Bearer {access_token}"),
+                ),
                 ("User-Agent".to_string(), "9Router".to_string()),
-                ("Accept".to_string(), "application/vnd.github+json".to_string()),
+                (
+                    "Accept".to_string(),
+                    "application/vnd.github+json".to_string(),
+                ),
             ],
             body: None,
         }),
@@ -1410,13 +1514,19 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
         "kilocode" => Some(PreparedRequest {
             method: Method::GET,
             url: "https://api.kilo.ai/api/profile".to_string(),
-            headers: vec![("Authorization".to_string(), format!("Bearer {access_token}"))],
+            headers: vec![(
+                "Authorization".to_string(),
+                format!("Bearer {access_token}"),
+            )],
             body: None,
         }),
         "gitlab" => Some(PreparedRequest {
             method: Method::GET,
             url: "https://gitlab.com/api/v4/user".to_string(),
-            headers: vec![("Authorization".to_string(), format!("Bearer {access_token}"))],
+            headers: vec![(
+                "Authorization".to_string(),
+                format!("Bearer {access_token}"),
+            )],
             body: None,
         }),
         _ => None,
@@ -1470,10 +1580,13 @@ async fn execute_simple_request(
 
 fn build_proxy_capable_client(effective_proxy: &EffectiveProxy) -> Result<Client, String> {
     let mut builder = Client::builder().timeout(DEFAULT_TIMEOUT);
-    if effective_proxy.connection_proxy_enabled && !effective_proxy.connection_proxy_url.is_empty() {
+    if effective_proxy.connection_proxy_enabled && !effective_proxy.connection_proxy_url.is_empty()
+    {
         let proxy = Proxy::all(&effective_proxy.connection_proxy_url)
             .map_err(|error| error.to_string())?
-            .no_proxy(reqwest::NoProxy::from_string(&effective_proxy.connection_no_proxy));
+            .no_proxy(reqwest::NoProxy::from_string(
+                &effective_proxy.connection_no_proxy,
+            ));
         builder = builder.proxy(proxy);
     }
     builder.build().map_err(|error| error.to_string())
@@ -1604,10 +1717,10 @@ fn resolve_effective_proxy(state: &AppState, connection: &ProviderConnection) ->
         .get("connectionProxyEnabled")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let connection_proxy_url = provider_specific_string(connection, "connectionProxyUrl")
-        .unwrap_or_default();
-    let connection_no_proxy = provider_specific_string(connection, "connectionNoProxy")
-        .unwrap_or_default();
+    let connection_proxy_url =
+        provider_specific_string(connection, "connectionProxyUrl").unwrap_or_default();
+    let connection_no_proxy =
+        provider_specific_string(connection, "connectionNoProxy").unwrap_or_default();
 
     EffectiveProxy {
         connection_proxy_enabled,
@@ -1667,11 +1780,17 @@ fn normalize_anthropic_models_url(base_url: &str) -> String {
 
 fn default_catalog_model(provider: &str) -> String {
     let catalog = provider_catalog();
-    let alias = catalog.static_alias_for_provider(provider).unwrap_or(provider);
+    let alias = catalog
+        .static_alias_for_provider(provider)
+        .unwrap_or(provider);
     catalog
         .models_for_alias(alias)
         .and_then(|models| models.iter().find(|model| model.kind == "llm"))
-        .or_else(|| catalog.models_for_alias(alias).and_then(|models| models.first()))
+        .or_else(|| {
+            catalog
+                .models_for_alias(alias)
+                .and_then(|models| models.first())
+        })
         .map(|model| model.id.clone())
         .unwrap_or_else(|| "gpt-4o-mini".to_string())
 }
@@ -1682,7 +1801,9 @@ fn is_token_expired(connection: &ProviderConnection) -> bool {
     };
 
     chrono::DateTime::parse_from_rfc3339(expires_at)
-        .map(|expires_at| expires_at.timestamp() <= Utc::now().timestamp() + TOKEN_EXPIRY_BUFFER_SECS)
+        .map(|expires_at| {
+            expires_at.timestamp() <= Utc::now().timestamp() + TOKEN_EXPIRY_BUFFER_SECS
+        })
         .unwrap_or(false)
 }
 

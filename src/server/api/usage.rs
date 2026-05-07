@@ -495,11 +495,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             .collect::<Vec<_>>();
 
         for entry in &usage_db.history {
-            let Some(timestamp) = entry
-                .timestamp
-                .as_deref()
-                .and_then(parse_usage_timestamp)
-            else {
+            let Some(timestamp) = entry.timestamp.as_deref().and_then(parse_usage_timestamp) else {
                 continue;
             };
             if timestamp < start || timestamp > now {
@@ -508,8 +504,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
 
             let delta_ms = timestamp.timestamp_millis() - start.timestamp_millis();
             let index = (delta_ms / bucket_ms).clamp(0, (bucket_count - 1) as i64) as usize;
-            buckets[index].tokens +=
-                usage_prompt_tokens(entry) + usage_completion_tokens(entry);
+            buckets[index].tokens += usage_prompt_tokens(entry) + usage_completion_tokens(entry);
             buckets[index].cost += entry.cost.unwrap_or(0.0);
         }
 
@@ -585,11 +580,20 @@ async fn get_request_details(
     let usage_db = state.usage_tracker().get_usage_db();
     let mut details = build_request_detail_records(&usage_db);
 
-    if let Some(provider) = query.provider.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    if let Some(provider) = query
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
         details.retain(|detail| detail.provider == provider);
     }
-    if let Some(model) = query.model.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    if let Some(model) = query
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         details.retain(|detail| detail.model == model);
     }
     if let Some(connection_id) = query
@@ -600,17 +604,18 @@ async fn get_request_details(
     {
         details.retain(|detail| detail.connection_id.as_deref() == Some(connection_id));
     }
-    if let Some(status) = query.status.as_deref().map(str::trim).filter(|value| !value.is_empty())
+    if let Some(status) = query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
     {
         details.retain(|detail| detail.status == status);
     }
-    if let Some(start_date) = query
-        .start_date
-        .as_deref()
-        .and_then(parse_usage_timestamp)
-    {
+    if let Some(start_date) = query.start_date.as_deref().and_then(parse_usage_timestamp) {
         details.retain(|detail| {
-            parse_usage_timestamp(&detail.timestamp).is_some_and(|timestamp| timestamp >= start_date)
+            parse_usage_timestamp(&detail.timestamp)
+                .is_some_and(|timestamp| timestamp >= start_date)
         });
     }
     if let Some(end_date) = query.end_date.as_deref().and_then(parse_usage_timestamp) {
@@ -870,7 +875,8 @@ fn usage_tokens(entry: &UsageEntry) -> TokenUsage {
 }
 
 fn request_latency_from_extra(extra: &BTreeMap<String, Value>) -> RequestLatency {
-    extra.get("latency")
+    extra
+        .get("latency")
         .cloned()
         .and_then(|value| serde_json::from_value::<RequestLatency>(value).ok())
         .unwrap_or_default()
@@ -880,7 +886,8 @@ fn fallback_request_detail_id(entry: &UsageEntry, index: usize) -> String {
     let timestamp = entry.timestamp.as_deref().unwrap_or("unknown");
     format!(
         "{timestamp}-{index}-{}",
-        entry.model
+        entry
+            .model
             .chars()
             .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
             .collect::<String>()
@@ -898,14 +905,16 @@ fn format_daily_chart_label(date: NaiveDate) -> String {
 }
 
 fn usage_prompt_tokens(entry: &UsageEntry) -> u64 {
-    entry.tokens
+    entry
+        .tokens
         .as_ref()
         .and_then(|tokens| tokens.prompt_tokens.or(tokens.input_tokens))
         .unwrap_or(0)
 }
 
 fn usage_completion_tokens(entry: &UsageEntry) -> u64 {
-    entry.tokens
+    entry
+        .tokens
         .as_ref()
         .and_then(|tokens| tokens.completion_tokens.or(tokens.output_tokens))
         .unwrap_or(0)

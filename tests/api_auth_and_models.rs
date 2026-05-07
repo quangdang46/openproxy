@@ -6,10 +6,17 @@ use axum::http::{Request, StatusCode};
 use hmac::{Hmac, Mac};
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
-use openproxy::types::{ApiKey, Combo, CustomModel, ProviderConnection};
+use openproxy::types::{
+    ApiKey, Combo, CustomModel, ModelAliasTarget, ProviderConnection, ProviderModelRef,
+};
+use serde_json::json;
 use sha2::Sha256;
 use tempfile::tempdir;
 use tower::util::ServiceExt;
+use wiremock::{
+    matchers::{method, path},
+    Mock, MockServer, ResponseTemplate,
+};
 
 fn active_key(key: &str) -> ApiKey {
     ApiKey {
@@ -395,7 +402,7 @@ async fn models_endpoint_dedupes_duplicate_model_ids() {
 }
 
 #[tokio::test]
-async fn models_endpoint_returns_empty_list_when_no_models_exist() {
+async fn models_endpoint_falls_back_to_static_models_when_no_active_connections() {
     let state = app_state().await;
     state
         .db
@@ -426,7 +433,314 @@ async fn models_endpoint_returns_empty_list_when_no_models_exist() {
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
     assert_eq!(json["object"], "list");
-    assert_eq!(json["data"], serde_json::Value::Array(Vec::new()));
+    let ids: Vec<&str> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+
+    assert!(!ids.is_empty());
+    assert!(ids.contains(&"openai/gpt-5.4"));
+    assert!(!ids.contains(&"openrouter/openai/text-embedding-3-large"));
+}
+
+#[tokio::test]
+async fn v1_root_matches_v1_models_listing() {
+    let app = openproxy::build_app(app_state().await);
+
+    let root = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1")
+                .header("authorization", "Bearer valid-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let models = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("authorization", "Bearer valid-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let root_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(root.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let models_json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(models.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(root_json, models_json);
+}
+
+#[tokio::test]
+async fn models_by_kind_returns_tts_models_from_provider_subconfig() {
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models/tts")
+                .header("authorization", "Bearer valid-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let ids: Vec<&str> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+
+    assert!(ids.contains(&"openai/tts-1"));
+    assert!(ids.contains(&"openai/gpt-4o-mini-tts"));
+    assert!(!ids.contains(&"openai/gpt-custom"));
+}
+
+#[tokio::test]
+async fn models_by_kind_returns_web_combos_and_provider_entries() {
+    let state = app_state().await;
+    state
+        .db
+        .update(|db| {
+            db.combos.push(Combo {
+                id: "combo-search".into(),
+                name: "search-combo".into(),
+                models: vec!["perplexity/search".into()],
+                kind: Some("webSearch".into()),
+                created_at: None,
+                updated_at: None,
+                extra: BTreeMap::new(),
+            });
+            db.combos.push(Combo {
+                id: "combo-fetch".into(),
+                name: "fetch-combo".into(),
+                models: vec!["tavily/fetch".into()],
+                kind: Some("webFetch".into()),
+                created_at: None,
+                updated_at: None,
+                extra: BTreeMap::new(),
+            });
+            db.provider_connections
+                .push(connection("perplexity", None, &[], true));
+            db.provider_connections
+                .push(connection("tavily", None, &[], true));
+        })
+        .await
+        .unwrap();
+
+    let app = openproxy::build_app(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models/web")
+                .header("authorization", "Bearer valid-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let items = json["data"].as_array().unwrap();
+    let ids: Vec<&str> = items
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+
+    assert!(ids.contains(&"search-combo"));
+    assert!(ids.contains(&"fetch-combo"));
+    assert!(ids.contains(&"pplx/search"));
+    assert!(ids.contains(&"tavily/search"));
+    assert!(ids.contains(&"tavily/fetch"));
+    assert!(items.iter().any(|item| item["kind"] == "webSearch"));
+    assert!(items.iter().any(|item| item["kind"] == "webFetch"));
+}
+
+#[tokio::test]
+async fn models_endpoint_normalizes_prefix_enabled_models_and_alias_targets() {
+    let state = app_state().await;
+    state
+        .db
+        .update(|db| {
+            let connection = db
+                .provider_connections
+                .iter_mut()
+                .find(|connection| connection.provider == "openai")
+                .expect("openai connection");
+            connection
+                .provider_specific_data
+                .insert("prefix".into(), serde_json::Value::String("oa".into()));
+            connection.provider_specific_data.insert(
+                "enabledModels".into(),
+                json!(["oa/gpt-4o", "openai/gpt-4.1", "openai/gpt-4.1"]),
+            );
+
+            db.model_aliases.insert(
+                "mini".into(),
+                ModelAliasTarget::Path("openai/gpt-4.1-mini".into()),
+            );
+            db.model_aliases.insert(
+                "realtime".into(),
+                ModelAliasTarget::Mapping(ProviderModelRef {
+                    provider: "openai".into(),
+                    model: "gpt-4o-realtime-preview".into(),
+                    extra: BTreeMap::new(),
+                }),
+            );
+        })
+        .await
+        .unwrap();
+
+    let app = openproxy::build_app(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("authorization", "Bearer valid-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let ids: Vec<&str> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+
+    assert!(ids.contains(&"oa/gpt-4o"));
+    assert!(ids.contains(&"oa/gpt-4.1"));
+    assert!(ids.contains(&"oa/gpt-4.1-mini"));
+    assert!(ids.contains(&"oa/gpt-4o-realtime-preview"));
+    assert_eq!(ids.iter().filter(|id| **id == "oa/gpt-4.1").count(), 1);
+}
+
+#[tokio::test]
+async fn models_endpoint_fetches_remote_models_for_openai_compatible_connections() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "gpt-4o-mini" },
+                { "id": "gpt-4.1-mini" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let state = app_state().await;
+    state
+        .db
+        .update(|db| {
+            db.provider_connections = vec![connection("openai-compatible-local", None, &[], true)];
+            let connection = db.provider_connections.first_mut().unwrap();
+            connection
+                .provider_specific_data
+                .insert("baseUrl".into(), serde_json::Value::String(server.uri()));
+            connection
+                .provider_specific_data
+                .insert("prefix".into(), serde_json::Value::String("compat".into()));
+        })
+        .await
+        .unwrap();
+
+    let app = openproxy::build_app(state);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models")
+                .header("authorization", "Bearer valid-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    let ids: Vec<&str> = json["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+
+    assert!(ids.contains(&"compat/gpt-4o-mini"));
+    assert!(ids.contains(&"compat/gpt-4.1-mini"));
+}
+
+#[tokio::test]
+async fn models_by_kind_rejects_unknown_kind() {
+    let app = openproxy::build_app(app_state().await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/models/not-a-kind")
+                .header("authorization", "Bearer valid-bearer")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let json: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(json["error"]["type"], "invalid_request_error");
 }
 
 #[tokio::test]

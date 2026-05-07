@@ -10,7 +10,7 @@ const fs = require("fs");
 const os = require("os");
 
 const packageName = process.env.UPDATER_PKG_NAME || "9router";
-const port = parseInt(process.env.UPDATER_PORT || "20129", 10);
+const port = parseInt(process.env.UPDATER_PORT || "4625", 10);
 const tailLines = parseInt(process.env.UPDATER_TAIL_LINES || "8", 10);
 const maxRetries = parseInt(process.env.UPDATER_RETRIES || "3", 10);
 const retryDelayMs = parseInt(process.env.UPDATER_RETRY_DELAY_MS || "5000", 10);
@@ -18,7 +18,7 @@ const lingerMs = parseInt(process.env.UPDATER_LINGER_MS || "30000", 10);
 const waitMinMs = parseInt(process.env.UPDATER_WAIT_MIN_MS || "3000", 10);
 const waitMaxMs = parseInt(process.env.UPDATER_WAIT_MAX_MS || "15000", 10);
 const waitCheckMs = parseInt(process.env.UPDATER_WAIT_CHECK_MS || "500", 10);
-const appPort = parseInt(process.env.UPDATER_APP_PORT || "20128", 10);
+const appPort = parseInt(process.env.UPDATER_APP_PORT || "4623", 10);
 
 // Data directory (match mitm/paths.js logic)
 function getDataDir() {

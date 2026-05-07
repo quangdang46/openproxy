@@ -119,9 +119,15 @@ impl UsageLiveState {
                 if *count == 0 {
                     continue;
                 }
-                let account = connection_names.get(connection_id).cloned().unwrap_or_else(|| {
-                    format!("Account {}...", connection_id.chars().take(8).collect::<String>())
-                });
+                let account = connection_names
+                    .get(connection_id)
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Account {}...",
+                            connection_id.chars().take(8).collect::<String>()
+                        )
+                    });
                 let (model, provider) = split_model_key(model_key);
                 active.push(ActiveRequest {
                     model,

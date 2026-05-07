@@ -106,10 +106,7 @@ pub async fn login(
         }
     };
 
-    let secure_cookie = std::env::var("AUTH_COOKIE_SECURE")
-        .ok()
-        .as_deref()
-        == Some("true")
+    let secure_cookie = std::env::var("AUTH_COOKIE_SECURE").ok().as_deref() == Some("true")
         || headers
             .get("x-forwarded-proto")
             .and_then(|value| value.to_str().ok())
@@ -299,14 +296,19 @@ fn is_tunnel_request(headers: &HeaderMap, settings: &Settings) -> bool {
     let host = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(':').next().unwrap_or(value).to_ascii_lowercase())
+        .map(|value| {
+            value
+                .split(':')
+                .next()
+                .unwrap_or(value)
+                .to_ascii_lowercase()
+        })
         .unwrap_or_default();
     if host.is_empty() {
         return false;
     }
 
-    tunnel_host(&settings.tunnel_url)
-        .is_some_and(|tunnel_host| tunnel_host == host)
+    tunnel_host(&settings.tunnel_url).is_some_and(|tunnel_host| tunnel_host == host)
         || tunnel_host(&settings.tailscale_url).is_some_and(|tailscale_host| tailscale_host == host)
 }
 

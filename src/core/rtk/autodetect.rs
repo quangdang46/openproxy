@@ -10,9 +10,12 @@ use crate::core::rtk::filters::{
 
 static RE_GIT_DIFF: Lazy<Regex> = Lazy::new(|| Regex::new(r"diff --git").unwrap());
 static RE_GIT_DIFF_HUNK: Lazy<Regex> = Lazy::new(|| Regex::new(r"@@ ").unwrap());
-static RE_GIT_STATUS: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?m)^On branch |^nothing to commit|^Changes (not |to be )|^Untracked files:").unwrap());
-static RE_PORCELAIN: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[ MADRCU?!][ MADRCU?!] \S").unwrap());
+static RE_GIT_STATUS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)^On branch |^nothing to commit|^Changes (not |to be )|^Untracked files:")
+        .unwrap()
+});
+static RE_PORCELAIN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^[ MADRCU?!][ MADRCU?!] \S").unwrap());
 static RE_TREE_GLYPH: Lazy<Regex> = Lazy::new(|| Regex::new(r"[├└]──|│  ").unwrap());
 static RE_LS_ROW: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[-dlbcps][rwx-]{9}").unwrap());
 static RE_LS_TOTAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^total \d+$").unwrap());
@@ -46,7 +49,11 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
     }
 
     let lines: Vec<&str> = head.lines().collect();
-    let non_empty: Vec<&str> = lines.iter().filter(|l| !l.trim().is_empty()).map(|l| *l).collect();
+    let non_empty: Vec<&str> = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| *l)
+        .collect();
 
     let first5: Vec<&&str> = non_empty.iter().take(5).collect();
     if first5.iter().any(|l| is_grep_line(l)) {

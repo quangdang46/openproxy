@@ -57,12 +57,15 @@ impl UsageTracker {
             extra: Default::default(),
         };
 
-        let _ = self.db.update_usage(move |db| {
-            db.history.push(entry);
-            if db.total_requests_lifetime < db.history.len() as u64 {
-                db.total_requests_lifetime = db.history.len() as u64;
-            }
-        }).await;
+        let _ = self
+            .db
+            .update_usage(move |db| {
+                db.history.push(entry);
+                if db.total_requests_lifetime < db.history.len() as u64 {
+                    db.total_requests_lifetime = db.history.len() as u64;
+                }
+            })
+            .await;
     }
 
     pub fn get_usage_db(&self) -> Arc<UsageDb> {

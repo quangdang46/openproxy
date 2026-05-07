@@ -1,7 +1,7 @@
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bytes::Bytes;
@@ -17,12 +17,16 @@ use crate::types::AppDb;
 
 use super::auth_error_response;
 
+pub async fn cors_options() -> Response {
+    cors_preflight_response("POST, OPTIONS")
+}
+
 pub async fn audio_transcriptions(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    generic_media_handler(state, headers, body, "audio/transcriptions").await
+    with_cors_response(generic_media_handler(state, headers, body, "audio/transcriptions").await)
 }
 
 pub async fn audio_speech(
@@ -30,7 +34,7 @@ pub async fn audio_speech(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    generic_media_handler(state, headers, body, "audio/speech").await
+    with_cors_response(generic_media_handler(state, headers, body, "audio/speech").await)
 }
 
 pub async fn embeddings(
@@ -38,7 +42,7 @@ pub async fn embeddings(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    generic_media_handler(state, headers, body, "embeddings").await
+    with_cors_response(generic_media_handler(state, headers, body, "embeddings").await)
 }
 
 pub async fn images_generations(
@@ -46,7 +50,7 @@ pub async fn images_generations(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    generic_media_handler(state, headers, body, "images/generations").await
+    with_cors_response(generic_media_handler(state, headers, body, "images/generations").await)
 }
 
 pub async fn search(
@@ -54,7 +58,7 @@ pub async fn search(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    generic_media_handler(state, headers, body, "search").await
+    with_cors_response(generic_media_handler(state, headers, body, "search").await)
 }
 
 async fn generic_media_handler(
@@ -447,13 +451,48 @@ fn is_hop_by_hop_header(name: &str) -> bool {
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
-    (
-        status,
-        Json(json!({
-            "error": {
-                "message": message
-            }
-        })),
+    with_cors_response(
+        (
+            status,
+            Json(json!({
+                "error": {
+                    "message": message
+                }
+            })),
+        )
+            .into_response(),
     )
-        .into_response()
+}
+
+fn with_cors_response(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    response
+}
+
+fn cors_preflight_response(methods: &str) -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("POST, OPTIONS")),
+    );
+    response
 }

@@ -34,7 +34,11 @@ pub fn safe_apply(filter_fn: fn(&str) -> String, text: &str, filter_name: &str) 
     }
 }
 
-pub fn safe_apply_from_option(filter_fn: Option<fn(&str) -> String>, text: &str, filter_name: &str) -> String {
+pub fn safe_apply_from_option(
+    filter_fn: Option<fn(&str) -> String>,
+    text: &str,
+    filter_name: &str,
+) -> String {
     match filter_fn {
         Some(f) => safe_apply(f, text, filter_name),
         None => text.to_string(),

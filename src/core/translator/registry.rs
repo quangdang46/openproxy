@@ -79,8 +79,7 @@ pub type RequestTransformFn =
 
 /// Response transform signature: (chunk, state) -> Vec<String>
 /// Returns SSE lines to emit.
-pub type ResponseTransformFn =
-    fn(chunk: &[u8], state: &mut ResponseTransformState) -> Vec<String>;
+pub type ResponseTransformFn = fn(chunk: &[u8], state: &mut ResponseTransformState) -> Vec<String>;
 
 /// Shared state for response streaming transforms.
 /// Each format has its own state variant tracked here.
@@ -278,22 +277,12 @@ impl TranslationRegistry {
     }
 
     /// Register a request transform.
-    pub fn register_request(
-        &mut self,
-        from: Format,
-        to: Format,
-        f: RequestTransformFn,
-    ) {
+    pub fn register_request(&mut self, from: Format, to: Format, f: RequestTransformFn) {
         self.request_transforms.insert((from, to), f);
     }
 
     /// Register a response transform.
-    pub fn register_response(
-        &mut self,
-        from: Format,
-        to: Format,
-        f: ResponseTransformFn,
-    ) {
+    pub fn register_response(&mut self, from: Format, to: Format, f: ResponseTransformFn) {
         self.response_transforms.insert((from, to), f);
     }
 
@@ -446,8 +435,8 @@ static REGISTRY: OnceLock<TranslationRegistry> = OnceLock::new();
 /// Get the global translation registry.
 /// Initializes with all registered transforms on first call.
 pub fn global_registry() -> &'static TranslationRegistry {
-    use crate::core::translator::request::openai_to_claude::openai_to_claude_request;
     use crate::core::translator::request::claude_to_openai::claude_to_openai_request;
+    use crate::core::translator::request::openai_to_claude::openai_to_claude_request;
 
     REGISTRY.get_or_init(|| {
         let mut reg = TranslationRegistry::new();

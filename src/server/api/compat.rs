@@ -1,6 +1,6 @@
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde_json::{json, Map, Value};
@@ -8,6 +8,10 @@ use serde_json::{json, Map, Value};
 use crate::server::state::AppState;
 
 use super::chat;
+
+pub async fn cors_options() -> Response {
+    cors_preflight_response("POST, OPTIONS")
+}
 
 pub async fn messages(
     State(state): State<AppState>,
@@ -54,7 +58,7 @@ pub async fn count_tokens(body: Result<Json<Value>, JsonRejection>) -> Response 
     let total_chars = count_request_chars(&body);
     let input_tokens = total_chars.div_ceil(4) as u64;
 
-    Json(json!({ "input_tokens": input_tokens })).into_response()
+    with_cors_response(Json(json!({ "input_tokens": input_tokens })).into_response())
 }
 
 #[derive(Clone, Copy)]
@@ -80,7 +84,9 @@ async fn forward_compat(
         CompatMode::Responses { compact: false } => Some("/v1/responses"),
         CompatMode::Responses { compact: true } => Some("/v1/responses/compact"),
     };
-    chat::chat_completions_for_endpoint(state, headers, Ok(Json(normalized)), endpoint).await
+    with_cors_response(
+        chat::chat_completions_for_endpoint(state, headers, Ok(Json(normalized)), endpoint).await,
+    )
 }
 
 fn normalize_body(mut body: Value, mode: CompatMode) -> Value {
@@ -313,11 +319,48 @@ fn count_chars(value: &Value) -> usize {
 }
 
 fn invalid_json_response() -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({ "error": "Invalid JSON body" })),
+    with_cors_response(
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid JSON body" })),
+        )
+            .into_response(),
     )
-        .into_response()
+}
+
+fn with_cors_response(mut response: Response) -> Response {
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    response
+}
+
+fn cors_preflight_response(methods: &str) -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("POST, OPTIONS")),
+    );
+    response
 }
 
 #[cfg(test)]

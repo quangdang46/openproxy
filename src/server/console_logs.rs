@@ -120,7 +120,9 @@ impl Write for ConsoleLogWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         if !self.current_line.is_empty() {
-            let line = String::from_utf8_lossy(&self.current_line).trim().to_string();
+            let line = String::from_utf8_lossy(&self.current_line)
+                .trim()
+                .to_string();
             self.current_line.clear();
             if !line.is_empty() {
                 self.buffer.append_line_blocking(line);

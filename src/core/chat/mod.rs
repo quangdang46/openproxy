@@ -38,12 +38,7 @@ pub struct RequestPlan {
 
 impl RequestPlan {
     /// Create a request plan from the request body and resolved provider/model.
-    pub fn new(
-        endpoint_path: Option<&str>,
-        body: &Value,
-        provider: &str,
-        model: &str,
-    ) -> Self {
+    pub fn new(endpoint_path: Option<&str>, body: &Value, provider: &str, model: &str) -> Self {
         let source_format = if let Some(path) = endpoint_path {
             registry::detect_source_format_by_endpoint(path)
                 .unwrap_or_else(|| registry::detect_source_format(body))
@@ -53,10 +48,7 @@ impl RequestPlan {
 
         let target_format = registry::get_target_format_for_provider(provider);
 
-        let stream = body
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
 
         Self {
             provider: provider.to_string(),
@@ -113,7 +105,10 @@ mod tests {
             "input": "hello",
             "stream": true
         });
-        assert_eq!(registry::detect_source_format(&body), Format::OpenAiResponses);
+        assert_eq!(
+            registry::detect_source_format(&body),
+            Format::OpenAiResponses
+        );
     }
 
     #[test]
@@ -158,25 +153,44 @@ mod tests {
 
     #[test]
     fn test_get_target_format_for_provider() {
-        assert_eq!(registry::get_target_format_for_provider("openai"), Format::OpenAi);
-        assert_eq!(registry::get_target_format_for_provider("claude"), Format::Claude);
-        assert_eq!(registry::get_target_format_for_provider("gemini"), Format::Gemini);
-        assert_eq!(registry::get_target_format_for_provider("cursor"), Format::Cursor);
-        assert_eq!(registry::get_target_format_for_provider("kiro"), Format::Kiro);
-        assert_eq!(registry::get_target_format_for_provider("codex"), Format::OpenAiResponses);
-        assert_eq!(registry::get_target_format_for_provider("ollama"), Format::Ollama);
-        assert_eq!(registry::get_target_format_for_provider("deepseek"), Format::OpenAi);
+        assert_eq!(
+            registry::get_target_format_for_provider("openai"),
+            Format::OpenAi
+        );
+        assert_eq!(
+            registry::get_target_format_for_provider("claude"),
+            Format::Claude
+        );
+        assert_eq!(
+            registry::get_target_format_for_provider("gemini"),
+            Format::Gemini
+        );
+        assert_eq!(
+            registry::get_target_format_for_provider("cursor"),
+            Format::Cursor
+        );
+        assert_eq!(
+            registry::get_target_format_for_provider("kiro"),
+            Format::Kiro
+        );
+        assert_eq!(
+            registry::get_target_format_for_provider("codex"),
+            Format::OpenAiResponses
+        );
+        assert_eq!(
+            registry::get_target_format_for_provider("ollama"),
+            Format::Ollama
+        );
+        assert_eq!(
+            registry::get_target_format_for_provider("deepseek"),
+            Format::OpenAi
+        );
     }
 
     #[test]
     fn test_request_plan_needs_translation() {
         let body = json!({"model": "gpt-4", "messages": [], "stream": true});
-        let plan = RequestPlan::new(
-            Some("/v1/chat/completions"),
-            &body,
-            "openai",
-            "gpt-4",
-        );
+        let plan = RequestPlan::new(Some("/v1/chat/completions"), &body, "openai", "gpt-4");
         // OpenAI body to OpenAI provider — no translation needed
         assert!(!plan.needs_translation());
 

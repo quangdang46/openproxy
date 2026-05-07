@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashSet};
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bytes::Bytes;
@@ -12,6 +12,7 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
+use crate::core::chat::RequestPlan;
 use crate::core::combo::{
     check_fallback_error, execute_combo_strategy, get_combo_models_from_data, ComboAttemptError,
     ComboExecutionError, ComboStrategy,
@@ -20,7 +21,6 @@ use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
-use crate::core::chat::RequestPlan;
 use crate::core::translator::registry::{self, Format};
 use crate::core::translator::response_transform::{transform_sse_stream, transformer_for_provider};
 use crate::server::auth::{extract_api_key, require_api_key};
@@ -29,12 +29,18 @@ use crate::types::{AppDb, ProviderConnection, TokenUsage};
 
 use super::auth_error_response;
 
+pub async fn cors_options() -> Response {
+    cors_preflight_response("GET, POST, OPTIONS")
+}
+
 pub async fn chat_completions(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    chat_completions_for_endpoint(state, headers, body, Some("/v1/chat/completions")).await
+    with_cors_response(
+        chat_completions_for_endpoint(state, headers, body, Some("/v1/chat/completions")).await,
+    )
 }
 
 pub async fn dashboard_chat_completions(
@@ -129,7 +135,12 @@ fn provider_connection_supports_model(connection: &ProviderConnection, model: &s
         .provider_specific_data
         .get("enabledModels")
         .and_then(Value::as_array)
-        .is_some_and(|models| models.iter().filter_map(Value::as_str).any(|item| item == model))
+        .is_some_and(|models| {
+            models
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|item| item == model)
+        })
 }
 
 pub async fn chat_completions_for_endpoint(
@@ -195,7 +206,8 @@ async fn chat_completions_impl(
                     let api_key = combo_api_key.clone();
                     // Build plan for this combo model
                     let combo_provider_str = resolved.provider.as_deref().unwrap_or("unknown");
-                    let combo_plan = RequestPlan::new(endpoint, &body, combo_provider_str, &combo_model);
+                    let combo_plan =
+                        RequestPlan::new(endpoint, &body, combo_provider_str, &combo_model);
                     let plan_for_combo = combo_plan.clone();
                     async move {
                         execute_single_model(
@@ -217,7 +229,12 @@ async fn chat_completions_impl(
             }
         }
         ModelRouteKind::Direct => {
-            let plan = RequestPlan::new(endpoint, &body, resolved.provider.as_deref().unwrap_or(model_str), &resolved.model);
+            let plan = RequestPlan::new(
+                endpoint,
+                &body,
+                resolved.provider.as_deref().unwrap_or(model_str),
+                &resolved.model,
+            );
             match execute_single_model(
                 &state,
                 &body,
@@ -268,8 +285,16 @@ async fn execute_single_model(
         plan.needs_translation(),
     );
 
-    forward_with_provider_fallback(state, &plan.provider, &plan.model, body, api_key, endpoint, plan)
-        .await
+    forward_with_provider_fallback(
+        state,
+        &plan.provider,
+        &plan.model,
+        body,
+        api_key,
+        endpoint,
+        plan,
+    )
+    .await
 }
 
 async fn forward_with_provider_fallback(
@@ -502,46 +527,40 @@ async fn forward_with_provider_fallback(
                     }
                     clear_connection_error(state, &connection.id).await;
                     if dashboard_stream {
-                        return Ok(
-                            proxy_dashboard_sse_with_usage_tracking(
-                                result.response,
-                                state,
-                                provider,
-                                model,
-                                Some(connection.id.as_str()),
-                                api_key,
-                                endpoint,
-                            )
-                            .await,
-                        );
+                        return Ok(proxy_dashboard_sse_with_usage_tracking(
+                            result.response,
+                            state,
+                            provider,
+                            model,
+                            Some(connection.id.as_str()),
+                            api_key,
+                            endpoint,
+                        )
+                        .await);
                     }
                     if !stream {
-                        return Ok(
-                            proxy_response_with_usage_tracking(
-                                result.response,
-                                state,
-                                provider,
-                                model,
-                                Some(connection.id.as_str()),
-                                api_key,
-                                endpoint,
-                            )
-                            .await,
-                        );
+                        return Ok(proxy_response_with_usage_tracking(
+                            result.response,
+                            state,
+                            provider,
+                            model,
+                            Some(connection.id.as_str()),
+                            api_key,
+                            endpoint,
+                        )
+                        .await);
                     }
                     let normalize_for_dashboard =
                         endpoint == Some("/api/dashboard/chat/completions");
-                    return Ok(
-                        proxy_response_with_pending_tracking(
-                            result.response,
-                            state.clone(),
-                            provider.to_string(),
-                            model.to_string(),
-                            Some(connection.id.clone()),
-                            normalize_for_dashboard,
-                        )
-                        .await,
-                    );
+                    return Ok(proxy_response_with_pending_tracking(
+                        result.response,
+                        state.clone(),
+                        provider.to_string(),
+                        model.to_string(),
+                        Some(connection.id.clone()),
+                        normalize_for_dashboard,
+                    )
+                    .await);
                 }
 
                 let retry_after = retry_after_from_headers(result.response.headers());
@@ -906,7 +925,9 @@ async fn proxy_response_with_pending_tracking(
 ) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
-    let transformer = normalize_for_dashboard.then(|| transformer_for_provider(&provider)).flatten();
+    let transformer = normalize_for_dashboard
+        .then(|| transformer_for_provider(&provider))
+        .flatten();
     let body = match response {
         UpstreamResponse::Reqwest(response) => {
             let state = state.clone();
@@ -1347,11 +1368,11 @@ fn parse_timestamp(value: &str) -> Option<DateTime<Utc>> {
 }
 
 fn combo_error_response(error: ComboExecutionError) -> Response {
-    attempt_error_response(ComboAttemptError {
+    with_cors_response(attempt_error_response(ComboAttemptError {
         status: error.status,
         message: error.message,
         retry_after: error.earliest_retry_after,
-    })
+    }))
 }
 
 fn attempt_error_response(error: ComboAttemptError) -> Response {
@@ -1377,15 +1398,50 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
-    (
-        status,
-        Json(json!({
-            "error": {
-                "message": message
-            }
-        })),
+    with_cors_response(
+        (
+            status,
+            Json(json!({
+                "error": {
+                    "message": message
+                }
+            })),
+        )
+            .into_response(),
     )
-        .into_response()
+}
+
+fn with_cors_response(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, POST, OPTIONS"),
+    );
+    response
+}
+
+fn cors_preflight_response(methods: &str) -> Response {
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("GET, POST, OPTIONS")),
+    );
+    response
 }
 
 #[cfg(test)]
@@ -1745,7 +1801,9 @@ mod tests {
 
     #[tokio::test]
     async fn build_dashboard_sse_response_returns_collectable_sse_body() {
-        let body = Bytes::from_static(b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n");
+        let body = Bytes::from_static(
+            b"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+        );
         let response = build_dashboard_sse_response(
             StatusCode::OK,
             &reqwest::header::HeaderMap::new(),

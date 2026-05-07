@@ -6,7 +6,7 @@ import fs from "node:fs";
 import lockfile from "proper-lockfile";
 import { DATA_DIR } from "@/lib/dataDir.js";
 
-const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
+const DEFAULT_MITM_ROUTER_BASE = "http://localhost:4623";
 const DB_FILE = path.join(DATA_DIR, "db.json");
 
 if (!fs.existsSync(DATA_DIR)) {
