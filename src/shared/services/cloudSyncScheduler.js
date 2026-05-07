@@ -1,5 +1,5 @@
 import { getConsistentMachineId } from "@/shared/utils/machineId";
-import { isCloudEnabled } from "@/lib/localDb";
+import { isCloudEnabled } from "@/shared/utils/backendApi";
 
 const INTERNAL_BASE_URL =
   process.env.BASE_URL ||
