@@ -22,6 +22,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/tunnel/start", post(start_tunnel))
         .route("/api/tunnel/stop", post(stop_tunnel))
         .route("/api/tunnel/status", get(tunnel_status))
+        .route("/api/tunnel/tailscale-install", post(tailscale_install))
+        .route("/api/tunnel/tailscale-login", post(tailscale_login))
+        .route("/api/tunnel/tailscale-start-daemon", post(tailscale_start_daemon))
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,4 +192,46 @@ fn command_exists(command: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+async fn tailscale_install() -> impl IntoResponse {
+    (
+        axum::http::StatusCode::OK,
+        Json(json!({
+            "success": false,
+            "message": "Tailscale install must be performed manually. Install via: curl -fsSL https://tailscale.com/install.sh | sh"
+        })),
+    )
+}
+
+async fn tailscale_login() -> impl IntoResponse {
+    match Command::new("tailscale").arg("login").output() {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let combined = format!("{}{}", stdout, stderr);
+            // Extract auth URL from output
+            let auth_url = combined.lines()
+                .find(|l| l.contains("https://login.tailscale.com"))
+                .map(|l| l.trim().to_string())
+                .unwrap_or_default();
+            Json(json!({ "success": true, "authUrl": auth_url }))
+        }
+        Err(e) => Json(json!({ "success": false, "error": format!("tailscale not found: {e}") })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TailscaleDaemonRequest {
+    sudo_password: Option<String>,
+}
+
+async fn tailscale_start_daemon(
+    Json(_req): Json<TailscaleDaemonRequest>,
+) -> impl IntoResponse {
+    match Command::new("tailscaled").arg("--state=/var/lib/tailscale/tailscaled.state").spawn() {
+        Ok(_) => Json(json!({ "success": true })),
+        Err(e) => Json(json!({ "success": false, "error": format!("tailscaled failed: {e}") })),
+    }
 }

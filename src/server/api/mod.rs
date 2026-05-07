@@ -16,6 +16,7 @@ pub mod models_disabled;
 pub mod oauth;
 pub mod pricing;
 mod provider_connection_test;
+mod provider_validate;
 mod provider_model_tests;
 mod provider_models;
 pub mod provider_nodes;
@@ -116,6 +117,7 @@ pub fn routes() -> Router<AppState> {
         .merge(translator::routes())
         .merge(providers::routes())
         .merge(provider_nodes::routes())
+        .merge(provider_validate::routes())
         .merge(admin_items::routes())
         .merge(usage::routes())
         // Dashboard API endpoints
@@ -137,6 +139,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/settings/proxy-test", post(proxy_test_api))
         .route("/api/version", get(get_version_api))
+        .route("/api/version/update", post(version_update_api))
         .route(
             "/api/settings/database",
             get(settings_database_export_api).post(settings_database_import_api),
@@ -172,6 +175,20 @@ async fn get_version_api() -> Response {
         "hasUpdate": has_update,
     }))
     .into_response()
+}
+
+
+async fn version_update_api() -> Response {
+    // In Rust standalone mode, self-update is not supported via the API.
+    // The CLI handles updates through cargo or manual binary replacement.
+    (
+        StatusCode::OK,
+        Json(json!({
+            "success": false,
+            "message": "Self-update is handled by the Rust binary. Use cargo install or download the latest release."
+        })),
+    )
+        .into_response()
 }
 
 fn dashboard_package_version() -> &'static str {
@@ -949,12 +966,38 @@ async fn update_settings_api(
         return response;
     }
 
-    if req.new_password.is_some() || req.current_password.is_some() {
-        return (
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({ "error": "Password updates are not implemented in the Rust server yet" })),
-        )
-            .into_response();
+    if let Some(new_password) = req.new_password {
+        let snapshot = state.db.snapshot();
+        let current_hash = snapshot.settings.password.as_deref();
+
+        // Verify current password if one exists
+        if let Some(hash) = current_hash {
+            let current = req.current_password.as_deref().unwrap_or("");
+            let verified = bcrypt::verify(current, hash).unwrap_or(false);
+            if !verified {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Invalid current password" })),
+                )
+                    .into_response();
+            }
+        } else {
+            // First-time password: allow empty or default "123456"
+            let current = req.current_password.as_deref().unwrap_or("123456");
+            if !current.is_empty() && current != "123456" {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Invalid current password" })),
+                )
+                    .into_response();
+            }
+        }
+
+        // Hash new password
+        let hash = bcrypt::hash(&new_password, 10).unwrap_or_else(|_| new_password.clone());
+        let _ = state.db.update(|db| {
+            db.settings.password = Some(hash);
+        }).await;
     }
 
     let result = state

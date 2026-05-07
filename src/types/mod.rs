@@ -351,6 +351,8 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub caveman_level: String,
+    #[serde(default, skip_serializing)]
+    pub password: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -383,6 +385,7 @@ impl Default for Settings {
             rtk_enabled: true,
             caveman_enabled: false,
             caveman_level: default_caveman_level(),
+            password: None,
             extra: BTreeMap::new(),
         }
     }
