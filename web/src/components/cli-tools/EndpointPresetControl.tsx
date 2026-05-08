@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, ChangeEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { ChangeEvent } from "react";
 
 const STORAGE_KEY = "openproxy.cliToolEndpointPresets";
 

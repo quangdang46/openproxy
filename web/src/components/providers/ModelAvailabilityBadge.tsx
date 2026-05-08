@@ -7,7 +7,8 @@
  * issues, with a hover popover for details and cooldown clearing.
  */
 
-import { useState, useEffect, useCallback, useRef, MouseEvent } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import type { MouseEvent } from "react";
 import { Button } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
 

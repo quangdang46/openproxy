@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, ChangeEvent, KeyboardEvent } from "react";
+import { useState, useEffect } from "react";
+import type { ChangeEvent, KeyboardEvent } from "react";
 import { Button, Modal } from "@/shared/components";
 
 interface AddCustomModelModalProps {
