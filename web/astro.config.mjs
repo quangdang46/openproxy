@@ -18,11 +18,6 @@ export default defineConfig({
   devToolbar: {
     enabled: false,
   },
-  vite: {
-    server: {
-      hmr: false,
-    },
-  },
   output: 'static',
   site: 'https://github.com/yourusername/openproxy-rust',
   base: '/',
@@ -32,6 +27,9 @@ export default defineConfig({
     inlineStylesheets: 'auto', // Better for caching
   },
   vite: {
+    server: {
+      hmr: false,
+    },
     resolve: {
       alias: {
         '@': path.resolve('./src'),
