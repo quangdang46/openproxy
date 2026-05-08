@@ -32,6 +32,8 @@ complete -c openproxy -n "__fish_openproxy_needs_command" -s h -l help -d 'Print
 complete -c openproxy -n "__fish_openproxy_needs_command" -f -a "provider"
 complete -c openproxy -n "__fish_openproxy_needs_command" -f -a "key"
 complete -c openproxy -n "__fish_openproxy_needs_command" -f -a "pool"
+complete -c openproxy -n "__fish_openproxy_needs_command" -f -a "tunnel"
+complete -c openproxy -n "__fish_openproxy_needs_command" -f -a "route"
 complete -c openproxy -n "__fish_openproxy_needs_command" -f -a "completion"
 complete -c openproxy -n "__fish_openproxy_needs_command" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c openproxy -n "__fish_openproxy_using_subcommand provider; and not __fish_seen_subcommand_from list add help" -s h -l help -d 'Print help'
@@ -75,12 +77,34 @@ complete -c openproxy -n "__fish_openproxy_using_subcommand pool; and __fish_see
 complete -c openproxy -n "__fish_openproxy_using_subcommand pool; and __fish_seen_subcommand_from help" -f -a "create"
 complete -c openproxy -n "__fish_openproxy_using_subcommand pool; and __fish_seen_subcommand_from help" -f -a "delete"
 complete -c openproxy -n "__fish_openproxy_using_subcommand pool; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and not __fish_seen_subcommand_from start stop status help" -s h -l help -d 'Print help'
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and not __fish_seen_subcommand_from start stop status help" -f -a "start"
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and not __fish_seen_subcommand_from start stop status help" -f -a "stop"
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and not __fish_seen_subcommand_from start stop status help" -f -a "status"
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and not __fish_seen_subcommand_from start stop status help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from start" -l provider -r
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from start" -l port -r
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from start" -s h -l help -d 'Print help'
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from stop" -s h -l help -d 'Print help'
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from status" -s h -l help -d 'Print help'
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from help" -f -a "start"
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from help" -f -a "stop"
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from help" -f -a "status"
+complete -c openproxy -n "__fish_openproxy_using_subcommand tunnel; and __fish_seen_subcommand_from help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c openproxy -n "__fish_openproxy_using_subcommand route" -l model -d 'Model ID (e.g. openai/gpt-4o-mini)' -r
+complete -c openproxy -n "__fish_openproxy_using_subcommand route" -l combo -d 'Combo name' -r
+complete -c openproxy -n "__fish_openproxy_using_subcommand route" -l prompt -d 'Prompt text' -r
+complete -c openproxy -n "__fish_openproxy_using_subcommand route" -l stream -d 'Stream output'
+complete -c openproxy -n "__fish_openproxy_using_subcommand route" -l json -d 'JSON output'
+complete -c openproxy -n "__fish_openproxy_using_subcommand route" -s h -l help -d 'Print help'
 complete -c openproxy -n "__fish_openproxy_using_subcommand completion" -s h -l help -d 'Print help'
-complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool completion help" -f -a "provider"
-complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool completion help" -f -a "key"
-complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool completion help" -f -a "pool"
-complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool completion help" -f -a "completion"
-complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool completion help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool tunnel route completion help" -f -a "provider"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool tunnel route completion help" -f -a "key"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool tunnel route completion help" -f -a "pool"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool tunnel route completion help" -f -a "tunnel"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool tunnel route completion help" -f -a "route"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool tunnel route completion help" -f -a "completion"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and not __fish_seen_subcommand_from provider key pool tunnel route completion help" -f -a "help" -d 'Print this message or the help of the given subcommand(s)'
 complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from provider" -f -a "list"
 complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from provider" -f -a "add"
 complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from key" -f -a "list"
@@ -89,3 +113,6 @@ complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_see
 complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from pool" -f -a "status"
 complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from pool" -f -a "create"
 complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from pool" -f -a "delete"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from tunnel" -f -a "start"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from tunnel" -f -a "stop"
+complete -c openproxy -n "__fish_openproxy_using_subcommand help; and __fish_seen_subcommand_from tunnel" -f -a "status"

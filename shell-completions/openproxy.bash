@@ -31,6 +31,12 @@ _openproxy() {
             openproxy,provider)
                 cmd="openproxy__subcmd__provider"
                 ;;
+            openproxy,route)
+                cmd="openproxy__subcmd__route"
+                ;;
+            openproxy,tunnel)
+                cmd="openproxy__subcmd__tunnel"
+                ;;
             openproxy__subcmd__help,completion)
                 cmd="openproxy__subcmd__help__subcmd__completion"
                 ;;
@@ -45,6 +51,12 @@ _openproxy() {
                 ;;
             openproxy__subcmd__help,provider)
                 cmd="openproxy__subcmd__help__subcmd__provider"
+                ;;
+            openproxy__subcmd__help,route)
+                cmd="openproxy__subcmd__help__subcmd__route"
+                ;;
+            openproxy__subcmd__help,tunnel)
+                cmd="openproxy__subcmd__help__subcmd__tunnel"
                 ;;
             openproxy__subcmd__help__subcmd__key,add)
                 cmd="openproxy__subcmd__help__subcmd__key__subcmd__add"
@@ -69,6 +81,15 @@ _openproxy() {
                 ;;
             openproxy__subcmd__help__subcmd__provider,list)
                 cmd="openproxy__subcmd__help__subcmd__provider__subcmd__list"
+                ;;
+            openproxy__subcmd__help__subcmd__tunnel,start)
+                cmd="openproxy__subcmd__help__subcmd__tunnel__subcmd__start"
+                ;;
+            openproxy__subcmd__help__subcmd__tunnel,status)
+                cmd="openproxy__subcmd__help__subcmd__tunnel__subcmd__status"
+                ;;
+            openproxy__subcmd__help__subcmd__tunnel,stop)
+                cmd="openproxy__subcmd__help__subcmd__tunnel__subcmd__stop"
                 ;;
             openproxy__subcmd__key,add)
                 cmd="openproxy__subcmd__key__subcmd__add"
@@ -136,6 +157,30 @@ _openproxy() {
             openproxy__subcmd__provider__subcmd__help,list)
                 cmd="openproxy__subcmd__provider__subcmd__help__subcmd__list"
                 ;;
+            openproxy__subcmd__tunnel,help)
+                cmd="openproxy__subcmd__tunnel__subcmd__help"
+                ;;
+            openproxy__subcmd__tunnel,start)
+                cmd="openproxy__subcmd__tunnel__subcmd__start"
+                ;;
+            openproxy__subcmd__tunnel,status)
+                cmd="openproxy__subcmd__tunnel__subcmd__status"
+                ;;
+            openproxy__subcmd__tunnel,stop)
+                cmd="openproxy__subcmd__tunnel__subcmd__stop"
+                ;;
+            openproxy__subcmd__tunnel__subcmd__help,help)
+                cmd="openproxy__subcmd__tunnel__subcmd__help__subcmd__help"
+                ;;
+            openproxy__subcmd__tunnel__subcmd__help,start)
+                cmd="openproxy__subcmd__tunnel__subcmd__help__subcmd__start"
+                ;;
+            openproxy__subcmd__tunnel__subcmd__help,status)
+                cmd="openproxy__subcmd__tunnel__subcmd__help__subcmd__status"
+                ;;
+            openproxy__subcmd__tunnel__subcmd__help,stop)
+                cmd="openproxy__subcmd__tunnel__subcmd__help__subcmd__stop"
+                ;;
             *)
                 ;;
         esac
@@ -143,7 +188,7 @@ _openproxy() {
 
     case "${cmd}" in
         openproxy)
-            opts="-h --host --port --log-filter --data-dir --help provider key pool completion help"
+            opts="-h --host --port --log-filter --data-dir --help provider key pool tunnel route completion help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -187,7 +232,7 @@ _openproxy() {
             return 0
             ;;
         openproxy__subcmd__help)
-            opts="provider key pool completion help"
+            opts="provider key pool tunnel route completion help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -369,6 +414,76 @@ _openproxy() {
             return 0
             ;;
         openproxy__subcmd__help__subcmd__provider__subcmd__list)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__help__subcmd__route)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__help__subcmd__tunnel)
+            opts="start stop status"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__help__subcmd__tunnel__subcmd__start)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__help__subcmd__tunnel__subcmd__status)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__help__subcmd__tunnel__subcmd__stop)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
@@ -720,6 +835,166 @@ _openproxy() {
             ;;
         openproxy__subcmd__provider__subcmd__list)
             opts="-h --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__route)
+            opts="-h --model --combo --prompt --stream --json --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --model)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --combo)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --prompt)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel)
+            opts="-h --help start stop status help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel__subcmd__help)
+            opts="start stop status help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel__subcmd__help__subcmd__start)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel__subcmd__help__subcmd__status)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel__subcmd__help__subcmd__stop)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel__subcmd__start)
+            opts="-h --provider --port --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --provider)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --port)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel__subcmd__status)
+            opts="-h --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        openproxy__subcmd__tunnel__subcmd__stop)
+            opts="-h --help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
