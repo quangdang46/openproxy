@@ -14,12 +14,21 @@ export default defineConfig({
       applyBaseStyles: false,
     }),
   ],
+  // Disable HMR to avoid WebSocket issues during development
+  devToolbar: {
+    enabled: false,
+  },
+  vite: {
+    server: {
+      hmr: false,
+    },
+  },
   output: 'static',
   site: 'https://github.com/yourusername/openproxy-rust',
   base: '/',
   compressHTML: true,
   build: {
-    format: 'directory', // Better for static sites caching
+    format: 'file', // Better for simple routing
     inlineStylesheets: 'auto', // Better for caching
   },
   vite: {
