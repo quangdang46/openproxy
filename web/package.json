@@ -51,10 +51,13 @@
     "better-sqlite3": "^12.6.2"
   },
   "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
     "autoprefixer": "^10.4.20",
     "eslint": "^9",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.17",
-    "terser": "^5.47.1"
+    "terser": "^5.47.1",
+    "typescript": "^5.9.3"
   }
 }
