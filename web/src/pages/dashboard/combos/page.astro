@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import CombosPageClient from '@/components/CombosPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <CombosPageClient client:only="react" />
+  <DashboardLayout client:only="react">
+    <CombosPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

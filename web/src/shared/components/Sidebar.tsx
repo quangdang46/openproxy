@@ -36,7 +36,6 @@ const debugItems: NavItem[] = [
 
 const systemItems: NavItem[] = [
   { href: "/dashboard/proxy-pools", label: "Proxy Pools", icon: "lan" },
-  { href: "/dashboard/skills", label: "Skills", icon: "extension" },
 ];
 
 interface SidebarProps {

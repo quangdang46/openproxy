@@ -138,13 +138,6 @@ const getPageInfo = (pathname: string): PageInfo => {
       icon: "lan",
       breadcrumbs: [],
     };
-  if (pathname.includes("/skills"))
-    return {
-      title: "Agent Skills",
-      description: "Copy a link and paste to your AI to use OpenProxy — no install needed",
-      icon: "extension",
-      breadcrumbs: [],
-    };
   if (pathname.includes("/endpoint"))
     return {
       title: "Endpoint",
