@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import SettingsPricingPageClient from '@/components/SettingsPricingPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <SettingsPricingPageClient client:only="react" />
+  <DashboardLayout client:only="react">
+    <SettingsPricingPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

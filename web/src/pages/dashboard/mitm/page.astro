@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import MitmPageClient from '@/components/MitmPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <MitmPageClient client:only="react" />
+  <DashboardLayout client:only="react">
+    <MitmPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

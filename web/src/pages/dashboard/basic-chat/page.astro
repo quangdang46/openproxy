@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import BasicChatPageClient from '@/components/BasicChatPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <BasicChatPageClient client:only="react" />
+  <DashboardLayout client:only="react">
+    <BasicChatPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import RequestDetailsTab from '@/components/usage/RequestDetailsTab';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <RequestDetailsTab client:only="react" />
+  <DashboardLayout client:only="react">
+    <RequestDetailsTab client:only="react" />
+  </DashboardLayout>
 </Layout>
