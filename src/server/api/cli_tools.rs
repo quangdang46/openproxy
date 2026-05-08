@@ -928,7 +928,10 @@ async fn write_codex_settings(settings: &CodexSettings) -> anyhow::Result<String
         &mut parsed,
         &["model_providers", "openproxy"],
         TomlValue::Table(TomlMap::from_iter([
-            ("name".to_string(), TomlValue::String("OpenProxy".to_string())),
+            (
+                "name".to_string(),
+                TomlValue::String("OpenProxy".to_string()),
+            ),
             (
                 "base_url".to_string(),
                 TomlValue::String(normalize_v1_base_url(&base_url)),
@@ -1030,7 +1033,8 @@ async fn read_string_optional(path: &FsPath) -> anyhow::Result<Option<String>> {
 }
 
 fn has_openproxy_codex_config(config: &str) -> bool {
-    config.contains("model_provider = \"openproxy\"") || config.contains("[model_providers.openproxy]")
+    config.contains("model_provider = \"openproxy\"")
+        || config.contains("[model_providers.openproxy]")
 }
 
 fn parse_toml_table(content: &str) -> anyhow::Result<TomlMap<String, TomlValue>> {
@@ -2432,8 +2436,6 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-
-
 // GET /api/cli-tools/cowork-mcp-registry
 // Fetches MCP server registry from Anthropic + GitHub plugins
 async fn get_cowork_mcp_registry() -> Response {
@@ -2461,22 +2463,39 @@ async fn get_cowork_mcp_registry() -> Response {
             "https://api.anthropic.com/mcp-registry/v0/servers?limit=500&visibility=commercial,gsuite,gsuite-google{}",
             if cursor.is_empty() { String::new() } else { format!("&cursor={}", urlencoding::encode(&cursor)) }
         );
-        match client.get(&url).header("accept", "application/json").send().await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<Value>().await {
-                    Ok(j) => {
-                        for item in j.get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-                            let s = item.get("server").cloned().unwrap_or_default();
-                            let remote = s.get("remotes").and_then(|r| r.as_array()).and_then(|a| a.first());
-                            let url = remote.and_then(|r| r.get("url")).and_then(Value::as_str).unwrap_or("");
-                            if url.is_empty() { continue; }
-                            let transport = remote.and_then(|r| r.get("type")).and_then(Value::as_str);
-                            let transport = match transport {
-                                Some("streamable-http") => "http",
-                                Some("sse") => "sse",
-                                _ => "http",
-                            };
-                            servers.push(json!({
+        match client
+            .get(&url)
+            .header("accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+                Ok(j) => {
+                    for item in j
+                        .get("servers")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                    {
+                        let s = item.get("server").cloned().unwrap_or_default();
+                        let remote = s
+                            .get("remotes")
+                            .and_then(|r| r.as_array())
+                            .and_then(|a| a.first());
+                        let url = remote
+                            .and_then(|r| r.get("url"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if url.is_empty() {
+                            continue;
+                        }
+                        let transport = remote.and_then(|r| r.get("type")).and_then(Value::as_str);
+                        let transport = match transport {
+                            Some("streamable-http") => "http",
+                            Some("sse") => "sse",
+                            _ => "http",
+                        };
+                        servers.push(json!({
                                 "source": "registry",
                                 "name": s.get("name").and_then(Value::as_str).unwrap_or(""),
                                 "title": s.get("title").or(s.get("name")).and_then(Value::as_str).unwrap_or(""),
@@ -2484,13 +2503,19 @@ async fn get_cowork_mcp_registry() -> Response {
                                 "url": url,
                                 "transport": transport,
                             }));
-                        }
-                        cursor = j.get("metadata").and_then(|m| m.get("nextCursor")).and_then(Value::as_str).unwrap_or("").to_string();
-                        if cursor.is_empty() { break; }
                     }
-                    Err(_) => break,
+                    cursor = j
+                        .get("metadata")
+                        .and_then(|m| m.get("nextCursor"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if cursor.is_empty() {
+                        break;
+                    }
                 }
-            }
+                Err(_) => break,
+            },
             _ => break,
         }
     }

@@ -24,7 +24,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/tunnel/status", get(tunnel_status))
         .route("/api/tunnel/tailscale-install", post(tailscale_install))
         .route("/api/tunnel/tailscale-login", post(tailscale_login))
-        .route("/api/tunnel/tailscale-start-daemon", post(tailscale_start_daemon))
+        .route(
+            "/api/tunnel/tailscale-start-daemon",
+            post(tailscale_start_daemon),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -211,7 +214,8 @@ async fn tailscale_login() -> impl IntoResponse {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let combined = format!("{}{}", stdout, stderr);
             // Extract auth URL from output
-            let auth_url = combined.lines()
+            let auth_url = combined
+                .lines()
                 .find(|l| l.contains("https://login.tailscale.com"))
                 .map(|l| l.trim().to_string())
                 .unwrap_or_default();
@@ -227,10 +231,11 @@ struct TailscaleDaemonRequest {
     sudo_password: Option<String>,
 }
 
-async fn tailscale_start_daemon(
-    Json(_req): Json<TailscaleDaemonRequest>,
-) -> impl IntoResponse {
-    match Command::new("tailscaled").arg("--state=/var/lib/tailscale/tailscaled.state").spawn() {
+async fn tailscale_start_daemon(Json(_req): Json<TailscaleDaemonRequest>) -> impl IntoResponse {
+    match Command::new("tailscaled")
+        .arg("--state=/var/lib/tailscale/tailscaled.state")
+        .spawn()
+    {
         Ok(_) => Json(json!({ "success": true })),
         Err(e) => Json(json!({ "success": false, "error": format!("tailscaled failed: {e}") })),
     }

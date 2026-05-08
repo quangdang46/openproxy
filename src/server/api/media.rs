@@ -53,7 +53,6 @@ pub async fn images_generations(
     with_cors_response(generic_media_handler(state, headers, body, "images/generations").await)
 }
 
-
 /// GET /v1/audio/voices?provider={p}[&lang=xx]
 /// Returns OpenAI-style voice list for TTS providers.
 async fn audio_voices(
@@ -90,7 +89,12 @@ async fn audio_voices(
 
     // Build URL with optional lang param
     let url = if let Some(l) = lang {
-        format!("{}{}lang={}", internal_url, if internal_url.contains('?') { "&" } else { "?" }, urlencoding::encode(l))
+        format!(
+            "{}{}lang={}",
+            internal_url,
+            if internal_url.contains('?') { "&" } else { "?" },
+            urlencoding::encode(l)
+        )
     } else {
         internal_url.to_string()
     };
@@ -120,12 +124,17 @@ async fn audio_voices(
 
                     // Extract voices from either format
                     let voices: Vec<Value> = if lang.is_some() {
-                        data.get("voices").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+                        data.get("voices")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default()
                     } else {
                         let mut v = Vec::new();
                         if let Some(by_lang) = data.get("byLang").and_then(|b| b.as_object()) {
                             for (_, lang_data) in by_lang {
-                                if let Some(lang_voices) = lang_data.get("voices").and_then(|v| v.as_array()) {
+                                if let Some(lang_voices) =
+                                    lang_data.get("voices").and_then(|v| v.as_array())
+                                {
                                     v.extend(lang_voices.clone());
                                 }
                             }
@@ -151,10 +160,14 @@ async fn audio_voices(
 
                     Json(json!({ "object": "list", "data": data_out })).into_response()
                 }
-                Err(e) => Json(json!({ "error": { "message": e.to_string(), "type": "server_error" } })).into_response(),
+                Err(e) => {
+                    Json(json!({ "error": { "message": e.to_string(), "type": "server_error" } }))
+                        .into_response()
+                }
             }
         }
-        Err(e) => Json(json!({ "error": { "message": e.to_string(), "type": "server_error" } })).into_response(),
+        Err(e) => Json(json!({ "error": { "message": e.to_string(), "type": "server_error" } }))
+            .into_response(),
     }
 }
 

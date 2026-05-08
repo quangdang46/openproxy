@@ -515,8 +515,6 @@ async fn get_inworld_voices(
     Json(serde_json::json!({"languages": languages, "byLang": by_lang})).into_response()
 }
 
-
-
 // ===== TTS Voice Routes =====
 
 #[derive(Debug, Deserialize)]
@@ -572,7 +570,13 @@ async fn get_edge_tts_voices_impl(lang_filter: Option<&str>) -> axum::response::
 
     let voices: Vec<serde_json::Value> = match resp.json().await {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": format!("Parse error: {e}") }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("Parse error: {e}") })),
+            )
+                .into_response()
+        }
     };
 
     let mut result_voices = Vec::new();
@@ -580,22 +584,44 @@ async fn get_edge_tts_voices_impl(lang_filter: Option<&str>) -> axum::response::
 
     for v in &voices {
         let short_name = v.get("ShortName").and_then(Value::as_str).unwrap_or("");
-        let friendly = v.get("FriendlyName").and_then(Value::as_str).unwrap_or(short_name);
+        let friendly = v
+            .get("FriendlyName")
+            .and_then(Value::as_str)
+            .unwrap_or(short_name);
         let locale = v.get("Locale").and_then(Value::as_str).unwrap_or("en-US");
         let gender = v.get("Gender").and_then(Value::as_str).unwrap_or("Neutral");
         let parts: Vec<&str> = locale.split('-').collect();
         let lang = parts.first().unwrap_or(&"en").to_string();
         let country = parts.get(1).unwrap_or(&"").to_string();
-        let name = friendly.replace("Microsoft ", "").replace(" Online (Natural) - ", " (");
+        let name = friendly
+            .replace("Microsoft ", "")
+            .replace(" Online (Natural) - ", " (");
         let voice = serde_json::json!({"id": short_name, "name": name, "locale": locale, "lang": lang, "country": country, "gender": gender});
-        if let Some(filter) = lang_filter { if lang != filter { continue; } }
-        let entry = by_lang.entry(lang.clone()).or_insert_with(|| serde_json::json!({"code": &lang, "name": &lang, "voices": []}));
-        entry.as_object_mut().unwrap().get_mut("voices").unwrap().as_array_mut().unwrap().push(voice.clone());
+        if let Some(filter) = lang_filter {
+            if lang != filter {
+                continue;
+            }
+        }
+        let entry = by_lang
+            .entry(lang.clone())
+            .or_insert_with(|| serde_json::json!({"code": &lang, "name": &lang, "voices": []}));
+        entry
+            .as_object_mut()
+            .unwrap()
+            .get_mut("voices")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(voice.clone());
         result_voices.push(voice);
     }
 
-    let languages: Vec<serde_json::Value> = by_lang.iter().map(|(code, _)| serde_json::json!({"code": code, "name": code})).collect();
-    Json(serde_json::json!({"voices": result_voices, "languages": languages, "byLang": by_lang})).into_response()
+    let languages: Vec<serde_json::Value> = by_lang
+        .iter()
+        .map(|(code, _)| serde_json::json!({"code": code, "name": code}))
+        .collect();
+    Json(serde_json::json!({"voices": result_voices, "languages": languages, "byLang": by_lang}))
+        .into_response()
 }
 
 /// GET /api/media-providers/tts/elevenlabs/voices
@@ -604,48 +630,116 @@ async fn get_elevenlabs_voices(
     Query(query): Query<TtsVoiceQuery>,
 ) -> axum::response::Response {
     let snapshot = state.db.snapshot();
-    let api_key = snapshot.provider_connections.iter()
+    let api_key = snapshot
+        .provider_connections
+        .iter()
         .find(|c| c.provider == "elevenlabs" && c.is_active())
         .and_then(|c| c.api_key.as_ref());
     match api_key {
         Some(key) => get_elevenlabs_voices_impl(key, query.lang.as_deref()).await,
-        None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": "No ElevenLabs connection found" }))).into_response(),
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "No ElevenLabs connection found" })),
+        )
+            .into_response(),
     }
 }
 
-async fn get_elevenlabs_voices_impl(api_key: &str, lang_filter: Option<&str>) -> axum::response::Response {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)).build().unwrap_or_default();
-    let resp = match client.get("https://api.elevenlabs.io/v1/voices").header("xi-api-key", api_key).send().await {
+async fn get_elevenlabs_voices_impl(
+    api_key: &str,
+    lang_filter: Option<&str>,
+) -> axum::response::Response {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default();
+    let resp = match client
+        .get("https://api.elevenlabs.io/v1/voices")
+        .header("xi-api-key", api_key)
+        .send()
+        .await
+    {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": format!("ElevenLabs API failed: {e}") }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("ElevenLabs API failed: {e}") })),
+            )
+                .into_response()
+        }
     };
     let status = resp.status();
     if !status.is_success() {
         let text = resp.text().await.unwrap_or_default();
-        return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": format!("ElevenLabs API {status}: {text}") }))).into_response();
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("ElevenLabs API {status}: {text}") })),
+        )
+            .into_response();
     }
     let data: serde_json::Value = match resp.json().await {
         Ok(v) => v,
-        Err(e) => return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({ "error": format!("Parse error: {e}") }))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("Parse error: {e}") })),
+            )
+                .into_response()
+        }
     };
-    let voices = data.get("voices").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let voices = data
+        .get("voices")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let mut by_lang: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
     for v in &voices {
-        let vid = v.get("voice_id").and_then(Value::as_str).unwrap_or_default();
+        let vid = v
+            .get("voice_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let name = v.get("name").and_then(Value::as_str).unwrap_or(vid);
-        let gender = v.get("labels").and_then(|l| l.get("gender")).and_then(Value::as_str).unwrap_or("");
-        let lang = v.get("labels").and_then(|l| l.get("language")).and_then(Value::as_str).unwrap_or("en");
+        let gender = v
+            .get("labels")
+            .and_then(|l| l.get("gender"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let lang = v
+            .get("labels")
+            .and_then(|l| l.get("language"))
+            .and_then(Value::as_str)
+            .unwrap_or("en");
         let category = v.get("category").and_then(Value::as_str).unwrap_or("");
         let voice = serde_json::json!({"id": vid, "name": name, "gender": gender, "lang": lang, "category": category});
-        if let Some(filter) = lang_filter { if lang != filter { continue; } }
-        let entry = by_lang.entry(lang.to_string()).or_insert_with(|| serde_json::json!({"code": lang, "name": lang, "voices": []}));
-        entry.as_object_mut().unwrap().get_mut("voices").unwrap().as_array_mut().unwrap().push(voice);
+        if let Some(filter) = lang_filter {
+            if lang != filter {
+                continue;
+            }
+        }
+        let entry = by_lang
+            .entry(lang.to_string())
+            .or_insert_with(|| serde_json::json!({"code": lang, "name": lang, "voices": []}));
+        entry
+            .as_object_mut()
+            .unwrap()
+            .get_mut("voices")
+            .unwrap()
+            .as_array_mut()
+            .unwrap()
+            .push(voice);
     }
     if let Some(filter) = lang_filter {
-        let voices = by_lang.get(filter).and_then(|v| v.get("voices")).cloned().unwrap_or(serde_json::json!([]));
+        let voices = by_lang
+            .get(filter)
+            .and_then(|v| v.get("voices"))
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
         return Json(serde_json::json!({"voices": voices})).into_response();
     }
-    let languages: Vec<serde_json::Value> = by_lang.iter().map(|(code, _)| serde_json::json!({"code": code, "name": code})).collect();
+    let languages: Vec<serde_json::Value> = by_lang
+        .iter()
+        .map(|(code, _)| serde_json::json!({"code": code, "name": code}))
+        .collect();
     Json(serde_json::json!({"languages": languages, "byLang": by_lang})).into_response()
 }
 
@@ -662,10 +756,7 @@ pub fn routes() -> Router<AppState> {
             "/api/media-providers/tts/inworld/voices",
             get(get_inworld_voices),
         )
-        .route(
-            "/api/media-providers/tts/voices",
-            get(get_tts_voices),
-        )
+        .route("/api/media-providers/tts/voices", get(get_tts_voices))
         .route(
             "/api/media-providers/tts/elevenlabs/voices",
             get(get_elevenlabs_voices),
