@@ -871,7 +871,7 @@ async fn test_proxy_url(
     let client = match reqwest::Client::builder()
         .proxy(proxy)
         .timeout(std::time::Duration::from_millis(normalized_timeout_ms))
-        .user_agent("9Router")
+        .user_agent("OpenProxy")
         .build()
     {
         Ok(client) => client,

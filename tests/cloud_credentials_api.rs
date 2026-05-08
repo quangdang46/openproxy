@@ -112,7 +112,7 @@ async fn response_json(response: axum::response::Response) -> (StatusCode, serde
 }
 
 #[tokio::test]
-async fn cloud_auth_matches_9router_payload() {
+async fn cloud_auth_matches_openproxy_payload() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(authorized_request(
@@ -152,7 +152,7 @@ async fn cloud_auth_matches_9router_payload() {
 }
 
 #[tokio::test]
-async fn cloud_routes_require_authorization_bearer_like_9router() {
+async fn cloud_routes_require_authorization_bearer_like_openproxy() {
     for request in [
         Request::builder()
             .method(Method::POST)
@@ -198,7 +198,7 @@ async fn cloud_routes_require_authorization_bearer_like_9router() {
 }
 
 #[tokio::test]
-async fn cloud_credentials_update_matches_9router_and_persists_tokens() {
+async fn cloud_credentials_update_matches_openproxy_and_persists_tokens() {
     let state = app_state().await;
     let app = openproxy::build_app(state.clone());
     let response = app
@@ -246,7 +246,7 @@ async fn cloud_credentials_update_matches_9router_and_persists_tokens() {
 }
 
 #[tokio::test]
-async fn cloud_credentials_update_matches_9router_errors() {
+async fn cloud_credentials_update_matches_openproxy_errors() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .clone()
@@ -291,7 +291,7 @@ async fn cloud_credentials_update_matches_9router_errors() {
 }
 
 #[tokio::test]
-async fn cloud_model_resolve_matches_9router_contract() {
+async fn cloud_model_resolve_matches_openproxy_contract() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .clone()
@@ -344,7 +344,7 @@ async fn cloud_model_resolve_matches_9router_contract() {
 }
 
 #[tokio::test]
-async fn cloud_models_alias_routes_match_9router_contract() {
+async fn cloud_models_alias_routes_match_openproxy_contract() {
     let state = app_state().await;
     let app = openproxy::build_app(state.clone());
 

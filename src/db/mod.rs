@@ -145,7 +145,7 @@ fn default_data_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
-    let preferred = home.join(".9router");
+    let preferred = home.join(".openproxy");
     let legacy = home.join(".openproxy");
 
     if preferred.exists() || !legacy.exists() {

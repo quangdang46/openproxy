@@ -195,13 +195,13 @@ async fn load_cowork_status() -> AnyhowResult<Value> {
         .and_then(|value| value.get("inferenceProvider"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let has_9router = provider.as_deref() == Some(PROVIDER)
+    let has_openproxy = provider.as_deref() == Some(PROVIDER)
         && base_url.as_deref().is_some_and(|value| !value.is_empty());
 
     Ok(json!({
         "installed": true,
         "config": config,
-        "has9Router": has_9router,
+        "hasOpenProxy": has_openproxy,
         "configPath": config_path.map(|path| path.to_string_lossy().to_string()),
         "cowork": {
             "appliedId": applied_id,

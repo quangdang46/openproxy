@@ -212,7 +212,7 @@ async fn fetch_latest_dashboard_version() -> Option<String> {
         .ok()?;
 
     client
-        .get("https://registry.npmjs.org/9router/latest")
+        .get("https://registry.npmjs.org/openproxy/latest")
         .send()
         .await
         .ok()?

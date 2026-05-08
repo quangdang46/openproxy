@@ -35,7 +35,7 @@ async fn response_json(response: axum::response::Response) -> (StatusCode, serde
 }
 
 #[tokio::test]
-async fn gitlab_pat_route_matches_9router_success_flow() {
+async fn gitlab_pat_route_matches_openproxy_success_flow() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v4/user"))

@@ -1494,7 +1494,7 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
                     "Authorization".to_string(),
                     format!("Bearer {access_token}"),
                 ),
-                ("User-Agent".to_string(), "9Router".to_string()),
+                ("User-Agent".to_string(), "OpenProxy".to_string()),
                 (
                     "Accept".to_string(),
                     "application/vnd.github+json".to_string(),
@@ -1656,7 +1656,7 @@ async fn test_proxy_url(proxy_url: &str) -> Result<(), String> {
 
     let response = client
         .head("https://google.com/")
-        .header("User-Agent", "9Router")
+        .header("User-Agent", "OpenProxy")
         .send()
         .await
         .map_err(|error| {
@@ -1824,11 +1824,11 @@ fn cline_headers(token: &str, extra_headers: Vec<(String, String)>) -> Vec<(Stri
         ("X-Title".to_string(), "Cline".to_string()),
         (
             "User-Agent".to_string(),
-            format!("9Router/{}", env!("CARGO_PKG_VERSION")),
+            format!("OpenProxy/{}", env!("CARGO_PKG_VERSION")),
         ),
         ("X-PLATFORM".to_string(), std::env::consts::OS.to_string()),
         ("X-PLATFORM-VERSION".to_string(), "rust".to_string()),
-        ("X-CLIENT-TYPE".to_string(), "9router".to_string()),
+        ("X-CLIENT-TYPE".to_string(), "openproxy".to_string()),
         (
             "X-CLIENT-VERSION".to_string(),
             env!("CARGO_PKG_VERSION").to_string(),

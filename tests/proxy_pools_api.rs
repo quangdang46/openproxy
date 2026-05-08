@@ -174,7 +174,7 @@ fn dashboard_cookie() -> String {
             authenticated: true,
             exp: now + 3600,
         },
-        &EncodingKey::from_secret(b"9router-default-secret-change-me"),
+        &EncodingKey::from_secret(b"openproxy-default-secret-change-me"),
     )
     .expect("dashboard token");
     format!("auth_token={token}")

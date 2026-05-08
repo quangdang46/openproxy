@@ -34,7 +34,7 @@
 ## Fixes
 - Include alias-backed models in /v1/models listing
 - Improve cloudflared exit code error messages
-- Redirect ~/.9router to DATA_DIR in Docker (persist usage across updates)
+- Redirect ~/.openproxy to DATA_DIR in Docker (persist usage across updates)
 - Prevent SSE listener leak in console-logs stream
 - Gate MITM sudo prompts on server platform
 - Fix Azure validation and persistence (providerSpecificData, Organization required)

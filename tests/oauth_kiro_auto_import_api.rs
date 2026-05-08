@@ -68,7 +68,7 @@ fn write_cache_file(home: &Path, name: &str, content: &str) {
 }
 
 #[tokio::test]
-async fn kiro_auto_import_reports_missing_cache_like_9router() {
+async fn kiro_auto_import_reports_missing_cache_like_openproxy() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let _home = EnvVarGuard::set_home(home.path());
@@ -88,7 +88,7 @@ async fn kiro_auto_import_reports_missing_cache_like_9router() {
 }
 
 #[tokio::test]
-async fn kiro_auto_import_prefers_kiro_auth_token_file_like_9router() {
+async fn kiro_auto_import_prefers_kiro_auth_token_file_like_openproxy() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let _home = EnvVarGuard::set_home(home.path());

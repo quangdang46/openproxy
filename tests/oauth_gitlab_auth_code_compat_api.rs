@@ -45,7 +45,7 @@ async fn response_json(response: axum::response::Response) -> (StatusCode, serde
 }
 
 #[tokio::test]
-async fn gitlab_authorize_matches_9router_query_shape() {
+async fn gitlab_authorize_matches_openproxy_query_shape() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(get_request(
@@ -75,7 +75,7 @@ async fn gitlab_authorize_matches_9router_query_shape() {
 }
 
 #[tokio::test]
-async fn gitlab_exchange_matches_9router_meta_and_saves_connection() {
+async fn gitlab_exchange_matches_openproxy_meta_and_saves_connection() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))

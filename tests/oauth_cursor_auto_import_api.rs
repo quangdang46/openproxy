@@ -201,7 +201,7 @@ fn install_cursor_desktop_file(home: &Path) {
 }
 
 #[tokio::test]
-async fn cursor_auto_import_returns_missing_database_error_like_9router() {
+async fn cursor_auto_import_returns_missing_database_error_like_openproxy() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", home.path());
@@ -220,7 +220,7 @@ async fn cursor_auto_import_returns_missing_database_error_like_9router() {
 }
 
 #[tokio::test]
-async fn cursor_auto_import_returns_not_installed_error_on_linux_like_9router() {
+async fn cursor_auto_import_returns_not_installed_error_on_linux_like_openproxy() {
     if std::env::consts::OS != "linux" {
         return;
     }
@@ -250,7 +250,7 @@ async fn cursor_auto_import_returns_not_installed_error_on_linux_like_9router() 
 }
 
 #[tokio::test]
-async fn cursor_auto_import_reads_tokens_from_local_db_like_9router() {
+async fn cursor_auto_import_reads_tokens_from_local_db_like_openproxy() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let _home = EnvVarGuard::set("HOME", home.path());

@@ -3,5 +3,5 @@ import Layout from '@/layouts/Layout.astro';
 import CLIToolsPageClient from '@/components/CLIToolsPageClient';
 ---
 <Layout>
-  <CLIToolsPageClient />
+  <CLIToolsPageClient client:only="react" />
 </Layout>

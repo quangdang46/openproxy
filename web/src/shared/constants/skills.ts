@@ -1,7 +1,7 @@
 // Agent Skills metadata — single source of truth for /dashboard/skills page.
 // Each skill = 1 raw GitHub URL the user copies and pastes to any AI agent.
 
-const REPO = "decolua/9router"; // TODO: Update to openproxy repo when available
+const REPO = "decolua/openproxy"; // TODO: Update to openproxy repo when available
 const BRANCH = "master";
 const SKILL_PATH = "skills";
 

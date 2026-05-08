@@ -27,7 +27,7 @@ async fn response_json(
 }
 
 #[tokio::test]
-async fn tags_get_matches_9router_payload_and_cors_headers() {
+async fn tags_get_matches_openproxy_payload_and_cors_headers() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(

@@ -46,7 +46,7 @@ fn make_cursor_jwt(email: &str, user_id: &str) -> String {
 }
 
 #[tokio::test]
-async fn cursor_import_get_matches_9router_instructions() {
+async fn cursor_import_get_matches_openproxy_instructions() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(request(
@@ -102,7 +102,7 @@ async fn cursor_import_get_matches_9router_instructions() {
 }
 
 #[tokio::test]
-async fn cursor_import_post_matches_9router_success_flow() {
+async fn cursor_import_post_matches_openproxy_success_flow() {
     let access_token = make_cursor_jwt("me@example.com", "user-123");
     let state = app_state().await;
     let app = openproxy::build_app(state.clone());
@@ -163,7 +163,7 @@ async fn cursor_import_post_matches_9router_success_flow() {
 }
 
 #[tokio::test]
-async fn cursor_import_post_validates_inputs_like_9router() {
+async fn cursor_import_post_validates_inputs_like_openproxy() {
     let valid_token = make_cursor_jwt("me@example.com", "user-123");
     let app = openproxy::build_app(app_state().await);
 

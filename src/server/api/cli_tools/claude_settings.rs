@@ -46,7 +46,7 @@ async fn get_claude_settings(State(state): State<AppState>, headers: HeaderMap) 
     match check_claude_installed().await {
         true => match read_settings().await {
             Ok(settings) => {
-                let has_9router = settings
+                let has_openproxy = settings
                     .as_ref()
                     .and_then(|value| value.get("env"))
                     .and_then(|value| value.get("ANTHROPIC_BASE_URL"))
@@ -55,7 +55,7 @@ async fn get_claude_settings(State(state): State<AppState>, headers: HeaderMap) 
                 Json(json!({
                     "installed": true,
                     "settings": settings,
-                    "has9Router": has_9router,
+                    "hasOpenProxy": has_openproxy,
                     "settingsPath": claude_settings_path().to_string_lossy().to_string(),
                 }))
                 .into_response()
