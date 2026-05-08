@@ -34,10 +34,7 @@ pub fn routes() -> Router<AppState> {
             "/v1/models/{kind}",
             get(list_models_by_kind).options(cors_options),
         )
-        .route(
-            "/v1/models/info",
-            get(models_info).options(cors_options),
-        )
+        .route("/v1/models/info", get(models_info).options(cors_options))
 }
 
 async fn cors_options() -> Response {
