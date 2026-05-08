@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, ChangeEvent, KeyboardEvent } from "react";
+import { useState, useEffect } from "react";
+import type { ChangeEvent, KeyboardEvent } from "react";
 import { Card, Button, Badge, Modal, Input, ModelSelectModal } from "@/shared/components";
 // import Image from "next/image";
 

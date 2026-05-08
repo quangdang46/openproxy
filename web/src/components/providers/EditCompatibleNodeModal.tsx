@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, ChangeEvent } from "react";
+import { useState, useEffect } from "react";
+import type { ChangeEvent } from "react";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
 
 interface Node {

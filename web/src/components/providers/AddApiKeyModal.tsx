@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, ChangeEvent } from "react";
+import { useState } from "react";
+import type { ChangeEvent } from "react";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
 
 interface ProxyPool {

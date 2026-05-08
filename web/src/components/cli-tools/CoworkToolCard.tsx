@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useMemo, ChangeEvent } from "react";
+import { useState, useEffect, useMemo } from "react";
+import type { ChangeEvent } from "react";
 import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/components";
 // import Image from "next/image";
 

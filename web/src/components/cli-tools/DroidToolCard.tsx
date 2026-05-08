@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, ChangeEvent, KeyboardEvent } from "react";
+import { useState, useEffect, useRef } from "react";
+import type { ChangeEvent, KeyboardEvent } from "react";
 import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/components";
 // import Image from "next/image";
 import EndpointPresetControl from "./EndpointPresetControl";

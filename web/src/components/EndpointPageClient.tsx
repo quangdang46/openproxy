@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef, ChangeEvent } from "react";
+import { useState, useEffect, useRef } from "react";
+import type { ChangeEvent } from "react";
 import { Card, Button, Input, Modal, CardSkeleton, Toggle } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 

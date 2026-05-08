@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, ChangeEvent, KeyboardEvent } from "react";
+import { useState, useEffect, useCallback } from "react";
+import type { ChangeEvent, KeyboardEvent } from "react";
 import { Card, Button, Badge, Input } from "@/shared/components";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:4623";

@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useCallback, ChangeEvent, KeyboardEvent } from "react";
+import { useState, useEffect, useCallback } from "react";
+import type { ChangeEvent, KeyboardEvent } from "react";
 import { Card, Button, Badge, Input, ModelSelectModal } from "@/shared/components";
 import { TOOL_HOSTS } from "@/shared/constants/mitmToolHosts";
 // import Image from "next/image";
