@@ -75,7 +75,7 @@ fn make_jwt(email: &str) -> String {
 }
 
 #[tokio::test]
-async fn kiro_social_exchange_matches_9router_success_flow() {
+async fn kiro_social_exchange_matches_openproxy_success_flow() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _env = EnvVarGuard::set("OPENPROXY_KIRO_AUTH_SERVICE_BASE_URL", &server.uri());
@@ -146,7 +146,7 @@ async fn kiro_social_exchange_matches_9router_success_flow() {
 }
 
 #[tokio::test]
-async fn kiro_social_exchange_validates_inputs_like_9router() {
+async fn kiro_social_exchange_validates_inputs_like_openproxy() {
     let app = openproxy::build_app(app_state().await);
 
     let missing = app
@@ -175,7 +175,7 @@ async fn kiro_social_exchange_validates_inputs_like_9router() {
 }
 
 #[tokio::test]
-async fn kiro_social_exchange_wraps_exchange_failure_like_9router() {
+async fn kiro_social_exchange_wraps_exchange_failure_like_openproxy() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _env = EnvVarGuard::set("OPENPROXY_KIRO_AUTH_SERVICE_BASE_URL", &server.uri());

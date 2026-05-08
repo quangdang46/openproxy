@@ -1,4 +1,4 @@
-//! Cloud auth, credential refresh, and alias APIs that must match 9router.
+//! Cloud auth, credential refresh, and alias APIs that must match openproxy.
 
 use axum::{
     extract::State,

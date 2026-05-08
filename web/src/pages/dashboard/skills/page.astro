@@ -3,5 +3,5 @@ import Layout from '@/layouts/Layout.astro';
 import SkillsPageClient from '@/components/SkillsPageClient';
 ---
 <Layout>
-  <SkillsPageClient />
+  <SkillsPageClient client:only="react" />
 </Layout>

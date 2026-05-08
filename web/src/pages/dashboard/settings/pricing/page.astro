@@ -3,5 +3,5 @@ import Layout from '@/layouts/Layout.astro';
 import SettingsPricingPageClient from '@/components/SettingsPricingPageClient';
 ---
 <Layout>
-  <SettingsPricingPageClient />
+  <SettingsPricingPageClient client:only="react" />
 </Layout>

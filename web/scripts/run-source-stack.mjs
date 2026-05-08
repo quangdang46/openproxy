@@ -23,7 +23,7 @@ const nextEnv = {
   NEXT_PUBLIC_BASE_URL: process.env.NEXT_PUBLIC_BASE_URL || 'http://127.0.0.1:4623',
 };
 
-console.log('🚀 Starting 9Router development stack...');
+console.log('🚀 Starting OpenProxy development stack...');
 console.log('📦 Rust backend: http://127.0.0.1:4623');
 console.log('🎨 Next.js dashboard: http://127.0.0.1:4624');
 console.log('');

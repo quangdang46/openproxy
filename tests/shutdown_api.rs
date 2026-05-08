@@ -118,7 +118,7 @@ async fn wait_for_ready(client: &reqwest::Client, base_url: &str) {
 }
 
 #[tokio::test]
-async fn shutdown_route_returns_401_when_secret_missing_like_9router() {
+async fn shutdown_route_returns_401_when_secret_missing_like_openproxy() {
     let mut server = ServerHandle::start("development", None).await;
     let response = server.post_shutdown(None).await;
 

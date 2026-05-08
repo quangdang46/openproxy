@@ -61,7 +61,7 @@ async fn response_json(response: axum::response::Response) -> (StatusCode, serde
 }
 
 #[tokio::test]
-async fn iflow_cookie_route_matches_9router_success_flow() {
+async fn iflow_cookie_route_matches_openproxy_success_flow() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _env = EnvVarGuard::set("OPENPROXY_IFLOW_API_BASE_URL", &server.uri());
@@ -130,7 +130,7 @@ async fn iflow_cookie_route_matches_9router_success_flow() {
 }
 
 #[tokio::test]
-async fn iflow_cookie_route_validates_cookie_input_like_9router() {
+async fn iflow_cookie_route_validates_cookie_input_like_openproxy() {
     let app = openproxy::build_app(app_state().await);
 
     let missing_cookie = app

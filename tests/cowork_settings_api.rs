@@ -163,7 +163,7 @@ async fn cowork_settings_post_bootstraps_and_get_reads_config() {
     let (status, json) = response_json(response).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["hasOpenProxy"], true);
     assert_eq!(json["cowork"]["baseUrl"], "https://proxy.example.com/v1");
     assert_eq!(
         json["cowork"]["models"],
@@ -254,6 +254,6 @@ async fn cowork_settings_delete_clears_existing_config() {
     let (status, json) = response_json(get_response).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], false);
+    assert_eq!(json["hasOpenProxy"], false);
     assert_eq!(json["cowork"]["baseUrl"], serde_json::Value::Null);
 }

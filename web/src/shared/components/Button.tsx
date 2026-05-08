@@ -2,7 +2,7 @@
 
 import { cn } from "@/shared/utils/cn";
 import React from "react";
-import { ButtonProps } from "@/types";
+import type { ButtonProps } from "@/types";
 
 const variants = {
   primary: "bg-brand-500 hover:bg-brand-600 text-white shadow-sm disabled:bg-surface-3 disabled:text-text-muted",

@@ -3,5 +3,5 @@ import Layout from '@/layouts/Layout.astro';
 import TranslatorPageClient from '@/components/TranslatorPageClient';
 ---
 <Layout>
-  <TranslatorPageClient />
+  <TranslatorPageClient client:only="react" />
 </Layout>

@@ -3,5 +3,5 @@ import Layout from '@/layouts/Layout.astro';
 import EndpointPageClient from '@/components/EndpointPageClient';
 ---
 <Layout>
-  <EndpointPageClient />
+  <EndpointPageClient client:only="react" />
 </Layout>

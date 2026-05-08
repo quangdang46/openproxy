@@ -9,7 +9,7 @@ export const APP_CONFIG = {
 
 // GitHub configuration
 export const GITHUB_CONFIG = {
-  changelogUrl: "https://raw.githubusercontent.com/decolua/9router/refs/heads/master/CHANGELOG.md", // TODO: Update to openproxy repo when available
+  changelogUrl: "https://raw.githubusercontent.com/decolua/openproxy/refs/heads/master/CHANGELOG.md", // TODO: Update to openproxy repo when available
 } as const;
 
 // Updater configuration
