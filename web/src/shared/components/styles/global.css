@@ -1,4 +1,5 @@
 @import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Inter:wght@400;500;600;700&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -7,118 +8,232 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ============================================================
-   OpenProxy palette — adopted from 9remote_private/web
-   Brand orange (dark) / soft coral (light), neutral warm bases
+   OpenProxy palette — MiniMax design system
+   Stark black/white canvas + product brand accents (coral, magenta,
+   blue, purple). DM Sans primary, Inter fallback.
    ============================================================ */
 :root {
-  /* Brand scale (light) - centered on #E56A4A */
-  --color-brand-50: #fdf1ed;
-  --color-brand-100: #fadccf;
-  --color-brand-200: #f4b59c;
-  --color-brand-300: #ee8d6a;
-  --color-brand-400: #ea7855;
-  --color-brand-500: #E56A4A;
-  --color-brand-600: #cc5236;
-  --color-brand-700: #a64027;
-  --color-brand-800: #7a2f1d;
-  --color-brand-900: #4d1e12;
+  /* ------------------------------------------------------------
+     MiniMax brand & product accents
+     ------------------------------------------------------------ */
+  --color-brand-coral: #E2400D;
+  --color-brand-magenta: #D8266F;
+  --color-brand-blue: #1668EE;
+  --color-brand-blue-deep: #0040D8;
+  --color-brand-blue-700: #1F3DB7;
+  --color-brand-blue-200: #DCE7FB;
+  --color-brand-cyan: #5BD2F7;
+  --color-brand-purple: #6E3FF3;
 
-  /* Primary (legacy alias for backward compat with existing components) */
-  --color-primary: var(--color-brand-500);
-  --color-primary-hover: var(--color-brand-600);
+  /* Coral as legacy "brand" scale for backward-compat with existing
+     bg-brand-500 / text-brand-600 utilities. Kept on the coral hue. */
+  --color-brand-50: #FCE9E2;
+  --color-brand-100: #F8C9B8;
+  --color-brand-200: #F2A488;
+  --color-brand-300: #EC7E58;
+  --color-brand-400: #E76434;
+  --color-brand-500: #E2400D;
+  --color-brand-600: #BD350B;
+  --color-brand-700: #962A09;
+  --color-brand-800: #6E1F06;
+  --color-brand-900: #461404;
 
-  /* Surfaces & backgrounds (light) */
-  --color-bg: #FDFAF6;
-  --color-bg-alt: #F7F3EE;
-  --color-surface: #ffffff;
-  --color-surface-2: #f4f4f5;
-  --color-surface-3: #e7e7e9;
-  --color-sidebar: rgba(244, 241, 236, 0.85);
+  /* ------------------------------------------------------------
+     Surface tokens (light)
+     ------------------------------------------------------------ */
+  --color-canvas: #FFFFFF;
+  --color-surface-base: #F5F5F5;
+  --color-surface-soft: #F9F9F9;
+  --color-hairline: #E5E5E5;
+  --color-hairline-soft: #F0F0F0;
+  --color-footer-bg: #0A0A0A;
 
-  /* Borders */
-  --color-border: #e5e7eb;
-  --color-border-subtle: #f1f1f3;
+  /* Legacy aliases for unchanged components.
+     bg / surface / surface-2 / surface-3 still work but point at the
+     new MiniMax tokens. */
+  --color-bg: var(--color-canvas);
+  --color-bg-alt: var(--color-surface-soft);
+  --color-surface: var(--color-canvas);
+  --color-surface-2: var(--color-surface-base);
+  --color-surface-3: var(--color-hairline);
+  --color-sidebar: var(--color-surface-soft);
 
-  /* Text */
-  --color-text: #0a0a0a;
-  --color-text-main: #0a0a0a;
-  --color-text-muted: #6B7280;
-  --color-text-subtle: #9CA3AF;
+  --color-border: var(--color-hairline);
+  --color-border-subtle: var(--color-hairline-soft);
 
-  /* Status */
-  --color-danger: #cf222e;
-  --color-success: #10B981;
+  /* ------------------------------------------------------------
+     Text tokens (light)
+     ------------------------------------------------------------ */
+  --color-ink: #0A0A0A;
+  --color-ink-strong: #000000;
+  --color-charcoal: #1F1F1F;
+  --color-slate: #4A4A4A;
+  --color-steel: #707070;
+  --color-stone: #8A8A8A;
+  --color-muted: #B0B0B0;
+  --color-on-primary: #FFFFFF;
+  --color-on-dark: #FFFFFF;
+
+  /* Legacy aliases — primary becomes near-black per MiniMax spec. */
+  --color-primary: var(--color-ink);
+  --color-primary-hover: var(--color-charcoal);
+  --color-text: var(--color-ink);
+  --color-text-main: var(--color-ink);
+  --color-text-muted: var(--color-slate);
+  --color-text-subtle: var(--color-steel);
+
+  /* ------------------------------------------------------------
+     Status
+     ------------------------------------------------------------ */
+  --color-success-bg: #E8F8E8;
+  --color-success-text: #168A1F;
+  --color-danger: #D45656;
+  --color-success: #168A1F;
   --color-warning: #F59E0B;
-  --color-info: #3B82F6;
+  --color-info: var(--color-brand-blue);
 
-  /* Radius */
-  --radius-brand: 10px;
-  --radius-brand-lg: 14px;
+  /* ------------------------------------------------------------
+     Radius scale (MiniMax)
+     ------------------------------------------------------------ */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-xxl: 20px;
+  --radius-xxxl: 24px;
+  --radius-hero: 32px;
+  --radius-pill: 9999px;
 
-  /* Shadows */
-  --shadow-soft: 0 1px 2px 0 rgba(0,0,0,0.04);
-  --shadow-warm: 0 2px 12px -2px rgba(229, 106, 74, 0.18);
-  --shadow-elevated: 0 12px 28px -4px rgba(60, 50, 45, 0.06);
-  --shadow-elev:
-    inset 0 1px 0 0 rgba(255,255,255,0.8),
-    0 1px 2px rgba(15,23,42,0.04),
-    0 12px 36px -8px rgba(15,23,42,0.10);
-  --shadow-focus: 0 0 0 3px rgba(229,106,74,0.18);
+  /* Legacy aliases. */
+  --radius-brand: var(--radius-md);
+  --radius-brand-lg: var(--radius-xl);
+
+  /* ------------------------------------------------------------
+     Spacing scale (MiniMax)
+     ------------------------------------------------------------ */
+  --space-xxs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 20px;
+  --space-xl: 24px;
+  --space-xxl: 32px;
+  --space-xxxl: 40px;
+  --space-section-sm: 48px;
+  --space-section: 64px;
+  --space-section-lg: 80px;
+  --space-hero: 96px;
+
+  /* ------------------------------------------------------------
+     Shadow / elevation
+     ------------------------------------------------------------ */
+  --shadow-soft: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
+  --shadow-card: 0 4px 6px 0 rgba(0, 0, 0, 0.08);
+  --shadow-atmospheric: 0 0 22px 0 rgba(0, 0, 0, 0.08);
+  --shadow-modal: 0 12px 16px -4px rgba(36, 36, 36, 0.08);
+  --shadow-focus: 0 0 0 3px rgba(0, 64, 216, 0.18);
+  --shadow-elevated: var(--shadow-card);
+  --shadow-elev: var(--shadow-card);
+  --shadow-warm: var(--shadow-atmospheric);
+
+  /* ------------------------------------------------------------
+     Typography
+     ------------------------------------------------------------ */
+  --font-sans: 'DM Sans', 'Inter', -apple-system, BlinkMacSystemFont,
+    'Helvetica Neue', Helvetica, Arial, sans-serif;
 
   color-scheme: light;
 }
 
 .dark {
-  /* Brand scale (dark) - centered on #E56A4A, same as light for consistency */
-  --color-brand-50: #fdf1ed;
-  --color-brand-100: #fadccf;
-  --color-brand-200: #f4b59c;
-  --color-brand-300: #ee8d6a;
-  --color-brand-400: #ea7855;
-  --color-brand-500: #E56A4A;
-  --color-brand-600: #cc5236;
-  --color-brand-700: #a64027;
-  --color-brand-800: #7a2f1d;
-  --color-brand-900: #4d1e12;
+  /* Keep all MiniMax brand accents identical in dark mode. */
+  --color-brand-coral: #E2400D;
+  --color-brand-magenta: #D8266F;
+  --color-brand-blue: #2F7AF7;
+  --color-brand-blue-deep: #0F4FE8;
+  --color-brand-blue-700: #2745C2;
+  --color-brand-blue-200: rgba(220, 231, 251, 0.16);
+  --color-brand-cyan: #5BD2F7;
+  --color-brand-purple: #8C5FFF;
 
-  --color-primary: #E56A4A;
-  --color-primary-hover: #cc5236;
+  --color-brand-50: #2C0F02;
+  --color-brand-100: #461404;
+  --color-brand-200: #6E1F06;
+  --color-brand-300: #962A09;
+  --color-brand-400: #BD350B;
+  --color-brand-500: #E2400D;
+  --color-brand-600: #EC7E58;
+  --color-brand-700: #F2A488;
+  --color-brand-800: #F8C9B8;
+  --color-brand-900: #FCE9E2;
 
-  /* Surfaces (dark - Claude-like neutral warm) */
-  --color-bg: #1a1a1a;
-  --color-bg-alt: #1F1F1E;
-  --color-surface: #262626;
-  --color-surface-2: #303030;
-  --color-surface-3: #3a3a3a;
-  --color-sidebar: rgba(30, 30, 30, 0.85);
+  /* Dark surfaces */
+  --color-canvas: #0E0E0E;
+  --color-surface-base: #1A1A1A;
+  --color-surface-soft: #161616;
+  --color-hairline: #2A2A2A;
+  --color-hairline-soft: #1F1F1F;
 
-  --color-border: #333333;
-  --color-border-subtle: #2a2a2a;
+  --color-bg: var(--color-canvas);
+  --color-bg-alt: var(--color-surface-soft);
+  --color-surface: #1A1A1A;
+  --color-surface-2: #232323;
+  --color-surface-3: #303030;
+  --color-sidebar: var(--color-surface-soft);
 
-  --color-text: #ededed;
-  --color-text-main: #ededed;
-  --color-text-muted: #9ca3af;
-  --color-text-subtle: #6b7280;
+  --color-border: var(--color-hairline);
+  --color-border-subtle: var(--color-hairline-soft);
 
-  --color-danger: #ef4444;
-  --color-success: #22c55e;
-  --color-warning: #fbbf24;
-  --color-info: #60a5fa;
+  /* Dark text */
+  --color-ink: #F4F4F4;
+  --color-ink-strong: #FFFFFF;
+  --color-charcoal: #E0E0E0;
+  --color-slate: #B5B5B5;
+  --color-steel: #909090;
+  --color-stone: #6E6E6E;
+  --color-muted: #4A4A4A;
+  --color-on-primary: #0A0A0A;
+  --color-on-dark: #FFFFFF;
 
-  --shadow-soft: 0 1px 2px 0 rgba(0,0,0,0.3);
-  --shadow-warm: 0 2px 12px -2px rgba(229, 106, 74, 0.25);
-  --shadow-elevated: 0 12px 28px -4px rgba(0, 0, 0, 0.45);
-  --shadow-elev:
-    inset 0 1px 0 0 rgba(255,255,255,0.06),
-    0 1px 2px rgba(0,0,0,0.4),
-    0 16px 48px -8px rgba(0,0,0,0.55);
-  --shadow-focus: 0 0 0 3px rgba(229, 106, 74, 0.18);
+  --color-primary: var(--color-ink);
+  --color-primary-hover: var(--color-charcoal);
+  --color-text: var(--color-ink);
+  --color-text-main: var(--color-ink);
+  --color-text-muted: var(--color-slate);
+  --color-text-subtle: var(--color-steel);
+
+  --color-success-bg: rgba(22, 138, 31, 0.18);
+  --color-success-text: #5DD167;
+  --color-danger: #EF6A6A;
+  --color-success: #5DD167;
+  --color-warning: #FBBF24;
+  --color-info: var(--color-brand-blue);
+
+  --shadow-soft: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
+  --shadow-card: 0 4px 6px 0 rgba(0, 0, 0, 0.5);
+  --shadow-atmospheric: 0 0 22px 0 rgba(0, 0, 0, 0.5);
+  --shadow-modal: 0 12px 16px -4px rgba(0, 0, 0, 0.55);
+  --shadow-focus: 0 0 0 3px rgba(47, 122, 247, 0.32);
+  --shadow-elevated: var(--shadow-card);
+  --shadow-elev: var(--shadow-card);
+  --shadow-warm: var(--shadow-atmospheric);
 
   color-scheme: dark;
 }
 
 @theme inline {
-  /* Brand scale */
+  /* MiniMax brand accents */
+  --color-brand-coral: var(--color-brand-coral);
+  --color-brand-magenta: var(--color-brand-magenta);
+  --color-brand-blue: var(--color-brand-blue);
+  --color-brand-blue-deep: var(--color-brand-blue-deep);
+  --color-brand-blue-700: var(--color-brand-blue-700);
+  --color-brand-blue-200: var(--color-brand-blue-200);
+  --color-brand-cyan: var(--color-brand-cyan);
+  --color-brand-purple: var(--color-brand-purple);
+
+  /* Brand scale (legacy compat) */
   --color-brand-50: var(--color-brand-50);
   --color-brand-100: var(--color-brand-100);
   --color-brand-200: var(--color-brand-200);
@@ -130,11 +245,28 @@
   --color-brand-800: var(--color-brand-800);
   --color-brand-900: var(--color-brand-900);
 
-  /* Primary aliases */
+  /* Surface tokens */
+  --color-canvas: var(--color-canvas);
+  --color-surface-base: var(--color-surface-base);
+  --color-surface-soft: var(--color-surface-soft);
+  --color-hairline: var(--color-hairline);
+  --color-hairline-soft: var(--color-hairline-soft);
+  --color-footer-bg: var(--color-footer-bg);
+
+  /* Text tokens */
+  --color-ink: var(--color-ink);
+  --color-ink-strong: var(--color-ink-strong);
+  --color-charcoal: var(--color-charcoal);
+  --color-slate: var(--color-slate);
+  --color-steel: var(--color-steel);
+  --color-stone: var(--color-stone);
+  --color-muted: var(--color-muted);
+  --color-on-primary: var(--color-on-primary);
+  --color-on-dark: var(--color-on-dark);
+
+  /* Legacy semantic aliases */
   --color-primary: var(--color-primary);
   --color-primary-hover: var(--color-primary-hover);
-
-  /* Semantic */
   --color-bg: var(--color-bg);
   --color-bg-alt: var(--color-bg-alt);
   --color-surface: var(--color-surface);
@@ -147,66 +279,173 @@
   --color-text-main: var(--color-text-main);
   --color-text-muted: var(--color-text-muted);
   --color-text-subtle: var(--color-text-subtle);
-  --color-accent: var(--color-brand-500);
+  --color-accent: var(--color-brand-coral);
+  --color-success-bg: var(--color-success-bg);
+  --color-success-text: var(--color-success-text);
   --color-danger: var(--color-danger);
   --color-success: var(--color-success);
   --color-warning: var(--color-warning);
   --color-info: var(--color-info);
 
-  /* Static fallbacks (explicit per-mode usage if needed) */
-  --color-bg-light: #FCFBF9;
-  --color-bg-dark: #1a1a1a;
-  --color-surface-light: #ffffff;
-  --color-surface-dark: #262626;
-  --color-sidebar-light: #F4F1EC;
-  --color-sidebar-dark: #1F1F1E;
-  --color-border-light: #e5e7eb;
-  --color-border-dark: #333333;
-  --color-text-main-light: #0a0a0a;
-  --color-text-main-dark: #ededed;
-  --color-text-muted-light: #6B7280;
-  --color-text-muted-dark: #9ca3af;
+  /* Static fallbacks */
+  --color-bg-light: #FFFFFF;
+  --color-bg-dark: #0E0E0E;
+  --color-surface-light: #FFFFFF;
+  --color-surface-dark: #1A1A1A;
+  --color-sidebar-light: #F9F9F9;
+  --color-sidebar-dark: #161616;
+  --color-border-light: #E5E5E5;
+  --color-border-dark: #2A2A2A;
+  --color-text-main-light: #0A0A0A;
+  --color-text-main-dark: #F4F4F4;
+  --color-text-muted-light: #4A4A4A;
+  --color-text-muted-dark: #B5B5B5;
 
   /* Radius */
+  --radius-xs: var(--radius-xs);
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+  --radius-xl: var(--radius-xl);
+  --radius-xxl: var(--radius-xxl);
+  --radius-xxxl: var(--radius-xxxl);
+  --radius-hero: var(--radius-hero);
+  --radius-pill: var(--radius-pill);
   --radius-brand: var(--radius-brand);
   --radius-brand-lg: var(--radius-brand-lg);
 
   /* Shadows */
   --shadow-soft: var(--shadow-soft);
-  --shadow-warm: var(--shadow-warm);
+  --shadow-card: var(--shadow-card);
+  --shadow-atmospheric: var(--shadow-atmospheric);
+  --shadow-modal: var(--shadow-modal);
+  --shadow-focus: var(--shadow-focus);
   --shadow-elevated: var(--shadow-elevated);
   --shadow-elev: var(--shadow-elev);
-  --shadow-focus: var(--shadow-focus);
+  --shadow-warm: var(--shadow-warm);
 
-  /* Font - Inter primary, Apple system fallback */
-  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', system-ui, sans-serif;
+  /* Font */
+  --font-sans: var(--font-sans);
 }
 
-/* Base */
+/* ============================================================
+   Base
+   ============================================================ */
 body {
-  background-color: var(--color-bg);
-  color: var(--color-text-main);
+  background-color: var(--color-canvas);
+  color: var(--color-ink);
   font-family: var(--font-sans);
+  font-feature-settings: 'ss01', 'cv11';
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Selection - brand-tinted */
+/* MiniMax tightens hero/display leading & letter-spacing. */
+h1, h2, h3 {
+  letter-spacing: -0.01em;
+}
+
+/* Selection — ink (not brand) per MiniMax monochrome canvas. */
 ::selection {
-  background-color: rgba(229, 106, 74, 0.25);
-  color: var(--color-primary);
+  background-color: rgba(10, 10, 10, 0.18);
+  color: var(--color-ink);
 }
 .dark ::selection {
-  background-color: rgba(229, 106, 74, 0.3);
-  color: var(--color-brand-300);
+  background-color: rgba(244, 244, 244, 0.18);
+  color: var(--color-ink);
 }
 
-/* iOS keyboard accent */
+/* iOS keyboard accent — uses brand-blue-deep (form activation color). */
 input, textarea {
-  accent-color: var(--color-primary);
+  accent-color: var(--color-brand-blue-deep);
 }
 
-/* Scrollbar (custom-scrollbar utility kept for compat) */
+/* ============================================================
+   Typography utilities — MiniMax scale
+   ============================================================ */
+.type-hero-display {
+  font-size: 80px;
+  line-height: 1.10;
+  letter-spacing: -2px;
+  font-weight: 600;
+}
+.type-display-lg {
+  font-size: 56px;
+  line-height: 1.10;
+  letter-spacing: -1.5px;
+  font-weight: 600;
+}
+.type-heading-lg {
+  font-size: 40px;
+  line-height: 1.20;
+  letter-spacing: -1px;
+  font-weight: 600;
+}
+.type-heading-md {
+  font-size: 32px;
+  line-height: 1.25;
+  letter-spacing: -0.5px;
+  font-weight: 600;
+}
+.type-heading-sm {
+  font-size: 24px;
+  line-height: 1.30;
+  font-weight: 600;
+}
+.type-card-title {
+  font-size: 20px;
+  line-height: 1.40;
+  font-weight: 600;
+}
+.type-subtitle {
+  font-size: 18px;
+  line-height: 1.50;
+  font-weight: 500;
+}
+.type-body-md {
+  font-size: 16px;
+  line-height: 1.50;
+  font-weight: 400;
+}
+.type-body-md-bold {
+  font-size: 16px;
+  line-height: 1.50;
+  font-weight: 700;
+}
+.type-body-sm {
+  font-size: 14px;
+  line-height: 1.50;
+  font-weight: 400;
+}
+.type-body-sm-medium {
+  font-size: 14px;
+  line-height: 1.50;
+  font-weight: 500;
+}
+.type-caption {
+  font-size: 13px;
+  line-height: 1.70;
+  font-weight: 400;
+}
+.type-caption-bold {
+  font-size: 13px;
+  line-height: 1.50;
+  font-weight: 600;
+}
+.type-micro {
+  font-size: 12px;
+  line-height: 1.50;
+  font-weight: 400;
+}
+.type-button-md {
+  font-size: 14px;
+  line-height: 1.40;
+  font-weight: 600;
+}
+
+/* ============================================================
+   Scrollbar (custom-scrollbar utility kept for compat)
+   ============================================================ */
 .custom-scrollbar::-webkit-scrollbar {
   width: 6px;
 }
@@ -214,46 +453,49 @@ input, textarea {
   background: transparent;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: rgba(156, 163, 175, 0.3);
+  background-color: rgba(112, 112, 112, 0.32);
   border-radius: 20px;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background-color: var(--color-primary);
+  background-color: var(--color-ink);
 }
 
-/* Thin horizontal scrollbar - brand colored */
+/* Thin horizontal scrollbar — ink colored */
 .scroll-thin-x {
   scrollbar-width: thin;
-  scrollbar-color: rgba(229, 106, 74, 0.55) transparent;
+  scrollbar-color: rgba(10, 10, 10, 0.45) transparent;
 }
 .dark .scroll-thin-x {
-  scrollbar-color: rgba(229, 106, 74, 0.55) transparent;
+  scrollbar-color: rgba(244, 244, 244, 0.45) transparent;
 }
 .scroll-thin-x::-webkit-scrollbar { height: 3px; }
 .scroll-thin-x::-webkit-scrollbar-track { background: transparent; }
 .scroll-thin-x::-webkit-scrollbar-thumb {
-  background: rgba(229, 106, 74, 0.55);
+  background: rgba(10, 10, 10, 0.45);
   border-radius: 3px;
 }
 .dark .scroll-thin-x::-webkit-scrollbar-thumb {
-  background: rgba(229, 106, 74, 0.55);
+  background: rgba(244, 244, 244, 0.45);
 }
 
-/* Reusable elevated card */
+/* ============================================================
+   Reusable card chrome (MiniMax: flat-with-borders default)
+   ============================================================ */
 .card-soft {
-  background-color: var(--color-surface);
-  box-shadow: var(--shadow-soft);
-  border-radius: var(--radius-brand-lg);
+  background-color: var(--color-canvas);
+  border: 1px solid var(--color-hairline);
+  border-radius: var(--radius-xl);
 }
 .card-elev {
-  background-color: var(--color-surface);
-  box-shadow: var(--shadow-elev);
-  border-radius: var(--radius-brand-lg);
+  background-color: var(--color-canvas);
+  border: 1px solid var(--color-hairline);
+  box-shadow: var(--shadow-card);
+  border-radius: var(--radius-xl);
 }
 
 /* Hero gradient (compat) */
 .bg-hero-gradient {
-  background: linear-gradient(180deg, var(--color-bg-alt) 0%, var(--color-bg) 100%);
+  background: linear-gradient(180deg, var(--color-surface-soft) 0%, var(--color-canvas) 100%);
 }
 
 /* macOS Vibrancy */
@@ -263,7 +505,7 @@ input, textarea {
   background: rgba(255, 255, 255, 0.72);
 }
 .dark .bg-vibrancy {
-  background: rgba(38, 38, 38, 0.72);
+  background: rgba(26, 26, 26, 0.72);
 }
 
 /* macOS Traffic Lights */
@@ -325,12 +567,12 @@ button {
 
 @keyframes border-glow {
   0%, 100% {
-    box-shadow: 0 0 5px rgba(229, 106, 74, 0.3), 0 0 10px rgba(229, 106, 74, 0.2);
-    border-color: rgba(229, 106, 74, 0.5);
+    box-shadow: 0 0 5px rgba(226, 64, 13, 0.3), 0 0 10px rgba(226, 64, 13, 0.2);
+    border-color: rgba(226, 64, 13, 0.5);
   }
   50% {
-    box-shadow: 0 0 10px rgba(229, 106, 74, 0.5), 0 0 20px rgba(229, 106, 74, 0.3);
-    border-color: rgba(229, 106, 74, 0.8);
+    box-shadow: 0 0 10px rgba(226, 64, 13, 0.5), 0 0 20px rgba(226, 64, 13, 0.3);
+    border-color: rgba(226, 64, 13, 0.8);
   }
 }
 .animate-border-glow { animation: border-glow 2s ease-in-out infinite; }
@@ -347,110 +589,23 @@ button {
   from { transform: translateY(-10px); opacity: 0; }
   to { transform: translateY(0); opacity: 1; }
 }
-.slide-in-right { animation: slideInFromRight 0.25s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
-.fade-in { animation: fadeIn 0.2s ease-out forwards; }
-.slide-in-top { animation: slideInFromTop 0.18s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+.animate-slide-in-right { animation: slideInFromRight 0.3s ease-out; }
+.animate-fade-in { animation: fadeIn 0.2s ease-out; }
+.animate-slide-in-top { animation: slideInFromTop 0.2s ease-out; }
 
-@keyframes pulseGlow {
-  0%, 100% { opacity: 0.4; transform: scale(1); }
-  50% { opacity: 0.7; transform: scale(1.05); }
-}
-.animate-pulse-glow { animation: pulseGlow 3s ease-in-out infinite; }
-
-/* CTA shimmer + glow pulse */
-@keyframes ctaShimmer {
-  0% { transform: translateX(-120%) skewX(-20deg); }
-  100% { transform: translateX(220%) skewX(-20deg); }
-}
-@keyframes ctaGlowPulse {
-  0%, 100% { box-shadow: 0 8px 24px -8px rgba(229, 106, 74, 0.45), 0 0 0 0 rgba(229, 106, 74, 0.5); }
-  50% { box-shadow: 0 12px 32px -8px rgba(229, 106, 74, 0.6), 0 0 0 8px rgba(229, 106, 74, 0); }
-}
-.btn-cta {
-  position: relative;
-  overflow: hidden;
-  isolation: isolate;
-  animation: ctaGlowPulse 2.4s ease-in-out infinite;
-}
-.btn-cta::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 50%;
-  height: 100%;
-  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
-  animation: ctaShimmer 2.8s ease-in-out infinite;
-  pointer-events: none;
-  z-index: 1;
-}
-.btn-cta > * { position: relative; z-index: 2; }
-
-/* Dot Grid Background Pattern */
-.dot-grid-bg {
-  background-color: var(--color-bg);
-  background-image:
-    radial-gradient(circle at 15% 20%, rgba(229, 106, 74, 0.10) 0%, transparent 40%),
-    radial-gradient(circle at 85% 80%, rgba(229, 106, 74, 0.06) 0%, transparent 40%);
-}
-.dark .dot-grid-bg {
-  background-image:
-    radial-gradient(circle at 15% 20%, rgba(229, 106, 74, 0.18) 0%, transparent 40%),
-    radial-gradient(circle at 85% 80%, rgba(229, 106, 74, 0.10) 0%, transparent 40%);
-}
-
-/* Landing-style faint grid overlay (use absolute pos inside relative parent) */
+/* ============================================================
+   Landing-grid utility (used as faint background on dashboard)
+   ============================================================ */
 .landing-grid {
   background-image:
-    linear-gradient(to right, var(--color-accent) 1px, transparent 1px),
-    linear-gradient(to bottom, var(--color-accent) 1px, transparent 1px);
-  background-size: 40px 40px;
-  opacity: 0.08;
+    linear-gradient(to right, rgba(10, 10, 10, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(10, 10, 10, 0.04) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+  -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
 }
 .dark .landing-grid {
-  opacity: 0.04;
-}
-
-/* Changelog markdown body */
-.changelog-body h1 {
-  font-size: 1.4rem;
-  font-weight: 700;
-  margin: 1.5rem 0 0.75rem;
-  padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--color-border);
-}
-.changelog-body h1:first-child { margin-top: 0; }
-.changelog-body h2 {
-  font-size: 1.05rem;
-  font-weight: 600;
-  margin: 1rem 0 0.5rem;
-  color: var(--color-primary);
-}
-.changelog-body h3 {
-  font-size: 0.95rem;
-  font-weight: 600;
-  margin: 0.75rem 0 0.4rem;
-}
-.changelog-body ul {
-  list-style: disc;
-  padding-left: 1.5rem;
-  margin: 0.5rem 0;
-}
-.changelog-body li { margin: 0.25rem 0; line-height: 1.6; }
-.changelog-body p { margin: 0.5rem 0; line-height: 1.6; }
-.changelog-body code {
-  background: var(--color-bg-alt);
-  padding: 0.1rem 0.35rem;
-  border-radius: 4px;
-  font-size: 0.875em;
-  font-family: ui-monospace, monospace;
-}
-.changelog-body a {
-  color: var(--color-primary);
-  text-decoration: underline;
-}
-.changelog-body hr {
-  border: none;
-  border-top: 1px solid var(--color-border);
-  margin: 1.5rem 0;
+  background-image:
+    linear-gradient(to right, rgba(244, 244, 244, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(244, 244, 244, 0.04) 1px, transparent 1px);
 }

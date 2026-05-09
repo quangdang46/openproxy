@@ -3,7 +3,28 @@
 import { cn } from "@/shared/utils/cn";
 import React from "react";
 
-type BadgeVariant = "default" | "primary" | "success" | "warning" | "error" | "info";
+/**
+ * MiniMax Badge variants:
+ *   default  -> generic neutral chip on surface
+ *   primary  -> coral product chip
+ *   success  -> badge-success (pale-green confirmation)
+ *   warning  -> warm warning chip (legacy)
+ *   error    -> red error chip (legacy)
+ *   info     -> brand-blue informational chip (legacy)
+ *   new      -> badge-new (coral "NEW" / "Live")
+ *   beta     -> badge-beta (pale-blue "BETA")
+ *   code     -> badge-code (inline code-style chip, square corners)
+ */
+type BadgeVariant =
+  | "default"
+  | "primary"
+  | "success"
+  | "warning"
+  | "error"
+  | "info"
+  | "new"
+  | "beta"
+  | "code";
 type BadgeSize = "sm" | "md" | "lg";
 
 interface BadgeProps {
@@ -16,18 +37,21 @@ interface BadgeProps {
 }
 
 const variants: Record<BadgeVariant, string> = {
-  default: "bg-surface-2 text-text-muted",
-  primary: "bg-brand-500/10 text-brand-600 dark:text-brand-300",
-  success: "bg-green-500/10 text-green-600 dark:text-green-400",
-  warning: "bg-yellow-500/10 text-yellow-600 dark:text-yellow-400",
-  error: "bg-red-500/10 text-red-600 dark:text-red-400",
-  info: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
+  default: "bg-surface-base text-slate",
+  primary: "bg-brand-coral/10 text-brand-coral",
+  success: "bg-success-bg text-success-text",
+  warning: "bg-yellow-500/12 text-yellow-700 dark:text-yellow-400",
+  error: "bg-[color:var(--color-danger)]/12 text-[color:var(--color-danger)]",
+  info: "bg-brand-blue-200 text-brand-blue-deep",
+  new: "bg-brand-coral text-on-dark",
+  beta: "bg-brand-blue-200 text-brand-blue-deep",
+  code: "bg-brand-blue-200 text-brand-blue-deep",
 };
 
 const sizes: Record<BadgeSize, string> = {
-  sm: "px-2 py-0.5 text-[10px]",
-  md: "px-2.5 py-1 text-xs",
-  lg: "px-3 py-1.5 text-sm",
+  sm: "px-2 py-0.5 text-[10px] tracking-wide",
+  md: "px-2.5 py-1 text-[11px] tracking-wide",
+  lg: "px-3 py-1.5 text-[13px]",
 };
 
 export default function Badge({
@@ -38,10 +62,15 @@ export default function Badge({
   icon,
   className,
 }: BadgeProps) {
+  // `code` variant uses square corners (rounded-mini-sm) per spec; all
+  // other badge variants use full pill.
+  const radius = variant === "code" ? "rounded-mini-sm" : "rounded-full";
+
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full font-semibold",
+        "inline-flex items-center gap-1.5 font-semibold leading-none",
+        radius,
         variants[variant],
         sizes[size],
         className
@@ -51,12 +80,15 @@ export default function Badge({
         <span
           className={cn(
             "size-1.5 rounded-full",
-            variant === "success" && "bg-green-500",
+            variant === "success" && "bg-success-text",
             variant === "warning" && "bg-yellow-500",
-            variant === "error" && "bg-red-500",
-            variant === "info" && "bg-blue-500",
-            variant === "primary" && "bg-brand-500",
-            variant === "default" && "bg-gray-500"
+            variant === "error" && "bg-[color:var(--color-danger)]",
+            variant === "info" && "bg-brand-blue-deep",
+            variant === "primary" && "bg-brand-coral",
+            variant === "new" && "bg-on-dark",
+            variant === "beta" && "bg-brand-blue-deep",
+            variant === "code" && "bg-brand-blue-deep",
+            variant === "default" && "bg-stone"
           )}
         />
       )}

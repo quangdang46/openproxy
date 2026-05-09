@@ -154,7 +154,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
 
   return (
     <>
-      <aside className="flex w-72 flex-col border-r border-border-subtle bg-vibrancy backdrop-blur-xl transition-colors duration-300 min-h-full">
+      <aside className="flex w-72 flex-col border-r border-hairline-soft bg-canvas transition-colors duration-300 min-h-full">
         {/* Traffic lights */}
         <div className="flex items-center gap-2 px-6 pt-5 pb-2">
           <div className="w-3 h-3 rounded-full bg-[#FF5F56]" />
@@ -165,14 +165,14 @@ export default function Sidebar({ onClose }: SidebarProps) {
         {/* Logo */}
         <div className="px-6 py-4 flex flex-col gap-2">
           <a href="/dashboard" className="flex items-center gap-3">
-            <div className="flex items-center justify-center size-9 rounded-[10px] bg-gradient-to-br from-brand-500 to-brand-700 shadow-[var(--shadow-warm)]">
-              <span className="material-symbols-outlined text-white text-[20px]">hub</span>
+            <div className="flex items-center justify-center size-9 rounded-mini-md bg-ink">
+              <span className="material-symbols-outlined text-on-primary text-[20px]">hub</span>
             </div>
             <div className="flex flex-col">
-              <h1 className="text-lg font-semibold tracking-tight text-text-main">
+              <h1 className="text-[17px] font-semibold tracking-tight text-ink">
                 {APP_CONFIG.name}
               </h1>
-              <span className="text-xs text-text-muted">v{APP_CONFIG.version}</span>
+              <span className="text-[11px] text-stone">v{APP_CONFIG.version}</span>
             </div>
           </a>
           {updateInfo && (
@@ -209,27 +209,27 @@ export default function Sidebar({ onClose }: SidebarProps) {
               href={item.href}
               onClick={onClose}
               className={cn(
-                "flex items-center gap-3 px-3 py-1 rounded-lg transition-all group",
+                "flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
                 isActive(item.href)
-                  ? "bg-primary/10 text-primary"
-                  : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+                  ? "bg-surface-base text-ink font-medium"
+                  : "text-charcoal hover:bg-surface-soft hover:text-ink"
               )}
             >
               <span
                 className={cn(
                   "material-symbols-outlined text-[18px]",
-                  isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
+                  isActive(item.href) ? "fill-1" : ""
                 )}
               >
                 {item.icon}
               </span>
-              <span className="text-[13px] font-medium">{item.label}</span>
+              <span className="text-[13px]">{item.label}</span>
             </a>
           ))}
 
           {/* System section */}
           <div className="pt-3 mt-2 space-y-0.5">
-            <p className="px-4 text-xs font-semibold text-text-muted/60 uppercase tracking-wider mb-2">
+            <p className="px-3 text-[11px] font-semibold text-stone uppercase tracking-[0.08em] mb-2">
               System
             </p>
 
@@ -237,14 +237,14 @@ export default function Sidebar({ onClose }: SidebarProps) {
             <button
               onClick={() => setMediaOpen((v) => !v)}
               className={cn(
-                "w-full flex items-center gap-3 px-3 py-1 rounded-lg transition-all group",
+                "w-full flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
                 pathname.startsWith("/dashboard/media-providers")
-                  ? "bg-primary/10 text-primary"
-                  : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+                  ? "bg-surface-base text-ink font-medium"
+                  : "text-charcoal hover:bg-surface-soft hover:text-ink"
               )}
             >
               <span className="material-symbols-outlined text-[18px]">perm_media</span>
-              <span className="text-[13px] font-medium flex-1 text-left">Media Providers</span>
+              <span className="text-[13px] flex-1 text-left">Media Providers</span>
               <span className="material-symbols-outlined text-[14px] transition-transform" style={{ transform: mediaOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
                 expand_more
               </span>
@@ -257,14 +257,14 @@ export default function Sidebar({ onClose }: SidebarProps) {
                     href={`/dashboard/media-providers/${kind.id}`}
                     onClick={onClose}
                     className={cn(
-                      "flex items-center gap-3 px-4 py-1 rounded-lg transition-all group",
+                      "flex items-center gap-3 px-4 py-1.5 rounded-mini-sm transition-colors group",
                       pathname.startsWith(`/dashboard/media-providers/${kind.id}`)
-                        ? "bg-primary/10 text-primary"
-                        : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+                        ? "bg-surface-base text-ink font-medium"
+                        : "text-charcoal hover:bg-surface-soft hover:text-ink"
                     )}
                   >
                     <span className="material-symbols-outlined text-[16px]">{kind.icon}</span>
-                    <span className="text-sm">{kind.label}</span>
+                    <span className="text-[13px]">{kind.label}</span>
                   </a>
                 ))}
                 <a
@@ -272,14 +272,14 @@ export default function Sidebar({ onClose }: SidebarProps) {
                   href={COMBINED_WEB_ITEM.href}
                   onClick={onClose}
                   className={cn(
-                    "flex items-center gap-3 px-4 py-1 rounded-lg transition-all group",
+                    "flex items-center gap-3 px-4 py-1.5 rounded-mini-sm transition-colors group",
                     pathname.startsWith(COMBINED_WEB_ITEM.href)
-                      ? "bg-primary/10 text-primary"
-                      : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+                      ? "bg-surface-base text-ink font-medium"
+                      : "text-charcoal hover:bg-surface-soft hover:text-ink"
                   )}
                 >
                   <span className="material-symbols-outlined text-[16px]">{COMBINED_WEB_ITEM.icon}</span>
-                  <span className="text-sm">{COMBINED_WEB_ITEM.label}</span>
+                  <span className="text-[13px]">{COMBINED_WEB_ITEM.label}</span>
                 </a>
               </div>
             )}
@@ -290,21 +290,21 @@ export default function Sidebar({ onClose }: SidebarProps) {
                 href={item.href}
                 onClick={onClose}
                 className={cn(
-                  "flex items-center gap-3 px-3 py-1 rounded-lg transition-all group",
+                  "flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
                   isActive(item.href)
-                    ? "bg-primary/10 text-primary"
-                    : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+                    ? "bg-surface-base text-ink font-medium"
+                    : "text-charcoal hover:bg-surface-soft hover:text-ink"
                 )}
               >
                 <span
                   className={cn(
                     "material-symbols-outlined text-[18px]",
-                    isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
+                    isActive(item.href) ? "fill-1" : ""
                   )}
                 >
                   {item.icon}
                 </span>
-                <span className="text-[13px] font-medium">{item.label}</span>
+                <span className="text-[13px]">{item.label}</span>
               </a>
             ))}
 
@@ -317,21 +317,21 @@ export default function Sidebar({ onClose }: SidebarProps) {
                   href={item.href}
                   onClick={onClose}
                   className={cn(
-                    "flex items-center gap-3 px-3 py-1 rounded-lg transition-all group",
+                    "flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
                     isActive(item.href)
-                      ? "bg-primary/10 text-primary"
-                      : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+                      ? "bg-surface-base text-ink font-medium"
+                      : "text-charcoal hover:bg-surface-soft hover:text-ink"
                   )}
                 >
                   <span
                     className={cn(
                       "material-symbols-outlined text-[18px]",
-                      isActive(item.href) ? "fill-1" : "group-hover:text-primary transition-colors"
+                      isActive(item.href) ? "fill-1" : ""
                     )}
                   >
                     {item.icon}
                   </span>
-                  <span className="text-[13px] font-medium">{item.label}</span>
+                  <span className="text-[13px]">{item.label}</span>
                 </a>
               ) : null;
             })}
@@ -341,27 +341,27 @@ export default function Sidebar({ onClose }: SidebarProps) {
               href="/dashboard/profile"
               onClick={onClose}
               className={cn(
-                "flex items-center gap-3 px-3 py-1 rounded-lg transition-all group",
+                "flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
                 isActive("/dashboard/profile")
-                  ? "bg-primary/10 text-primary"
-                  : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+                  ? "bg-surface-base text-ink font-medium"
+                  : "text-charcoal hover:bg-surface-soft hover:text-ink"
               )}
             >
               <span
                 className={cn(
                   "material-symbols-outlined text-[18px]",
-                  isActive("/dashboard/profile") ? "fill-1" : "group-hover:text-primary transition-colors"
+                  isActive("/dashboard/profile") ? "fill-1" : ""
                 )}
               >
                 settings
               </span>
-              <span className="text-[13px] font-medium">Settings</span>
+              <span className="text-[13px]">Settings</span>
             </a>
           </div>
         </nav>
 
         {/* Footer section */}
-        <div className="p-3 border-t border-border-subtle">
+        <div className="p-3 border-t border-hairline-soft">
           {/* Shutdown button */}
           <Button
             variant="outline"

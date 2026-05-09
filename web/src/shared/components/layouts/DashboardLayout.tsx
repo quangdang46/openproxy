@@ -13,13 +13,13 @@ interface DashboardLayoutProps {
 function getToastStyle(type: string) {
   if (type === "success") {
     return {
-      wrapper: "border-green-500/30 bg-green-500/10 text-green-600 dark:text-green-400",
+      wrapper: "border-success-text/30 bg-success-bg text-success-text",
       icon: "check_circle",
     };
   }
   if (type === "error") {
     return {
-      wrapper: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400",
+      wrapper: "border-[color:var(--color-danger)]/30 bg-[color:var(--color-danger)]/10 text-[color:var(--color-danger)]",
       icon: "error",
     };
   }
@@ -30,7 +30,7 @@ function getToastStyle(type: string) {
     };
   }
   return {
-    wrapper: "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-400",
+    wrapper: "border-brand-blue-deep/30 bg-brand-blue-200 text-brand-blue-deep",
     icon: "info",
   };
 }
@@ -49,14 +49,14 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   const removeNotification = useNotificationStore((state) => state.removeNotification);
 
   return (
-    <div className="flex h-screen w-full overflow-hidden bg-bg">
+    <div className="flex h-screen w-full overflow-hidden bg-canvas">
       <div className="fixed top-4 right-4 z-[80] flex w-[min(92vw,380px)] flex-col gap-2">
         {notifications.map((n) => {
           const style = getToastStyle(n.type);
           return (
             <div
               key={n.id}
-              className={`rounded-lg border px-3 py-2 shadow-lg backdrop-blur-sm ${style.wrapper}`}
+              className={`rounded-mini-md border px-3 py-2 shadow-modal backdrop-blur-sm ${style.wrapper}`}
             >
               <div className="flex items-start gap-2">
                 <span className="material-symbols-outlined text-[18px] leading-5">{style.icon}</span>
