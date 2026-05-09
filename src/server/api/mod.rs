@@ -16,10 +16,10 @@ pub mod models_disabled;
 pub mod oauth;
 pub mod pricing;
 mod provider_connection_test;
-mod provider_validate;
 mod provider_model_tests;
 mod provider_models;
 pub mod provider_nodes;
+mod provider_validate;
 pub mod providers;
 pub mod shutdown;
 pub mod tags;
@@ -177,7 +177,6 @@ async fn get_version_api() -> Response {
     .into_response()
 }
 
-
 async fn version_update_api() -> Response {
     // In Rust standalone mode, self-update is not supported via the API.
     // The CLI handles updates through cargo or manual binary replacement.
@@ -212,7 +211,7 @@ async fn fetch_latest_dashboard_version() -> Option<String> {
         .ok()?;
 
     client
-        .get("https://registry.npmjs.org/9router/latest")
+        .get("https://registry.npmjs.org/openproxy/latest")
         .send()
         .await
         .ok()?
@@ -314,7 +313,10 @@ fn safe_settings_payload(settings: &crate::types::Settings) -> Value {
             "enableTranslator".to_string(),
             Value::Bool(std::env::var("ENABLE_TRANSLATOR").ok().as_deref() == Some("true")),
         );
-        fields.insert("hasPassword".to_string(), Value::Bool(settings.password.is_some()));
+        fields.insert(
+            "hasPassword".to_string(),
+            Value::Bool(settings.password.is_some()),
+        );
     }
 
     value
@@ -995,9 +997,12 @@ async fn update_settings_api(
 
         // Hash new password
         let hash = bcrypt::hash(&new_password, 10).unwrap_or_else(|_| new_password.clone());
-        let _ = state.db.update(|db| {
-            db.settings.password = Some(hash);
-        }).await;
+        let _ = state
+            .db
+            .update(|db| {
+                db.settings.password = Some(hash);
+            })
+            .await;
     }
 
     let result = state

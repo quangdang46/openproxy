@@ -93,7 +93,7 @@ pub fn require_dashboard_session(
 
     let token = extract_auth_token(headers).ok_or(DashboardAuthError::Missing)?;
     let secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "9router-default-secret-change-me".to_string());
+        .unwrap_or_else(|_| "openproxy-default-secret-change-me".to_string());
     let validation = Validation::default();
     let decoded = decode::<DashboardClaims>(
         &token,

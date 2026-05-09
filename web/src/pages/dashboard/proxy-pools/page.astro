@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import ProxyPoolsPageClient from '@/components/ProxyPoolsPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <ProxyPoolsPageClient />
+  <DashboardLayout client:only="react">
+    <ProxyPoolsPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

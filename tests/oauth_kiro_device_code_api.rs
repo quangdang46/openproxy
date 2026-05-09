@@ -89,7 +89,7 @@ fn is_base64url_no_pad(value: &str) -> bool {
 }
 
 #[tokio::test]
-async fn kiro_device_code_defaults_match_9router_builder_id_flow() {
+async fn kiro_device_code_defaults_match_openproxy_builder_id_flow() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _env = EnvVarGuard::set("OPENPROXY_KIRO_OIDC_BASE_URL", &server.uri());
@@ -164,7 +164,7 @@ async fn kiro_device_code_defaults_match_9router_builder_id_flow() {
 }
 
 #[tokio::test]
-async fn kiro_device_code_supports_idc_query_params_like_9router() {
+async fn kiro_device_code_supports_idc_query_params_like_openproxy() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _env = EnvVarGuard::set("OPENPROXY_KIRO_OIDC_BASE_URL", &server.uri());
@@ -229,7 +229,7 @@ async fn kiro_poll_returns_missing_device_code_without_api_key() {
 }
 
 #[tokio::test]
-async fn kiro_poll_returns_pending_shape_like_9router() {
+async fn kiro_poll_returns_pending_shape_like_openproxy() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _env = EnvVarGuard::set("OPENPROXY_KIRO_OIDC_BASE_URL", &server.uri());
@@ -284,7 +284,7 @@ async fn kiro_poll_returns_pending_shape_like_9router() {
 }
 
 #[tokio::test]
-async fn kiro_poll_success_saves_connection_like_9router() {
+async fn kiro_poll_success_saves_connection_like_openproxy() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _env = EnvVarGuard::set("OPENPROXY_KIRO_OIDC_BASE_URL", &server.uri());

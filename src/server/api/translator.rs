@@ -40,10 +40,7 @@ pub fn routes() -> Router<AppState> {
 /// Step 1: Detect provider, model, source/target format from client body
 /// Step 2: Translate source format -> OpenAI intermediate
 /// Step 3: Translate OpenAI intermediate -> target, build URL/headers
-async fn translate_pipeline(
-    State(state): State<AppState>,
-    Json(body): Json<Value>,
-) -> Response {
+async fn translate_pipeline(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     let step = body.get("step").and_then(Value::as_u64).unwrap_or(0);
 
     match step {
@@ -52,7 +49,11 @@ async fn translate_pipeline(
         3 => step_to_target(&body, &state).await,
         _ => {
             // Legacy: plain text translation
-            (StatusCode::BAD_REQUEST, Json(json!({ "success": false, "error": "Step (1-3) required" }))).into_response()
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "success": false, "error": "Step (1-3) required" })),
+            )
+                .into_response()
         }
     }
 }
@@ -62,7 +63,10 @@ use axum::http::StatusCode;
 /// Step 1: Detect provider, model, source format, target format
 fn step_detect(body: &Value, state: &AppState) -> Response {
     let client_body = body.get("body").cloned().unwrap_or_else(|| body.clone());
-    let model_str = client_body.get("model").and_then(Value::as_str).unwrap_or("");
+    let model_str = client_body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("");
 
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(model_str, &snapshot);
@@ -80,14 +84,21 @@ fn step_detect(body: &Value, state: &AppState) -> Response {
             "sourceFormat": source_format.as_str(),
             "targetFormat": target_format.as_str()
         }
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// Step 2: Translate source format -> OpenAI intermediate
 fn step_to_openai(body: &Value, state: &AppState) -> Response {
     let client_body = body.get("body").cloned().unwrap_or_else(|| body.clone());
-    let model_str = client_body.get("model").and_then(Value::as_str).unwrap_or("");
-    let stream = client_body.get("stream").and_then(Value::as_bool).unwrap_or(true);
+    let model_str = client_body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let stream = client_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
 
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(model_str, &snapshot);
@@ -101,14 +112,22 @@ fn step_to_openai(body: &Value, state: &AppState) -> Response {
     let did_translate = if source_format == Format::OpenAi {
         true // Already OpenAI format
     } else {
-        reg.translate_request(source_format, Format::OpenAi, &model, &mut translated, stream, None)
+        reg.translate_request(
+            source_format,
+            Format::OpenAi,
+            &model,
+            &mut translated,
+            stream,
+            None,
+        )
     };
 
     if !did_translate && source_format != Format::OpenAi {
         return Json(json!({
             "success": false,
             "error": format!("No translator for {} -> openai", source_format.as_str())
-        })).into_response();
+        }))
+        .into_response();
     }
 
     Json(json!({
@@ -116,7 +135,8 @@ fn step_to_openai(body: &Value, state: &AppState) -> Response {
         "result": {
             "body": translated
         }
-    })).into_response()
+    }))
+    .into_response()
 }
 
 /// Step 3: Translate OpenAI intermediate -> target, build URL/headers via executor
@@ -126,15 +146,26 @@ async fn step_to_target(body: &Value, state: &AppState) -> Response {
     let model = body.get("model").and_then(Value::as_str).unwrap_or("");
 
     if provider.is_empty() || model.is_empty() {
-        return Json(json!({ "success": false, "error": "provider and model required" })).into_response();
+        return Json(json!({ "success": false, "error": "provider and model required" }))
+            .into_response();
     }
 
     let target_format = registry::get_target_format_for_provider(provider);
-    let stream = openai_body.get("stream").and_then(Value::as_bool).unwrap_or(true);
+    let stream = openai_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
 
     let reg = registry::global_registry();
     let mut translated = openai_body.clone();
-    let did_translate = reg.translate_request(Format::OpenAi, target_format, model, &mut translated, stream, None);
+    let did_translate = reg.translate_request(
+        Format::OpenAi,
+        target_format,
+        model,
+        &mut translated,
+        stream,
+        None,
+    );
 
     if !did_translate && target_format != Format::OpenAi {
         // Try passthrough - just set the model
@@ -143,12 +174,16 @@ async fn step_to_target(body: &Value, state: &AppState) -> Response {
 
     // Find active connection for URL/headers
     let snapshot = state.db.snapshot();
-    let connection = snapshot.provider_connections.iter()
+    let connection = snapshot
+        .provider_connections
+        .iter()
         .find(|c| c.provider == provider && c.is_active.unwrap_or(true));
 
     let (url, headers) = match connection {
         Some(conn) => {
-            let base_url = conn.provider_specific_data.get("baseUrl")
+            let base_url = conn
+                .provider_specific_data
+                .get("baseUrl")
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let api_url = if base_url.is_empty() {
@@ -183,14 +218,17 @@ async fn step_to_target(body: &Value, state: &AppState) -> Response {
             "headers": headers,
             "body": translated
         }
-    })).into_response()
+    }))
+    .into_response()
 }
 
 fn default_provider_url(provider: &str) -> String {
     match provider {
         "openai" => "https://api.openai.com/v1/chat/completions".to_string(),
         "anthropic" | "claude" => "https://api.anthropic.com/v1/messages".to_string(),
-        "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions".to_string(),
+        "gemini" => {
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions".to_string()
+        }
         "deepseek" => "https://api.deepseek.com/v1/chat/completions".to_string(),
         "groq" => "https://api.groq.com/openai/v1/chat/completions".to_string(),
         "openrouter" => "https://openrouter.ai/api/v1/chat/completions".to_string(),
@@ -201,28 +239,33 @@ fn default_provider_url(provider: &str) -> String {
 // === Send to Provider ===
 
 /// POST /api/translator/send - Proxy request to provider and stream response
-async fn send_to_provider(
-    State(state): State<AppState>,
-    Json(body): Json<Value>,
-) -> Response {
+async fn send_to_provider(State(state): State<AppState>, Json(body): Json<Value>) -> Response {
     let provider = body.get("provider").and_then(Value::as_str).unwrap_or("");
     let model = body.get("model").and_then(Value::as_str).unwrap_or("");
     let req_body = body.get("body").cloned().unwrap_or_else(|| json!({}));
-    let stream = req_body.get("stream").and_then(Value::as_bool).unwrap_or(true);
+    let stream = req_body
+        .get("stream")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
 
     if provider.is_empty() || model.is_empty() {
-        return Json(json!({ "success": false, "error": "provider, model, and body required" })).into_response();
+        return Json(json!({ "success": false, "error": "provider, model, and body required" }))
+            .into_response();
     }
 
     let snapshot = state.db.snapshot();
-    let connection = snapshot.provider_connections.iter()
+    let connection = snapshot
+        .provider_connections
+        .iter()
         .find(|c| c.provider == provider && c.is_active.unwrap_or(true));
 
     let Some(connection) = connection else {
         return Json(json!({ "success": false, "error": format!("No active connection for provider: {provider}") })).into_response();
     };
 
-    let base_url = connection.provider_specific_data.get("baseUrl")
+    let base_url = connection
+        .provider_specific_data
+        .get("baseUrl")
         .and_then(Value::as_str)
         .unwrap_or("");
     let url = if base_url.is_empty() {
@@ -236,8 +279,7 @@ async fn send_to_provider(
         .build()
         .unwrap_or_default();
 
-    let mut req = client.post(&url)
-        .header("Content-Type", "application/json");
+    let mut req = client.post(&url).header("Content-Type", "application/json");
 
     if let Some(key) = &connection.api_key {
         req = req.header("Authorization", format!("Bearer {}", key));
@@ -256,7 +298,8 @@ async fn send_to_provider(
                     "success": false,
                     "error": format!("Provider error: {status_code}"),
                     "details": error_text
-                })).into_response();
+                }))
+                .into_response();
             }
 
             if stream {
@@ -275,19 +318,18 @@ async fn send_to_provider(
                         (header::CONNECTION, "keep-alive"),
                     ],
                     Body::from_stream(body_stream),
-                ).into_response();
+                )
+                    .into_response();
             }
 
             let body_text = resp.text().await.unwrap_or_default();
-            (
-                [(header::CONTENT_TYPE, "application/json")],
-                body_text,
-            ).into_response()
+            ([(header::CONTENT_TYPE, "application/json")], body_text).into_response()
         }
         Err(e) => Json(json!({
             "success": false,
             "error": e.to_string()
-        })).into_response(),
+        }))
+        .into_response(),
     }
 }
 
@@ -387,12 +429,36 @@ pub struct FormatInfo {
 
 async fn get_formats() -> Json<Vec<FormatInfo>> {
     Json(vec![
-        FormatInfo { id: "openai".into(), name: "OpenAI".into(), description: "OpenAI Chat Completions format".into() },
-        FormatInfo { id: "claude".into(), name: "Claude".into(), description: "Anthropic Claude Messages format".into() },
-        FormatInfo { id: "gemini".into(), name: "Gemini".into(), description: "Google Gemini format".into() },
-        FormatInfo { id: "openai-responses".into(), name: "OpenAI Responses".into(), description: "OpenAI Responses API format".into() },
-        FormatInfo { id: "cursor".into(), name: "Cursor".into(), description: "Cursor format".into() },
-        FormatInfo { id: "kiro".into(), name: "Kiro".into(), description: "Kiro/AWS Bedrock format".into() },
+        FormatInfo {
+            id: "openai".into(),
+            name: "OpenAI".into(),
+            description: "OpenAI Chat Completions format".into(),
+        },
+        FormatInfo {
+            id: "claude".into(),
+            name: "Claude".into(),
+            description: "Anthropic Claude Messages format".into(),
+        },
+        FormatInfo {
+            id: "gemini".into(),
+            name: "Gemini".into(),
+            description: "Google Gemini format".into(),
+        },
+        FormatInfo {
+            id: "openai-responses".into(),
+            name: "OpenAI Responses".into(),
+            description: "OpenAI Responses API format".into(),
+        },
+        FormatInfo {
+            id: "cursor".into(),
+            name: "Cursor".into(),
+            description: "Cursor format".into(),
+        },
+        FormatInfo {
+            id: "kiro".into(),
+            name: "Kiro".into(),
+            description: "Kiro/AWS Bedrock format".into(),
+        },
     ])
 }
 
@@ -413,11 +479,14 @@ async fn save_translations(
     Json(req): Json<SaveTranslationsRequest>,
 ) -> Json<Value> {
     if let Some(translations) = &req.translations {
-        let result = state.db.update(|db| {
-            if let Ok(value) = serde_json::to_value(translations) {
-                db.extra.insert("translator_translations".into(), value);
-            }
-        }).await;
+        let result = state
+            .db
+            .update(|db| {
+                if let Ok(value) = serde_json::to_value(translations) {
+                    db.extra.insert("translator_translations".into(), value);
+                }
+            })
+            .await;
         match result {
             Ok(_) => return Json(json!({ "success": true, "count": translations.len() })),
             Err(e) => return Json(json!({ "success": false, "error": e.to_string() })),
@@ -426,9 +495,13 @@ async fn save_translations(
 
     // Save file/content pair
     if let (Some(file), Some(content)) = (&req.file, &req.content) {
-        let result = state.db.update(|db| {
-            db.extra.insert(format!("translator_file_{file}"), json!(content));
-        }).await;
+        let result = state
+            .db
+            .update(|db| {
+                db.extra
+                    .insert(format!("translator_file_{file}"), json!(content));
+            })
+            .await;
         match result {
             Ok(_) => return Json(json!({ "success": true })),
             Err(e) => return Json(json!({ "success": false, "error": e.to_string() })),

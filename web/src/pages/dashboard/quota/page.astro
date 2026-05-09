@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import QuotaPageClient from '@/components/QuotaPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <QuotaPageClient />
+  <DashboardLayout client:only="react">
+    <QuotaPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

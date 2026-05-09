@@ -149,7 +149,7 @@ async fn claude_settings_get_reports_not_installed_without_binary_or_config() {
 }
 
 #[tokio::test]
-async fn claude_settings_post_get_and_delete_match_9router_behavior() {
+async fn claude_settings_post_get_and_delete_match_openproxy_behavior() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
@@ -216,7 +216,7 @@ async fn claude_settings_post_get_and_delete_match_9router_behavior() {
     let (status, json) = response_json(get).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["hasOpenProxy"], true);
     assert_eq!(
         json["settingsPath"],
         settings_path.to_string_lossy().to_string()
@@ -335,7 +335,7 @@ async fn hermes_settings_post_get_and_delete_preserve_other_files() {
     let (status, json) = response_json(get).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["hasOpenProxy"], true);
     assert_eq!(json["settings"]["model"]["default"], "oa/gpt-4.1");
     assert_eq!(json["settings"]["model"]["provider"], "custom");
     assert_eq!(
@@ -358,7 +358,7 @@ async fn hermes_settings_post_get_and_delete_preserve_other_files() {
         json,
         json!({
             "success": true,
-            "message": "9router model block removed"
+            "message": "openproxy model block removed"
         })
     );
 
@@ -402,7 +402,7 @@ async fn codex_settings_get_reports_not_installed_without_binary_or_config() {
 }
 
 #[tokio::test]
-async fn codex_settings_post_get_and_delete_match_9router_file_behavior() {
+async fn codex_settings_post_get_and_delete_match_openproxy_file_behavior() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
@@ -433,7 +433,7 @@ async fn codex_settings_post_get_and_delete_match_9router_file_behavior() {
             Method::POST,
             "/api/cli-tools/codex-settings",
             Body::from(
-                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-9router","model":"oa/gpt-4.1","subagentModel":"oa/gpt-4.1-mini"}"#,
+                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-openproxy","model":"oa/gpt-4.1","subagentModel":"oa/gpt-4.1-mini"}"#,
             ),
         ))
         .await
@@ -451,8 +451,8 @@ async fn codex_settings_post_get_and_delete_match_9router_file_behavior() {
 
     let saved_config = std::fs::read_to_string(&config_path).unwrap();
     assert!(saved_config.contains("model = \"oa/gpt-4.1\""));
-    assert!(saved_config.contains("model_provider = \"9router\""));
-    assert!(saved_config.contains("[model_providers.9router]"));
+    assert!(saved_config.contains("model_provider = \"openproxy\""));
+    assert!(saved_config.contains("[model_providers.openproxy]"));
     assert!(saved_config.contains("base_url = \"https://proxy.example.com/v1\""));
     assert!(saved_config.contains("wire_api = \"responses\""));
     assert!(saved_config.contains("[agents.subagent]"));
@@ -462,7 +462,7 @@ async fn codex_settings_post_get_and_delete_match_9router_file_behavior() {
     let saved_auth: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(codex_auth_path(home.path())).unwrap())
             .unwrap();
-    assert_eq!(saved_auth["OPENAI_API_KEY"], "sk-9router");
+    assert_eq!(saved_auth["OPENAI_API_KEY"], "sk-openproxy");
     assert_eq!(saved_auth["auth_mode"], "apikey");
     assert_eq!(saved_auth["refresh_token"], "keep-me");
 
@@ -478,7 +478,7 @@ async fn codex_settings_post_get_and_delete_match_9router_file_behavior() {
     let (status, json) = response_json(get).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["hasOpenProxy"], true);
     assert_eq!(
         json["configPath"],
         config_path.to_string_lossy().to_string()
@@ -500,13 +500,13 @@ async fn codex_settings_post_get_and_delete_match_9router_file_behavior() {
         json,
         json!({
             "success": true,
-            "message": "9Router settings removed successfully"
+            "message": "OpenProxy settings removed successfully"
         })
     );
 
     let reset_config = std::fs::read_to_string(&config_path).unwrap();
-    assert!(!reset_config.contains("model_provider = \"9router\""));
-    assert!(!reset_config.contains("[model_providers.9router]"));
+    assert!(!reset_config.contains("model_provider = \"openproxy\""));
+    assert!(!reset_config.contains("[model_providers.openproxy]"));
     assert!(!reset_config.contains("[agents.subagent]"));
     assert!(reset_config.contains("[existing]"));
 
@@ -541,7 +541,7 @@ async fn copilot_settings_get_reports_installed_without_existing_config() {
         json!({
             "installed": true,
             "config": null,
-            "has9Router": false,
+            "hasOpenProxy": false,
             "configPath": copilot_config_path(home.path()).to_string_lossy().to_string(),
             "currentModel": null,
             "currentUrl": null
@@ -550,7 +550,7 @@ async fn copilot_settings_get_reports_installed_without_existing_config() {
 }
 
 #[tokio::test]
-async fn copilot_settings_post_get_and_delete_match_9router_file_behavior() {
+async fn copilot_settings_post_get_and_delete_match_openproxy_file_behavior() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -566,7 +566,7 @@ async fn copilot_settings_post_get_and_delete_match_9router_file_behavior() {
                 "models": [{ "id": "other/model" }]
             },
             {
-                "name": "9Router",
+                "name": "OpenProxy",
                 "vendor": "azure",
                 "models": [{ "id": "old/model", "url": "https://old.example.com/chat/completions#models.ai.azure.com" }]
             }
@@ -582,7 +582,7 @@ async fn copilot_settings_post_get_and_delete_match_9router_file_behavior() {
             Method::POST,
             "/api/cli-tools/copilot-settings",
             Body::from(
-                r#"{"baseUrl":"https://proxy.example.com/v1","apiKey":"sk-9router","models":["oa/gpt-4.1","oa/gpt-4.1-mini"]}"#,
+                r#"{"baseUrl":"https://proxy.example.com/v1","apiKey":"sk-openproxy","models":["oa/gpt-4.1","oa/gpt-4.1-mini"]}"#,
             ),
         ))
         .await
@@ -603,9 +603,9 @@ async fn copilot_settings_post_get_and_delete_match_9router_file_behavior() {
     let saved_array = saved.as_array().unwrap();
     assert_eq!(saved_array.len(), 2);
     assert_eq!(saved_array[0]["name"], "Other");
-    assert_eq!(saved_array[1]["name"], "9Router");
+    assert_eq!(saved_array[1]["name"], "OpenProxy");
     assert_eq!(saved_array[1]["vendor"], "azure");
-    assert_eq!(saved_array[1]["apiKey"], "sk-9router");
+    assert_eq!(saved_array[1]["apiKey"], "sk-openproxy");
     assert_eq!(saved_array[1]["models"][0]["id"], "oa/gpt-4.1");
     assert_eq!(saved_array[1]["models"][0]["name"], "oa/gpt-4.1");
     assert_eq!(
@@ -630,7 +630,7 @@ async fn copilot_settings_post_get_and_delete_match_9router_file_behavior() {
     let (status, json) = response_json(get).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["hasOpenProxy"], true);
     assert_eq!(json["config"], saved);
     assert_eq!(json["currentModel"], "oa/gpt-4.1");
     assert_eq!(
@@ -653,7 +653,7 @@ async fn copilot_settings_post_get_and_delete_match_9router_file_behavior() {
         json,
         json!({
             "success": true,
-            "message": "9Router removed from Copilot config"
+            "message": "OpenProxy removed from Copilot config"
         })
     );
 
@@ -702,7 +702,7 @@ async fn droid_settings_get_reports_not_installed_without_binary_or_config() {
 }
 
 #[tokio::test]
-async fn droid_settings_post_get_and_delete_match_9router_file_behavior() {
+async fn droid_settings_post_get_and_delete_match_openproxy_file_behavior() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
@@ -722,7 +722,7 @@ async fn droid_settings_post_get_and_delete_match_9router_file_behavior() {
                     "index": 99
                 },
                 {
-                    "id": "custom:9Router-old",
+                    "id": "custom:OpenProxy-old",
                     "model": "old/model"
                 }
             ]
@@ -738,7 +738,7 @@ async fn droid_settings_post_get_and_delete_match_9router_file_behavior() {
             Method::POST,
             "/api/cli-tools/droid-settings",
             Body::from(
-                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-9router","models":["oa/gpt-4.1","oa/gpt-4.1-mini"],"activeModel":"oa/gpt-4.1-mini"}"#,
+                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-openproxy","models":["oa/gpt-4.1","oa/gpt-4.1-mini"],"activeModel":"oa/gpt-4.1-mini"}"#,
             ),
         ))
         .await
@@ -759,14 +759,14 @@ async fn droid_settings_post_get_and_delete_match_9router_file_behavior() {
     assert_eq!(saved["theme"], "keep");
     let custom_models = saved["customModels"].as_array().unwrap();
     assert_eq!(custom_models.len(), 3);
-    assert_eq!(custom_models[0]["id"], "custom:9Router-0");
+    assert_eq!(custom_models[0]["id"], "custom:OpenProxy-0");
     assert_eq!(custom_models[0]["model"], "oa/gpt-4.1");
     assert_eq!(custom_models[0]["index"], 0);
     assert_eq!(custom_models[0]["baseUrl"], "https://proxy.example.com/v1");
-    assert_eq!(custom_models[0]["apiKey"], "sk-9router");
+    assert_eq!(custom_models[0]["apiKey"], "sk-openproxy");
     assert_eq!(custom_models[1]["id"], "custom:other-0");
     assert_eq!(custom_models[1]["index"], 1);
-    assert_eq!(custom_models[2]["id"], "custom:9Router-1");
+    assert_eq!(custom_models[2]["id"], "custom:OpenProxy-1");
     assert_eq!(custom_models[2]["model"], "oa/gpt-4.1-mini");
     assert_eq!(custom_models[2]["index"], 2);
 
@@ -782,7 +782,7 @@ async fn droid_settings_post_get_and_delete_match_9router_file_behavior() {
     let (status, json) = response_json(get).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["hasOpenProxy"], true);
     assert_eq!(
         json["settingsPath"],
         settings_path.to_string_lossy().to_string()
@@ -804,7 +804,7 @@ async fn droid_settings_post_get_and_delete_match_9router_file_behavior() {
         json,
         json!({
             "success": true,
-            "message": "9Router settings removed successfully"
+            "message": "OpenProxy settings removed successfully"
         })
     );
 
@@ -856,7 +856,7 @@ async fn opencode_settings_get_reports_not_installed_without_binary_or_config() 
 }
 
 #[tokio::test]
-async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
+async fn opencode_settings_post_patch_and_delete_match_openproxy_file_behavior() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
@@ -870,7 +870,7 @@ async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
         serde_json::to_vec_pretty(&json!({
             "provider": {
                 "other": { "keep": true },
-                "9router": {
+                "openproxy": {
                     "npm": "@ai-sdk/openai-compatible",
                     "options": {
                         "region": "keep",
@@ -903,7 +903,7 @@ async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
             Method::POST,
             "/api/cli-tools/opencode-settings",
             Body::from(
-                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-9router","models":["oa/gpt-4.1","oa/gpt-4.1-mini"],"activeModel":"oa/gpt-4.1-mini","subagentModel":"oa/gpt-4.1-nano"}"#,
+                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-openproxy","models":["oa/gpt-4.1","oa/gpt-4.1-mini"],"activeModel":"oa/gpt-4.1-mini","subagentModel":"oa/gpt-4.1-nano"}"#,
             ),
         ))
         .await
@@ -923,35 +923,35 @@ async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
         serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
     assert_eq!(saved["provider"]["other"]["keep"], true);
     assert_eq!(
-        saved["provider"]["9router"]["npm"],
+        saved["provider"]["openproxy"]["npm"],
         "@ai-sdk/openai-compatible"
     );
-    assert_eq!(saved["provider"]["9router"]["options"]["region"], "keep");
+    assert_eq!(saved["provider"]["openproxy"]["options"]["region"], "keep");
     assert_eq!(
-        saved["provider"]["9router"]["options"]["baseURL"],
+        saved["provider"]["openproxy"]["options"]["baseURL"],
         "https://proxy.example.com/v1"
     );
     assert_eq!(
-        saved["provider"]["9router"]["options"]["apiKey"],
-        "sk-9router"
+        saved["provider"]["openproxy"]["options"]["apiKey"],
+        "sk-openproxy"
     );
     assert_eq!(
-        saved["provider"]["9router"]["models"]["old/model"]["name"],
+        saved["provider"]["openproxy"]["models"]["old/model"]["name"],
         "old/model"
     );
     assert_eq!(
-        saved["provider"]["9router"]["models"]["oa/gpt-4.1"]["name"],
+        saved["provider"]["openproxy"]["models"]["oa/gpt-4.1"]["name"],
         "oa/gpt-4.1"
     );
     assert_eq!(
-        saved["provider"]["9router"]["models"]["oa/gpt-4.1-mini"]["name"],
+        saved["provider"]["openproxy"]["models"]["oa/gpt-4.1-mini"]["name"],
         "oa/gpt-4.1-mini"
     );
-    assert_eq!(saved["model"], "9router/oa/gpt-4.1-mini");
+    assert_eq!(saved["model"], "openproxy/oa/gpt-4.1-mini");
     assert_eq!(saved["agent"]["keep"]["still"], true);
     assert_eq!(
         saved["agent"]["explorer"]["model"],
-        "9router/oa/gpt-4.1-nano"
+        "openproxy/oa/gpt-4.1-nano"
     );
 
     let get = app
@@ -966,7 +966,7 @@ async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
     let (status, json) = response_json(get).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["hasOpenProxy"], true);
     assert_eq!(json["config"], saved);
     assert_eq!(
         json["configPath"],
@@ -1024,13 +1024,13 @@ async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
 
     let deleted_one: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    assert!(deleted_one["provider"]["9router"]["models"]
+    assert!(deleted_one["provider"]["openproxy"]["models"]
         .get("oa/gpt-4.1")
         .is_none());
-    assert!(deleted_one["provider"]["9router"]["models"]
+    assert!(deleted_one["provider"]["openproxy"]["models"]
         .get("old/model")
         .is_some());
-    assert!(deleted_one["provider"]["9router"]["models"]
+    assert!(deleted_one["provider"]["openproxy"]["models"]
         .get("oa/gpt-4.1-mini")
         .is_some());
     assert!(deleted_one["agent"].get("explorer").is_none());
@@ -1052,13 +1052,13 @@ async fn opencode_settings_post_patch_and_delete_match_9router_file_behavior() {
         json,
         json!({
             "success": true,
-            "message": "9Router settings removed from OpenCode"
+            "message": "OpenProxy settings removed from OpenCode"
         })
     );
 
     let reset: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&config_path).unwrap()).unwrap();
-    assert!(reset["provider"].get("9router").is_none());
+    assert!(reset["provider"].get("openproxy").is_none());
     assert_eq!(reset["provider"]["other"]["keep"], true);
     assert_eq!(reset["agent"]["keep"]["still"], true);
     assert_eq!(reset["model"], "");
@@ -1095,7 +1095,7 @@ async fn openclaw_settings_get_reports_not_installed_without_binary_or_config() 
 }
 
 #[tokio::test]
-async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
+async fn openclaw_settings_post_get_and_delete_match_openproxy_file_behavior() {
     let _lock = ENV_LOCK.lock().unwrap();
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
@@ -1127,7 +1127,7 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
                     },
                     "models": {
                         "other/model": {},
-                        "9router/old-model": {}
+                        "openproxy/old-model": {}
                     }
                 },
                 "list": [
@@ -1135,7 +1135,7 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
                         "id": "agent-a",
                         "name": "Agent A",
                         "agentDir": agent_a_dir.to_string_lossy().to_string(),
-                        "model": "9router/old-model"
+                        "model": "openproxy/old-model"
                     },
                     {
                         "id": "agent-b",
@@ -1166,7 +1166,7 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
             "/api/cli-tools/openclaw-settings",
             Body::from(
                 format!(
-                    r#"{{"baseUrl":"https://proxy.example.com","apiKey":"sk-9router","model":"oa/gpt-4.1","agentModels":{{"agent-a":"oa/gpt-4.1-mini"}}}}"#
+                    r#"{{"baseUrl":"https://proxy.example.com","apiKey":"sk-openproxy","model":"oa/gpt-4.1","agentModels":{{"agent-a":"oa/gpt-4.1-mini"}}}}"#
                 ),
             ),
         ))
@@ -1187,40 +1187,40 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
     assert_eq!(
         saved["agents"]["defaults"]["model"]["primary"],
-        "9router/oa/gpt-4.1"
+        "openproxy/oa/gpt-4.1"
     );
     assert!(saved["agents"]["defaults"]["models"]
-        .get("9router/old-model")
+        .get("openproxy/old-model")
         .is_none());
     assert!(saved["agents"]["defaults"]["models"]
         .get("other/model")
         .is_some());
     assert!(saved["agents"]["defaults"]["models"]
-        .get("9router/oa/gpt-4.1")
+        .get("openproxy/oa/gpt-4.1")
         .is_some());
     assert!(saved["agents"]["defaults"]["models"]
-        .get("9router/oa/gpt-4.1-mini")
+        .get("openproxy/oa/gpt-4.1-mini")
         .is_some());
     assert_eq!(
-        saved["models"]["providers"]["9router"]["baseUrl"],
+        saved["models"]["providers"]["openproxy"]["baseUrl"],
         "https://proxy.example.com/v1"
     );
     assert_eq!(
-        saved["models"]["providers"]["9router"]["apiKey"],
-        "sk-9router"
+        saved["models"]["providers"]["openproxy"]["apiKey"],
+        "sk-openproxy"
     );
     assert_eq!(
-        saved["models"]["providers"]["9router"]["api"],
+        saved["models"]["providers"]["openproxy"]["api"],
         "openai-completions"
     );
-    let provider_models = saved["models"]["providers"]["9router"]["models"]
+    let provider_models = saved["models"]["providers"]["openproxy"]["models"]
         .as_array()
         .unwrap();
     assert_eq!(provider_models.len(), 2);
     assert_eq!(provider_models[0]["id"], "oa/gpt-4.1");
     assert_eq!(provider_models[1]["id"], "oa/gpt-4.1-mini");
     let agent_list = saved["agents"]["list"].as_array().unwrap();
-    assert_eq!(agent_list[0]["model"], "9router/oa/gpt-4.1-mini");
+    assert_eq!(agent_list[0]["model"], "openproxy/oa/gpt-4.1-mini");
     assert!(agent_list[1].get("model").is_none());
     assert!(agent_list[2].get("model").is_none());
 
@@ -1229,14 +1229,14 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
             .unwrap();
     assert_eq!(agent_a_models["providers"]["other"]["keep"], true);
     assert_eq!(
-        agent_a_models["providers"]["9router"]["models"][0]["id"],
+        agent_a_models["providers"]["openproxy"]["models"][0]["id"],
         "oa/gpt-4.1-mini"
     );
     let agent_b_models: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(agent_b_dir.join("models.json")).unwrap())
             .unwrap();
     assert_eq!(
-        agent_b_models["providers"]["9router"]["models"][0]["id"],
+        agent_b_models["providers"]["openproxy"]["models"][0]["id"],
         "oa/gpt-4.1"
     );
 
@@ -1252,7 +1252,7 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
     let (status, json) = response_json(get).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["installed"], true);
-    assert_eq!(json["has9Router"], true);
+    assert_eq!(json["hasOpenProxy"], true);
     assert_eq!(json["settings"], saved);
     assert_eq!(
         json["settingsPath"],
@@ -1278,19 +1278,19 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
         json,
         json!({
             "success": true,
-            "message": "9Router settings removed successfully"
+            "message": "OpenProxy settings removed successfully"
         })
     );
 
     let reset: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&settings_path).unwrap()).unwrap();
-    assert!(reset["models"]["providers"].get("9router").is_none());
+    assert!(reset["models"]["providers"].get("openproxy").is_none());
     assert_eq!(reset["models"]["providers"]["other"]["keep"], true);
     assert!(reset["agents"]["defaults"]["models"]
-        .get("9router/oa/gpt-4.1")
+        .get("openproxy/oa/gpt-4.1")
         .is_none());
     assert!(reset["agents"]["defaults"]["models"]
-        .get("9router/oa/gpt-4.1-mini")
+        .get("openproxy/oa/gpt-4.1-mini")
         .is_none());
     assert!(reset["agents"]["defaults"]["models"]
         .get("other/model")
@@ -1300,7 +1300,7 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
         .is_none());
     assert_eq!(
         reset["agents"]["list"][0]["model"],
-        "9router/oa/gpt-4.1-mini"
+        "openproxy/oa/gpt-4.1-mini"
     );
 
     let get_after_delete = app
@@ -1314,7 +1314,7 @@ async fn openclaw_settings_post_get_and_delete_match_9router_file_behavior() {
         .unwrap();
     let (status, json) = response_json(get_after_delete).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["has9Router"], false);
+    assert_eq!(json["hasOpenProxy"], false);
     let agents = json["agents"].as_array().unwrap();
     assert_eq!(agents[0]["currentModel"], "oa/gpt-4.1-mini");
     assert_eq!(agents[1]["currentModel"], "oa/gpt-4.1");

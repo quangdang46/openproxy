@@ -87,7 +87,7 @@ pub async fn login(
 
     let expires_at = now_secs() + 86400;
     let secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "9router-default-secret-change-me".to_string());
+        .unwrap_or_else(|_| "openproxy-default-secret-change-me".to_string());
     let token = match encode(
         &JwtHeader::default(),
         &AuthTokenClaims {

@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import ConsoleLogClient from '@/components/ConsoleLogClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <ConsoleLogClient />
+  <DashboardLayout client:only="react">
+    <ConsoleLogClient client:only="react" />
+  </DashboardLayout>
 </Layout>

@@ -239,8 +239,5 @@ export interface ModalProps {
   size?: "sm" | "md" | "lg" | "xl";
 }
 
-// Re-export component prop types for use in components
-export { ButtonProps, InputProps, ModalProps };
-
 // Utility types
 export type ClassNameValue = string | number | boolean | undefined | null | ClassNameValue[];
