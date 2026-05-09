@@ -6,6 +6,44 @@ export default {
   theme: {
     extend: {
       colors: {
+        // ----------------------------------------------------------
+        // MiniMax brand & product accents
+        // ----------------------------------------------------------
+        'brand-coral': 'var(--color-brand-coral)',
+        'brand-magenta': 'var(--color-brand-magenta)',
+        'brand-blue': 'var(--color-brand-blue)',
+        'brand-blue-deep': 'var(--color-brand-blue-deep)',
+        'brand-blue-700': 'var(--color-brand-blue-700)',
+        'brand-blue-200': 'var(--color-brand-blue-200)',
+        'brand-cyan': 'var(--color-brand-cyan)',
+        'brand-purple': 'var(--color-brand-purple)',
+
+        // Surface tokens
+        canvas: 'var(--color-canvas)',
+        'surface-base': 'var(--color-surface-base)',
+        'surface-soft': 'var(--color-surface-soft)',
+        hairline: 'var(--color-hairline)',
+        'hairline-soft': 'var(--color-hairline-soft)',
+        'footer-bg': 'var(--color-footer-bg)',
+
+        // Text tokens
+        ink: 'var(--color-ink)',
+        'ink-strong': 'var(--color-ink-strong)',
+        charcoal: 'var(--color-charcoal)',
+        slate: 'var(--color-slate)',
+        steel: 'var(--color-steel)',
+        stone: 'var(--color-stone)',
+        muted: 'var(--color-muted)',
+        'on-primary': 'var(--color-on-primary)',
+        'on-dark': 'var(--color-on-dark)',
+
+        // Status
+        'success-bg': 'var(--color-success-bg)',
+        'success-text': 'var(--color-success-text)',
+
+        // ----------------------------------------------------------
+        // Legacy aliases (do not remove — referenced across the app)
+        // ----------------------------------------------------------
         brand: {
           50: 'var(--color-brand-50)',
           100: 'var(--color-brand-100)',
@@ -44,11 +82,38 @@ export default {
         },
       },
       borderRadius: {
+        // MiniMax radius scale
+        'mini-xs': 'var(--radius-xs)',
+        'mini-sm': 'var(--radius-sm)',
+        'mini-md': 'var(--radius-md)',
+        'mini-lg': 'var(--radius-lg)',
+        'mini-xl': 'var(--radius-xl)',
+        'mini-xxl': 'var(--radius-xxl)',
+        'mini-xxxl': 'var(--radius-xxxl)',
+        hero: 'var(--radius-hero)',
+        // Legacy aliases
         brand: 'var(--radius-brand)',
         'brand-lg': 'var(--radius-brand-lg)',
       },
+      spacing: {
+        'mini-xxs': 'var(--space-xxs)',
+        'mini-xs': 'var(--space-xs)',
+        'mini-sm': 'var(--space-sm)',
+        'mini-md': 'var(--space-md)',
+        'mini-lg': 'var(--space-lg)',
+        'mini-xl': 'var(--space-xl)',
+        'mini-xxl': 'var(--space-xxl)',
+        'mini-xxxl': 'var(--space-xxxl)',
+        'section-sm': 'var(--space-section-sm)',
+        section: 'var(--space-section)',
+        'section-lg': 'var(--space-section-lg)',
+        hero: 'var(--space-hero)',
+      },
       boxShadow: {
         soft: 'var(--shadow-soft)',
+        card: 'var(--shadow-card)',
+        atmospheric: 'var(--shadow-atmospheric)',
+        modal: 'var(--shadow-modal)',
         warm: 'var(--shadow-warm)',
         elevated: 'var(--shadow-elevated)',
         elev: 'var(--shadow-elev)',
