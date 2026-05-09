@@ -1,4 +1,4 @@
-import { Suspense, useState } from "react";
+import { Suspense, useState, useEffect } from "react";
 // import { useSearchParams, useRouter } from "next/navigation";  // ported: next.js -> Astro+React
 import { UsageStats, RequestLogger, CardSkeleton, SegmentedControl } from "@/shared/components";
 import RequestDetailsTab from "@/components/usage/RequestDetailsTab";
@@ -43,7 +43,7 @@ function UsageContent() {
     ? tabFromUrl
     : "overview";
 
-  const handleTabChange = (value) => {
+  const handleTabChange = (value: string) => {
     if (value === activeTab) return;
     setTabLoading(true);
     const params = new URLSearchParams(searchParams);
