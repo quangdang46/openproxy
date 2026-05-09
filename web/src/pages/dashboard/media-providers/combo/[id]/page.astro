@@ -5,7 +5,10 @@ import MediaProvidersComboIdPageClient from '@/components/MediaProvidersComboIdP
 export async function getStaticPaths() {
   return [];
 }
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <MediaProvidersComboIdPageClient />
+  <DashboardLayout client:only="react">
+    <MediaProvidersComboIdPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

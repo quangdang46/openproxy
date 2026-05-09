@@ -14,7 +14,7 @@ async fn app_state() -> AppState {
 }
 
 #[tokio::test]
-async fn init_route_matches_9router_plain_text_response() {
+async fn init_route_matches_openproxy_plain_text_response() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(

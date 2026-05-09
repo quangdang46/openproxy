@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import EndpointPageClient from '@/components/EndpointPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <EndpointPageClient />
+  <DashboardLayout client:only="react">
+    <EndpointPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import CLIToolsPageClient from '@/components/CLIToolsPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <CLIToolsPageClient />
+  <DashboardLayout client:only="react">
+    <CLIToolsPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

@@ -92,7 +92,7 @@ fn make_codex_id_token(email: &str, account_id: &str, plan_type: &str) -> String
 }
 
 #[tokio::test]
-async fn claude_authorize_matches_9router_response_shape() {
+async fn claude_authorize_matches_openproxy_response_shape() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(get_request(
@@ -129,7 +129,7 @@ async fn claude_authorize_matches_9router_response_shape() {
 }
 
 #[tokio::test]
-async fn codex_authorize_matches_9router_response_shape() {
+async fn codex_authorize_matches_openproxy_response_shape() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(get_request(
@@ -172,7 +172,7 @@ async fn exchange_compat_rejects_missing_required_fields() {
 }
 
 #[tokio::test]
-async fn claude_exchange_matches_9router_and_saves_connection() {
+async fn claude_exchange_matches_openproxy_and_saves_connection() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _token_url = EnvVarGuard::set(
@@ -237,7 +237,7 @@ async fn claude_exchange_matches_9router_and_saves_connection() {
 }
 
 #[tokio::test]
-async fn codex_exchange_matches_9router_and_maps_id_token() {
+async fn codex_exchange_matches_openproxy_and_maps_id_token() {
     let _lock = ENV_LOCK.lock().unwrap();
     let server = MockServer::start().await;
     let _token_url = EnvVarGuard::set(

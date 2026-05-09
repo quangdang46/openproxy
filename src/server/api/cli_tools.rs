@@ -331,11 +331,11 @@ async fn get_codex_settings(State(state): State<AppState>, headers: HeaderMap) -
 
     match read_codex_config().await {
         Ok(config) => {
-            let has_9router = config.as_deref().is_some_and(has_9router_codex_config);
+            let has_openproxy = config.as_deref().is_some_and(has_openproxy_codex_config);
             Json(json!({
                 "installed": true,
                 "config": config,
-                "has9Router": has_9router,
+                "hasOpenProxy": has_openproxy,
                 "configPath": codex_config_path().to_string_lossy().to_string(),
             }))
             .into_response()
@@ -427,12 +427,12 @@ async fn get_copilot_settings(State(state): State<AppState>, headers: HeaderMap)
 
     match read_copilot_config().await {
         Ok(config) => {
-            let has_9router = config.as_ref().is_some_and(has_9router_copilot_config);
-            let entry = config.as_ref().and_then(get_9router_copilot_entry);
+            let has_openproxy = config.as_ref().is_some_and(has_openproxy_copilot_config);
+            let entry = config.as_ref().and_then(get_openproxy_copilot_entry);
             Json(json!({
                 "installed": true,
                 "config": config,
-                "has9Router": has_9router,
+                "hasOpenProxy": has_openproxy,
                 "configPath": copilot_config_path().to_string_lossy().to_string(),
                 "currentModel": entry
                     .and_then(|entry| entry.get("models"))
@@ -536,11 +536,11 @@ async fn get_droid_settings(State(state): State<AppState>, headers: HeaderMap) -
 
     match read_droid_settings().await {
         Ok(settings) => {
-            let has_9router = settings.as_ref().is_some_and(has_9router_droid_settings);
+            let has_openproxy = settings.as_ref().is_some_and(has_openproxy_droid_settings);
             Json(json!({
                 "installed": true,
                 "settings": settings,
-                "has9Router": has_9router,
+                "hasOpenProxy": has_openproxy,
                 "settingsPath": droid_settings_path().to_string_lossy().to_string(),
             }))
             .into_response()
@@ -653,7 +653,7 @@ async fn get_opencode_settings(State(state): State<AppState>, headers: HeaderMap
             let provider_config = config
                 .as_ref()
                 .and_then(|config| config.get("provider"))
-                .and_then(|provider| provider.get("9router"));
+                .and_then(|provider| provider.get("openproxy"));
             let model_map = provider_config.and_then(|provider| provider.get("models"));
             let models = model_map
                 .and_then(Value::as_object)
@@ -668,7 +668,7 @@ async fn get_opencode_settings(State(state): State<AppState>, headers: HeaderMap
             Json(json!({
                 "installed": true,
                 "config": config,
-                "has9Router": provider_config.is_some(),
+                "hasOpenProxy": provider_config.is_some(),
                 "configPath": opencode_config_path().to_string_lossy().to_string(),
                 "opencode": {
                     "models": models,
@@ -676,7 +676,7 @@ async fn get_opencode_settings(State(state): State<AppState>, headers: HeaderMap
                         .as_ref()
                         .and_then(|config| config.get("model"))
                         .and_then(Value::as_str)
-                        .and_then(|model| model.strip_prefix("9router/")),
+                        .and_then(|model| model.strip_prefix("openproxy/")),
                     "baseURL": provider_config
                         .and_then(|provider| provider.get("options"))
                         .and_then(|options| options.get("baseURL"))
@@ -830,9 +830,9 @@ async fn get_openclaw_settings(State(state): State<AppState>, headers: HeaderMap
                 "installed": true,
                 "settings": settings,
                 "agents": enriched_agents,
-                "has9Router": settings
+                "hasOpenProxy": settings
                     .as_ref()
-                    .is_some_and(has_9router_openclaw_settings),
+                    .is_some_and(has_openproxy_openclaw_settings),
                 "settingsPath": openclaw_settings_path().to_string_lossy().to_string(),
             }))
             .into_response()
@@ -922,13 +922,16 @@ async fn write_codex_settings(settings: &CodexSettings) -> anyhow::Result<String
     parsed.insert("model".to_string(), TomlValue::String(model));
     parsed.insert(
         "model_provider".to_string(),
-        TomlValue::String("9router".to_string()),
+        TomlValue::String("openproxy".to_string()),
     );
     set_toml_section(
         &mut parsed,
-        &["model_providers", "9router"],
+        &["model_providers", "openproxy"],
         TomlValue::Table(TomlMap::from_iter([
-            ("name".to_string(), TomlValue::String("9Router".to_string())),
+            (
+                "name".to_string(),
+                TomlValue::String("OpenProxy".to_string()),
+            ),
             (
                 "base_url".to_string(),
                 TomlValue::String(normalize_v1_base_url(&base_url)),
@@ -982,11 +985,11 @@ async fn reset_codex_settings() -> anyhow::Result<Value> {
     };
 
     let mut parsed = parse_toml_table(&existing_config)?;
-    if parsed.get("model_provider").and_then(TomlValue::as_str) == Some("9router") {
+    if parsed.get("model_provider").and_then(TomlValue::as_str) == Some("openproxy") {
         parsed.remove("model");
         parsed.remove("model_provider");
     }
-    delete_toml_section(&mut parsed, &["model_providers", "9router"]);
+    delete_toml_section(&mut parsed, &["model_providers", "openproxy"]);
     delete_toml_section(&mut parsed, &["agents", "subagent"]);
 
     let config_content = toml::to_string_pretty(&TomlValue::Table(parsed))?;
@@ -1017,7 +1020,7 @@ async fn reset_codex_settings() -> anyhow::Result<Value> {
 
     Ok(json!({
         "success": true,
-        "message": "9Router settings removed successfully",
+        "message": "OpenProxy settings removed successfully",
     }))
 }
 
@@ -1029,8 +1032,9 @@ async fn read_string_optional(path: &FsPath) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn has_9router_codex_config(config: &str) -> bool {
-    config.contains("model_provider = \"9router\"") || config.contains("[model_providers.9router]")
+fn has_openproxy_codex_config(config: &str) -> bool {
+    config.contains("model_provider = \"openproxy\"")
+        || config.contains("[model_providers.openproxy]")
 }
 
 fn parse_toml_table(content: &str) -> anyhow::Result<TomlMap<String, TomlValue>> {
@@ -1165,9 +1169,9 @@ async fn write_copilot_settings(req: &CopilotSettingsRequest) -> anyhow::Result<
         .api_key
         .clone()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "sk_9router".to_string());
+        .unwrap_or_else(|| "sk_openproxy".to_string());
     let new_entry = json!({
-        "name": "9Router",
+        "name": "OpenProxy",
         "vendor": "azure",
         "apiKey": api_key,
         "models": req.models.iter().map(|id| {
@@ -1187,7 +1191,7 @@ async fn write_copilot_settings(req: &CopilotSettingsRequest) -> anyhow::Result<
         entry
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(|name| name == "9Router")
+            .is_some_and(|name| name == "OpenProxy")
     }) {
         config[index] = new_entry;
     } else {
@@ -1219,7 +1223,7 @@ async fn reset_copilot_settings() -> anyhow::Result<Value> {
         entry
             .get("name")
             .and_then(Value::as_str)
-            .is_none_or(|name| name != "9Router")
+            .is_none_or(|name| name != "OpenProxy")
     });
     fs::write(
         &config_path,
@@ -1229,7 +1233,7 @@ async fn reset_copilot_settings() -> anyhow::Result<Value> {
 
     Ok(json!({
         "success": true,
-        "message": "9Router removed from Copilot config",
+        "message": "OpenProxy removed from Copilot config",
     }))
 }
 
@@ -1259,7 +1263,7 @@ async fn write_droid_settings(
         !entry
             .get("id")
             .and_then(Value::as_str)
-            .is_some_and(|id| id.starts_with("custom:9Router"))
+            .is_some_and(|id| id.starts_with("custom:OpenProxy"))
     });
 
     let normalized_base_url = normalize_v1_base_url(&req.base_url);
@@ -1286,7 +1290,7 @@ async fn write_droid_settings(
         }
         custom_models.push(json!({
             "model": model,
-            "id": format!("custom:9Router-{index}"),
+            "id": format!("custom:OpenProxy-{index}"),
             "index": index,
             "baseUrl": normalized_base_url,
             "apiKey": api_key,
@@ -1297,8 +1301,8 @@ async fn write_droid_settings(
         }));
     }
 
-    // Intentionally matches 9router's whole-array reordering behavior, including
-    // pre-existing non-9Router entries that may shift indexes.
+    // Intentionally matches openproxy's whole-array reordering behavior, including
+    // pre-existing non-OpenProxy entries that may shift indexes.
     if let Some(default_index) = default_index {
         if default_index < custom_models.len() {
             let default_entry = custom_models.remove(default_index);
@@ -1345,7 +1349,7 @@ async fn reset_droid_settings() -> anyhow::Result<Value> {
             !entry
                 .get("id")
                 .and_then(Value::as_str)
-                .is_some_and(|id| id.starts_with("custom:9Router"))
+                .is_some_and(|id| id.starts_with("custom:OpenProxy"))
         });
         if !custom_models.is_empty() {
             settings.insert("customModels".to_string(), Value::Array(custom_models));
@@ -1359,7 +1363,7 @@ async fn reset_droid_settings() -> anyhow::Result<Value> {
     .await?;
     Ok(json!({
         "success": true,
-        "message": "9Router settings removed successfully",
+        "message": "OpenProxy settings removed successfully",
     }))
 }
 
@@ -1383,7 +1387,7 @@ async fn write_opencode_settings(
         .api_key
         .clone()
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "sk_9router".to_string());
+        .unwrap_or_else(|| "sk_openproxy".to_string());
     let effective_subagent_model = req
         .subagent_model
         .clone()
@@ -1400,7 +1404,7 @@ async fn write_opencode_settings(
         .ok_or_else(|| anyhow::anyhow!("provider must be an object"))?;
 
     let existing_provider = provider_map
-        .entry("9router".to_string())
+        .entry("openproxy".to_string())
         .or_insert_with(|| {
             json!({
                 "npm": "@ai-sdk/openai-compatible",
@@ -1417,7 +1421,7 @@ async fn write_opencode_settings(
     }
     let existing_provider_map = existing_provider
         .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("provider.9router must be an object"))?;
+        .ok_or_else(|| anyhow::anyhow!("provider.openproxy must be an object"))?;
 
     let options = existing_provider_map
         .entry("options".to_string())
@@ -1427,7 +1431,7 @@ async fn write_opencode_settings(
     }
     let options_map = options
         .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("provider.9router.options must be an object"))?;
+        .ok_or_else(|| anyhow::anyhow!("provider.openproxy.options must be an object"))?;
     options_map.insert("baseURL".to_string(), Value::String(normalized_base_url));
     options_map.insert("apiKey".to_string(), Value::String(api_key));
 
@@ -1439,7 +1443,7 @@ async fn write_opencode_settings(
     }
     let existing_models_map = existing_models
         .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("provider.9router.models must be an object"))?;
+        .ok_or_else(|| anyhow::anyhow!("provider.openproxy.models must be an object"))?;
     for model in models {
         if model.is_empty() {
             continue;
@@ -1459,7 +1463,7 @@ async fn write_opencode_settings(
                 .unwrap_or_else(|| models[0].clone());
             config.insert(
                 "model".to_string(),
-                Value::String(format!("9router/{final_active}")),
+                Value::String(format!("openproxy/{final_active}")),
             );
         }
     }
@@ -1478,7 +1482,7 @@ async fn write_opencode_settings(
         json!({
             "description": "Fast explorer subagent for codebase exploration",
             "mode": "subagent",
-            "model": format!("9router/{effective_subagent_model}"),
+            "model": format!("openproxy/{effective_subagent_model}"),
         }),
     );
 
@@ -1507,7 +1511,7 @@ async fn patch_opencode_config(req: &PatchOpenCodeSettingsRequest) -> anyhow::Re
         && config
             .get("model")
             .and_then(Value::as_str)
-            .is_some_and(|model| model.starts_with("9router/"))
+            .is_some_and(|model| model.starts_with("openproxy/"))
     {
         config.insert("model".to_string(), Value::String(String::new()));
     }
@@ -1540,13 +1544,13 @@ async fn reset_opencode_settings(model_to_remove: Option<String>) -> anyhow::Res
         let active_model_matches = config
             .get("model")
             .and_then(Value::as_str)
-            .is_some_and(|model| model == format!("9router/{model_to_remove}"));
+            .is_some_and(|model| model == format!("openproxy/{model_to_remove}"));
         let mut remove_provider = false;
         let mut next_model = None;
         if let Some(models_map) = config
             .get_mut("provider")
             .and_then(Value::as_object_mut)
-            .and_then(|provider| provider.get_mut("9router"))
+            .and_then(|provider| provider.get_mut("openproxy"))
             .and_then(Value::as_object_mut)
             .and_then(|provider| provider.get_mut("models"))
             .and_then(Value::as_object_mut)
@@ -1560,29 +1564,29 @@ async fn reset_opencode_settings(model_to_remove: Option<String>) -> anyhow::Res
         }
         if remove_provider {
             if let Some(provider) = config.get_mut("provider").and_then(Value::as_object_mut) {
-                provider.remove("9router");
+                provider.remove("openproxy");
             }
             if config
                 .get("model")
                 .and_then(Value::as_str)
-                .is_some_and(|model| model.starts_with("9router/"))
+                .is_some_and(|model| model.starts_with("openproxy/"))
             {
                 config.remove("model");
             }
         } else if let Some(next_model) = next_model {
             config.insert(
                 "model".to_string(),
-                Value::String(format!("9router/{next_model}")),
+                Value::String(format!("openproxy/{next_model}")),
             );
         }
     } else {
         if let Some(provider) = config.get_mut("provider").and_then(Value::as_object_mut) {
-            provider.remove("9router");
+            provider.remove("openproxy");
         }
         if config
             .get("model")
             .and_then(Value::as_str)
-            .is_some_and(|model| model.starts_with("9router/"))
+            .is_some_and(|model| model.starts_with("openproxy/"))
         {
             config.remove("model");
         }
@@ -1595,7 +1599,7 @@ async fn reset_opencode_settings(model_to_remove: Option<String>) -> anyhow::Res
         .and_then(Value::as_object)
         .and_then(|explorer| explorer.get("model"))
         .and_then(Value::as_str)
-        .is_some_and(|model| model.starts_with("9router/"));
+        .is_some_and(|model| model.starts_with("openproxy/"));
     if should_remove_explorer {
         if let Some(agent) = config.get_mut("agent").and_then(Value::as_object_mut) {
             agent.remove("explorer");
@@ -1614,7 +1618,7 @@ async fn reset_opencode_settings(model_to_remove: Option<String>) -> anyhow::Res
         "success": true,
         "message": model_to_remove
             .map(|model| Value::String(format!("Model \"{model}\" removed")))
-            .unwrap_or_else(|| Value::String("9Router settings removed from OpenCode".to_string())),
+            .unwrap_or_else(|| Value::String("OpenProxy settings removed from OpenCode".to_string())),
     }))
 }
 
@@ -1635,14 +1639,14 @@ async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Resul
     ensure_object_path(&mut settings, &["models", "providers"])?;
 
     let normalized_base_url = normalize_v1_base_url(&req.base_url);
-    let full_model_id = format!("9router/{}", req.model);
+    let full_model_id = format!("openproxy/{}", req.model);
 
     if let Some(default_models) =
         get_nested_object_mut(&mut settings, &["agents", "defaults", "models"])
     {
         let keys_to_remove = default_models
             .keys()
-            .filter(|key| key.starts_with("9router/"))
+            .filter(|key| key.starts_with("openproxy/"))
             .cloned()
             .collect::<Vec<_>>();
         for key in keys_to_remove {
@@ -1667,7 +1671,7 @@ async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Resul
         get_nested_object_mut(&mut settings, &["agents", "defaults", "models"])
     {
         for model in &all_model_ids {
-            default_models.insert(format!("9router/{model}"), json!({}));
+            default_models.insert(format!("openproxy/{model}"), json!({}));
         }
     }
 
@@ -1676,7 +1680,7 @@ async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Resul
             if agent
                 .get("model")
                 .and_then(Value::as_str)
-                .is_some_and(|model| model.starts_with("9router/"))
+                .is_some_and(|model| model.starts_with("openproxy/"))
             {
                 if let Some(agent_object) = agent.as_object_mut() {
                     agent_object.remove("model");
@@ -1687,7 +1691,7 @@ async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Resul
 
     if let Some(providers) = get_nested_object_mut(&mut settings, &["models", "providers"]) {
         providers.insert(
-            "9router".to_string(),
+            "openproxy".to_string(),
             json!({
                 "baseUrl": normalized_base_url,
                 "apiKey": req.api_key.clone().unwrap_or_else(|| "your_api_key".to_string()),
@@ -1710,7 +1714,7 @@ async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Resul
                     if let Some(agent_object) = agent.as_object_mut() {
                         agent_object.insert(
                             "model".to_string(),
-                            Value::String(format!("9router/{agent_model}")),
+                            Value::String(format!("openproxy/{agent_model}")),
                         );
                     }
                 }
@@ -1759,7 +1763,7 @@ async fn reset_openclaw_settings() -> anyhow::Result<Value> {
     };
 
     if let Some(providers) = get_nested_object_mut(&mut settings, &["models", "providers"]) {
-        providers.remove("9router");
+        providers.remove("openproxy");
         if providers.is_empty() {
             remove_nested_key(&mut settings, &["models", "providers"]);
         }
@@ -1770,7 +1774,7 @@ async fn reset_openclaw_settings() -> anyhow::Result<Value> {
     {
         let keys_to_remove = default_models
             .keys()
-            .filter(|key| key.starts_with("9router/"))
+            .filter(|key| key.starts_with("openproxy/"))
             .cloned()
             .collect::<Vec<_>>();
         for key in keys_to_remove {
@@ -1787,7 +1791,7 @@ async fn reset_openclaw_settings() -> anyhow::Result<Value> {
         .and_then(|defaults| defaults.get("model"))
         .and_then(|model| model.get("primary"))
         .and_then(Value::as_str)
-        .is_some_and(|model| model.starts_with("9router/"))
+        .is_some_and(|model| model.starts_with("openproxy/"))
     {
         remove_nested_key(&mut settings, &["agents", "defaults", "model", "primary"]);
     }
@@ -1799,7 +1803,7 @@ async fn reset_openclaw_settings() -> anyhow::Result<Value> {
     .await?;
     Ok(json!({
         "success": true,
-        "message": "9Router settings removed successfully",
+        "message": "OpenProxy settings removed successfully",
     }))
 }
 
@@ -1808,7 +1812,7 @@ async fn read_openclaw_agent_model(agent_dir: &PathBuf) -> Option<String> {
     let content = fs::read_to_string(models_path).await.ok()?;
     let data = serde_json::from_str::<Value>(&content).ok()?;
     data.get("providers")
-        .and_then(|providers| providers.get("9router"))
+        .and_then(|providers| providers.get("openproxy"))
         .and_then(|provider| provider.get("models"))
         .and_then(Value::as_array)
         .and_then(|models| models.first())
@@ -1841,7 +1845,7 @@ async fn write_openclaw_agent_models(
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("providers must be an object"))?;
     providers_map.insert(
-        "9router".to_string(),
+        "openproxy".to_string(),
         json!({
             "baseUrl": base_url,
             "apiKey": api_key.unwrap_or("your_api_key"),
@@ -1951,11 +1955,11 @@ fn remove_nested_key(root: &mut serde_json::Map<String, Value>, path: &[&str]) {
     }
 }
 
-fn has_9router_copilot_config(config: &Value) -> bool {
-    get_9router_copilot_entry(config).is_some()
+fn has_openproxy_copilot_config(config: &Value) -> bool {
+    get_openproxy_copilot_entry(config).is_some()
 }
 
-fn has_9router_droid_settings(settings: &Value) -> bool {
+fn has_openproxy_droid_settings(settings: &Value) -> bool {
     settings
         .get("customModels")
         .and_then(Value::as_array)
@@ -1964,24 +1968,24 @@ fn has_9router_droid_settings(settings: &Value) -> bool {
                 entry
                     .get("id")
                     .and_then(Value::as_str)
-                    .is_some_and(|id| id.starts_with("custom:9Router"))
+                    .is_some_and(|id| id.starts_with("custom:OpenProxy"))
             })
         })
 }
 
-fn has_9router_openclaw_settings(settings: &Value) -> bool {
+fn has_openproxy_openclaw_settings(settings: &Value) -> bool {
     settings
         .get("models")
         .and_then(|models| models.get("providers"))
-        .and_then(|providers| providers.get("9router"))
+        .and_then(|providers| providers.get("openproxy"))
         .is_some()
 }
 
-fn get_9router_copilot_entry(config: &Value) -> Option<&Value> {
+fn get_openproxy_copilot_entry(config: &Value) -> Option<&Value> {
     config
         .as_array()?
         .iter()
-        .find(|entry| entry.get("name").and_then(Value::as_str) == Some("9Router"))
+        .find(|entry| entry.get("name").and_then(Value::as_str) == Some("OpenProxy"))
 }
 
 fn copilot_config_path() -> PathBuf {
@@ -2432,8 +2436,6 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
-
-
 // GET /api/cli-tools/cowork-mcp-registry
 // Fetches MCP server registry from Anthropic + GitHub plugins
 async fn get_cowork_mcp_registry() -> Response {
@@ -2461,22 +2463,39 @@ async fn get_cowork_mcp_registry() -> Response {
             "https://api.anthropic.com/mcp-registry/v0/servers?limit=500&visibility=commercial,gsuite,gsuite-google{}",
             if cursor.is_empty() { String::new() } else { format!("&cursor={}", urlencoding::encode(&cursor)) }
         );
-        match client.get(&url).header("accept", "application/json").send().await {
-            Ok(resp) if resp.status().is_success() => {
-                match resp.json::<Value>().await {
-                    Ok(j) => {
-                        for item in j.get("servers").and_then(|v| v.as_array()).cloned().unwrap_or_default() {
-                            let s = item.get("server").cloned().unwrap_or_default();
-                            let remote = s.get("remotes").and_then(|r| r.as_array()).and_then(|a| a.first());
-                            let url = remote.and_then(|r| r.get("url")).and_then(Value::as_str).unwrap_or("");
-                            if url.is_empty() { continue; }
-                            let transport = remote.and_then(|r| r.get("type")).and_then(Value::as_str);
-                            let transport = match transport {
-                                Some("streamable-http") => "http",
-                                Some("sse") => "sse",
-                                _ => "http",
-                            };
-                            servers.push(json!({
+        match client
+            .get(&url)
+            .header("accept", "application/json")
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => match resp.json::<Value>().await {
+                Ok(j) => {
+                    for item in j
+                        .get("servers")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                    {
+                        let s = item.get("server").cloned().unwrap_or_default();
+                        let remote = s
+                            .get("remotes")
+                            .and_then(|r| r.as_array())
+                            .and_then(|a| a.first());
+                        let url = remote
+                            .and_then(|r| r.get("url"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if url.is_empty() {
+                            continue;
+                        }
+                        let transport = remote.and_then(|r| r.get("type")).and_then(Value::as_str);
+                        let transport = match transport {
+                            Some("streamable-http") => "http",
+                            Some("sse") => "sse",
+                            _ => "http",
+                        };
+                        servers.push(json!({
                                 "source": "registry",
                                 "name": s.get("name").and_then(Value::as_str).unwrap_or(""),
                                 "title": s.get("title").or(s.get("name")).and_then(Value::as_str).unwrap_or(""),
@@ -2484,13 +2503,19 @@ async fn get_cowork_mcp_registry() -> Response {
                                 "url": url,
                                 "transport": transport,
                             }));
-                        }
-                        cursor = j.get("metadata").and_then(|m| m.get("nextCursor")).and_then(Value::as_str).unwrap_or("").to_string();
-                        if cursor.is_empty() { break; }
                     }
-                    Err(_) => break,
+                    cursor = j
+                        .get("metadata")
+                        .and_then(|m| m.get("nextCursor"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if cursor.is_empty() {
+                        break;
+                    }
                 }
-            }
+                Err(_) => break,
+            },
             _ => break,
         }
     }

@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import ProvidersNewPageClient from '@/components/ProvidersNewPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <ProvidersNewPageClient />
+  <DashboardLayout client:only="react">
+    <ProvidersNewPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

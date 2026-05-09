@@ -1,7 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import TranslatorPageClient from '@/components/TranslatorPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <TranslatorPageClient />
+  <DashboardLayout client:only="react">
+    <TranslatorPageClient client:only="react" />
+  </DashboardLayout>
 </Layout>

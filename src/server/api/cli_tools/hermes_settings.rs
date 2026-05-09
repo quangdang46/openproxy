@@ -17,7 +17,7 @@ use tokio::{fs, process::Command};
 
 use crate::server::state::AppState;
 
-const PROVIDER_NAME: &str = "9router";
+const PROVIDER_NAME: &str = "openproxy";
 const API_KEY_ENV: &str = "OPENAI_API_KEY";
 
 static MODEL_BLOCK_RE: Lazy<Regex> =
@@ -60,7 +60,7 @@ async fn get_hermes_settings(State(state): State<AppState>, headers: HeaderMap) 
             Json(json!({
                 "installed": true,
                 "settings": { "model": model.clone() },
-                "has9Router": has_9router_config(model.as_ref()),
+                "hasOpenProxy": has_openproxy_config(model.as_ref()),
                 "configPath": hermes_config_path().to_string_lossy().to_string(),
             }))
             .into_response()
@@ -244,7 +244,7 @@ fn extract_model_field(body: &str, key: &str) -> Option<String> {
         .map(|value| value.as_str().trim().to_string())
 }
 
-fn has_9router_config(model: Option<&Value>) -> bool {
+fn has_openproxy_config(model: Option<&Value>) -> bool {
     let Some(model) = model else {
         return false;
     };

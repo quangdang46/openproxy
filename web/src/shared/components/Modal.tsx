@@ -4,7 +4,7 @@ import { useEffect } from "react";
 import { cn } from "@/shared/utils/cn";
 import Button from "./Button";
 import React from "react";
-import { ModalProps } from "@/types";
+import type { ModalProps } from "@/types";
 
 type ModalSize = "sm" | "md" | "lg" | "xl" | "full";
 

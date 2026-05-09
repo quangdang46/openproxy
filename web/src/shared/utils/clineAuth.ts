@@ -19,7 +19,7 @@ export function buildClineHeaders(token: string | null | undefined, extraHeaders
   const headers: Record<string, string> = {
     "HTTP-Referer": "https://cline.bot",
     "X-Title": "Cline",
-    "User-Agent": `9Router/${APP_VERSION}`,
+    "User-Agent": `OpenProxy/${APP_VERSION}`,
     "X-PLATFORM": process.platform || "unknown",
     "X-PLATFORM-VERSION": process.version || "unknown",
     "X-CLIENT-TYPE": "openproxy",

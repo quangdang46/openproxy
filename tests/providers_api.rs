@@ -515,7 +515,7 @@ async fn provider_test_route_returns_exact_missing_connection_payload() {
 }
 
 #[tokio::test]
-async fn provider_test_route_matches_9router_payload_and_updates_connection_status() {
+async fn provider_test_route_matches_openproxy_payload_and_updates_connection_status() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/models"))

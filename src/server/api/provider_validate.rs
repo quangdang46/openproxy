@@ -30,15 +30,29 @@ async fn validate_provider(
     let api_key = req.api_key.as_deref().unwrap_or("").trim().to_string();
 
     // No-auth providers
-    let no_auth = ["edge-tts", "local-device", "sdwebui", "comfyui", "ollama-local"];
+    let no_auth = [
+        "edge-tts",
+        "local-device",
+        "sdwebui",
+        "comfyui",
+        "ollama-local",
+    ];
     if no_auth.contains(&provider.as_str()) {
         return Json(json!({ "valid": true })).into_response();
     }
     if provider.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Provider is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Provider is required" })),
+        )
+            .into_response();
     }
     if api_key.is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "API key is required" }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "API key is required" })),
+        )
+            .into_response();
     }
 
     let client = match reqwest::Client::builder()
@@ -224,17 +238,39 @@ async fn validate_provider(
     })).into_response()
 }
 
-async fn validate_bearer(client: &reqwest::Client, url: &str, api_key: &str) -> (bool, Option<String>) {
-    match client.get(url).header("Authorization", format!("Bearer {api_key}")).send().await {
+async fn validate_bearer(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+) -> (bool, Option<String>) {
+    match client
+        .get(url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .send()
+        .await
+    {
         Ok(resp) => (resp.status().is_success(), None),
         Err(e) => (false, Some(e.to_string())),
     }
 }
 
 fn is_openai_compatible(provider: &str) -> bool {
-    matches!(provider, "custom-openai" | "custom-embedding" | "volcengine-ark" | "byteplus" | "glm-cn" | "alicode" | "alicode-intl" | "opencode-go")
+    matches!(
+        provider,
+        "custom-openai"
+            | "custom-embedding"
+            | "volcengine-ark"
+            | "byteplus"
+            | "glm-cn"
+            | "alicode"
+            | "alicode-intl"
+            | "opencode-go"
+    )
 }
 
 fn is_anthropic_compatible(provider: &str) -> bool {
-    matches!(provider, "custom-anthropic" | "glm" | "kimi" | "minimax" | "minimax-cn")
+    matches!(
+        provider,
+        "custom-anthropic" | "glm" | "kimi" | "minimax" | "minimax-cn"
+    )
 }

@@ -40,7 +40,7 @@ fn is_base64url_no_pad(value: &str) -> bool {
 }
 
 #[tokio::test]
-async fn kiro_social_authorize_matches_9router_google_response() {
+async fn kiro_social_authorize_matches_openproxy_google_response() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(request("/api/oauth/kiro/social-authorize?provider=google"))
@@ -74,7 +74,7 @@ async fn kiro_social_authorize_matches_9router_google_response() {
 }
 
 #[tokio::test]
-async fn kiro_social_authorize_uses_github_idp_name_like_9router() {
+async fn kiro_social_authorize_uses_github_idp_name_like_openproxy() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(request("/api/oauth/kiro/social-authorize?provider=github"))

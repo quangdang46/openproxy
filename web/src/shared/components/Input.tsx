@@ -2,7 +2,7 @@
 
 import { cn } from "@/shared/utils/cn";
 import React from "react";
-import { InputProps } from "@/types";
+import type { InputProps } from "@/types";
 
 export default function Input({
   label,

@@ -5,7 +5,10 @@ import ModelRow from '@/components/providers/ModelRow';
 export async function getStaticPaths() {
   return [];
 }
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
-  <ModelRow />
+  <DashboardLayout client:only="react">
+    <ModelRow client:only="react" />
+  </DashboardLayout>
 </Layout>

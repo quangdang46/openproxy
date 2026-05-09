@@ -97,7 +97,7 @@ fn cline_code(payload: serde_json::Value) -> String {
 }
 
 #[tokio::test]
-async fn gemini_authorize_matches_9router_response_shape() {
+async fn gemini_authorize_matches_openproxy_response_shape() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(get_request(
@@ -127,7 +127,7 @@ async fn gemini_authorize_matches_9router_response_shape() {
 }
 
 #[tokio::test]
-async fn antigravity_authorize_matches_9router_response_shape() {
+async fn antigravity_authorize_matches_openproxy_response_shape() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(get_request(
@@ -152,7 +152,7 @@ async fn antigravity_authorize_matches_9router_response_shape() {
 }
 
 #[tokio::test]
-async fn iflow_authorize_matches_9router_response_shape() {
+async fn iflow_authorize_matches_openproxy_response_shape() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(get_request(
@@ -177,7 +177,7 @@ async fn iflow_authorize_matches_9router_response_shape() {
 }
 
 #[tokio::test]
-async fn cline_authorize_matches_9router_response_shape() {
+async fn cline_authorize_matches_openproxy_response_shape() {
     let app = openproxy::build_app(app_state().await);
     let response = app
         .oneshot(get_request(
@@ -198,7 +198,7 @@ async fn cline_authorize_matches_9router_response_shape() {
 }
 
 #[tokio::test]
-async fn gemini_exchange_matches_9router_and_saves_connection() {
+async fn gemini_exchange_matches_openproxy_and_saves_connection() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -295,7 +295,7 @@ async fn gemini_exchange_matches_9router_and_saves_connection() {
 }
 
 #[tokio::test]
-async fn antigravity_exchange_matches_9router_and_saves_connection() {
+async fn antigravity_exchange_matches_openproxy_and_saves_connection() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -435,7 +435,7 @@ async fn antigravity_exchange_matches_9router_and_saves_connection() {
 }
 
 #[tokio::test]
-async fn iflow_exchange_matches_9router_and_saves_connection() {
+async fn iflow_exchange_matches_openproxy_and_saves_connection() {
     let _lock = ENV_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
