@@ -1,14 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
-import ModelRow from '@/components/providers/ModelRow';
-
-export async function getStaticPaths() {
-  return [];
-}
+import UsagePageClient from '@/components/usage/UsagePageClient';
 import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
   <DashboardLayout client:only="react">
-    <ModelRow client:only="react" />
+    <UsagePageClient client:only="react" />
   </DashboardLayout>
 </Layout>

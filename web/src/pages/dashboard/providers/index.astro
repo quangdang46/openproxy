@@ -1,10 +1,10 @@
 ---
 import Layout from '@/layouts/Layout.astro';
-import ModelAvailabilityBadge from '@/components/providers/ModelAvailabilityBadge';
+import ProvidersPageClient from '@/components/providers/ProvidersPageClient';
 import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
   <DashboardLayout client:only="react">
-    <ModelAvailabilityBadge client:only="react" />
+    <ProvidersPageClient client:only="react" />
   </DashboardLayout>
 </Layout>
