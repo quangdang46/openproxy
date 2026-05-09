@@ -1,0 +1,19 @@
+---
+import Layout from '@/layouts/Layout.astro';
+import ProviderDetailPageClient from '@/components/providers/ProviderDetailPageClient';
+import { AI_PROVIDERS } from '@/shared/constants/providers';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+
+export async function getStaticPaths() {
+  // Pre-render the detail page for every known provider id so that
+  // `/dashboard/providers/<id>` resolves in the static build.
+  // User-added compatible providers (`openai-compatible-*`, `anthropic-compatible-*`)
+  // are not pre-rendered; navigation to those works only in dev mode for now.
+  return Object.keys(AI_PROVIDERS).map((id) => ({ params: { id } }));
+}
+---
+<Layout>
+  <DashboardLayout client:only="react">
+    <ProviderDetailPageClient client:only="react" />
+  </DashboardLayout>
+</Layout>
