@@ -205,13 +205,13 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
   };
 
   return (
-    <header className="shrink-0 flex items-center justify-between gap-3 px-4 lg:px-8 pt-3 pb-2 border-b border-border-subtle bg-surface/60 backdrop-blur-xl lg:bg-transparent lg:backdrop-blur-none z-20">
+    <header className="shrink-0 flex items-center justify-between gap-3 px-4 lg:px-8 pt-3 pb-3 border-b border-hairline-soft bg-canvas/95 backdrop-blur-xl lg:bg-canvas lg:backdrop-blur-none z-20">
       {/* Mobile menu button */}
       <div className="flex items-center gap-3 lg:hidden shrink-0">
         {showMenuButton && (
           <button
             onClick={onMenuClick}
-            className="text-text-main hover:text-primary transition-colors"
+            className="text-ink hover:opacity-70 transition-opacity"
           >
             <span className="material-symbols-outlined">menu</span>
           </button>
@@ -235,7 +235,7 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
                 {crumb.href ? (
                   <a
                     href={crumb.href}
-                    className="text-text-muted hover:text-primary transition-colors"
+                    className="text-slate hover:text-ink transition-colors text-[13px] font-medium"
                   >
                     {crumb.label}
                   </a>
@@ -250,7 +250,7 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
                         fallbackText={crumb.label.slice(0, 2).toUpperCase()}
                       />
                     )}
-                    <h1 className="text-base lg:text-2xl font-semibold text-text-main tracking-tight truncate">
+                    <h1 className="text-[18px] lg:text-[28px] font-semibold text-ink tracking-tight truncate leading-tight">
                       {translate(crumb.label)}
                     </h1>
                   </div>
@@ -260,18 +260,18 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
           </div>
         ) : title ? (
           <div>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2.5">
               {icon && (
-                <span className="material-symbols-outlined text-primary text-xl lg:text-2xl">
+                <span className="material-symbols-outlined text-ink text-xl lg:text-2xl">
                   {icon}
                 </span>
               )}
-              <h1 className="text-base lg:text-2xl font-semibold tracking-tight truncate">
+              <h1 className="text-[18px] lg:text-[28px] font-semibold tracking-tight truncate text-ink leading-tight">
                 {translate(title)}
               </h1>
             </div>
             {description && (
-              <p className="hidden lg:block text-sm text-text-muted truncate">
+              <p className="hidden lg:block text-[13px] text-slate truncate mt-0.5">
                 {translate(description)}
               </p>
             )}
