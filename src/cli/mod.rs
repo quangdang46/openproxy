@@ -19,8 +19,16 @@ use crate::types::{ApiKey, AppDb, ProviderConnection, ProxyPool};
 
 use crate::core::tunnel::{TunnelManager, TunnelProvider};
 
+pub mod config;
+pub mod doctor;
+pub mod output;
+pub mod schema;
+
 #[derive(Debug, Clone, Parser)]
-#[command(name = "openproxy", about = "Local AI routing gateway")]
+#[command(
+    name = "openproxy",
+    about = "Local AI routing gateway (server + agent-first CLI)"
+)]
 pub struct Cli {
     #[arg(long, env = "HOST", default_value = "0.0.0.0")]
     pub host: String,
@@ -31,11 +39,80 @@ pub struct Cli {
     #[arg(long, env = "RUST_LOG", default_value = "info")]
     pub log_filter: String,
 
-    #[arg(long, env = "DATA_DIR")]
+    /// Path to the OpenProxy data directory (db.json, usage.json).
+    /// Falls back to $DATA_DIR or ~/.openproxy.
+    #[arg(long, env = "DATA_DIR", global = true)]
     pub data_dir: Option<PathBuf>,
+
+    /// Emit a stable JSON envelope (`openproxy.v1.*`) to stdout for agents.
+    /// No banners, no color, NDJSON for streaming commands.
+    #[arg(long, global = true)]
+    pub robot: bool,
+
+    /// Increase logging verbosity (-v info, -vv debug, -vvv trace).
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    pub verbose: u8,
+
+    /// Suppress non-essential human output. Errors still go to stderr.
+    #[arg(short = 'q', long, global = true)]
+    pub quiet: bool,
+
+    /// Color preference for human output. Default = auto-detect TTY.
+    #[arg(long, value_enum, default_value_t = ColorChoice::Auto, global = true)]
+    pub color: ColorChoice,
+
+    /// Optional config profile (from ~/.config/openproxy/config.toml).
+    #[arg(long, env = "OPENPROXY_PROFILE", global = true)]
+    pub profile: Option<String>,
+
+    /// Remote management mode: target a server at this base URL instead of
+    /// the local DB. Pairs with --api-key (or $OPENPROXY_API_KEY).
+    #[arg(long, env = "OPENPROXY_URL", global = true)]
+    pub url: Option<String>,
+
+    /// API key for remote management. Read from $OPENPROXY_API_KEY by default.
+    #[arg(long, env = "OPENPROXY_API_KEY", global = true, hide_env_values = true)]
+    pub api_key: Option<String>,
 
     #[command(subcommand)]
     pub cmd: Option<Command>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+impl Cli {
+    /// Build the resolved output context shared by every subcommand.
+    pub fn output_ctx(&self) -> output::OutputCtx {
+        let mode = if self.robot {
+            output::OutputMode::Robot
+        } else {
+            output::OutputMode::Human
+        };
+        let color = match self.color {
+            ColorChoice::Auto => output::ColorMode::Auto,
+            ColorChoice::Always => output::ColorMode::Always,
+            ColorChoice::Never => output::ColorMode::Never,
+        };
+        output::OutputCtx {
+            mode,
+            color,
+            quiet: self.quiet,
+        }
+    }
+
+    pub fn cli_overrides(&self) -> config::CliOverrides {
+        config::CliOverrides {
+            data_dir: self.data_dir.clone(),
+            url: self.url.clone(),
+            api_key: self.api_key.clone(),
+            profile: self.profile.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -76,6 +153,30 @@ pub enum Command {
     Completion {
         #[arg(value_enum)]
         shell: Shell,
+    },
+    /// Print JSON Schema / examples for resources the CLI accepts.
+    /// Useful for agents to discover the right shape before generating payloads.
+    Schema {
+        #[command(subcommand)]
+        cmd: SchemaCmd,
+    },
+    /// Run a self-test of the local install (data dir, db, server health).
+    Doctor,
+}
+
+#[derive(Debug, Clone, Subcommand)]
+pub enum SchemaCmd {
+    /// List all resources for which the CLI exposes a schema/example.
+    List,
+    /// Print the JSON Schema for a single resource.
+    Show {
+        /// Resource name (e.g. provider, combo, key, pool, settings).
+        resource: String,
+    },
+    /// Print an example payload for a single resource.
+    Example {
+        /// Resource name (e.g. provider, combo, key, pool, settings).
+        resource: String,
     },
 }
 
@@ -146,6 +247,8 @@ pub enum TunnelCmd {
 impl Cli {
     pub fn run(self) -> anyhow::Result<()> {
         let rt = tokio::runtime::Runtime::new()?;
+        let ctx = self.output_ctx();
+        let overrides = self.cli_overrides();
         if let Some(cmd) = self.cmd {
             match cmd {
                 Command::Provider { cmd } => {
@@ -187,6 +290,24 @@ impl Cli {
                     let mut cmd = Cli::command();
                     clap_complete::generate(shell, &mut cmd, "openproxy", &mut std::io::stdout());
                     Ok(())
+                }
+                Command::Schema { cmd } => {
+                    // Schema commands have no async I/O; we still go through
+                    // the same dispatcher so the global flags (--robot, etc.)
+                    // are honored uniformly.
+                    match cmd {
+                        SchemaCmd::List => schema::run_list(ctx),
+                        SchemaCmd::Show { resource } => {
+                            schema::run_show(ctx, &resource).map(|_| ())
+                        }
+                        SchemaCmd::Example { resource } => {
+                            schema::run_example(ctx, &resource).map(|_| ())
+                        }
+                    }
+                }
+                Command::Doctor => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    rt.block_on(doctor::run(ctx, &resolved)).map(|_| ())
                 }
             }
         } else {
