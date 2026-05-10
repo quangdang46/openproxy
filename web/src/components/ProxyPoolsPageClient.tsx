@@ -6,8 +6,8 @@ import { Card, Button, Badge } from "@/shared/components";
 interface Pool {
   id: string;
   name: string;
-  description?: string;
-  active: boolean;
+  proxyUrl?: string;
+  isActive?: boolean;
 }
 
 export default function ProxyPoolsPageClient() {
@@ -23,7 +23,7 @@ export default function ProxyPoolsPageClient() {
       const res = await fetch("/api/proxy-pools");
       if (res.ok) {
         const data = await res.json();
-        setPools(data.pools || []);
+        setPools(data.proxyPools || data.pools || []);
       }
     } catch (error) {
       console.error("Failed to fetch proxy pools:", error);
@@ -57,10 +57,10 @@ export default function ProxyPoolsPageClient() {
               <div className="flex items-center justify-between">
                 <div>
                   <h3 className="font-semibold">{pool.name}</h3>
-                  <p className="text-sm text-text-muted">{pool.description || "No description"}</p>
+                  <p className="text-sm text-text-muted">{pool.proxyUrl || "No proxy URL"}</p>
                 </div>
-                <Badge variant={pool.active ? "success" : "neutral"}>
-                  {pool.active ? "Active" : "Inactive"}
+                <Badge variant={pool.isActive ? "success" : "neutral"}>
+                  {pool.isActive ? "Active" : "Inactive"}
                 </Badge>
               </div>
             </Card>
