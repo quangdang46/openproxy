@@ -47,9 +47,39 @@ struct AddMediaProviderRequest {
     extra: BTreeMap<String, Value>,
 }
 
-fn detect_media_type(connection: &ProviderConnection) -> Option<String> {
-    let provider = connection.provider.to_lowercase();
+/// Kinds the dashboard knows about. Mirrors `MEDIA_PROVIDER_KINDS` in
+/// `web/src/shared/constants/providers.ts`.
+const KNOWN_KINDS: &[&str] = &[
+    "embedding",
+    "image",
+    "imageToText",
+    "tts",
+    "stt",
+    "webSearch",
+    "webFetch",
+    "video",
+    "music",
+    // Legacy alias retained for the old `add_media_provider` shape and
+    // for the `MediaProvidersResponse` aggregator.
+    "search",
+];
 
+fn detect_media_type(connection: &ProviderConnection) -> Option<String> {
+    // Prefer explicit metadata stored on the connection.
+    for key in &["mediaType", "media_type", "type"] {
+        if let Some(v) = connection
+            .provider_specific_data
+            .get(*key)
+            .and_then(Value::as_str)
+        {
+            if KNOWN_KINDS.contains(&v) {
+                return Some(v.to_string());
+            }
+        }
+    }
+
+    // Then fall back to a kind-of-provider heuristic on the provider name.
+    let provider = connection.provider.to_lowercase();
     if provider.contains("tts")
         || provider.contains("elevenlabs")
         || provider == "edge-tts"
@@ -81,21 +111,21 @@ fn detect_media_type(connection: &ProviderConnection) -> Option<String> {
         return Some("search".to_string());
     }
 
-    // Check provider_specific_data for type info
-    for key in &["mediaType", "media_type", "type"] {
-        if let Some(v) = connection
-            .provider_specific_data
-            .get(*key)
-            .and_then(Value::as_str)
-        {
-            match v {
-                "tts" | "stt" | "embedding" | "image" | "search" => return Some(v.to_string()),
-                _ => {}
-            }
-        }
-    }
-
     None
+}
+
+/// Some kinds are exposed under combined dashboard views. The `web` page
+/// shows both web-search and web-fetch providers, while the legacy
+/// `search` aggregator collects anything web-flavored.
+fn kind_matches(kind: &str, detected: &str) -> bool {
+    if kind == detected {
+        return true;
+    }
+    match kind {
+        "web" => matches!(detected, "webSearch" | "webFetch" | "search"),
+        "webSearch" | "webFetch" => detected == "search",
+        _ => false,
+    }
 }
 
 fn to_summary(conn: &ProviderConnection) -> ProviderSummary {
@@ -743,11 +773,151 @@ async fn get_elevenlabs_voices_impl(
     Json(serde_json::json!({"languages": languages, "byLang": by_lang})).into_response()
 }
 
+fn provider_summary_for_kind(conn: &ProviderConnection) -> serde_json::Value {
+    let detected = detect_media_type(conn).unwrap_or_default();
+    serde_json::json!({
+        "id": conn.id,
+        "name": conn.name.clone().unwrap_or_else(|| conn.provider.clone()),
+        "description": conn.display_name,
+        "provider": conn.provider,
+        "type": detected,
+        "active": conn.is_active(),
+    })
+}
+
+/// GET /api/media-providers/{kind}
+/// Lists provider connections that match a dashboard kind
+/// (`embedding`, `tts`, `image`, …). The matcher is permissive so the
+/// `web` and `webSearch`/`webFetch` views all see related providers.
+async fn list_providers_by_kind(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(kind): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        crate::server::api::require_dashboard_or_management_api_key(&headers, &state)
+    {
+        return response;
+    }
+
+    if !KNOWN_KINDS.contains(&kind.as_str()) && kind != "web" {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("Unknown media provider kind: {kind}"),
+            })),
+        )
+            .into_response();
+    }
+
+    let snapshot = state.db.snapshot();
+    let providers: Vec<serde_json::Value> = snapshot
+        .provider_connections
+        .iter()
+        .filter(|c| c.is_active())
+        .filter(|c| match detect_media_type(c).as_deref() {
+            Some(detected) => kind_matches(&kind, detected),
+            None => false,
+        })
+        .map(provider_summary_for_kind)
+        .collect();
+
+    Json(serde_json::json!({ "kind": kind, "providers": providers })).into_response()
+}
+
+/// GET /api/media-providers/{kind}/{id}
+/// Returns a single provider connection, scoped to the requested kind.
+async fn get_provider_by_kind(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path((kind, id)): Path<(String, String)>,
+) -> axum::response::Response {
+    if let Err(response) =
+        crate::server::api::require_dashboard_or_management_api_key(&headers, &state)
+    {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let Some(conn) = snapshot.provider_connections.iter().find(|c| c.id == id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Media provider not found" })),
+        )
+            .into_response();
+    };
+
+    if let Some(detected) = detect_media_type(conn) {
+        if !kind_matches(&kind, &detected) {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": format!("Provider {id} is not of kind {kind}"),
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    Json(provider_summary_for_kind(conn)).into_response()
+}
+
+/// GET /api/media-providers/combo/{id}
+/// Returns a single combo (alias of `/api/combos/{id}`) shaped for the
+/// `MediaProvidersComboIdPageClient` component.
+async fn get_combo_for_media(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    if let Err(response) =
+        crate::server::api::require_dashboard_or_management_api_key(&headers, &state)
+    {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let Some(combo) = snapshot.combos.iter().find(|c| c.id == id).cloned() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Combo not found" })),
+        )
+            .into_response();
+    };
+
+    let providers: Vec<serde_json::Value> = combo
+        .models
+        .iter()
+        .map(|model| serde_json::json!({ "id": model, "name": model }))
+        .collect();
+
+    let active = combo
+        .extra
+        .get("isActive")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+
+    Json(serde_json::json!({
+        "id": combo.id,
+        "name": combo.name,
+        "description": combo.kind,
+        "active": active,
+        "providers": providers,
+    }))
+    .into_response()
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/media-providers", get(list_media_providers))
         .route("/api/media-providers", post(add_media_provider))
-        .route("/api/media-providers/{id}", delete(delete_media_provider))
+        // Specific (non-kind) routes must register before the generic
+        // `/{kind}` matcher so that `combo/{id}` and the TTS voices
+        // routes win against the kind matcher.
+        .route(
+            "/api/media-providers/combo/{id}",
+            get(get_combo_for_media),
+        )
         .route(
             "/api/media-providers/tts/deepgram/voices",
             get(get_deepgram_voices),
@@ -760,5 +930,17 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/media-providers/tts/elevenlabs/voices",
             get(get_elevenlabs_voices),
+        )
+        // Generic kind routes — keep last so they don't shadow the
+        // explicit paths above. Axum requires a single param name per
+        // path slot, so the GET-list and DELETE-by-id share the same
+        // route entry.
+        .route(
+            "/api/media-providers/{kind}",
+            get(list_providers_by_kind).delete(delete_media_provider),
+        )
+        .route(
+            "/api/media-providers/{kind}/{id}",
+            get(get_provider_by_kind),
         )
 }
