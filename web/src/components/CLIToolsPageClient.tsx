@@ -7,7 +7,7 @@ import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from "@/shared/constants/
 import { ClaudeToolCard, CodexToolCard, DroidToolCard, OpenClawToolCard, HermesToolCard, DefaultToolCard, OpenCodeToolCard, CoworkToolCard, MitmLinkCard } from "./cli-tools";
 import { MITM_TOOLS } from "@/shared/constants/cliTools";
 
-const CLOUD_URL = process.env.NEXT_PUBLIC_CLOUD_URL;
+const CLOUD_URL: string | undefined = (import.meta.env as Record<string, string | undefined>)?.PUBLIC_CLOUD_URL;
 
 
 const STATUS_ENDPOINTS: Record<string, string> = {
