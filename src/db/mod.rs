@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 use crate::types::{AppDb, Combo, ModelAliasTarget, ProviderConnection, ProviderNode, UsageDb};
 
+pub mod watcher;
+
 #[derive(Debug, Clone, Default)]
 pub struct ProviderConnectionFilter {
     pub provider: Option<String>,
@@ -201,6 +203,34 @@ async fn load_or_init_usage_db(path: &Path) -> anyhow::Result<UsageDb> {
         write_json_atomic(path, &value).await?;
     }
     Ok(value)
+}
+
+/// Re-read `db.json` from disk without writing anything back. Used by the
+/// file watcher to pick up CLI mutations made by another process. Tolerates
+/// a brief read race during atomic-rename writes by retrying once.
+pub async fn reload_app_db(path: &Path) -> anyhow::Result<AppDb> {
+    let bytes = match fs::read(path).await {
+        Ok(b) => b,
+        Err(_) => {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            fs::read(path).await?
+        }
+    };
+    let parsed: Value = serde_json::from_slice(&bytes)?;
+    Ok(AppDb::from_json_value(parsed))
+}
+
+/// Re-read `usage.json` from disk without writing anything back.
+pub async fn reload_usage_db(path: &Path) -> anyhow::Result<UsageDb> {
+    let bytes = match fs::read(path).await {
+        Ok(b) => b,
+        Err(_) => {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            fs::read(path).await?
+        }
+    };
+    let parsed: Value = serde_json::from_slice(&bytes)?;
+    Ok(UsageDb::from_json_value(parsed))
 }
 
 async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
