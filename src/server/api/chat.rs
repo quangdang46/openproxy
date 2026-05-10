@@ -204,16 +204,25 @@ async fn chat_completions_impl(
                     let body = combo_body.clone();
                     let combo_model = combo_model.to_string();
                     let api_key = combo_api_key.clone();
-                    // Build plan for this combo model
-                    let combo_provider_str = resolved.provider.as_deref().unwrap_or("unknown");
+                    // Re-resolve provider/model for this combo entry so each
+                    // iteration dispatches against the correct provider node
+                    // (e.g. "custom/gpt-fail" -> provider "node-openai", model "gpt-fail").
+                    let inner_snapshot = state.db.snapshot();
+                    let combo_resolved = get_model_info(&combo_model, &inner_snapshot);
+                    let combo_provider_str = combo_resolved
+                        .provider
+                        .as_deref()
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let resolved_model = combo_resolved.model.clone();
                     let combo_plan =
-                        RequestPlan::new(endpoint, &body, combo_provider_str, &combo_model);
+                        RequestPlan::new(endpoint, &body, &combo_provider_str, &resolved_model);
                     let plan_for_combo = combo_plan.clone();
                     async move {
                         execute_single_model(
                             &state,
                             &body,
-                            &combo_model,
+                            &resolved_model,
                             api_key.as_deref(),
                             endpoint,
                             &plan_for_combo,

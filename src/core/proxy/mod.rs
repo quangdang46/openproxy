@@ -214,17 +214,8 @@ pub async fn test_proxy_url(url: &str) -> Result<bool, String> {
         return Err("Empty proxy URL".to_string());
     }
 
-    // Build a client that uses this proxy
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return Err(format!("Failed to build HTTP client: {}", e)),
-    };
-
     // For SOCKS5 proxies, we need to test connectivity differently
-    // For HTTP(S) proxies, we can try a simple GET request to a known endpoint
+    // For HTTP(S) proxies, we route a request through the proxy and observe.
     let result = timeout(Duration::from_secs(5), async {
         if normalized.starts_with("socks5") {
             // For SOCKS5, try to connect via TCP to the proxy
@@ -244,7 +235,18 @@ pub async fn test_proxy_url(url: &str) -> Result<bool, String> {
                 .map_err(|e| format!("SOCKS5 connection failed: {}", e))?;
             Ok(true)
         } else {
-            // For HTTP(S) proxies, try a simple request
+            // Configure a reqwest client that actually routes through the
+            // proxy under test, then issue a simple GET. The request must
+            // go through the proxy, otherwise this is a no-op test that
+            // succeeds whenever the runner has direct internet access.
+            let proxy = reqwest::Proxy::all(&normalized)
+                .map_err(|e| format!("Invalid proxy URL: {}", e))?;
+            let client = reqwest::Client::builder()
+                .proxy(proxy)
+                .timeout(Duration::from_secs(5))
+                .build()
+                .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
             let target_url = if normalized.starts_with("https") {
                 "https://www.google.com/generate_204"
             } else {
@@ -254,7 +256,7 @@ pub async fn test_proxy_url(url: &str) -> Result<bool, String> {
                 .get(target_url)
                 .send()
                 .await
-                .map_err(|e| format!("HTTP proxy request failed: {}", e))?;
+                .map_err(|e| format!("HTTP proxy connection failed: {}", e))?;
             Ok(true)
         }
     })
