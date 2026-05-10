@@ -288,10 +288,9 @@ pub async fn delete_all_sessions(State(state): State<AppState>, headers: HeaderM
 /// stable identity from the live auth/settings state so the Profile page
 /// can render meaningful data.
 pub async fn get_user(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = crate::server::api::require_dashboard_or_management_api_key(
-        &headers,
-        &state,
-    ) {
+    if let Err(response) =
+        crate::server::api::require_dashboard_or_management_api_key(&headers, &state)
+    {
         return response;
     }
 
