@@ -33,23 +33,26 @@ fn combo_lookup_ignores_provider_prefixed_models() {
 
 #[test]
 fn round_robin_rotation_advances_state() {
-    reset_combo_rotation(None);
+    // Use a unique combo name + reset only that name so this test does not
+    // race with other tests that mutate the global COMBO_ROTATION_STATE.
+    let combo_name = "writer-rotation-advances";
+    reset_combo_rotation(Some(combo_name));
     let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
     assert_eq!(
-        get_rotated_models(&models, Some("writer"), ComboStrategy::RoundRobin),
+        get_rotated_models(&models, Some(combo_name), ComboStrategy::RoundRobin),
         vec!["a", "b", "c"]
     );
-    assert_eq!(rotation_index("writer"), Some(1));
+    assert_eq!(rotation_index(combo_name), Some(1));
 
     assert_eq!(
-        get_rotated_models(&models, Some("writer"), ComboStrategy::RoundRobin),
+        get_rotated_models(&models, Some(combo_name), ComboStrategy::RoundRobin),
         vec!["b", "c", "a"]
     );
-    assert_eq!(rotation_index("writer"), Some(2));
+    assert_eq!(rotation_index(combo_name), Some(2));
 
     assert_eq!(
-        get_rotated_models(&models, Some("writer"), ComboStrategy::Fallback),
+        get_rotated_models(&models, Some(combo_name), ComboStrategy::Fallback),
         vec!["a", "b", "c"]
     );
 }
@@ -88,14 +91,15 @@ fn fallback_error_rules_retry_for_transient_gateway_statuses() {
 
 #[tokio::test]
 async fn combo_strategy_stops_after_first_success() {
-    reset_combo_rotation(None);
+    let combo_name = "writer-stops-after-success";
+    reset_combo_rotation(Some(combo_name));
     let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
     let attempts = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
     let seen = attempts.clone();
 
     let result = execute_combo_strategy(
         &models,
-        Some("writer"),
+        Some(combo_name),
         ComboStrategy::Fallback,
         move |model| {
             let seen = seen.clone();
@@ -129,12 +133,13 @@ async fn combo_strategy_stops_after_first_success() {
 
 #[tokio::test]
 async fn combo_strategy_round_robin_uses_rotated_order() {
-    reset_combo_rotation(None);
+    let combo_name = "writer-round-robin-rotated";
+    reset_combo_rotation(Some(combo_name));
     let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
     let first = execute_combo_strategy(
         &models,
-        Some("writer"),
+        Some(combo_name),
         ComboStrategy::RoundRobin,
         |model| {
             let model = model.to_string();
@@ -144,7 +149,7 @@ async fn combo_strategy_round_robin_uses_rotated_order() {
     .await;
     let second = execute_combo_strategy(
         &models,
-        Some("writer"),
+        Some(combo_name),
         ComboStrategy::RoundRobin,
         |model| {
             let model = model.to_string();
@@ -159,14 +164,15 @@ async fn combo_strategy_round_robin_uses_rotated_order() {
 
 #[tokio::test]
 async fn combo_strategy_returns_earliest_retry_after_on_exhaustion() {
-    reset_combo_rotation(None);
+    let combo_name = "writer-earliest-retry-after";
+    reset_combo_rotation(Some(combo_name));
     let models = vec!["a".to_string(), "b".to_string()];
     let early = Utc::now() + Duration::seconds(30);
     let late = Utc::now() + Duration::seconds(90);
 
     let error = execute_combo_strategy(
         &models,
-        Some("writer"),
+        Some(combo_name),
         ComboStrategy::Fallback,
         move |model| {
             let retry_after = if model == "a" { late } else { early };
