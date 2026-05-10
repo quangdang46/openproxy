@@ -69,7 +69,7 @@ export default function ProviderLimits() {
   // Fetch all provider connections
   const fetchConnections = useCallback(async () => {
     try {
-      const response = await fetch("/api/providers/client");
+      const response = await fetch("/api/providers");
       if (!response.ok) throw new Error("Failed to fetch connections");
 
       const data = await response.json();
@@ -375,12 +375,8 @@ export default function ProviderLimits() {
     };
   }, [autoRefresh, refreshAll]);
 
-  // Filter only supported providers
-  const filteredConnections = connections.filter(
-    (conn) =>
-      USAGE_SUPPORTED_PROVIDERS.includes(conn.provider) &&
-      conn.authType === "oauth",
-  );
+  // Filter only supported providers (OAuth or whitelisted apikey)
+  const filteredConnections = connections.filter(isUsageEligible);
 
   const providerFilteredConnections = filteredConnections.filter(
     (conn) => providerFilter === "all" || conn.provider === providerFilter,
