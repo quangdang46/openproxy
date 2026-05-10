@@ -5,7 +5,9 @@ use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use openproxy::cli::{Cli, Command};
+use openproxy::cli::config::ResolvedConfig;
+use openproxy::cli::{Cli, Command, SchemaCmd};
+use openproxy::db::watcher::spawn_watcher;
 use openproxy::db::Db;
 use openproxy::server::console_logs::{shared_console_log_buffer, ConsoleLogMakeWriter};
 use openproxy::server::state::AppState;
@@ -13,6 +15,13 @@ use openproxy::server::state::AppState;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let ctx = cli.output_ctx();
+    let resolved = ResolvedConfig::resolve(cli.cli_overrides())?;
+
+    // Make sure downstream code (server, Db::load, oauth helpers, ...) sees
+    // the same DATA_DIR the CLI resolved. Doing this here means a single
+    // resolution path: flag > env > config profile > default.
+    std::env::set_var("DATA_DIR", &resolved.data_dir);
 
     if let Some(cmd) = &cli.cmd {
         match cmd {
@@ -64,11 +73,32 @@ async fn main() -> anyhow::Result<()> {
                 clap_complete::generate(*shell, &mut cmd, "openproxy", &mut std::io::stdout());
                 return Ok(());
             }
+            Command::Schema { cmd } => {
+                let exit = match cmd {
+                    SchemaCmd::List => {
+                        openproxy::cli::schema::run_list(ctx)?;
+                        0
+                    }
+                    SchemaCmd::Show { resource } => {
+                        openproxy::cli::schema::run_show(ctx, resource)?
+                    }
+                    SchemaCmd::Example { resource } => {
+                        openproxy::cli::schema::run_example(ctx, resource)?
+                    }
+                };
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Doctor => {
+                let exit = openproxy::cli::doctor::run(ctx, &resolved).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
         }
-    }
-
-    if let Some(data_dir) = &cli.data_dir {
-        std::env::set_var("DATA_DIR", data_dir);
     }
 
     let console_log_writer = ConsoleLogMakeWriter::new(shared_console_log_buffer());
@@ -84,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Db::load().await?;
     let db = Arc::new(db);
+    spawn_watcher(db.clone());
     let state = AppState::new(db);
     let app = openproxy::build_app(state);
     let addr = format!("{}:{}", cli.host, cli.port);
