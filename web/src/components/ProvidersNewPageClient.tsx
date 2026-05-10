@@ -1,35 +1,30 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Card, Button, Input } from "@/shared/components";
+import { useState } from "react";
+import { Card, Button } from "@/shared/components";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/providers";
 
 export default function ProvidersNewPageClient() {
   const [selectedProvider, setSelectedProvider] = useState<string | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
 
-  const handleConnect = async () => {
+  const handleConnect = () => {
     if (!selectedProvider) return;
 
-    setLoading(true);
-    try {
-      const res = await fetch("/api/providers/connect", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ provider: selectedProvider }),
-      });
-
-      if (res.ok) {
-        window.location.href = "/dashboard/providers";
-      }
-    } catch (error) {
-      console.error("Failed to connect provider:", error);
-    } finally {
-      setLoading(false);
+    // OAuth providers: kick off the OAuth flow on the server.
+    if (selectedProvider in OAUTH_PROVIDERS) {
+      window.location.href = `/api/oauth/${encodeURIComponent(selectedProvider)}/start`;
+      return;
     }
+
+    // API-key providers: send the user to the providers list with a
+    // query param so the page can open the right "Add API key" panel.
+    window.location.href = `/dashboard/providers?add=${encodeURIComponent(selectedProvider)}`;
   };
 
-  const allProviders = [...Object.values(OAUTH_PROVIDERS), ...Object.values(APIKEY_PROVIDERS)];
+  const allProviders = [
+    ...Object.values(OAUTH_PROVIDERS),
+    ...Object.values(APIKEY_PROVIDERS),
+  ];
 
   return (
     <div className="flex flex-col gap-6">
@@ -51,8 +46,8 @@ export default function ProvidersNewPageClient() {
             ))}
           </select>
 
-          <Button onClick={handleConnect} disabled={loading || !selectedProvider}>
-            {loading ? "Connecting..." : "Connect Provider"}
+          <Button onClick={handleConnect} disabled={!selectedProvider}>
+            Connect Provider
           </Button>
         </div>
       </Card>
