@@ -914,10 +914,7 @@ pub fn routes() -> Router<AppState> {
         // Specific (non-kind) routes must register before the generic
         // `/{kind}` matcher so that `combo/{id}` and the TTS voices
         // routes win against the kind matcher.
-        .route(
-            "/api/media-providers/combo/{id}",
-            get(get_combo_for_media),
-        )
+        .route("/api/media-providers/combo/{id}", get(get_combo_for_media))
         .route(
             "/api/media-providers/tts/deepgram/voices",
             get(get_deepgram_voices),
