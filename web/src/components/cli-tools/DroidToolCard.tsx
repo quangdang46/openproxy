@@ -6,7 +6,7 @@ import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/comp
 // import Image from "next/image";
 import EndpointPresetControl from "./EndpointPresetControl";
 
-const CLOUD_URL = process.env.NEXT_PUBLIC_CLOUD_URL;
+const CLOUD_URL: string | undefined = (import.meta.env as Record<string, string | undefined>)?.PUBLIC_CLOUD_URL;
 
 interface Tool {
   name: string;

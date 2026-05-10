@@ -5,9 +5,8 @@ import {
   ReactFlow,
   Handle,
   Position,
-  Node,
-  Edge,
 } from "@xyflow/react";
+import type { Node, Edge } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 
