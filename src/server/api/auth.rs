@@ -324,7 +324,13 @@ pub fn routes() -> Router<AppState> {
 }
 
 fn settings_password_hash(settings: &Settings) -> Option<&str> {
-    settings.extra.get("password")?.as_str()
+    if let Some(hash) = settings.password.as_deref() {
+        return Some(hash);
+    }
+    settings
+        .extra
+        .get("password")
+        .and_then(|value| value.as_str())
 }
 
 fn is_tunnel_request(headers: &HeaderMap, settings: &Settings) -> bool {
