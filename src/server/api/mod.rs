@@ -313,10 +313,13 @@ fn safe_settings_payload(settings: &crate::types::Settings) -> Value {
             "enableTranslator".to_string(),
             Value::Bool(std::env::var("ENABLE_TRANSLATOR").ok().as_deref() == Some("true")),
         );
-        fields.insert(
-            "hasPassword".to_string(),
-            Value::Bool(settings.password.is_some()),
-        );
+        let has_password = settings.password.is_some()
+            || settings
+                .extra
+                .get("password")
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| !value.is_empty());
+        fields.insert("hasPassword".to_string(), Value::Bool(has_password));
     }
 
     value
@@ -968,41 +971,14 @@ async fn update_settings_api(
         return response;
     }
 
-    if let Some(new_password) = req.new_password {
-        let snapshot = state.db.snapshot();
-        let current_hash = snapshot.settings.password.as_deref();
-
-        // Verify current password if one exists
-        if let Some(hash) = current_hash {
-            let current = req.current_password.as_deref().unwrap_or("");
-            let verified = bcrypt::verify(current, hash).unwrap_or(false);
-            if !verified {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "Invalid current password" })),
-                )
-                    .into_response();
-            }
-        } else {
-            // First-time password: allow empty or default "123456"
-            let current = req.current_password.as_deref().unwrap_or("123456");
-            if !current.is_empty() && current != "123456" {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({ "error": "Invalid current password" })),
-                )
-                    .into_response();
-            }
-        }
-
-        // Hash new password
-        let hash = bcrypt::hash(&new_password, 10).unwrap_or_else(|_| new_password.clone());
-        let _ = state
-            .db
-            .update(|db| {
-                db.settings.password = Some(hash);
-            })
-            .await;
+    if req.new_password.is_some() || req.current_password.is_some() {
+        return (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": "Password changes must use a dedicated endpoint, not PATCH /api/settings"
+            })),
+        )
+            .into_response();
     }
 
     let result = state

@@ -279,6 +279,40 @@ pub async fn delete_all_sessions(State(state): State<AppState>, headers: HeaderM
     .into_response()
 }
 
+/// GET /api/user
+/// Returns the current dashboard user's profile info.
+///
+/// OpenProxy is a single-user dashboard guarded by either a JWT cookie
+/// (set by `POST /api/auth/login`) or a management API key. Since the
+/// dashboard does not model multiple users, this endpoint synthesizes a
+/// stable identity from the live auth/settings state so the Profile page
+/// can render meaningful data.
+pub async fn get_user(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) =
+        crate::server::api::require_dashboard_or_management_api_key(&headers, &state)
+    {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let has_password = settings_password_hash(&snapshot.settings).is_some();
+    let auth_method = if crate::server::auth::extract_auth_token(&headers).is_some() {
+        "dashboard_session"
+    } else {
+        "management_api_key"
+    };
+
+    Json(json!({
+        "username": "admin",
+        "email": null,
+        "role": "owner",
+        "authMethod": auth_method,
+        "hasPassword": has_password,
+        "requireLogin": snapshot.settings.require_login,
+    }))
+    .into_response()
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/auth/login", post(login))
@@ -286,10 +320,17 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/sessions", get(list_sessions))
         .route("/api/auth/sessions", delete(delete_all_sessions))
         .route("/api/auth/session/{session_id}", get(get_session))
+        .route("/api/user", get(get_user))
 }
 
 fn settings_password_hash(settings: &Settings) -> Option<&str> {
-    settings.extra.get("password")?.as_str()
+    if let Some(hash) = settings.password.as_deref() {
+        return Some(hash);
+    }
+    settings
+        .extra
+        .get("password")
+        .and_then(|value| value.as_str())
 }
 
 fn is_tunnel_request(headers: &HeaderMap, settings: &Settings) -> bool {
