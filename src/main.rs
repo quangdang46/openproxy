@@ -43,6 +43,18 @@ async fn main() -> anyhow::Result<()> {
                 openproxy::cli::run_pool(cmd.clone(), &db, ctx).await?;
                 return Ok(());
             }
+            Command::Combo { cmd } => {
+                let db = Db::load().await?;
+                let db = Arc::new(db);
+                openproxy::cli::combo::run(cmd.clone(), &db, ctx).await?;
+                return Ok(());
+            }
+            Command::Models { cmd } => {
+                let db = Db::load().await?;
+                let db = Arc::new(db);
+                openproxy::cli::models::run(cmd.clone(), &db, ctx).await?;
+                return Ok(());
+            }
             Command::Tunnel { cmd } => {
                 let db = Db::load().await?;
                 let db = Arc::new(db);

@@ -19,12 +19,26 @@ use crate::types::{ApiKey, AppDb, ProviderConnection, ProxyPool};
 
 use crate::core::tunnel::{TunnelManager, TunnelProvider};
 
+pub mod apply;
 pub mod auth;
+pub mod combo;
 pub mod config;
 pub mod doctor;
+pub mod key_ext;
+pub mod models;
 pub mod output;
+pub mod pool_ext;
+pub mod provider_ext;
+pub mod provider_models;
+pub mod provider_node;
 pub mod schema;
 pub mod server;
+
+#[cfg(test)]
+pub(crate) mod test_lock {
+    use std::sync::Mutex;
+    pub static ENV_LOCK: Mutex<()> = Mutex::new(());
+}
 
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -130,6 +144,16 @@ pub enum Command {
     Pool {
         #[command(subcommand)]
         cmd: PoolCmd,
+    },
+    /// Combo (fallback / round-robin chain) management.
+    Combo {
+        #[command(subcommand)]
+        cmd: combo::ComboCmd,
+    },
+    /// Top-level model registry (built-in + custom).
+    Models {
+        #[command(subcommand)]
+        cmd: models::ModelsCmd,
     },
     Tunnel {
         #[command(subcommand)]
@@ -269,6 +293,60 @@ pub enum ProviderCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Custom provider node (instance) management.
+    Node {
+        #[command(subcommand)]
+        cmd: provider_node::NodeCmd,
+    },
+    /// Models, aliases, and disabled-model list for a provider.
+    Models {
+        #[command(subcommand)]
+        cmd: provider_models::ModelsCmd,
+    },
+    /// Show one provider connection by id or name.
+    Get { id_or_name: String },
+    /// Edit a provider connection's fields.
+    Edit {
+        id_or_name: String,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        base_url: Option<String>,
+        #[arg(long)]
+        priority: Option<u32>,
+        #[arg(long)]
+        default_model: Option<String>,
+    },
+    /// Delete a provider connection.
+    Delete {
+        id_or_name: String,
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Mark provider active.
+    Enable { id_or_name: String },
+    /// Mark provider inactive.
+    Disable { id_or_name: String },
+    /// Run a real connectivity probe.
+    Test { id_or_name: String },
+    /// Validate raw credentials (no DB write).
+    Validate {
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        base_url: Option<String>,
+    },
+    /// Report this CLI's client identity.
+    ClientInfo,
+    /// Idempotent upsert from a YAML/JSON document.
+    Apply {
+        #[arg(long = "from-file", default_value = "-")]
+        from_file: String,
+        #[arg(long)]
+        prune: bool,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -282,6 +360,27 @@ pub enum KeyCmd {
         key: String,
         #[arg(long)]
         json: bool,
+    },
+    /// Show one key by id or name (secret is masked).
+    Get { id_or_name: String },
+    /// Generate a fresh secret for an existing key.
+    Rotate { id_or_name: String },
+    /// Delete a key.
+    Delete {
+        id_or_name: String,
+        #[arg(long)]
+        strict: bool,
+    },
+    /// Mark key active.
+    Enable { id_or_name: String },
+    /// Mark key inactive.
+    Disable { id_or_name: String },
+    /// Idempotent upsert from YAML/JSON.
+    Apply {
+        #[arg(long = "from-file", default_value = "-")]
+        from_file: String,
+        #[arg(long)]
+        prune: bool,
     },
 }
 
@@ -306,6 +405,37 @@ pub enum PoolCmd {
         name: String,
         #[arg(long)]
         json: bool,
+    },
+    /// Show a single pool by name or id.
+    Get { name: String },
+    /// Edit a pool's URL/type/strict flag.
+    Edit {
+        name: String,
+        #[arg(long)]
+        proxy_url: Option<String>,
+        #[arg(long)]
+        r#type: Option<String>,
+        #[arg(long)]
+        strict: Option<bool>,
+    },
+    /// Mark pool active.
+    Enable { name: String },
+    /// Mark pool inactive.
+    Disable { name: String },
+    /// Probe an HTTP target through the pool.
+    Test {
+        name: String,
+        #[arg(long, default_value = "https://httpbin.org/get")]
+        target: String,
+    },
+    /// Show recorded success/rtt stats.
+    Stats { name: String },
+    /// Idempotent upsert from YAML/JSON.
+    Apply {
+        #[arg(long = "from-file", default_value = "-")]
+        from_file: String,
+        #[arg(long)]
+        prune: bool,
     },
 }
 
@@ -345,6 +475,18 @@ impl Cli {
                     let db = std::sync::Arc::new(db);
                     let rt = tokio::runtime::Runtime::new()?;
                     rt.block_on(run_pool(cmd, &db, ctx))
+                }
+                Command::Combo { cmd } => {
+                    let db = rt.block_on(Db::load())?;
+                    let db = std::sync::Arc::new(db);
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(combo::run(cmd, &db, ctx))
+                }
+                Command::Models { cmd } => {
+                    let db = rt.block_on(Db::load())?;
+                    let db = std::sync::Arc::new(db);
+                    let rt = tokio::runtime::Runtime::new()?;
+                    rt.block_on(models::run(cmd, &db, ctx))
                 }
                 Command::Tunnel { cmd } => {
                     let db = rt.block_on(Db::load())?;
@@ -544,6 +686,80 @@ pub async fn run_provider(cmd: ProviderCmd, db: &Db, ctx: output::OutputCtx) -> 
                 );
             }
         }
+        ProviderCmd::Node { cmd } => provider_node::run(cmd, db, ctx).await?,
+        ProviderCmd::Models { cmd } => provider_models::run(cmd, db, ctx).await?,
+        ProviderCmd::Get { id_or_name } => {
+            provider_ext::run(provider_ext::ProviderExtCmd::Get { id_or_name }, db, ctx).await?
+        }
+        ProviderCmd::Edit {
+            id_or_name,
+            api_key,
+            base_url,
+            priority,
+            default_model,
+        } => {
+            provider_ext::run(
+                provider_ext::ProviderExtCmd::Edit {
+                    id_or_name,
+                    api_key,
+                    base_url,
+                    priority,
+                    default_model,
+                },
+                db,
+                ctx,
+            )
+            .await?
+        }
+        ProviderCmd::Delete { id_or_name, strict } => {
+            provider_ext::run(
+                provider_ext::ProviderExtCmd::Delete { id_or_name, strict },
+                db,
+                ctx,
+            )
+            .await?
+        }
+        ProviderCmd::Enable { id_or_name } => {
+            provider_ext::run(provider_ext::ProviderExtCmd::Enable { id_or_name }, db, ctx).await?
+        }
+        ProviderCmd::Disable { id_or_name } => {
+            provider_ext::run(
+                provider_ext::ProviderExtCmd::Disable { id_or_name },
+                db,
+                ctx,
+            )
+            .await?
+        }
+        ProviderCmd::Test { id_or_name } => {
+            provider_ext::run(provider_ext::ProviderExtCmd::Test { id_or_name }, db, ctx).await?
+        }
+        ProviderCmd::Validate {
+            provider,
+            api_key,
+            base_url,
+        } => {
+            provider_ext::run(
+                provider_ext::ProviderExtCmd::Validate {
+                    provider,
+                    api_key,
+                    base_url,
+                },
+                db,
+                ctx,
+            )
+            .await?
+        }
+        ProviderCmd::ClientInfo => {
+            provider_ext::run(provider_ext::ProviderExtCmd::ClientInfo, db, ctx).await?
+        }
+        ProviderCmd::Apply { from_file, prune } => {
+            provider_ext::run(
+                provider_ext::ProviderExtCmd::Apply { from_file, prune },
+                db,
+                ctx,
+            )
+            .await?
+        }
     }
     Ok(())
 }
@@ -692,6 +908,24 @@ pub async fn run_key(cmd: KeyCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::Re
                 output::humanln(ctx, "API key added successfully");
             }
         }
+        KeyCmd::Get { id_or_name } => {
+            key_ext::run(key_ext::KeyExtCmd::Get { id_or_name }, db, ctx).await?
+        }
+        KeyCmd::Rotate { id_or_name } => {
+            key_ext::run(key_ext::KeyExtCmd::Rotate { id_or_name }, db, ctx).await?
+        }
+        KeyCmd::Delete { id_or_name, strict } => {
+            key_ext::run(key_ext::KeyExtCmd::Delete { id_or_name, strict }, db, ctx).await?
+        }
+        KeyCmd::Enable { id_or_name } => {
+            key_ext::run(key_ext::KeyExtCmd::Enable { id_or_name }, db, ctx).await?
+        }
+        KeyCmd::Disable { id_or_name } => {
+            key_ext::run(key_ext::KeyExtCmd::Disable { id_or_name }, db, ctx).await?
+        }
+        KeyCmd::Apply { from_file, prune } => {
+            key_ext::run(key_ext::KeyExtCmd::Apply { from_file, prune }, db, ctx).await?
+        }
     }
     Ok(())
 }
@@ -825,6 +1059,40 @@ pub async fn run_pool(cmd: PoolCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::
             } else {
                 output::humanln(ctx, format!("Pool '{}' deleted successfully", name));
             }
+        }
+        PoolCmd::Get { name } => pool_ext::run(pool_ext::PoolExtCmd::Get { name }, db, ctx).await?,
+        PoolCmd::Edit {
+            name,
+            proxy_url,
+            r#type,
+            strict,
+        } => {
+            pool_ext::run(
+                pool_ext::PoolExtCmd::Edit {
+                    name,
+                    proxy_url,
+                    r#type,
+                    strict,
+                },
+                db,
+                ctx,
+            )
+            .await?
+        }
+        PoolCmd::Enable { name } => {
+            pool_ext::run(pool_ext::PoolExtCmd::Enable { name }, db, ctx).await?
+        }
+        PoolCmd::Disable { name } => {
+            pool_ext::run(pool_ext::PoolExtCmd::Disable { name }, db, ctx).await?
+        }
+        PoolCmd::Test { name, target } => {
+            pool_ext::run(pool_ext::PoolExtCmd::Test { name, target }, db, ctx).await?
+        }
+        PoolCmd::Stats { name } => {
+            pool_ext::run(pool_ext::PoolExtCmd::Stats { name }, db, ctx).await?
+        }
+        PoolCmd::Apply { from_file, prune } => {
+            pool_ext::run(pool_ext::PoolExtCmd::Apply { from_file, prune }, db, ctx).await?
         }
     }
     Ok(())
