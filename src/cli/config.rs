@@ -123,7 +123,10 @@ fn default_data_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".openproxy"))
 }
 
-fn config_file_path() -> Option<PathBuf> {
+/// Resolve the path of the CLI config file. Honors `$OPENPROXY_CONFIG` so
+/// `auth login` / tests can point at a temporary file without touching the
+/// real `~/.config/openproxy/config.toml`.
+pub fn config_file_path() -> Option<PathBuf> {
     if let Ok(custom) = std::env::var("OPENPROXY_CONFIG") {
         return Some(PathBuf::from(custom));
     }
@@ -131,7 +134,9 @@ fn config_file_path() -> Option<PathBuf> {
     Some(dirs.config_dir().join("config.toml"))
 }
 
-fn load_config_file() -> anyhow::Result<ConfigFile> {
+/// Read the config file from disk, returning a default (empty) file if it
+/// does not exist. Errors only on read or parse failure.
+pub fn load_config_file() -> anyhow::Result<ConfigFile> {
     let Some(path) = config_file_path() else {
         return Ok(ConfigFile::default());
     };
@@ -143,6 +148,22 @@ fn load_config_file() -> anyhow::Result<ConfigFile> {
     let parsed: ConfigFile = toml::from_str(&text)
         .with_context(|| format!("parse config file at {}", path.display()))?;
     Ok(parsed)
+}
+
+/// Serialize `file` to disk at the resolved config path. Creates the parent
+/// directory if needed. Used by `auth login` / `auth logout` so the user does
+/// not have to hand-edit TOML.
+pub fn save_config_file(file: &ConfigFile) -> anyhow::Result<PathBuf> {
+    let path =
+        config_file_path().ok_or_else(|| anyhow::anyhow!("cannot determine config file path"))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("create config parent directory {}", parent.display()))?;
+    }
+    let text = toml::to_string_pretty(file).context("serialize config file to TOML")?;
+    std::fs::write(&path, text)
+        .with_context(|| format!("write config file at {}", path.display()))?;
+    Ok(path)
 }
 
 #[cfg(test)]

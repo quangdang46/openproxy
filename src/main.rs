@@ -6,7 +6,7 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use openproxy::cli::config::ResolvedConfig;
-use openproxy::cli::{Cli, Command, SchemaCmd};
+use openproxy::cli::{AuthCmd, Cli, Command, SchemaCmd, ServerCmd};
 use openproxy::db::watcher::spawn_watcher;
 use openproxy::db::Db;
 use openproxy::server::console_logs::{shared_console_log_buffer, ConsoleLogMakeWriter};
@@ -28,25 +28,25 @@ async fn main() -> anyhow::Result<()> {
             Command::Provider { cmd } => {
                 let db = Db::load().await?;
                 let db = Arc::new(db);
-                openproxy::cli::run_provider(cmd.clone(), &db).await?;
+                openproxy::cli::run_provider(cmd.clone(), &db, ctx).await?;
                 return Ok(());
             }
             Command::Key { cmd } => {
                 let db = Db::load().await?;
                 let db = Arc::new(db);
-                openproxy::cli::run_key(cmd.clone(), &db).await?;
+                openproxy::cli::run_key(cmd.clone(), &db, ctx).await?;
                 return Ok(());
             }
             Command::Pool { cmd } => {
                 let db = Db::load().await?;
                 let db = Arc::new(db);
-                openproxy::cli::run_pool(cmd.clone(), &db).await?;
+                openproxy::cli::run_pool(cmd.clone(), &db, ctx).await?;
                 return Ok(());
             }
             Command::Tunnel { cmd } => {
                 let db = Db::load().await?;
                 let db = Arc::new(db);
-                openproxy::cli::run_tunnel(cmd.clone(), db).await?;
+                openproxy::cli::run_tunnel(cmd.clone(), db, ctx).await?;
                 return Ok(());
             }
             Command::Route {
@@ -58,12 +58,15 @@ async fn main() -> anyhow::Result<()> {
             } => {
                 let db = Db::load().await?;
                 let db = Arc::new(db);
+                // `--robot` implies JSON mode for route, but the per-event
+                // shape is left to a future M3 refactor (streaming envelope).
+                let json_mode = *json || ctx.is_robot();
                 return run_route(
                     model.clone(),
                     combo.clone(),
                     prompt.clone(),
                     *stream,
-                    *json,
+                    json_mode,
                     &db,
                 )
                 .await;
@@ -93,6 +96,87 @@ async fn main() -> anyhow::Result<()> {
             }
             Command::Doctor => {
                 let exit = openproxy::cli::doctor::run(ctx, &resolved).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Server { cmd } => match cmd {
+                ServerCmd::Start { detach, host, port } => {
+                    let opts = openproxy::cli::server::StartOptions {
+                        host: host.clone().unwrap_or_else(|| cli.host.clone()),
+                        port: port.unwrap_or(cli.port),
+                        detach: *detach,
+                    };
+                    match openproxy::cli::server::run_start(ctx, &resolved, opts).await? {
+                        Some(exit) => {
+                            if exit != 0 {
+                                std::process::exit(exit);
+                            }
+                            return Ok(());
+                        }
+                        // Foreground: fall through to the server boot below.
+                        None => {}
+                    }
+                }
+                ServerCmd::Stop => {
+                    let exit = openproxy::cli::server::run_stop(ctx, &resolved).await?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    return Ok(());
+                }
+                ServerCmd::Status => {
+                    let exit = openproxy::cli::server::run_status(ctx, &resolved, cli.port).await?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    return Ok(());
+                }
+                ServerCmd::Init { force } => {
+                    let exit = openproxy::cli::server::run_init(ctx, &resolved, *force).await?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    return Ok(());
+                }
+            },
+            Command::Auth { cmd } => {
+                let exit = match cmd {
+                    AuthCmd::Login {
+                        url,
+                        api_key,
+                        profile,
+                        no_verify,
+                        no_activate,
+                    } => {
+                        openproxy::cli::auth::run_login(
+                            ctx,
+                            openproxy::cli::auth::LoginOptions {
+                                url: url.clone(),
+                                api_key: api_key.clone(),
+                                profile: profile.clone(),
+                                no_verify: *no_verify,
+                                no_activate: *no_activate,
+                            },
+                        )
+                        .await?
+                    }
+                    AuthCmd::Logout {
+                        profile,
+                        keep_default,
+                    } => openproxy::cli::auth::run_logout(
+                        ctx,
+                        openproxy::cli::auth::LogoutOptions {
+                            profile: profile.clone(),
+                            keep_default: *keep_default,
+                        },
+                    )?,
+                    AuthCmd::Whoami { verify } => {
+                        openproxy::cli::auth::run_whoami(ctx, &resolved, *verify).await?
+                    }
+                    AuthCmd::List => openproxy::cli::auth::run_list(ctx)?,
+                };
                 if exit != 0 {
                     std::process::exit(exit);
                 }
