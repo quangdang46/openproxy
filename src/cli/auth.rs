@@ -381,6 +381,7 @@ mod tests {
     /// Round-trip: login then logout against a temporary config file.
     #[tokio::test]
     async fn login_then_logout_round_trip() {
+        let _g = crate::cli::test_lock::ENV_LOCK.lock().unwrap();
         let tmp = tempfile::tempdir().unwrap();
         let cfg_path = tmp.path().join("config.toml");
         std::env::set_var("OPENPROXY_CONFIG", &cfg_path);
