@@ -20,6 +20,8 @@ const RESOURCES: &[&str] = &[
     "key",
     "pool",
     "settings",
+    "custom-model",
+    "model-alias",
 ];
 
 pub fn run_list(ctx: OutputCtx) -> anyhow::Result<()> {
@@ -170,6 +172,35 @@ fn schema_for(resource: &str) -> Option<Value> {
                 "tunnelProvider": {"type": "string"}
             }
         }),
+        "custom-model" => json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "CustomModel",
+            "type": "object",
+            "required": ["providerAlias", "id"],
+            "properties": {
+                "providerAlias": {"type": "string"},
+                "id": {"type": "string"},
+                "type": {"type": "string", "default": "chat"},
+                "name": {"type": ["string", "null"]}
+            }
+        }),
+        "model-alias" => json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "ModelAlias",
+            "type": "object",
+            "required": ["alias", "target"],
+            "properties": {
+                "alias": {"type": "string"},
+                "target": {
+                    "type": "object",
+                    "required": ["provider", "model"],
+                    "properties": {
+                        "provider": {"type": "string"},
+                        "model": {"type": "string"}
+                    }
+                }
+            }
+        }),
         _ => return None,
     })
 }
@@ -208,6 +239,19 @@ fn example_for(resource: &str) -> Option<Value> {
             "cavemanEnabled": false,
             "cavemanLevel": "medium",
             "requireLogin": true
+        }),
+        "custom-model" => json!({
+            "providerAlias": "openai",
+            "id": "gpt-4o-2025-stub",
+            "type": "chat",
+            "name": "GPT-4o stub"
+        }),
+        "model-alias" => json!({
+            "alias": "fast",
+            "target": {
+                "provider": "openai",
+                "model": "gpt-4o-mini"
+            }
         }),
         _ => return None,
     })

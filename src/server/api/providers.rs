@@ -629,7 +629,12 @@ fn is_safe_outbound_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn test_provider_api(
+/// Test connectivity to a provider's `/v1/models` (or equivalent) endpoint.
+/// Returns `(success, optional error string, optional latency in ms)`.
+///
+/// Exposed at `pub(crate)` so the CLI can run the same validation logic
+/// directly without going through the HTTP API.
+pub(crate) async fn test_provider_api(
     provider: &str,
     api_key: Option<&str>,
     base_url: Option<&str>,
