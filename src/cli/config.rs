@@ -169,9 +169,7 @@ pub fn save_config_file(file: &ConfigFile) -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::cli::test_lock::ENV_LOCK;
 
     fn clear_env() {
         std::env::remove_var("DATA_DIR");
