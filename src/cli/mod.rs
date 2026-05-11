@@ -34,6 +34,12 @@ pub mod provider_node;
 pub mod schema;
 pub mod server;
 
+#[cfg(test)]
+pub(crate) mod test_lock {
+    use std::sync::Mutex;
+    pub static ENV_LOCK: Mutex<()> = Mutex::new(());
+}
+
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "openproxy",
