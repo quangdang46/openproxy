@@ -6,7 +6,10 @@ use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use openproxy::cli::config::ResolvedConfig;
-use openproxy::cli::{AuthCmd, Cli, Command, SchemaCmd, ServerCmd};
+use openproxy::cli::{
+    chat as cli_chat, logs as cli_logs, provider_oauth, quota as cli_quota, usage as cli_usage,
+    AuthCmd, Cli, Command, ProviderCmd, SchemaCmd, ServerCmd,
+};
 use openproxy::db::watcher::spawn_watcher;
 use openproxy::db::Db;
 use openproxy::server::console_logs::{shared_console_log_buffer, ConsoleLogMakeWriter};
@@ -26,6 +29,13 @@ async fn main() -> anyhow::Result<()> {
     if let Some(cmd) = &cli.cmd {
         match cmd {
             Command::Provider { cmd } => {
+                if let ProviderCmd::Oauth { cmd: oauth_cmd } = cmd {
+                    let exit = provider_oauth::run(oauth_cmd.clone(), &resolved, ctx).await?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    return Ok(());
+                }
                 let db = Db::load().await?;
                 let db = Arc::new(db);
                 openproxy::cli::run_provider(cmd.clone(), &db, ctx).await?;
@@ -189,6 +199,34 @@ async fn main() -> anyhow::Result<()> {
                     }
                     AuthCmd::List => openproxy::cli::auth::run_list(ctx)?,
                 };
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Usage { cmd } => {
+                let exit = cli_usage::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Logs { cmd } => {
+                let exit = cli_logs::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Quota { cmd } => {
+                let exit = cli_quota::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Chat { cmd } => {
+                let exit = cli_chat::run(cmd.clone(), &resolved, ctx).await?;
                 if exit != 0 {
                     std::process::exit(exit);
                 }
