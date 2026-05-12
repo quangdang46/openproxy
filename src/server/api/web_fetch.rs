@@ -645,6 +645,7 @@ async fn mark_connection_unavailable(
     let until = ChronoDuration::from_std(cooldown)
         .map(|d| Utc::now() + d)
         .unwrap_or_else(|_| Utc::now());
+    let until_rfc = until.to_rfc3339();
     let connection_id = connection_id.to_string();
     let message = message.to_string();
     let _ = state
@@ -664,6 +665,7 @@ async fn mark_connection_unavailable(
                     .map(|e| e.saturating_add(1))
                     .or(Some(1));
                 c.test_status = Some("unavailable".into());
+                c.rate_limited_until = Some(until_rfc);
             }
         })
         .await;
@@ -685,6 +687,7 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
                 c.backoff_level = Some(0);
                 c.consecutive_errors = Some(0);
                 c.test_status = None;
+                c.rate_limited_until = None;
             }
         })
         .await;

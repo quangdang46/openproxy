@@ -132,40 +132,14 @@ pub async fn execute_command(
         }
     };
 
-    // Execute the command
-    let result = tokio::process::Command::new(&program)
-        .args(&args)
-        .output()
-        .await;
-
+    // Execute the command with a hard timeout so callers can't hang the request.
+    let response = run_command_with_timeout(&program, &args, timeout_secs).await;
     let duration_ms = start_time.elapsed().as_millis() as u64;
-
-    match result {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code();
-
-            Json(CliCommandResponse {
-                success: output.status.success(),
-                exit_code,
-                stdout: stdout.to_string(),
-                stderr: stderr.to_string(),
-                duration_ms,
-                timed_out: false,
-            })
-            .into_response()
-        }
-        Err(e) => Json(CliCommandResponse {
-            success: false,
-            exit_code: Some(-1),
-            stdout: String::new(),
-            stderr: format!("Failed to execute command: {}", e),
-            duration_ms,
-            timed_out: false,
-        })
-        .into_response(),
-    }
+    Json(CliCommandResponse {
+        duration_ms,
+        ..response
+    })
+    .into_response()
 }
 
 /// POST /api/cli-tools/run
@@ -184,35 +158,76 @@ pub async fn run_tool(
     let start_time = std::time::Instant::now();
 
     let (program, args) = build_tool_command(&tool_name, req.args.unwrap_or_default());
+
+    let response = run_command_with_timeout(&program, &args, timeout_secs).await;
     let duration_ms = start_time.elapsed().as_millis() as u64;
 
-    let output = match Command::new(&program).args(&args).output().await {
-        Ok(o) => o,
+    Json(CliCommandResponse {
+        duration_ms,
+        ..response
+    })
+    .into_response()
+}
+
+/// Run a child process with a hard timeout. Returns a `CliCommandResponse`
+/// (with `duration_ms` set to 0 so the caller can fill it in once they've
+/// measured wall-clock time from before parsing).
+async fn run_command_with_timeout(
+    program: &str,
+    args: &[String],
+    timeout_secs: u64,
+) -> CliCommandResponse {
+    let child = match tokio::process::Command::new(program)
+        .args(args)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
         Err(e) => {
-            return Json(CliCommandResponse {
+            return CliCommandResponse {
                 success: false,
                 exit_code: Some(-1),
                 stdout: String::new(),
-                stderr: format!("Failed to execute: {}", e),
-                duration_ms,
+                stderr: format!("Failed to execute command: {}", e),
+                duration_ms: 0,
                 timed_out: false,
-            })
-            .into_response()
+            };
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    Json(CliCommandResponse {
-        success: output.status.success(),
-        exit_code: output.status.code(),
-        stdout: stdout.to_string(),
-        stderr: stderr.to_string(),
-        duration_ms,
-        timed_out: false,
-    })
-    .into_response()
+    let wait_fut = child.wait_with_output();
+    match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), wait_fut).await {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            CliCommandResponse {
+                success: output.status.success(),
+                exit_code: output.status.code(),
+                stdout,
+                stderr,
+                duration_ms: 0,
+                timed_out: false,
+            }
+        }
+        Ok(Err(e)) => CliCommandResponse {
+            success: false,
+            exit_code: Some(-1),
+            stdout: String::new(),
+            stderr: format!("Failed to execute command: {}", e),
+            duration_ms: 0,
+            timed_out: false,
+        },
+        Err(_) => CliCommandResponse {
+            success: false,
+            exit_code: None,
+            stdout: String::new(),
+            stderr: format!("Command timed out after {}s", timeout_secs),
+            duration_ms: 0,
+            timed_out: true,
+        },
+    }
 }
 
 /// Parse a command string into program and arguments
@@ -2611,5 +2626,59 @@ mod tests {
         let (program, args) = build_tool_command("unknown-tool", vec!["arg1".to_string()]);
         assert_eq!(program, "unknown-tool");
         assert_eq!(args, vec!["arg1"]);
+    }
+
+    #[tokio::test]
+    async fn run_command_with_timeout_returns_success_for_fast_command() {
+        let response =
+            run_command_with_timeout("/bin/sh", &["-c".to_string(), "exit 0".to_string()], 5).await;
+        assert!(response.success);
+        assert_eq!(response.exit_code, Some(0));
+        assert!(!response.timed_out);
+    }
+
+    #[tokio::test]
+    async fn run_command_with_timeout_captures_stdout() {
+        let response = run_command_with_timeout(
+            "/bin/sh",
+            &["-c".to_string(), "printf hello".to_string()],
+            5,
+        )
+        .await;
+        assert!(response.success);
+        assert_eq!(response.stdout, "hello");
+        assert!(!response.timed_out);
+    }
+
+    #[tokio::test]
+    async fn run_command_with_timeout_kills_long_running_process() {
+        // sleep 30 should easily exceed the 1s timeout; we expect the killer
+        // to fire and return timed_out=true within a couple of seconds.
+        let start = std::time::Instant::now();
+        let response =
+            run_command_with_timeout("/bin/sh", &["-c".to_string(), "sleep 30".to_string()], 1)
+                .await;
+        let elapsed = start.elapsed();
+        assert!(response.timed_out, "expected timed_out=true, got {response:?}");
+        assert!(!response.success);
+        assert!(response.exit_code.is_none());
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "command should have been killed quickly, took {elapsed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_command_with_timeout_reports_failure_for_missing_binary() {
+        let response = run_command_with_timeout(
+            "/this/definitely/does/not/exist-openproxy-test",
+            &[],
+            5,
+        )
+        .await;
+        assert!(!response.success);
+        assert_eq!(response.exit_code, Some(-1));
+        assert!(response.stderr.contains("Failed to execute"));
+        assert!(!response.timed_out);
     }
 }
