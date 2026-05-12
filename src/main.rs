@@ -7,8 +7,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use openproxy::cli::config::ResolvedConfig;
 use openproxy::cli::{
-    chat as cli_chat, logs as cli_logs, provider_oauth, quota as cli_quota, usage as cli_usage,
-    AuthCmd, Cli, Command, ProviderCmd, SchemaCmd, ServerCmd,
+    chat as cli_chat, logs as cli_logs, media as cli_media, mitm as cli_mitm, provider_oauth,
+    quota as cli_quota, tool as cli_tool, translator as cli_translator, tunnel_rt as cli_tunnel_rt,
+    usage as cli_usage, AuthCmd, Cli, Command, ProviderCmd, SchemaCmd, ServerCmd, TunnelCmd,
 };
 use openproxy::db::watcher::spawn_watcher;
 use openproxy::db::Db;
@@ -65,12 +66,57 @@ async fn main() -> anyhow::Result<()> {
                 openproxy::cli::models::run(cmd.clone(), &db, ctx).await?;
                 return Ok(());
             }
-            Command::Tunnel { cmd } => {
-                let db = Db::load().await?;
-                let db = Arc::new(db);
-                openproxy::cli::run_tunnel(cmd.clone(), db, ctx).await?;
-                return Ok(());
-            }
+            Command::Tunnel { cmd } => match cmd {
+                TunnelCmd::Start { .. } | TunnelCmd::Stop | TunnelCmd::Status => {
+                    let db = Db::load().await?;
+                    let db = Arc::new(db);
+                    openproxy::cli::run_tunnel(cmd.clone(), db, ctx).await?;
+                    return Ok(());
+                }
+                TunnelCmd::Enable { provider, port } => {
+                    let exit = cli_tunnel_rt::run(
+                        cli_tunnel_rt::TunnelRtCmd::Enable {
+                            provider: provider.clone(),
+                            port: *port,
+                        },
+                        &resolved,
+                        ctx,
+                    )
+                    .await?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    return Ok(());
+                }
+                TunnelCmd::Disable { provider } => {
+                    let exit = cli_tunnel_rt::run(
+                        cli_tunnel_rt::TunnelRtCmd::Disable {
+                            provider: provider.clone(),
+                        },
+                        &resolved,
+                        ctx,
+                    )
+                    .await?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    return Ok(());
+                }
+                TunnelCmd::Tailscale { cmd: ts_cmd } => {
+                    let exit = cli_tunnel_rt::run(
+                        cli_tunnel_rt::TunnelRtCmd::Tailscale {
+                            cmd: ts_cmd.clone(),
+                        },
+                        &resolved,
+                        ctx,
+                    )
+                    .await?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    return Ok(());
+                }
+            },
             Command::Route {
                 model,
                 combo,
@@ -227,6 +273,34 @@ async fn main() -> anyhow::Result<()> {
             }
             Command::Chat { cmd } => {
                 let exit = cli_chat::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Mitm { cmd } => {
+                let exit = cli_mitm::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Tool { cmd } => {
+                let exit = cli_tool::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Translator { cmd } => {
+                let exit = cli_translator::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Media { cmd } => {
+                let exit = cli_media::run(cmd.clone(), &resolved, ctx).await?;
                 if exit != 0 {
                     std::process::exit(exit);
                 }
