@@ -414,6 +414,7 @@ mod tests {
         let (location, project_id, actual_model, is_partner) =
             VertexExecutor::parse_vertex_model("vertex/gemini-2.5-flash");
         assert_eq!(location, "us-central1");
+        assert_eq!(project_id, "");
         assert_eq!(actual_model, "models/gemini-2.5-flash");
         assert!(!is_partner);
     }
@@ -423,6 +424,8 @@ mod tests {
         let (location, project_id, actual_model, is_partner) =
             VertexExecutor::parse_vertex_model("vertex-partner/glm-5-maas");
         assert_eq!(location, "us-central1");
+        assert_eq!(project_id, "");
+        assert_eq!(actual_model, "glm-5-maas");
         assert!(is_partner);
     }
 
