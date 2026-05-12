@@ -26,7 +26,7 @@ use crate::db::Db;
 use crate::types::ApiKey;
 
 /// File name of the PID file written into `$DATA_DIR`.
-const PID_FILE: &str = "openproxy.pid";
+pub const PID_FILE: &str = "openproxy.pid";
 /// Sidecar file recording `<host>:<port>` of the running server so that
 /// `server status` and `server stop` can probe the right endpoint without
 /// asking the user.

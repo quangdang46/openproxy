@@ -21,18 +21,24 @@ use crate::core::tunnel::{TunnelManager, TunnelProvider};
 
 pub mod apply;
 pub mod auth;
+pub mod chat;
 pub mod combo;
 pub mod config;
 pub mod doctor;
 pub mod key_ext;
+pub mod logs;
 pub mod models;
 pub mod output;
 pub mod pool_ext;
 pub mod provider_ext;
 pub mod provider_models;
 pub mod provider_node;
+pub mod provider_oauth;
+pub mod quota;
+pub mod runtime;
 pub mod schema;
 pub mod server;
+pub mod usage;
 
 #[cfg(test)]
 pub(crate) mod test_lock {
@@ -198,6 +204,26 @@ pub enum Command {
         #[command(subcommand)]
         cmd: AuthCmd,
     },
+    /// Runtime usage statistics (talks to /api/usage/*).
+    Usage {
+        #[command(subcommand)]
+        cmd: usage::UsageCmd,
+    },
+    /// Observability log buffer (talks to /api/observability/*).
+    Logs {
+        #[command(subcommand)]
+        cmd: logs::LogsCmd,
+    },
+    /// Per-provider quota counters and reset.
+    Quota {
+        #[command(subcommand)]
+        cmd: quota::QuotaCmd,
+    },
+    /// Lightweight chat client against the running proxy.
+    Chat {
+        #[command(subcommand)]
+        cmd: chat::ChatCmd,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -340,6 +366,11 @@ pub enum ProviderCmd {
     },
     /// Report this CLI's client identity.
     ClientInfo,
+    /// OAuth / device-code / cookie import flows.
+    Oauth {
+        #[command(subcommand)]
+        cmd: provider_oauth::ProviderOAuthCmd,
+    },
     /// Idempotent upsert from a YAML/JSON document.
     Apply {
         #[arg(long = "from-file", default_value = "-")]
@@ -459,10 +490,19 @@ impl Cli {
         if let Some(cmd) = self.cmd {
             match cmd {
                 Command::Provider { cmd } => {
-                    let db = rt.block_on(Db::load())?;
-                    let db = std::sync::Arc::new(db);
-                    let rt = tokio::runtime::Runtime::new()?;
-                    rt.block_on(run_provider(cmd, &db, ctx))
+                    if let ProviderCmd::Oauth { cmd: oauth_cmd } = cmd {
+                        let resolved = config::ResolvedConfig::resolve(overrides)?;
+                        let exit = rt.block_on(provider_oauth::run(oauth_cmd, &resolved, ctx))?;
+                        if exit != 0 {
+                            std::process::exit(exit);
+                        }
+                        Ok(())
+                    } else {
+                        let db = rt.block_on(Db::load())?;
+                        let db = std::sync::Arc::new(db);
+                        let rt = tokio::runtime::Runtime::new()?;
+                        rt.block_on(run_provider(cmd, &db, ctx))
+                    }
                 }
                 Command::Key { cmd } => {
                     let db = rt.block_on(Db::load())?;
@@ -588,6 +628,38 @@ impl Cli {
                             .map(|_| ()),
                         AuthCmd::List => auth::run_list(ctx).map(|_| ()),
                     }
+                }
+                Command::Usage { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(usage::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Logs { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(logs::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Quota { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(quota::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Chat { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(chat::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
                 }
             }
         } else {
@@ -751,6 +823,16 @@ pub async fn run_provider(cmd: ProviderCmd, db: &Db, ctx: output::OutputCtx) -> 
         }
         ProviderCmd::ClientInfo => {
             provider_ext::run(provider_ext::ProviderExtCmd::ClientInfo, db, ctx).await?
+        }
+        ProviderCmd::Oauth { .. } => {
+            // OAuth subcommands need access to the resolved config (for the
+            // runtime base URL), which the `run_provider` helper does not
+            // carry. The CLI dispatcher in `main` routes them via
+            // `dispatch_provider_oauth` directly.
+            unreachable!(
+                "provider oauth must be dispatched via the main CLI entrypoint, \
+                 not run_provider"
+            );
         }
         ProviderCmd::Apply { from_file, prune } => {
             provider_ext::run(

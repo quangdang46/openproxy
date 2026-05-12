@@ -14,6 +14,7 @@ pub mod models_availability;
 pub mod models_custom;
 pub mod models_disabled;
 pub mod oauth;
+pub mod observability;
 pub mod pricing;
 mod provider_connection_test;
 mod provider_model_tests;
@@ -120,6 +121,7 @@ pub fn routes() -> Router<AppState> {
         .merge(provider_validate::routes())
         .merge(admin_items::routes())
         .merge(usage::routes())
+        .merge(observability::routes())
         // Dashboard API endpoints
         .route("/api/providers", get(list_providers_api))
         .route("/api/providers", post(create_provider_api))
@@ -146,7 +148,6 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/settings/require-login", get(get_require_login_api))
         .route("/api/db/export", get(export_db_api))
-        .route("/api/observability/logs", get(get_logs_api))
         // Auth, shutdown, cli-tools APIs
         .merge(auth::routes())
         .merge(shutdown::routes())
@@ -1328,26 +1329,6 @@ async fn proxy_test_api(
                 .into_response()
         }
     }
-}
-
-// Logs API (observability)
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct LogEntry {
-    timestamp: Option<String>,
-    model: Option<String>,
-    provider: Option<String>,
-    endpoint: Option<String>,
-    tokens: Option<u64>,
-    cost: Option<f64>,
-}
-
-async fn get_logs_api(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_management_api_key(&headers, &state) {
-        return response;
-    }
-
-    Json(Vec::<LogEntry>::new()).into_response()
 }
 
 pub(super) fn auth_error_response(error: AuthError) -> Response {

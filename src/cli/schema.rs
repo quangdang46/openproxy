@@ -22,6 +22,11 @@ const RESOURCES: &[&str] = &[
     "settings",
     "custom-model",
     "model-alias",
+    "usage-event",
+    "log-event",
+    "chat-event",
+    "quota",
+    "oauth-status",
 ];
 
 pub fn run_list(ctx: OutputCtx) -> anyhow::Result<()> {
@@ -201,6 +206,63 @@ fn schema_for(resource: &str) -> Option<Value> {
                 }
             }
         }),
+        "usage-event" => json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "UsageEvent",
+            "type": "object",
+            "description": "NDJSON envelope emitted by `usage stream`.",
+            "properties": {
+                "schema": {"const": "openproxy.v1.usage.event"},
+                "ok": {"const": true},
+                "data": {"type": ["object", "array", "string", "number", "null"]}
+            }
+        }),
+        "log-event" => json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "LogEvent",
+            "type": "object",
+            "description": "NDJSON envelope emitted by `logs tail` / `logs export`.",
+            "properties": {
+                "schema": {"const": "openproxy.v1.log.event"},
+                "ok": {"const": true},
+                "data": {"type": ["object", "string"]}
+            }
+        }),
+        "chat-event" => json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "ChatEvent",
+            "type": "object",
+            "description": "NDJSON envelope emitted by `chat stream`.",
+            "properties": {
+                "schema": {"const": "openproxy.v1.chat.event"},
+                "ok": {"const": true},
+                "data": {"type": ["object", "string"]}
+            }
+        }),
+        "quota" => json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "Quota",
+            "type": "object",
+            "description": "Per-provider aggregate row returned by `quota list/get`.",
+            "properties": {
+                "provider": {"type": "string"},
+                "requests": {"type": "integer", "minimum": 0},
+                "tokens":   {"type": "integer", "minimum": 0},
+                "cost":     {"type": "number",  "minimum": 0}
+            }
+        }),
+        "oauth-status" => json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": "OAuthStatus",
+            "type": "object",
+            "description": "Returned by `provider oauth status` and `start/poll`.",
+            "properties": {
+                "provider": {"type": "string"},
+                "status":   {"type": "string", "enum": ["pending", "linked", "expired", "error"]},
+                "url":      {"type": ["string", "null"], "format": "uri"},
+                "expires_at": {"type": ["integer", "null"]}
+            }
+        }),
         _ => return None,
     })
 }
@@ -252,6 +314,36 @@ fn example_for(resource: &str) -> Option<Value> {
                 "provider": "openai",
                 "model": "gpt-4o-mini"
             }
+        }),
+        "usage-event" => json!({
+            "schema": "openproxy.v1.usage.event",
+            "ok": true,
+            "data": {"totals": {"requests": 17, "tokens": 4321, "cost": 0.0123}},
+            "meta": {}
+        }),
+        "log-event" => json!({
+            "schema": "openproxy.v1.log.event",
+            "ok": true,
+            "data": {"line": "2025-01-01T00:00:00Z INFO  proxy: routed gpt-4o"},
+            "meta": {}
+        }),
+        "chat-event" => json!({
+            "schema": "openproxy.v1.chat.event",
+            "ok": true,
+            "data": {"choices": [{"delta": {"content": "Hello"}}]},
+            "meta": {}
+        }),
+        "quota" => json!({
+            "provider": "openai",
+            "requests": 17,
+            "tokens": 4321,
+            "cost": 0.0123
+        }),
+        "oauth-status" => json!({
+            "provider": "claude",
+            "status": "linked",
+            "url": null,
+            "expires_at": 1735689600
         }),
         _ => return None,
     })
