@@ -779,17 +779,15 @@ pub fn openai_to_claude_request(
                         schema_json
                     );
                     if let Some(last) = result_system.last_mut() {
-                        if let ClaudeSystemBlock::Text { text, .. } = last {
-                            text.push_str(&format!("\n\n{}", hint));
-                        }
+                        let ClaudeSystemBlock::Text { text, .. } = last;
+                        text.push_str(&format!("\n\n{}", hint));
                     }
                 }
             } else if fmt_type == "json_object" {
                 let hint = "You must respond with valid JSON. Respond ONLY with a JSON object, no other text.";
                 if let Some(last) = result_system.last_mut() {
-                    if let ClaudeSystemBlock::Text { text, .. } = last {
-                        text.push_str(&format!("\n\n{}", hint));
-                    }
+                    let ClaudeSystemBlock::Text { text, .. } = last;
+                    text.push_str(&format!("\n\n{}", hint));
                 }
             }
         }
