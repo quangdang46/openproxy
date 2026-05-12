@@ -27,6 +27,8 @@ pub mod config;
 pub mod doctor;
 pub mod key_ext;
 pub mod logs;
+pub mod media;
+pub mod mitm;
 pub mod models;
 pub mod output;
 pub mod pool_ext;
@@ -38,6 +40,9 @@ pub mod quota;
 pub mod runtime;
 pub mod schema;
 pub mod server;
+pub mod tool;
+pub mod translator;
+pub mod tunnel_rt;
 pub mod usage;
 
 #[cfg(test)]
@@ -164,6 +169,26 @@ pub enum Command {
     Tunnel {
         #[command(subcommand)]
         cmd: TunnelCmd,
+    },
+    /// Manage the in-process MITM router (PLAN v3 §4.10).
+    Mitm {
+        #[command(subcommand)]
+        cmd: mitm::MitmCmd,
+    },
+    /// Manage CLI-tool integrations (claude, codex, copilot, ...).
+    Tool {
+        #[command(subcommand)]
+        cmd: tool::ToolCmd,
+    },
+    /// Translate or pass requests through the format translator.
+    Translator {
+        #[command(subcommand)]
+        cmd: translator::TranslatorCmd,
+    },
+    /// Media providers + TTS / STT / embed / image / web helpers.
+    Media {
+        #[command(subcommand)]
+        cmd: media::MediaCmd,
     },
     Route {
         /// Model ID (e.g. openai/gpt-4o-mini)
@@ -472,14 +497,30 @@ pub enum PoolCmd {
 
 #[derive(Debug, Clone, Subcommand)]
 pub enum TunnelCmd {
+    /// Local-in-process tunnel start (M1 stub).
     Start {
         #[arg(long, default_value = "cloudflare")]
         provider: String,
         #[arg(long, default_value_t = 4623)]
         port: u16,
     },
+    /// Local-in-process tunnel stop (M1 stub).
     Stop,
+    /// Local-in-process tunnel status (M1 stub).
     Status,
+    /// Enable a tunnel provider via the running server's `/api/tunnel/*`.
+    Enable {
+        provider: String,
+        #[arg(long)]
+        port: Option<u16>,
+    },
+    /// Disable a tunnel provider via the running server's `/api/tunnel/*`.
+    Disable { provider: String },
+    /// Tailscale-specific helpers (install / login / check / enable / disable).
+    Tailscale {
+        #[command(subcommand)]
+        cmd: tunnel_rt::TailscaleCmd,
+    },
 }
 
 impl Cli {
@@ -528,12 +569,53 @@ impl Cli {
                     let rt = tokio::runtime::Runtime::new()?;
                     rt.block_on(models::run(cmd, &db, ctx))
                 }
-                Command::Tunnel { cmd } => {
-                    let db = rt.block_on(Db::load())?;
-                    let db = std::sync::Arc::new(db);
-                    let rt = tokio::runtime::Runtime::new()?;
-                    rt.block_on(run_tunnel(cmd, db.clone(), ctx))
-                }
+                Command::Tunnel { cmd } => match cmd {
+                    TunnelCmd::Start { .. } | TunnelCmd::Stop | TunnelCmd::Status => {
+                        let db = rt.block_on(Db::load())?;
+                        let db = std::sync::Arc::new(db);
+                        let rt = tokio::runtime::Runtime::new()?;
+                        rt.block_on(run_tunnel(cmd, db.clone(), ctx))
+                    }
+                    TunnelCmd::Enable { provider, port } => {
+                        let resolved = config::ResolvedConfig::resolve(overrides)?;
+                        let rt = tokio::runtime::Runtime::new()?;
+                        let exit = rt.block_on(tunnel_rt::run(
+                            tunnel_rt::TunnelRtCmd::Enable { provider, port },
+                            &resolved,
+                            ctx,
+                        ))?;
+                        if exit != 0 {
+                            std::process::exit(exit);
+                        }
+                        Ok(())
+                    }
+                    TunnelCmd::Disable { provider } => {
+                        let resolved = config::ResolvedConfig::resolve(overrides)?;
+                        let rt = tokio::runtime::Runtime::new()?;
+                        let exit = rt.block_on(tunnel_rt::run(
+                            tunnel_rt::TunnelRtCmd::Disable { provider },
+                            &resolved,
+                            ctx,
+                        ))?;
+                        if exit != 0 {
+                            std::process::exit(exit);
+                        }
+                        Ok(())
+                    }
+                    TunnelCmd::Tailscale { cmd } => {
+                        let resolved = config::ResolvedConfig::resolve(overrides)?;
+                        let rt = tokio::runtime::Runtime::new()?;
+                        let exit = rt.block_on(tunnel_rt::run(
+                            tunnel_rt::TunnelRtCmd::Tailscale { cmd },
+                            &resolved,
+                            ctx,
+                        ))?;
+                        if exit != 0 {
+                            std::process::exit(exit);
+                        }
+                        Ok(())
+                    }
+                },
                 Command::Route {
                     model,
                     combo,
@@ -656,6 +738,38 @@ impl Cli {
                 Command::Chat { cmd } => {
                     let resolved = config::ResolvedConfig::resolve(overrides)?;
                     let exit = rt.block_on(chat::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Mitm { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(mitm::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Tool { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(tool::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Translator { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(translator::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Media { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(media::run(cmd, &resolved, ctx))?;
                     if exit != 0 {
                         std::process::exit(exit);
                     }
@@ -932,6 +1046,10 @@ pub async fn run_tunnel(
             } else {
                 output::humanln(ctx, "Tunnel is stopped");
             }
+        }
+        TunnelCmd::Enable { .. } | TunnelCmd::Disable { .. } | TunnelCmd::Tailscale { .. } => {
+            // Routed via `tunnel_rt` in `Cli::run`; unreachable here.
+            unreachable!("runtime tunnel commands dispatched separately");
         }
     }
     Ok(())
