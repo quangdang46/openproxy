@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::time::{self, Duration};
 
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
-use crate::server::auth::require_dashboard_session;
 use crate::server::state::AppState;
 use crate::server::usage_live::UsageEvent;
 use crate::server::usage_stream::{build_usage_stats, UsagePeriod, UsageStatsPayload};
@@ -94,12 +93,8 @@ async fn get_usage_stats(
     Query(query): Query<StatsQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(error) = require_dashboard_session(&headers, &state.db) {
-        return (
-            axum::http::StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": error.message() })),
-        )
-            .into_response();
+    if let Err(response) = require_usage_access(&headers, &state) {
+        return response;
     }
 
     let period = match query.period.as_deref().unwrap_or("7d") {
@@ -122,12 +117,8 @@ async fn get_usage_stats(
 }
 
 async fn stream_usage_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_dashboard_session(&headers, &state.db) {
-        return (
-            axum::http::StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "error": error.message() })),
-        )
-            .into_response();
+    if let Err(response) = require_usage_access(&headers, &state) {
+        return response;
     }
 
     let encoder = std::sync::Arc::new(tokio::sync::Mutex::new(()));
