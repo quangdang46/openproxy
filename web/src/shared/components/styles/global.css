@@ -222,6 +222,23 @@
   color-scheme: dark;
 }
 
+/* ============================================================
+   Fix native select dropdowns in dark mode (otherwise Chrome
+   renders dark-on-dark option text, see 9router #997).
+   ============================================================ */
+select {
+  color-scheme: light;
+}
+
+.dark select {
+  color-scheme: dark;
+}
+
+.dark select option {
+  background-color: var(--color-surface);
+  color: var(--color-text-main);
+}
+
 @theme inline {
   /* MiniMax brand accents */
   --color-brand-coral: var(--color-brand-coral);
