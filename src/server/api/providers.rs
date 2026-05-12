@@ -1069,7 +1069,7 @@ async fn get_client_info(State(state): State<AppState>, headers: HeaderMap) -> R
     let settings = &snapshot.settings;
 
     // Get client identity - prefer hostname, fallback to os username
-    let client_id = whoami::hostname();
+    let client_id = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string());
     let client_name = whoami::username();
 
     Json(ClientInfoResponse {

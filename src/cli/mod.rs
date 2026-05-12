@@ -4,8 +4,6 @@ use std::sync::Arc;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
-use futures_util::TryStreamExt;
-use http_body_util::BodyExt;
 use serde_json::Value;
 
 use crate::core::account_fallback::AccountRegistry;
@@ -24,6 +22,7 @@ pub mod auth;
 pub mod chat;
 pub mod combo;
 pub mod config;
+pub mod db;
 pub mod doctor;
 pub mod key_ext;
 pub mod logs;
@@ -40,6 +39,7 @@ pub mod quota;
 pub mod runtime;
 pub mod schema;
 pub mod server;
+pub mod settings;
 pub mod tool;
 pub mod translator;
 pub mod tunnel_rt;
@@ -249,6 +249,16 @@ pub enum Command {
         #[command(subcommand)]
         cmd: chat::ChatCmd,
     },
+    /// Manage the running server's settings document, locale, and version.
+    Settings {
+        #[command(subcommand)]
+        cmd: settings::SettingsCmd,
+    },
+    /// Database snapshot, dump, import, and cloud-sync helpers (PLAN v3 §4.17-4.18).
+    Db {
+        #[command(subcommand)]
+        cmd: db::DbCmd,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -330,6 +340,9 @@ pub enum SchemaCmd {
         /// Resource name (e.g. provider, combo, key, pool, settings).
         resource: String,
     },
+    /// Print the schema namespace + stability contract. As of M6 the
+    /// `openproxy.v1.*` envelopes are declared **stable** (additive-only).
+    Stability,
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -644,6 +657,7 @@ impl Cli {
                         SchemaCmd::Example { resource } => {
                             schema::run_example(ctx, &resource).map(|_| ())
                         }
+                        SchemaCmd::Stability => schema::run_stability(ctx),
                     }
                 }
                 Command::Doctor => {
@@ -770,6 +784,22 @@ impl Cli {
                 Command::Media { cmd } => {
                     let resolved = config::ResolvedConfig::resolve(overrides)?;
                     let exit = rt.block_on(media::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Settings { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(settings::run(cmd, &resolved, ctx))?;
+                    if exit != 0 {
+                        std::process::exit(exit);
+                    }
+                    Ok(())
+                }
+                Command::Db { cmd } => {
+                    let resolved = config::ResolvedConfig::resolve(overrides)?;
+                    let exit = rt.block_on(db::run(cmd, &resolved, ctx))?;
                     if exit != 0 {
                         std::process::exit(exit);
                     }
