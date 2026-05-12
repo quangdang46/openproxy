@@ -29,17 +29,53 @@ const RESOURCES: &[&str] = &[
     "oauth-status",
 ];
 
+/// Schema namespace covered by the v1 stability contract (M6).
+///
+/// Once a CLI release ships with `openproxy.v1.*` envelopes, the shape of
+/// each successful envelope is frozen: existing fields keep their names,
+/// types, and meanings. New fields are additive only, and new schemas may
+/// be introduced but never renamed. A new `openproxy.v2.*` namespace will
+/// be opened before any breaking change.
+pub const SCHEMA_NAMESPACE: &str = "openproxy.v1";
+
+/// Human-readable stability statement returned by `openproxy schema
+/// stability`. Bumping the version string here counts as a compatibility
+/// promise — keep it in sync with `docs/cli-schema.md` (if/when added).
+pub const SCHEMA_STABILITY: &str = "stable";
+
 pub fn run_list(ctx: OutputCtx) -> anyhow::Result<()> {
     let data = json!({
+        "namespace": SCHEMA_NAMESPACE,
+        "stability": SCHEMA_STABILITY,
         "resources": RESOURCES,
     });
     if ctx.is_robot() {
         emit_robot("openproxy.v1.schema.list", data)?;
     } else {
-        humanln(ctx, "Available resource schemas:");
+        humanln(
+            ctx,
+            format!("Available resource schemas ({SCHEMA_NAMESPACE}, {SCHEMA_STABILITY}):"),
+        );
         for r in RESOURCES {
             humanln(ctx, format!("  {r}"));
         }
+    }
+    Ok(())
+}
+
+pub fn run_stability(ctx: OutputCtx) -> anyhow::Result<()> {
+    let data = json!({
+        "namespace": SCHEMA_NAMESPACE,
+        "stability": SCHEMA_STABILITY,
+        "policy": "Existing field names, types, and semantics in openproxy.v1.* envelopes are frozen. New fields are additive only. A new openproxy.v2.* namespace will be opened before any breaking change.",
+    });
+    if ctx.is_robot() {
+        emit_robot("openproxy.v1.schema.stability", data)?;
+    } else {
+        humanln(
+            ctx,
+            format!("{SCHEMA_NAMESPACE}: {SCHEMA_STABILITY} (additive-only changes; v2 will open before any break)"),
+        );
     }
     Ok(())
 }

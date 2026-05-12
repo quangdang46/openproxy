@@ -7,9 +7,10 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use openproxy::cli::config::ResolvedConfig;
 use openproxy::cli::{
-    chat as cli_chat, logs as cli_logs, media as cli_media, mitm as cli_mitm, provider_oauth,
-    quota as cli_quota, tool as cli_tool, translator as cli_translator, tunnel_rt as cli_tunnel_rt,
-    usage as cli_usage, AuthCmd, Cli, Command, ProviderCmd, SchemaCmd, ServerCmd, TunnelCmd,
+    chat as cli_chat, db as cli_db, logs as cli_logs, media as cli_media, mitm as cli_mitm,
+    provider_oauth, quota as cli_quota, settings as cli_settings, tool as cli_tool,
+    translator as cli_translator, tunnel_rt as cli_tunnel_rt, usage as cli_usage, AuthCmd, Cli,
+    Command, ProviderCmd, SchemaCmd, ServerCmd, TunnelCmd,
 };
 use openproxy::db::watcher::spawn_watcher;
 use openproxy::db::Db;
@@ -156,6 +157,10 @@ async fn main() -> anyhow::Result<()> {
                     SchemaCmd::Example { resource } => {
                         openproxy::cli::schema::run_example(ctx, resource)?
                     }
+                    SchemaCmd::Stability => {
+                        openproxy::cli::schema::run_stability(ctx)?;
+                        0
+                    }
                 };
                 if exit != 0 {
                     std::process::exit(exit);
@@ -301,6 +306,20 @@ async fn main() -> anyhow::Result<()> {
             }
             Command::Media { cmd } => {
                 let exit = cli_media::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Settings { cmd } => {
+                let exit = cli_settings::run(cmd.clone(), &resolved, ctx).await?;
+                if exit != 0 {
+                    std::process::exit(exit);
+                }
+                return Ok(());
+            }
+            Command::Db { cmd } => {
+                let exit = cli_db::run(cmd.clone(), &resolved, ctx).await?;
                 if exit != 0 {
                     std::process::exit(exit);
                 }
