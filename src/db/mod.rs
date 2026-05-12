@@ -29,11 +29,25 @@ pub struct Db {
 
 impl Db {
     pub async fn load() -> anyhow::Result<Self> {
-        let data_dir = std::env::var_os("DATA_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(default_data_dir);
+        let configured = std::env::var_os("DATA_DIR").map(PathBuf::from);
+        let default = default_data_dir();
 
-        Self::load_from(&data_dir).await
+        match &configured {
+            Some(dir) => match Self::load_from(dir).await {
+                Ok(db) => Ok(db),
+                Err(err) if is_permission_denied(&err) && *dir != default => {
+                    tracing::warn!(
+                        target: "openproxy::db",
+                        configured = %dir.display(),
+                        fallback = %default.display(),
+                        "DATA_DIR not writable (permission denied); falling back to default"
+                    );
+                    Self::load_from(&default).await
+                }
+                Err(err) => Err(err),
+            },
+            None => Self::load_from(&default).await,
+        }
     }
 
     pub async fn load_from(data_dir: impl AsRef<Path>) -> anyhow::Result<Self> {
@@ -155,6 +169,14 @@ fn default_data_dir() -> PathBuf {
     } else {
         legacy
     }
+}
+
+fn is_permission_denied(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    })
 }
 
 async fn load_or_init_app_db(path: &Path) -> anyhow::Result<AppDb> {
