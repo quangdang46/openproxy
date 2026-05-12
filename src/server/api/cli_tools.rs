@@ -2659,7 +2659,10 @@ mod tests {
             run_command_with_timeout("/bin/sh", &["-c".to_string(), "sleep 30".to_string()], 1)
                 .await;
         let elapsed = start.elapsed();
-        assert!(response.timed_out, "expected timed_out=true, got {response:?}");
+        assert!(
+            response.timed_out,
+            "expected timed_out=true, got {response:?}"
+        );
         assert!(!response.success);
         assert!(response.exit_code.is_none());
         assert!(
@@ -2670,12 +2673,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_with_timeout_reports_failure_for_missing_binary() {
-        let response = run_command_with_timeout(
-            "/this/definitely/does/not/exist-openproxy-test",
-            &[],
-            5,
-        )
-        .await;
+        let response =
+            run_command_with_timeout("/this/definitely/does/not/exist-openproxy-test", &[], 5)
+                .await;
         assert!(!response.success);
         assert_eq!(response.exit_code, Some(-1));
         assert!(response.stderr.contains("Failed to execute"));
