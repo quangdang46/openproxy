@@ -8,6 +8,7 @@ pub mod compat;
 pub mod locale;
 pub mod media;
 pub mod media_providers;
+pub mod stt;
 pub mod mitm_config;
 pub mod models_alias;
 pub mod models_availability;
@@ -84,7 +85,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/v1/audio/transcriptions",
-            post(media::audio_transcriptions).options(media::cors_options),
+            post(stt::audio_transcriptions).options(stt::cors_options),
         )
         .route(
             "/v1/audio/speech",
