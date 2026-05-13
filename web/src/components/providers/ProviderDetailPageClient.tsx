@@ -1201,6 +1201,10 @@ export default function ProviderDetailPageClient() {
         onClose={() => {
           setAddConnectionError("");
           setShowAddApiKeyModal(false);
+          // Refresh after close — bulk-add posts directly to /api/providers
+          // and never goes through handleSaveApiKey, so fetchConnections only
+          // runs here.
+          fetchConnections();
         }}
       />
       <EditConnectionModal
