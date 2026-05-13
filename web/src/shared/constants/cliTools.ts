@@ -209,7 +209,7 @@ export const CLI_TOOLS: Record<string, CLITool> = {
     image: "/providers/cline.png",
     color: "#00D1B2",
     description: "Cline AI Coding Assistant",
-    configType: "guide",
+    configType: "custom",
     guideSteps: [
       { step: 1, title: "Open Settings", desc: "Go to Cline Settings panel" },
       { step: 2, title: "Select Provider", desc: "Choose API Provider → OpenAI Compatible" },
@@ -224,7 +224,7 @@ export const CLI_TOOLS: Record<string, CLITool> = {
     image: "/providers/kilocode.png",
     color: "#FF6B6B",
     description: "Kilo Code AI Assistant",
-    configType: "guide",
+    configType: "custom",
     guideSteps: [
       { step: 1, title: "Open Settings", desc: "Go to Kilo Code Settings panel" },
       { step: 2, title: "Select Provider", desc: "Choose API Provider → OpenAI Compatible" },
