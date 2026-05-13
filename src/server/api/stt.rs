@@ -193,10 +193,7 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
             let provider = match resolved.provider.as_deref() {
                 Some(p) if !p.is_empty() => p.to_string(),
                 _ => {
-                    return with_cors(json_error(
-                        StatusCode::BAD_REQUEST,
-                        "Invalid model format",
-                    ));
+                    return with_cors(json_error(StatusCode::BAD_REQUEST, "Invalid model format"));
                 }
             };
             let model = resolved.model.clone();
@@ -294,7 +291,9 @@ async fn parse_multipart_request(mp: &mut Multipart) -> Result<SttRequest, Reque
     })
 }
 
-async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String, RequestError> {
+async fn read_text_field(
+    field: axum::extract::multipart::Field<'_>,
+) -> Result<String, RequestError> {
     let bytes = field
         .bytes()
         .await
@@ -408,7 +407,9 @@ async fn dispatch_with_fallback(
             }
             return json_error(
                 last_status.unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
-                last_message.as_deref().unwrap_or("All accounts unavailable"),
+                last_message
+                    .as_deref()
+                    .unwrap_or("All accounts unavailable"),
             );
         };
 
@@ -570,8 +571,7 @@ pub fn audio_mime_from_filename(name: &str) -> String {
 }
 
 async fn upstream_error(res: reqwest::Response) -> DispatchResult {
-    let status =
-        StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let text = res.text().await.unwrap_or_default();
     let message = parse_upstream_error_message(&text)
         .unwrap_or_else(|| format!("Upstream error ({})", status));
@@ -1139,7 +1139,14 @@ mod tests {
 
     #[test]
     fn stt_catalog_has_expected_providers() {
-        for p in ["openai", "groq", "deepgram", "assemblyai", "huggingface", "gemini"] {
+        for p in [
+            "openai",
+            "groq",
+            "deepgram",
+            "assemblyai",
+            "huggingface",
+            "gemini",
+        ] {
             assert!(stt_config(p).is_some(), "{} should have STT config", p);
         }
         assert!(stt_config("anthropic").is_none());
@@ -1152,7 +1159,10 @@ mod tests {
         assert_eq!(audio_mime_from_filename("clip.WAV"), "audio/wav");
         assert_eq!(audio_mime_from_filename("clip.m4a"), "audio/mp4");
         assert_eq!(audio_mime_from_filename("clip.opus"), "audio/opus");
-        assert_eq!(audio_mime_from_filename("noext"), "application/octet-stream");
+        assert_eq!(
+            audio_mime_from_filename("noext"),
+            "application/octet-stream"
+        );
     }
 
     #[test]
@@ -1168,8 +1178,7 @@ mod tests {
 
     #[test]
     fn deepgram_url_uses_explicit_language_when_set() {
-        let url =
-            build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", Some("en"));
+        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", Some("en"));
         assert!(url.contains("&language=en") || url.contains("?language=en"));
         assert!(!url.contains("detect_language=true"));
     }
