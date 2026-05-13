@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
                 ServerCmd::Status => {
-                    let exit = openproxy::cli::server::run_status(ctx, &resolved, cli.port).await?;
+                    let exit = openproxy::cli::server::run_status(ctx, &resolved).await?;
                     if exit != 0 {
                         std::process::exit(exit);
                     }

@@ -46,7 +46,7 @@ pub async fn run(ctx: OutputCtx, cfg: &ResolvedConfig) -> anyhow::Result<i32> {
     if let Some(url) = cfg.remote_url.as_deref() {
         checks.push(check_server_reachable(url).await);
     } else {
-        checks.push(check_local_server_reachable().await);
+        checks.push(check_local_server_reachable(cfg.port).await);
     }
 
     let all_ok = checks.iter().all(|c| c.ok);
@@ -127,8 +127,7 @@ async fn check_db_loadable() -> Check {
     }
 }
 
-async fn check_local_server_reachable() -> Check {
-    let port = std::env::var("PORT").unwrap_or_else(|_| "4623".to_string());
+async fn check_local_server_reachable(port: u16) -> Check {
     let url = format!("http://127.0.0.1:{port}/health");
     probe(&url, "server_reachable").await
 }

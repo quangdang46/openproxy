@@ -309,7 +309,6 @@ pub async fn run_stop(ctx: OutputCtx, cfg: &ResolvedConfig) -> anyhow::Result<i3
 pub async fn run_status(
     ctx: OutputCtx,
     cfg: &ResolvedConfig,
-    fallback_port: u16,
 ) -> anyhow::Result<i32> {
     let pid = read_pid(&cfg.data_dir);
     let alive = pid.map(process_alive).unwrap_or(false);
@@ -326,7 +325,7 @@ pub async fn run_status(
         };
         format!("http://{dial_host}:{port}")
     } else {
-        format!("http://127.0.0.1:{fallback_port}")
+        format!("http://127.0.0.1:{}", cfg.port)
     };
     let health_url = format!("{}/api/health", probe_url.trim_end_matches('/'));
     let reachable = probe_health(&health_url).await;

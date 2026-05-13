@@ -138,6 +138,7 @@ impl Cli {
             url: self.url.clone(),
             api_key: self.api_key.clone(),
             profile: self.profile.clone(),
+            port: Some(self.port),
         }
     }
 }
@@ -680,7 +681,7 @@ impl Cli {
                             rt.block_on(server::run_stop(ctx, &resolved)).map(|_| ())
                         }
                         ServerCmd::Status => rt
-                            .block_on(server::run_status(ctx, &resolved, 4623))
+                            .block_on(server::run_status(ctx, &resolved))
                             .map(|_| ()),
                         ServerCmd::Init { force } => rt
                             .block_on(server::run_init(ctx, &resolved, force))
