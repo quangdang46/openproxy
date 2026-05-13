@@ -33,6 +33,7 @@ pub struct ResolvedConfig {
     /// touch the env again later).
     pub api_key: Option<String>,
     pub profile: Option<String>,
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -63,6 +64,7 @@ pub struct CliOverrides {
     pub url: Option<String>,
     pub api_key: Option<String>,
     pub profile: Option<String>,
+    pub port: Option<u16>,
 }
 
 impl ResolvedConfig {
@@ -103,11 +105,17 @@ impl ResolvedConfig {
             })
             .or(profile.api_key);
 
+        let port = overrides
+            .port
+            .or_else(|| std::env::var("PORT").ok().and_then(|s| s.parse().ok()))
+            .unwrap_or(4623);
+
         Ok(Self {
             data_dir,
             remote_url,
             api_key,
             profile: profile_name,
+            port,
         })
     }
 
@@ -190,6 +198,7 @@ mod tests {
             url: Some("http://x".into()),
             api_key: Some("k".into()),
             profile: None,
+            port: None,
         })
         .unwrap();
         assert_eq!(resolved.data_dir, PathBuf::from("/tmp/from-flag"));

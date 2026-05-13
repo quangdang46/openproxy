@@ -69,7 +69,9 @@ impl AppDb {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConnection {
+    #[serde(default)]
     pub id: String,
+    #[serde(default)]
     pub provider: String,
     #[serde(default = "default_auth_type")]
     pub auth_type: String,
