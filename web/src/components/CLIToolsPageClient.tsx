@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardSkeleton } from "@/shared/components";
 import { CLI_TOOLS } from "@/shared/constants/cliTools";
 import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from "@/shared/constants/models";
-import { ClaudeToolCard, CodexToolCard, DroidToolCard, OpenClawToolCard, HermesToolCard, DefaultToolCard, OpenCodeToolCard, CoworkToolCard, MitmLinkCard } from "./cli-tools";
+import { ClaudeToolCard, ClineToolCard, KiloToolCard, CodexToolCard, DroidToolCard, OpenClawToolCard, HermesToolCard, DefaultToolCard, OpenCodeToolCard, CoworkToolCard, MitmLinkCard } from "./cli-tools";
 import { MITM_TOOLS } from "@/shared/constants/cliTools";
 
 const CLOUD_URL: string | undefined = (import.meta.env as Record<string, string | undefined>)?.PUBLIC_CLOUD_URL;
@@ -12,6 +12,8 @@ const CLOUD_URL: string | undefined = (import.meta.env as Record<string, string 
 
 const STATUS_ENDPOINTS: Record<string, string> = {
   claude: "/api/cli-tools/claude-settings",
+  cline: "/api/cli-tools/cline-settings",
+  kilo: "/api/cli-tools/kilo-settings",
   codex: "/api/cli-tools/codex-settings",
   opencode: "/api/cli-tools/opencode-settings",
   droid: "/api/cli-tools/droid-settings",
@@ -181,6 +183,10 @@ export default function CLIToolsPageClient({ machineId }: CLIToolsPageClientProp
             initialStatus={toolStatuses.claude}
           />
         );
+      case "cline":
+        return <ClineToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} cloudEnabled={cloudEnabled} initialStatus={toolStatuses.cline} />;
+      case "kilo":
+        return <KiloToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} cloudEnabled={cloudEnabled} initialStatus={toolStatuses.kilo} />;
       case "codex":
         return <CodexToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} cloudEnabled={cloudEnabled} initialStatus={toolStatuses.codex} />;
       case "opencode":
