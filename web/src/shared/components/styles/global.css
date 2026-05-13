@@ -1,4 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap');
+/* Local Material Symbols (no Google Fonts) — vendored via `material-symbols` */
+@import url('material-symbols/outlined.css');
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Inter:wght@400;500;600;700&display=swap');
 
 @tailwind base;
@@ -220,6 +221,23 @@
   --shadow-warm: var(--shadow-atmospheric);
 
   color-scheme: dark;
+}
+
+/* ============================================================
+   Fix native select dropdowns in dark mode (otherwise Chrome
+   renders dark-on-dark option text, see 9router #997).
+   ============================================================ */
+select {
+  color-scheme: light;
+}
+
+.dark select {
+  color-scheme: dark;
+}
+
+.dark select option {
+  background-color: var(--color-surface);
+  color: var(--color-text-main);
 }
 
 @theme inline {

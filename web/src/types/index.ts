@@ -27,6 +27,7 @@ export interface Provider {
   };
   serviceKinds?: ServiceKind[];
   ttsConfig?: TTSConfig;
+  sttConfig?: STTConfig;
   embeddingConfig?: EmbeddingConfig;
   thinkingConfig?: ThinkingConfig;
   kindNotice?: Record<string, string>;
@@ -52,6 +53,29 @@ export interface TTSConfig {
 }
 
 export interface TTSModel {
+  id: string;
+  name: string;
+}
+
+export type STTFormat =
+  | "openai"
+  | "deepgram"
+  | "assemblyai"
+  | "nvidia-asr"
+  | "huggingface-asr"
+  | "gemini-stt";
+
+export interface STTConfig {
+  baseUrl: string;
+  authType: "none" | "apikey";
+  authHeader: "bearer" | "token" | "x-api-key" | "key" | "none";
+  format: STTFormat;
+  models: STTModel[];
+  /** True for providers that require an async upload+poll flow (AssemblyAI). */
+  async?: boolean;
+}
+
+export interface STTModel {
   id: string;
   name: string;
 }

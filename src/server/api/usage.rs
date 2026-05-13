@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::time::{self, Duration};
 
+use crate::core::usage::quota_fetcher::{fetch_glm_quota, fetch_minimax_quota};
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::server::state::AppState;
 use crate::server::usage_live::UsageEvent;
@@ -418,14 +419,44 @@ async fn get_connection_usage(
         }
     }
 
+    // Live quota fetch for whitelisted apikey providers (GLM, MiniMax). Falls
+    // back to a static info message when the fetcher returns one. We never
+    // surface upstream errors as HTTP failures — the dashboard treats
+    // `quotas: {}` + `message` as "connected, but quota unavailable".
+    let mut live_quotas = serde_json::json!({});
+    let mut live_message: Option<String> = None;
+    if is_apikey_eligible {
+        if let Some(api_key) = connection
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let provider = connection.provider.clone();
+            let result = match provider.as_str() {
+                "glm" | "glm-cn" => fetch_glm_quota(api_key, &provider).await,
+                "minimax" | "minimax-cn" => fetch_minimax_quota(api_key, &provider).await,
+                _ => serde_json::json!({}),
+            };
+            if let Some(quotas) = result.get("quotas") {
+                live_quotas = quotas.clone();
+            }
+            if let Some(msg) = result.get("message").and_then(|v| v.as_str()) {
+                live_message = Some(msg.to_string());
+            }
+        }
+    }
+
+    let message = live_message.unwrap_or_else(|| usage_message_for_provider(&connection.provider));
+
     Json(ConnectionUsageResponse {
         connection_id,
         total_requests: request_count,
         total_prompt_tokens: prompt,
         total_completion_tokens: completion,
         total_cost: cost,
-        message: usage_message_for_provider(&connection.provider),
-        quotas: serde_json::json!({}),
+        message,
+        quotas: live_quotas,
     })
     .into_response()
 }

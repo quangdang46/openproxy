@@ -23,6 +23,7 @@ pub mod provider_nodes;
 mod provider_validate;
 pub mod providers;
 pub mod shutdown;
+pub mod stt;
 pub mod tags;
 pub mod translator;
 pub mod tunnel;
@@ -84,7 +85,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/v1/audio/transcriptions",
-            post(media::audio_transcriptions).options(media::cors_options),
+            post(stt::audio_transcriptions).options(stt::cors_options),
         )
         .route(
             "/v1/audio/speech",

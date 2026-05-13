@@ -485,7 +485,12 @@ export default function ConnectionsCard({ providerId, isOAuth = false }: Connect
         provider={providerId}
         proxyPools={proxyPools}
         onSave={handleSaveApiKey}
-        onClose={() => setShowAddModal(false)}
+        onClose={() => {
+          setShowAddModal(false);
+          // Refresh after close — bulk-add posts directly to /api/providers
+          // and never goes through handleSaveApiKey.
+          void fetch_();
+        }}
       />
       <EditConnectionModal
         isOpen={showEditModal}
