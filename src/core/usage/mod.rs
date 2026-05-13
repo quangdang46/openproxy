@@ -18,6 +18,7 @@
 //! Subscriptions (Claude Code, Codex, Copilot, Cursor) are tracked via their own quota systems.
 
 mod pricing;
+pub mod quota_fetcher;
 mod tracker;
 
 pub use pricing::{CostModel, ModelPricing, Pricing};
