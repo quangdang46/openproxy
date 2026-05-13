@@ -97,6 +97,8 @@ export default function ProvidersPageClient() {
   const [providerNodes, setProviderNodes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddCompatibleModal, setShowAddCompatibleModal] = useState(false);
+  const [showAllApikey, setShowAllApikey] = useState(false);
+  const APIKEY_INITIAL_VISIBLE = 20;
   const [showAddAnthropicCompatibleModal, setShowAddAnthropicCompatibleModal] =
     useState(false);
   const [testingMode, setTestingMode] = useState(null);
@@ -257,10 +259,31 @@ export default function ProvidersPageClient() {
   const freeTierEntries = Object.entries(FREE_TIER_PROVIDERS).filter(
     ([, info]) => matchSearch(info.name),
   );
-  const apikeyEntries = Object.entries(APIKEY_PROVIDERS).filter(
-    ([, info]) =>
-      (info.serviceKinds ?? ["llm"]).includes("llm") && matchSearch(info.name),
+  // Sort APIKEY providers so ones with any connected (working) connection
+  // surface first; ties break alphabetically. Mirrors 9router's
+  // sortByPriority — when the list is long, this keeps the most useful
+  // providers above the fold.
+  const sortApikeyByPriority = (entries: Array<[string, any]>) =>
+    [...entries].sort(([ka, a], [kb, b]) => {
+      const sa = getProviderStats(ka, "apikey");
+      const sb = getProviderStats(kb, "apikey");
+      const ca = sa.connected > 0 ? 1 : 0;
+      const cb = sb.connected > 0 ? 1 : 0;
+      if (ca !== cb) return cb - ca;
+      return (a.name || "").localeCompare(b.name || "");
+    });
+  const apikeyEntries = sortApikeyByPriority(
+    Object.entries(APIKEY_PROVIDERS).filter(
+      ([, info]) =>
+        (info.serviceKinds ?? ["llm"]).includes("llm") && matchSearch(info.name),
+    ),
   );
+  const isApikeySearching = !!searchQuery.trim();
+  const visibleApikeyEntries =
+    isApikeySearching || showAllApikey
+      ? apikeyEntries
+      : apikeyEntries.slice(0, APIKEY_INITIAL_VISIBLE);
+  const hiddenApikeyCount = apikeyEntries.length - APIKEY_INITIAL_VISIBLE;
 
   if (loading) {
     return (
@@ -464,7 +487,7 @@ export default function ProvidersPageClient() {
           </button>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-          {apikeyEntries.map(([key, info]) => (
+          {visibleApikeyEntries.map(([key, info]) => (
             <ApiKeyProviderCard
               key={key}
               providerId={key}
@@ -475,6 +498,15 @@ export default function ProvidersPageClient() {
             />
           ))}
         </div>
+        {!isApikeySearching && !showAllApikey && hiddenApikeyCount > 0 && (
+          <button
+            onClick={() => setShowAllApikey(true)}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-primary/40 px-3 py-2.5 text-sm font-medium text-primary transition-colors hover:border-primary hover:bg-primary/5"
+          >
+            <span className="material-symbols-outlined text-[16px]">expand_more</span>
+            Show all {apikeyEntries.length} providers
+          </button>
+        )}
       </div>
       )}
 
