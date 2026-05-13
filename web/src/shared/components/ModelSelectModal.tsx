@@ -2,6 +2,7 @@
 
 import { useState, useMemo, useEffect } from "react";
 import Modal from "./Modal";
+import Button from "./Button";
 import { getModelsByProviderId } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 import React from "react";
@@ -66,6 +67,9 @@ interface ModelSelectModalProps {
   title?: string;
   modelAliases?: Record<string, string>;
   kindFilter?: string | null;
+  // When false, picking a model does not close the modal; the user must press
+  // Done. Useful when the parent uses onSelect to toggle multiple entries.
+  closeOnSelect?: boolean;
 }
 
 export default function ModelSelectModal({
@@ -77,6 +81,7 @@ export default function ModelSelectModal({
   title = "Select Model",
   modelAliases = {},
   kindFilter = null,
+  closeOnSelect = true,
 }: ModelSelectModalProps) {
   // Filter activeProviders by serviceKinds when kindFilter set (e.g. "webSearch", "webFetch")
   const filteredActiveProviders = useMemo(() => {
@@ -356,8 +361,10 @@ export default function ModelSelectModal({
 
   const handleSelect = (model: Model) => {
     onSelect(model);
-    onClose();
-    setSearchQuery("");
+    if (closeOnSelect) {
+      onClose();
+      setSearchQuery("");
+    }
   };
 
   return (
@@ -370,6 +377,19 @@ export default function ModelSelectModal({
       title={title}
       size="md"
       className="p-4!"
+      footer={
+        !closeOnSelect ? (
+          <Button
+            onClick={() => {
+              onClose();
+              setSearchQuery("");
+            }}
+            fullWidth
+          >
+            Done
+          </Button>
+        ) : null
+      }
     >
       {/* Search - compact */}
       <div className="mb-3">
