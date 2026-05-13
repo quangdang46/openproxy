@@ -7,6 +7,7 @@ import ThemeToggle from "@/shared/components/ThemeToggle";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS } from "@/shared/constants/providers";
 import { translate } from "@/i18n/runtime";
+import { useHeaderSearchStore } from "@/store/headerSearchStore";
 
 interface Breadcrumb {
   label: string;
@@ -281,9 +282,47 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
 
       {/* Right actions */}
       <div className="flex items-center gap-1 shrink-0">
+        <HeaderSearchInput />
         <ThemeToggle />
         <HeaderMenu onLogout={handleLogout} />
       </div>
     </header>
+  );
+}
+
+/**
+ * Search input wired to the global useHeaderSearchStore. Pages opt in by
+ * calling `register(placeholder)` on mount and `unregister()` on unmount; the
+ * input is hidden whenever no page has registered.
+ */
+function HeaderSearchInput() {
+  const visible = useHeaderSearchStore((s) => s.visible);
+  const query = useHeaderSearchStore((s) => s.query);
+  const placeholder = useHeaderSearchStore((s) => s.placeholder);
+  const setQuery = useHeaderSearchStore((s) => s.setQuery);
+  if (!visible) return null;
+  return (
+    <div className="relative hidden sm:flex items-center mr-1">
+      <span className="material-symbols-outlined absolute left-2 top-1/2 -translate-y-1/2 text-text-muted text-[16px] pointer-events-none">
+        search
+      </span>
+      <input
+        type="text"
+        placeholder={placeholder}
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        className="pl-7 pr-2.5 py-1.5 w-[180px] md:w-[220px] rounded border border-hairline bg-surface text-[12px] text-ink placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary/50"
+      />
+      {query && (
+        <button
+          type="button"
+          onClick={() => setQuery("")}
+          className="absolute right-1 top-1/2 -translate-y-1/2 text-text-muted hover:text-ink"
+          aria-label="Clear search"
+        >
+          <span className="material-symbols-outlined text-[16px]">close</span>
+        </button>
+      )}
+    </div>
   );
 }

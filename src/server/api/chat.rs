@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
@@ -28,6 +29,12 @@ use crate::server::state::AppState;
 use crate::types::{AppDb, ProviderConnection, TokenUsage};
 
 use super::auth_error_response;
+
+/// Maximum time we'll wait for the next byte from an upstream SSE stream before
+/// considering the connection stalled. 3 minutes matches what most providers
+/// use for their keep-alive heartbeats (OpenAI sends a comment every ~30s,
+/// Anthropic every ~60s, Gemini every ~30s — 180s is well past any of them).
+const SSE_STALL_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub async fn cors_options() -> Response {
     cors_preflight_response("GET, POST, OPTIONS")
@@ -948,8 +955,24 @@ async fn proxy_response_with_pending_tracking(
             let stream = async_stream::stream! {
                 let mut upstream = response.bytes_stream();
                 loop {
-                    match upstream.try_next().await {
-                        Ok(Some(chunk)) => {
+                    let next = tokio::time::timeout(SSE_STALL_TIMEOUT, upstream.try_next()).await;
+                    match next {
+                        Err(_elapsed) => {
+                            // Upstream went silent for SSE_STALL_TIMEOUT; treat
+                            // as an error so the client can retry.
+                            tracing::warn!(
+                                target: "openproxy::chat::stream",
+                                provider = %provider,
+                                model = %model,
+                                "SSE stalled, closing stream"
+                            );
+                            state
+                                .usage_live
+                                .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                .await;
+                            return;
+                        }
+                        Ok(Ok(Some(chunk))) => {
                             if let Some(transformer) = transformer.as_mut() {
                                 for line in transform_dashboard_sse_chunk(&chunk, transformer.as_mut(), &mut pending_text) {
                                     if let Some(frame) = sse_frame_for_dashboard(&line) {
@@ -960,8 +983,8 @@ async fn proxy_response_with_pending_tracking(
                                 yield Ok::<Bytes, std::io::Error>(chunk);
                             }
                         }
-                        Ok(None) => break,
-                        Err(_) => {
+                        Ok(Ok(None)) => break,
+                        Ok(Err(_)) => {
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -993,7 +1016,25 @@ async fn proxy_response_with_pending_tracking(
             let mut transformer = transformer;
             let mut pending_text = String::new();
             let stream = async_stream::stream! {
-                while let Some(frame_result) = body.frame().await {
+                loop {
+                    let next = tokio::time::timeout(SSE_STALL_TIMEOUT, body.frame()).await;
+                    let frame_result = match next {
+                        Err(_elapsed) => {
+                            tracing::warn!(
+                                target: "openproxy::chat::stream",
+                                provider = %provider,
+                                model = %model,
+                                "SSE stalled, closing stream"
+                            );
+                            state
+                                .usage_live
+                                .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                .await;
+                            return;
+                        }
+                        Ok(Some(result)) => result,
+                        Ok(None) => break,
+                    };
                     match frame_result {
                         Ok(frame) => {
                             if let Ok(data) = frame.into_data() {

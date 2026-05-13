@@ -216,7 +216,28 @@ impl ApiKeyExecutor {
     }
 
     fn transform_request(&self, body: &Value) -> Value {
-        body.clone()
+        let mut transformed = body.clone();
+        normalize_developer_role(&mut transformed);
+        transformed
+    }
+}
+
+/// Many OpenAI-format providers (Deepseek, Groq, Mistral, Perplexity, Together,
+/// Fireworks, Cerebras, xAI, NVIDIA, …) reject `role: "developer"` with a 400
+/// — they only accept `system`, `user`, `assistant`, `tool`. OpenAI itself uses
+/// `developer` for its newer Responses API. Rewrite at the dispatch boundary so
+/// the upstream sees the role it understands.
+fn normalize_developer_role(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        let Some(role) = message.get_mut("role") else {
+            continue;
+        };
+        if role.as_str() == Some("developer") {
+            *role = Value::String("system".to_string());
+        }
     }
 }
 
@@ -348,4 +369,56 @@ pub fn get_api_key_provider_config(provider: &str) -> Option<(&'static str, &'st
 
 pub fn is_api_key_provider(provider: &str) -> bool {
     API_KEY_PROVIDERS.contains_key(provider)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalize_developer_role_rewrites_developer_to_system() {
+        let mut body = json!({
+            "model": "deepseek-chat",
+            "messages": [
+                { "role": "developer", "content": "be terse" },
+                { "role": "user", "content": "hi" },
+            ]
+        });
+        normalize_developer_role(&mut body);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["role"], "user");
+    }
+
+    #[test]
+    fn normalize_developer_role_leaves_other_roles_alone() {
+        let mut body = json!({
+            "messages": [
+                { "role": "system", "content": "you are helpful" },
+                { "role": "user", "content": "hello" },
+                { "role": "assistant", "content": "hi" },
+                { "role": "tool", "content": "{}" },
+            ]
+        });
+        let original = body.clone();
+        normalize_developer_role(&mut body);
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn normalize_developer_role_handles_missing_messages_field() {
+        let mut body = json!({ "model": "x" });
+        normalize_developer_role(&mut body);
+        assert_eq!(body, json!({ "model": "x" }));
+    }
+
+    #[test]
+    fn normalize_developer_role_handles_messages_without_role_field() {
+        let mut body = json!({
+            "messages": [{ "content": "no role" }]
+        });
+        let original = body.clone();
+        normalize_developer_role(&mut body);
+        assert_eq!(body, original);
+    }
 }
