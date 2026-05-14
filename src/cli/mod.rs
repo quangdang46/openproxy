@@ -101,6 +101,24 @@ pub struct Cli {
     #[arg(long, env = "OPENPROXY_API_KEY", global = true, hide_env_values = true)]
     pub api_key: Option<String>,
 
+    /// Reverse-proxy dashboard requests to this URL instead of serving the
+    /// embedded `web/dist/` assets. Used for UI development against the
+    /// Astro dev server (e.g. `http://127.0.0.1:4624`).
+    #[arg(long, env = "DASHBOARD_SIDECAR_URL")]
+    pub dashboard_sidecar_url: Option<String>,
+
+    /// Serve the dashboard from a directory on disk instead of the embedded
+    /// assets. Useful for iterating on a pre-built `web/dist/` without
+    /// rebuilding the Rust binary. Ignored if `--dashboard-sidecar-url` is set.
+    #[arg(long, env = "OPENPROXY_WEB_DIR")]
+    pub web_dir: Option<PathBuf>,
+
+    /// Do not auto-open the dashboard in a web browser when starting the
+    /// server in the foreground. Default behaviour: open the browser if
+    /// stdout is a TTY.
+    #[arg(long, env = "OPENPROXY_NO_OPEN")]
+    pub no_open: bool,
+
     #[command(subcommand)]
     pub cmd: Option<Command>,
 }
@@ -680,9 +698,9 @@ impl Cli {
                         ServerCmd::Stop => {
                             rt.block_on(server::run_stop(ctx, &resolved)).map(|_| ())
                         }
-                        ServerCmd::Status => rt
-                            .block_on(server::run_status(ctx, &resolved))
-                            .map(|_| ()),
+                        ServerCmd::Status => {
+                            rt.block_on(server::run_status(ctx, &resolved)).map(|_| ())
+                        }
                         ServerCmd::Init { force } => rt
                             .block_on(server::run_init(ctx, &resolved, force))
                             .map(|_| ()),

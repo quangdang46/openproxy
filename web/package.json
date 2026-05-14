@@ -3,6 +3,10 @@
   "version": "0.4.16",
   "description": "OpenProxy Astro dashboard sidecar",
   "private": true,
+  "packageManager": "pnpm@10.33.2",
+  "engines": {
+    "node": ">=20.3.0"
+  },
   "scripts": {
     "dev": "astro dev --port 4624",
     "dev:stack": "node scripts/run-source-stack.mjs",
@@ -12,7 +16,7 @@
     "build:bun": "NODE_ENV=production bun --bun astro build",
     "preview:bun": "NODE_ENV=production bun --bun astro preview",
     "package:npm": "node scripts/build-npm-package.mjs",
-    "dist:npm": "cargo build --release && npm run build && node scripts/build-npm-package.mjs",
+    "dist:npm": "cargo build --release && pnpm run build && node scripts/build-npm-package.mjs",
     "verify:npm": "node scripts/verify-npm-package.mjs"
   },
   "dependencies": {

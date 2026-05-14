@@ -306,10 +306,7 @@ pub async fn run_stop(ctx: OutputCtx, cfg: &ResolvedConfig) -> anyhow::Result<i3
 }
 
 /// `openproxy server status`.
-pub async fn run_status(
-    ctx: OutputCtx,
-    cfg: &ResolvedConfig,
-) -> anyhow::Result<i32> {
+pub async fn run_status(ctx: OutputCtx, cfg: &ResolvedConfig) -> anyhow::Result<i32> {
     let pid = read_pid(&cfg.data_dir);
     let alive = pid.map(process_alive).unwrap_or(false);
 

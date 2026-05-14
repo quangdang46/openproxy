@@ -7,13 +7,11 @@
   
   **Connect All AI Code Tools (Claude Code, Cursor, Antigravity, Copilot, Codex, Gemini, OpenCode, Cline, OpenClaw...) to 40+ AI Providers & 100+ Models.**
   
-  [![npm](https://img.shields.io/npm/v/openproxy.svg)](https://www.npmjs.com/package/openproxy)
-  [![Downloads](https://img.shields.io/npm/dm/openproxy.svg)](https://www.npmjs.com/package/openproxy)
-  [![License](https://img.shields.io/npm/l/openproxy.svg)](https://github.com/decolua/openproxy/blob/main/LICENSE)
+  [![npm](https://img.shields.io/npm/v/@openprx/openproxy.svg)](https://www.npmjs.com/package/@openprx/openproxy)
+  [![Downloads](https://img.shields.io/npm/dm/@openprx/openproxy.svg)](https://www.npmjs.com/package/@openprx/openproxy)
+  [![License](https://img.shields.io/npm/l/@openprx/openproxy.svg)](https://github.com/quangdang46/openproxy/blob/main/LICENSE)
 
-  <a href="https://trendshift.io/repositories/22628" target="_blank"><img src="https://trendshift.io/api/badge/repositories/22628" alt="decolua%2Fopenproxy | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-  
-  [🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [📖 Setup](#-setup-guide) • [🌐 Website](https://openproxy.com)
+  [🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [📖 Setup](#-setup-guide)
 
   [🇻🇳 Tiếng Việt](./i18n/README.vi.md) • [🇨🇳 中文](./i18n/README.zh-CN.md) • [🇯🇵 日本語](./i18n/README.ja-JP.md)
 </div>
@@ -70,20 +68,31 @@ Result: Never stop coding, minimal cost + 20-40% token savings via RTK
 
 ## ⚡ Quick Start
 
-**1. Install globally:**
+**1. Install (pick one):**
 
 ```bash
-npm install -g openproxy
+# Option A — one-shot installer (Linux / macOS, x86_64 + aarch64)
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash
+
+# Option B — npm (any platform with Node 18+)
+npm install -g @openprx/openproxy
+```
+
+Both install the same prebuilt binary from the same GitHub release. The curl path drops the binary at `~/.local/bin/openproxy`; the npm path uses `optionalDependencies` to pull just the binary that matches your platform.
+
+**2. Run it:**
+
+```bash
 openproxy
 ```
 
-🎉 Dashboard opens at `http://localhost:4623`
+The server starts on `http://127.0.0.1:4623`, the embedded dashboard auto-opens in your default browser. Add `--no-open` for headless / SSH / container use.
 
-**2. Connect a FREE provider (no signup needed):**
+**3. Connect a FREE provider (no signup needed):**
 
 Dashboard → Providers → Connect **Kiro AI** (free Claude unlimited) or **OpenCode Free** (no auth) → Done!
 
-**3. Use in your CLI tool:**
+**4. Use in your CLI tool:**
 
 ```
 Claude Code/Codex/OpenClaw/Cursor/Cline Settings:
@@ -94,48 +103,79 @@ Claude Code/Codex/OpenClaw/Cursor/Cline Settings:
 
 **That's it!** Start coding with FREE AI models.
 
-**One-command source dev stack:**
+<details>
+<summary><b>Other install methods</b></summary>
 
 ```bash
-cp .env.example .env
-npm install
-npm run dev:stack
+# Pin a specific release
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --version v0.1.0
+
+# Install system-wide (may need sudo)
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --system
+
+# Auto-update PATH in ~/.bashrc / ~/.zshrc
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --easy-mode
+
+# Build from source (requires cargo + Node 20 + pnpm)
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --from-source
+
+# Uninstall
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --uninstall
 ```
 
-This starts the Rust API on `4623` and the Next.js sidecar on `4624` with the correct proxy wiring already set.
+Manual download: https://github.com/quangdang46/openproxy/releases
 
-**Build the npm-style launcher locally:**
+</details>
+
+<details>
+<summary><b>Building from source (contributors)</b></summary>
+
+Requires Node.js ≥ 20.3 and `pnpm` (`corepack enable && corepack prepare pnpm@10.33.2 --activate`, or `npm i -g pnpm`).
 
 ```bash
-npm install
-npm run verify:npm
+git clone https://github.com/quangdang46/openproxy.git
+cd openproxy
+
+# 1. Build the dashboard (output: web/dist/)
+pnpm --dir web install
+pnpm --dir web run build
+
+# 2. Build the binary (embeds web/dist/ via rust-embed)
+cargo build --release --locked
+
+# 3. Run
+./target/release/openproxy
 ```
 
-That builds the Rust binary, builds the Next standalone sidecar, creates tarballs in `dist/npm/`, installs them into a temp prefix, and verifies `http://127.0.0.1:4623/health` plus `http://127.0.0.1:4623/landing`.
-
-**Alternative: run from source (this repository):**
-
-This repository package is private (`openproxy`), so source execution is expected to run the Next.js dashboard sidecar and the Rust backend together.
+**UI iteration without rebuilding the binary:** point a debug binary at the dashboard on disk:
 
 ```bash
-cp .env.example .env
-npm install
-NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 npm run dev
-DATA_DIR=/tmp/openproxy BASE_URL=http://127.0.0.1:4623 NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 DASHBOARD_SIDECAR_URL=http://127.0.0.1:4624 cargo run -- --port 4623
+pnpm --dir web run build
+cargo run -- --web-dir ./web/dist
 ```
 
-Production mode:
+**UI live-reload via the Astro dev server (legacy sidecar mode):**
 
 ```bash
-npm run build
-PORT=4624 HOSTNAME=0.0.0.0 NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 npm run start
-DATA_DIR=/tmp/openproxy BASE_URL=http://127.0.0.1:4623 NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 DASHBOARD_SIDECAR_URL=http://127.0.0.1:4624 cargo run --release -- --port 4623
+# Terminal 1
+NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 pnpm --dir web run dev   # → http://127.0.0.1:4624
+
+# Terminal 2 — reverse-proxy dashboard requests to the dev server
+DATA_DIR=/tmp/openproxy cargo run -- --dashboard-sidecar-url http://127.0.0.1:4624
 ```
 
-Default URLs:
-- Dashboard: `http://localhost:4623/dashboard`
+**Headless build** (no embedded dashboard, smaller binary, requires `--web-dir` or `--dashboard-sidecar-url` at runtime):
+
+```bash
+cargo build --release --locked --no-default-features
+```
+
+</details>
+
+**Default URLs:**
+- Dashboard: `http://localhost:4623/`
 - OpenAI-compatible API: `http://localhost:4623/v1`
-- Next.js sidecar: `http://localhost:4624`
+- Health probe: `http://localhost:4623/health`
 
 ---
 
@@ -194,7 +234,7 @@ Default URLs:
 
 </div>
 
-> 🎬 **Made a video about OpenProxy?** Submit a [Pull Request](https://github.com/decolua/openproxy/pulls) adding your video to this section — we'll merge it!
+> 🎬 **Made a video about OpenProxy?** Submit a [Pull Request](https://github.com/quangdang46/openproxy/pulls) adding your video to this section — we'll merge it!
 
 ---
 
@@ -1041,10 +1081,10 @@ Model: cc/claude-opus-4-7
 
 ```bash
 # Clone and install
-git clone https://github.com/decolua/openproxy.git
+git clone https://github.com/quangdang46/openproxy.git
 cd openproxy
-npm install
-npm run build
+pnpm --dir web install
+pnpm --dir web run build
 
 # Configure
 export JWT_SECRET="your-secure-secret-change-this"
@@ -1054,12 +1094,11 @@ export PORT="4623"
 export HOSTNAME="0.0.0.0"
 export NODE_ENV="production"
 export NEXT_PUBLIC_BASE_URL="http://localhost:4623"
-export NEXT_PUBLIC_CLOUD_URL="https://openproxy.com"
 export API_KEY_SECRET="endpoint-proxy-api-key-secret"
 export MACHINE_ID_SALT="endpoint-proxy-salt"
 
 # Start
-npm run start
+pnpm --dir web run start
 
 # Or use PM2
 npm install -g pm2
@@ -1119,9 +1158,9 @@ docker stop openproxy && docker rm openproxy
 | `HOSTNAME` | framework default | Bind host (Docker defaults to `0.0.0.0`) |
 | `NODE_ENV` | runtime default | Set `production` for deploy |
 | `BASE_URL` | `http://localhost:4623` | Server-side internal base URL used by cloud sync jobs |
-| `CLOUD_URL` | `https://openproxy.com` | Server-side cloud sync endpoint base URL |
+| `CLOUD_URL` | _unset (opt-in)_ | Server-side cloud sync endpoint. Set this to enable cloud sync; leave unset to disable. |
 | `NEXT_PUBLIC_BASE_URL` | `http://localhost:3000` | Backward-compatible/public base URL (prefer `BASE_URL` for server runtime) |
-| `NEXT_PUBLIC_CLOUD_URL` | `https://openproxy.com` | Backward-compatible/public cloud URL (prefer `CLOUD_URL` for server runtime) |
+| `NEXT_PUBLIC_CLOUD_URL` | _unset (opt-in)_ | Backward-compatible/public cloud URL. Prefer `CLOUD_URL` for server runtime; leave unset to disable cloud sync. |
 | `API_KEY_SECRET` | `endpoint-proxy-api-key-secret` | HMAC secret for generated API keys |
 | `MACHINE_ID_SALT` | `endpoint-proxy-salt` | Salt for stable machine ID hashing |
 | `ENABLE_REQUEST_LOGS` | `false` | Enables request/response logs under `logs/` |
@@ -1247,12 +1286,12 @@ Notes:
 
 ## 🛠️ Tech Stack
 
-- **Runtime**: Node.js 20+
-- **Framework**: Next.js 16
-- **UI**: React 19 + Tailwind CSS 4
-- **Database**: LowDB (JSON file-based)
-- **Streaming**: Server-Sent Events (SSE)
-- **Auth**: OAuth 2.0 (PKCE) + JWT + API Keys
+- **Server**: Rust 1.76+ (axum 0.8, hyper 1, tower-http)
+- **Dashboard**: Astro 4 (static output) + React 19 + Tailwind CSS, embedded into the binary via `rust-embed`
+- **Storage**: SQLite (rusqlite, bundled) + JSON state for config
+- **Streaming**: Server-Sent Events (SSE) end-to-end
+- **Auth**: OAuth 2.0 (PKCE) + JWT + scoped API keys
+- **Build / dist**: pnpm 10 (web), Cargo (binary), `cross` for Linux musl, GitHub Releases + npm (`@openprx/openproxy`)
 
 ---
 
@@ -1285,29 +1324,9 @@ Authorization: Bearer your-api-key
 
 ## 📧 Support
 
-- **Website**: [openproxy.com](https://openproxy.com)
-- **GitHub**: [github.com/decolua/openproxy](https://github.com/decolua/openproxy)
-- **Issues**: [github.com/decolua/openproxy/issues](https://github.com/decolua/openproxy/issues)
-
----
-
-## 👥 Contributors
-
-Thanks to all contributors who helped make OpenProxy better!
-
-[![Contributors](https://contrib.rocks/image?repo=decolua/openproxy&max=150&columns=15&anon=1&v=20260309)](https://github.com/decolua/openproxy/graphs/contributors)
-
----
-
-## 📊 Star Chart
-
-[![Star Chart](https://starchart.cc/decolua/openproxy.svg?variant=adaptive)](https://starchart.cc/decolua/openproxy)
-
-
-
-## 🔀 Forks
-
-**[OmniRoute](https://github.com/diegosouzapw/OmniRoute)** — A full-featured TypeScript fork of OpenProxy. Adds 36+ providers, 4-tier auto-fallback, multi-modal APIs (images, embeddings, audio, TTS), circuit breaker, semantic cache, LLM evaluations, and a polished dashboard. 368+ unit tests. Available via npm and Docker.
+- **GitHub**: [github.com/quangdang46/openproxy](https://github.com/quangdang46/openproxy)
+- **Issues**: [github.com/quangdang46/openproxy/issues](https://github.com/quangdang46/openproxy/issues)
+- **npm**: [@openprx/openproxy](https://www.npmjs.com/package/@openprx/openproxy)
 
 ---
 
@@ -1315,9 +1334,9 @@ Thanks to all contributors who helped make OpenProxy better!
 
 Built on the shoulders of giants:
 
-- **CLIProxyAPI** — original Go implementation that inspired this JavaScript port.
-- **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — Rust token-saver. OpenProxy ports its compression pipeline to JS → **−20-40% input tokens** on every request.
-- **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) by **[@JuliusBrussee](https://github.com/JuliusBrussee)** — viral *"why use many token when few token do trick"*. OpenProxy adapts its prompt → **−65% output tokens**.
+- **CLIProxyAPI** — original Go implementation that inspired the architecture.
+- **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — token-saver. OpenProxy ports its compression pipeline → **−20-40% input tokens** on every request.
+- **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) by **[@JuliusBrussee](https://github.com/JuliusBrussee)** — *"why use many token when few token do trick"*. OpenProxy adapts its prompt → **−65% output tokens**.
 
 Huge thanks to these authors — without their work, OpenProxy's token-saving features wouldn't exist. ⭐ them on GitHub!
 
