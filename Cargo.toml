@@ -104,6 +104,13 @@ notify = "7"
 # CLI: cross-platform user config directory resolution
 directories = "5"
 
+# Embedded web dashboard (Astro static output) + cross-platform browser-open.
+# `compression` requires the rust-embed `folder` to be a relative path at the
+# crate root, so we drop `interpolate-folder-path`.
+rust-embed = { version = "8", features = ["compression", "mime-guess"] }
+mime_guess = "2"
+open = "5"
+
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
@@ -114,3 +121,15 @@ insta = { version = "1", features = ["json", "yaml"] }
 [[bin]]
 name = "openproxy"
 path = "src/main.rs"
+
+[features]
+default = ["embed-web"]
+# Embed `web/dist/` into the release binary. Disable for headless / sidecar-proxy builds.
+embed-web = []
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+opt-level = "s"

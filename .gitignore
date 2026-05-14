@@ -63,8 +63,6 @@ PUBLIC.md
 Thanks.md
 PUBLIC.en.md
 PR/*
-package-lock.json
-
 
 #Ignore vscode AI rules
 .github/instructions/codacy.instructions.md
@@ -82,3 +80,8 @@ gitbooks/*
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# npm distribution: binaries are staged into platform packages at release time,
+# never committed. The bin/.gitkeep stubs themselves are tracked.
+/packages/platform/*/bin/openproxy
+/packages/platform/*/bin/openproxy.exe

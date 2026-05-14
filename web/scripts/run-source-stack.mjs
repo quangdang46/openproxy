@@ -44,7 +44,7 @@ rustProcess.on('error', (err) => {
 setTimeout(() => {
   console.log('🎨 Starting Next.js dashboard...\n');
   
-  const nextProcess = spawn('npm', ['run', 'dev'], {
+  const nextProcess = spawn('pnpm', ['run', 'dev'], {
     cwd: path.join(rootDir, 'web'),
     env: nextEnv,
     stdio: 'inherit',

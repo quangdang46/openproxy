@@ -342,13 +342,69 @@ async fn main() -> anyhow::Result<()> {
     let db = Db::load().await?;
     let db = Arc::new(db);
     spawn_watcher(db.clone());
-    let state = AppState::new(db);
+    let state = AppState::new(db)
+        .with_dashboard_sidecar_url(cli.dashboard_sidecar_url.clone())
+        .with_web_dir(cli.web_dir.clone());
     let app = openproxy::build_app(state);
     let addr = format!("{}:{}", cli.host, cli.port);
     info!("Starting openproxy on {}", addr);
     let listener = TcpListener::bind(&addr).await?;
+    let bound = listener.local_addr().ok();
+
+    // Auto-open the dashboard in the user's default browser when running
+    // interactively. Skipped when:
+    //   • --no-open / OPENPROXY_NO_OPEN is set
+    //   • stdout is not a TTY (containers, CI, SSH redirected, systemd, …)
+    //   • --robot is set (machine-readable output mode)
+    if should_open_browser(&cli) {
+        let port = bound.map(|a| a.port()).unwrap_or(cli.port);
+        let host = browser_host(&cli.host);
+        let url = format!("http://{host}:{port}/");
+        tokio::spawn(async move {
+            // axum needs a moment to start accepting connections. The browser
+            // is forgiving — if the request lands ~200ms before the server is
+            // ready, modern browsers retry. A short sleep is enough.
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if let Err(err) = open::that(&url) {
+                tracing::warn!(target: "openproxy", "could not open browser at {url}: {err}");
+            } else {
+                tracing::info!(target: "openproxy", "opened {url} in default browser");
+            }
+        });
+    }
+
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Decide whether to launch the user's default browser at startup.
+fn should_open_browser(cli: &Cli) -> bool {
+    if cli.no_open || cli.robot {
+        return false;
+    }
+    is_stdout_tty()
+}
+
+#[cfg(unix)]
+fn is_stdout_tty() -> bool {
+    // SAFETY: `isatty` only inspects a file descriptor.
+    unsafe { libc::isatty(libc::STDOUT_FILENO) == 1 }
+}
+
+#[cfg(not(unix))]
+fn is_stdout_tty() -> bool {
+    // Conservative default on non-Unix: assume interactive. Users on Windows
+    // can opt out with --no-open if needed.
+    true
+}
+
+/// Browser-friendly host: bind hosts like `0.0.0.0` are not resolvable in
+/// browsers; rewrite them to `127.0.0.1` for the launch URL only.
+fn browser_host(bind_host: &str) -> &str {
+    match bind_host {
+        "0.0.0.0" | "[::]" | "::" | "" => "127.0.0.1",
+        h => h,
+    }
 }
 
 async fn run_route(
