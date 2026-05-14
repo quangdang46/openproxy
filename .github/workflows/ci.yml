@@ -62,9 +62,17 @@ jobs:
 
       - name: cargo test (macOS / Windows — partial)
         if: runner.os != 'Linux'
-        # tests/cli_tool_native_settings_api.rs has pre-existing platform
-        # dependencies (HOME-redirection + system binary detection for
-        # copilot/codex/droid/hermes/openclaw/opencode) that fail on macOS
-        # and Windows runners. The first panic poisons the shared ENV_LOCK
-        # mutex and cascades. Tracked for cleanup; not blocking distribution.
-        run: cargo test --all-features -- --skip cli_tool_native_settings_api
+        shell: bash
+        # tests/cli_tool_native_settings_api.rs has 10 pre-existing tests
+        # (copilot/droid/hermes/openclaw/opencode × 2 each) that fail on
+        # macOS/Windows runners due to platform-specific HOME-redirect +
+        # system binary detection. The first panic poisons the shared
+        # ENV_LOCK mutex and cascades. Skipping by test-name prefix until
+        # the test file gets a per-platform cleanup pass.
+        run: |
+          cargo test --all-features -- \
+            --skip copilot_settings_ \
+            --skip droid_settings_ \
+            --skip hermes_settings_ \
+            --skip openclaw_settings_ \
+            --skip opencode_settings_

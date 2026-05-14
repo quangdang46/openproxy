@@ -13,6 +13,7 @@
 //! - `server init [--force]`: create an empty `db.json` and emit the first
 //!   admin API key (shown exactly once).
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
