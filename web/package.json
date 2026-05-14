@@ -10,11 +10,11 @@
   "scripts": {
     "dev": "astro dev --port 4624",
     "dev:stack": "node scripts/run-source-stack.mjs",
-    "build": "NODE_ENV=production astro build",
-    "preview": "NODE_ENV=production astro preview",
+    "build": "astro build",
+    "preview": "astro preview",
     "dev:bun": "bun --bun astro dev --port 4624",
-    "build:bun": "NODE_ENV=production bun --bun astro build",
-    "preview:bun": "NODE_ENV=production bun --bun astro preview",
+    "build:bun": "bun --bun astro build",
+    "preview:bun": "bun --bun astro preview",
     "package:npm": "node scripts/build-npm-package.mjs",
     "dist:npm": "cargo build --release && pnpm run build && node scripts/build-npm-package.mjs",
     "verify:npm": "node scripts/verify-npm-package.mjs"
