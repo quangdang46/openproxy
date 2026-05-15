@@ -1,11 +1,26 @@
-<div align="center">
-  # OpenProxy
+<h1 align="center">OpenProxy</h1>
 
-  Single-binary AI router for AI coding tools. Embedded web dashboard, OpenAI-compatible API, auto-fallback across 40+ providers, token compression via RTK.
+<p align="center">
+  <b>Single-binary AI router for AI coding tools.</b><br/>
+  Embedded dashboard · OpenAI-compatible API · auto-fallback across 40+ providers · ~20–40% input-token savings via RTK.
+</p>
 
-  [![npm](https://img.shields.io/npm/v/@openprx/openproxy.svg)](https://www.npmjs.com/package/@openprx/openproxy)
-  [![License](https://img.shields.io/npm/l/@openprx/openproxy.svg)](https://github.com/quangdang46/openproxy/blob/main/LICENSE)
-</div>
+<p align="center">
+  <a href="https://github.com/quangdang46/openproxy/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/quangdang46/openproxy/actions/workflows/ci.yml/badge.svg?branch=main" /></a>
+  <a href="https://github.com/quangdang46/openproxy/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/quangdang46/openproxy?display_name=tag&sort=semver&label=release&color=brightgreen" /></a>
+  <a href="https://www.npmjs.com/package/@openprx/openproxy"><img alt="npm" src="https://img.shields.io/badge/npm-%40openprx%2Fopenproxy-CB3837?logo=npm&logoColor=white" /></a>
+  <a href="https://github.com/quangdang46/openproxy/blob/main/README.md#license"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
+  <a href="#install"><img alt="Install" src="https://img.shields.io/badge/install-curl%20%7C%20npm-1e90ff" /></a>
+</p>
+
+<p align="center">
+  <a href="#install">Install</a> ·
+  <a href="#connect-a-cli-tool">Connect a CLI</a> ·
+  <a href="#supported-providers">Providers</a> ·
+  <a href="#combos-build-a-fallback-chain">Combos</a> ·
+  <a href="#for-ai-agents">For AI Agents</a> ·
+  <a href="#configuration">Configuration</a>
+</p>
 
 ---
 
@@ -81,6 +96,54 @@ Most tools ask for an OpenAI base URL and an API key.
 The API key comes from the dashboard. Visit `http://127.0.0.1:4623`, create an API key, paste it into the tool's settings.
 
 Tested CLIs: **Claude Code, Codex, Cursor, Cline, Continue, Roo, Kilo, Copilot, OpenClaw, OpenCode, Antigravity, Droid**.
+
+---
+
+## For AI Agents
+
+OpenProxy is built to be driven by AI agents (Devin, Claude Code, Codex, Cursor, OpenClaw, …) end-to-end — install, init, configure, and verify without any browser interaction.
+
+A ready-to-use agent skill ships in this repo:
+
+- [`.agents/skills/openproxy/SKILL.md`](.agents/skills/openproxy/SKILL.md) — install, `server init`, `server start --detach`, declarative `provider apply`, and wiring CLI tools.
+
+Drop the same file at `~/.agents/skills/openproxy/SKILL.md` to make it discoverable across sessions for tools that scan the home directory.
+
+The CLI is agent-friendly by design:
+
+- `--robot` emits stable line-delimited JSON envelopes (`openproxy.v1.*`, frozen contract — additive only).
+- `openproxy schema list` / `schema show <resource>` exposes the JSON shape for every `apply`-able resource.
+- `openproxy provider apply --from-file -` is declarative and idempotent (`--prune` to reconcile).
+- `openproxy doctor` self-tests the install, data dir, and server reachability.
+
+Minimal autonomous bootstrap (no TTY, no browser, no prompts):
+
+```bash
+# 1. Install (drops binary at ~/.local/bin/openproxy)
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash
+export PATH="$HOME/.local/bin:$PATH"
+
+# 2. Initialize data dir; capture the admin API key from the JSON envelope
+openproxy --robot server init | tee /tmp/op-init.json
+APIKEY=$(jq -r '.data.admin_key.key' /tmp/op-init.json)
+
+# 3. Start server detached + headless, then self-test
+openproxy server start --detach --no-open
+openproxy --robot doctor
+openproxy --robot server status
+
+# 4. Configure a provider declaratively (idempotent)
+cat > /tmp/providers.json <<JSON
+{ "providers": [{ "name": "openai", "provider": "openai", "apiKey": "sk-...", "isActive": true }] }
+JSON
+OPENPROXY_API_KEY="$APIKEY" openproxy --robot provider apply --from-file /tmp/providers.json
+
+# 5. End-to-end smoke test against the running server
+curl -sS http://127.0.0.1:4623/health
+curl -sS http://127.0.0.1:4623/v1/models -H "Authorization: Bearer $APIKEY"
+```
+
+Full walkthrough — including failure modes, OAuth provider notes, and post-install verification — lives in [`.agents/skills/openproxy/SKILL.md`](.agents/skills/openproxy/SKILL.md).
 
 ---
 
