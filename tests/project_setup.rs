@@ -1,3 +1,4 @@
+use openproxy::core::tls::ensure_rustls_provider;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -60,6 +61,7 @@ fn project_structure_matches_bead_layout() {
 
 #[test]
 fn dependency_stack_smoke_test() {
+    ensure_rustls_provider();
     let _router: Router = Router::new()
         .route("/health", get(|| async { "ok" }))
         .layer(CorsLayer::permissive());
