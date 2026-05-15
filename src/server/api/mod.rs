@@ -164,8 +164,14 @@ async fn api_health() -> Response {
 }
 
 async fn get_version_api() -> Response {
-    let current_version = dashboard_package_version().to_string();
-    let latest_version = fetch_latest_dashboard_version().await;
+    // Bug #11: previous releases reported the dashboard package version
+    // (`web/package.json` → 0.4.16) as `currentVersion`, which made the
+    // server look like a much newer build than it really was. Use the
+    // crate's `CARGO_PKG_VERSION` (the actual binary version) instead so
+    // `currentVersion`, `openproxy --version`, and the GitHub release tag
+    // are all the same number.
+    let current_version = env!("CARGO_PKG_VERSION").to_string();
+    let latest_version = fetch_latest_release_version().await;
     let has_update = latest_version
         .as_deref()
         .map(|latest| compare_semver_like(latest, &current_version) > 0)
@@ -175,6 +181,10 @@ async fn get_version_api() -> Response {
         "currentVersion": current_version,
         "latestVersion": latest_version,
         "hasUpdate": has_update,
+        // Keep the legacy field name around for the dashboard which still
+        // reads it; this is the version of the embedded web bundle, not
+        // the binary.
+        "dashboardVersion": dashboard_package_version(),
     }))
     .into_response()
 }
@@ -223,6 +233,29 @@ async fn fetch_latest_dashboard_version() -> Option<String> {
         .get("version")
         .and_then(Value::as_str)
         .map(str::to_string)
+}
+
+/// Probe the GitHub Releases API for the latest published binary version.
+/// Strips the leading `v` from `vX.Y.Z` tag names so the value compares
+/// cleanly against `CARGO_PKG_VERSION`. Returns `None` when the network
+/// is unavailable or the API responds with anything other than 200.
+async fn fetch_latest_release_version() -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(4))
+        .user_agent(concat!("openproxy/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .ok()?;
+
+    let body: Value = client
+        .get("https://api.github.com/repos/quangdang46/openproxy/releases/latest")
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    let tag = body.get("tag_name").and_then(Value::as_str)?;
+    Some(tag.trim_start_matches('v').to_string())
 }
 
 fn compare_semver_like(a: &str, b: &str) -> i32 {

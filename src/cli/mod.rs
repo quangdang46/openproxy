@@ -54,10 +54,16 @@ pub(crate) mod test_lock {
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "openproxy",
-    about = "Local AI routing gateway (server + agent-first CLI)"
+    about = "Local AI routing gateway (server + agent-first CLI)",
+    version
 )]
 pub struct Cli {
-    #[arg(long, env = "HOST", default_value = "0.0.0.0")]
+    /// Bind host. Defaults to `127.0.0.1` (loopback only). Set to `0.0.0.0`
+    /// to expose on the LAN — only do this together with
+    /// `REQUIRE_API_KEY=true` and a strong `INITIAL_PASSWORD`.
+    /// Honors `$HOSTNAME` (preferred, matches Docker / README) or the legacy
+    /// `$HOST` env var.
+    #[arg(long, env = "HOSTNAME", default_value = "127.0.0.1")]
     pub host: String,
 
     #[arg(long, env = "PORT", default_value_t = 4623)]
@@ -293,6 +299,11 @@ pub enum ServerCmd {
         /// Override the port the server binds to.
         #[arg(long)]
         port: Option<u16>,
+        /// Do not auto-open the dashboard in a browser. Equivalent to the
+        /// global `--no-open` flag, accepted here too because the README
+        /// and SKILL.md show `openproxy server start --detach --no-open`.
+        #[arg(long)]
+        no_open: bool,
     },
     /// Send SIGTERM to the running server and wait for it to exit.
     Stop,
@@ -443,9 +454,16 @@ pub enum KeyCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Mint a new API key. The secret is required positionally; pass
+    /// `--auto` to have the CLI generate a fresh `op-…` secret instead.
     Add {
         name: String,
+        /// Secret value. Omit when `--auto` is passed.
+        #[arg(default_value = "")]
         key: String,
+        /// Generate a fresh random secret instead of taking one positionally.
+        #[arg(long)]
+        auto: bool,
         #[arg(long)]
         json: bool,
     },
@@ -686,9 +704,9 @@ impl Cli {
                 Command::Server { cmd } => {
                     let resolved = config::ResolvedConfig::resolve(overrides)?;
                     match cmd {
-                        ServerCmd::Start { detach, host, port } => {
+                        ServerCmd::Start { detach, host, port, no_open: _ } => {
                             let opts = server::StartOptions {
-                                host: host.unwrap_or_else(|| "0.0.0.0".to_string()),
+                                host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
                                 port: port.unwrap_or(4623),
                                 detach,
                             };
@@ -831,6 +849,103 @@ impl Cli {
     }
 }
 
+/// Default `auth_type` value used by the type registry. Mirror the
+/// constant in `crate::types::default_auth_type` so the CLI can detect
+/// when an incoming payload left the field at the default and infer a
+/// better value (see bug #8 in the bug report).
+fn default_auth_type_str() -> String {
+    "oauth".to_string()
+}
+
+/// Build a fresh random `op-…` secret for `key add --auto`. Mirrors the
+/// formatting of `cli::server::generate_api_key` so admin keys minted by
+/// `server init` and keys minted here have the same shape.
+fn generate_api_key_secret() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 24];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!("op-{hex}")
+}
+
+/// Try to install a freshly minted API key via the running server's
+/// `/api/keys` HTTP endpoint, falling back to a direct `db.json` write
+/// when the server is not reachable. Returns `true` if the HTTP path
+/// succeeded.
+///
+/// Bug #13: writing directly to `db.json` while the server is running
+/// races against `db::watcher::spawn_watcher`'s file-watcher reload.
+/// Calling `/api/keys` makes the server install the key into its
+/// in-memory snapshot synchronously, so subsequent `/v1/*` calls see it
+/// immediately.
+async fn try_add_key_via_http(key: &ApiKey) -> bool {
+    use crate::cli::server::{read_endpoint, read_pid};
+
+    let dir = std::env::var_os("DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            home.join(".openproxy")
+        });
+    let Some(pid) = read_pid(&dir) else {
+        return false;
+    };
+    if !crate::cli::server::process_alive(pid) {
+        return false;
+    }
+    let (host, port) = read_endpoint(&dir).unwrap_or_else(|| ("127.0.0.1".to_string(), 4623));
+    let dial_host = if host == "0.0.0.0" || host == "::" || host.is_empty() {
+        "127.0.0.1".to_string()
+    } else {
+        host
+    };
+
+    // Find an existing admin key to authenticate the call.
+    let admin_key: Option<String> = {
+        let snap_path = dir.join("db.json");
+        std::fs::read(&snap_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| {
+                value
+                    .get("apiKeys")?
+                    .as_array()?
+                    .iter()
+                    .find_map(|entry| entry.get("key").and_then(|s| s.as_str()).map(str::to_string))
+            })
+    };
+    let Some(admin) = admin_key else {
+        return false;
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let url = format!("http://{dial_host}:{port}/api/keys");
+    let body = serde_json::json!({
+        "id": key.id,
+        "name": key.name,
+        "key": key.key,
+        "isActive": key.is_active,
+    });
+    matches!(
+        client
+            .post(&url)
+            .header("Authorization", format!("Bearer {admin}"))
+            .header("x-api-key", admin.as_str())
+            .json(&body)
+            .send()
+            .await,
+        Ok(r) if r.status().is_success()
+    )
+}
+
 pub async fn run_provider(cmd: ProviderCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::Result<()> {
     match cmd {
         ProviderCmd::List { json } => {
@@ -897,7 +1012,25 @@ pub async fn run_provider(cmd: ProviderCmd, db: &Db, ctx: output::OutputCtx) -> 
             };
 
             let mut new_conn = config;
-            new_conn.provider = name;
+            // Bug #8: `<NAME>` is the human-friendly *name* of this connection
+            // (e.g. "openai-paid"), not the underlying provider type. The
+            // provider type comes from the JSON payload (`{"provider":"openai"}`)
+            // and falls back to the name only when the payload omitted it.
+            if new_conn.provider.is_empty() {
+                new_conn.provider = name.clone();
+            }
+            if new_conn.name.is_none() {
+                new_conn.name = Some(name);
+            }
+            // Bug #8: the schema example uses `apiKey`, but `auth_type`
+            // defaulted to "oauth" so the resulting connection looked like
+            // an OAuth provider. Infer "apiKey" when an api_key is present
+            // and no explicit auth_type was set.
+            if new_conn.auth_type == default_auth_type_str()
+                && new_conn.api_key.as_deref().is_some_and(|k| !k.is_empty())
+            {
+                new_conn.auth_type = "apiKey".to_string();
+            }
             if new_conn.id.is_empty() {
                 new_conn.id = uuid::Uuid::new_v4().to_string();
             }
@@ -917,7 +1050,10 @@ pub async fn run_provider(cmd: ProviderCmd, db: &Db, ctx: output::OutputCtx) -> 
             } else {
                 output::humanln(
                     ctx,
-                    format!("Provider '{}' added successfully", new_conn.provider),
+                    format!(
+                        "Provider '{}' added successfully",
+                        new_conn.name.as_deref().unwrap_or(&new_conn.provider)
+                    ),
                 );
             }
         }
@@ -1133,26 +1269,76 @@ pub async fn run_key(cmd: KeyCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::Re
                 }
             }
         }
-        KeyCmd::Add { name, key, json } => {
+        KeyCmd::Add {
+            name,
+            key,
+            auto,
+            json,
+        } => {
+            // Bug #7: support `--auto` for generating a random `op-…` secret
+            // when the user does not want to invent one.
+            let secret = if auto {
+                if !key.is_empty() {
+                    let exit = output::emit_error(
+                        ctx,
+                        "validation",
+                        "pass either a secret value positionally or --auto, not both",
+                    )?;
+                    std::process::exit(exit);
+                }
+                generate_api_key_secret()
+            } else if key.is_empty() {
+                let exit = output::emit_error(
+                    ctx,
+                    "usage",
+                    "missing key secret. Pass a value positionally (`openproxy key add <NAME> <SECRET>`) or use `--auto` to generate one.",
+                )?;
+                std::process::exit(exit);
+            } else {
+                key
+            };
+
+            // Bug #13: when the local server is running, write the key via
+            // its HTTP API so the in-memory snapshot is updated synchronously.
+            // Falling back to the direct `db.json` path for offline use keeps
+            // the legacy behaviour (with the watcher reload race the bug
+            // report described — but only when no server is up to cooperate).
             let new_key = ApiKey {
                 id: uuid::Uuid::new_v4().to_string(),
-                name,
-                key,
+                name: name.clone(),
+                key: secret.clone(),
                 machine_id: None,
                 is_active: Some(true),
                 created_at: Some(chrono::Utc::now().to_rfc3339()),
                 extra: std::collections::BTreeMap::new(),
             };
 
-            db.update(|db| {
-                db.api_keys.push(new_key.clone());
-            })
-            .await?;
+            let used_http = try_add_key_via_http(&new_key).await;
+            if !used_http {
+                db.update(|db| {
+                    db.api_keys.push(new_key.clone());
+                })
+                .await?;
+            }
 
             if ctx.is_robot() {
-                output::emit_robot("openproxy.v1.key.add", serde_json::to_value(&new_key)?)?;
+                let mut payload = serde_json::to_value(&new_key)?;
+                if let Some(obj) = payload.as_object_mut() {
+                    obj.insert(
+                        "applied_via".to_string(),
+                        serde_json::Value::String(
+                            if used_http { "http" } else { "db" }.to_string(),
+                        ),
+                    );
+                }
+                output::emit_robot("openproxy.v1.key.add", payload)?;
             } else if json {
                 println!("{}", serde_json::to_string_pretty(&new_key)?);
+            } else if auto {
+                output::humanln(
+                    ctx,
+                    format!("API key '{name}' added — secret (shown once): {secret}"),
+                );
             } else {
                 output::humanln(ctx, "API key added successfully");
             }

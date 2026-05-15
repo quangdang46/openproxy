@@ -85,10 +85,29 @@ async fn serve_embedded(uri: &Uri) -> Response {
         return resp;
     }
 
-    // SPA fallback: requests without a file extension are likely client-router
-    // routes (e.g. `/dashboard/usage`). Serve the SPA shell so the JS router
-    // can take over. Skip this for paths with extensions — let those 404.
+    // Astro `build.format: 'file'` outputs `dashboard.html` rather than
+    // `dashboard/index.html`. URLs from the dashboard SPA never include the
+    // `.html` extension (`/dashboard`, `/dashboard/endpoint`), so we try the
+    // `<path>.html` variant before the SPA shell fallback. Without this the
+    // server returns the redirect-stub `index.html` for `/dashboard`, which
+    // points back at `/dashboard` and produces an infinite meta-refresh loop
+    // (see bug report #1).
     if !looks_like_asset(candidate) {
+        let html_candidate = format!("{candidate}.html");
+        if let Some(resp) = lookup_embedded(&html_candidate) {
+            return resp;
+        }
+        // Also try the directory-style layout `<path>/index.html` for
+        // forward compatibility if Astro is switched to `format: 'directory'`.
+        let dir_candidate = format!("{candidate}/index.html");
+        if let Some(resp) = lookup_embedded(&dir_candidate) {
+            return resp;
+        }
+        // SPA fallback: requests without a file extension are client-router
+        // routes. Serve the SPA shell so the JS router can take over.
+        if let Some(resp) = lookup_embedded("dashboard.html") {
+            return resp;
+        }
         if let Some(resp) = lookup_embedded("index.html") {
             return resp;
         }
@@ -163,6 +182,19 @@ async fn serve_from_disk(root: &Path, uri: &Uri) -> Response {
         return resp;
     }
     if !looks_like_asset(candidate) {
+        // Mirror the embedded path: try `<path>.html` first, then `<path>/index.html`,
+        // then fall back to the SPA shell.
+        let html_candidate = format!("{candidate}.html");
+        if let Some(resp) = read_disk_asset(root, &html_candidate) {
+            return resp;
+        }
+        let dir_candidate = format!("{candidate}/index.html");
+        if let Some(resp) = read_disk_asset(root, &dir_candidate) {
+            return resp;
+        }
+        if let Some(resp) = read_disk_asset(root, "dashboard.html") {
+            return resp;
+        }
         if let Some(resp) = read_disk_asset(root, "index.html") {
             return resp;
         }

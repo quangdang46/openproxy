@@ -668,9 +668,15 @@ pub(crate) async fn test_provider_api(
             match request.send().await {
                 Ok(resp) => {
                     let latency_ms = _start.elapsed().as_millis() as u64;
-                    (resp.status().is_success(), None, Some(latency_ms))
+                    let success = resp.status().is_success();
+                    let error = if success {
+                        None
+                    } else {
+                        Some(describe_http_failure("openai", resp).await)
+                    };
+                    (success, error, Some(latency_ms))
                 }
-                Err(e) => (false, Some(e.to_string()), None),
+                Err(e) => (false, Some(format!("network: {e}")), None),
             }
         }
         "anthropic" => {
@@ -685,9 +691,15 @@ pub(crate) async fn test_provider_api(
             match request.send().await {
                 Ok(resp) => {
                     let latency_ms = _start.elapsed().as_millis() as u64;
-                    (resp.status().is_success(), None, Some(latency_ms))
+                    let success = resp.status().is_success();
+                    let error = if success {
+                        None
+                    } else {
+                        Some(describe_http_failure("anthropic", resp).await)
+                    };
+                    (success, error, Some(latency_ms))
                 }
-                Err(e) => (false, Some(e.to_string()), None),
+                Err(e) => (false, Some(format!("network: {e}")), None),
             }
         }
         "gemini" => {
@@ -699,9 +711,15 @@ pub(crate) async fn test_provider_api(
                 match client.get(&url).send().await {
                     Ok(resp) => {
                         let latency_ms = _start.elapsed().as_millis() as u64;
-                        (resp.status().is_success(), None, Some(latency_ms))
+                        let success = resp.status().is_success();
+                        let error = if success {
+                            None
+                        } else {
+                            Some(describe_http_failure("gemini", resp).await)
+                        };
+                        (success, error, Some(latency_ms))
                     }
-                    Err(e) => (false, Some(e.to_string()), None),
+                    Err(e) => (false, Some(format!("network: {e}")), None),
                 }
             } else {
                 (false, Some("API key required".to_string()), None)
@@ -717,9 +735,15 @@ pub(crate) async fn test_provider_api(
             match request.send().await {
                 Ok(resp) => {
                     let latency_ms = _start.elapsed().as_millis() as u64;
-                    (resp.status().is_success(), None, Some(latency_ms))
+                    let success = resp.status().is_success();
+                    let error = if success {
+                        None
+                    } else {
+                        Some(describe_http_failure("openrouter", resp).await)
+                    };
+                    (success, error, Some(latency_ms))
                 }
-                Err(e) => (false, Some(e.to_string()), None),
+                Err(e) => (false, Some(format!("network: {e}")), None),
             }
         }
         // Custom/OpenAI compatible providers with base_url
@@ -737,16 +761,48 @@ pub(crate) async fn test_provider_api(
                         if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 {
                             (false, Some("Invalid API key".to_string()), Some(latency_ms))
                         } else {
-                            (resp.status().is_success(), None, Some(latency_ms))
+                            let success = resp.status().is_success();
+                            let error = if success {
+                                None
+                            } else {
+                                Some(describe_http_failure("custom", resp).await)
+                            };
+                            (success, error, Some(latency_ms))
                         }
                     }
-                    Err(e) => (false, Some(e.to_string()), None),
+                    Err(e) => (false, Some(format!("network: {e}")), None),
                 }
             } else {
                 (false, Some("Base URL required".to_string()), None)
             }
         }
     }
+}
+
+/// Build a human-readable description of an upstream HTTP failure. Tries to
+/// surface the upstream JSON error (e.g. OpenAI's `error.message`) and falls
+/// back to the canonical status reason. Used by `test_provider_api` and
+/// `provider validate` so users never see a bare `error: null` (bug #14).
+async fn describe_http_failure(provider: &str, resp: reqwest::Response) -> String {
+    let status = resp.status();
+    let canonical = status.canonical_reason().unwrap_or("");
+    let body = resp.text().await.unwrap_or_default();
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return format!("{provider} responded HTTP {} {canonical}", status.as_u16());
+    }
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        if let Some(msg) = value
+            .pointer("/error/message")
+            .or_else(|| value.pointer("/error/error/message"))
+            .or_else(|| value.pointer("/message"))
+            .and_then(Value::as_str)
+        {
+            return format!("HTTP {} — {msg}", status.as_u16());
+        }
+    }
+    let snippet: String = trimmed.chars().take(160).collect();
+    format!("HTTP {} {canonical}: {snippet}", status.as_u16())
 }
 
 async fn test_url(

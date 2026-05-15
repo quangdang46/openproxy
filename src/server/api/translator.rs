@@ -143,11 +143,31 @@ fn step_to_openai(body: &Value, state: &AppState) -> Response {
 async fn step_to_target(body: &Value, state: &AppState) -> Response {
     let openai_body = body.get("body").cloned().unwrap_or_else(|| body.clone());
     let provider = body.get("provider").and_then(Value::as_str).unwrap_or("");
-    let model = body.get("model").and_then(Value::as_str).unwrap_or("");
+    // Bug #14: the CLI defaults `--model` to "" so translator translate could
+    // be called with no top-level model. Fall back to the model embedded in
+    // the request body before declaring this an error.
+    let model_from_body = openai_body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let model = match body.get("model").and_then(Value::as_str) {
+        Some(s) if !s.is_empty() => s,
+        _ => model_from_body,
+    };
 
-    if provider.is_empty() || model.is_empty() {
-        return Json(json!({ "success": false, "error": "provider and model required" }))
-            .into_response();
+    if provider.is_empty() {
+        return Json(json!({
+            "success": false,
+            "error": "provider is required (pass --to <provider> on the CLI or include `provider` in the JSON body)",
+        }))
+        .into_response();
+    }
+    if model.is_empty() {
+        return Json(json!({
+            "success": false,
+            "error": "model is required: pass --model <id> or include `model` in the JSON body",
+        }))
+        .into_response();
     }
 
     let target_format = registry::get_target_format_for_provider(provider);

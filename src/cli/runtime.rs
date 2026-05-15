@@ -544,13 +544,35 @@ pub fn read_stdin_to_string() -> anyhow::Result<String> {
     Ok(s)
 }
 
-/// Read stdin (or a file path) into a string. `-` means stdin.
+/// Read stdin (or a file path, or treat as inline text). The order is:
+/// 1. `-` → stdin.
+/// 2. `@<path>` → read the file at `<path>` (familiar `curl -d @file` syntax).
+/// 3. existing file path → read the file (matches the legacy behaviour for
+///    callers that pass a path on disk; keeps `translator translate
+///    --from-file foo.json` working).
+/// 4. otherwise → treat the string as inline text.
+///
+/// This fixes bug #12 in the bug report: `openproxy chat send --prompt
+/// "hello"` previously failed with `read input file 'hello': No such file
+/// or directory` because the legacy implementation always treated the
+/// argument as a path. Inline text is now the default for non-file
+/// arguments, matching the `--help` description ("Prompt string, or `-` to
+/// read from stdin").
 pub fn read_input(from: &str) -> anyhow::Result<String> {
     if from == "-" {
-        read_stdin_to_string()
-    } else {
-        std::fs::read_to_string(from).with_context(|| format!("read input file '{from}'"))
+        return read_stdin_to_string();
     }
+    if let Some(path) = from.strip_prefix('@') {
+        return std::fs::read_to_string(path)
+            .with_context(|| format!("read input file '{path}'"));
+    }
+    // Treat the argument as a path **only** if it actually exists. Otherwise
+    // it is inline text (e.g. `--prompt "hello"`).
+    if std::path::Path::new(from).is_file() {
+        return std::fs::read_to_string(from)
+            .with_context(|| format!("read input file '{from}'"));
+    }
+    Ok(from.to_string())
 }
 
 /// Helper: convert `RuntimeError` to a user-facing `emit_error` exit code.
@@ -634,5 +656,32 @@ mod tests {
             message: "bad".into(),
         };
         assert_eq!(auth.code(), "auth");
+    }
+
+    #[test]
+    fn read_input_treats_unknown_string_as_inline_text() {
+        // Bug #12: `--prompt "hello"` should be inline text, not a file path.
+        assert_eq!(read_input("hello").unwrap(), "hello");
+        assert_eq!(read_input("multi word prompt").unwrap(), "multi word prompt");
+    }
+
+    #[test]
+    fn read_input_reads_file_when_path_exists() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"file contents\n").unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        assert_eq!(read_input(&path).unwrap(), "file contents\n");
+    }
+
+    #[test]
+    fn read_input_at_prefix_forces_file_read() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), b"forced").unwrap();
+        let path = format!("@{}", tmp.path().to_string_lossy());
+        assert_eq!(read_input(&path).unwrap(), "forced");
+
+        // `@<missing>` is a hard error (explicit file intent).
+        let err = read_input("@/this/path/should/not/exist/xyz").unwrap_err();
+        assert!(err.to_string().contains("read input file"));
     }
 }
