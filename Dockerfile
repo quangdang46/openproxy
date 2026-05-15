@@ -51,7 +51,10 @@ RUN apt-get update \
 # the source tree, then the embedded dashboard from stage 1.
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ ./src/
+# rust-embed reads web/dist/ at compile time; src/server/api/mod.rs also
+# include_str!s web/package.json. Both must exist before `cargo build`.
 COPY --from=web /web/dist/ ./web/dist/
+COPY --from=web /web/package.json ./web/package.json
 
 # Build with the default `embed-web` feature on. build.rs verifies
 # web/dist/index.html exists before invoking rust-embed.
