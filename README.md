@@ -1,6 +1,4 @@
 <div align="center">
-  <img src="./images/openproxy.png?1" alt="OpenProxy Dashboard" width="800"/>
-
   # OpenProxy
 
   Single-binary AI router for AI coding tools. Embedded web dashboard, OpenAI-compatible API, auto-fallback across 40+ providers, token compression via RTK.
