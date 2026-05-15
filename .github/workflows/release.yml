@@ -173,14 +173,23 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────
   # 3) Publish npm packages.
   #
+  # Uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret required.
+  # Requirements:
+  #   - Node >= 22.14.0, npm CLI >= 11.5.1
+  #   - Each package configured on npmjs.com as a Trusted Publisher:
+  #     Repository: quangdang46/openproxy
+  #     Workflow: release.yml
+  #     Environment: (leave blank)
+  #   - id-token: write permission (set at workflow level)
+  #
   # Order is non-negotiable:
   #   a) stage binaries into packages/platform/<target>/bin/openproxy
   #   b) publish all 4 platform packages
   #   c) wait for npm registry propagation
   #   d) publish the meta `@openprx/openproxy` package
   #
-  # Required secret: NPM_TOKEN with publish permission on @openprx scope.
-  # First-time scope setup: `npm org create openprx`.
+  # Setup: `npm org create openprx` (first time).
+  # See: https://docs.npmjs.com/generating-provenance-statements#trusted-publishing
   # ──────────────────────────────────────────────────────────────────────
   publish-npm:
     name: Publish to npm
@@ -192,8 +201,10 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
+          node-version: 22
+
+      - name: Ensure npm CLI supports OIDC trusted publishing
+        run: npm install -g npm@^11.5.1 && node --version && npm --version
 
       - name: Download release tarballs
         uses: actions/download-artifact@v4
@@ -212,13 +223,11 @@ jobs:
           done
 
       - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           for d in packages/platform/*/; do
             echo "::group::Publish $(basename "$d")"
-            (cd "$d" && npm publish --access public --provenance)
+            (cd "$d" && npm publish --access public)
             echo "::endgroup::"
           done
 
@@ -230,7 +239,5 @@ jobs:
           sleep 30
 
       - name: Publish meta package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages/openproxy
-        run: npm publish --access public --provenance
+        run: npm publish --access public
