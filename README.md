@@ -267,6 +267,18 @@ cargo build --release --locked --no-default-features
 
 ### Docker
 
+Pull the prebuilt image (published to GHCR by the release pipeline):
+
+```bash
+docker run -d \
+  --name openproxy \
+  -p 4623:4623 \
+  -v openproxy-data:/app/data \
+  ghcr.io/quangdang46/openproxy:latest
+```
+
+Or build locally:
+
 ```bash
 docker build -t openproxy .
 docker run -d \
@@ -274,11 +286,12 @@ docker run -d \
   -p 4623:4623 \
   --env-file ./.env \
   -v openproxy-data:/app/data \
-  -v openproxy-usage:/root/.openproxy \
   openproxy
 ```
 
-Container defaults: `PORT=4623`, `HOSTNAME=0.0.0.0`. Mount a writable volume at `/app/data` for persistence.
+Container defaults: `HOSTNAME=0.0.0.0`, `PORT=4623`, `DATA_DIR=/app/data`. The dashboard is embedded — no separate volume needed for it. Mount `/app/data` to persist `db.json`, `usage.json`, and request logs across container restarts.
+
+> First-time pulls from GHCR for this repo may require the package to be set to public at https://github.com/quangdang46/openproxy/pkgs/container/openproxy.
 
 ### Behind a reverse proxy
 
