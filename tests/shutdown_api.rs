@@ -1,3 +1,4 @@
+use openproxy::core::tls::ensure_rustls_provider;
 use std::net::TcpListener;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
@@ -119,6 +120,7 @@ async fn wait_for_ready(client: &reqwest::Client, base_url: &str) {
 
 #[tokio::test]
 async fn shutdown_route_returns_401_when_secret_missing_like_openproxy() {
+    ensure_rustls_provider();
     let mut server = ServerHandle::start("development", None).await;
     let response = server.post_shutdown(None).await;
 
@@ -136,6 +138,7 @@ async fn shutdown_route_returns_401_when_secret_missing_like_openproxy() {
 
 #[tokio::test]
 async fn shutdown_route_returns_403_in_production_before_auth() {
+    ensure_rustls_provider();
     let mut server = ServerHandle::start("production", Some("topsecret")).await;
     let response = server.post_shutdown(Some("Bearer topsecret")).await;
 
@@ -153,6 +156,7 @@ async fn shutdown_route_returns_403_in_production_before_auth() {
 
 #[tokio::test]
 async fn shutdown_route_exits_process_after_successful_dev_request() {
+    ensure_rustls_provider();
     let mut server = ServerHandle::start("development", Some("topsecret")).await;
     let response = server.post_shutdown(Some("Bearer topsecret")).await;
 
@@ -171,6 +175,7 @@ async fn shutdown_route_exits_process_after_successful_dev_request() {
 
 #[tokio::test]
 async fn shutdown_legacy_routes_are_not_exposed() {
+    ensure_rustls_provider();
     let mut server = ServerHandle::start("development", Some("topsecret")).await;
 
     let status_response = server.get("/api/shutdown/status").await;

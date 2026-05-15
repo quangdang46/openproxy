@@ -1,3 +1,4 @@
+use openproxy::core::tls::ensure_rustls_provider;
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -115,6 +116,7 @@ async fn codex_proxy_fallback_redirects_to_app_callback() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json, json!({ "success": true, "serverSide": false }));
 
+    ensure_rustls_provider();
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()

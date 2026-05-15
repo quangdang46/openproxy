@@ -20,6 +20,7 @@ use openproxy::server::state::AppState;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    openproxy::core::tls::ensure_rustls_provider();
     let ctx = cli.output_ctx();
     let resolved = ResolvedConfig::resolve(cli.cli_overrides())?;
 
