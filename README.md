@@ -145,6 +145,60 @@ curl -sS http://127.0.0.1:4623/v1/models -H "Authorization: Bearer $APIKEY"
 
 Full walkthrough — including failure modes, OAuth provider notes, and post-install verification — lives in [`.agents/skills/openproxy/SKILL.md`](.agents/skills/openproxy/SKILL.md).
 
+### Copy-paste prompt for your AI agent
+
+Paste the block below into Devin, Claude Code, Codex, Cursor, OpenClaw, or any agent chat. It's a single self-contained instruction set — the agent will install OpenProxy, start it, and verify it works without asking further questions.
+
+````text
+You are setting up OpenProxy (https://github.com/quangdang46/openproxy) on this
+machine. OpenProxy is a single-binary AI router exposing an OpenAI-compatible
+API on http://127.0.0.1:4623. Follow these steps exactly, stop on the first
+error, and report the captured admin API key back to me at the end.
+
+1. Check whether `openproxy` is already on PATH:
+       command -v openproxy && openproxy --version || echo "not installed"
+   If already installed, skip to step 3.
+
+2. Install the binary. Pick ONE path:
+   a) Linux / macOS, x86_64 or aarch64 (preferred):
+          curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash
+          export PATH="$HOME/.local/bin:$PATH"
+   b) Any platform with Node >= 18 (use if (a) fails or on Windows):
+          npm install -g @openprx/openproxy
+
+3. Initialize a data dir and capture the admin API key. Use --robot so the
+   output is JSON; never re-run with --force without my explicit approval:
+       openproxy --robot server init | tee /tmp/op-init.json
+       APIKEY=$(jq -r '.data.admin_key.key' /tmp/op-init.json)
+       export OPENPROXY_API_KEY="$APIKEY"
+   If `server init` reports `db.json already exists`, STOP and tell me — the
+   data dir is pre-populated and I need to decide whether to overwrite.
+
+4. Start the server detached and headless, then self-test:
+       openproxy server start --detach --no-open
+       openproxy --robot server status
+       openproxy --robot doctor
+
+5. Verify end-to-end:
+       curl -sS http://127.0.0.1:4623/health
+       curl -sS http://127.0.0.1:4623/v1/models \
+         -H "Authorization: Bearer $OPENPROXY_API_KEY"
+
+6. Report back to me:
+   - The exact `openproxy --version` output.
+   - The admin API key (value of $OPENPROXY_API_KEY).
+   - Result of step 4's `server status` and `doctor`.
+   - Any non-2xx response from step 5.
+
+Do NOT run `openproxy server init --force`, do NOT delete ~/.openproxy/, and
+do NOT add provider API keys unless I gave you values explicitly. If you hit
+the failure modes documented in
+https://github.com/quangdang46/openproxy/blob/main/.agents/skills/openproxy/SKILL.md
+("Common failure modes & fixes"), apply the listed fix; otherwise stop and ask.
+````
+
+The same instructions in machine-readable form live at [`.agents/skills/openproxy/SKILL.md`](.agents/skills/openproxy/SKILL.md) — agents that auto-discover `.agents/skills/` (Devin, etc.) will pick them up without any copy-paste.
+
 ---
 
 ## Supported providers
