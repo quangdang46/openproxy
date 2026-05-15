@@ -203,9 +203,6 @@ jobs:
         with:
           node-version: 22
 
-      - name: Ensure npm CLI supports OIDC trusted publishing
-        run: npm install -g npm@^11.5.1 && node --version && npm --version
-
       - name: Download release tarballs
         uses: actions/download-artifact@v4
         with:
