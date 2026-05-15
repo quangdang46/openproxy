@@ -10,6 +10,7 @@ use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
 use crate::core::proxy::ProxyTarget;
+use crate::core::tls::ensure_rustls_provider;
 
 pub const CLIENT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 pub const CLIENT_POOL_MAX_IDLE_PER_HOST: usize = 8;
@@ -25,6 +26,7 @@ pub type DirectHyperClient = HyperClient<HttpsConnector<HttpConnector>, Full<Byt
 
 impl ClientPool {
     pub fn new() -> Self {
+        ensure_rustls_provider();
         Self::default()
     }
 
