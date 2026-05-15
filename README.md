@@ -46,19 +46,19 @@ The server binds to `127.0.0.1:4623` and the dashboard auto-opens in your browse
 
 ```bash
 # Pin a version
-curl -fsSL ".../install.sh" | bash -s -- --version v0.1.0
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --version v0.1.0
 
 # Install system-wide (may need sudo)
-curl -fsSL ".../install.sh" | bash -s -- --system
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --system
 
 # Add to PATH automatically (~/.bashrc / ~/.zshrc)
-curl -fsSL ".../install.sh" | bash -s -- --easy-mode
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --easy-mode
 
 # Build from source (requires cargo + Node 20 + pnpm)
-curl -fsSL ".../install.sh" | bash -s -- --from-source
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --from-source
 
 # Uninstall
-curl -fsSL ".../install.sh" | bash -s -- --uninstall
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --uninstall
 ```
 
 Manual download: https://github.com/quangdang46/openproxy/releases
