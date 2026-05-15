@@ -13,6 +13,8 @@
 #   --easy-mode            Append PATH export to ~/.bashrc / ~/.zshrc if needed
 #   --verify               Run `openproxy --version` after install
 #   --from-source          Skip release download, build from source via cargo
+#   --no-skill             Skip installing the agent skill into ~/.agents/skills/openproxy/SKILL.md
+#   --skill-dest <dir>     Override the skills root. Default: ~/.agents/skills
 #   --quiet, -q            Suppress info logs
 #   --uninstall            Remove the binary and any easy-mode PATH lines
 #   -h, --help             Show this help and exit
@@ -35,6 +37,8 @@ EASY=0
 VERIFY=0
 FROM_SOURCE=0
 UNINSTALL=0
+NO_SKILL=0
+SKILL_DEST="${SKILL_DEST:-$HOME/.agents/skills}"
 MAX_RETRIES=3
 DOWNLOAD_TIMEOUT=120
 LOCK_DIR="/tmp/${BINARY_NAME}-install.lock.d"
@@ -96,17 +100,20 @@ usage() {
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --dest)        DEST="$2"; shift 2;;
-        --dest=*)      DEST="${1#*=}"; shift;;
-        --version)     VERSION="$2"; shift 2;;
-        --version=*)   VERSION="${1#*=}"; shift;;
-        --system)      DEST="/usr/local/bin"; shift;;
-        --easy-mode)   EASY=1; shift;;
-        --verify)      VERIFY=1; shift;;
-        --from-source) FROM_SOURCE=1; shift;;
-        --quiet|-q)    QUIET=1; shift;;
-        --uninstall)   UNINSTALL=1; shift;;
-        -h|--help)     usage;;
+        --dest)         DEST="$2"; shift 2;;
+        --dest=*)       DEST="${1#*=}"; shift;;
+        --version)      VERSION="$2"; shift 2;;
+        --version=*)    VERSION="${1#*=}"; shift;;
+        --system)       DEST="/usr/local/bin"; shift;;
+        --easy-mode)    EASY=1; shift;;
+        --verify)       VERIFY=1; shift;;
+        --from-source)  FROM_SOURCE=1; shift;;
+        --no-skill)     NO_SKILL=1; shift;;
+        --skill-dest)   SKILL_DEST="$2"; shift 2;;
+        --skill-dest=*) SKILL_DEST="${1#*=}"; shift;;
+        --quiet|-q)     QUIET=1; shift;;
+        --uninstall)    UNINSTALL=1; shift;;
+        -h|--help)      usage;;
         *) log_warn "unknown argument: $1 (ignored)"; shift;;
     esac
 done
@@ -133,6 +140,14 @@ do_uninstall() {
             log_success "cleaned PATH lines from $rc"
         fi
     done
+    # Remove the auto-installed agent skill if it still carries our header
+    # marker (preserves user edits).
+    local skill_file="$SKILL_DEST/${BINARY_NAME}/SKILL.md"
+    if [ -f "$skill_file" ] && grep -q "^name: ${BINARY_NAME}$" "$skill_file" 2>/dev/null; then
+        rm -f "$skill_file"
+        rmdir "$SKILL_DEST/${BINARY_NAME}" 2>/dev/null || true
+        log_success "removed agent skill $skill_file"
+    fi
     log_success "uninstalled"
     exit 0
 }
@@ -272,6 +287,50 @@ maybe_add_path() {
 }
 
 # ════════════════════════════════════════════════════════════════════════════
+# Agent skill install — drops SKILL.md into ~/.agents/skills/openproxy/ so
+# agents that auto-discover .agents/skills/ (Devin, Claude Code, ...) can
+# install + operate openproxy on the user's behalf.
+#
+# Idempotent: if the destination file already exists and was NOT written by
+# this installer (i.e. doesn't start with our "name: openproxy" frontmatter),
+# we leave it alone to preserve user edits.
+# ════════════════════════════════════════════════════════════════════════════
+
+install_agent_skill() {
+    [ "$NO_SKILL" -eq 1 ] && return 0
+
+    local skill_dir="$SKILL_DEST/${BINARY_NAME}"
+    local skill_file="$skill_dir/SKILL.md"
+    local skill_url
+    # Pull from the same ref the binary came from when --version was pinned,
+    # otherwise from main.
+    if [ -n "$VERSION" ]; then
+        skill_url="https://raw.githubusercontent.com/${OWNER}/${REPO}/${VERSION}/.agents/skills/${BINARY_NAME}/SKILL.md"
+    else
+        skill_url="https://raw.githubusercontent.com/${OWNER}/${REPO}/main/.agents/skills/${BINARY_NAME}/SKILL.md"
+    fi
+
+    if [ -f "$skill_file" ] && ! grep -q "^name: ${BINARY_NAME}$" "$skill_file" 2>/dev/null; then
+        log_info "agent skill at $skill_file looks user-edited — leaving it alone"
+        return 0
+    fi
+
+    mkdir -p "$skill_dir" 2>/dev/null || {
+        log_warn "could not create $skill_dir — skipping agent skill install"
+        return 0
+    }
+
+    local tmp_skill="$skill_file.tmp.$$"
+    if curl -fsSL --connect-timeout 10 --max-time 30 -o "$tmp_skill" "$skill_url"; then
+        mv -f "$tmp_skill" "$skill_file"
+        log_success "agent skill installed → $skill_file"
+    else
+        rm -f "$tmp_skill"
+        log_warn "could not download agent skill from $skill_url (continuing)"
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════════════════
 # Build from source
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -356,6 +415,7 @@ main() {
     fi
 
     maybe_add_path
+    install_agent_skill
 
     if [ "$VERIFY" -eq 1 ]; then
         log_info "running self-test: $DEST/$BINARY_NAME --version"
