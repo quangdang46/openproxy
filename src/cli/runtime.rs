@@ -563,14 +563,12 @@ pub fn read_input(from: &str) -> anyhow::Result<String> {
         return read_stdin_to_string();
     }
     if let Some(path) = from.strip_prefix('@') {
-        return std::fs::read_to_string(path)
-            .with_context(|| format!("read input file '{path}'"));
+        return std::fs::read_to_string(path).with_context(|| format!("read input file '{path}'"));
     }
     // Treat the argument as a path **only** if it actually exists. Otherwise
     // it is inline text (e.g. `--prompt "hello"`).
     if std::path::Path::new(from).is_file() {
-        return std::fs::read_to_string(from)
-            .with_context(|| format!("read input file '{from}'"));
+        return std::fs::read_to_string(from).with_context(|| format!("read input file '{from}'"));
     }
     Ok(from.to_string())
 }
@@ -662,7 +660,10 @@ mod tests {
     fn read_input_treats_unknown_string_as_inline_text() {
         // Bug #12: `--prompt "hello"` should be inline text, not a file path.
         assert_eq!(read_input("hello").unwrap(), "hello");
-        assert_eq!(read_input("multi word prompt").unwrap(), "multi word prompt");
+        assert_eq!(
+            read_input("multi word prompt").unwrap(),
+            "multi word prompt"
+        );
     }
 
     #[test]
