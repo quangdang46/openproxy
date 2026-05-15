@@ -704,7 +704,12 @@ impl Cli {
                 Command::Server { cmd } => {
                     let resolved = config::ResolvedConfig::resolve(overrides)?;
                     match cmd {
-                        ServerCmd::Start { detach, host, port, no_open: _ } => {
+                        ServerCmd::Start {
+                            detach,
+                            host,
+                            port,
+                            no_open: _,
+                        } => {
                             let opts = server::StartOptions {
                                 host: host.unwrap_or_else(|| "127.0.0.1".to_string()),
                                 port: port.unwrap_or(4623),
@@ -909,11 +914,12 @@ async fn try_add_key_via_http(key: &ApiKey) -> bool {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .and_then(|value| {
-                value
-                    .get("apiKeys")?
-                    .as_array()?
-                    .iter()
-                    .find_map(|entry| entry.get("key").and_then(|s| s.as_str()).map(str::to_string))
+                value.get("apiKeys")?.as_array()?.iter().find_map(|entry| {
+                    entry
+                        .get("key")
+                        .and_then(|s| s.as_str())
+                        .map(str::to_string)
+                })
             })
     };
     let Some(admin) = admin_key else {

@@ -185,7 +185,12 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             Command::Server { cmd } => match cmd {
-                ServerCmd::Start { detach, host, port, no_open } => {
+                ServerCmd::Start {
+                    detach,
+                    host,
+                    port,
+                    no_open,
+                } => {
                     // Hoist subcommand-level `--no-open` onto the global flag
                     // so the foreground server-boot path (which reads
                     // `cli.no_open`) honors it. Bug #6: README and SKILL.md
