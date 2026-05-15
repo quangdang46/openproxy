@@ -109,21 +109,53 @@ fn check_db_file(dir: &Path) -> Check {
 }
 
 async fn check_db_loadable() -> Check {
-    match crate::db::Db::load().await {
-        Ok(db) => {
-            let snap = db.snapshot();
+    // Use a non-side-effecting probe: read `db.json` directly and try to
+    // parse it, instead of `Db::load()` which would *create* the file
+    // (causing a misleading FAIL/ok flip on the very first run — bug #5).
+    let dir = std::env::var_os("DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            home.join(".openproxy")
+        });
+    let db_path = dir.join("db.json");
+    if !db_path.exists() {
+        return Check::fail(
+            "db_loadable",
+            format!(
+                "{} not present; run 'openproxy server init' to create it",
+                db_path.display()
+            ),
+        );
+    }
+    let bytes = match std::fs::read(&db_path) {
+        Ok(b) => b,
+        Err(e) => return Check::fail("db_loadable", format!("read {}: {e}", db_path.display())),
+    };
+    let parsed: Result<Value, _> = serde_json::from_slice(&bytes);
+    match parsed {
+        Ok(value) => {
+            let count = |key: &str| {
+                value
+                    .get(key)
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            };
             Check::ok(
                 "db_loadable",
                 format!(
                     "{} providers, {} keys, {} pools, {} combos",
-                    snap.provider_connections.len(),
-                    snap.api_keys.len(),
-                    snap.proxy_pools.len(),
-                    snap.combos.len()
+                    count("providerConnections"),
+                    count("apiKeys"),
+                    count("proxyPools"),
+                    count("combos"),
                 ),
             )
         }
-        Err(e) => Check::fail("db_loadable", format!("failed: {e}")),
+        Err(e) => Check::fail("db_loadable", format!("parse error: {e}")),
     }
 }
 

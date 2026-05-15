@@ -1,6 +1,6 @@
 {
   "name": "openproxy",
-  "version": "0.4.16",
+  "version": "0.1.0",
   "description": "OpenProxy Astro dashboard sidecar",
   "private": true,
   "packageManager": "pnpm@10.33.2",
@@ -14,10 +14,7 @@
     "preview": "astro preview",
     "dev:bun": "bun --bun astro dev --port 4624",
     "build:bun": "bun --bun astro build",
-    "preview:bun": "bun --bun astro preview",
-    "package:npm": "node scripts/build-npm-package.mjs",
-    "dist:npm": "cargo build --release && pnpm run build && node scripts/build-npm-package.mjs",
-    "verify:npm": "node scripts/verify-npm-package.mjs"
+    "preview:bun": "bun --bun astro preview"
   },
   "dependencies": {
     "@astrojs/react": "^4.2.1",

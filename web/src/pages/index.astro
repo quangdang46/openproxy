@@ -1,8 +1,15 @@
 ---
-import { redirect } from 'astro/redirect';
+// `/` shows the dashboard endpoint page directly. Previously this file
+// emitted a `<meta http-equiv="refresh" content="0;url=/dashboard">` stub
+// which, combined with `astro.config.mjs build.format: 'file'`, produced an
+// infinite redirect loop on the embedded server (bug #1 in the bug report).
+// Rendering the dashboard inline removes the round-trip entirely.
+import Layout from '@/layouts/Layout.astro';
+import EndpointPageClient from '@/components/EndpointPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
-<script set:html={false}>
-  window.location.href = '/dashboard';
-</script>
-<meta http-equiv="refresh" content="0;url=/dashboard" />
-<p>Redirecting to <a href="/dashboard">/dashboard</a>...</p>
+<Layout>
+  <DashboardLayout client:only="react">
+    <EndpointPageClient client:only="react" />
+  </DashboardLayout>
+</Layout>

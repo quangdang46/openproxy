@@ -19,7 +19,16 @@ use openproxy::server::state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    // Backward-compat: previous releases read the bind host from `$HOST`.
+    // The CLI flag now reads `$HOSTNAME` (matches the README and Docker
+    // env), so promote `$HOST` to `$HOSTNAME` if the latter is unset.
+    if std::env::var_os("HOSTNAME").is_none() {
+        if let Some(legacy) = std::env::var_os("HOST") {
+            std::env::set_var("HOSTNAME", legacy);
+        }
+    }
+
+    let mut cli = Cli::parse();
     openproxy::core::tls::ensure_rustls_provider();
     let ctx = cli.output_ctx();
     let resolved = ResolvedConfig::resolve(cli.cli_overrides())?;
@@ -176,7 +185,15 @@ async fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             Command::Server { cmd } => match cmd {
-                ServerCmd::Start { detach, host, port } => {
+                ServerCmd::Start { detach, host, port, no_open } => {
+                    // Hoist subcommand-level `--no-open` onto the global flag
+                    // so the foreground server-boot path (which reads
+                    // `cli.no_open`) honors it. Bug #6: README and SKILL.md
+                    // both show `openproxy server start --detach --no-open`,
+                    // so we accept it here too.
+                    if *no_open {
+                        cli.no_open = true;
+                    }
                     let opts = openproxy::cli::server::StartOptions {
                         host: host.clone().unwrap_or_else(|| cli.host.clone()),
                         port: port.unwrap_or(cli.port),

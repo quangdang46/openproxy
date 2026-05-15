@@ -262,18 +262,23 @@ openproxy --web-dir ./web/dist     # serve dashboard from disk (UI dev)
 openproxy --dashboard-sidecar-url http://127.0.0.1:4624
                                    # reverse-proxy dashboard requests to a dev server
 
+openproxy --version
 openproxy provider list
-openproxy provider add <name> <type>
-openproxy combo create <name> --models cc/opus,glm/glm-5
+openproxy provider add <name> '<json-config>'
+                                   # e.g. openproxy provider add openai-paid \
+                                   #        '{"provider":"openai","apiKey":"sk-..."}'
+openproxy combo create --name <name> --models cc/opus,glm/glm-5
 openproxy key list
-openproxy key add <name>
-openproxy quota
-openproxy usage
+openproxy key add <name> <secret>  # provide your own secret
+openproxy key add <name> --auto    # let openproxy mint a fresh `op-…` secret
+openproxy quota list               # subcommands: list / get / reset / refresh
+openproxy usage summary            # subcommands: summary / daily / chart / history / …
 openproxy doctor                   # diagnose common config issues
 
-openproxy server start [--detach] [--port P]
+openproxy server start [--detach] [--no-open] [--port P]
 openproxy server status
 openproxy server stop
+openproxy server init              # mint the first admin API key
 ```
 
 `openproxy --help` prints the full reference. Subcommands have their own `--help`.
