@@ -107,7 +107,10 @@ A ready-to-use agent skill ships in this repo:
 
 - [`.agents/skills/openproxy/SKILL.md`](.agents/skills/openproxy/SKILL.md) — install, `server init`, `server start --detach`, declarative `provider apply`, and wiring CLI tools.
 
-Drop the same file at `~/.agents/skills/openproxy/SKILL.md` to make it discoverable across sessions for tools that scan the home directory.
+The `install.sh` one-shot installer **automatically drops the same file at `~/.agents/skills/openproxy/SKILL.md`** so agents that scan the home directory (Devin, Claude Code, …) pick it up the moment you install openproxy. The installer preserves any user-edited skill file (detected via the `name: openproxy` frontmatter marker) and exposes two flags:
+
+- `--no-skill` — skip the auto-install entirely.
+- `--skill-dest <dir>` — write to a custom skills root (default: `~/.agents/skills`).
 
 The CLI is agent-friendly by design:
 
