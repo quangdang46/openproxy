@@ -11,3 +11,4 @@ pub mod tunnel;
 pub mod usage;
 
 pub mod chat;
+pub mod tls;
