@@ -1,1131 +1,276 @@
 <div align="center">
   <img src="./images/openproxy.png?1" alt="OpenProxy Dashboard" width="800"/>
-  
-  # OpenProxy - FREE AI Router & Token Saver
-  
-  **Never stop coding. Save 20-40% tokens with RTK + auto-fallback to FREE & cheap AI models.**
-  
-  **Connect All AI Code Tools (Claude Code, Cursor, Antigravity, Copilot, Codex, Gemini, OpenCode, Cline, OpenClaw...) to 40+ AI Providers & 100+ Models.**
-  
+
+  # OpenProxy
+
+  Single-binary AI router for AI coding tools. Embedded web dashboard, OpenAI-compatible API, auto-fallback across 40+ providers, token compression via RTK.
+
   [![npm](https://img.shields.io/npm/v/@openprx/openproxy.svg)](https://www.npmjs.com/package/@openprx/openproxy)
-  [![Downloads](https://img.shields.io/npm/dm/@openprx/openproxy.svg)](https://www.npmjs.com/package/@openprx/openproxy)
   [![License](https://img.shields.io/npm/l/@openprx/openproxy.svg)](https://github.com/quangdang46/openproxy/blob/main/LICENSE)
-
-  [🚀 Quick Start](#-quick-start) • [💡 Features](#-key-features) • [📖 Setup](#-setup-guide)
-
-  [🇻🇳 Tiếng Việt](./i18n/README.vi.md) • [🇨🇳 中文](./i18n/README.zh-CN.md) • [🇯🇵 日本語](./i18n/README.ja-JP.md)
 </div>
 
 ---
 
-## 🤔 Why OpenProxy?
+## What it does
 
-**Stop wasting money, tokens and hitting limits:**
+OpenProxy runs as one binary on `127.0.0.1:4623`. Point any tool that speaks the OpenAI Chat Completions API at it (Claude Code, Codex, Cursor, Cline, OpenClaw, Copilot, ...) and OpenProxy:
 
-- ❌ Subscription quota expires unused every month
-- ❌ Rate limits stop you mid-coding
-- ❌ Tool outputs (git diff, grep, ls...) burn tokens fast
-- ❌ Expensive APIs ($20-50/month per provider)
-- ❌ Manual switching between providers
+- routes the request to a provider you've configured (OAuth, API key, or free)
+- falls back to the next provider in your combo when one is rate-limited or errors
+- compresses tool-call results via [RTK](https://github.com/rtk-ai/rtk) before they hit the LLM (typical −20–40% input tokens on tool-heavy turns)
+- tracks per-account quota so you can use subscription tiers fully before paying for API calls
+- serves a local dashboard at `/` for configuration, monitoring, and account management
 
-**OpenProxy solves this:**
-
-- ✅ **RTK Token Saver** - Auto-compress tool_result content, save 20-40% tokens per request
-- ✅ **Maximize subscriptions** - Track quota, use every bit before reset
-- ✅ **Auto fallback** - Subscription → Cheap → Free, zero downtime
-- ✅ **Multi-account** - Round-robin between accounts per provider
-- ✅ **Universal** - Works with Claude Code, Codex, Cursor, Cline, any CLI tool
+There is no cloud component required. All state lives in `~/.openproxy/db.json`.
 
 ---
 
-## 🔄 How It Works
-
-```
-┌─────────────┐
-│  Your CLI   │  (Claude Code, Codex, OpenClaw, Cursor, Cline...)
-│   Tool      │
-└──────┬──────┘
-       │ http://localhost:4623/v1
-       ↓
-┌─────────────────────────────────────────────┐
-│           OpenProxy (Smart Router)            │
-│  • RTK Token Saver (cut tool_result tokens) │
-│  • Format translation (OpenAI ↔ Claude)     │
-│  • Quota tracking                           │
-│  • Auto token refresh                       │
-└──────┬──────────────────────────────────────┘
-       │
-       ├─→ [Tier 1: SUBSCRIPTION] Claude Code, Codex, GitHub Copilot
-       │   ↓ quota exhausted
-       ├─→ [Tier 2: CHEAP] GLM ($0.6/1M), MiniMax ($0.2/1M)
-       │   ↓ budget limit
-       └─→ [Tier 3: FREE] Kiro, OpenCode Free, Vertex ($300 credits)
-
-Result: Never stop coding, minimal cost + 20-40% token savings via RTK
-```
-
----
-
-## ⚡ Quick Start
-
-**1. Install (pick one):**
+## Install
 
 ```bash
-# Option A — one-shot installer (Linux / macOS, x86_64 + aarch64)
+# Linux / macOS — x86_64 + aarch64
 curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash
 
-# Option B — npm (any platform with Node 18+)
+# Or via npm (any platform with Node 18+)
 npm install -g @openprx/openproxy
 ```
 
-Both install the same prebuilt binary from the same GitHub release. The curl path drops the binary at `~/.local/bin/openproxy`; the npm path uses `optionalDependencies` to pull just the binary that matches your platform.
-
-**2. Run it:**
+Both pull the same prebuilt binary from the same GitHub release. The curl path drops the binary at `~/.local/bin/openproxy`. The npm path uses `optionalDependencies` to install only the platform binary that matches your machine.
 
 ```bash
 openproxy
 ```
 
-The server starts on `http://127.0.0.1:4623`, the embedded dashboard auto-opens in your default browser. Add `--no-open` for headless / SSH / container use.
-
-**3. Connect a FREE provider (no signup needed):**
-
-Dashboard → Providers → Connect **Kiro AI** (free Claude unlimited) or **OpenCode Free** (no auth) → Done!
-
-**4. Use in your CLI tool:**
-
-```
-Claude Code/Codex/OpenClaw/Cursor/Cline Settings:
-  Endpoint: http://localhost:4623/v1
-  API Key: [copy from dashboard]
-  Model: kr/claude-sonnet-4.5
-```
-
-**That's it!** Start coding with FREE AI models.
+The server binds to `127.0.0.1:4623` and the dashboard auto-opens in your browser. Use `--no-open` for headless / SSH / container contexts.
 
 <details>
-<summary><b>Other install methods</b></summary>
+<summary>Other install options</summary>
 
 ```bash
-# Pin a specific release
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --version v0.1.0
+# Pin a version
+curl -fsSL ".../install.sh" | bash -s -- --version v0.1.0
 
 # Install system-wide (may need sudo)
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --system
+curl -fsSL ".../install.sh" | bash -s -- --system
 
-# Auto-update PATH in ~/.bashrc / ~/.zshrc
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --easy-mode
+# Add to PATH automatically (~/.bashrc / ~/.zshrc)
+curl -fsSL ".../install.sh" | bash -s -- --easy-mode
 
 # Build from source (requires cargo + Node 20 + pnpm)
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --from-source
+curl -fsSL ".../install.sh" | bash -s -- --from-source
 
 # Uninstall
-curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash -s -- --uninstall
+curl -fsSL ".../install.sh" | bash -s -- --uninstall
 ```
 
 Manual download: https://github.com/quangdang46/openproxy/releases
 
 </details>
 
-<details>
-<summary><b>Building from source (contributors)</b></summary>
+---
 
-Requires Node.js ≥ 20.3 and `pnpm` (`corepack enable && corepack prepare pnpm@10.33.2 --activate`, or `npm i -g pnpm`).
+## Connect a CLI tool
+
+Most tools ask for an OpenAI base URL and an API key.
+
+| Tool | Setting | Value |
+|---|---|---|
+| Cursor / Cline / Continue / Roo / Kilo | OpenAI base URL | `http://127.0.0.1:4623/v1` |
+| Codex CLI | `OPENAI_BASE_URL` | `http://127.0.0.1:4623` |
+| Claude Code | `~/.claude/config.json` `anthropic_api_base` | `http://127.0.0.1:4623/v1` |
+| OpenClaw | dashboard → CLI Tools → OpenClaw | one-click apply |
+
+The API key comes from the dashboard. Visit `http://127.0.0.1:4623`, create an API key, paste it into the tool's settings.
+
+Tested CLIs: **Claude Code, Codex, Cursor, Cline, Continue, Roo, Kilo, Copilot, OpenClaw, OpenCode, Antigravity, Droid**.
+
+---
+
+## Supported providers
+
+| Tier | Provider | Auth | Notes |
+|---|---|---|---|
+| OAuth subscription | Claude Code, Codex, GitHub Copilot, Cursor, Antigravity | OAuth (PKCE) | Use your existing subscription quota. Auto-refresh. |
+| API key | OpenAI, Anthropic, Gemini, OpenRouter, GLM, Kimi, MiniMax, DeepSeek, Groq, xAI, Mistral, Perplexity, Together, Fireworks, Cerebras, Cohere, NVIDIA, SiliconFlow, Nebius, Chutes, Hyperbolic, custom OpenAI/Anthropic-compatible endpoints | API key | 40+ supported. |
+| Free | Kiro AI (Claude 4.5 + GLM-5 + MiniMax), OpenCode Free, Vertex AI ($300 trial credits) | OAuth / no auth / GCP service account | Best for fallback tiers. |
+
+Configure providers from the dashboard (`Providers` tab) or via `openproxy provider` CLI subcommands. Each provider supports multiple accounts; OpenProxy round-robins between them.
+
+---
+
+## Combos: build a fallback chain
+
+A combo is an ordered list of models. OpenProxy tries them in order, falling back when one is rate-limited or errors. Models are addressed as `<provider-prefix>/<model-id>`:
+
+```
+combo: my-stack
+  1. cc/claude-opus-4-7      # Claude Pro/Max subscription
+  2. glm/glm-4.7             # paid backup ($0.6/1M)
+  3. kr/claude-sonnet-4.5    # Kiro free fallback
+```
+
+Created from `Combos` in the dashboard or `openproxy combo create`. Use the combo name as the model field in your CLI tool — OpenProxy resolves it.
+
+---
+
+## Configuration
+
+Most operators only set `JWT_SECRET` and `INITIAL_PASSWORD` and leave the rest at defaults.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `JWT_SECRET` | `openproxy-default-secret-change-me` | Sign the dashboard session cookie. **Change in production.** |
+| `INITIAL_PASSWORD` | `123456` | First-login password (one-time, replaced on first save). |
+| `DATA_DIR` | `~/.openproxy` | Where `db.json`, `usage.json`, `log.txt` live. |
+| `PORT` | `4623` | HTTP listen port. |
+| `HOSTNAME` | `127.0.0.1` | Bind host. Set `0.0.0.0` to expose on LAN. |
+| `BASE_URL` | `http://localhost:4623` | Internal base URL for cloud-sync jobs. |
+| `CLOUD_URL` | _unset_ | Cloud-sync endpoint. Leave unset to disable cloud sync. |
+| `API_KEY_SECRET` | `endpoint-proxy-api-key-secret` | HMAC secret for generated API keys. |
+| `MACHINE_ID_SALT` | `endpoint-proxy-salt` | Salt for the stable machine-ID hash. |
+| `AUTH_COOKIE_SECURE` | `false` | Force `Secure` flag on the auth cookie. Set `true` behind HTTPS. |
+| `REQUIRE_API_KEY` | `false` | Reject `/v1/*` requests without `Authorization: Bearer …`. Recommended for any internet-exposed deploy. |
+| `ENABLE_REQUEST_LOGS` | `false` | Write per-request logs under `logs/`. |
+| `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | _unset_ | Forward outbound provider calls through an HTTP proxy. Lowercase variants also honored. |
+
+---
+
+## CLI reference
+
+```
+openproxy [FLAGS]                  # default: start server + open browser
+openproxy --port 4623 --no-open    # foreground, no browser
+openproxy --web-dir ./web/dist     # serve dashboard from disk (UI dev)
+openproxy --dashboard-sidecar-url http://127.0.0.1:4624
+                                   # reverse-proxy dashboard requests to a dev server
+
+openproxy provider list
+openproxy provider add <name> <type>
+openproxy combo create <name> --models cc/opus,glm/glm-5
+openproxy key list
+openproxy key add <name>
+openproxy quota
+openproxy usage
+openproxy doctor                   # diagnose common config issues
+
+openproxy server start [--detach] [--port P]
+openproxy server status
+openproxy server stop
+```
+
+`openproxy --help` prints the full reference. Subcommands have their own `--help`.
+
+Output formats: human (default), `--robot` (line-delimited JSON for agent/automation use), `--quiet`.
+
+---
+
+## API
+
+OpenAI-compatible chat completions:
+
+```http
+POST /v1/chat/completions
+Authorization: Bearer <api-key>
+Content-Type: application/json
+
+{
+  "model": "cc/claude-opus-4-6",
+  "messages": [{"role": "user", "content": "..."}],
+  "stream": true
+}
+```
+
+List available models and combos:
+
+```http
+GET /v1/models
+Authorization: Bearer <api-key>
+```
+
+Health probe (no auth):
+
+```http
+GET /health   →   200 OK
+```
+
+The dashboard at `/` is the same authenticated API surface in HTML form. Admin endpoints live under `/api/*` and use the dashboard session cookie.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────┐
+│ openproxy  (single binary, port 4623)      │
+│                                             │
+│  /            embedded web dashboard       │
+│               (Astro static via rust-embed)│
+│                                             │
+│  /v1/*        OpenAI-compatible API        │
+│  /api/*       admin / dashboard data       │
+│  /codex/*     Codex OAuth helper           │
+│                                             │
+│  RTK token compression  ─┐                  │
+│  format translation     ─┤                  │
+│  quota tracking         ─┼─→ provider HTTP │
+│  account fallback       ─┘                  │
+└─────────────────────────────────────────────┘
+                                                  │
+                                                  ↓
+                          [ provider APIs: Anthropic, OpenAI, GLM, ... ]
+```
+
+Stack: Rust 1.76+, axum 0.8, hyper 1, rusqlite (bundled), Astro 4 (static, embedded), React 19, Tailwind. Storage: `db.json` + SQLite.
+
+---
+
+## Build from source
+
+Requires Node ≥ 20.3 and `pnpm` (`corepack enable && corepack prepare pnpm@10.33.2 --activate`, or `npm i -g pnpm`).
 
 ```bash
 git clone https://github.com/quangdang46/openproxy.git
 cd openproxy
 
-# 1. Build the dashboard (output: web/dist/)
 pnpm --dir web install
 pnpm --dir web run build
 
-# 2. Build the binary (embeds web/dist/ via rust-embed)
 cargo build --release --locked
-
-# 3. Run
 ./target/release/openproxy
 ```
 
-**UI iteration without rebuilding the binary:** point a debug binary at the dashboard on disk:
+UI iteration without rebuilding the binary:
 
 ```bash
 pnpm --dir web run build
 cargo run -- --web-dir ./web/dist
 ```
 
-**UI live-reload via the Astro dev server (legacy sidecar mode):**
+UI live-reload via the Astro dev server:
 
 ```bash
 # Terminal 1
-NEXT_PUBLIC_BASE_URL=http://127.0.0.1:4623 pnpm --dir web run dev   # → http://127.0.0.1:4624
+pnpm --dir web run dev   # → http://127.0.0.1:4624
 
-# Terminal 2 — reverse-proxy dashboard requests to the dev server
-DATA_DIR=/tmp/openproxy cargo run -- --dashboard-sidecar-url http://127.0.0.1:4624
+# Terminal 2
+cargo run -- --dashboard-sidecar-url http://127.0.0.1:4624
 ```
 
-**Headless build** (no embedded dashboard, smaller binary, requires `--web-dir` or `--dashboard-sidecar-url` at runtime):
+Headless build (no embedded dashboard, smaller binary):
 
 ```bash
 cargo build --release --locked --no-default-features
-```
-
-</details>
-
-**Default URLs:**
-- Dashboard: `http://localhost:4623/`
-- OpenAI-compatible API: `http://localhost:4623/v1`
-- Health probe: `http://localhost:4623/health`
-
----
-
-## Video Guides
-
-<div align="center">
-
-<table>
-  <tr>
-    <td align="center" width="320">
-      <a href="https://www.youtube.com/watch?v=raEyZPg5xE0">
-        <img src="https://img.youtube.com/vi/raEyZPg5xE0/maxresdefault.jpg" alt="OpenProxy Setup Tutorial" width="300"/>
-      </a><br/>
-      <b>🇺🇸 English</b><br/>
-      <sub>OpenProxy + Claude Code FREE Setup<br/>by <a href="https://www.youtube.com/@BuildAIWithHamid">Build AI With Hamid</a></sub>
-    </td>
-    <td align="center" width="320">
-      <a href="https://www.youtube.com/watch?v=X69n5Lm06Yw">
-        <img src="https://img.youtube.com/vi/X69n5Lm06Yw/maxresdefault.jpg" alt="Tiết kiệm chi phí LLM với OpenProxy" width="300"/>
-      </a><br/>
-      <b>🇻🇳 Tiếng Việt</b><br/>
-      <sub>Tiết kiệm chi phí LLM cho OpenClaw với OpenProxy<br/>by <a href="https://www.youtube.com/c/M%C3%ACAIblog">Mì AI</a></sub>
-    </td>
-    <td align="center" width="320">
-      <a href="https://www.youtube.com/watch?v=o3qYCyjrFYg">
-        <img src="https://img.youtube.com/vi/o3qYCyjrFYg/maxresdefault.jpg" alt="Claude Code FREE Forever" width="300"/>
-      </a><br/>
-      <b>🇺🇸 English</b><br/>
-      <sub>Claude Code FREE Forever — Unlimited Models<br/>by <a href="https://www.youtube.com/@BuildAIWithHamid">Build AI With Hamid</a></sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="320">
-      <a href="https://www.youtube.com/watch?v=Ttpc26m39Dw">
-        <img src="https://img.youtube.com/vi/Ttpc26m39Dw/maxresdefault.jpg" alt="Claude CLI Free Setup" width="300"/>
-      </a><br/>
-      <b>🇺🇸 English</b><br/>
-      <sub>Claude CLI Free Setup with OpenProxy 🚀<br/>by <a href="https://www.youtube.com/@CodeVerseSoban">CodeVerse Soban</a></sub>
-    </td>
-    <td align="center" width="320">
-      <a href="https://www.youtube.com/watch?v=G-5A_D5Pm6Y">
-        <img src="https://img.youtube.com/vi/G-5A_D5Pm6Y/maxresdefault.jpg" alt="Cài đặt OpenClaw Free A-Z" width="300"/>
-      </a><br/>
-      <b>🇻🇳 Tiếng Việt</b><br/>
-      <sub>Cài Đặt OpenClaw Free Từ A-Z + OpenProxy<br/>by <a href="https://www.youtube.com/@maigia">Mai Gia</a></sub>
-    </td>
-    <td align="center" width="320">
-      <a href="https://www.youtube.com/watch?v=JXmg8_gccgE">
-        <img src="https://img.youtube.com/vi/JXmg8_gccgE/maxresdefault.jpg" alt="FREE OpenClaw with Claude Opus" width="300"/>
-      </a><br/>
-      <b>🇺🇸 English</b><br/>
-      <sub>FREE OpenClaw + Claude Opus 4.6<br/>by <a href="https://www.youtube.com/@BuildAIWithHamid">Build AI With Hamid</a></sub>
-    </td>
-  </tr>
-</table>
-
-</div>
-
-> 🎬 **Made a video about OpenProxy?** Submit a [Pull Request](https://github.com/quangdang46/openproxy/pulls) adding your video to this section — we'll merge it!
-
----
-
-## 🛠️ Supported CLI Tools
-
-OpenProxy works seamlessly with all major AI coding tools:
-
-<div align="center">
-  <table>
-    <tr>
-      <td align="center" width="120">
-        <img src="./public/providers/claude.png" width="60" alt="Claude Code"/><br/>
-        <b>Claude-Code</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/openclaw.png" width="60" alt="OpenClaw"/><br/>
-        <b>OpenClaw</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/codex.png" width="60" alt="Codex"/><br/>
-        <b>Codex</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/opencode.png" width="60" alt="OpenCode"/><br/>
-        <b>OpenCode</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/cursor.png" width="60" alt="Cursor"/><br/>
-        <b>Cursor</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/antigravity.png" width="60" alt="Antigravity"/><br/>
-        <b>Antigravity</b>
-      </td>
-    </tr>
-    <tr>
-      <td align="center" width="120">
-        <img src="./public/providers/cline.png" width="60" alt="Cline"/><br/>
-        <b>Cline</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/continue.png" width="60" alt="Continue"/><br/>
-        <b>Continue</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/droid.png" width="60" alt="Droid"/><br/>
-        <b>Droid</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/roo.png" width="60" alt="Roo"/><br/>
-        <b>Roo</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/copilot.png" width="60" alt="Copilot"/><br/>
-        <b>Copilot</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/kilocode.png" width="60" alt="Kilo Code"/><br/>
-        <b>Kilo Code</b>
-      </td>
-    </tr>
-  </table>
-</div>
-
----
-
-## 🌐 Supported Providers
-
-### 🔐 OAuth Providers
-
-<div align="center">
-  <table>
-    <tr>
-      <td align="center" width="120">
-        <img src="./public/providers/claude.png" width="60" alt="Claude Code"/><br/>
-        <b>Claude-Code</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/antigravity.png" width="60" alt="Antigravity"/><br/>
-        <b>Antigravity</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/codex.png" width="60" alt="Codex"/><br/>
-        <b>Codex</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/github.png" width="60" alt="GitHub"/><br/>
-        <b>GitHub</b>
-      </td>
-      <td align="center" width="120">
-        <img src="./public/providers/cursor.png" width="60" alt="Cursor"/><br/>
-        <b>Cursor</b>
-      </td>
-    </tr>
-  </table>
-</div>
-
-### 🆓 Free Providers
-
-<div align="center">
-  <table>
-    <tr>
-      <td align="center" width="150">
-        <img src="./public/providers/kiro.png" width="70" alt="Kiro"/><br/>
-        <b>Kiro AI</b><br/>
-        <sub>Claude 4.5 + GLM-5 + MiniMax<br/>Unlimited FREE</sub>
-      </td>
-      <td align="center" width="150">
-        <img src="./public/providers/opencode.png" width="70" alt="OpenCode Free"/><br/>
-        <b>OpenCode Free</b><br/>
-        <sub>No auth • Auto-fetch models<br/>Unlimited FREE</sub>
-      </td>
-      <td align="center" width="150">
-        <img src="./public/providers/gemini.png" width="70" alt="Vertex AI"/><br/>
-        <b>Vertex AI</b><br/>
-        <sub>Gemini 3 Pro + GLM-5 + DeepSeek<br/>$300 credits free</sub>
-      </td>
-    </tr>
-  </table>
-</div>
-
-> **Note:** iFlow, Qwen and Gemini CLI free tiers were discontinued in 2026. Use Kiro / OpenCode Free / Vertex instead.
-
-### 🔑 API Key Providers (40+)
-
-<div align="center">
-  <table>
-    <tr>
-      <td align="center" width="100">
-        <img src="./public/providers/openrouter.png" width="50" alt="OpenRouter"/><br/>
-        <sub>OpenRouter</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/glm.png" width="50" alt="GLM"/><br/>
-        <sub>GLM</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/kimi.png" width="50" alt="Kimi"/><br/>
-        <sub>Kimi</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/minimax.png" width="50" alt="MiniMax"/><br/>
-        <sub>MiniMax</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/openai.png" width="50" alt="OpenAI"/><br/>
-        <sub>OpenAI</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/anthropic.png" width="50" alt="Anthropic"/><br/>
-        <sub>Anthropic</sub>
-      </td>
-    </tr>
-    <tr>
-      <td align="center" width="100">
-        <img src="./public/providers/gemini.png" width="50" alt="Gemini"/><br/>
-        <sub>Gemini</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/deepseek.png" width="50" alt="DeepSeek"/><br/>
-        <sub>DeepSeek</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/groq.png" width="50" alt="Groq"/><br/>
-        <sub>Groq</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/xai.png" width="50" alt="xAI"/><br/>
-        <sub>xAI</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/mistral.png" width="50" alt="Mistral"/><br/>
-        <sub>Mistral</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/perplexity.png" width="50" alt="Perplexity"/><br/>
-        <sub>Perplexity</sub>
-      </td>
-    </tr>
-    <tr>
-      <td align="center" width="100">
-        <img src="./public/providers/together.png" width="50" alt="Together"/><br/>
-        <sub>Together AI</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/fireworks.png" width="50" alt="Fireworks"/><br/>
-        <sub>Fireworks</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/cerebras.png" width="50" alt="Cerebras"/><br/>
-        <sub>Cerebras</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/cohere.png" width="50" alt="Cohere"/><br/>
-        <sub>Cohere</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/nvidia.png" width="50" alt="NVIDIA"/><br/>
-        <sub>NVIDIA</sub>
-      </td>
-      <td align="center" width="100">
-        <img src="./public/providers/siliconflow.png" width="50" alt="SiliconFlow"/><br/>
-        <sub>SiliconFlow</sub>
-      </td>
-    </tr>
-  </table>
-  <p><i>...and 20+ more providers including Nebius, Chutes, Hyperbolic, and custom OpenAI/Anthropic compatible endpoints</i></p>
-</div>
-
----
-
-## 💡 Key Features
-
-| Feature | What It Does | Why It Matters |
-|---------|--------------|----------------|
-| 🚀 **RTK Token Saver** ([RTK](https://github.com/rtk-ai/rtk) ⭐40K) | Compress tool outputs (`git diff`, `grep`, `ls`, `tree`...) before sending to LLM | Save **20-40% input tokens** per request |
-| 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K) | Inject caveman-speak prompt → LLM replies terse, technical substance preserved | Save **up to 65% output tokens** |
-| 🎯 **Smart 3-Tier Fallback** | Auto-route: Subscription → Cheap → Free | Never stop coding, zero downtime |
-| 📊 **Real-Time Quota Tracking** | Live token count + reset countdown | Maximize subscription value |
-| 🔄 **Format Translation** | OpenAI ↔ Claude ↔ Gemini ↔ Cursor ↔ Kiro ↔ Vertex | Works with any CLI tool |
-| 👥 **Multi-Account Support** | Multiple accounts per provider | Load balancing + redundancy |
-| 🔄 **Auto Token Refresh** | OAuth tokens refresh automatically | No manual re-login needed |
-| 🎨 **Custom Combos** | Create unlimited model combinations | Tailor fallback to your needs |
-| 📝 **Request Logging** | Debug mode with full request/response logs | Troubleshoot issues easily |
-| 💾 **Cloud Sync** | Sync config across devices | Same setup everywhere |
-| 📊 **Usage Analytics** | Track tokens, cost, trends over time | Optimize spending |
-| 🌐 **Deploy Anywhere** | Localhost, VPS, Docker, Cloudflare Workers | Flexible deployment options |
-
-<details>
-<summary><b>📖 Feature Details</b></summary>
-
-### 🚀 RTK Token Saver
-
-Tool outputs (`git diff`, `grep`, `find`, `ls`, `tree`, log dumps...) often eat 30-50% of your prompt budget. RTK detects them and applies smart, lossless compression **before** the request hits the LLM:
-
-- **Filters:** `git-diff`, `git-status`, `grep`, `find`, `ls`, `tree`, `dedup-log`, `smart-truncate`, `read-numbered`, `search-list`
-- **Auto-detect:** No config needed — RTK peeks the first 1KB of each `tool_result` and picks the right filter.
-- **Safe by design:** If a filter fails, throws, or makes output bigger, RTK silently keeps the original text. Errors never break your request.
-- **Universal:** Works across all formats (OpenAI, Claude, Gemini, Cursor, Kiro, OpenAI Responses) because it runs **before** any format translation.
-- **Default ON:** Toggle anytime in Dashboard → Endpoint settings.
-
-```
-Without RTK: 47K tokens sent to LLM
-With RTK:    28K tokens sent to LLM   (40% saved · same context · same answer)
-```
-
-### 🎯 Smart 3-Tier Fallback
-
-Create combos with automatic fallback:
-
-```
-Combo: "my-coding-stack"
-  1. cc/claude-opus-4-6        (your subscription)
-  2. glm/glm-4.7               (cheap backup, $0.6/1M)
-  3. if/kimi-k2-thinking       (free fallback)
-
-→ Auto switches when quota runs out or errors occur
-```
-
-### 📊 Real-Time Quota Tracking
-
-- Token consumption per provider
-- Reset countdown (5-hour, daily, weekly)
-- Cost estimation for paid tiers
-- Monthly spending reports
-
-### 🔄 Format Translation
-
-Seamless translation between formats:
-- **OpenAI** ↔ **Claude** ↔ **Gemini** ↔ **Cursor** ↔ **Kiro** ↔ **Vertex** ↔ **Antigravity** ↔ **Ollama** ↔ **OpenAI Responses**
-- Your CLI tool sends OpenAI format → OpenProxy translates → Provider receives native format
-- Works with any tool that supports custom OpenAI endpoints
-
-### 👥 Multi-Account Support
-
-- Add multiple accounts per provider
-- Auto round-robin or priority-based routing
-- Fallback to next account when one hits quota
-
-### 🔄 Auto Token Refresh
-
-- OAuth tokens automatically refresh before expiration
-- No manual re-authentication needed
-- Seamless experience across all providers
-
-### 🎨 Custom Combos
-
-- Create unlimited model combinations
-- Mix subscription, cheap, and free tiers
-- Name your combos for easy access
-- Share combos across devices with Cloud Sync
-
-### 📝 Request Logging
-
-- Enable debug mode for full request/response logs
-- Track API calls, headers, and payloads
-- Troubleshoot integration issues
-- Export logs for analysis
-
-### 💾 Cloud Sync
-
-- Sync providers, combos, and settings across devices
-- Automatic background sync
-- Secure encrypted storage
-- Access your setup from anywhere
-
-#### Cloud Runtime Notes
-
-- Prefer server-side cloud variables in production:
-  - `BASE_URL` (internal callback URL used by sync scheduler)
-  - `CLOUD_URL` (cloud sync endpoint base)
-- `NEXT_PUBLIC_BASE_URL` and `NEXT_PUBLIC_CLOUD_URL` are still supported for compatibility/UI, but server runtime now prioritizes `BASE_URL`/`CLOUD_URL`.
-- Cloud sync requests now use timeout + fail-fast behavior to avoid UI hanging when cloud DNS/network is unavailable.
-
-### 📊 Usage Analytics
-
-- Track token usage per provider and model
-- Cost estimation and spending trends
-- Monthly reports and insights
-- Optimize your AI spending
-
-> **💡 IMPORTANT - Understanding Dashboard Costs:**
-> 
-> The "cost" displayed in Usage Analytics is **for tracking and comparison purposes only**. 
-> OpenProxy itself **never charges** you anything. You only pay providers directly (if using paid services).
-> 
-> **Example:** If your dashboard shows "$290 total cost" while using iFlow models, this represents 
-> what you would have paid using paid APIs directly. Your actual cost = **$0** (iFlow is free unlimited).
-> 
-> Think of it as a "savings tracker" showing how much you're saving by using free models or 
-> routing through OpenProxy!
-
-### 🌐 Deploy Anywhere
-
-- 💻 **Localhost** - Default, works offline
-- ☁️ **VPS/Cloud** - Share across devices
-- 🐳 **Docker** - One-command deployment
-- 🚀 **Cloudflare Workers** - Global edge network
-
-</details>
-
----
-
-## 💰 Pricing at a Glance
-
-| Tier | Provider | Cost | Quota Reset | Best For |
-|------|----------|------|-------------|----------|
-| **🚀 TOKEN SAVER** | **RTK (built-in)** | **FREE** | Always on | **Save 20-40% tokens on EVERY request** |
-| **💳 SUBSCRIPTION** | Claude Code (Pro/Max) | $20-200/mo | 5h + weekly | Already subscribed |
-| | Codex (Plus/Pro) | $20-200/mo | 5h + weekly | OpenAI users |
-| | GitHub Copilot | $10-19/mo | Monthly | GitHub users |
-| | Cursor IDE | $20/mo | Monthly | Cursor users |
-| **💰 CHEAP** | GLM-5.1 / GLM-4.7 | $0.6/1M | Daily 10AM | Budget backup |
-| | MiniMax M2.7 | $0.2/1M | 5-hour rolling | Cheapest option |
-| | Kimi K2.5 | $9/mo flat | 10M tokens/mo | Predictable cost |
-| **🆓 FREE** | Kiro AI | $0 | Unlimited | Claude 4.5 + GLM-5 + MiniMax free |
-| | OpenCode Free | $0 | Unlimited | No auth, auto-fetch models |
-| | Vertex AI | $300 credits | New GCP accounts | Gemini 3 Pro + DeepSeek + GLM-5 |
-
-**💡 Pro Tip:** RTK + Kiro AI + OpenCode Free combo = **$0 cost + 20-40% token savings**!
-
----
-
-### 📊 Understanding OpenProxy Costs & Billing
-
-**OpenProxy Billing Reality:**
-
-✅ **OpenProxy software = FREE forever** (open source, never charges)  
-✅ **Dashboard "costs" = Display/tracking only** (not actual bills)  
-✅ **You pay providers directly** (subscriptions or API fees)  
-✅ **FREE providers stay FREE** (iFlow, Kiro, Qwen = $0 unlimited)  
-❌ **OpenProxy never sends invoices** or charges your card
-
-**How Cost Display Works:**
-
-The dashboard shows **estimated costs** as if you were using paid APIs directly. This is **not billing** - it's a comparison tool to show your savings.
-
-**Example Scenario:**
-```
-Dashboard Display:
-• Total Requests: 1,662
-• Total Tokens: 47M
-• Display Cost: $290
-
-Reality Check:
-• Provider: iFlow (FREE unlimited)
-• Actual Payment: $0.00
-• What $290 Means: Amount you SAVED by using free models!
-```
-
-**Payment Rules:**
-- **Subscription providers** (Claude Code, Codex): Pay them directly via their websites
-- **Cheap providers** (GLM, MiniMax): Pay them directly, OpenProxy just routes
-- **FREE providers** (iFlow, Kiro, Qwen): Genuinely free forever, no hidden charges
-- **OpenProxy**: Never charges anything, ever
-
----
-
-## 🎯 Use Cases
-
-### Case 1: "I have Claude Pro subscription"
-
-**Problem:** Quota expires unused, rate limits during heavy coding
-
-**Solution:**
-```
-Combo: "maximize-claude"
-  1. cc/claude-opus-4-7        (use subscription fully)
-  2. glm/glm-5.1               (cheap backup when quota out)
-  3. kr/claude-sonnet-4.5      (free emergency fallback)
-
-Monthly cost: $20 (subscription) + ~$5 (backup) = $25 total
-vs. $20 + hitting limits = frustration
-```
-
-### Case 2: "I want zero cost"
-
-**Problem:** Can't afford subscriptions, need reliable AI coding
-
-**Solution:**
-```
-Combo: "free-forever"
-  1. kr/claude-sonnet-4.5      (Claude 4.5 free unlimited)
-  2. kr/glm-5                  (GLM-5 free via Kiro)
-  3. oc/<auto>                 (OpenCode Free, no auth)
-
-Monthly cost: $0
-Quality: Production-ready models + RTK saves 20-40% tokens
-```
-
-### Case 3: "I need 24/7 coding, no interruptions"
-
-**Problem:** Deadlines, can't afford downtime
-
-**Solution:**
-```
-Combo: "always-on"
-  1. cc/claude-opus-4-7        (best quality)
-  2. cx/gpt-5.5                (second subscription)
-  3. glm/glm-5.1               (cheap, resets daily)
-  4. minimax/MiniMax-M2.7      (cheapest, 5h reset)
-  5. kr/claude-sonnet-4.5      (free unlimited)
-
-Result: 5 layers of fallback = zero downtime
-Monthly cost: $20-200 (subscriptions) + $10-20 (backup)
-```
-
-### Case 4: "I want FREE AI in OpenClaw"
-
-**Problem:** Need AI assistant in messaging apps (WhatsApp, Telegram, Slack...), completely free
-
-**Solution:**
-```
-Combo: "openclaw-free"
-  1. kr/claude-sonnet-4.5      (Claude 4.5 free)
-  2. kr/glm-5                  (GLM-5 free)
-  3. kr/MiniMax-M2.5           (MiniMax free)
-
-Monthly cost: $0
-Access via: WhatsApp, Telegram, Slack, Discord, iMessage, Signal...
+# Requires --web-dir or --dashboard-sidecar-url at runtime.
 ```
 
 ---
 
-## ❓ Frequently Asked Questions
-
-<details>
-<summary><b>📊 Why does my dashboard show high costs?</b></summary>
-
-The dashboard tracks your token usage and displays **estimated costs** as if you were using paid APIs directly. This is **not actual billing** - it's a reference to show how much you're saving by using free models or existing subscriptions through OpenProxy.
-
-**Example:**
-- **Dashboard shows:** "$290 total cost"
-- **Reality:** You're using iFlow (FREE unlimited)
-- **Your actual cost:** **$0.00**
-- **What $290 means:** Amount you **saved** by using free models instead of paid APIs!
-
-The cost display is a "savings tracker" to help you understand your usage patterns and optimization opportunities.
-
-</details>
-
-<details>
-<summary><b>💳 Will I be charged by OpenProxy?</b></summary>
-
-**No.** OpenProxy is free, open-source software that runs on your own computer. It never charges you anything.
-
-**You only pay:**
-- ✅ **Subscription providers** (Claude Code $20/mo, Codex $20-200/mo) → Pay them directly on their websites
-- ✅ **Cheap providers** (GLM, MiniMax) → Pay them directly, OpenProxy just routes your requests
-- ❌ **OpenProxy itself** → **Never charges anything, ever**
-
-OpenProxy is a local proxy/router. It doesn't have your credit card, can't send invoices, and has no billing system. It's completely free software.
-
-</details>
-
-<details>
-<summary><b>🆓 Are FREE providers really unlimited?</b></summary>
-
-**Yes!** The current FREE providers (Kiro, OpenCode Free, Vertex) are genuinely free with **no hidden charges**.
-
-These are free services offered by those respective companies:
-- **Kiro AI**: Free unlimited Claude 4.5 + GLM-5 + MiniMax via AWS Builder ID / Google / GitHub OAuth
-- **OpenCode Free**: No-auth passthrough proxy, models auto-fetched from `opencode.ai/zen/v1/models`
-- **Vertex AI**: $300 free credits for new Google Cloud accounts (90 days)
-
-OpenProxy just routes your requests to them - there's no "catch" or future billing. They're truly free services, and OpenProxy makes them easy to use with fallback support.
-
-**Discontinued free tiers (no longer recommended):**
-- ❌ **iFlow**: Was free unlimited, now changed to paid (2026)
-- ❌ **Qwen Code**: Free OAuth tier discontinued by Alibaba on 2026-04-15
-- ❌ **Gemini CLI**: Still works, but using it with non-CLI tools (Claude, Codex, Cursor...) may result in account bans — only use if you stick to Gemini CLI itself
-
-</details>
-
-<details>
-<summary><b>💰 How do I minimize my actual AI costs?</b></summary>
-
-**Free-First Strategy:**
-
-1. **Start with 100% free combo:**
-   ```
-   1. gc/gemini-3-flash (180K/month free from Google)
-   2. if/kimi-k2-thinking (unlimited free from iFlow)
-   3. qw/qwen3-coder-plus (unlimited free from Qwen)
-   ```
-   **Cost: $0/month**
-
-2. **Add cheap backup** only if you need it:
-   ```
-   4. glm/glm-4.7 ($0.6/1M tokens)
-   ```
-   **Additional cost: Only pay for what you actually use**
-
-3. **Use subscription providers last:**
-   - Only if you already have them
-   - OpenProxy helps maximize their value through quota tracking
-
-**Result:** Most users can operate at $0/month using only free tiers!
-
-</details>
-
-<details>
-<summary><b>📈 What if my usage suddenly spikes?</b></summary>
-
-OpenProxy's smart fallback prevents surprise charges:
-
-**Scenario:** You're on a coding sprint and blow through your quotas
-
-**Without OpenProxy:**
-- ❌ Hit rate limit → Work stops → Frustration
-- ❌ Or: Accidentally rack up huge API bills
-
-**With OpenProxy:**
-- ✅ Subscription hits limit → Auto-fallback to cheap tier
-- ✅ Cheap tier gets expensive → Auto-fallback to free tier
-- ✅ Never stop coding → Predictable costs
-
-**You're in control:** Set spending limits per provider in dashboard, and OpenProxy respects them.
-
-</details>
-
----
-
-## 📖 Setup Guide
-
-<details>
-<summary><b>🔐 Subscription Providers (Maximize Value)</b></summary>
-
-### Claude Code (Pro/Max)
-
-```bash
-Dashboard → Providers → Connect Claude Code
-→ OAuth login → Auto token refresh
-→ 5-hour + weekly quota tracking
-
-Models:
-  cc/claude-opus-4-7
-  cc/claude-opus-4-6
-  cc/claude-sonnet-4-6
-  cc/claude-haiku-4-5-20251001
-```
-
-**Pro Tip:** Use Opus for complex tasks, Sonnet for speed. OpenProxy tracks quota per model!
-
-### OpenAI Codex (Plus/Pro)
-
-```bash
-Dashboard → Providers → Connect Codex
-→ OAuth login (port 1455)
-→ 5-hour + weekly reset
-
-Models:
-  cx/gpt-5.5
-  cx/gpt-5.4
-  cx/gpt-5.3-codex
-  cx/gpt-5.2-codex
-```
-
-### GitHub Copilot
-
-```bash
-Dashboard → Providers → Connect GitHub
-→ OAuth via GitHub
-→ Monthly reset (1st of month)
-
-Models:
-  gh/gpt-5.4
-  gh/claude-opus-4.7
-  gh/claude-sonnet-4.6
-  gh/gemini-3.1-pro-preview
-  gh/grok-code-fast-1
-```
-
-### Cursor IDE
-
-```bash
-Dashboard → Providers → Connect Cursor
-→ OAuth login
-→ Monthly subscription
-
-Models:
-  cu/claude-4.6-opus-max
-  cu/claude-4.5-sonnet-thinking
-  cu/gpt-5.3-codex
-```
-
-</details>
-
-<details>
-<summary><b>💰 Cheap Providers (Backup)</b></summary>
-
-### GLM-5.1 / GLM-4.7 (Daily reset, $0.6/1M)
-
-1. Sign up: [Zhipu AI](https://open.bigmodel.cn/)
-2. Get API key from Coding Plan
-3. Dashboard → Add API Key:
-   - Provider: `glm`
-   - API Key: `your-key`
-
-**Use:** `glm/glm-5.1`, `glm/glm-5`, `glm/glm-4.7`
-
-**Pro Tip:** Coding Plan offers 3× quota at 1/7 cost! Reset daily 10:00 AM.
-
-### MiniMax M2.7 (5h reset, $0.20/1M)
-
-1. Sign up: [MiniMax](https://www.minimax.io/)
-2. Get API key
-3. Dashboard → Add API Key
-
-**Use:** `minimax/MiniMax-M2.7`, `minimax/MiniMax-M2.5`
-
-**Pro Tip:** Cheapest option for long context (1M tokens)!
-
-### Kimi K2.5 ($9/month flat)
-
-1. Subscribe: [Moonshot AI](https://platform.moonshot.ai/)
-2. Get API key
-3. Dashboard → Add API Key
-
-**Use:** `kimi/kimi-k2.5`, `kimi/kimi-k2.5-thinking`
-
-**Pro Tip:** Fixed $9/month for 10M tokens = $0.90/1M effective cost!
-
-</details>
-
-<details>
-<summary><b>🆓 FREE Providers (Recommended)</b></summary>
-
-### Kiro AI (Claude 4.5 + GLM-5 + MiniMax FREE)
-
-```bash
-Dashboard → Connect Kiro
-→ AWS Builder ID, AWS IAM Identity Center, Google, or GitHub
-→ Unlimited usage
-
-Models:
-  kr/claude-sonnet-4.5
-  kr/claude-haiku-4.5
-  kr/glm-5
-  kr/MiniMax-M2.5
-  kr/qwen3-coder-next
-  kr/deepseek-3.2
-```
-
-**Pro Tip:** Best free option for Claude. No API key, no payment, fully unlimited.
-
-### OpenCode Free (No auth, auto-fetch models)
-
-```bash
-Dashboard → Connect OpenCode Free
-→ No login required (passthrough proxy)
-→ Models auto-fetched from opencode.ai/zen/v1/models
-```
-
-**Pro Tip:** Fastest setup. Just connect and start coding.
-
-### Vertex AI ($300 free credits for new GCP accounts)
-
-```bash
-Dashboard → Connect Vertex AI
-→ Upload Google Cloud Service Account JSON
-→ Enable Vertex AI API in your GCP project
-
-Models:
-  vertex/gemini-3.1-pro-preview
-  vertex/gemini-3-flash-preview
-  vertex/gemini-2.5-flash
-
-Vertex Partner (Anthropic / DeepSeek / GLM / Qwen via Vertex):
-  vertex-partner/glm-5-maas
-  vertex-partner/deepseek-v3.2-maas
-  vertex-partner/qwen3-next-80b-a3b-thinking-maas
-```
-
-**Pro Tip:** New Google Cloud accounts get $300 credits free for 90 days. Plenty for daily coding.
-
-</details>
-
-<details>
-<summary><b>🎨 Create Combos</b></summary>
-
-### Example 1: Maximize Subscription → Cheap Backup
-
-```
-Dashboard → Combos → Create New
-
-Name: premium-coding
-Models:
-  1. cc/claude-opus-4-7 (Subscription primary)
-  2. glm/glm-5.1 (Cheap backup, $0.6/1M)
-  3. minimax/MiniMax-M2.7 (Cheapest fallback, $0.20/1M)
-
-Use in CLI: premium-coding
-
-Monthly cost example (100M tokens):
-  80M via Claude (subscription): $0 extra
-  15M via GLM: $9
-  5M via MiniMax: $1
-  Total: $10 + your subscription
-```
-
-### Example 2: Free-Only (Zero Cost)
-
-```
-Name: free-combo
-Models:
-  1. kr/claude-sonnet-4.5 (Claude 4.5 free unlimited)
-  2. kr/glm-5 (GLM-5 free via Kiro)
-  3. vertex/gemini-3.1-pro-preview ($300 free credits)
-
-Cost: $0 forever (+ 20-40% token savings via RTK)!
-```
-
-</details>
-
-<details>
-<summary><b>🔧 CLI Integration</b></summary>
-
-### Cursor IDE
-
-```
-Settings → Models → Advanced:
-  OpenAI API Base URL: http://localhost:4623/v1
-  OpenAI API Key: [from openproxy dashboard]
-  Model: cc/claude-opus-4-7
-```
-
-Or use combo: `premium-coding`
-
-### Claude Code
-
-Edit `~/.claude/config.json`:
-
-```json
-{
-  "anthropic_api_base": "http://localhost:4623/v1",
-  "anthropic_api_key": "your-openproxy-api-key"
-}
-```
-
-### Codex CLI
-
-```bash
-export OPENAI_BASE_URL="http://localhost:4623"
-export OPENAI_API_KEY="your-openproxy-api-key"
-
-codex "your prompt"
-```
-
-### OpenClaw
-
-**Option 1 — Dashboard (recommended):**
-
-```
-Dashboard → CLI Tools → OpenClaw → Select Model → Apply
-```
-
-**Option 2 — Manual:** Edit `~/.openclaw/openclaw.json`:
-
-```json
-{
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "openproxy/kr/claude-sonnet-4.5"
-      }
-    }
-  },
-  "models": {
-    "providers": {
-      "openproxy": {
-        "baseUrl": "http://127.0.0.1:4623/v1",
-        "apiKey": "sk_openproxy",
-        "api": "openai-completions",
-        "models": [
-          {
-            "id": "kr/claude-sonnet-4.5",
-            "name": "Claude Sonnet 4.5 (Kiro Free)"
-          }
-        ]
-      }
-    }
-  }
-}
-```
-
-> **Note:** OpenClaw only works with local OpenProxy. Use `127.0.0.1` instead of `localhost` to avoid IPv6 resolution issues.
-
-### Cline / Continue / RooCode
-
-```
-Provider: OpenAI Compatible
-Base URL: http://localhost:4623/v1
-API Key: [from dashboard]
-Model: cc/claude-opus-4-7
-```
-
-</details>
-
-<details>
-<summary><b>🚀 Deployment</b></summary>
-
-### VPS Deployment
-
-```bash
-# Clone and install
-git clone https://github.com/quangdang46/openproxy.git
-cd openproxy
-pnpm --dir web install
-pnpm --dir web run build
-
-# Configure
-export JWT_SECRET="your-secure-secret-change-this"
-export INITIAL_PASSWORD="your-password"
-export DATA_DIR="/var/lib/openproxy"
-export PORT="4623"
-export HOSTNAME="0.0.0.0"
-export NODE_ENV="production"
-export NEXT_PUBLIC_BASE_URL="http://localhost:4623"
-export API_KEY_SECRET="endpoint-proxy-api-key-secret"
-export MACHINE_ID_SALT="endpoint-proxy-salt"
-
-# Start
-pnpm --dir web run start
-
-# Or use PM2
-npm install -g pm2
-pm2 start npm --name openproxy -- start
-pm2 save
-pm2 startup
-```
+## Deployment
 
 ### Docker
 
 ```bash
-# Build image (from repository root)
 docker build -t openproxy .
-
-# Run container (command used in current setup)
-docker run -d \
-  --name openproxy \
-  -p 4623:4623 \
-  --env-file /root/dev/openproxy/.env \
-  -v openproxy-data:/app/data \
-  -v openproxy-usage:/root/.openproxy \
-  openproxy
-```
-
-Portable command (if you are already at repository root):
-
-```bash
 docker run -d \
   --name openproxy \
   -p 4623:4623 \
@@ -1135,219 +280,40 @@ docker run -d \
   openproxy
 ```
 
-Container defaults:
-- `PORT=4623`
-- `HOSTNAME=0.0.0.0`
+Container defaults: `PORT=4623`, `HOSTNAME=0.0.0.0`. Mount a writable volume at `/app/data` for persistence.
 
-Useful commands:
+### Behind a reverse proxy
 
-```bash
-docker logs -f openproxy
-docker restart openproxy
-docker stop openproxy && docker rm openproxy
-```
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `JWT_SECRET` | `openproxy-default-secret-change-me` | JWT signing secret for dashboard auth cookie (**change in production**) |
-| `INITIAL_PASSWORD` | `123456` | First login password when no saved hash exists |
-| `DATA_DIR` | `~/.openproxy` | Main app database location (`db.json`) |
-| `PORT` | framework default | Service port (`4623` in examples) |
-| `HOSTNAME` | framework default | Bind host (Docker defaults to `0.0.0.0`) |
-| `NODE_ENV` | runtime default | Set `production` for deploy |
-| `BASE_URL` | `http://localhost:4623` | Server-side internal base URL used by cloud sync jobs |
-| `CLOUD_URL` | _unset (opt-in)_ | Server-side cloud sync endpoint. Set this to enable cloud sync; leave unset to disable. |
-| `NEXT_PUBLIC_BASE_URL` | `http://localhost:3000` | Backward-compatible/public base URL (prefer `BASE_URL` for server runtime) |
-| `NEXT_PUBLIC_CLOUD_URL` | _unset (opt-in)_ | Backward-compatible/public cloud URL. Prefer `CLOUD_URL` for server runtime; leave unset to disable cloud sync. |
-| `API_KEY_SECRET` | `endpoint-proxy-api-key-secret` | HMAC secret for generated API keys |
-| `MACHINE_ID_SALT` | `endpoint-proxy-salt` | Salt for stable machine ID hashing |
-| `ENABLE_REQUEST_LOGS` | `false` | Enables request/response logs under `logs/` |
-| `AUTH_COOKIE_SECURE` | `false` | Force `Secure` auth cookie (set `true` behind HTTPS reverse proxy) |
-| `REQUIRE_API_KEY` | `false` | Enforce Bearer API key on `/v1/*` routes (recommended for internet-exposed deploys) |
-| `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY` | empty | Optional outbound proxy for upstream provider calls |
-
-Notes:
-- Lowercase proxy variables are also supported: `http_proxy`, `https_proxy`, `all_proxy`, `no_proxy`.
-- `.env` is not baked into Docker image (`.dockerignore`); inject runtime config with `--env-file` or `-e`.
-- On Windows, `APPDATA` can be used for local storage path resolution.
-- `INSTANCE_NAME` appears in older docs/env templates, but is currently not used at runtime.
-
-### Runtime Files and Storage
-
-- Main app state: `${DATA_DIR}/db.json` (providers, combos, aliases, keys, settings), managed by `src/lib/localDb.js`.
-- Usage history and logs: `${DATA_DIR}/usage.json` and `${DATA_DIR}/log.txt`, managed by `src/lib/usageDb.js`.
-- Optional request/translator logs: `<repo>/logs/...` when `ENABLE_REQUEST_LOGS=true`.
-- Both `${DATA_DIR}` and `~/.openproxy` resolve to the same location in a Docker container — the symlink `/root/.openproxy -> /app/data` is created at build time.
-
-</details>
+For internet-exposed deploys: set `REQUIRE_API_KEY=true`, `AUTH_COOKIE_SECURE=true`, terminate TLS at the proxy, and forward only `/v1/*` if you don't need the dashboard accessible publicly.
 
 ---
 
-## 📊 Available Models
+## Troubleshooting
 
-<details>
-<summary><b>View all available models</b></summary>
+| Symptom | Cause | Fix |
+|---|---|---|
+| `EADDRINUSE` on `4623` | Port in use | `openproxy --port 4624` or `openproxy server stop` |
+| Dashboard shows blank page | Embedded asset not hashed correctly | Hard reload (`Ctrl+Shift+R`); check `/health` returns 200 |
+| OAuth "callback failed" | Browser blocked the redirect | Retry from the dashboard's `Providers → Reconnect` |
+| 401 on `/v1/chat/completions` | Wrong API key | Copy fresh from dashboard. Header: `Authorization: Bearer <key>` |
+| Quota exhausted message | Subscription / API limit hit | Combo fallback handles this — add a cheaper or free tier as the next entry |
+| `cargo build` fails with "web/dist not built" | Embedded build needs the dashboard | `(cd web && pnpm install --frozen-lockfile && pnpm run build)` first |
+| First login password rejected | `INITIAL_PASSWORD` not what you set | Default is `123456` if unset; check `.env` is sourced |
 
-**Claude Code (`cc/`)** - Pro/Max:
-- `cc/claude-opus-4-7`
-- `cc/claude-opus-4-6`
-- `cc/claude-sonnet-4-6`
-- `cc/claude-sonnet-4-5-20250929`
-- `cc/claude-haiku-4-5-20251001`
-
-**Codex (`cx/`)** - Plus/Pro:
-- `cx/gpt-5.5`
-- `cx/gpt-5.4`
-- `cx/gpt-5.3-codex`
-- `cx/gpt-5.2-codex`
-- `cx/gpt-5.1-codex-max`
-
-**GitHub Copilot (`gh/`)**:
-- `gh/gpt-5.4`
-- `gh/claude-opus-4.7`
-- `gh/claude-sonnet-4.6`
-- `gh/gemini-3.1-pro-preview`
-- `gh/grok-code-fast-1`
-
-**Cursor (`cu/`)** - Subscription:
-- `cu/claude-4.6-opus-max`
-- `cu/claude-4.5-sonnet-thinking`
-- `cu/gpt-5.3-codex`
-- `cu/kimi-k2.5`
-
-**GLM (`glm/`)** - $0.6/1M:
-- `glm/glm-5.1`
-- `glm/glm-5`
-- `glm/glm-4.7`
-
-**MiniMax (`minimax/`)** - $0.2/1M:
-- `minimax/MiniMax-M2.7`
-- `minimax/MiniMax-M2.5`
-
-**Kimi (`kimi/`)** - $9/mo flat:
-- `kimi/kimi-k2.5`
-- `kimi/kimi-k2.5-thinking`
-
-**Kiro (`kr/`)** - FREE unlimited:
-- `kr/claude-sonnet-4.5`
-- `kr/claude-haiku-4.5`
-- `kr/glm-5`
-- `kr/MiniMax-M2.5`
-- `kr/qwen3-coder-next`
-- `kr/deepseek-3.2`
-
-**OpenCode Free (`oc/`)** - FREE no-auth:
-- Auto-fetched from `opencode.ai/zen/v1/models`
-
-**Vertex AI (`vertex/`)** - $300 free credits:
-- `vertex/gemini-3.1-pro-preview`
-- `vertex/gemini-3-flash-preview`
-- `vertex/gemini-2.5-flash`
-- `vertex-partner/glm-5-maas`
-- `vertex-partner/deepseek-v3.2-maas`
-
-</details>
+Logs: enable with `ENABLE_REQUEST_LOGS=true`, then watch `logs/` (or stderr).
 
 ---
 
-## 🐛 Troubleshooting
+## Acknowledgments
 
-**"Language model did not provide messages"**
-- Provider quota exhausted → Check dashboard quota tracker
-- Solution: Use combo fallback or switch to cheaper tier
+Built on the work of others:
 
-**Rate limiting**
-- Subscription quota out → Fallback to GLM/MiniMax
-- Add combo: `cc/claude-opus-4-7 → glm/glm-5.1 → kr/claude-sonnet-4.5`
-
-**OAuth token expired**
-- Auto-refreshed by OpenProxy
-- If issues persist: Dashboard → Provider → Reconnect
-
-**High costs**
-- Enable RTK in Dashboard → Endpoint settings (default ON, saves 20-40% tokens)
-- Check usage stats in Dashboard
-- Switch primary model to GLM/MiniMax
-- Use free tier (Kiro, OpenCode Free, Vertex) for non-critical tasks
-
-**Dashboard opens on wrong port**
-- Set `PORT=4623` and `NEXT_PUBLIC_BASE_URL=http://localhost:4623`
-
-**First login not working**
-- Check `INITIAL_PASSWORD` in `.env`
-- If unset, fallback password is `123456`
-
-**No request logs under `logs/`**
-- Set `ENABLE_REQUEST_LOGS=true`
+- **CLIProxyAPI** — Go implementation that inspired the architecture.
+- **[RTK](https://github.com/rtk-ai/rtk)** — token compression pipeline. OpenProxy's `tool_result` compression is a port.
+- **[Caveman](https://github.com/JuliusBrussee/caveman)** — caveman-speak prompt that trims output tokens by reframing the system instruction.
 
 ---
 
-## 🛠️ Tech Stack
+## License
 
-- **Server**: Rust 1.76+ (axum 0.8, hyper 1, tower-http)
-- **Dashboard**: Astro 4 (static output) + React 19 + Tailwind CSS, embedded into the binary via `rust-embed`
-- **Storage**: SQLite (rusqlite, bundled) + JSON state for config
-- **Streaming**: Server-Sent Events (SSE) end-to-end
-- **Auth**: OAuth 2.0 (PKCE) + JWT + scoped API keys
-- **Build / dist**: pnpm 10 (web), Cargo (binary), `cross` for Linux musl, GitHub Releases + npm (`@openprx/openproxy`)
-
----
-
-## 📝 API Reference
-
-### Chat Completions
-
-```bash
-POST http://localhost:4623/v1/chat/completions
-Authorization: Bearer your-api-key
-Content-Type: application/json
-
-{
-  "model": "cc/claude-opus-4-6",
-  "messages": [
-    {"role": "user", "content": "Write a function to..."}
-  ],
-  "stream": true
-}
-```
-
-### List Models
-
-```bash
-GET http://localhost:4623/v1/models
-Authorization: Bearer your-api-key
-
-→ Returns all models + combos in OpenAI format
-```
-
-## 📧 Support
-
-- **GitHub**: [github.com/quangdang46/openproxy](https://github.com/quangdang46/openproxy)
-- **Issues**: [github.com/quangdang46/openproxy/issues](https://github.com/quangdang46/openproxy/issues)
-- **npm**: [@openprx/openproxy](https://www.npmjs.com/package/@openprx/openproxy)
-
----
-
-## 🙏 Acknowledgments
-
-Built on the shoulders of giants:
-
-- **CLIProxyAPI** — original Go implementation that inspired the architecture.
-- **[RTK](https://github.com/rtk-ai/rtk)** ![Stars](https://img.shields.io/github/stars/rtk-ai/rtk?style=flat&color=yellow) — token-saver. OpenProxy ports its compression pipeline → **−20-40% input tokens** on every request.
-- **[Caveman](https://github.com/JuliusBrussee/caveman)** ![Stars](https://img.shields.io/github/stars/JuliusBrussee/caveman?style=flat&color=yellow) by **[@JuliusBrussee](https://github.com/JuliusBrussee)** — *"why use many token when few token do trick"*. OpenProxy adapts its prompt → **−65% output tokens**.
-
-Huge thanks to these authors — without their work, OpenProxy's token-saving features wouldn't exist. ⭐ them on GitHub!
-
----
-
-## 📄 License
-
-MIT License - see [LICENSE](LICENSE) for details.
-
----
-
-<div align="center">
-  <sub>Built with ❤️ for developers who code 24/7</sub>
-</div>
+MIT — see [LICENSE](LICENSE).
