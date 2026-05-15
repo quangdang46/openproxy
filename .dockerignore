@@ -1,0 +1,50 @@
+# Build outputs
+target/
+web/dist/
+web/node_modules/
+**/node_modules/
+
+# Git / CI internals
+.git/
+.github/
+.gitignore
+.gitattributes
+
+# Editor / IDE
+.idea/
+.vscode/
+.cursor/
+.devin/
+.agents/
+
+# Distribution-only artifacts (not needed in image)
+packages/
+scripts/
+install.sh
+shell-completions/
+
+# Docs & internal planning (binary embeds nothing from these)
+*.md
+PLAN.md
+plan.txt
+CHANGELOG.md
+LICENSE
+images/
+
+# Runtime artifacts
+*.log
+logs/
+data/
+.openproxy/
+
+# Test artifacts
+coverage/
+tests/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Self-reference
+Dockerfile
+.dockerignore
