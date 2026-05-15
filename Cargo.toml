@@ -16,7 +16,7 @@ hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", 
 hyper-rustls = { version = "0.27", features = ["http2"] }
 
 # HTTP client (complex - OAuth, proxy)
-reqwest = { version = "0.12", features = ["json", "cookies", "multipart", "gzip", "brotli", "socks", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "multipart", "gzip", "brotli", "socks", "stream", "rustls-tls"] }
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }
