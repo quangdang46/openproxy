@@ -373,7 +373,7 @@ impl Default for Settings {
             provider_strategies: BTreeMap::new(),
             combo_strategy: default_combo_strategy(),
             combo_strategies: BTreeMap::new(),
-            require_login: true,
+            require_login: false,
             tunnel_dashboard_access: true,
             observability_enabled: true,
             observability_max_records: default_observability_max_records(),
