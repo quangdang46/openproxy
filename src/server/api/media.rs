@@ -249,6 +249,15 @@ async fn execute_media_provider(
 
     let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
 
+    // Try the provider-specific media adapter first (image / tts /
+    // embeddings / search). Falls through to the generic upstream
+    // forwarder below when no adapter handles this provider+route.
+    if let Some(resp) =
+        try_provider_adapter(state, &connection, provider, model, route_kind, request_body).await
+    {
+        return resp;
+    }
+
     let url = build_media_url(provider, model, route_kind, &connection);
     let headers = match build_media_headers(provider, &connection) {
         Ok(h) => h,
@@ -567,6 +576,51 @@ fn is_hop_by_hop_header(name: &str) -> bool {
             | "upgrade"
     )
 }
+
+
+/// Try to handle the request through one of the per-provider media
+/// adapters (image / tts / embeddings / search). Returns `Some(response)`
+/// when an adapter ran for this provider; `None` to fall through to the
+/// generic upstream forwarder.
+async fn try_provider_adapter(
+    state: &AppState,
+    connection: &crate::types::ProviderConnection,
+    provider: &str,
+    model: &str,
+    route_kind: &str,
+    request_body: &Value,
+) -> Option<Response> {
+    use crate::core::media::{embeddings, image, search, tts, MediaError};
+
+    let snapshot = state.db.snapshot();
+    let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
+    let client = state.client_pool.get(provider, proxy.as_ref()).ok()?;
+
+    let result: Option<Result<Value, MediaError>> = match route_kind {
+        "images/generations" => image::dispatch(&client, connection, provider, model, request_body).await,
+        "audio/speech" => tts::dispatch(&client, connection, provider, model, request_body).await,
+        "embeddings" => embeddings::dispatch(&client, connection, provider, model, request_body).await,
+        "search" => search::dispatch(&client, connection, provider, request_body).await,
+        // STT input is multipart and lives on a dedicated route in stt.rs;
+        // it does not flow through this JSON handler.
+        _ => None,
+    };
+
+    Some(media_result_to_response(result?))
+}
+
+fn media_result_to_response(
+    result: Result<Value, crate::core::media::MediaError>,
+) -> Response {
+    match result {
+        Ok(body) => with_cors_response((StatusCode::OK, Json(body)).into_response()),
+        Err(err) => {
+            let status = StatusCode::from_u16(err.status()).unwrap_or(StatusCode::BAD_GATEWAY);
+            json_error_response(status, &err.message())
+        }
+    }
+}
+
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
     with_cors_response(

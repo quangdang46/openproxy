@@ -18,6 +18,24 @@ pub mod handler;
 pub use base::{EmbeddingAdapter, EmbeddingRequest, EmbeddingResponse};
 pub use handler::{handle_embeddings, EmbeddingsHandlerError};
 
+/// Run the embeddings pipeline for `provider` if a matching adapter
+/// exists. Returns `None` to fall through to a generic flow.
+pub async fn dispatch(
+    client: &reqwest::Client,
+    credentials: &crate::types::ProviderConnection,
+    provider: &str,
+    model: &str,
+    body: &serde_json::Value,
+) -> Option<Result<serde_json::Value, super::MediaError>> {
+    let adapter = get_embedding_adapter(provider)?;
+    let request = EmbeddingRequest {
+        body,
+        model,
+        credentials,
+    };
+    Some(handle_embeddings(client, adapter, request).await.map_err(Into::into))
+}
+
 /// Look up the embedding adapter for a provider id. Falls back to the
 /// runtime-configured node adapter when the provider name matches the
 /// `openai-compatible-*` / `custom-embedding-*` namespaces.
