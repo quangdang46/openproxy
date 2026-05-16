@@ -1,6 +1,6 @@
 {
   "name": "@openprx/openproxy-linux-arm64",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OpenProxy native binary for linux arm64. Installed automatically as an optional dependency of the openproxy meta package.",
   "homepage": "https://github.com/quangdang46/openproxy#readme",
   "repository": {
