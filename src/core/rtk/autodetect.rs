@@ -3,9 +3,9 @@ use regex::Regex;
 
 use crate::core::rtk::constants::*;
 use crate::core::rtk::filters::{
-    dedup_log_impl, find_impl, git_diff_impl, git_status_impl, grep_impl, ls_impl,
-    read_numbered_impl, search_list_impl, smart_truncate_impl, tree_impl, READ_NUMBERED_LINE_RE,
-    SEARCH_LIST_HEADER_RE,
+    build_output_impl, dedup_log_impl, find_impl, git_diff_impl, git_status_impl, grep_impl,
+    ls_impl, read_numbered_impl, search_list_impl, smart_truncate_impl, tree_impl,
+    READ_NUMBERED_LINE_RE, SEARCH_LIST_HEADER_RE,
 };
 
 static RE_GIT_DIFF: Lazy<Regex> = Lazy::new(|| Regex::new(r"diff --git").unwrap());
@@ -19,6 +19,14 @@ static RE_PORCELAIN: Lazy<Regex> =
 static RE_TREE_GLYPH: Lazy<Regex> = Lazy::new(|| Regex::new(r"[├└]──|│  ").unwrap());
 static RE_LS_ROW: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[-dlbcps][rwx-]{9}").unwrap());
 static RE_LS_TOTAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^total \d+$").unwrap());
+/// Build-tool output detector. Catches npm/yarn/cargo/pip-style logs so
+/// they can be compressed before being treated as porcelain or grep
+/// output. Match priority is intentionally above `RE_GIT_STATUS` to avoid
+/// misclassifying cargo `Compiling` lines as porcelain status.
+static RE_BUILD_OUTPUT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?im)^(npm (warn|error|ERR!)|yarn (warn|error)|\s*Compiling\s+\S+|\s*Downloading\s+\S+|added \d+ package|\[ERROR\]|BUILD (SUCCESS|FAILED)|\s*Finished\s+|Successfully (installed|built)|ERROR:)")
+        .unwrap()
+});
 
 pub type FilterFn = fn(&str) -> String;
 
@@ -38,6 +46,15 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
         return Some(DetectedFilter {
             filter_fn: git_diff_impl,
             filter_name: FILTER_GIT_DIFF,
+        });
+    }
+
+    // Build-output BEFORE porcelain check: prevents cargo "Compiling" lines
+    // from being misclassified as git-status porcelain.
+    if RE_BUILD_OUTPUT.is_match(head) {
+        return Some(DetectedFilter {
+            filter_fn: build_output_impl,
+            filter_name: FILTER_BUILD_OUTPUT,
         });
     }
 

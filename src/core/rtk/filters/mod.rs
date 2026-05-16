@@ -713,6 +713,223 @@ pub fn smart_truncate_impl(input: &str) -> String {
     result
 }
 
+pub struct BuildOutputFilter;
+impl BuildOutputFilter {
+    pub fn apply(&self, text: &str) -> String {
+        safe_apply(build_output_impl, text, FILTER_BUILD_OUTPUT)
+    }
+}
+
+/// Cargo / rustc error continuation lines: `--> file:line`, `  |`,
+/// `N | code`, `  = note: ...`. We keep these verbatim while we're inside
+/// an error/warning block so the LLM gets the full context.
+static RE_CARGO_ERR_CONT: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^\s*(-->|\||\d+\s*\||=)").expect("RE_CARGO_ERR_CONT")
+});
+
+const BUILD_OUTPUT_DEPRECATION_KEEP: usize = 3;
+const BUILD_OUTPUT_WARNING_KEEP: usize = 5;
+
+/// Compress build-tool output (npm, cargo, pip, maven, gradle, …).
+///
+/// Keeps: errors, warnings, final summary, deprecation tail, compile/download counts.
+/// Strips: progress lines like "Compiling X v1.0.0" and "Downloading foo".
+///
+/// Mirrors `open-sse/rtk/filters/buildOutput.js` from 9router.
+pub fn build_output_impl(input: &str) -> String {
+    let lines: Vec<&str> = input.split('\n').collect();
+    if lines.is_empty() {
+        return input.to_string();
+    }
+
+    let mut errors: Vec<&str> = Vec::new();
+    let mut warnings: Vec<&str> = Vec::new();
+    let mut deprecations: Vec<&str> = Vec::new();
+    let mut summary_parts: Vec<&str> = Vec::new();
+    let mut compiling_count: usize = 0;
+    let mut downloading_count: usize = 0;
+    let mut in_cargo_error = false;
+
+    for line in &lines {
+        let trimmed = line.trim();
+
+        // Continuation of a cargo error/warning block.
+        if in_cargo_error {
+            if trimmed.is_empty() {
+                in_cargo_error = false;
+                continue;
+            }
+            if RE_CARGO_ERR_CONT.is_match(line) {
+                errors.push(line);
+                continue;
+            }
+            in_cargo_error = false;
+        }
+
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+
+        if lower.starts_with("npm err!") || lower.starts_with("npm error") || lower.starts_with("yarn error") {
+            errors.push(line);
+            continue;
+        }
+
+        if lower.starts_with("npm warn deprecated") {
+            deprecations.push(line);
+            continue;
+        }
+        if lower.starts_with("npm warn") || lower.starts_with("yarn warn") {
+            warnings.push(line);
+            continue;
+        }
+
+        if (lower.starts_with("error[") || lower.starts_with("error:"))
+            || trimmed.starts_with("error -->")
+        {
+            errors.push(line);
+            in_cargo_error = true;
+            continue;
+        }
+
+        if (lower.starts_with("warning[") || lower.starts_with("warning:"))
+            || trimmed.starts_with("warning -->")
+        {
+            warnings.push(line);
+            in_cargo_error = true;
+            continue;
+        }
+
+        if lower.starts_with("error:") {
+            errors.push(line);
+            continue;
+        }
+        if lower.starts_with("[error]") || lower.starts_with("build failed") {
+            errors.push(line);
+            continue;
+        }
+        if lower.starts_with("[warning]") {
+            warnings.push(line);
+            continue;
+        }
+
+        let trim_start = trimmed.split_whitespace().next().unwrap_or("");
+        if trim_start.eq_ignore_ascii_case("compiling") {
+            compiling_count += 1;
+            continue;
+        }
+        if trim_start.eq_ignore_ascii_case("downloading") || trim_start.eq_ignore_ascii_case("fetching") {
+            downloading_count += 1;
+            continue;
+        }
+
+        if is_build_summary_line(trimmed, &lower) {
+            summary_parts.push(line);
+            continue;
+        }
+    }
+
+    let mut out = String::new();
+
+    let keep_dep = deprecations.len().min(BUILD_OUTPUT_DEPRECATION_KEEP);
+    for d in &deprecations[..keep_dep] {
+        out.push_str(d);
+        out.push('\n');
+    }
+    if deprecations.len() > keep_dep {
+        out.push_str(&format!(
+            "... +{} more deprecated packages\n",
+            deprecations.len() - keep_dep
+        ));
+    }
+
+    if compiling_count > 0 {
+        out.push_str(&format!("Compiled {} packages\n", compiling_count));
+    }
+    if downloading_count > 0 {
+        out.push_str(&format!("Downloaded {} packages\n", downloading_count));
+    }
+
+    for e in &errors {
+        out.push_str(e);
+        out.push('\n');
+    }
+
+    let keep_warn = warnings.len().min(BUILD_OUTPUT_WARNING_KEEP);
+    for w in &warnings[..keep_warn] {
+        out.push_str(w);
+        out.push('\n');
+    }
+    if warnings.len() > keep_warn {
+        out.push_str(&format!(
+            "... +{} more warnings\n",
+            warnings.len() - keep_warn
+        ));
+    }
+
+    if !summary_parts.is_empty() {
+        out.push_str(&summary_parts.join("\n"));
+        out.push('\n');
+    }
+
+    let trimmed_out = out.trim_end_matches('\n');
+    if trimmed_out.is_empty() {
+        input.to_string()
+    } else {
+        trimmed_out.to_string()
+    }
+}
+
+fn is_build_summary_line(trimmed: &str, lower: &str) -> bool {
+    // Mirror the regex set from buildOutput.js. Each branch is a cheap
+    // heuristic; precise patterns are not needed because false positives
+    // here just keep more context, which is fine.
+    let starts_word = |kw: &str| lower.starts_with(kw);
+    if starts_word("added ")
+        || starts_word("removed ")
+        || starts_word("changed ")
+        || starts_word("audited ")
+        || starts_word("installed ")
+    {
+        return true;
+    }
+    if lower.starts_with("finished ") {
+        return true;
+    }
+    if lower.starts_with("build success") {
+        return true;
+    }
+    if lower.starts_with("successfully installed") || lower.starts_with("successfully built") {
+        return true;
+    }
+    if lower.starts_with("to address") {
+        return true;
+    }
+    if lower.starts_with("run `npm audit`") || lower.starts_with("run `npm fund`") {
+        return true;
+    }
+    if lower.contains("packages are looking for funding") {
+        return true;
+    }
+    // "N vulnerabilities", "N packages", "N warnings", "N errors"
+    if let Some(num_end) = trimmed.find(|c: char| !c.is_ascii_digit()) {
+        if num_end > 0 {
+            let rest = trimmed[num_end..].trim_start();
+            if rest.starts_with("vulnerabilities")
+                || rest.starts_with("package")
+                || rest.starts_with("warning")
+                || rest.starts_with("error")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -786,6 +1003,34 @@ mod tests {
     fn test_smart_truncate_short() {
         let input = "line1\nline2\nline3";
         let result = smart_truncate_impl(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn build_output_keeps_cargo_errors_with_continuation() {
+        let input = "   Compiling foo v1.0\n   Compiling bar v2.0\nerror[E0382]: borrow of moved value\n  --> src/main.rs:3:10\n   |\n3  | use_value(x);\n   |           ^ value borrowed here\n   = note: not Copy\n\n   Compiling baz v0.1\nwarning: unused variable\n";
+        let result = build_output_impl(input);
+        assert!(result.contains("error[E0382]"));
+        assert!(result.contains("--> src/main.rs:3:10"));
+        assert!(result.contains("note: not Copy"));
+        assert!(result.contains("Compiled 3 packages"));
+        assert!(result.contains("warning: unused variable"));
+        assert!(!result.contains("Compiling foo"));
+    }
+
+    #[test]
+    fn build_output_summarises_npm_install() {
+        let input = "npm warn deprecated lodash@1\nnpm warn deprecated request@2\nnpm warn deprecated old@3\nnpm warn deprecated old@4\nadded 245 packages, audited 250 packages in 12s\n";
+        let result = build_output_impl(input);
+        assert!(result.contains("npm warn deprecated lodash@1"));
+        assert!(result.contains("+1 more deprecated packages"));
+        assert!(result.contains("added 245 packages"));
+    }
+
+    #[test]
+    fn build_output_returns_input_when_nothing_matches() {
+        let input = "just some prose\nthat is not a build log";
+        let result = build_output_impl(input);
         assert_eq!(result, input);
     }
 }
