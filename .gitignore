@@ -85,3 +85,4 @@ gitbooks/*
 # never committed. The bin/.gitkeep stubs themselves are tracked.
 /packages/platform/*/bin/openproxy
 /packages/platform/*/bin/openproxy.exe
+.ms/
