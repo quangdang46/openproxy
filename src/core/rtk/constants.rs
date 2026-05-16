@@ -89,3 +89,4 @@ pub const FILTER_DEDUP_LOG: &str = "dedup-log";
 pub const FILTER_SMART_TRUNCATE: &str = "smart-truncate";
 pub const FILTER_READ_NUMBERED: &str = "read-numbered";
 pub const FILTER_SEARCH_LIST: &str = "search-list";
+pub const FILTER_BUILD_OUTPUT: &str = "build-output";

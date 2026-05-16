@@ -383,9 +383,14 @@ async fn forward_with_provider_fallback(
             .await;
 
         use crate::core::executor::{
-            CodexExecutionRequest, CodexExecutor, CursorExecutionRequest, CursorExecutor,
-            DefaultExecutor, ExecutionRequest, KiroExecutionRequest, KiroExecutor,
-            KiroExecutorResponse, VertexExecutionRequest, VertexExecutor,
+            AzureExecutionRequest, AzureExecutor, CodexExecutionRequest, CodexExecutor,
+            CommandCodeExecutionRequest, CommandCodeExecutor, CursorExecutionRequest,
+            CursorExecutor, DefaultExecutor, ExecutionRequest, GeminiCliExecutionRequest,
+            GeminiCliExecutor, GithubExecutionRequest, GithubExecutor, IFlowExecutionRequest,
+            IFlowExecutor, KiroExecutionRequest, KiroExecutor, KiroExecutorResponse,
+            OpenCodeExecutionRequest, OpenCodeExecutor, OpenCodeGoExecutionRequest,
+            OpenCodeGoExecutor, QoderExecutionRequest, QoderExecutor, QwenExecutionRequest,
+            QwenExecutor, VertexExecutionRequest, VertexExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/");
@@ -487,6 +492,258 @@ async fn forward_with_provider_fallback(
                     .map_err(|e| ComboAttemptError {
                         status: 500,
                         message: format!("Cursor execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "github" {
+                let executor = GithubExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Github executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(GithubExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Github execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "azure" {
+                let executor = AzureExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Azure executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(AzureExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Azure execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "qwen" {
+                let executor = QwenExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Qwen executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(QwenExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Qwen execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "iflow" {
+                let executor = IFlowExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("IFlow executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(IFlowExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("IFlow execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "gemini-cli" {
+                let executor = GeminiCliExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("GeminiCli executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(GeminiCliExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("GeminiCli execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "opencode" {
+                let executor = OpenCodeExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("OpenCode executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(OpenCodeExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("OpenCode execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "opencode-go" {
+                let executor = OpenCodeGoExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("OpenCodeGo executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(OpenCodeGoExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("OpenCodeGo execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "qoder" {
+                let executor = QoderExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Qoder executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(QoderExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Qoder execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "commandcode" {
+                let executor = CommandCodeExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("CommandCode executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(CommandCodeExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("CommandCode execution failed: {:?}", e),
                         retry_after: None,
                     })?;
                 Ok(KiroExecutorResponse {

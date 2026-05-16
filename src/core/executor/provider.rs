@@ -874,5 +874,7 @@ pub fn get_free_providers() -> Vec<&'static str> {
 pub fn get_specialty_providers() -> Vec<&'static str> {
     vec![
         "claude", "codex", "github", "kiro", "vertex", "cursor", "ollama", "grok",
+        "azure", "qwen", "iflow", "gemini-cli", "opencode", "opencode-go", "qoder",
+        "commandcode",
     ]
 }

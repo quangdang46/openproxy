@@ -86,3 +86,4 @@ gitbooks/*
 /packages/platform/*/bin/openproxy
 /packages/platform/*/bin/openproxy.exe
 .ms/
+HANDOFF.md
