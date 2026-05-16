@@ -36,6 +36,10 @@ impl AppDb {
     pub fn normalize(&mut self) {
         self.settings.normalize();
 
+        // Migration v0.1.3: default require_login to false for better local UX.
+        // Users can re-enable in Settings if needed.
+        self.settings.require_login = false;
+
         for api_key in &mut self.api_keys {
             if api_key.is_active.is_none() {
                 api_key.is_active = Some(true);
