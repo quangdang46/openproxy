@@ -3,6 +3,7 @@ pub mod auth;
 pub mod combo;
 pub mod config;
 pub mod executor;
+pub mod media;
 pub mod mitm;
 pub mod model;
 pub mod proxy;
