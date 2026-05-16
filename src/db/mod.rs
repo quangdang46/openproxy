@@ -197,7 +197,16 @@ async fn load_or_init_app_db(path: &Path) -> anyhow::Result<AppDb> {
     };
 
     let value = AppDb::from_json_value(parsed.clone());
-    if serde_json::to_value(&value)? != parsed {
+
+    // Migration v0.1.3: default require_login to false for better local UX.
+    let mut mutated = false;
+    let mut value = value;
+    if value.settings.require_login {
+        value.settings.require_login = false;
+        mutated = true;
+    }
+
+    if mutated || serde_json::to_value(&value)? != parsed {
         write_json_atomic(path, &value).await?;
     }
     Ok(value)
