@@ -11,3 +11,5 @@
 //! trait that the public handler dispatches to.
 
 pub mod image;
+pub mod stt;
+pub mod tts;
