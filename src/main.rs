@@ -374,6 +374,16 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&addr).await?;
     let bound = listener.local_addr().ok();
 
+    // Print startup banner to stderr so the user sees it even when
+    // stdout is captured (containers, CI, …). The tracing subscriber
+    // writes to the log file only — this is the only terminal feedback.
+    eprintln!();
+    eprintln!("  openproxy {}", env!("CARGO_PKG_VERSION"));
+    eprintln!("  Dashboard → http://{}:{}", browser_host(&cli.host), bound.map(|a| a.port()).unwrap_or(cli.port));
+    eprintln!("  API       → http://{}:{}/v1", browser_host(&cli.host), bound.map(|a| a.port()).unwrap_or(cli.port));
+    eprintln!("  Press Ctrl+C to stop");
+    eprintln!();
+
     // Auto-open the dashboard in the user's default browser when running
     // interactively. Skipped when:
     //   • --no-open / OPENPROXY_NO_OPEN is set
