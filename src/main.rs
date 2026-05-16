@@ -379,8 +379,16 @@ async fn main() -> anyhow::Result<()> {
     // writes to the log file only — this is the only terminal feedback.
     eprintln!();
     eprintln!("  openproxy {}", env!("CARGO_PKG_VERSION"));
-    eprintln!("  Dashboard → http://{}:{}", browser_host(&cli.host), bound.map(|a| a.port()).unwrap_or(cli.port));
-    eprintln!("  API       → http://{}:{}/v1", browser_host(&cli.host), bound.map(|a| a.port()).unwrap_or(cli.port));
+    eprintln!(
+        "  Dashboard → http://{}:{}",
+        browser_host(&cli.host),
+        bound.map(|a| a.port()).unwrap_or(cli.port)
+    );
+    eprintln!(
+        "  API       → http://{}:{}/v1",
+        browser_host(&cli.host),
+        bound.map(|a| a.port()).unwrap_or(cli.port)
+    );
     eprintln!("  Press Ctrl+C to stop");
     eprintln!();
 
