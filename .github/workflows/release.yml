@@ -173,14 +173,9 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────
   # 3) Publish npm packages.
   #
-  # Uses npm Trusted Publishing (OIDC) — no NPM_TOKEN secret required.
-  # Requirements:
-  #   - Node >= 22.14.0, npm CLI >= 11.5.1
-  #   - Each package configured on npmjs.com as a Trusted Publisher:
-  #     Repository: quangdang46/openproxy
-  #     Workflow: release.yml
-  #     Environment: (leave blank)
-  #   - id-token: write permission (set at workflow level)
+  # Uses NPM_TOKEN (automation token) for authentication.
+  # The token must be a Classic Automation token or Granular token with
+  # bypass 2FA enabled.
   #
   # Order is non-negotiable:
   #   a) stage binaries into packages/platform/<target>/bin/openproxy
@@ -189,7 +184,6 @@ jobs:
   #   d) publish the meta `@openprx/openproxy` package
   #
   # Setup: `npm org create openprx` (first time).
-  # See: https://docs.npmjs.com/generating-provenance-statements#trusted-publishing
   # ──────────────────────────────────────────────────────────────────────
   publish-npm:
     name: Publish to npm
@@ -202,6 +196,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          registry-url: https://registry.npmjs.org
 
       - name: Download release tarballs
         uses: actions/download-artifact@v4
@@ -220,6 +215,8 @@ jobs:
           done
 
       - name: Publish platform packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -euo pipefail
           for d in packages/platform/*/; do
@@ -236,5 +233,7 @@ jobs:
           sleep 30
 
       - name: Publish meta package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages/openproxy
         run: npm publish --access public
