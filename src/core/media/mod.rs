@@ -10,6 +10,9 @@
 //! Each provider lives in its own module and implements a small adapter
 //! trait that the public handler dispatches to.
 
+pub mod embeddings;
 pub mod image;
+pub mod responses;
+pub mod search;
 pub mod stt;
 pub mod tts;
