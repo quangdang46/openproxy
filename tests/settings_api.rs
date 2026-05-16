@@ -33,6 +33,8 @@ async fn app_state() -> AppState {
             .settings
             .extra
             .insert("password".into(), Value::String("hashed-secret".into()));
+        state.settings.require_login = true;
+        state
     })
     .await
     .expect("seed db");
