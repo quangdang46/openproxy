@@ -118,7 +118,7 @@ impl OllamaExecutor {
         &self,
         request: OllamaExecutionRequest,
     ) -> Result<OllamaExecutorResponse, OllamaExecutorError> {
-        let url = self.build_url(&request.model, request.stream);
+        let url = self.build_url(&request.model, request.stream, &request.credentials);
         let headers = self.build_headers()?;
 
         let transformed_body = self.transform_request(&request.body)?;
@@ -142,8 +142,28 @@ impl OllamaExecutor {
         })
     }
 
-    fn build_url(&self, _model: &str, stream: bool) -> String {
-        format!("http://localhost:11434/api/chat?stream={}", stream)
+    /// Resolve the Ollama base URL.
+    ///
+    /// Order of precedence:
+    ///   1. `credentials.provider_specific_data.baseUrl` (e.g. when
+    ///      operating against a remote/host-overridden Ollama instance).
+    ///   2. The default `http://localhost:11434`.
+    fn build_url(
+        &self,
+        _model: &str,
+        stream: bool,
+        credentials: &crate::types::ProviderConnection,
+    ) -> String {
+        let base = credentials
+            .provider_specific_data
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "http://localhost:11434".to_string());
+        let base = base.trim_end_matches('/');
+        format!("{base}/api/chat?stream={stream}")
     }
 
     fn build_headers(&self) -> Result<HeaderMap, OllamaExecutorError> {
@@ -264,10 +284,23 @@ mod tests {
     #[test]
     fn test_build_url() {
         let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
-        let url = executor.build_url("llama3", true);
+        let creds = crate::types::ProviderConnection::default();
+        let url = executor.build_url("llama3", true, &creds);
         assert!(url.contains("stream=true"));
-        let url_no_stream = executor.build_url("llama3", false);
+        let url_no_stream = executor.build_url("llama3", false, &creds);
         assert!(url_no_stream.contains("stream=false"));
+    }
+
+    #[test]
+    fn test_build_url_honours_provider_specific_base() {
+        let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
+        let mut creds = crate::types::ProviderConnection::default();
+        creds.provider_specific_data.insert(
+            "baseUrl".to_string(),
+            serde_json::json!("http://192.168.1.10:11434"),
+        );
+        let url = executor.build_url("llama3", true, &creds);
+        assert!(url.starts_with("http://192.168.1.10:11434/api/chat"));
     }
 
     #[test]

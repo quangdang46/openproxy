@@ -1,3 +1,4 @@
+mod antigravity;
 mod api_key;
 mod azure;
 mod client_pool;
@@ -21,6 +22,10 @@ mod vertex;
 pub use api_key::{
     get_api_key_provider_config, is_api_key_provider, ApiKeyExecutionRequest, ApiKeyExecutor,
     ApiKeyExecutorError, ApiKeyExecutorResponse,
+};
+pub use antigravity::{
+    AntigravityExecutionRequest, AntigravityExecutor, AntigravityExecutorError,
+    AntigravityExecutorResponse, ANTIGRAVITY_BASE_URL,
 };
 pub use azure::{
     AzureExecutionRequest, AzureExecutor, AzureExecutorError, AzureExecutorResponse,
