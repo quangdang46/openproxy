@@ -31,6 +31,37 @@ pub use base::{
 };
 pub use handler::{handle_image_generation, ImageHandlerError};
 
+/// Run the image-generation pipeline for `provider` if a matching
+/// adapter exists. Returns `None` to indicate the caller should fall
+/// through to a generic flow.
+pub async fn dispatch(
+    client: &reqwest::Client,
+    credentials: &crate::types::ProviderConnection,
+    provider: &str,
+    model: &str,
+    body: &serde_json::Value,
+) -> Option<Result<serde_json::Value, super::MediaError>> {
+    let adapter = get_image_adapter(provider)?;
+    let inputs = handler::ImageHandlerInputs {
+        client,
+        adapter,
+        request: ImageRequest {
+            body,
+            model,
+            credentials,
+        },
+        binary_output: false,
+        stream_to_client: false,
+    };
+    Some(match handle_image_generation(inputs).await {
+        Ok(handler::HandlerOutput::Json(v)) => Ok(v),
+        Ok(_) => Err(super::MediaError::Validation(
+            "non-JSON image responses are only available via the binary endpoint".into(),
+        )),
+        Err(e) => Err(e.into()),
+    })
+}
+
 /// Look up the image adapter for a provider id. Returns `None` if the
 /// provider does not support image generation.
 pub fn get_image_adapter(provider: &str) -> Option<&'static dyn ImageAdapter> {

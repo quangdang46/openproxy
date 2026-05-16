@@ -9,7 +9,7 @@
 //! `ttsConfig.format` (hyperbolic, deepgram, nvidia, huggingface,
 //! inworld, cartesia, playht, coqui, tortoise, openai-compat).
 
-mod base;
+pub mod base;
 mod edge_tts;
 mod elevenlabs;
 mod gemini;
@@ -24,6 +24,38 @@ mod openrouter;
 pub use base::{TtsAdapter, TtsRequest, TtsResult};
 pub use generic_formats::{synthesize_via_format, GenericFormat, GenericTtsRequest};
 pub use handler::{handle_tts, TtsHandlerError};
+
+/// Synthesize speech for `provider` if a matching adapter exists.
+/// Returns the OpenAI-shape `{audio, format}` body, or `None` to fall
+/// through to a generic flow.
+pub async fn dispatch(
+    client: &reqwest::Client,
+    credentials: &crate::types::ProviderConnection,
+    provider: &str,
+    model: &str,
+    body: &serde_json::Value,
+) -> Option<Result<serde_json::Value, super::MediaError>> {
+    let adapter = get_tts_adapter(provider)?;
+    let text = body.get("input").and_then(|v| v.as_str()).unwrap_or("");
+    if text.trim().is_empty() {
+        return Some(Err(super::MediaError::Validation(
+            "Missing required field: input".into(),
+        )));
+    }
+    let request = TtsRequest {
+        text,
+        model,
+        credentials,
+        language: body.get("language").and_then(|v| v.as_str()),
+    };
+    Some(
+        adapter
+            .synthesize(client, &request)
+            .await
+            .map(|r| serde_json::json!({"audio": r.base64, "format": r.format}))
+            .map_err(Into::into),
+    )
+}
 
 /// Look up the TTS adapter for a provider id.
 pub fn get_tts_adapter(provider: &str) -> Option<&'static dyn TtsAdapter> {
