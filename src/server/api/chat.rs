@@ -383,14 +383,16 @@ async fn forward_with_provider_fallback(
             .await;
 
         use crate::core::executor::{
-            AzureExecutionRequest, AzureExecutor, CodexExecutionRequest, CodexExecutor,
-            CommandCodeExecutionRequest, CommandCodeExecutor, CursorExecutionRequest,
-            CursorExecutor, DefaultExecutor, ExecutionRequest, GeminiCliExecutionRequest,
-            GeminiCliExecutor, GithubExecutionRequest, GithubExecutor, IFlowExecutionRequest,
-            IFlowExecutor, KiroExecutionRequest, KiroExecutor, KiroExecutorResponse,
-            OpenCodeExecutionRequest, OpenCodeExecutor, OpenCodeGoExecutionRequest,
-            OpenCodeGoExecutor, QoderExecutionRequest, QoderExecutor, QwenExecutionRequest,
-            QwenExecutor, VertexExecutionRequest, VertexExecutor,
+            AntigravityExecutionRequest, AntigravityExecutor, AzureExecutionRequest, AzureExecutor,
+            CodexExecutionRequest, CodexExecutor, CommandCodeExecutionRequest, CommandCodeExecutor,
+            CursorExecutionRequest, CursorExecutor, DefaultExecutor, ExecutionRequest,
+            GeminiCliExecutionRequest, GeminiCliExecutor, GithubExecutionRequest, GithubExecutor,
+            GrokWebExecutionRequest, GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor,
+            KiroExecutionRequest, KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest,
+            OpenCodeExecutor, OpenCodeGoExecutionRequest, OpenCodeGoExecutor,
+            PerplexityWebExecutionRequest, PerplexityWebExecutor, QoderExecutionRequest,
+            QoderExecutor, QwenExecutionRequest, QwenExecutor, VertexExecutionRequest,
+            VertexExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/");
@@ -744,6 +746,80 @@ async fn forward_with_provider_fallback(
                     .map_err(|e| ComboAttemptError {
                         status: 500,
                         message: format!("CommandCode execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "antigravity" {
+                let executor = AntigravityExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Antigravity executor creation failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                let result = executor
+                    .execute_request(AntigravityExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Antigravity execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "grok-web" {
+                let executor = GrokWebExecutor::new(state.client_pool.clone());
+                let result = executor
+                    .execute_request(GrokWebExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("GrokWeb execution failed: {:?}", e),
+                        retry_after: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "perplexity-web" {
+                let executor = PerplexityWebExecutor::new(state.client_pool.clone());
+                let result = executor
+                    .execute_request(PerplexityWebExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("PerplexityWeb execution failed: {:?}", e),
                         retry_after: None,
                     })?;
                 Ok(KiroExecutorResponse {

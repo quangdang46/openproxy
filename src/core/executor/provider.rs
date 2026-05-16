@@ -767,6 +767,88 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
                 "exa",
                 ProviderExecutorConfig::openai("https://api.exa.ai/v1"),
             ),
+            (
+                "antigravity",
+                ProviderExecutorConfig::gemini(
+                    "https://cloudcode-pa.googleapis.com/v1internal",
+                ),
+            ),
+            (
+                "grok-web",
+                ProviderExecutorConfig::openai("https://grok.com/app-chat/conversations/new"),
+            ),
+            (
+                "perplexity-web",
+                ProviderExecutorConfig::openai("https://www.perplexity.ai"),
+            ),
+            (
+                "xiaomi-mimo",
+                ProviderExecutorConfig::openai("https://api.xiaomimimo.com/v1"),
+            ),
+            (
+                "assemblyai",
+                ProviderExecutorConfig::openai("https://api.assemblyai.com/v2"),
+            ),
+            (
+                "black-forest-labs",
+                ProviderExecutorConfig::openai("https://api.blackforestlabs.ai/v1"),
+            ),
+            (
+                "fal-ai",
+                ProviderExecutorConfig::openai("https://fal.run/fal-ai"),
+            ),
+            (
+                "runwayml",
+                ProviderExecutorConfig::openai("https://api.runwayml.com/v1"),
+            ),
+            (
+                "sdwebui",
+                ProviderExecutorConfig::openai("http://127.0.0.1:7860"),
+            ),
+            (
+                "comfyui",
+                ProviderExecutorConfig::openai("http://127.0.0.1:8188"),
+            ),
+            (
+                "huggingface",
+                ProviderExecutorConfig::openai("https://api-inference.huggingface.co"),
+            ),
+            (
+                "jina-ai",
+                ProviderExecutorConfig::openai("https://api.jina.ai/v1"),
+            ),
+            (
+                "linkup",
+                ProviderExecutorConfig::openai("https://api.linkup.so/v1"),
+            ),
+            (
+                "searxng",
+                ProviderExecutorConfig::openai("http://localhost:8080"),
+            ),
+            (
+                "youcom",
+                ProviderExecutorConfig::openai("https://api.you.com/v1"),
+            ),
+            (
+                "google-pse",
+                ProviderExecutorConfig::openai("https://www.googleapis.com/customsearch/v1"),
+            ),
+            (
+                "searchapi",
+                ProviderExecutorConfig::openai("https://www.searchapi.io/api/v1"),
+            ),
+            (
+                "firecrawl",
+                ProviderExecutorConfig::openai("https://api.firecrawl.dev/v1"),
+            ),
+            (
+                "topaz",
+                ProviderExecutorConfig::openai("https://api.topazlabs.com/v1"),
+            ),
+            (
+                "ollama",
+                ProviderExecutorConfig::openai("https://api.ollama.com/v1"),
+            ),
         ])
     });
 
@@ -856,6 +938,26 @@ pub fn get_api_key_providers() -> Vec<&'static str> {
         "brave-search",
         "serper",
         "exa",
+        "antigravity",
+        "grok-web",
+        "perplexity-web",
+        "xiaomi-mimo",
+        "assemblyai",
+        "black-forest-labs",
+        "fal-ai",
+        "runwayml",
+        "sdwebui",
+        "comfyui",
+        "huggingface",
+        "jina-ai",
+        "linkup",
+        "searxng",
+        "youcom",
+        "google-pse",
+        "searchapi",
+        "firecrawl",
+        "topaz",
+        "ollama",
     ]
 }
 
@@ -875,6 +977,6 @@ pub fn get_specialty_providers() -> Vec<&'static str> {
     vec![
         "claude", "codex", "github", "kiro", "vertex", "cursor", "ollama", "grok",
         "azure", "qwen", "iflow", "gemini-cli", "opencode", "opencode-go", "qoder",
-        "commandcode",
+        "commandcode", "antigravity", "grok-web", "perplexity-web", "xiaomi-mimo",
     ]
 }
