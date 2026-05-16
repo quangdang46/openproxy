@@ -1,0 +1,115 @@
+---
+// `/login` — Dashboard login page.
+// Handles first-login password entry and session creation.
+import Layout from '@/layouts/Layout.astro';
+
+const INITIAL_PASSWORD = '123456';
+---
+<Layout title="OpenProxy - Login">
+  <div class="min-h-screen flex items-center justify-center bg-canvas px-4">
+    <div class="w-full max-w-md">
+      <!-- Logo / Brand -->
+      <div class="text-center mb-8">
+        <div class="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-primary/10 mb-4">
+          <span class="material-symbols-outlined text-3xl text-primary">shield_lock</span>
+        </div>
+        <h1 class="text-2xl font-bold text-ink mb-1">OpenProxy</h1>
+        <p class="text-sm text-text-muted">Sign in to your dashboard</p>
+      </div>
+
+      <!-- Login Form -->
+      <div class="bg-surface rounded-xl border border-hairline-soft p-6 shadow-sm">
+        <form id="login-form" class="space-y-4">
+          <div>
+            <label for="password" class="block text-sm font-medium text-ink mb-1.5">
+              Password
+            </label>
+            <input
+              type="password"
+              id="password"
+              name="password"
+              required
+              autocomplete="current-password"
+              class="w-full px-3 py-2 rounded-lg border border-hairline-soft bg-surface-2 text-ink text-sm focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition"
+              placeholder="Enter your password"
+            />
+          </div>
+
+          <div id="error-msg" class="hidden text-sm text-danger bg-danger/10 border border-danger/20 rounded-lg px-3 py-2">
+          </div>
+
+          <button
+            type="submit"
+            id="login-btn"
+            class="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-white text-sm font-medium hover:bg-primary/90 transition focus:outline-none focus:ring-2 focus:ring-primary/50 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <span id="btn-text">Sign In</span>
+            <span id="btn-spinner" class="hidden">
+              <svg class="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+            </span>
+          </button>
+        </form>
+
+        <!-- First-login hint -->
+        <div id="first-login-hint" class="mt-4 pt-4 border-t border-hairline-soft text-xs text-text-muted text-center">
+          Default password: <code class="px-1.5 py-0.5 rounded bg-surface-2 font-mono">{INITIAL_PASSWORD}</code>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById('login-form') as HTMLFormElement;
+    const passwordInput = document.getElementById('password') as HTMLInputElement;
+    const errorMsg = document.getElementById('error-msg') as HTMLDivElement;
+    const loginBtn = document.getElementById('login-btn') as HTMLButtonElement;
+    const btnText = document.getElementById('btn-text') as HTMLSpanElement;
+    const btnSpinner = document.getElementById('btn-spinner') as HTMLSpanElement;
+    const firstLoginHint = document.getElementById('first-login-hint') as HTMLDivElement;
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errorMsg.classList.add('hidden');
+      loginBtn.disabled = true;
+      btnText.textContent = 'Signing in...';
+      btnSpinner.classList.remove('hidden');
+
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: passwordInput.value }),
+        });
+
+        const data = await res.json();
+
+        if (res.ok && data.authenticated) {
+          // Check if this is first login (default password)
+          if (passwordInput.value === '{INITIAL_PASSWORD}') {
+            firstLoginHint.classList.remove('hidden');
+            firstLoginHint.innerHTML = '<span class="text-warning">This is the default password. Change it in Settings → Security after logging in.</span>';
+          }
+          window.location.href = '/dashboard';
+        } else {
+          errorMsg.textContent = data.error || 'Invalid password. Please try again.';
+          errorMsg.classList.remove('hidden');
+          passwordInput.value = '';
+          passwordInput.focus();
+        }
+      } catch (err) {
+        errorMsg.textContent = 'Connection failed. Is the server running?';
+        errorMsg.classList.remove('hidden');
+      } finally {
+        loginBtn.disabled = false;
+        btnText.textContent = 'Sign In';
+        btnSpinner.classList.add('hidden');
+      }
+    });
+
+    // Focus password field on load
+    passwordInput.focus();
+  </script>
+</Layout>
