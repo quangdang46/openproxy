@@ -6,6 +6,7 @@ pub mod cloud_credentials;
 pub mod cloud_sync;
 pub mod compat;
 pub mod locale;
+pub mod mcp;
 pub mod media;
 pub mod media_providers;
 pub mod mitm_config;
@@ -106,6 +107,7 @@ pub fn routes() -> Router<AppState> {
         .merge(cloud_sync::routes())
         .merge(cloud_credentials::routes())
         .merge(locale::routes())
+        .merge(mcp::routes())
         .merge(models_disabled::routes())
         .merge(models_alias::routes())
         .merge(models_availability::routes())
