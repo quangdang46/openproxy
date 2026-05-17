@@ -98,15 +98,15 @@ async fn get_usage_stats(
         return response;
     }
 
-    let period = match query.period.as_deref().unwrap_or("7d") {
-        value @ ("24h" | "7d" | "30d" | "60d" | "all") => {
+    let period = match query.period.as_deref().unwrap_or("today") {
+        value @ ("today" | "24h" | "7d" | "30d" | "60d" | "all") => {
             UsagePeriod::parse(value).expect("validated usage period must parse")
         }
         _ => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
-                    "error": "Invalid period. Use one of: 24h, 7d, 30d, 60d, all"
+                    "error": "Invalid period. Use one of: today, 24h, 7d, 30d, 60d, all"
                 })),
             )
                 .into_response()
@@ -484,8 +484,8 @@ async fn get_usage_chart(
         return response;
     }
 
-    let period = params.period.as_deref().unwrap_or("7d");
-    if !matches!(period, "24h" | "7d" | "30d" | "60d") {
+    let period = params.period.as_deref().unwrap_or("today");
+    if !matches!(period, "today" | "24h" | "7d" | "30d" | "60d") {
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "Invalid period" })),
@@ -499,6 +499,44 @@ async fn get_usage_chart(
 }
 
 fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> {
+    if period == "today" {
+        let now = Utc::now();
+        let start = now
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| naive.and_utc())
+            .unwrap_or(now);
+        let bucket_count = 24usize;
+        let bucket_ms = 60 * 60 * 1000_i64;
+
+        let mut buckets = (0..bucket_count)
+            .map(|index| {
+                let ts = start + ChronoDuration::hours(index as i64);
+                UsageChartBucket {
+                    label: ts.format("%H:%M").to_string(),
+                    tokens: 0,
+                    cost: 0.0,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for entry in &usage_db.history {
+            let Some(timestamp) = entry.timestamp.as_deref().and_then(parse_usage_timestamp) else {
+                continue;
+            };
+            if timestamp < start || timestamp > now {
+                continue;
+            }
+
+            let delta_ms = timestamp.timestamp_millis() - start.timestamp_millis();
+            let index = (delta_ms / bucket_ms).clamp(0, (bucket_count - 1) as i64) as usize;
+            buckets[index].tokens += usage_prompt_tokens(entry) + usage_completion_tokens(entry);
+            buckets[index].cost += entry.cost.unwrap_or(0.0);
+        }
+
+        return buckets;
+    }
+
     if period == "24h" {
         let now = Utc::now();
         let bucket_count = 24usize;

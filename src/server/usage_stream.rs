@@ -120,6 +120,7 @@ pub struct RecentRequest {
 
 #[derive(Debug, Clone, Copy)]
 pub enum UsagePeriod {
+    Today,
     Last24Hours,
     Last7Days,
     Last30Days,
@@ -130,6 +131,7 @@ pub enum UsagePeriod {
 impl UsagePeriod {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
+            "today" => Some(Self::Today),
             "24h" => Some(Self::Last24Hours),
             "7d" => Some(Self::Last7Days),
             "30d" => Some(Self::Last30Days),
@@ -213,6 +215,29 @@ pub fn build_usage_stats(
     };
 
     match period {
+        UsagePeriod::Today => {
+            let now = Utc::now();
+            let cutoff = now
+                .date_naive()
+                .and_hms_opt(0, 0, 0)
+                .map(|naive| naive.and_utc())
+                .unwrap_or(now);
+            for entry in usage_db.history.iter().filter(|entry| {
+                entry
+                    .timestamp
+                    .as_deref()
+                    .and_then(parse_timestamp)
+                    .is_some_and(|ts| ts >= cutoff)
+            }) {
+                aggregate_live_entry(
+                    &mut stats,
+                    entry,
+                    &connection_names,
+                    &provider_names,
+                    &api_key_names,
+                );
+            }
+        }
         UsagePeriod::Last24Hours => {
             let cutoff = Utc::now() - ChronoDuration::hours(24);
             for entry in usage_db.history.iter().filter(|entry| {
@@ -240,7 +265,7 @@ pub fn build_usage_stats(
                 UsagePeriod::Last30Days => Some(30),
                 UsagePeriod::Last60Days => Some(60),
                 UsagePeriod::All => None,
-                UsagePeriod::Last24Hours => unreachable!(),
+                UsagePeriod::Last24Hours | UsagePeriod::Today => unreachable!(),
             };
             let today = Utc::now().date_naive();
             for (date_key, day) in &usage_db.daily_summary {
