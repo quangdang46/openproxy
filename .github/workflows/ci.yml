@@ -6,17 +6,25 @@ on:
   pull_request:
     branches: [main]
 
+# Cancel any in-flight CI run on the same ref when a new push lands.
+# Spares ~30 minutes of runner time per stacked push to a branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    name: Check (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  # ──────────────────────────────────────────────────────────────────────
+  # Web: lint + typecheck + build the Astro dashboard.
+  #
+  # Runs unconditionally — the resulting web/dist/ is required by build.rs
+  # before any Rust compile step in this workflow.
+  # ──────────────────────────────────────────────────────────────────────
+  web:
+    name: Web (Astro)
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -32,11 +40,82 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
+      - name: Install deps
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      # `astro check` runs the TypeScript compiler against .astro/.ts/.tsx
+      # files and surfaces type errors that `pnpm run build` only catches
+      # for content collections. Advisory until the web side is clean —
+      # tighten by removing `|| true` once green.
+      - name: astro check (advisory)
+        working-directory: web
+        run: pnpm exec astro check || true
+
       - name: Build dashboard
         working-directory: web
+        run: pnpm run build
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 1
+
+  # ──────────────────────────────────────────────────────────────────────
+  # JS unit tests under tests/unit/. These are translator and RTK
+  # regression suites that don't need the Rust binary to run.
+  # ──────────────────────────────────────────────────────────────────────
+  js-tests:
+    name: JS unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run unit tests
         run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
+          set -euo pipefail
+          shopt -s nullglob
+          tests=(tests/unit/*.test.js)
+          if [ ${#tests[@]} -eq 0 ]; then
+            echo "no JS unit tests found under tests/unit/"
+            exit 0
+          fi
+          # node --test discovers files via its own glob; we pass them
+          # explicitly so a future rename can't silently disable the suite.
+          node --test "${tests[@]}"
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Rust: fmt + clippy + tests on Linux and macOS only.
+  #
+  # We previously matrixed Windows too, but the release workflow does not
+  # ship a Windows binary, and the Rust crate doesn't have Windows-specific
+  # code paths beyond what cargo/rustc already validates per-target. Once
+  # release.yml gains a Windows target, re-add `windows-latest` here.
+  # ──────────────────────────────────────────────────────────────────────
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: [web]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -45,6 +124,9 @@ jobs:
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
+        with:
+          # Per-OS key so PRs on different runners don't collide.
+          key: ${{ matrix.os }}
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -61,8 +143,54 @@ jobs:
         # several places (HOME-redirect for CLI tool detection in
         # cli_tool_native_settings_api.rs and cowork_settings_api.rs;
         # POSIX shell-out in src/server/api/cli_tools.rs unit tests).
-        # macOS/Windows still run fmt + clippy above as a build/compile
-        # gate. Cross-platform binary builds are validated end-to-end
-        # in .github/workflows/release.yml.
+        # macOS still runs fmt + clippy above as a build/compile gate.
+        # Cross-platform binary builds are validated end-to-end in
+        # .github/workflows/release.yml.
         if: runner.os == 'Linux'
         run: cargo test --all-features
+
+  # ──────────────────────────────────────────────────────────────────────
+  # Manifest version sync gate.
+  #
+  # Ensures Cargo.toml and every published package.json move together —
+  # any drift between them produces a binary whose `--version` disagrees
+  # with the npm package, which is exactly the bug we ran into pre-0.1.4.
+  # ──────────────────────────────────────────────────────────────────────
+  manifests:
+    name: Manifest versions in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          CARGO=$(awk '/^\[package\]/{p=1; next} p && /^\[/{exit} p && /^[[:space:]]*version[[:space:]]*=/{
+            match($0, /"[^"]+"/); print substr($0, RSTART+1, RLENGTH-2); exit
+          }' Cargo.toml)
+          META=$(node -p "require('./packages/openproxy/package.json').version")
+          echo "Cargo.toml             $CARGO"
+          echo "packages/openproxy     $META"
+          fail=0
+          if [ "$CARGO" != "$META" ]; then
+            echo "::error::Cargo.toml ($CARGO) != packages/openproxy ($META)"
+            fail=1
+          fi
+          for d in packages/platform/*/; do
+            v=$(node -p "require('./${d}package.json').version")
+            name=$(basename "$d")
+            echo "platform/${name}     $v"
+            if [ "$v" != "$CARGO" ]; then
+              echo "::error::Cargo.toml ($CARGO) != platform/${name} ($v)"
+              fail=1
+            fi
+          done
+          # Meta optionalDependencies must also pin the same version.
+          while IFS= read -r dep_v; do
+            if [ "$dep_v" != "$CARGO" ]; then
+              echo "::error::meta optionalDependencies pin $dep_v != $CARGO"
+              fail=1
+            fi
+          done < <(node -e "const d=require('./packages/openproxy/package.json').optionalDependencies||{}; Object.values(d).forEach(v=>console.log(v))")
+          exit $fail

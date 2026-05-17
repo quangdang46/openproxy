@@ -47,7 +47,10 @@ excalidraw.log
 next-env.d.ts
 
 .bin/*
-data/
+# Top-level `data/` is the Next.js side-app's scratch directory. Anchor with
+# a leading slash so we don't sweep up Rust-side data dirs like
+# `src/core/config/data/` that ship include_str! payloads.
+/data/
 logs/*
 source/*
 .cursor/*

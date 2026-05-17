@@ -5,8 +5,10 @@
  * Called by the release workflow after binaries are built and downloaded.
  *
  * Responsibilities:
- *   1. Set the `version` field in all 5 package.json files (meta + 4 platforms)
- *      and rewrite the meta package's `optionalDependencies` versions.
+ *   1. Set the `version` field in Cargo.toml and all 5 package.json files
+ *      (meta + 4 platforms), and rewrite the meta package's
+ *      `optionalDependencies` versions. Keeps the Rust binary's `--version`
+ *      output in lockstep with the npm package version users install.
  *   2. Extract each release tarball and place the binary at
  *      packages/platform/<npm-target>/bin/openproxy with mode 0755.
  *
@@ -79,7 +81,42 @@ function updatePackageJson(path, mutate) {
   writeFileSync(path, JSON.stringify(json, null, 2) + '\n');
 }
 
+function setCargoVersion(cargoPath, version) {
+  const raw = readFileSync(cargoPath, 'utf8');
+  // Only rewrite the first `version = "..."` line inside the [package] block.
+  // We anchor on the [package] header so a stray version key elsewhere
+  // (e.g. inside a dependency entry rendered across lines) is never touched.
+  const lines = raw.split('\n');
+  let inPackage = false;
+  let rewrote = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*\[package\]\s*$/.test(line)) {
+      inPackage = true;
+      continue;
+    }
+    if (inPackage && /^\s*\[/.test(line)) {
+      // Entered a new table; we're done with [package].
+      break;
+    }
+    if (inPackage && /^\s*version\s*=\s*"[^"]*"\s*$/.test(line)) {
+      lines[i] = line.replace(/"[^"]*"/, `"${version}"`);
+      rewrote = true;
+      break;
+    }
+  }
+  if (!rewrote) {
+    throw new Error(`could not find version key in [package] block of ${cargoPath}`);
+  }
+  writeFileSync(cargoPath, lines.join('\n'));
+}
+
 function setVersions(version) {
+  // Cargo manifest — keeps `openproxy --version` aligned with npm/GitHub release.
+  const cargoPath = join(REPO_ROOT, 'Cargo.toml');
+  setCargoVersion(cargoPath, version);
+  console.log(`✓ Cargo.toml -> ${version}`);
+
   // Meta package
   const metaPath = join(REPO_ROOT, 'packages/openproxy/package.json');
   updatePackageJson(metaPath, (json) => {
