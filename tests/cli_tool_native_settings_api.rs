@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_lock)]
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

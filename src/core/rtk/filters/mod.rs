@@ -509,7 +509,7 @@ pub fn ls_impl(input: &str) -> String {
     let mut summary = format!("\nSummary: {} files, {} dirs", files.len(), dirs.len());
     if !by_ext.is_empty() {
         let mut ext: Vec<(String, usize)> = by_ext.iter().map(|(k, v)| (k.clone(), *v)).collect();
-        ext.sort_by(|a, b| b.1.cmp(&a.1));
+        ext.sort_by_key(|b| std::cmp::Reverse(b.1));
         let parts: Vec<String> = ext
             .iter()
             .take(LS_EXT_SUMMARY_TOP)

@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_lock)]
 use openproxy::core::tls::ensure_rustls_provider;
 use std::sync::{Arc, Mutex};
 

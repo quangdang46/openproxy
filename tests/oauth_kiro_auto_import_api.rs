@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_lock)]
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 

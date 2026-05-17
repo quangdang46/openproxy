@@ -3,8 +3,8 @@
 //! Per-connection session-id manager for the Antigravity Cloud Code path.
 //! The upstream binary mints a session id once at startup (`randomUUID()
 //! + Date.now()`); since the proxy is long-running, we simulate the same
-//! "stable for the process lifetime" behaviour by caching one id per
-//! connection-id (typically the OAuth account email).
+//!   "stable for the process lifetime" behaviour by caching one id per
+//!   connection-id (typically the OAuth account email).
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;

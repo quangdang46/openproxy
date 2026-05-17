@@ -1,3 +1,4 @@
+#![allow(clippy::await_holding_lock)]
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
