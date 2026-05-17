@@ -4,6 +4,7 @@ import { UsageStats, RequestLogger, CardSkeleton, SegmentedControl } from "@/sha
 import RequestDetailsTab from "@/components/usage/RequestDetailsTab";
 
 const PERIODS = [
+  { value: "today", label: "Today" },
   { value: "24h", label: "24h" },
   { value: "7d", label: "7D" },
   { value: "30d", label: "30D" },
@@ -36,7 +37,7 @@ function UsageContent() {
   };
 
   const [tabLoading, setTabLoading] = useState(false);
-  const [period, setPeriod] = useState("7d");
+  const [period, setPeriod] = useState("today");
 
   const tabFromUrl = searchParams.get("tab");
   const activeTab = tabFromUrl && ["overview", "logs", "details"].includes(tabFromUrl)
