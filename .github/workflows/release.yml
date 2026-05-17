@@ -15,6 +15,52 @@ permissions:
 
 jobs:
   # ──────────────────────────────────────────────────────────────────────
+  # 0) Sanity gate: refuse to release if Cargo.toml, the meta package.json,
+  #    and every platform package.json don't already match the tag.
+  #
+  # The stage-npm-binaries.mjs script rewrites every manifest at publish
+  # time, but we still want a hard fail here if the tag was cut from a
+  # commit where the manifests had drifted — that way the released GitHub
+  # tarball and the npm package always agree on what `--version` prints.
+  # ──────────────────────────────────────────────────────────────────────
+  verify-versions:
+    name: Verify manifest versions match tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compare versions
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          CARGO=$(awk '/^\[package\]/{p=1; next} p && /^\[/{exit} p && /^[[:space:]]*version[[:space:]]*=/{
+            match($0, /"[^"]+"/); print substr($0, RSTART+1, RLENGTH-2); exit
+          }' Cargo.toml)
+          META=$(node -p "require('./packages/openproxy/package.json').version")
+          echo "tag                    $TAG"
+          echo "Cargo.toml             $CARGO"
+          echo "packages/openproxy     $META"
+          fail=0
+          if [ "$CARGO" != "$TAG" ]; then
+            echo "::error::Cargo.toml ($CARGO) does not match tag ($TAG)"
+            fail=1
+          fi
+          if [ "$META" != "$TAG" ]; then
+            echo "::error::packages/openproxy ($META) does not match tag ($TAG)"
+            fail=1
+          fi
+          for d in packages/platform/*/; do
+            v=$(node -p "require('./${d}package.json').version")
+            name=$(basename "$d")
+            echo "platform/${name}     $v"
+            if [ "$v" != "$TAG" ]; then
+              echo "::error::platform/${name} ($v) does not match tag ($TAG)"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  # ──────────────────────────────────────────────────────────────────────
   # 1) Build platform binaries.
   #
   # Each job builds the dashboard with pnpm, then cross-compiles (Linux
@@ -24,6 +70,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────
   build:
     name: Build ${{ matrix.target }}
+    needs: [verify-versions]
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -221,19 +268,64 @@ jobs:
           set -euo pipefail
           for d in packages/platform/*/; do
             echo "::group::Publish $(basename "$d")"
-            (cd "$d" && npm publish --access public)
+            # --provenance produces a signed npm attestation against this
+            # workflow run; requires the `id-token: write` permission set
+            # at the top of this file.
+            (cd "$d" && npm publish --access public --provenance)
             echo "::endgroup::"
           done
 
       - name: Wait for npm registry propagation
+        shell: bash
         run: |
+          set -euo pipefail
           # The meta package's optionalDependencies reference the platform
           # packages by name + exact version. npm refuses to publish if any
-          # referenced version isn't yet available, so we need a margin.
-          sleep 30
+          # referenced version isn't yet available, so we poll the registry
+          # for each platform package instead of sleeping a fixed amount.
+          TAG="${GITHUB_REF_NAME#v}"
+          PACKAGES=(
+            "@openprx/openproxy-linux-x64"
+            "@openprx/openproxy-linux-arm64"
+            "@openprx/openproxy-darwin-x64"
+            "@openprx/openproxy-darwin-arm64"
+          )
+          for pkg in "${PACKAGES[@]}"; do
+            echo "::group::Waiting for ${pkg}@${TAG}"
+            for attempt in $(seq 1 60); do
+              if npm view "${pkg}@${TAG}" version >/dev/null 2>&1; then
+                echo "found after ${attempt} attempt(s)"
+                break
+              fi
+              if [ "$attempt" -eq 60 ]; then
+                echo "::error::${pkg}@${TAG} did not appear within 120s"
+                exit 1
+              fi
+              sleep 2
+            done
+            echo "::endgroup::"
+          done
 
       - name: Publish meta package
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: packages/openproxy
-        run: npm publish --access public
+        run: npm publish --access public --provenance
+
+      # Smoke test: install the just-published meta package on a fresh
+      # runner via `npm install -g` and execute `--version`. Catches
+      # publishing accidents (missing bin, broken optionalDependencies,
+      # binary that segfaults at boot) before a user does.
+      - name: Smoke test published package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          npm install -g "@openprx/openproxy@${TAG}"
+          OUT=$(openproxy --version 2>&1 || true)
+          echo "openproxy --version: $OUT"
+          if ! echo "$OUT" | grep -q "$TAG"; then
+            echo "::error::openproxy --version does not contain ${TAG}: ${OUT}"
+            exit 1
+          fi

@@ -1,2 +1,78 @@
+# Dependabot config — keeps the Rust crate, dashboard, npm packages,
+# and GitHub Actions in lockstep. One PR per ecosystem per week so the
+# noise is bounded and easy to review.
+#
+# Reviewer note: dependabot opens against the default branch. CI on
+# those PRs runs the full lint+test matrix from ci.yml.
 version: 2
-updates: []
+updates:
+  # Rust crate at the repo root.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: "deps(cargo)"
+    groups:
+      tokio:
+        patterns: ["tokio*"]
+      tower:
+        patterns: ["tower*"]
+      hyper:
+        patterns: ["hyper*", "hyper-*"]
+      tracing:
+        patterns: ["tracing*"]
+      serde:
+        patterns: ["serde*"]
+
+  # Astro dashboard.
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - dashboard
+    commit-message:
+      prefix: "deps(web)"
+
+  # npm meta package (mostly just a launcher; rarely changes).
+  - package-ecosystem: npm
+    directory: "/packages/openproxy"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 2
+    labels:
+      - dependencies
+      - npm-meta
+    commit-message:
+      prefix: "deps(npm-meta)"
+
+  # GitHub Actions used in the three workflows.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: "Asia/Ho_Chi_Minh"
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: "deps(actions)"
