@@ -381,6 +381,10 @@ impl TranslationRegistry {
 /// Mirrors the hooks in open-sse/translator/index.js:
 ///   stripContentTypes, normalizeThinkingConfig, ensureToolCallIds, fixMissingToolResponses
 fn apply_normalization_hooks(body: &mut Value) -> bool {
+    // normalizeDeveloperRole: rewrite role "developer" -> "system" so
+    // OAI-compat providers (DeepSeek, Groq, Ollama, …) that pre-date the
+    // Codex CLI role split don't 400 on the request.
+    crate::core::translator::helpers::openai_helper::normalize_developer_role(body);
     // ensureToolCallIds: ensure tool_calls have ids
     ensure_tool_call_ids(body);
     // fixMissingToolResponses: insert empty tool_result if needed
