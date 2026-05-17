@@ -169,7 +169,6 @@ async fn execute_combo_fetch(
 ) -> Result<Response, crate::core::combo::ComboExecutionError> {
     let url = url.clone();
     let format = format.to_string();
-    let max_chars = max_chars;
     let state = state.clone();
 
     crate::core::combo::execute_combo_strategy(models, combo_name, strategy, move |model: &str| {

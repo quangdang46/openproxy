@@ -886,7 +886,7 @@ async fn models_availability_post_clears_cooldown_like_js() {
         .unwrap();
     assert_eq!(untouched.test_status.as_deref(), Some("unavailable"));
     assert_eq!(untouched.last_error.as_deref(), Some("still locked"));
-    assert!(untouched.extra.get("modelLock_gpt-4o-mini").is_none());
+    assert!(!untouched.extra.contains_key("modelLock_gpt-4o-mini"));
 }
 
 #[tokio::test]

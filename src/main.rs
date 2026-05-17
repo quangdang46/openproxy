@@ -1,3 +1,4 @@
+#![allow(clippy::single_match)]
 use clap::CommandFactory;
 use clap::Parser;
 use std::sync::Arc;

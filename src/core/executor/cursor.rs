@@ -1085,9 +1085,9 @@ fn generate_cursor_checksum(machine_id: &str) -> String {
 
     // Jyh cipher obfuscation
     let mut t: u8 = 165;
-    for i in 0..byte_array.len() {
-        byte_array[i] = (byte_array[i] ^ t).wrapping_add(i as u8);
-        t = byte_array[i];
+    for (i, byte) in byte_array.iter_mut().enumerate() {
+        *byte = (*byte ^ t).wrapping_add(i as u8);
+        t = *byte;
     }
 
     // URL-safe base64 encode (without padding)

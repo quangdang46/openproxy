@@ -86,11 +86,8 @@ async fn parse_codex_stream(response: reqwest::Response) -> Result<Option<String
         let chunk = chunk.map_err(|e| format!("codex stream: {e}"))?;
         buffer.extend_from_slice(&chunk);
 
-        loop {
+        while let Some(idx) = find_blank_line(&buffer) {
             // Frames are delimited by \n\n.
-            let Some(idx) = find_blank_line(&buffer) else {
-                break;
-            };
             let frame = buffer.drain(..idx + 2).collect::<Vec<u8>>();
             let frame_str = String::from_utf8_lossy(&frame[..idx]);
             let mut event_name: Option<String> = None;
