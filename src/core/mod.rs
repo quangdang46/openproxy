@@ -4,6 +4,7 @@ pub mod combo;
 pub mod config;
 pub mod dns;
 pub mod executor;
+pub mod mcp;
 pub mod media;
 pub mod mitm;
 pub mod model;
