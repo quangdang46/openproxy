@@ -249,6 +249,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.topazlabs.com/v1"),
         ),
         (
+            "inference-net",
+            ProviderConfig::openai("https://api.inference.net/v1/chat/completions"),
+        ),
+        (
             "ollama",
             ProviderConfig::openai("https://api.ollama.com/v1/chat/completions"),
         ),

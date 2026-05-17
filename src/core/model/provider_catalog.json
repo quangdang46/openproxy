@@ -55,7 +55,8 @@
     "perplexity-web": "perplexity-web",
     "azure": "azure",
     "cloudflare-ai": "cloudflare-ai",
-    "xiaomi-mimo": "xiaomi-mimo"
+    "xiaomi-mimo": "xiaomi-mimo",
+    "inference-net": "inference-net"
   },
   "providerModels": [
     {
@@ -3106,6 +3107,26 @@
           "kind": "llm"
         }
       ]
+    },
+    {
+      "alias": "inference-net",
+      "models": [
+        {
+          "id": "meta-llama/llama-3.3-70b-instruct/fp-16",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek/deepseek-v3-0324",
+          "name": "DeepSeek V3",
+          "kind": "llm"
+        },
+        {
+          "id": "mistralai/mistral-nemo-12b-instruct/fp-16",
+          "name": "Mistral Nemo 12B",
+          "kind": "llm"
+        }
+      ]
     }
   ],
   "providers": [
@@ -4149,6 +4170,17 @@
     {
       "id": "perplexity-web",
       "alias": "pw",
+      "serviceKinds": [
+        "llm"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "inference-net",
+      "alias": "inference-net",
       "serviceKinds": [
         "llm"
       ],
