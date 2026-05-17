@@ -834,7 +834,15 @@ async fn get_openclaw_settings(State(state): State<AppState>, headers: HeaderMap
                     } else {
                         None
                     };
+                // Coerce `agent.model` to its string id when OpenClaw 2026.5.x
+                // stores it as `{primary, fallbacks}` so frontend code can call
+                // `.startsWith()` on it without throwing TypeError. Ports
+                // `resolveAgentModel` from upstream 9router
+                // `src/app/api/cli-tools/openclaw-settings/route.js`.
+                let normalized_model =
+                    resolve_openclaw_agent_model_id(agent.get("model")).to_string();
                 if let Some(agent_object) = agent.as_object_mut() {
+                    agent_object.insert("model".to_string(), Value::String(normalized_model));
                     agent_object.insert(
                         "currentModel".to_string(),
                         current_model.map(Value::String).unwrap_or(Value::Null),
@@ -1694,11 +1702,9 @@ async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Resul
 
     if let Some(agents_list) = get_nested_array_mut(&mut settings, &["agents", "list"]) {
         for agent in agents_list.iter_mut() {
-            if agent
-                .get("model")
-                .and_then(Value::as_str)
-                .is_some_and(|model| model.starts_with("openproxy/"))
-            {
+            // Normalize before `.starts_with` so we catch both the legacy
+            // string form and OpenClaw 2026.5.x `{primary, fallbacks}` form.
+            if resolve_openclaw_agent_model_id(agent.get("model")).starts_with("openproxy/") {
                 if let Some(agent_object) = agent.as_object_mut() {
                     agent_object.remove("model");
                 }
@@ -1729,9 +1735,11 @@ async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Resul
             if let Some(agent_id) = agent_id {
                 if let Some(agent_model) = req.agent_models.get(&agent_id) {
                     if let Some(agent_object) = agent.as_object_mut() {
-                        agent_object.insert(
-                            "model".to_string(),
-                            Value::String(format!("openproxy/{agent_model}")),
+                        // Preserve user-configured `fallbacks` when OpenClaw
+                        // 2026.5.x stored the model as `{primary, fallbacks}`.
+                        set_openclaw_agent_model_id(
+                            agent_object,
+                            format!("openproxy/{agent_model}"),
                         );
                     }
                 }
@@ -1996,6 +2004,35 @@ fn has_openproxy_openclaw_settings(settings: &Value) -> bool {
         .and_then(|models| models.get("providers"))
         .and_then(|providers| providers.get("openproxy"))
         .is_some()
+}
+
+/// OpenClaw 2026.5.x writes `agents.list[].model` as either a plain string
+/// (legacy) or `{primary, fallbacks}` (current). Return the string id either
+/// way so callers can call `.starts_with()` safely.
+///
+/// Ports `resolveAgentModel()` from
+/// `src/app/api/cli-tools/openclaw-settings/route.js` (decolua/9router).
+fn resolve_openclaw_agent_model_id(model: Option<&Value>) -> &str {
+    match model {
+        Some(Value::String(s)) => s.as_str(),
+        Some(Value::Object(map)) => map.get("primary").and_then(Value::as_str).unwrap_or(""),
+        _ => "",
+    }
+}
+
+/// Set the per-agent model id, preserving the `{primary, fallbacks}` shape
+/// when OpenClaw 2026.5.x stored it that way. If the existing value is a
+/// string (legacy) or missing, write a string. If it's an object, only
+/// rewrite the `primary` field so any user-configured `fallbacks` survive.
+fn set_openclaw_agent_model_id(agent: &mut serde_json::Map<String, Value>, full_model_id: String) {
+    match agent.get_mut("model") {
+        Some(Value::Object(map)) => {
+            map.insert("primary".to_string(), Value::String(full_model_id));
+        }
+        _ => {
+            agent.insert("model".to_string(), Value::String(full_model_id));
+        }
+    }
 }
 
 fn get_openproxy_copilot_entry(config: &Value) -> Option<&Value> {
@@ -2684,5 +2721,94 @@ mod tests {
         assert_eq!(response.exit_code, Some(-1));
         assert!(response.stderr.contains("Failed to execute"));
         assert!(!response.timed_out);
+    }
+
+    #[test]
+    fn resolve_openclaw_agent_model_id_handles_string_form() {
+        let model = json!("openproxy/glm-4.6");
+        assert_eq!(
+            resolve_openclaw_agent_model_id(Some(&model)),
+            "openproxy/glm-4.6"
+        );
+    }
+
+    #[test]
+    fn resolve_openclaw_agent_model_id_handles_object_form() {
+        let model = json!({
+            "primary": "openproxy/claude-sonnet-4",
+            "fallbacks": ["anthropic/claude-sonnet-4"]
+        });
+        assert_eq!(
+            resolve_openclaw_agent_model_id(Some(&model)),
+            "openproxy/claude-sonnet-4"
+        );
+    }
+
+    #[test]
+    fn resolve_openclaw_agent_model_id_returns_empty_for_missing_primary() {
+        let model = json!({"fallbacks": ["anthropic/claude-sonnet-4"]});
+        assert_eq!(resolve_openclaw_agent_model_id(Some(&model)), "");
+    }
+
+    #[test]
+    fn resolve_openclaw_agent_model_id_returns_empty_for_none() {
+        assert_eq!(resolve_openclaw_agent_model_id(None), "");
+    }
+
+    #[test]
+    fn resolve_openclaw_agent_model_id_returns_empty_for_unexpected_type() {
+        let null = Value::Null;
+        let number = json!(42);
+        let array = json!(["openproxy/glm-4.6"]);
+        assert_eq!(resolve_openclaw_agent_model_id(Some(&null)), "");
+        assert_eq!(resolve_openclaw_agent_model_id(Some(&number)), "");
+        assert_eq!(resolve_openclaw_agent_model_id(Some(&array)), "");
+    }
+
+    #[test]
+    fn set_openclaw_agent_model_id_writes_string_when_missing() {
+        let mut agent = serde_json::Map::new();
+        agent.insert("id".to_string(), json!("planner"));
+        set_openclaw_agent_model_id(&mut agent, "openproxy/glm-4.6".to_string());
+        assert_eq!(agent.get("model"), Some(&json!("openproxy/glm-4.6")));
+    }
+
+    #[test]
+    fn set_openclaw_agent_model_id_writes_string_when_legacy_string() {
+        let mut agent = serde_json::Map::new();
+        agent.insert("model".to_string(), json!("openproxy/old"));
+        set_openclaw_agent_model_id(&mut agent, "openproxy/new".to_string());
+        assert_eq!(agent.get("model"), Some(&json!("openproxy/new")));
+    }
+
+    #[test]
+    fn set_openclaw_agent_model_id_preserves_fallbacks_on_object_form() {
+        // OpenClaw 2026.5.x: only the `primary` field should be rewritten —
+        // user-configured `fallbacks` must survive an OpenProxy save.
+        let mut agent = serde_json::Map::new();
+        agent.insert(
+            "model".to_string(),
+            json!({
+                "primary": "openproxy/old",
+                "fallbacks": ["anthropic/claude-sonnet-4", "openai/gpt-4o"]
+            }),
+        );
+        set_openclaw_agent_model_id(&mut agent, "openproxy/new".to_string());
+        assert_eq!(
+            agent.get("model"),
+            Some(&json!({
+                "primary": "openproxy/new",
+                "fallbacks": ["anthropic/claude-sonnet-4", "openai/gpt-4o"]
+            }))
+        );
+    }
+
+    #[test]
+    fn openclaw_starts_with_check_matches_object_form() {
+        // Regression for upstream 9router #1216: agent.model in object form
+        // must still be recognized as starting with "openproxy/" so we can
+        // remove it on save without throwing a TypeError on `.startsWith`.
+        let model = json!({"primary": "openproxy/glm-4.6", "fallbacks": []});
+        assert!(resolve_openclaw_agent_model_id(Some(&model)).starts_with("openproxy/"));
     }
 }
