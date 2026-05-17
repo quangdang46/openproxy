@@ -71,7 +71,8 @@ pub struct ProviderModel {
 }
 
 static DUMP: Lazy<RawDump> = Lazy::new(|| {
-    serde_json::from_str(RAW_DATA).expect("9router_models.json is malformed; re-run the dump script")
+    serde_json::from_str(RAW_DATA)
+        .expect("9router_models.json is malformed; re-run the dump script")
 });
 
 /// Provider catalog keyed by 9router alias (`cc`, `cx`, `kr`, `openai`, …).
@@ -106,7 +107,19 @@ mod tests {
 
     #[test]
     fn loads_known_aliases() {
-        let known = ["cc", "cx", "gc", "qw", "if", "ag", "gh", "kr", "openai", "anthropic", "gemini"];
+        let known = [
+            "cc",
+            "cx",
+            "gc",
+            "qw",
+            "if",
+            "ag",
+            "gh",
+            "kr",
+            "openai",
+            "anthropic",
+            "gemini",
+        ];
         for alias in known {
             assert!(
                 models_for(alias).is_some(),

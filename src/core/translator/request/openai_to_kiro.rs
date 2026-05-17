@@ -28,7 +28,11 @@ pub fn openai_to_kiro_request(
     stream: bool,
     credentials: Option<&Value>,
 ) -> bool {
-    let messages = body.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let messages = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     let tools = body.get("tools").cloned().unwrap_or(Value::Null);
 
     let mut history: Vec<Value> = Vec::new();
@@ -40,14 +44,22 @@ pub fn openai_to_kiro_request(
 
     let tools_array = tools.as_array().cloned().unwrap_or_default();
 
-    let flush_pending = |history: &mut Vec<Value>, pending_user_content: &mut Vec<String>,
-                         pending_assistant_content: &mut Vec<String>, pending_tool_results: &mut Vec<Value>,
-                         pending_images: &mut Vec<Value>, current_role: &Option<String>,
-                         tools_arr: &[Value], history_len: usize| {
+    let flush_pending = |history: &mut Vec<Value>,
+                         pending_user_content: &mut Vec<String>,
+                         pending_assistant_content: &mut Vec<String>,
+                         pending_tool_results: &mut Vec<Value>,
+                         pending_images: &mut Vec<Value>,
+                         current_role: &Option<String>,
+                         tools_arr: &[Value],
+                         history_len: usize| {
         match current_role.as_deref() {
             Some("user") => {
                 let content = pending_user_content.join("\n\n").trim().to_string();
-                let content = if content.is_empty() { "continue".to_string() } else { content };
+                let content = if content.is_empty() {
+                    "continue".to_string()
+                } else {
+                    content
+                };
                 let mut user_msg = serde_json::json!({
                     "userInputMessage": {
                         "content": content,
@@ -67,7 +79,8 @@ pub fn openai_to_kiro_request(
 
                 if !tools_arr.is_empty() && history_len == 0 {
                     if user_msg["userInputMessage"]["userInputMessageContext"].is_null() {
-                        user_msg["userInputMessage"]["userInputMessageContext"] = serde_json::json!({});
+                        user_msg["userInputMessage"]["userInputMessageContext"] =
+                            serde_json::json!({});
                     }
                     let converted_tools: Vec<Value> = tools_arr.iter().map(|t| {
                         let name = t.get("function").and_then(|f| f.get("name")).or_else(|| t.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -79,7 +92,7 @@ pub fn openai_to_kiro_request(
                             .or_else(|| t.get("parameters"))
                             .or_else(|| t.get("input_schema"))
                             .cloned().unwrap_or(Value::Object(serde_json::Map::new()));
-                        let normalized_schema = if schema.as_object().map_or(true, |o| o.is_empty()) {
+                        let normalized_schema = if schema.as_object().is_none_or(|o| o.is_empty()) {
                             serde_json::json!({"type": "object", "properties": {}, "required": []})
                         } else {
                             let mut s = schema.clone();
@@ -96,14 +109,19 @@ pub fn openai_to_kiro_request(
                             }
                         })
                     }).collect();
-                    user_msg["userInputMessage"]["userInputMessageContext"]["tools"] = Value::Array(converted_tools);
+                    user_msg["userInputMessage"]["userInputMessageContext"]["tools"] =
+                        Value::Array(converted_tools);
                 }
 
                 history.push(user_msg);
             }
             Some("assistant") => {
                 let content = pending_assistant_content.join("\n\n").trim().to_string();
-                let content = if content.is_empty() { "...".to_string() } else { content };
+                let content = if content.is_empty() {
+                    "...".to_string()
+                } else {
+                    content
+                };
                 history.push(serde_json::json!({
                     "assistantResponseMessage": { "content": content }
                 }));
@@ -115,7 +133,11 @@ pub fn openai_to_kiro_request(
     let mut i = 0;
     while i < messages.len() {
         let msg = &messages[i];
-        let mut role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let mut role = msg
+            .get("role")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         if role == "system" || role == "tool" {
             role = "user".to_string();
@@ -123,8 +145,16 @@ pub fn openai_to_kiro_request(
 
         if Some(&role) != current_role.as_ref() && current_role.is_some() {
             let hist_len = history.len();
-            flush_pending(&mut history, &mut pending_user_content, &mut pending_assistant_content,
-                         &mut pending_tool_results, &mut pending_images, &current_role, &tools_array, hist_len);
+            flush_pending(
+                &mut history,
+                &mut pending_user_content,
+                &mut pending_assistant_content,
+                &mut pending_tool_results,
+                &mut pending_images,
+                &current_role,
+                &tools_array,
+                hist_len,
+            );
         }
         current_role = Some(role.clone());
 
@@ -144,7 +174,11 @@ pub fn openai_to_kiro_request(
                             }
                         }
                         Some("image_url") => {
-                            if let Some(url) = c.get("image_url").and_then(|u| u.get("url")).and_then(|v| v.as_str()) {
+                            if let Some(url) = c
+                                .get("image_url")
+                                .and_then(|u| u.get("url"))
+                                .and_then(|v| v.as_str())
+                            {
                                 if let Some(data_uri) = url.strip_prefix("data:") {
                                     if let Some((mime, b64)) = data_uri.split_once(";base64,") {
                                         let format = mime.split('/').nth(1).unwrap_or(mime);
@@ -155,7 +189,8 @@ pub fn openai_to_kiro_request(
                                     } else {
                                         text_parts.push(format!("[Image: {}]", url));
                                     }
-                                } else if url.starts_with("http://") || url.starts_with("https://") {
+                                } else if url.starts_with("http://") || url.starts_with("https://")
+                                {
                                     text_parts.push(format!("[Image: {}]", url));
                                 }
                             }
@@ -167,7 +202,8 @@ pub fn openai_to_kiro_request(
                                         source.get("media_type").and_then(|v| v.as_str()),
                                         source.get("data").and_then(|v| v.as_str()),
                                     ) {
-                                        let format = media_type.split('/').nth(1).unwrap_or(media_type);
+                                        let format =
+                                            media_type.split('/').nth(1).unwrap_or(media_type);
                                         pending_images.push(serde_json::json!({
                                             "format": format,
                                             "source": {"bytes": data}
@@ -177,12 +213,21 @@ pub fn openai_to_kiro_request(
                             }
                         }
                         Some("tool_result") => {
-                            let tool_text = if let Some(tc_arr) = c.get("content").and_then(|v| v.as_array()) {
-                                tc_arr.iter().filter_map(|x| x.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("\n")
-                            } else {
-                                c.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string()
-                            };
-                            if let Some(tool_use_id) = c.get("tool_use_id").and_then(|v| v.as_str()) {
+                            let tool_text =
+                                if let Some(tc_arr) = c.get("content").and_then(|v| v.as_array()) {
+                                    tc_arr
+                                        .iter()
+                                        .filter_map(|x| x.get("text").and_then(|t| t.as_str()))
+                                        .collect::<Vec<_>>()
+                                        .join("\n")
+                                } else {
+                                    c.get("content")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string()
+                                };
+                            if let Some(tool_use_id) = c.get("tool_use_id").and_then(|v| v.as_str())
+                            {
                                 pending_tool_results.push(serde_json::json!({
                                     "toolUseId": tool_use_id,
                                     "status": "success",
@@ -214,14 +259,16 @@ pub fn openai_to_kiro_request(
             let mut tool_uses: Vec<Value> = Vec::new();
 
             if let Some(arr) = content.as_array() {
-                let text_blocks: Vec<String> = arr.iter()
+                let text_blocks: Vec<String> = arr
+                    .iter()
                     .filter(|c| c.get("type").and_then(|v| v.as_str()) == Some("text"))
                     .filter_map(|b| b.get("text").and_then(|v| v.as_str()))
                     .map(|s| s.to_string())
                     .collect();
                 text_content = text_blocks.join("\n").trim().to_string();
 
-                tool_uses = arr.iter()
+                tool_uses = arr
+                    .iter()
                     .filter(|c| c.get("type").and_then(|v| v.as_str()) == Some("tool_use"))
                     .cloned()
                     .collect();
@@ -231,7 +278,7 @@ pub fn openai_to_kiro_request(
 
             if let Some(tc_arr) = msg.get("tool_calls").and_then(|v| v.as_array()) {
                 if !tc_arr.is_empty() {
-                    tool_uses = tc_arr.iter().cloned().collect();
+                    tool_uses = tc_arr.to_vec();
                 }
             }
 
@@ -241,34 +288,71 @@ pub fn openai_to_kiro_request(
 
             if !tool_uses.is_empty() {
                 let hist_len = history.len();
-                flush_pending(&mut history, &mut pending_user_content, &mut pending_assistant_content,
-                             &mut pending_tool_results, &mut pending_images, &current_role, &tools_array, hist_len);
+                flush_pending(
+                    &mut history,
+                    &mut pending_user_content,
+                    &mut pending_assistant_content,
+                    &mut pending_tool_results,
+                    &mut pending_images,
+                    &current_role,
+                    &tools_array,
+                    hist_len,
+                );
 
                 if let Some(last) = history.last_mut() {
                     if last.get("assistantResponseMessage").is_some() {
-                        let converted: Vec<Value> = tool_uses.iter().map(|tc| {
-                            if let Some(func) = tc.get("function") {
-                                let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-                                let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let args = func.get("arguments").map(|v| {
-                                    if let Some(s) = v.as_str() { safe_parse_json(s) } else { v.clone() }
-                                }).unwrap_or(Value::Object(serde_json::Map::new()));
-                                serde_json::json!({
-                                    "toolUseId": id,
-                                    "name": name,
-                                    "input": args
-                                })
-                            } else {
-                                let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-                                let name = tc.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let input = tc.get("input").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
-                                serde_json::json!({
-                                    "toolUseId": id,
-                                    "name": name,
-                                    "input": input
-                                })
-                            }
-                        }).collect();
+                        let converted: Vec<Value> = tool_uses
+                            .iter()
+                            .map(|tc| {
+                                if let Some(func) = tc.get("function") {
+                                    let id = tc
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown")
+                                        .to_string();
+                                    let name = func
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let args = func
+                                        .get("arguments")
+                                        .map(|v| {
+                                            if let Some(s) = v.as_str() {
+                                                safe_parse_json(s)
+                                            } else {
+                                                v.clone()
+                                            }
+                                        })
+                                        .unwrap_or(Value::Object(serde_json::Map::new()));
+                                    serde_json::json!({
+                                        "toolUseId": id,
+                                        "name": name,
+                                        "input": args
+                                    })
+                                } else {
+                                    let id = tc
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown")
+                                        .to_string();
+                                    let name = tc
+                                        .get("name")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let input = tc
+                                        .get("input")
+                                        .cloned()
+                                        .unwrap_or(Value::Object(serde_json::Map::new()));
+                                    serde_json::json!({
+                                        "toolUseId": id,
+                                        "name": name,
+                                        "input": input
+                                    })
+                                }
+                            })
+                            .collect();
                         last["assistantResponseMessage"]["toolUses"] = Value::Array(converted);
                     }
                 }
@@ -280,8 +364,16 @@ pub fn openai_to_kiro_request(
 
     if current_role.is_some() {
         let hist_len = history.len();
-        flush_pending(&mut history, &mut pending_user_content, &mut pending_assistant_content,
-                     &mut pending_tool_results, &mut pending_images, &current_role, &tools_array, hist_len);
+        flush_pending(
+            &mut history,
+            &mut pending_user_content,
+            &mut pending_assistant_content,
+            &mut pending_tool_results,
+            &mut pending_images,
+            &current_role,
+            &tools_array,
+            hist_len,
+        );
     }
 
     // Pop last userInputMessage as currentMessage
@@ -294,7 +386,8 @@ pub fn openai_to_kiro_request(
     }
 
     // Grab tools from first history item
-    let first_history_tools = history.first()
+    let first_history_tools = history
+        .first()
         .and_then(|h| h.get("userInputMessage"))
         .and_then(|m| m.get("userInputMessageContext"))
         .and_then(|c| c.get("tools"))
@@ -302,16 +395,25 @@ pub fn openai_to_kiro_request(
 
     // Clean up history
     for item in &mut history {
-        if let Some(ctx) = item.get_mut("userInputMessage").and_then(|m| m.get_mut("userInputMessageContext")) {
+        if let Some(ctx) = item
+            .get_mut("userInputMessage")
+            .and_then(|m| m.get_mut("userInputMessageContext"))
+        {
             if ctx.get("tools").is_some() {
                 ctx.as_object_mut().unwrap().remove("tools");
             }
-            if ctx.as_object().map_or(false, |o| o.is_empty()) {
-                item["userInputMessage"].as_object_mut().unwrap().remove("userInputMessageContext");
+            if ctx.as_object().is_some_and(|o| o.is_empty()) {
+                item["userInputMessage"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("userInputMessageContext");
             }
         }
-        if let Some(model_id) = item.get_mut("userInputMessage").and_then(|m| m.get_mut("modelId")) {
-            if model_id.as_str().map_or(true, |s| s.is_empty()) {
+        if let Some(model_id) = item
+            .get_mut("userInputMessage")
+            .and_then(|m| m.get_mut("modelId"))
+        {
+            if model_id.as_str().is_none_or(|s| s.is_empty()) {
                 *model_id = Value::String(model.to_string());
             }
         }
@@ -321,12 +423,22 @@ pub fn openai_to_kiro_request(
     let mut merged_history: Vec<Value> = Vec::new();
     for item in &history {
         if item.get("userInputMessage").is_some()
-            && merged_history.last().and_then(|h| h.get("userInputMessage")).is_some()
+            && merged_history
+                .last()
+                .and_then(|h| h.get("userInputMessage"))
+                .is_some()
         {
             if let Some(prev) = merged_history.last_mut() {
-                let prev_content = prev["userInputMessage"]["content"].as_str().unwrap_or("").to_string();
-                let curr_content = item["userInputMessage"]["content"].as_str().unwrap_or("").to_string();
-                prev["userInputMessage"]["content"] = Value::String(format!("{}\n\n{}", prev_content, curr_content));
+                let prev_content = prev["userInputMessage"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                let curr_content = item["userInputMessage"]["content"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                prev["userInputMessage"]["content"] =
+                    Value::String(format!("{}\n\n{}", prev_content, curr_content));
             }
         } else {
             merged_history.push(item.clone());
@@ -335,7 +447,10 @@ pub fn openai_to_kiro_request(
 
     // Merge tools into currentMessage
     if let (Some(tools), Some(ref mut cm)) = (first_history_tools, &mut current_message) {
-        if cm["userInputMessage"]["userInputMessageContext"].get("tools").is_none() {
+        if cm["userInputMessage"]["userInputMessageContext"]
+            .get("tools")
+            .is_none()
+        {
             if cm["userInputMessage"]["userInputMessageContext"].is_null() {
                 cm["userInputMessage"]["userInputMessageContext"] = serde_json::json!({});
             }
@@ -355,7 +470,11 @@ pub fn openai_to_kiro_request(
     let mut prefix_parts: Vec<String> = Vec::new();
     // Check for thinking
     let thinking_enabled = body.get("reasoning_effort").is_some()
-        || body.get("thinking").and_then(|t| t.get("type")).and_then(|v| v.as_str()) == Some("enabled");
+        || body
+            .get("thinking")
+            .and_then(|t| t.get("type"))
+            .and_then(|v| v.as_str())
+            == Some("enabled");
     if thinking_enabled {
         prefix_parts.push("<thinking_mode>enabled</thinking_mode>".to_string());
     }
@@ -365,7 +484,9 @@ pub fn openai_to_kiro_request(
     // Check for -agentic suffix
     let is_agentic = model.ends_with("-agentic");
     if is_agentic {
-        prefix_parts.push("[Agentic mode enabled: Use chunked file writes for large operations.]".to_string());
+        prefix_parts.push(
+            "[Agentic mode enabled: Use chunked file writes for large operations.]".to_string(),
+        );
     }
 
     let upstream_model = if is_agentic {
@@ -394,7 +515,11 @@ pub fn openai_to_kiro_request(
     });
 
     // Add profileArn if present
-    if let Some(profile_arn) = credentials.and_then(|c| c.get("providerSpecificData")).and_then(|d| d.get("profileArn")).and_then(|v| v.as_str()) {
+    if let Some(profile_arn) = credentials
+        .and_then(|c| c.get("providerSpecificData"))
+        .and_then(|d| d.get("profileArn"))
+        .and_then(|v| v.as_str())
+    {
         payload["profileArn"] = Value::String(profile_arn.to_string());
     }
 
@@ -404,8 +529,12 @@ pub fn openai_to_kiro_request(
     let top_p = body.get("top_p");
     if temperature.is_some() || top_p.is_some() {
         let mut config = serde_json::json!({"maxTokens": max_tokens});
-        if let Some(t) = temperature { config["temperature"] = t.clone(); }
-        if let Some(t) = top_p { config["topP"] = t.clone(); }
+        if let Some(t) = temperature {
+            config["temperature"] = t.clone();
+        }
+        if let Some(t) = top_p {
+            config["topP"] = t.clone();
+        }
         payload["inferenceConfig"] = config;
     }
 

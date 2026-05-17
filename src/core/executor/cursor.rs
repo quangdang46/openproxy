@@ -1909,7 +1909,7 @@ mod tests {
 
     #[test]
     fn test_cursor_executor_error_from_io() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "test");
+        let io_err = std::io::Error::other("test");
         let executor_err: CursorExecutorError = io_err.into();
         assert!(matches!(
             executor_err,

@@ -108,11 +108,7 @@ pub async fn upstream_error(response: reqwest::Response) -> TtsError {
             .pointer("/error/message")
             .and_then(|v| v.as_str())
             .or_else(|| parsed.get("message").and_then(|v| v.as_str()))
-            .or_else(|| {
-                parsed
-                    .pointer("/detail/message")
-                    .and_then(|v| v.as_str())
-            })
+            .or_else(|| parsed.pointer("/detail/message").and_then(|v| v.as_str()))
             .or_else(|| parsed.get("detail").and_then(|v| v.as_str()))
             .map(str::to_string)
             .unwrap_or(text.clone())
@@ -138,7 +134,11 @@ pub fn parse_model_voice<'a>(
     if model.is_empty() {
         return (default_model.to_string(), default_voice.to_string());
     }
-    let mut sorted: Vec<&str> = known_models.iter().copied().filter(|m| !m.is_empty()).collect();
+    let mut sorted: Vec<&str> = known_models
+        .iter()
+        .copied()
+        .filter(|m| !m.is_empty())
+        .collect();
     sorted.sort_by(|a, b| b.len().cmp(&a.len()));
     for id in sorted {
         if model == id {

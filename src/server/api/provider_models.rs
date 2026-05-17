@@ -931,10 +931,10 @@ fn parse_gemini_cli_models(payload: &Value) -> Vec<ProviderModel> {
             items
                 .iter()
                 .filter(|(_, info)| {
-                    info.get("isInternal")
+                    !info
+                        .get("isInternal")
                         .and_then(Value::as_bool)
                         .unwrap_or(false)
-                        == false
                 })
                 .map(|(id, info)| ProviderModel {
                     id: id.to_string(),

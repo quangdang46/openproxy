@@ -14,10 +14,7 @@ const CLAUDE_OAUTH_TOOL_PREFIX: &str = "proxy_";
 
 /// Convert one OpenAI chat-completion chunk into zero or more Claude SSE
 /// events. `state` is the per-stream scratch space.
-pub fn openai_to_claude_response(
-    chunk: &Value,
-    state: &mut Map<String, Value>,
-) -> Vec<Value> {
+pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) -> Vec<Value> {
     let Some(choice) = chunk.pointer("/choices/0") else {
         return vec![];
     };
@@ -123,7 +120,11 @@ pub fn openai_to_claude_response(
     let reasoning = delta
         .and_then(|d| d.get("reasoning_content"))
         .and_then(|v| v.as_str())
-        .or_else(|| delta.and_then(|d| d.get("reasoning")).and_then(|v| v.as_str()));
+        .or_else(|| {
+            delta
+                .and_then(|d| d.get("reasoning"))
+                .and_then(|v| v.as_str())
+        });
     if let Some(reasoning) = reasoning {
         if !reasoning.is_empty() {
             stop_text_block(state, &mut results);
@@ -156,7 +157,10 @@ pub fn openai_to_claude_response(
     }
 
     // ── content → text block ───────────────────────────────────────────
-    if let Some(content) = delta.and_then(|d| d.get("content")).and_then(|v| v.as_str()) {
+    if let Some(content) = delta
+        .and_then(|d| d.get("content"))
+        .and_then(|v| v.as_str())
+    {
         if !content.is_empty() {
             stop_thinking_block(state, &mut results);
 
@@ -189,7 +193,10 @@ pub fn openai_to_claude_response(
     }
 
     // ── tool_calls → tool_use blocks ───────────────────────────────────
-    if let Some(tool_calls) = delta.and_then(|d| d.get("tool_calls")).and_then(|v| v.as_array()) {
+    if let Some(tool_calls) = delta
+        .and_then(|d| d.get("tool_calls"))
+        .and_then(|v| v.as_array())
+    {
         for tc in tool_calls {
             let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
 
@@ -207,10 +214,7 @@ pub fn openai_to_claude_response(
                 if let Some(rest) = tool_name.strip_prefix(CLAUDE_OAUTH_TOOL_PREFIX) {
                     tool_name = rest.to_string();
                 }
-                if let Some(map) = state
-                    .get_mut("toolCalls")
-                    .and_then(|v| v.as_object_mut())
-                {
+                if let Some(map) = state.get_mut("toolCalls").and_then(|v| v.as_object_mut()) {
                     map.insert(
                         idx.to_string(),
                         json!({
@@ -412,8 +416,7 @@ mod tests {
         let thinking_start = out
             .iter()
             .find(|v| {
-                v["type"] == "content_block_start"
-                    && v["content_block"]["type"] == "thinking"
+                v["type"] == "content_block_start" && v["content_block"]["type"] == "thinking"
             })
             .expect("thinking block_start");
         assert_eq!(thinking_start["index"], 0);
@@ -428,9 +431,7 @@ mod tests {
         // Text block should come AFTER thinking block (separate index).
         let text_start = out
             .iter()
-            .find(|v| {
-                v["type"] == "content_block_start" && v["content_block"]["type"] == "text"
-            })
+            .find(|v| v["type"] == "content_block_start" && v["content_block"]["type"] == "text")
             .expect("text block_start");
         assert_eq!(text_start["index"], 1);
     }

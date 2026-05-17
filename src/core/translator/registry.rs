@@ -170,14 +170,12 @@ pub fn detect_source_format(body: &Value) -> Format {
         .get("request")
         .and_then(|r| r.get("contents"))
         .is_some()
-    {
-        if body
+        && body
             .get("userAgent")
             .and_then(Value::as_str)
             .is_some_and(|ua| ua == "antigravity")
-        {
-            return Format::Antigravity;
-        }
+    {
+        return Format::Antigravity;
     }
 
     // 3. Gemini format: has `contents[]` or `systemInstruction[]`
@@ -436,13 +434,15 @@ static REGISTRY: OnceLock<TranslationRegistry> = OnceLock::new();
 /// Initializes with all registered transforms on first call.
 pub fn global_registry() -> &'static TranslationRegistry {
     use crate::core::translator::request::antigravity_to_openai::antigravity_to_openai_request;
-    use crate::core::translator::request::openai_responses::{chat_to_openai_responses_request, openai_responses_to_chat_request};
     use crate::core::translator::request::claude_to_openai::claude_to_openai_request;
     use crate::core::translator::request::gemini_to_openai::gemini_to_openai_request;
+    use crate::core::translator::request::openai_responses::{
+        chat_to_openai_responses_request, openai_responses_to_chat_request,
+    };
     use crate::core::translator::request::openai_to_claude::openai_to_claude_request;
     use crate::core::translator::request::openai_to_cursor::openai_to_cursor_request;
-    use crate::core::translator::request::openai_to_gemini::openai_to_gemini_request;
     use crate::core::translator::request::openai_to_gemini::openai_to_gemini_cli_request;
+    use crate::core::translator::request::openai_to_gemini::openai_to_gemini_request;
     use crate::core::translator::request::openai_to_kiro::openai_to_kiro_request;
     use crate::core::translator::request::openai_to_ollama::openai_to_ollama_request;
     use crate::core::translator::request::openai_to_vertex::openai_to_vertex_request;
@@ -451,21 +451,81 @@ pub fn global_registry() -> &'static TranslationRegistry {
         let mut reg = TranslationRegistry::new();
 
         // Request transforms
-        reg.register_request(Format::OpenAi, Format::Claude, openai_to_claude_request as RequestTransformFn);
-        reg.register_request(Format::Claude, Format::OpenAi, claude_to_openai_request as RequestTransformFn);
-        reg.register_request(Format::Gemini, Format::OpenAi, gemini_to_openai_request as RequestTransformFn);
-        reg.register_request(Format::GeminiCli, Format::OpenAi, gemini_to_openai_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::Ollama, openai_to_ollama_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::Gemini, openai_to_gemini_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::GeminiCli, openai_to_gemini_cli_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::Vertex, openai_to_vertex_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::Kiro, openai_to_kiro_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::Cursor, openai_to_cursor_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::Antigravity, openai_to_gemini_cli_request as RequestTransformFn);
-        reg.register_request(Format::Antigravity, Format::OpenAi, antigravity_to_openai_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::OpenAiResponses, chat_to_openai_responses_request as RequestTransformFn);
-        reg.register_request(Format::OpenAiResponses, Format::OpenAi, openai_responses_to_chat_request as RequestTransformFn);
-        reg.register_request(Format::OpenAi, Format::Codex, chat_to_openai_responses_request as RequestTransformFn);
+        reg.register_request(
+            Format::OpenAi,
+            Format::Claude,
+            openai_to_claude_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::Claude,
+            Format::OpenAi,
+            claude_to_openai_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::Gemini,
+            Format::OpenAi,
+            gemini_to_openai_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::GeminiCli,
+            Format::OpenAi,
+            gemini_to_openai_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::Ollama,
+            openai_to_ollama_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::Gemini,
+            openai_to_gemini_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::GeminiCli,
+            openai_to_gemini_cli_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::Vertex,
+            openai_to_vertex_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::Kiro,
+            openai_to_kiro_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::Cursor,
+            openai_to_cursor_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::Antigravity,
+            openai_to_gemini_cli_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::Antigravity,
+            Format::OpenAi,
+            antigravity_to_openai_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::OpenAiResponses,
+            chat_to_openai_responses_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAiResponses,
+            Format::OpenAi,
+            openai_responses_to_chat_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::Codex,
+            chat_to_openai_responses_request as RequestTransformFn,
+        );
 
         reg
     })

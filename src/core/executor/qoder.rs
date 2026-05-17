@@ -91,10 +91,15 @@ impl QoderExecutor {
         &self.pool
     }
 
-    fn create_signature(user_agent: &str, session_id: &str, timestamp: &str, api_key: &str) -> String {
+    fn create_signature(
+        user_agent: &str,
+        session_id: &str,
+        timestamp: &str,
+        api_key: &str,
+    ) -> String {
         let payload = format!("{}:{}:{}", user_agent, session_id, timestamp);
-        let mut mac = HmacSha256::new_from_slice(api_key.as_bytes())
-            .expect("HMAC can take key of any size");
+        let mut mac =
+            HmacSha256::new_from_slice(api_key.as_bytes()).expect("HMAC can take key of any size");
         mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -119,16 +124,13 @@ impl QoderExecutor {
         let api_key = credentials
             .api_key
             .as_deref()
-            .or_else(|| credentials.access_token.as_deref())
+            .or(credentials.access_token.as_deref())
             .unwrap_or("");
 
         let signature = Self::create_signature(user_agent, &session_id, &timestamp, api_key);
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             "session-id",
             HeaderValue::from_str(&session_id).unwrap_or_else(|_| HeaderValue::from_static("")),

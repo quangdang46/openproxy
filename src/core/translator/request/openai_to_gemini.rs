@@ -21,7 +21,11 @@ fn sanitize_gemini_function_name(name: &str) -> String {
             }
         })
         .collect();
-    if !sanitized.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+    if !sanitized
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+    {
         sanitized.insert(0, '_');
     }
     sanitized.truncate(64);
@@ -140,7 +144,8 @@ fn clean_json_schema(schema: &Value) -> Value {
     }
 
     // Ensure properties exists for object type
-    if obj.get("type").and_then(|v| v.as_str()) == Some("object") && obj.get("properties").is_none() {
+    if obj.get("type").and_then(|v| v.as_str()) == Some("object") && obj.get("properties").is_none()
+    {
         obj.insert("properties".to_string(), serde_json::json!({}));
     }
 
@@ -148,12 +153,7 @@ fn clean_json_schema(schema: &Value) -> Value {
 }
 
 /// Core: Convert OpenAI request to Gemini format.
-fn openai_to_gemini_base(
-    model: &str,
-    body: &Value,
-    stream: bool,
-    _signature: &str,
-) -> Value {
+fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, _signature: &str) -> Value {
     let mut result = serde_json::json!({
         "model": model,
         "contents": [],
@@ -191,7 +191,9 @@ fn openai_to_gemini_base(
                         if tc.get("type").and_then(|v| v.as_str()) == Some("function") {
                             if let (Some(id), Some(name)) = (
                                 tc.get("id").and_then(|v| v.as_str()),
-                                tc.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()),
+                                tc.get("function")
+                                    .and_then(|f| f.get("name"))
+                                    .and_then(|v| v.as_str()),
                             ) {
                                 tc_id_to_name.insert(id.to_string(), name.to_string());
                             }
@@ -242,10 +244,13 @@ fn openai_to_gemini_base(
             if role == "user" || (role == "system" && messages.len() == 1) {
                 let parts = convert_openai_content_to_parts(&content);
                 if !parts.is_empty() {
-                    result["contents"].as_array_mut().unwrap().push(serde_json::json!({
-                        "role": "user",
-                        "parts": parts
-                    }));
+                    result["contents"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "role": "user",
+                            "parts": parts
+                        }));
                 }
                 continue;
             }
@@ -283,7 +288,10 @@ fn openai_to_gemini_base(
                         }
                         let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
                         let name = fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        let args = fn_obj.get("arguments").map(|v| try_parse_json(v.as_str().unwrap_or("{}"))).unwrap_or(Value::Null);
+                        let args = fn_obj
+                            .get("arguments")
+                            .map(|v| try_parse_json(v.as_str().unwrap_or("{}")))
+                            .unwrap_or(Value::Null);
                         let id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
                         parts.push(serde_json::json!({
@@ -300,14 +308,19 @@ fn openai_to_gemini_base(
                     }
 
                     if !parts.is_empty() {
-                        result["contents"].as_array_mut().unwrap().push(serde_json::json!({
-                            "role": "model",
-                            "parts": parts
-                        }));
+                        result["contents"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(serde_json::json!({
+                                "role": "model",
+                                "parts": parts
+                            }));
                     }
 
                     // Check if there are actual tool responses
-                    let has_actual_responses = tool_call_ids.iter().any(|fid| tool_responses.contains_key(fid));
+                    let has_actual_responses = tool_call_ids
+                        .iter()
+                        .any(|fid| tool_responses.contains_key(fid));
                     if has_actual_responses {
                         let mut tool_parts = Vec::new();
                         for fid in &tool_call_ids {
@@ -321,11 +334,12 @@ fn openai_to_gemini_base(
                                     }
                                 });
                                 let parsed_resp = try_parse_json(resp_str);
-                                let final_resp = if parsed_resp.is_object() || parsed_resp.is_array() {
-                                    parsed_resp
-                                } else {
-                                    serde_json::json!({"result": parsed_resp})
-                                };
+                                let final_resp =
+                                    if parsed_resp.is_object() || parsed_resp.is_array() {
+                                        parsed_resp
+                                    } else {
+                                        serde_json::json!({"result": parsed_resp})
+                                    };
                                 tool_parts.push(serde_json::json!({
                                     "functionResponse": {
                                         "id": fid,
@@ -336,17 +350,23 @@ fn openai_to_gemini_base(
                             }
                         }
                         if !tool_parts.is_empty() {
-                            result["contents"].as_array_mut().unwrap().push(serde_json::json!({
-                                "role": "user",
-                                "parts": tool_parts
-                            }));
+                            result["contents"]
+                                .as_array_mut()
+                                .unwrap()
+                                .push(serde_json::json!({
+                                    "role": "user",
+                                    "parts": tool_parts
+                                }));
                         }
                     }
                 } else if !parts.is_empty() {
-                    result["contents"].as_array_mut().unwrap().push(serde_json::json!({
-                        "role": "model",
-                        "parts": parts
-                    }));
+                    result["contents"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "role": "model",
+                            "parts": parts
+                        }));
                 }
             }
         }
@@ -360,7 +380,10 @@ fn openai_to_gemini_base(
             if t.get("name").is_some() && t.get("input_schema").is_some() {
                 let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("");
                 let description = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                let schema = clean_json_schema(t.get("input_schema").unwrap_or(&serde_json::json!({"type": "object", "properties": {}})));
+                let schema = clean_json_schema(
+                    t.get("input_schema")
+                        .unwrap_or(&serde_json::json!({"type": "object", "properties": {}})),
+                );
                 function_declarations.push(serde_json::json!({
                     "name": sanitize_gemini_function_name(name),
                     "description": description,
@@ -371,8 +394,15 @@ fn openai_to_gemini_base(
             else if t.get("type").and_then(|v| v.as_str()) == Some("function") {
                 if let Some(fn_obj) = t.get("function") {
                     let name = fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let description = fn_obj.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                    let schema = clean_json_schema(fn_obj.get("parameters").unwrap_or(&serde_json::json!({"type": "object", "properties": {}})));
+                    let description = fn_obj
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let schema = clean_json_schema(
+                        fn_obj
+                            .get("parameters")
+                            .unwrap_or(&serde_json::json!({"type": "object", "properties": {}})),
+                    );
                     function_declarations.push(serde_json::json!({
                         "name": sanitize_gemini_function_name(name),
                         "description": description,
@@ -439,7 +469,10 @@ pub fn openai_to_gemini_cli_request(
     // Clean schema for tools
     if let Some(tools_arr) = gemini.get_mut("tools").and_then(|v| v.as_array_mut()) {
         if let Some(first_tool) = tools_arr.first_mut() {
-            if let Some(func_decls) = first_tool.get_mut("functionDeclarations").and_then(|v| v.as_array_mut()) {
+            if let Some(func_decls) = first_tool
+                .get_mut("functionDeclarations")
+                .and_then(|v| v.as_array_mut())
+            {
                 for fn_decl in func_decls {
                     if let Some(params) = fn_decl.get_mut("parameters") {
                         let cleaned = clean_json_schema(params);

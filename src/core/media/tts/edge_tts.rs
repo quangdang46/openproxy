@@ -24,9 +24,8 @@ struct Token {
 
 static CACHE: Lazy<RwLock<Option<Token>>> = Lazy::new(|| RwLock::new(None));
 
-static RE_TOKEN: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"params_AbusePreventionHelper\s*=\s*\[([^,]+),([^,]+),").unwrap()
-});
+static RE_TOKEN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"params_AbusePreventionHelper\s*=\s*\[([^,]+),([^,]+),").unwrap());
 
 async fn fetch_token(client: &Client) -> Result<Token, TtsError> {
     let res = client

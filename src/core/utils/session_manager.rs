@@ -97,9 +97,13 @@ fn maybe_run_cleanup() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn empty_connection_id_returns_uncached_value() {
+        let _guard = TEST_LOCK.lock().unwrap();
         clear_session_store();
         let a = derive_session_id("");
         let b = derive_session_id("");
@@ -110,6 +114,7 @@ mod tests {
 
     #[test]
     fn same_connection_returns_same_id() {
+        let _guard = TEST_LOCK.lock().unwrap();
         clear_session_store();
         let a = derive_session_id("test-conn-1");
         let b = derive_session_id("test-conn-1");
@@ -120,6 +125,7 @@ mod tests {
 
     #[test]
     fn different_connections_get_different_ids() {
+        let _guard = TEST_LOCK.lock().unwrap();
         clear_session_store();
         let a = derive_session_id("test-conn-a");
         let b = derive_session_id("test-conn-b");

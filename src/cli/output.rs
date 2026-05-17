@@ -21,17 +21,12 @@ pub enum OutputMode {
 }
 
 /// Color preference resolved from `--color` flag and TTY detection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorMode {
+    #[default]
     Auto,
     Always,
     Never,
-}
-
-impl Default for ColorMode {
-    fn default() -> Self {
-        ColorMode::Auto
-    }
 }
 
 impl ColorMode {

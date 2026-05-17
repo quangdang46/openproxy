@@ -157,7 +157,7 @@ fn looks_like_asset(path: &str) -> bool {
     // `.svg`, `.woff2`, dotfiles, etc. SPA routes typically have no dot.
     path.rsplit('/')
         .next()
-        .map_or(false, |last| last.contains('.'))
+        .is_some_and(|last| last.contains('.'))
 }
 
 fn cache_control_for(path: &str) -> &'static str {

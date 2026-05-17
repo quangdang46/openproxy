@@ -24,7 +24,11 @@ pub fn convert_responses_api_format(body: &Value) -> Value {
     if let Some(input) = out.get("input").cloned() {
         match input {
             Value::String(s) => {
-                let text = if s.trim().is_empty() { "..." } else { s.as_str() };
+                let text = if s.trim().is_empty() {
+                    "..."
+                } else {
+                    s.as_str()
+                };
                 out["input"] = json!([{
                     "type": "message",
                     "role": "user",
@@ -117,7 +121,8 @@ pub fn convert_responses_stream_to_json(input: &str) -> Value {
                     let idx = parsed
                         .get("output_index")
                         .and_then(|v| v.as_u64())
-                        .unwrap_or(summary.items.len() as u64) as usize;
+                        .unwrap_or(summary.items.len() as u64)
+                        as usize;
                     if idx >= summary.items.len() {
                         summary.items.resize(idx + 1, Value::Null);
                     }
@@ -175,9 +180,7 @@ mod tests {
         // First message should be a system message carrying the instructions.
         assert_eq!(messages[0]["role"], "system");
         // And there should be at least one user message with the prompt text.
-        assert!(messages
-            .iter()
-            .any(|m| m["role"] == "user"));
+        assert!(messages.iter().any(|m| m["role"] == "user"));
     }
 
     #[test]

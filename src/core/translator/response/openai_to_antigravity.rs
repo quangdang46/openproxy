@@ -5,8 +5,14 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-pub fn openai_to_antigravity_response(chunk: &Value, state: &mut serde_json::Map<String, Value>) -> Vec<Value> {
-    let choice = chunk.get("choices").and_then(|v| v.as_array()).and_then(|a| a.first());
+pub fn openai_to_antigravity_response(
+    chunk: &Value,
+    state: &mut serde_json::Map<String, Value>,
+) -> Vec<Value> {
+    let choice = chunk
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first());
     if choice.is_none() {
         if chunk.get("usage").is_some() {
             state.insert("_usage".to_string(), chunk["usage"].clone());
@@ -14,14 +20,20 @@ pub fn openai_to_antigravity_response(chunk: &Value, state: &mut serde_json::Map
         return vec![];
     }
     let choice = choice.unwrap();
-    let delta = choice.get("delta").cloned().unwrap_or(Value::Object(serde_json::Map::new()));
+    let delta = choice
+        .get("delta")
+        .cloned()
+        .unwrap_or(Value::Object(serde_json::Map::new()));
     let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str());
 
     if !state.contains_key("_toolCallAccum") {
         state.insert("_toolCallAccum".to_string(), serde_json::json!({}));
     }
     if !state.contains_key("_responseId") {
-        let rid = chunk.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+        let rid = chunk
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         state.insert("_responseId".to_string(), Value::String(rid.to_string()));
     }
     if !state.contains_key("_modelVersion") {
@@ -48,20 +60,29 @@ pub fn openai_to_antigravity_response(chunk: &Value, state: &mut serde_json::Map
             let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
             let accum_key = idx.to_string();
             if !state["_toolCallAccum"].get(&accum_key).is_some() {
-                state["_toolCallAccum"][&accum_key] = serde_json::json!({"id": "", "name": "", "arguments": ""});
+                state["_toolCallAccum"][&accum_key] =
+                    serde_json::json!({"id": "", "name": "", "arguments": ""});
             }
             let accum = &mut state["_toolCallAccum"][&accum_key];
             if let Some(id) = tc.get("id").and_then(|v| v.as_str()) {
                 accum["id"] = Value::String(id.to_string());
             }
-            if let Some(name) = tc.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()) {
+            if let Some(name) = tc
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(|v| v.as_str())
+            {
                 if let Some(existing) = accum["name"].as_str() {
                     accum["name"] = Value::String(format!("{}{}", existing, name));
                 } else {
                     accum["name"] = Value::String(name.to_string());
                 }
             }
-            if let Some(args) = tc.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()) {
+            if let Some(args) = tc
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|v| v.as_str())
+            {
                 if let Some(existing) = accum["arguments"].as_str() {
                     accum["arguments"] = Value::String(format!("{}{}", existing, args));
                 } else {
@@ -79,8 +100,12 @@ pub fn openai_to_antigravity_response(chunk: &Value, state: &mut serde_json::Map
             let indices: Vec<String> = accum_obj.keys().cloned().collect();
             for idx in indices {
                 let accum = &state["_toolCallAccum"][&idx];
-                let args_str = accum.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
-                let args: Value = serde_json::from_str(args_str).unwrap_or(Value::Object(serde_json::Map::new()));
+                let args_str = accum
+                    .get("arguments")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}");
+                let args: Value =
+                    serde_json::from_str(args_str).unwrap_or(Value::Object(serde_json::Map::new()));
                 let name = accum.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
                 let tool_name_map = state.get("toolNameMap");
@@ -113,7 +138,9 @@ pub fn openai_to_antigravity_response(chunk: &Value, state: &mut serde_json::Map
         ("length", "MAX_TOKENS"),
         ("tool_calls", "STOP"),
         ("content_filter", "SAFETY"),
-    ].into_iter().collect();
+    ]
+    .into_iter()
+    .collect();
 
     let candidate = {
         let mut c = serde_json::json!({
@@ -134,7 +161,10 @@ pub fn openai_to_antigravity_response(chunk: &Value, state: &mut serde_json::Map
     let usage = chunk.get("usage").or_else(|| state.get("_usage"));
     if let Some(u) = usage {
         let prompt_tokens = u.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let completion_tokens = u.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let completion_tokens = u
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let total_tokens = u.get("total_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
         let mut usage_meta = serde_json::json!({
             "promptTokenCount": prompt_tokens,

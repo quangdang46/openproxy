@@ -53,7 +53,11 @@ mod tests {
     #[tokio::test]
     async fn rejects_non_http_url() {
         let client = Client::new();
-        assert!(fetch_image_as_base64(&client, "data:image/png;base64,abc").await.is_none());
-        assert!(fetch_image_as_base64(&client, "/local/file.png").await.is_none());
+        assert!(fetch_image_as_base64(&client, "data:image/png;base64,abc")
+            .await
+            .is_none());
+        assert!(fetch_image_as_base64(&client, "/local/file.png")
+            .await
+            .is_none());
     }
 }

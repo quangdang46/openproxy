@@ -14,10 +14,7 @@ pub static ADAPTER: GeminiAdapter = GeminiAdapter;
 
 const DEFAULT_MODEL: &str = "gemini-2.5-flash-preview-tts";
 const DEFAULT_VOICE: &str = "Kore";
-const KNOWN_MODELS: &[&str] = &[
-    "gemini-2.5-flash-preview-tts",
-    "gemini-2.5-pro-preview-tts",
-];
+const KNOWN_MODELS: &[&str] = &["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"];
 const SAMPLE_RATE: u32 = 24_000;
 const CHANNELS: u16 = 1;
 const BITS_PER_SAMPLE: u16 = 16;
@@ -105,7 +102,12 @@ impl TtsAdapter for GeminiAdapter {
             }
         });
 
-        let res = client.post(&url).headers(headers).json(&body).send().await?;
+        let res = client
+            .post(&url)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
         if !res.status().is_success() {
             return Err(upstream_error(res).await);
         }

@@ -103,17 +103,19 @@ impl OpenCodeGoExecutor {
         format!("{}{}", OPENCODE_GO_BASE, path)
     }
 
-    fn build_headers(&self, credentials: &ProviderConnection, stream: bool, model: &str) -> HeaderMap {
+    fn build_headers(
+        &self,
+        credentials: &ProviderConnection,
+        stream: bool,
+        model: &str,
+    ) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         let key = credentials
             .api_key
             .as_deref()
-            .or_else(|| credentials.access_token.as_deref())
+            .or(credentials.access_token.as_deref())
             .unwrap_or("");
 
         if Self::is_claude_format(model) {
@@ -121,10 +123,7 @@ impl OpenCodeGoExecutor {
                 "x-api-key",
                 HeaderValue::from_str(key).unwrap_or_else(|_| HeaderValue::from_static("")),
             );
-            headers.insert(
-                "anthropic-version",
-                HeaderValue::from_static("2023-06-01"),
-            );
+            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
         } else {
             headers.insert(
                 AUTHORIZATION,

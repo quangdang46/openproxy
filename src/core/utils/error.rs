@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 
 /// Build the OpenAI-shaped error body for a given HTTP status.
 pub fn build_error_body(status: u16, message: Option<&str>) -> Value {
-    let info = error_type_for(status).unwrap_or_else(|| {
+    let info = error_type_for(status).unwrap_or({
         if status >= 500 {
             crate::core::config::error_config::ErrorTypeInfo {
                 r#type: "server_error",

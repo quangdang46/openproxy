@@ -21,9 +21,9 @@ pub enum TtsHandlerError {
 impl From<TtsError> for TtsHandlerError {
     fn from(e: TtsError) -> Self {
         match e {
-            TtsError::MissingCredentials(p) => TtsHandlerError::Validation(format!(
-                "Provider '{p}' is missing credentials"
-            )),
+            TtsError::MissingCredentials(p) => {
+                TtsHandlerError::Validation(format!("Provider '{p}' is missing credentials"))
+            }
             TtsError::Upstream { status, message } => TtsHandlerError::Http(status, message),
             TtsError::Parse(m) | TtsError::Network(m) => TtsHandlerError::Upstream(m),
         }

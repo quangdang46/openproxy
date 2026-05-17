@@ -187,10 +187,7 @@ fn build_minimax_quota(
     })
 }
 
-fn pick_representative<'a, F: Fn(&Value) -> f64>(
-    models: &'a [Value],
-    get_total: F,
-) -> Option<&'a Value> {
+fn pick_representative<F: Fn(&Value) -> f64>(models: &[Value], get_total: F) -> Option<&Value> {
     let with_quota: Vec<&Value> = models.iter().filter(|m| get_total(m) > 0.0).collect();
     let pool = if !with_quota.is_empty() {
         with_quota

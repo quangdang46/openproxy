@@ -69,7 +69,7 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
     let non_empty: Vec<&str> = lines
         .iter()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| *l)
+        .copied()
         .collect();
 
     let first5: Vec<&&str> = non_empty.iter().take(5).collect();
@@ -80,7 +80,7 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
         });
     }
 
-    if non_empty.len() >= 3 && non_empty.iter().all(|l| is_path_like(l)) {
+    if non_empty.len() >= 3 && non_empty.iter().all(is_path_like) {
         return Some(DetectedFilter {
             filter_fn: find_impl,
             filter_name: FILTER_FIND,

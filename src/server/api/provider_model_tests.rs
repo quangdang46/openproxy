@@ -132,7 +132,7 @@ fn static_models_for_provider(provider: &str) -> Vec<TestModelTarget> {
         .collect()
 }
 
-fn provider_alias<'a>(provider: &'a str) -> &'a str {
+fn provider_alias(provider: &str) -> &str {
     provider_catalog()
         .static_alias_for_provider(provider)
         .unwrap_or(provider)

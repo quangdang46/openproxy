@@ -177,7 +177,11 @@ async fn huggingface(client: &Client, req: GenericTtsRequest<'_>) -> Result<TtsR
         return Err(TtsError::Parse("Invalid HuggingFace model ID".into()));
     }
     let res = client
-        .post(format!("{}/{}", req.base_url.trim_end_matches('/'), req.model_id))
+        .post(format!(
+            "{}/{}",
+            req.base_url.trim_end_matches('/'),
+            req.model_id
+        ))
         .headers(bearer_headers(key)?)
         .json(&json!({"inputs": req.text}))
         .send()
@@ -240,10 +244,7 @@ async fn cartesia(client: &Client, req: GenericTtsRequest<'_>) -> Result<TtsResu
     });
     if !req.voice_id.is_empty() {
         if let Some(obj) = body.as_object_mut() {
-            obj.insert(
-                "voice".into(),
-                json!({"mode": "id", "id": req.voice_id}),
-            );
+            obj.insert("voice".into(), json!({"mode": "id", "id": req.voice_id}));
         }
     }
     let res = client
@@ -349,10 +350,7 @@ async fn tortoise(client: &Client, req: GenericTtsRequest<'_>) -> Result<TtsResu
     response_to_base64(res, "wav").await
 }
 
-async fn openai_compat(
-    client: &Client,
-    req: GenericTtsRequest<'_>,
-) -> Result<TtsResult, TtsError> {
+async fn openai_compat(client: &Client, req: GenericTtsRequest<'_>) -> Result<TtsResult, TtsError> {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     if let Some(key) = req.api_key.filter(|s| !s.is_empty()) {

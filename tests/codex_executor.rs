@@ -1,12 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use openproxy::core::executor::{ClientPool, TransportKind};
-use openproxy::core::proxy::ProxyTarget;
+use openproxy::core::executor::ClientPool;
 use openproxy::types::{ProviderConnection, ProviderNode};
 use serde_json::json;
-use wiremock::matchers::{body_json, header, method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use openproxy::core::executor::{
     convert_openai_sse_to_standard, CodexExecutionRequest, CodexExecutor, CodexExecutorError,

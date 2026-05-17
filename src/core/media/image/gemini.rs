@@ -20,7 +20,10 @@ impl ImageAdapter for GeminiAdapter {
             .as_deref()
             .or(request.credentials.access_token.as_deref())
             .unwrap_or("");
-        let model = request.model.strip_prefix("models/").unwrap_or(request.model);
+        let model = request
+            .model
+            .strip_prefix("models/")
+            .unwrap_or(request.model);
         Ok(format!(
             "{BASE_URL}/{model}:generateContent?key={}",
             urlencoding::encode(key)

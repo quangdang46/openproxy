@@ -58,10 +58,7 @@ fn sanitize_tool_id(id: &str) -> Option<String> {
 /// Validate / repair every tool_call id in `body.messages`. Mutates in
 /// place. Mirrors `ensureToolCallIds` in 9router.
 pub fn ensure_tool_call_ids(body: &mut Value) {
-    let Some(messages) = body
-        .get_mut("messages")
-        .and_then(|v| v.as_array_mut())
-    else {
+    let Some(messages) = body.get_mut("messages").and_then(|v| v.as_array_mut()) else {
         return;
     };
 
@@ -107,8 +104,7 @@ pub fn ensure_tool_call_ids(body: &mut Value) {
                     }
 
                     // Stringify arguments if present as object.
-                    if let Some(func) = tc_obj.get_mut("function").and_then(|v| v.as_object_mut())
-                    {
+                    if let Some(func) = tc_obj.get_mut("function").and_then(|v| v.as_object_mut()) {
                         if let Some(args) = func.get_mut("arguments") {
                             if !args.is_string() {
                                 let serialised = serde_json::to_string(args).unwrap_or_default();
@@ -128,8 +124,8 @@ pub fn ensure_tool_call_ids(body: &mut Value) {
                 .map(str::to_string);
             if let Some(id) = id_owned {
                 if !TOOL_ID_PATTERN.is_match(&id) {
-                    let new_id = sanitize_tool_id(&id)
-                        .unwrap_or_else(|| generate_tool_call_id(i, 0, None));
+                    let new_id =
+                        sanitize_tool_id(&id).unwrap_or_else(|| generate_tool_call_id(i, 0, None));
                     obj.insert("tool_call_id".into(), Value::String(new_id));
                 }
             }
@@ -157,8 +153,9 @@ pub fn ensure_tool_call_ids(body: &mut Value) {
                                     .get("name")
                                     .and_then(|v| v.as_str())
                                     .map(str::to_string);
-                                let new_id = sanitize_tool_id(&id)
-                                    .unwrap_or_else(|| generate_tool_call_id(i, k, name.as_deref()));
+                                let new_id = sanitize_tool_id(&id).unwrap_or_else(|| {
+                                    generate_tool_call_id(i, k, name.as_deref())
+                                });
                                 block_obj.insert("id".into(), Value::String(new_id));
                             }
                         }
@@ -246,10 +243,7 @@ pub fn has_tool_results(msg: &Value, tool_call_ids: &[String]) -> bool {
 /// Insert empty `role:tool` replies for any assistant tool_calls that
 /// the next message did not answer. Mutates `body.messages` in place.
 pub fn fix_missing_tool_responses(body: &mut Value) {
-    let Some(messages) = body
-        .get("messages")
-        .and_then(|v| v.as_array())
-    else {
+    let Some(messages) = body.get("messages").and_then(|v| v.as_array()) else {
         return;
     };
     let original = messages.clone();

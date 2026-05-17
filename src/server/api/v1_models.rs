@@ -164,7 +164,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
             }
         }
 
-        if kind_filter.iter().any(|kind| *kind == LLM_KIND) {
+        if kind_filter.contains(&LLM_KIND) {
             for custom_model in snapshot
                 .custom_models
                 .iter()
@@ -257,8 +257,8 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
             let merged_model_ids = dedupe_strings(
                 model_ids
                     .into_iter()
-                    .chain(custom_model_ids.into_iter())
-                    .chain(alias_model_ids.into_iter())
+                    .chain(custom_model_ids)
+                    .chain(alias_model_ids)
                     .collect(),
             );
 
@@ -267,7 +267,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
                     .get(model_id.as_str())
                     .copied()
                     .unwrap_or_else(|| infer_kind_from_unknown_model_id(&model_id));
-                if !kind_filter.iter().any(|candidate| *candidate == kind) {
+                if !kind_filter.contains(&kind) {
                     continue;
                 }
 
@@ -280,7 +280,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
             }
 
             if let Some(provider_info) = catalog.provider_info(provider_id) {
-                if kind_filter.iter().any(|kind| *kind == "tts") {
+                if kind_filter.contains(&"tts") {
                     for model_id in &provider_info.tts_models {
                         models.push(model_card(
                             format!("{output_alias}/{model_id}"),
@@ -291,7 +291,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
                     }
                 }
 
-                if kind_filter.iter().any(|kind| *kind == "embedding") {
+                if kind_filter.contains(&"embedding") {
                     for model_id in &provider_info.embedding_models {
                         models.push(model_card(
                             format!("{output_alias}/{model_id}"),
@@ -302,7 +302,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
                     }
                 }
 
-                if kind_filter.iter().any(|kind| *kind == "webSearch") && provider_info.has_search {
+                if kind_filter.contains(&"webSearch") && provider_info.has_search {
                     models.push(model_card(
                         format!("{output_alias}/search"),
                         output_alias.clone(),
@@ -311,7 +311,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
                     ));
                 }
 
-                if kind_filter.iter().any(|kind| *kind == "webFetch") && provider_info.has_fetch {
+                if kind_filter.contains(&"webFetch") && provider_info.has_fetch {
                     models.push(model_card(
                         format!("{output_alias}/fetch"),
                         output_alias.clone(),
@@ -345,7 +345,7 @@ fn provider_matches_kinds(
         .unwrap_or(&[]);
 
     if service_kinds.is_empty() {
-        return kind_filter.iter().any(|kind| *kind == LLM_KIND);
+        return kind_filter.contains(&LLM_KIND);
     }
 
     kind_filter
@@ -355,7 +355,7 @@ fn provider_matches_kinds(
 
 fn combo_matches_kinds(kind: Option<&str>, kind_filter: &[&str]) -> bool {
     let combo_kind = kind.unwrap_or(LLM_KIND);
-    kind_filter.iter().any(|candidate| *candidate == combo_kind)
+    kind_filter.contains(&combo_kind)
 }
 
 fn output_alias(

@@ -38,6 +38,12 @@ pub struct UsageLiveState {
     sender: broadcast::Sender<UsageEvent>,
 }
 
+impl Default for UsageLiveState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl UsageLiveState {
     pub fn new() -> Self {
         let (sender, _) = broadcast::channel(128);

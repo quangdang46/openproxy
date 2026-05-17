@@ -70,11 +70,9 @@ pub fn git_diff_impl(diff: &str) -> String {
                 } else {
                     hunk_skipped += 1;
                 }
-            } else if hunk_shown < max_hunk_lines && !line.starts_with('\\') {
-                if hunk_shown > 0 {
-                    result.push(format!("  {}", line));
-                    hunk_shown += 1;
-                }
+            } else if hunk_shown < max_hunk_lines && !line.starts_with('\\') && hunk_shown > 0 {
+                result.push(format!("  {}", line));
+                hunk_shown += 1;
             }
         }
 
@@ -161,10 +159,8 @@ pub fn git_status_impl(input: &str) -> String {
                 conflicts_count += 1;
             }
 
-            if y == 'M' || y == 'D' {
-                if raw.len() > 3 {
-                    modified_files.push(raw[3..].trim().to_string());
-                }
+            if (y == 'M' || y == 'D') && raw.len() > 3 {
+                modified_files.push(raw[3..].trim().to_string());
             }
             continue;
         }
@@ -723,9 +719,8 @@ impl BuildOutputFilter {
 /// Cargo / rustc error continuation lines: `--> file:line`, `  |`,
 /// `N | code`, `  = note: ...`. We keep these verbatim while we're inside
 /// an error/warning block so the LLM gets the full context.
-static RE_CARGO_ERR_CONT: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^\s*(-->|\||\d+\s*\||=)").expect("RE_CARGO_ERR_CONT")
-});
+static RE_CARGO_ERR_CONT: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"^\s*(-->|\||\d+\s*\||=)").expect("RE_CARGO_ERR_CONT"));
 
 const BUILD_OUTPUT_DEPRECATION_KEEP: usize = 3;
 const BUILD_OUTPUT_WARNING_KEEP: usize = 5;
@@ -772,7 +767,10 @@ pub fn build_output_impl(input: &str) -> String {
 
         let lower = trimmed.to_ascii_lowercase();
 
-        if lower.starts_with("npm err!") || lower.starts_with("npm error") || lower.starts_with("yarn error") {
+        if lower.starts_with("npm err!")
+            || lower.starts_with("npm error")
+            || lower.starts_with("yarn error")
+        {
             errors.push(line);
             continue;
         }
@@ -820,7 +818,9 @@ pub fn build_output_impl(input: &str) -> String {
             compiling_count += 1;
             continue;
         }
-        if trim_start.eq_ignore_ascii_case("downloading") || trim_start.eq_ignore_ascii_case("fetching") {
+        if trim_start.eq_ignore_ascii_case("downloading")
+            || trim_start.eq_ignore_ascii_case("fetching")
+        {
             downloading_count += 1;
             continue;
         }
@@ -928,7 +928,6 @@ fn is_build_summary_line(trimmed: &str, lower: &str) -> bool {
     }
     false
 }
-
 
 #[cfg(test)]
 mod tests {

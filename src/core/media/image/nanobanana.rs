@@ -105,13 +105,10 @@ impl ImageAdapter for NanobananaAdapter {
             .and_then(|v| v.as_str())
             .ok_or_else(|| "NanoBanana: no taskId".to_string())?
             .to_string();
-        let poll_url = format!(
-            "{POLL_BASE}?taskId={}",
-            urlencoding::encode(&task_id)
-        );
+        let poll_url = format!("{POLL_BASE}?taskId={}", urlencoding::encode(&task_id));
 
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(POLL_TIMEOUT_MS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(POLL_TIMEOUT_MS);
         loop {
             if std::time::Instant::now() > deadline {
                 return Err("NanoBanana polling timeout".to_string());

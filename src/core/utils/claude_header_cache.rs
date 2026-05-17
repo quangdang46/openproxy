@@ -59,11 +59,7 @@ pub fn cache_claude_headers(headers: &HashMap<String, String>) {
     }
     let captured: HashMap<String, String> = CLAUDE_IDENTITY_HEADERS
         .iter()
-        .filter_map(|name| {
-            headers
-                .get(*name)
-                .map(|v| ((*name).to_string(), v.clone()))
-        })
+        .filter_map(|name| headers.get(*name).map(|v| ((*name).to_string(), v.clone())))
         .collect();
     if !captured.is_empty() {
         *cache().write() = Some(captured);
@@ -106,7 +102,10 @@ mod tests {
             ("totally-unrelated", "foo"),
         ]));
         let cached = get_cached_claude_headers().expect("cached");
-        assert_eq!(cached.get("anthropic-version").map(String::as_str), Some("2023-06-01"));
+        assert_eq!(
+            cached.get("anthropic-version").map(String::as_str),
+            Some("2023-06-01")
+        );
         assert!(!cached.contains_key("totally-unrelated"));
     }
 }

@@ -95,10 +95,7 @@ impl CommandCodeExecutor {
 
     fn build_headers(&self, credentials: &ProviderConnection, stream: bool) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             "x-session-id",
             HeaderValue::from_str(&Uuid::new_v4().to_string())
@@ -108,7 +105,7 @@ impl CommandCodeExecutor {
         let token = credentials
             .api_key
             .as_deref()
-            .or_else(|| credentials.access_token.as_deref());
+            .or(credentials.access_token.as_deref());
         if let Some(t) = token {
             headers.insert(
                 AUTHORIZATION,

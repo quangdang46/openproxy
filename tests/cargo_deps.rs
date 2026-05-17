@@ -38,13 +38,13 @@ fn key_dependencies_present_with_correct_versions() {
     for (name, expected_prefix) in cases {
         let dep = deps
             .get(name)
-            .expect(&format!("{name} should be present in Cargo.toml"));
+            .unwrap_or_else(|| panic!("{name} should be present in Cargo.toml"));
         let version_str = match dep {
             toml::Value::String(s) => s.clone(),
             toml::Value::Table(t) => t
                 .get("version")
                 .and_then(|v| v.as_str())
-                .expect(&format!("{name} has no version field"))
+                .unwrap_or_else(|| panic!("{name} has no version field"))
                 .to_string(),
             _ => panic!("unexpected toml type for {name}"),
         };

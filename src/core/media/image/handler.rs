@@ -24,7 +24,11 @@ pub enum HandlerOutput {
     /// Raw image bytes plus the inferred content-type. Returned when
     /// `binary_output = true` and the upstream produced a base64 image
     /// we can decode.
-    Binary { bytes: Vec<u8>, content_type: String, filename: String },
+    Binary {
+        bytes: Vec<u8>,
+        content_type: String,
+        filename: String,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -130,7 +134,10 @@ pub async fn handle_image_generation(
             .and_then(|v| v.as_array())
             .and_then(|a| a.first())
         {
-            let b64_owned = item.get("b64_json").and_then(|v| v.as_str()).map(str::to_string);
+            let b64_owned = item
+                .get("b64_json")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
             let b64 = if let Some(b) = b64_owned {
                 Some(b)
             } else if let Some(url) = item.get("url").and_then(|v| v.as_str()) {
@@ -138,9 +145,7 @@ pub async fn handle_image_generation(
                 if let Some(r) = r {
                     if r.status().is_success() {
                         let bytes = r.bytes().await.ok();
-                        bytes.map(|b| {
-                            base64::engine::general_purpose::STANDARD.encode(b)
-                        })
+                        bytes.map(|b| base64::engine::general_purpose::STANDARD.encode(b))
                     } else {
                         None
                     }

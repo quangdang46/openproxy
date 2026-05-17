@@ -100,18 +100,9 @@ impl OpenCodeExecutor {
 
     fn build_headers(&self, _credentials: &ProviderConnection, stream: bool) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_static("Bearer public"),
-        );
-        headers.insert(
-            "x-opencode-client",
-            HeaderValue::from_static("desktop"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer public"));
+        headers.insert("x-opencode-client", HeaderValue::from_static("desktop"));
 
         if stream {
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));

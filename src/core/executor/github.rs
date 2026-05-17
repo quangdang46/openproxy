@@ -121,7 +121,7 @@ impl GithubExecutor {
             .provider_specific_data
             .get("copilotToken")
             .and_then(|v| v.as_str())
-            .or_else(|| credentials.access_token.as_deref())
+            .or(credentials.access_token.as_deref())
             .unwrap_or("");
 
         let mut headers = HeaderMap::new();
@@ -130,10 +130,7 @@ impl GithubExecutor {
             HeaderValue::from_str(&format!("Bearer {}", token))
                 .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             "copilot-integration-id",
             HeaderValue::from_static("vscode-chat"),
@@ -145,11 +142,8 @@ impl GithubExecutor {
         );
         headers.insert(
             "editor-plugin-version",
-            HeaderValue::from_str(&format!(
-                "copilot-chat/{}",
-                GITHUB_COPILOT_CHAT_VERSION
-            ))
-            .unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&format!("copilot-chat/{}", GITHUB_COPILOT_CHAT_VERSION))
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             reqwest::header::USER_AGENT,
@@ -186,7 +180,10 @@ impl GithubExecutor {
     /// Check if model requires max_completion_tokens instead of max_tokens
     fn requires_max_completion_tokens(model: &str) -> bool {
         let lower = model.to_lowercase();
-        lower.contains("gpt-5") || lower.contains("o1-") || lower.contains("o3-") || lower.contains("o4-")
+        lower.contains("gpt-5")
+            || lower.contains("o1-")
+            || lower.contains("o3-")
+            || lower.contains("o4-")
     }
 
     /// Check if model supports temperature parameter
@@ -203,7 +200,10 @@ impl GithubExecutor {
     fn supports_reasoning_effort(model: &str) -> bool {
         let lower = model.to_lowercase();
         // Claude Opus 4.6 and Sonnet 4.6 support it
-        if lower.contains("claude") && (lower.contains("opus") || lower.contains("sonnet")) && lower.contains("4.6") {
+        if lower.contains("claude")
+            && (lower.contains("opus") || lower.contains("sonnet"))
+            && lower.contains("4.6")
+        {
             return true;
         }
         // All other Claude models: strip
@@ -219,7 +219,8 @@ impl GithubExecutor {
     fn sanitize_messages(body: &mut Value) {
         // Extract response_format and model info first (before mutable borrow of messages)
         let needs_json_instruction = {
-            let has_claude = body.get("model")
+            let has_claude = body
+                .get("model")
                 .and_then(|m| m.as_str())
                 .map(|m| m.to_lowercase().contains("claude"))
                 .unwrap_or(false);
@@ -229,7 +230,10 @@ impl GithubExecutor {
 
         let system_instruction = if needs_json_instruction {
             let response_format = body.get("response_format").cloned().unwrap_or(Value::Null);
-            if let Some(schema) = response_format.get("json_schema").and_then(|j| j.get("schema")) {
+            if let Some(schema) = response_format
+                .get("json_schema")
+                .and_then(|j| j.get("schema"))
+            {
                 Some("CRITICAL: You must ONLY output raw JSON. Never use markdown code blocks. Never use backticks. Never wrap JSON in triple backticks. Output ONLY the raw JSON object.".to_string())
             } else if response_format.get("type").and_then(|t| t.as_str()) == Some("json_object") {
                 Some("CRITICAL: You must ONLY output raw JSON. Never use markdown code blocks. Never use backticks.".to_string())
@@ -256,10 +260,13 @@ impl GithubExecutor {
                         *content = json!(format!("{}\n\n{}", instruction, existing));
                     }
                 } else {
-                    messages.insert(0, json!({
-                        "role": "system",
-                        "content": instruction
-                    }));
+                    messages.insert(
+                        0,
+                        json!({
+                            "role": "system",
+                            "content": instruction
+                        }),
+                    );
                 }
 
                 let mut last_user_idx = None;
@@ -297,7 +304,8 @@ impl GithubExecutor {
                                 if part_type == "text" || part_type == "image_url" {
                                     clean_content.push(part.clone());
                                 } else {
-                                    let serialized = serde_json::to_string(part).unwrap_or_default();
+                                    let serialized =
+                                        serde_json::to_string(part).unwrap_or_default();
                                     let text = part
                                         .get("text")
                                         .or_else(|| part.get("content"))
@@ -345,12 +353,18 @@ impl GithubExecutor {
 
         // Strip reasoning_effort "none"
         if transformed.get("reasoning_effort").and_then(|v| v.as_str()) == Some("none") {
-            transformed.as_object_mut().unwrap().remove("reasoning_effort");
+            transformed
+                .as_object_mut()
+                .unwrap()
+                .remove("reasoning_effort");
         }
 
         // Strip reasoning_effort for unsupported models
         if !Self::supports_reasoning_effort(model) {
-            transformed.as_object_mut().unwrap().remove("reasoning_effort");
+            transformed
+                .as_object_mut()
+                .unwrap()
+                .remove("reasoning_effort");
         }
 
         transformed
@@ -406,11 +420,7 @@ impl GithubExecutor {
         );
         headers.insert(
             "Editor-Plugin-Version",
-            HeaderValue::from_str(&format!(
-                "copilot-chat/{}",
-                GITHUB_COPILOT_CHAT_VERSION
-            ))
-            .ok()?,
+            HeaderValue::from_str(&format!("copilot-chat/{}", GITHUB_COPILOT_CHAT_VERSION)).ok()?,
         );
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(

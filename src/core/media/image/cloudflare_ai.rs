@@ -8,7 +8,9 @@ use reqwest::Client;
 use serde_json::{json, Map, Value};
 use std::collections::HashSet;
 
-use super::base::{empty_normalized, now_secs, ImageAdapter, ImageRequest, ImageResponse, ParseContext};
+use super::base::{
+    empty_normalized, now_secs, ImageAdapter, ImageRequest, ImageResponse, ParseContext,
+};
 
 const BASE_URL: &str = "https://api.cloudflare.com/client/v4/accounts";
 
@@ -172,18 +174,13 @@ impl ImageAdapter for CloudflareAiAdapter {
             .provider_specific_data
             .get("accountId")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| "cloudflare-ai requires accountId in providerSpecificData".to_string())?;
-        Ok(format!(
-            "{BASE_URL}/{account_id}/ai/run/{}",
-            request.model
-        ))
+            .ok_or_else(|| {
+                "cloudflare-ai requires accountId in providerSpecificData".to_string()
+            })?;
+        Ok(format!("{BASE_URL}/{account_id}/ai/run/{}", request.model))
     }
 
-    fn build_headers(
-        &self,
-        request: &ImageRequest<'_>,
-        body: &Value,
-    ) -> Result<HeaderMap, String> {
+    fn build_headers(&self, request: &ImageRequest<'_>, body: &Value) -> Result<HeaderMap, String> {
         // We don't have direct access to the multipart marker on the body
         // here; the JSON path always sets Content-Type. For the multipart
         // path, build_body returns a placeholder Value and the handler
@@ -238,9 +235,7 @@ impl ImageAdapter for CloudflareAiAdapter {
                     req.insert("image_b64".into(), json!(b64));
                     req.insert(
                         "image".into(),
-                        Value::Array(
-                            b64_to_bytes(&b64).into_iter().map(|b| json!(b)).collect(),
-                        ),
+                        Value::Array(b64_to_bytes(&b64).into_iter().map(|b| json!(b)).collect()),
                     );
                 }
             }

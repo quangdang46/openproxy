@@ -6,7 +6,9 @@ fn normalize_tool_parameters(params: Option<&Value>) -> Value {
     match params {
         None => serde_json::json!({"type": "object", "properties": {}}),
         Some(p) => {
-            if p.get("type").and_then(|v| v.as_str()) == Some("object") && p.get("properties").is_none() {
+            if p.get("type").and_then(|v| v.as_str()) == Some("object")
+                && p.get("properties").is_none()
+            {
                 let mut clone = p.clone();
                 clone["properties"] = serde_json::json!({});
                 clone
@@ -41,9 +43,12 @@ pub fn openai_responses_to_chat_request(
 
     if let Some(instructions) = body.get("instructions") {
         if let Some(s) = instructions.as_str() {
-            result["messages"].as_array_mut().unwrap().push(serde_json::json!({
-                "role": "system", "content": s
-            }));
+            result["messages"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "role": "system", "content": s
+                }));
         }
     }
 
@@ -94,9 +99,12 @@ pub fn openai_responses_to_chat_request(
                 };
 
                 if let Some(role) = item.get("role").and_then(|v| v.as_str()) {
-                    result["messages"].as_array_mut().unwrap().push(serde_json::json!({
-                        "role": role, "content": content
-                    }));
+                    result["messages"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "role": role, "content": content
+                        }));
                 }
             }
             Some("function_call") => {
@@ -132,11 +140,14 @@ pub fn openai_responses_to_chat_request(
                     serde_json::to_string(&item.get("output").cloned().unwrap_or(Value::Null))
                         .unwrap_or_default()
                 };
-                result["messages"].as_array_mut().unwrap().push(serde_json::json!({
-                    "role": "tool",
-                    "tool_call_id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "content": output
-                }));
+                result["messages"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "content": output
+                    }));
             }
             Some("reasoning") => {}
             _ => {}
@@ -203,21 +214,34 @@ pub fn chat_to_openai_responses_request(
     });
 
     let mut has_system = false;
-    let messages = body.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let messages = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
 
     for msg in &messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
         if role == "system" {
             if !has_system {
-                result["instructions"] = msg.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string().into();
+                result["instructions"] = msg
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string()
+                    .into();
                 has_system = true;
             }
             continue;
         }
 
         if role == "user" || role == "assistant" {
-            let content_type = if role == "user" { "input_text" } else { "output_text" };
+            let content_type = if role == "user" {
+                "input_text"
+            } else {
+                "output_text"
+            };
             let content = if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
                 vec![serde_json::json!({"type": content_type, "text": s})]
             } else if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
@@ -245,11 +269,14 @@ pub fn chat_to_openai_responses_request(
             };
 
             if !content.is_empty() {
-                result["input"].as_array_mut().unwrap().push(serde_json::json!({
-                    "type": "message",
-                    "role": role,
-                    "content": content
-                }));
+                result["input"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "type": "message",
+                        "role": role,
+                        "content": content
+                    }));
             }
         }
 
@@ -270,7 +297,10 @@ pub fn chat_to_openai_responses_request(
             let output = if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
                 s.to_string()
             } else if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
-                arr.iter().filter_map(|c| c.get("text").and_then(|v| v.as_str())).collect::<Vec<_>>().join("")
+                arr.iter()
+                    .filter_map(|c| c.get("text").and_then(|v| v.as_str()))
+                    .collect::<Vec<_>>()
+                    .join("")
             } else {
                 serde_json::to_string(&msg.get("content").cloned().unwrap_or(Value::Null))
                     .unwrap_or_default()
@@ -308,9 +338,15 @@ pub fn chat_to_openai_responses_request(
         result["tools"] = Value::Array(converted);
     }
 
-    if let Some(t) = body.get("temperature") { result["temperature"] = t.clone(); }
-    if let Some(m) = body.get("max_tokens") { result["max_tokens"] = m.clone(); }
-    if let Some(t) = body.get("top_p") { result["top_p"] = t.clone(); }
+    if let Some(t) = body.get("temperature") {
+        result["temperature"] = t.clone();
+    }
+    if let Some(m) = body.get("max_tokens") {
+        result["max_tokens"] = m.clone();
+    }
+    if let Some(t) = body.get("top_p") {
+        result["top_p"] = t.clone();
+    }
 
     *body = result;
     let _ = stream;

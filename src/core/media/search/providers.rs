@@ -101,7 +101,11 @@ impl SearchProvider for SerperProvider {
         } else {
             "organic"
         };
-        let items = body.get(key).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let items = body
+            .get(key)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let results: Vec<SearchResult> = items
             .iter()
             .enumerate()
@@ -234,7 +238,10 @@ impl SearchProvider for PerplexityProvider {
         "perplexity"
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url("https://api.perplexity.ai/search", request))
+        Ok(resolve_base_url(
+            "https://api.perplexity.ai/search",
+            request,
+        ))
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "perplexity")?;
@@ -398,10 +405,7 @@ impl SearchProvider for TavilyProvider {
         "tavily"
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url(
-            "https://api.tavily.com/search",
-            request,
-        ))
+        Ok(resolve_base_url("https://api.tavily.com/search", request))
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "tavily")?;
@@ -721,11 +725,7 @@ impl SearchProvider for SearchApiProvider {
             .get("organic_results")
             .and_then(|v| v.as_array())
             .cloned()
-            .or_else(|| {
-                body.get("top_stories")
-                    .and_then(|v| v.as_array())
-                    .cloned()
-            })
+            .or_else(|| body.get("top_stories").and_then(|v| v.as_array()).cloned())
             .unwrap_or_default();
         let results: Vec<SearchResult> = items
             .iter()
@@ -870,11 +870,7 @@ impl SearchProvider for YouComProvider {
                     .get("markdown")
                     .and_then(|v| v.as_str())
                     .or_else(|| item.get("html").and_then(|v| v.as_str()));
-                let livecrawl_format = if item
-                    .get("markdown")
-                    .and_then(|v| v.as_str())
-                    .is_some()
-                {
+                let livecrawl_format = if item.get("markdown").and_then(|v| v.as_str()).is_some() {
                     "markdown"
                 } else {
                     "html"

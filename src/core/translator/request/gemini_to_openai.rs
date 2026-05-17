@@ -6,7 +6,10 @@ use serde_json::Value;
 
 /// Convert Gemini content to OpenAI message
 fn convert_gemini_content(content: &Value) -> Option<Value> {
-    let role = content.get("role").and_then(|v| v.as_str()).unwrap_or("user");
+    let role = content
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("user");
     let openai_role = if role == "user" { "user" } else { "assistant" };
 
     let parts = content.get("parts").and_then(|v| v.as_array())?;
@@ -183,7 +186,10 @@ pub fn gemini_to_openai_request(
             if let Some(func_decls) = tool.get("functionDeclarations").and_then(|v| v.as_array()) {
                 for func in func_decls {
                     let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let description = func.get("description").and_then(|v| v.as_str()).unwrap_or("");
+                    let description = func
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
                     let parameters = func
                         .get("parameters")
                         .cloned()
@@ -228,6 +234,6 @@ mod tests {
 
         let model = body.get("model").unwrap().as_str().unwrap();
         assert_eq!(model, "gemini-pro");
-        assert!(body.get("messages").unwrap().as_array().unwrap().len() >= 1);
+        assert!(!body.get("messages").unwrap().as_array().unwrap().is_empty());
     }
 }

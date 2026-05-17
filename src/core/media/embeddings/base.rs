@@ -20,9 +20,7 @@ impl<'a> EmbeddingRequest<'a> {
     }
 
     pub fn encoding_format(&self) -> Option<&'a str> {
-        self.body
-            .get("encoding_format")
-            .and_then(|v| v.as_str())
+        self.body.get("encoding_format").and_then(|v| v.as_str())
     }
 
     pub fn dimensions(&self) -> Option<u64> {
@@ -214,11 +212,7 @@ impl EmbeddingAdapter for GeminiAdapter {
             .or(request.credentials.access_token.as_deref())
             .unwrap_or("");
         let path = model_path(request.model);
-        let op = if request
-            .input()
-            .map(|v| v.is_array())
-            .unwrap_or(false)
-        {
+        let op = if request.input().map(|v| v.is_array()).unwrap_or(false) {
             "batchEmbedContents"
         } else {
             "embedContent"
@@ -270,8 +264,7 @@ impl EmbeddingAdapter for GeminiAdapter {
         {
             return body.clone();
         }
-        let items: Vec<Value> = if let Some(arr) =
-            body.get("embeddings").and_then(|v| v.as_array())
+        let items: Vec<Value> = if let Some(arr) = body.get("embeddings").and_then(|v| v.as_array())
         {
             arr.iter()
                 .enumerate()
@@ -287,11 +280,7 @@ impl EmbeddingAdapter for GeminiAdapter {
                     })
                 })
                 .collect()
-        } else if let Some(values) = body
-            .get("embedding")
-            .and_then(|e| e.get("values"))
-            .cloned()
-        {
+        } else if let Some(values) = body.get("embedding").and_then(|e| e.get("values")).cloned() {
             vec![json!({
                 "object": "embedding",
                 "index": 0,
