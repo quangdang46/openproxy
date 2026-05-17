@@ -471,6 +471,20 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
         return None;
     }
 
+    // Kiro format (AWS CodeWhisperer): the request body has no top-level
+    // `messages`/`input` array — instead it's
+    // `conversationState.{history[], currentMessage}` and each entry holds
+    // its `tool_result` payload at
+    // `userInputMessage.userInputMessageContext.toolResults[].content[].text`.
+    // Ports `compressKiroFormat()` from upstream 9router (#1194,
+    // open-sse/rtk/index.js).
+    if body
+        .as_object()
+        .is_some_and(|fields| fields.contains_key("conversationState"))
+    {
+        return Some(compress_kiro_format(body));
+    }
+
     let items = {
         let fields = body.as_object()?;
         let arr = fields.get("messages").and_then(Value::as_array);
@@ -549,6 +563,111 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
     Some(stats)
 }
 
+/// Walk `conversationState.history[]` + `conversationState.currentMessage`
+/// and compress every `toolResults[].content[].text` payload in place.
+/// Error tool results (`status == "error"`) are preserved verbatim so the
+/// LLM still sees the failure trace.
+///
+/// Ports `compressKiroFormat()` from upstream 9router (open-sse/rtk/index.js).
+fn compress_kiro_format(body: &mut Value) -> RtkStats {
+    let mut stats = RtkStats {
+        bytes_before: 0,
+        bytes_after: 0,
+        hits: Vec::new(),
+    };
+
+    let Some(state) = body
+        .get_mut("conversationState")
+        .and_then(Value::as_object_mut)
+    else {
+        return stats;
+    };
+
+    // Build a flat list of message references: history entries first, then
+    // currentMessage. Borrow rules force us to handle them in two passes
+    // because we can't simultaneously hold mutable references into both
+    // sibling fields of the same map.
+    if let Some(history) = state.get_mut("history").and_then(Value::as_array_mut) {
+        for msg in history.iter_mut() {
+            compress_kiro_tool_results(msg, &mut stats);
+        }
+    }
+    if let Some(current) = state.get_mut("currentMessage") {
+        compress_kiro_tool_results(current, &mut stats);
+    }
+
+    stats
+}
+
+/// Compress `userInputMessage.userInputMessageContext.toolResults[].content[].text`
+/// for a single Kiro message entry. Skips entries whose `status == "error"`.
+fn compress_kiro_tool_results(msg: &mut Value, stats: &mut RtkStats) {
+    let Some(tool_results) = msg
+        .get_mut("userInputMessage")
+        .and_then(|v| v.get_mut("userInputMessageContext"))
+        .and_then(|v| v.get_mut("toolResults"))
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+
+    for tr in tool_results.iter_mut() {
+        if tr.get("status").and_then(Value::as_str) == Some("error") {
+            continue;
+        }
+        let Some(content) = tr.get_mut("content").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for part in content.iter_mut() {
+            let Some(part_obj) = part.as_object_mut() else {
+                continue;
+            };
+            let Some(text) = part_obj.get("text").and_then(Value::as_str) else {
+                continue;
+            };
+            let original = text.to_string();
+            let compressed = compress_tool_text_owned(&original, stats, "kiro-tool-result");
+            if compressed.len() < original.len() {
+                part_obj.insert("text".to_string(), Value::String(compressed));
+            }
+        }
+    }
+}
+
+/// Variant of `compress_tool_text` that returns the (possibly-compressed)
+/// output instead of discarding it. Used by the Kiro path which has to write
+/// the result back into the request body so the upstream actually sees a
+/// smaller payload.
+fn compress_tool_text_owned(text: &str, stats: &mut RtkStats, shape: &str) -> String {
+    let bytes_in = text.len();
+    stats.bytes_before += bytes_in;
+
+    if !(MIN_COMPRESS_SIZE..=RAW_CAP).contains(&bytes_in) {
+        stats.bytes_after += bytes_in;
+        return text.to_string();
+    }
+
+    let Some(detected) = auto_detect_filter(text) else {
+        stats.bytes_after += bytes_in;
+        return text.to_string();
+    };
+
+    let out = safe_apply(detected.filter_fn, text, detected.filter_name);
+
+    if out.is_empty() || out.len() >= bytes_in {
+        stats.bytes_after += bytes_in;
+        return text.to_string();
+    }
+
+    stats.bytes_after += out.len();
+    stats.hits.push(RtkHit {
+        shape: shape.to_string(),
+        filter: detected.filter_name.to_string(),
+        saved: bytes_in - out.len(),
+    });
+    out
+}
+
 fn compress_tool_text<F>(text: &str, stats: &mut RtkStats, shape: &str, detect_fn: F)
 where
     F: Fn(&str) -> Option<FilterFn>,
@@ -593,8 +712,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_request_preprocessing, inject_caveman_prompt, normalize_caveman_level,
-        should_auto_apply_caveman, CompressionLevel,
+        apply_request_preprocessing, compress_messages, inject_caveman_prompt,
+        normalize_caveman_level, should_auto_apply_caveman, CompressionLevel,
     };
     use crate::types::Settings;
     use serde_json::json;
@@ -874,6 +993,267 @@ mod tests {
         assert!(!ultra.is_empty());
         assert_ne!(lite, full);
         assert_ne!(full, ultra);
+    }
+
+    /// Build a Kiro `conversationState` request body whose toolResult[0]
+    /// content[0].text is the given string. Mirrors the fixtures used in
+    /// upstream `tests/unit/rtkKiro.test.js`.
+    fn make_kiro_body(text: &str, in_history: bool) -> serde_json::Value {
+        let entry = json!({
+            "userInputMessage": {
+                "content": "stub",
+                "modelId": "claude-sonnet-4.5",
+                "userInputMessageContext": {
+                    "toolResults": [{
+                        "toolUseId": "tool_1",
+                        "status": "success",
+                        "content": [{"text": text}]
+                    }]
+                }
+            }
+        });
+        if in_history {
+            json!({
+                "conversationState": {
+                    "chatTriggerType": "MANUAL",
+                    "conversationId": "test",
+                    "history": [entry],
+                    "currentMessage": {
+                        "userInputMessage": {
+                            "content": "what happened?",
+                            "modelId": "claude-sonnet-4.5"
+                        }
+                    }
+                }
+            })
+        } else {
+            json!({
+                "conversationState": {
+                    "chatTriggerType": "MANUAL",
+                    "conversationId": "test",
+                    "history": [],
+                    "currentMessage": entry
+                }
+            })
+        }
+    }
+
+    /// 18 npm-install lines so we comfortably exceed MIN_COMPRESS_SIZE (500 B)
+    /// and let `buildOutput` strip most of the noise.
+    fn npm_install_log() -> String {
+        let lines = [
+            "npm warn deprecated har-validator@5.1.5: this library is no longer supported",
+            "npm warn deprecated uuid@3.4.0: uuid@10 and below is no longer supported",
+            "npm warn deprecated request@2.88.2: request has been deprecated",
+            "npm warn deprecated inflight@1.0.6: This module is not supported",
+            "npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported",
+            "npm warn deprecated rimraf@2.7.1: Rimraf versions prior to v4 are no longer supported",
+            "",
+            "added 47 packages, and audited 48 packages in 13s",
+            "",
+            "3 packages are looking for funding",
+            "  run `npm fund` for details",
+            "",
+            "4 vulnerabilities (2 moderate, 2 critical)",
+            "",
+            "Some issues need review, and may require choosing",
+            "a different dependency.",
+            "",
+            "Run `npm audit` for details.",
+        ];
+        lines.join("\n")
+    }
+
+    #[test]
+    fn kiro_compresses_tool_results_in_current_message() {
+        let mut body = make_kiro_body(&npm_install_log(), false);
+        let stats = compress_messages(&mut body, true).expect("kiro path returns stats");
+
+        assert!(stats.bytes_before > 500, "fixture must exceed min size");
+        assert!(stats.bytes_after < stats.bytes_before, "should shrink");
+        assert_eq!(stats.hits.len(), 1);
+        assert_eq!(stats.hits[0].filter, "build-output");
+        assert_eq!(stats.hits[0].shape, "kiro-tool-result");
+
+        // Verify the compressed payload was actually written back into the
+        // request body (so the upstream sees the smaller version).
+        let new_text = body["conversationState"]["currentMessage"]["userInputMessage"]
+            ["userInputMessageContext"]["toolResults"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(new_text.len() < npm_install_log().len());
+    }
+
+    #[test]
+    fn kiro_compresses_tool_results_in_history() {
+        // 20 cargo compile lines + finished line — enough to trigger buildOutput.
+        let mut log = String::new();
+        for i in 1..=20 {
+            log.push_str(&format!("   Compiling package-{} v1.0.{}\n", i, i));
+        }
+        log.push_str("    Finished `dev` profile [unoptimized + debuginfo] target(s) in 12.34s");
+
+        let mut body = make_kiro_body(&log, true);
+        let stats = compress_messages(&mut body, true).expect("kiro path returns stats");
+
+        assert_eq!(stats.hits.len(), 1);
+        assert_eq!(stats.hits[0].filter, "build-output");
+        assert!(stats.bytes_after < stats.bytes_before);
+    }
+
+    #[test]
+    fn kiro_preserves_error_tool_results() {
+        // status=error → must be left untouched so the LLM still sees the trace.
+        let raw_error_log = npm_install_log();
+        let mut body = json!({
+            "conversationState": {
+                "history": [],
+                "currentMessage": {
+                    "userInputMessage": {
+                        "content": "install foo",
+                        "userInputMessageContext": {
+                            "toolResults": [{
+                                "toolUseId": "t1",
+                                "status": "error",
+                                "content": [{"text": raw_error_log}]
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        let stats = compress_messages(&mut body, true).expect("kiro path returns stats");
+        assert!(
+            stats.hits.is_empty(),
+            "error results must not be compressed"
+        );
+        let preserved = body["conversationState"]["currentMessage"]["userInputMessage"]
+            ["userInputMessageContext"]["toolResults"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(preserved, npm_install_log());
+    }
+
+    #[test]
+    fn kiro_compresses_both_history_and_current_message() {
+        let mut history_lines: Vec<String> = (1..=12)
+            .map(|i| format!("npm warn deprecated package-{i}@1.0.0: This version is deprecated"))
+            .collect();
+        history_lines.push("added 50 packages in 5s".to_string());
+        let history_log = history_lines.join("\n");
+
+        let mut current_lines: Vec<String> = (1..=12)
+            .map(|i| {
+                format!("npm warn deprecated lib-{i}@2.0.0: This library is no longer supported")
+            })
+            .collect();
+        current_lines.push("added 1 package in 2s".to_string());
+        let current_log = current_lines.join("\n");
+
+        let mut body = json!({
+            "conversationState": {
+                "history": [{
+                    "userInputMessage": {
+                        "userInputMessageContext": {
+                            "toolResults": [{
+                                "toolUseId": "t1",
+                                "status": "success",
+                                "content": [{"text": history_log}]
+                            }]
+                        }
+                    }
+                }],
+                "currentMessage": {
+                    "userInputMessage": {
+                        "userInputMessageContext": {
+                            "toolResults": [{
+                                "toolUseId": "t2",
+                                "status": "success",
+                                "content": [{"text": current_log}]
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        let stats = compress_messages(&mut body, true).expect("kiro path returns stats");
+        assert_eq!(stats.hits.len(), 2);
+        assert!(stats.hits.iter().all(|h| h.filter == "build-output"));
+        assert!(stats.hits.iter().all(|h| h.shape == "kiro-tool-result"));
+    }
+
+    #[test]
+    fn kiro_short_payloads_below_min_size_are_skipped() {
+        let mut body = make_kiro_body("short", false);
+        let stats = compress_messages(&mut body, true).expect("kiro path returns stats");
+        assert!(stats.hits.is_empty(), "below 500B must skip");
+        // Payload untouched.
+        let after = body["conversationState"]["currentMessage"]["userInputMessage"]
+            ["userInputMessageContext"]["toolResults"][0]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(after, "short");
+    }
+
+    #[test]
+    fn kiro_path_handles_empty_history_and_no_current_tool_results() {
+        let mut body = json!({
+            "conversationState": {
+                "history": [],
+                "currentMessage": {
+                    "userInputMessage": {"content": "hi", "modelId": "claude-sonnet-4.5"}
+                }
+            }
+        });
+        let stats = compress_messages(&mut body, true).expect("kiro path returns stats");
+        assert_eq!(stats.bytes_before, 0);
+        assert_eq!(stats.bytes_after, 0);
+        assert!(stats.hits.is_empty());
+    }
+
+    #[test]
+    fn kiro_path_ignores_non_object_content_parts() {
+        let mut body = json!({
+            "conversationState": {
+                "history": [],
+                "currentMessage": {
+                    "userInputMessage": {
+                        "userInputMessageContext": {
+                            "toolResults": [{
+                                "toolUseId": "t1",
+                                "status": "success",
+                                "content": ["a", null, 42, {"text": "tiny"}]
+                            }]
+                        }
+                    }
+                }
+            }
+        });
+        // Should not panic; non-object parts and missing-text entries are ignored.
+        let stats = compress_messages(&mut body, true).expect("kiro path returns stats");
+        assert!(stats.hits.is_empty());
+    }
+
+    #[test]
+    fn kiro_disabled_returns_none() {
+        let mut body = make_kiro_body(&npm_install_log(), false);
+        assert!(compress_messages(&mut body, false).is_none());
+    }
+
+    #[test]
+    fn non_kiro_request_still_goes_through_messages_path() {
+        // Sanity check that the conversationState shortcut doesn't accidentally
+        // hijack regular OpenAI requests.
+        let mut body = json!({
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        let stats = compress_messages(&mut body, true);
+        assert!(stats.is_some());
+        // No tool messages → no hits, but the function still returns Some.
+        assert_eq!(stats.unwrap().hits.len(), 0);
     }
 
     #[test]
