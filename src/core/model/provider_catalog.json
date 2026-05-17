@@ -55,7 +55,8 @@
     "perplexity-web": "perplexity-web",
     "azure": "azure",
     "cloudflare-ai": "cloudflare-ai",
-    "xiaomi-mimo": "xiaomi-mimo"
+    "xiaomi-mimo": "xiaomi-mimo",
+    "vercel-ai-gateway": "vercel-ai-gateway"
   },
   "providerModels": [
     {
@@ -4094,6 +4095,17 @@
     {
       "id": "perplexity-web",
       "alias": "pw",
+      "serviceKinds": [
+        "llm"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "vercel-ai-gateway",
+      "alias": "vercel-ai-gateway",
       "serviceKinds": [
         "llm"
       ],

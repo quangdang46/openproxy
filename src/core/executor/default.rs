@@ -249,6 +249,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.topazlabs.com/v1"),
         ),
         (
+            "vercel-ai-gateway",
+            ProviderConfig::openai("https://ai-gateway.vercel.sh/v1/chat/completions"),
+        ),
+        (
             "ollama",
             ProviderConfig::openai("https://api.ollama.com/v1/chat/completions"),
         ),
