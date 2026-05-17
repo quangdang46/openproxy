@@ -556,7 +556,7 @@ where
     let bytes_in = text.len();
     stats.bytes_before += bytes_in;
 
-    if bytes_in < MIN_COMPRESS_SIZE || bytes_in > RAW_CAP {
+    if !(MIN_COMPRESS_SIZE..=RAW_CAP).contains(&bytes_in) {
         stats.bytes_after += bytes_in;
         return;
     }

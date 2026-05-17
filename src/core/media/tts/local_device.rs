@@ -94,7 +94,13 @@ async fn synthesize_windows(text: &str, voice_id: &str) -> Result<Vec<u8>, TtsEr
         path = wav.to_string_lossy(),
     );
     let status = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command"])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+        ])
         .arg(&script)
         .status()
         .await

@@ -180,7 +180,7 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
                 "tool_use" => {
                     let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
                     let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let input = block.get("input").map(|v| v.clone()).unwrap_or(Value::Null);
+                    let input = block.get("input").cloned().unwrap_or(Value::Null);
                     let arguments = if input.is_null() {
                         "{}".to_string()
                     } else {
@@ -804,7 +804,7 @@ mod tests {
 
         claude_to_openai_request("gpt-4", &mut body, true, None);
 
-        assert_eq!(body.get("stream").unwrap().as_bool().unwrap(), true);
+        assert!(body.get("stream").unwrap().as_bool().unwrap());
     }
 
     #[test]

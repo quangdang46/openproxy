@@ -214,10 +214,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             "black-forest-labs",
             ProviderConfig::openai("https://api.blackforestlabs.ai/v1"),
         ),
-        (
-            "fal-ai",
-            ProviderConfig::openai("https://fal.run/fal-ai"),
-        ),
+        ("fal-ai", ProviderConfig::openai("https://fal.run/fal-ai")),
         (
             "runwayml",
             ProviderConfig::openai("https://api.runwayml.com/v1"),
@@ -226,30 +223,15 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             "sdwebui",
             ProviderConfig::openai("http://127.0.0.1:7860/sdapi/v1"),
         ),
-        (
-            "comfyui",
-            ProviderConfig::openai("http://127.0.0.1:8188"),
-        ),
+        ("comfyui", ProviderConfig::openai("http://127.0.0.1:8188")),
         (
             "huggingface",
             ProviderConfig::openai("https://api-inference.huggingface.co"),
         ),
-        (
-            "jina-ai",
-            ProviderConfig::openai("https://api.jina.ai/v1"),
-        ),
-        (
-            "linkup",
-            ProviderConfig::openai("https://api.linkup.so/v1"),
-        ),
-        (
-            "searxng",
-            ProviderConfig::openai("http://localhost:8080"),
-        ),
-        (
-            "youcom",
-            ProviderConfig::openai("https://api.you.com/v1"),
-        ),
+        ("jina-ai", ProviderConfig::openai("https://api.jina.ai/v1")),
+        ("linkup", ProviderConfig::openai("https://api.linkup.so/v1")),
+        ("searxng", ProviderConfig::openai("http://localhost:8080")),
+        ("youcom", ProviderConfig::openai("https://api.you.com/v1")),
         (
             "google-pse",
             ProviderConfig::openai("https://www.googleapis.com/customsearch/v1"),

@@ -109,12 +109,14 @@ impl GeminiCliExecutor {
         format!("{}/{}:{}", GEMINI_CLI_BASE_URL, model, action)
     }
 
-    fn build_headers(&self, credentials: &ProviderConnection, stream: bool, model: &str) -> HeaderMap {
+    fn build_headers(
+        &self,
+        credentials: &ProviderConnection,
+        stream: bool,
+        model: &str,
+    ) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         if let Some(token) = credentials.access_token.as_deref() {
             headers.insert(

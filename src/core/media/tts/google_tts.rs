@@ -12,8 +12,8 @@ use regex::Regex;
 use reqwest::header::{HeaderValue, REFERER};
 use reqwest::Client;
 use serde_json::Value;
-use std::time::{Duration, Instant};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use super::base::{TtsAdapter, TtsError, TtsRequest, TtsResult, UA};
 
@@ -105,7 +105,10 @@ impl TtsAdapter for GoogleTtsAdapter {
         let payload = serde_json::json!([clean, lang, Value::Null, "undefined", [0]]);
         let body = format!(
             "f.req={}",
-            urlencoding::encode(&serde_json::json!([[[rpc_id, payload.to_string(), Value::Null, "generic"]]]).to_string())
+            urlencoding::encode(
+                &serde_json::json!([[[rpc_id, payload.to_string(), Value::Null, "generic"]]])
+                    .to_string()
+            )
         );
 
         let url = format!(
@@ -121,7 +124,10 @@ impl TtsAdapter for GoogleTtsAdapter {
                 "Content-Type",
                 HeaderValue::from_static("application/x-www-form-urlencoded"),
             )
-            .header(REFERER, HeaderValue::from_static("https://translate.google.com/"))
+            .header(
+                REFERER,
+                HeaderValue::from_static("https://translate.google.com/"),
+            )
             .header("User-Agent", UA)
             .body(body)
             .send()
@@ -138,8 +144,8 @@ impl TtsAdapter for GoogleTtsAdapter {
         let raw = lines
             .get(3)
             .ok_or_else(|| TtsError::Parse("Google TTS: short response".into()))?;
-        let split: Value = serde_json::from_str(raw)
-            .map_err(|e| TtsError::Parse(format!("google split: {e}")))?;
+        let split: Value =
+            serde_json::from_str(raw).map_err(|e| TtsError::Parse(format!("google split: {e}")))?;
         let inner_str = split
             .pointer("/0/2")
             .and_then(|v| v.as_str())

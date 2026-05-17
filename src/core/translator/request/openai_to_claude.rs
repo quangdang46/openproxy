@@ -170,7 +170,7 @@ fn get_content_blocks_from_message(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let content = msg.get("content").map(|v| v.clone()).unwrap_or(Value::Null);
+        let content = msg.get("content").cloned().unwrap_or(Value::Null);
         blocks.push(ClaudeContentBlock::ToolResult {
             tool_use_id: tool_call_id,
             content,
@@ -201,10 +201,7 @@ fn get_content_blocks_from_message(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let content = part
-                            .get("content")
-                            .map(|v| v.clone())
-                            .unwrap_or(Value::Null);
+                        let content = part.get("content").cloned().unwrap_or(Value::Null);
                         let is_error = part.get("is_error").and_then(|v| v.as_bool());
                         blocks.push(ClaudeContentBlock::ToolResult {
                             tool_use_id,
@@ -298,7 +295,7 @@ fn get_content_blocks_from_message(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let input = part.get("input").map(|v| v.clone()).unwrap_or(Value::Null);
+                        let input = part.get("input").cloned().unwrap_or(Value::Null);
                         blocks.push(ClaudeContentBlock::ToolUse { id, name, input });
                     }
                     "thinking" => {
@@ -686,7 +683,7 @@ pub fn openai_to_claude_request(
 
     let tool_choice = body_obj
         .get("tool_choice")
-        .and_then(|v| convert_openai_tool_choice(v));
+        .and_then(convert_openai_tool_choice);
 
     let mut reasoning_effort_thinking: Option<ClaudeThinking> = None;
     if body_obj.get("reasoning_effort").is_some() && body_obj.get("thinking").is_none() {
@@ -840,7 +837,7 @@ mod tests {
         openai_to_claude_request("claude-3", &mut body, false, None);
 
         let system = body.get("system").unwrap().as_array().unwrap();
-        assert!(system.len() >= 1);
+        assert!(!system.is_empty());
         assert!(system[0]
             .get("text")
             .unwrap()

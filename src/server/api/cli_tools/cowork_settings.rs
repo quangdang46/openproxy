@@ -32,7 +32,6 @@ fn require_management_access(
     state: &AppState,
 ) -> std::result::Result<(), Response> {
     super::super::require_dashboard_or_management_api_key(headers, state)
-        .map_err(|response| response)
 }
 
 #[derive(Debug, Deserialize)]

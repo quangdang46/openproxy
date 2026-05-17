@@ -84,7 +84,7 @@ pub fn require_dashboard_session(
     db: &Db,
 ) -> Result<DashboardClaims, DashboardAuthError> {
     let snapshot = db.snapshot();
-    if snapshot.settings.require_login == false {
+    if !snapshot.settings.require_login {
         return Ok(DashboardClaims {
             authenticated: true,
             exp: usize::MAX,

@@ -237,7 +237,7 @@ fn parse_cli_command(
     command: &str,
     additional_args: Option<&[String]>,
 ) -> Option<(String, Vec<String>)> {
-    let parts: Vec<&str> = command.trim().split_whitespace().collect();
+    let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
         return None;
     }

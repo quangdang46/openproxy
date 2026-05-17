@@ -208,9 +208,7 @@ impl AntigravityExecutor {
                         continue;
                     };
                     let parts_owned = co.get("parts").cloned();
-                    let Some(parts_array) =
-                        parts_owned.as_ref().and_then(|p| p.as_array())
-                    else {
+                    let Some(parts_array) = parts_owned.as_ref().and_then(|p| p.as_array()) else {
                         continue;
                     };
 
@@ -230,7 +228,8 @@ impl AntigravityExecutor {
                             let Some(o) = p.as_object() else {
                                 return true;
                             };
-                            let has_thought = o.get("thought").map(|v| !v.is_null()).unwrap_or(false);
+                            let has_thought =
+                                o.get("thought").map(|v| !v.is_null()).unwrap_or(false);
                             let has_function_call = o.contains_key("functionCall");
                             let has_thought_signature = o.contains_key("thoughtSignature");
                             let has_text = o.contains_key("text");
@@ -256,19 +255,14 @@ impl AntigravityExecutor {
             {
                 let mut all_decls: Vec<Value> = Vec::new();
                 for group in tools {
-                    let Some(decls) = group
-                        .get("functionDeclarations")
-                        .and_then(|v| v.as_array())
+                    let Some(decls) = group.get("functionDeclarations").and_then(|v| v.as_array())
                     else {
                         continue;
                     };
                     for decl in decls {
                         let mut new_decl = decl.clone();
                         if let Some(obj) = new_decl.as_object_mut() {
-                            let raw_name = obj
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("");
+                            let raw_name = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
                             obj.insert(
                                 "name".into(),
                                 Value::String(Self::sanitize_function_name(raw_name)),
@@ -318,10 +312,7 @@ impl AntigravityExecutor {
                 .or_insert_with(|| Value::Object(Map::new()));
             if let Some(gen_obj) = gen.as_object_mut() {
                 let cap = MAX_ANTIGRAVITY_OUTPUT_TOKENS;
-                if let Some(max_out) = gen_obj
-                    .get("maxOutputTokens")
-                    .and_then(|v| v.as_u64())
-                {
+                if let Some(max_out) = gen_obj.get("maxOutputTokens").and_then(|v| v.as_u64()) {
                     if max_out > cap {
                         gen_obj.insert("maxOutputTokens".into(), Value::from(cap));
                     }

@@ -59,7 +59,7 @@ pub fn generate_cursor_checksum(machine_id: &str) -> String {
 
     let mut t: u8 = 165;
     for (i, b) in bytes.iter_mut().enumerate() {
-        *b = ((*b ^ t).wrapping_add((i % 256) as u8)) & 0xFF;
+        *b = (*b ^ t).wrapping_add((i % 256) as u8);
         t = *b;
     }
 
@@ -73,8 +73,7 @@ pub fn generate_cursor_checksum(machine_id: &str) -> String {
         encoded.push(URL_SAFE_ALPHABET[(a >> 2) as usize] as char);
         encoded.push(URL_SAFE_ALPHABET[(((a & 0b11) << 4) | (b >> 4)) as usize] as char);
         if i + 1 < bytes.len() {
-            encoded
-                .push(URL_SAFE_ALPHABET[(((b & 0b1111) << 2) | (c >> 6)) as usize] as char);
+            encoded.push(URL_SAFE_ALPHABET[(((b & 0b1111) << 2) | (c >> 6)) as usize] as char);
         }
         if i + 2 < bytes.len() {
             encoded.push(URL_SAFE_ALPHABET[(c & 0b111111) as usize] as char);

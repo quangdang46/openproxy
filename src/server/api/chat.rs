@@ -730,10 +730,10 @@ async fn forward_with_provider_fallback(
             } else if provider == "commandcode" {
                 let executor = CommandCodeExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
-                        status: 500,
-                        message: format!("CommandCode executor creation failed: {:?}", e),
-                        retry_after: None,
-                    })?;
+                    status: 500,
+                    message: format!("CommandCode executor creation failed: {:?}", e),
+                    retry_after: None,
+                })?;
                 let result = executor
                     .execute_request(CommandCodeExecutionRequest {
                         model: model.to_string(),
@@ -758,10 +758,10 @@ async fn forward_with_provider_fallback(
             } else if provider == "antigravity" {
                 let executor = AntigravityExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
-                        status: 500,
-                        message: format!("Antigravity executor creation failed: {:?}", e),
-                        retry_after: None,
-                    })?;
+                    status: 500,
+                    message: format!("Antigravity executor creation failed: {:?}", e),
+                    retry_after: None,
+                })?;
                 let result = executor
                     .execute_request(AntigravityExecutionRequest {
                         model: model.to_string(),
@@ -1574,7 +1574,7 @@ fn build_proxied_response(
 ) -> Response {
     let mut proxied = Response::new(body);
     *proxied.status_mut() = status;
-    let connection_tokens = connection_header_tokens(&headers);
+    let connection_tokens = connection_header_tokens(headers);
 
     for (name, value) in headers {
         if is_hop_by_hop_header(name.as_str())

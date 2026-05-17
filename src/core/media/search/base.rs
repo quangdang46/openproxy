@@ -101,11 +101,7 @@ pub trait SearchProvider: Send + Sync {
     }
 
     /// Normalise the upstream JSON to [`SearchResultSet`].
-    fn normalize(
-        &self,
-        body: &Value,
-        request: &SearchRequest<'_>,
-    ) -> SearchResultSet;
+    fn normalize(&self, body: &Value, request: &SearchRequest<'_>) -> SearchResultSet;
 }
 
 /// Split `domain_filter` into `(includes, excludes)` where excludes are
@@ -171,7 +167,10 @@ pub fn request_from_body<'a>(
         .get("time_range")
         .and_then(|v| v.as_str())
         .map(str::to_string);
-    let offset = body.get("offset").and_then(|v| v.as_u64()).map(|n| n as u32);
+    let offset = body
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
     let domain_filter = body
         .get("domain_filter")
         .and_then(|v| v.as_array())

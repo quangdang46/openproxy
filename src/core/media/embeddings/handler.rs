@@ -35,11 +35,9 @@ pub async fn handle_embeddings(
     adapter: &dyn EmbeddingAdapter,
     request: EmbeddingRequest<'_>,
 ) -> Result<Value, EmbeddingsHandlerError> {
-    let input = request
-        .input()
-        .ok_or_else(|| {
-            EmbeddingsHandlerError::Validation("Missing required field: input".into())
-        })?;
+    let input = request.input().ok_or_else(|| {
+        EmbeddingsHandlerError::Validation("Missing required field: input".into())
+    })?;
     if !input.is_string() && !input.is_array() {
         return Err(EmbeddingsHandlerError::Validation(
             "input must be a string or array of strings".into(),

@@ -87,16 +87,12 @@ pub fn is_thinking_model(model: &str) -> bool {
 
 /// Strip the `-agentic` suffix if present.
 pub fn strip_agentic_suffix(model: &str) -> &str {
-    model
-        .strip_suffix(KIRO_AGENTIC_SUFFIX)
-        .unwrap_or(model)
+    model.strip_suffix(KIRO_AGENTIC_SUFFIX).unwrap_or(model)
 }
 
 /// Strip the `-thinking` suffix if present.
 pub fn strip_thinking_suffix(model: &str) -> &str {
-    model
-        .strip_suffix(KIRO_THINKING_SUFFIX)
-        .unwrap_or(model)
+    model.strip_suffix(KIRO_THINKING_SUFFIX).unwrap_or(model)
 }
 
 /// Resolve a 9router model id to the real upstream id + behavioural flags.
@@ -151,11 +147,7 @@ pub fn is_thinking_enabled(
 
     if let Some(body) = body {
         if let Some(thinking) = body.get("thinking") {
-            if thinking
-                .get("type")
-                .and_then(|v| v.as_str())
-                == Some("enabled")
-            {
+            if thinking.get("type").and_then(|v| v.as_str()) == Some("enabled") {
                 let budget = thinking.get("budget_tokens").and_then(|v| v.as_f64());
                 if budget.is_none() || budget.is_some_and(|b| b.is_finite() && b > 0.0) {
                     return true;
@@ -325,7 +317,10 @@ mod tests {
     #[test]
     fn is_thinking_enabled_via_header() {
         let mut h = std::collections::BTreeMap::new();
-        h.insert("Anthropic-Beta".to_string(), "interleaved-thinking-2024".to_string());
+        h.insert(
+            "Anthropic-Beta".to_string(),
+            "interleaved-thinking-2024".to_string(),
+        );
         assert!(is_thinking_enabled(None, Some(&h), None));
     }
 

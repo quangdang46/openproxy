@@ -1,20 +1,35 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-pub fn ollama_to_openai_response(chunk: &Value, state: &mut HashMap<String, Value>) -> Option<Value> {
+pub fn ollama_to_openai_response(
+    chunk: &Value,
+    state: &mut HashMap<String, Value>,
+) -> Option<Value> {
     if !state.contains_key("id") {
         let id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
-        let model = chunk.get("model")
+        let model = chunk
+            .get("model")
             .and_then(|v| v.as_str())
             .unwrap_or("ollama")
             .to_string();
         state.insert("id".to_string(), Value::String(id));
         state.insert("model".to_string(), Value::String(model));
-        state.insert("created".to_string(), Value::Number(chrono::Utc::now().timestamp().into()));
+        state.insert(
+            "created".to_string(),
+            Value::Number(chrono::Utc::now().timestamp().into()),
+        );
     }
 
-    let id = state.get("id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
-    let model = state.get("model").and_then(|v| v.as_str()).unwrap_or("ollama").to_string();
+    let id = state
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let model = state
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("ollama")
+        .to_string();
     let created = state.get("created").and_then(|v| v.as_i64()).unwrap_or(0);
 
     if chunk.get("done").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -27,7 +42,10 @@ pub fn ollama_to_openai_response(chunk: &Value, state: &mut HashMap<String, Valu
 
         let mut finish_reason = "stop";
         if chunk.get("done_reason").and_then(|v| v.as_str()) == Some("tool_calls")
-            || state.get("hadToolCalls").and_then(|v| v.as_bool()).unwrap_or(false)
+            || state
+                .get("hadToolCalls")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
         {
             finish_reason = "tool_calls";
         }
@@ -50,8 +68,14 @@ pub fn ollama_to_openai_response(chunk: &Value, state: &mut HashMap<String, Valu
         return None;
     };
 
-    let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    let thinking = message.get("thinking").and_then(|v| v.as_str()).unwrap_or("");
+    let content = message
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let thinking = message
+        .get("thinking")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
     let tool_calls = message.get("tool_calls").and_then(|v| v.as_array());
 
     if content.is_empty() && thinking.is_empty() && tool_calls.is_none() {
@@ -63,7 +87,10 @@ pub fn ollama_to_openai_response(chunk: &Value, state: &mut HashMap<String, Valu
         delta.insert("content".to_string(), Value::String(content.to_string()));
     }
     if !thinking.is_empty() {
-        delta.insert("reasoning_content".to_string(), Value::String(thinking.to_string()));
+        delta.insert(
+            "reasoning_content".to_string(),
+            Value::String(thinking.to_string()),
+        );
     }
     if let Some(tool_calls_arr) = tool_calls {
         state.insert("hadToolCalls".to_string(), Value::Bool(true));

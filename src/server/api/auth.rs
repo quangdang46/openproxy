@@ -57,8 +57,7 @@ pub async fn login(
     Json(req): Json<PasswordLoginRequest>,
 ) -> Response {
     let snapshot = state.db.snapshot();
-    if is_tunnel_request(&headers, &snapshot.settings)
-        && snapshot.settings.tunnel_dashboard_access != true
+    if is_tunnel_request(&headers, &snapshot.settings) && !snapshot.settings.tunnel_dashboard_access
     {
         return (
             StatusCode::FORBIDDEN,

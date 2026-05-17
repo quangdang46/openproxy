@@ -52,7 +52,10 @@ fn to_data_url(input: &str) -> Option<String> {
     if input.is_empty() {
         return None;
     }
-    if input.starts_with("data:image/") || input.starts_with("http://") || input.starts_with("https://") {
+    if input.starts_with("data:image/")
+        || input.starts_with("http://")
+        || input.starts_with("https://")
+    {
         return Some(input.to_string());
     }
     Some(format!("data:image/png;base64,{input}"))
@@ -105,7 +108,8 @@ async fn parse_codex_stream(response: reqwest::Response) -> Result<Option<String
             if event == "response.output_item.done" && !data.is_empty() {
                 if let Ok(parsed) = serde_json::from_str::<Value>(&data) {
                     if let Some(item) = parsed.get("item") {
-                        if item.get("type").and_then(|v| v.as_str()) == Some("image_generation_call")
+                        if item.get("type").and_then(|v| v.as_str())
+                            == Some("image_generation_call")
                         {
                             if let Some(result) = item.get("result").and_then(|v| v.as_str()) {
                                 image_b64 = Some(result.to_string());
@@ -148,15 +152,9 @@ async fn build_sse_response(
     };
 
     use axum::response::IntoResponse;
-    let mut resp = (
-        axum::http::StatusCode::OK,
-        axum::Json(body),
-    )
-        .into_response();
-    resp.headers_mut().insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
+    let mut resp = (axum::http::StatusCode::OK, axum::Json(body)).into_response();
+    resp.headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     Ok(resp)
 }
 
@@ -171,11 +169,7 @@ impl ImageAdapter for CodexAdapter {
         request: &ImageRequest<'_>,
         _body: &Value,
     ) -> Result<HeaderMap, String> {
-        let access_token = request
-            .credentials
-            .access_token
-            .as_deref()
-            .unwrap_or("");
+        let access_token = request.credentials.access_token.as_deref().unwrap_or("");
         let account_id = request
             .credentials
             .provider_specific_data
@@ -203,8 +197,7 @@ impl ImageAdapter for CodexAdapter {
         );
         h.insert(
             "chatgpt-account-id",
-            HeaderValue::from_str(&account_id)
-                .map_err(|e| format!("account id header: {e}"))?,
+            HeaderValue::from_str(&account_id).map_err(|e| format!("account id header: {e}"))?,
         );
         h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         h.insert("originator", HeaderValue::from_static(CODEX_ORIGINATOR));

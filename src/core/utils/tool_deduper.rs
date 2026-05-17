@@ -100,9 +100,7 @@ pub fn dedupe_tools(tools: &[Value]) -> DedupeResult {
             continue;
         }
         for n in &names {
-            if rule.strip.iter().any(|p| p.matches(n))
-                && !to_strip.iter().any(|x| x == n)
-            {
+            if rule.strip.iter().any(|p| p.matches(n)) && !to_strip.iter().any(|x| x == n) {
                 to_strip.push((*n).to_string());
             }
         }
@@ -113,8 +111,7 @@ pub fn dedupe_tools(tools: &[Value]) -> DedupeResult {
             stripped: Vec::new(),
         };
     }
-    let strip_set: std::collections::HashSet<&str> =
-        to_strip.iter().map(String::as_str).collect();
+    let strip_set: std::collections::HashSet<&str> = to_strip.iter().map(String::as_str).collect();
     let kept = tools
         .iter()
         .filter(|t| !strip_set.contains(tool_name(t)))

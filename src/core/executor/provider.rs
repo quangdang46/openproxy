@@ -769,9 +769,7 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             ),
             (
                 "antigravity",
-                ProviderExecutorConfig::gemini(
-                    "https://cloudcode-pa.googleapis.com/v1internal",
-                ),
+                ProviderExecutorConfig::gemini("https://cloudcode-pa.googleapis.com/v1internal"),
             ),
             (
                 "grok-web",
@@ -975,8 +973,25 @@ pub fn get_free_providers() -> Vec<&'static str> {
 
 pub fn get_specialty_providers() -> Vec<&'static str> {
     vec![
-        "claude", "codex", "github", "kiro", "vertex", "cursor", "ollama", "grok",
-        "azure", "qwen", "iflow", "gemini-cli", "opencode", "opencode-go", "qoder",
-        "commandcode", "antigravity", "grok-web", "perplexity-web", "xiaomi-mimo",
+        "claude",
+        "codex",
+        "github",
+        "kiro",
+        "vertex",
+        "cursor",
+        "ollama",
+        "grok",
+        "azure",
+        "qwen",
+        "iflow",
+        "gemini-cli",
+        "opencode",
+        "opencode-go",
+        "qoder",
+        "commandcode",
+        "antigravity",
+        "grok-web",
+        "perplexity-web",
+        "xiaomi-mimo",
     ]
 }

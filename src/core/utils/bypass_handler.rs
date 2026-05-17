@@ -47,11 +47,7 @@ fn extract_text(content: Option<&Value>) -> String {
 /// `user_agent` should be the lower-cased `User-Agent` header. `cc_filter_naming`
 /// enables Pattern #5 (Claude Code's `isNewTopic` detector) — the caller
 /// usually wires this to a setting.
-pub fn detect_bypass(
-    body: &Value,
-    user_agent: &str,
-    cc_filter_naming: bool,
-) -> BypassDecision {
+pub fn detect_bypass(body: &Value, user_agent: &str, cc_filter_naming: bool) -> BypassDecision {
     if !user_agent.contains("claude-cli") {
         return BypassDecision::Pass;
     }
@@ -84,10 +80,9 @@ pub fn detect_bypass(
     // Pattern 3: single-message "count" probe.
     if messages.len() == 1
         && messages[0].get("role").and_then(|v| v.as_str()) == Some("user")
+        && extract_text(messages[0].get("content")) == "count"
     {
-        if extract_text(messages[0].get("content")) == "count" {
-            return BypassDecision::Bypass;
-        }
+        return BypassDecision::Bypass;
     }
 
     // Pattern 4: SKIP_PATTERNS substring match across all user messages.

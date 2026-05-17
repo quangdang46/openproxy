@@ -11,10 +11,7 @@ use serde_json::{json, Map, Value};
 ///
 /// `state` is the per-stream scratch space; the same map is threaded
 /// through every call for a given stream.
-pub fn claude_to_openai_response(
-    chunk: &Value,
-    state: &mut Map<String, Value>,
-) -> Vec<Value> {
+pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) -> Vec<Value> {
     let Some(event) = chunk.get("type").and_then(|v| v.as_str()) else {
         return vec![];
     };
@@ -37,11 +34,7 @@ pub fn claude_to_openai_response(
                 .entry("toolCalls".to_string())
                 .or_insert_with(|| Value::Object(Map::new()));
 
-            results.push(make_chunk(
-                state,
-                json!({"role": "assistant"}),
-                Value::Null,
-            ));
+            results.push(make_chunk(state, json!({"role": "assistant"}), Value::Null));
         }
 
         "content_block_start" => {
@@ -61,17 +54,18 @@ pub fn claude_to_openai_response(
                 "thinking" => {
                     state.insert("inThinkingBlock".into(), Value::Bool(true));
                     state.insert("currentBlockIndex".into(), Value::from(index));
-                    results.push(make_chunk(state, json!({"content": "<think>"}), Value::Null));
+                    results.push(make_chunk(
+                        state,
+                        json!({"content": "<think>"}),
+                        Value::Null,
+                    ));
                 }
                 "tool_use" => {
                     let tool_call_index = state
                         .get("toolCallIndex")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0);
-                    state.insert(
-                        "toolCallIndex".into(),
-                        Value::from(tool_call_index + 1),
-                    );
+                    state.insert("toolCallIndex".into(), Value::from(tool_call_index + 1));
 
                     let raw_name = chunk
                         .pointer("/content_block/name")
@@ -99,10 +93,7 @@ pub fn claude_to_openai_response(
                     });
 
                     // Stash the in-progress tool call by Claude block index.
-                    if let Some(map) = state
-                        .get_mut("toolCalls")
-                        .and_then(|v| v.as_object_mut())
-                    {
+                    if let Some(map) = state.get_mut("toolCalls").and_then(|v| v.as_object_mut()) {
                         map.insert(index.to_string(), tool_call.clone());
                     }
 
@@ -118,9 +109,7 @@ pub fn claude_to_openai_response(
 
         "content_block_delta" => {
             let index = chunk.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let server_idx = state
-                .get("serverToolBlockIndex")
-                .and_then(|v| v.as_u64());
+            let server_idx = state.get("serverToolBlockIndex").and_then(|v| v.as_u64());
             if server_idx == Some(index) {
                 return results;
             }
@@ -129,14 +118,9 @@ pub fn claude_to_openai_response(
             let dtype = delta.and_then(|d| d.get("type")).and_then(|v| v.as_str());
             match dtype {
                 Some("text_delta") => {
-                    if let Some(text) = delta.and_then(|d| d.get("text")).and_then(|v| v.as_str())
-                    {
+                    if let Some(text) = delta.and_then(|d| d.get("text")).and_then(|v| v.as_str()) {
                         if !text.is_empty() {
-                            results.push(make_chunk(
-                                state,
-                                json!({"content": text}),
-                                Value::Null,
-                            ));
+                            results.push(make_chunk(state, json!({"content": text}), Value::Null));
                         }
                     }
                 }
@@ -176,9 +160,7 @@ pub fn claude_to_openai_response(
                                 .and_then(|v| v.as_str().map(str::to_string))
                             {
                                 let next = format!("{args}{partial}");
-                                if let Some(slot) = tool_call
-                                    .pointer_mut("/function/arguments")
-                                {
+                                if let Some(slot) = tool_call.pointer_mut("/function/arguments") {
                                     *slot = Value::String(next);
                                 }
                             }
@@ -186,7 +168,10 @@ pub fn claude_to_openai_response(
                         });
                     if let Some(tc) = tool_call_clone {
                         let idx_num = tc.get("index").cloned().unwrap_or(Value::from(0u64));
-                        let id = tc.get("id").cloned().unwrap_or(Value::String(String::new()));
+                        let id = tc
+                            .get("id")
+                            .cloned()
+                            .unwrap_or(Value::String(String::new()));
                         results.push(make_chunk(
                             state,
                             json!({
@@ -206,9 +191,7 @@ pub fn claude_to_openai_response(
 
         "content_block_stop" => {
             let index = chunk.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let server_idx = state
-                .get("serverToolBlockIndex")
-                .and_then(|v| v.as_u64());
+            let server_idx = state.get("serverToolBlockIndex").and_then(|v| v.as_u64());
             if server_idx == Some(index) {
                 state.insert("serverToolBlockIndex".into(), Value::from(u64::MAX));
                 return results;
@@ -218,9 +201,7 @@ pub fn claude_to_openai_response(
                 .get("inThinkingBlock")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let current_block = state
-                .get("currentBlockIndex")
-                .and_then(|v| v.as_u64());
+            let current_block = state.get("currentBlockIndex").and_then(|v| v.as_u64());
             if in_thinking && current_block == Some(index) {
                 results.push(make_chunk(
                     state,
@@ -270,13 +251,12 @@ pub fn claude_to_openai_response(
                 state.insert("usage".into(), tracked);
             }
 
-            if let Some(stop_reason) = chunk
-                .pointer("/delta/stop_reason")
-                .and_then(|v| v.as_str())
+            if let Some(stop_reason) = chunk.pointer("/delta/stop_reason").and_then(|v| v.as_str())
             {
                 let finish = convert_stop_reason(stop_reason);
                 state.insert("finishReason".into(), Value::String(finish.to_string()));
-                let mut final_chunk = make_chunk(state, json!({}), Value::String(finish.to_string()));
+                let mut final_chunk =
+                    make_chunk(state, json!({}), Value::String(finish.to_string()));
 
                 if let Some(usage) = state.get("usage").cloned() {
                     let mut openai_usage = json!({
@@ -295,16 +275,11 @@ pub fn claude_to_openai_response(
                     if cache_read > 0 || cache_create > 0 {
                         let mut details = Map::new();
                         if cache_read > 0 {
-                            details.insert(
-                                "cached_tokens".into(),
-                                Value::from(cache_read),
-                            );
+                            details.insert("cached_tokens".into(), Value::from(cache_read));
                         }
                         if cache_create > 0 {
-                            details.insert(
-                                "cache_creation_tokens".into(),
-                                Value::from(cache_create),
-                            );
+                            details
+                                .insert("cache_creation_tokens".into(), Value::from(cache_create));
                         }
                         openai_usage["prompt_tokens_details"] = Value::Object(details);
                     }
@@ -334,7 +309,11 @@ pub fn claude_to_openai_response(
                             .and_then(|v| v.as_object())
                             .map(|m| !m.is_empty())
                             .unwrap_or(false);
-                        if has_tools { "tool_calls".to_string() } else { "stop".to_string() }
+                        if has_tools {
+                            "tool_calls".to_string()
+                        } else {
+                            "stop".to_string()
+                        }
                     });
 
                 let mut final_chunk = make_chunk(state, json!({}), Value::String(finish));
@@ -463,7 +442,10 @@ mod tests {
         ];
         let out = run(&events);
         assert_eq!(out[1]["choices"][0]["delta"]["content"], "<think>");
-        assert_eq!(out[2]["choices"][0]["delta"]["reasoning_content"], "reasoning...");
+        assert_eq!(
+            out[2]["choices"][0]["delta"]["reasoning_content"],
+            "reasoning..."
+        );
         assert_eq!(out[3]["choices"][0]["delta"]["content"], "</think>");
     }
 
@@ -507,7 +489,10 @@ mod tests {
     fn tool_name_map_remaps_response_name() {
         let mut state = Map::new();
         let mut tool_map = Map::new();
-        tool_map.insert("WebSearch_ide".to_string(), Value::String("WebSearch".to_string()));
+        tool_map.insert(
+            "WebSearch_ide".to_string(),
+            Value::String("WebSearch".to_string()),
+        );
         state.insert("toolNameMap".to_string(), Value::Object(tool_map));
 
         let events = [

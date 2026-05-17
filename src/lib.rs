@@ -1,3 +1,11 @@
+#![allow(
+    dead_code,
+    private_interfaces,
+    unused_imports,
+    unused_mut,
+    unused_variables
+)]
+
 pub mod cli;
 pub mod core;
 pub mod db;

@@ -358,7 +358,7 @@ mod tests {
     fn select_skips_unhealthy() {
         let mut bad = pool("bad");
         bad.success_rate = Some(0.3);
-        let pools = vec![bad, pool("good")];
+        let pools = [bad, pool("good")];
         let refs: Vec<&ProxyPool> = pools.iter().collect();
         assert_eq!(best_proxy(&refs), Some(1));
     }

@@ -135,14 +135,11 @@ impl QwenExecutor {
         let token = credentials
             .access_token
             .as_deref()
-            .or_else(|| credentials.api_key.as_deref())
+            .or(credentials.api_key.as_deref())
             .unwrap_or("");
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", token))
@@ -152,9 +149,18 @@ impl QwenExecutor {
             reqwest::header::USER_AGENT,
             HeaderValue::from_static(QWEN_USER_AGENT),
         );
-        headers.insert("x-dashscope-authtype", HeaderValue::from_static("qwen-oauth"));
-        headers.insert("x-dashscope-cachecontrol", HeaderValue::from_static("enable"));
-        headers.insert("x-dashscope-useragent", HeaderValue::from_static(QWEN_USER_AGENT));
+        headers.insert(
+            "x-dashscope-authtype",
+            HeaderValue::from_static("qwen-oauth"),
+        );
+        headers.insert(
+            "x-dashscope-cachecontrol",
+            HeaderValue::from_static("enable"),
+        );
+        headers.insert(
+            "x-dashscope-useragent",
+            HeaderValue::from_static(QWEN_USER_AGENT),
+        );
         headers.insert("x-stainless-arch", HeaderValue::from_static("x64"));
         headers.insert("x-stainless-lang", HeaderValue::from_static("js"));
         headers.insert("x-stainless-os", HeaderValue::from_static("Linux"));

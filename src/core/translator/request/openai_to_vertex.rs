@@ -2,8 +2,8 @@
 //!
 //! Converts via Gemini then post-processes for Vertex AI compatibility.
 
-use serde_json::Value;
 use crate::core::translator::request::openai_to_gemini::openai_to_gemini_request;
+use serde_json::Value;
 
 const DEFAULT_THINKING_VERTEX_SIGNATURE: &str = "vertex-thinking-signature";
 
@@ -18,7 +18,10 @@ fn post_process_for_vertex(body: &mut Value) {
         for part in parts {
             if let Some(obj) = part.as_object_mut() {
                 if obj.contains_key("thoughtSignature") {
-                    obj.insert("thoughtSignature".to_string(), Value::String(DEFAULT_THINKING_VERTEX_SIGNATURE.to_string()));
+                    obj.insert(
+                        "thoughtSignature".to_string(),
+                        Value::String(DEFAULT_THINKING_VERTEX_SIGNATURE.to_string()),
+                    );
                 }
                 if let Some(fc) = obj.get_mut("functionCall") {
                     if let Some(fc_obj) = fc.as_object_mut() {

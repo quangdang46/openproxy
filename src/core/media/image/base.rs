@@ -44,10 +44,7 @@ pub async fn url_to_base64(client: &Client, url: &str) -> Result<String, String>
     if !res.status().is_success() {
         return Err(format!("fetch {url}: HTTP {}", res.status()));
     }
-    let bytes = res
-        .bytes()
-        .await
-        .map_err(|e| format!("read {url}: {e}"))?;
+    let bytes = res.bytes().await.map_err(|e| format!("read {url}: {e}"))?;
     use base64::Engine as _;
     Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
 }
@@ -128,8 +125,7 @@ pub trait ImageAdapter: Send + Sync {
     fn build_url(&self, request: &ImageRequest<'_>) -> Result<String, String>;
 
     /// Build the request headers.
-    fn build_headers(&self, request: &ImageRequest<'_>, body: &Value)
-        -> Result<HeaderMap, String>;
+    fn build_headers(&self, request: &ImageRequest<'_>, body: &Value) -> Result<HeaderMap, String>;
 
     /// Build the request body (upstream-shaped JSON).
     async fn build_body(&self, request: &ImageRequest<'_>) -> Result<Value, String>;

@@ -36,7 +36,11 @@ fn extract_text(instruction: &Value) -> String {
         return s.to_string();
     }
     if let Some(parts) = instruction.get("parts").and_then(|v| v.as_array()) {
-        return parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join("");
+        return parts
+            .iter()
+            .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("");
     }
     String::new()
 }
@@ -50,9 +54,7 @@ fn convert_content(content: &Value) -> Option<Value> {
     };
 
     let parts = content.get("parts").and_then(|v| v.as_array());
-    if parts.is_none() {
-        return None;
-    }
+    parts?;
     let parts = parts.unwrap();
 
     let mut text_parts: Vec<Value> = Vec::new();
@@ -109,12 +111,14 @@ fn convert_content(content: &Value) -> Option<Value> {
             }));
         }
         if let Some(func_response) = part.get("functionResponse") {
-            let tool_call_id = func_response.get("id")
+            let tool_call_id = func_response
+                .get("id")
                 .or_else(|| func_response.get("name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let response_content = func_response.get("response")
+            let response_content = func_response
+                .get("response")
                 .and_then(|r| r.get("result"))
                 .or_else(|| func_response.get("response"))
                 .cloned()
@@ -182,7 +186,11 @@ pub fn antigravity_to_openai_request(
     if let Some(config) = req.get("generationConfig") {
         if let Some(max_output) = config.get("maxOutputTokens").and_then(|v| v.as_u64()) {
             let has_tools = req.get("tools").is_some();
-            let adjusted = if has_tools && max_output < 32000 { 32000 } else { max_output };
+            let adjusted = if has_tools && max_output < 32000 {
+                32000
+            } else {
+                max_output
+            };
             result["max_tokens"] = serde_json::json!(adjusted);
         }
         if let Some(temp) = config.get("temperature") {
@@ -195,9 +203,18 @@ pub fn antigravity_to_openai_request(
             result["top_k"] = top_k.clone();
         }
         if let Some(thinking_config) = config.get("thinkingConfig") {
-            if let Some(budget) = thinking_config.get("thinkingBudget").and_then(|v| v.as_u64()) {
+            if let Some(budget) = thinking_config
+                .get("thinkingBudget")
+                .and_then(|v| v.as_u64())
+            {
                 if budget > 0 {
-                    let effort = if budget <= 2048 { "low" } else if budget <= 16384 { "medium" } else { "high" };
+                    let effort = if budget <= 2048 {
+                        "low"
+                    } else if budget <= 16384 {
+                        "medium"
+                    } else {
+                        "high"
+                    };
                     result["reasoning_effort"] = Value::String(effort.to_string());
                 }
             }
@@ -207,9 +224,12 @@ pub fn antigravity_to_openai_request(
     if let Some(system_instruction) = req.get("systemInstruction") {
         let system_text = extract_text(system_instruction);
         if !system_text.is_empty() {
-            result["messages"].as_array_mut().unwrap().push(serde_json::json!({
-                "role": "system", "content": system_text
-            }));
+            result["messages"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "role": "system", "content": system_text
+                }));
         }
     }
 
@@ -231,9 +251,13 @@ pub fn antigravity_to_openai_request(
             if let Some(func_decls) = tool.get("functionDeclarations").and_then(|v| v.as_array()) {
                 for func in func_decls {
                     let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let description = func.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                    let parameters = func.get("parameters")
-                        .map(|p| normalize_schema_types(p))
+                    let description = func
+                        .get("description")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let parameters = func
+                        .get("parameters")
+                        .map(normalize_schema_types)
                         .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
                     converted_tools.push(serde_json::json!({
                         "type": "function",

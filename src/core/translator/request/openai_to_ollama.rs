@@ -7,7 +7,13 @@ fn normalize_content(content: &Value) -> String {
         Value::String(s) => s.clone(),
         Value::Array(arr) => arr
             .iter()
-            .filter_map(|b| b.get("type").and_then(|t| t.as_str()).filter(|&t| t == "text").and_then(|_| b.get("text")).and_then(|t| t.as_str()))
+            .filter_map(|b| {
+                b.get("type")
+                    .and_then(|t| t.as_str())
+                    .filter(|&t| t == "text")
+                    .and_then(|_| b.get("text"))
+                    .and_then(|t| t.as_str())
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         _ => String::new(),
@@ -15,15 +21,22 @@ fn normalize_content(content: &Value) -> String {
 }
 
 fn extract_images(content: &Value) -> Vec<String> {
-    let Some(arr) = content.as_array() else { return vec![] };
+    let Some(arr) = content.as_array() else {
+        return vec![];
+    };
     arr.iter()
         .filter_map(|block| {
             let t = block.get("type").and_then(|v| v.as_str())?;
-            if t != "image_url" { return None; }
-            let url = block.get("image_url")
+            if t != "image_url" {
+                return None;
+            }
+            let url = block
+                .get("image_url")
                 .and_then(|v| v.get("url"))
                 .and_then(|v| v.as_str())?;
-            url.strip_prefix("data:").and_then(|s| s.split(";base64,").nth(1)).map(String::from)
+            url.strip_prefix("data:")
+                .and_then(|s| s.split(";base64,").nth(1))
+                .map(String::from)
         })
         .collect()
 }
@@ -34,7 +47,9 @@ pub fn openai_to_ollama_request(
     stream: bool,
     _credentials: Option<&Value>,
 ) -> bool {
-    let Some(body_obj) = body.as_object() else { return false; };
+    let Some(body_obj) = body.as_object() else {
+        return false;
+    };
 
     let mut tool_call_map: serde_json::Map<String, Value> = serde_json::Map::new();
     if let Some(messages) = body_obj.get("messages").and_then(|v| v.as_array()) {
@@ -60,9 +75,14 @@ pub fn openai_to_ollama_request(
             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
             match role {
                 "tool" => {
-                    let content = normalize_content(msg.get("content").unwrap_or(&Value::String(String::new())));
-                    if content.is_empty() { continue; }
-                    let tool_name = msg.get("tool_call_id")
+                    let content = normalize_content(
+                        msg.get("content").unwrap_or(&Value::String(String::new())),
+                    );
+                    if content.is_empty() {
+                        continue;
+                    }
+                    let tool_name = msg
+                        .get("tool_call_id")
                         .and_then(|id| tool_call_map.get(id.as_str()?))
                         .or_else(|| msg.get("name"))
                         .cloned()
@@ -75,7 +95,9 @@ pub fn openai_to_ollama_request(
                     }));
                 }
                 "assistant" => {
-                    let content = normalize_content(msg.get("content").unwrap_or(&Value::String(String::new())));
+                    let content = normalize_content(
+                        msg.get("content").unwrap_or(&Value::String(String::new())),
+                    );
                     let mut out = serde_json::json!({
                         "role": "assistant",
                         "content": content
@@ -97,22 +119,30 @@ pub fn openai_to_ollama_request(
                         }).collect();
                         out["tool_calls"] = Value::Array(ollama_tool_calls);
                     }
-                    let images = extract_images(msg.get("content").unwrap_or(&Value::Array(vec![])));
+                    let images =
+                        extract_images(msg.get("content").unwrap_or(&Value::Array(vec![])));
                     if !images.is_empty() {
-                        out["images"] = Value::Array(images.into_iter().map(Value::String).collect());
+                        out["images"] =
+                            Value::Array(images.into_iter().map(Value::String).collect());
                     }
                     messages.push(out);
                 }
                 _ => {
-                    let content = normalize_content(msg.get("content").unwrap_or(&Value::String(String::new())));
-                    if content.is_empty() && role != "assistant" { continue; }
+                    let content = normalize_content(
+                        msg.get("content").unwrap_or(&Value::String(String::new())),
+                    );
+                    if content.is_empty() && role != "assistant" {
+                        continue;
+                    }
                     let mut out = serde_json::json!({
                         "role": role,
                         "content": content
                     });
-                    let images = extract_images(msg.get("content").unwrap_or(&Value::Array(vec![])));
+                    let images =
+                        extract_images(msg.get("content").unwrap_or(&Value::Array(vec![])));
                     if !images.is_empty() {
-                        out["images"] = Value::Array(images.into_iter().map(Value::String).collect());
+                        out["images"] =
+                            Value::Array(images.into_iter().map(Value::String).collect());
                     }
                     messages.push(out);
                 }
@@ -173,6 +203,6 @@ mod tests {
         openai_to_ollama_request("llama3", &mut body, false, None);
 
         assert_eq!(body.get("model").unwrap().as_str().unwrap(), "llama3");
-        assert!(body.get("messages").unwrap().as_array().unwrap().len() >= 1);
+        assert!(!body.get("messages").unwrap().as_array().unwrap().is_empty());
     }
 }

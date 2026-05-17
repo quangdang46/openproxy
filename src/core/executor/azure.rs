@@ -123,15 +123,12 @@ impl AzureExecutor {
 
     fn build_headers(&self, credentials: &ProviderConnection, stream: bool) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
 
         let api_key = credentials
             .api_key
             .as_deref()
-            .or_else(|| credentials.access_token.as_deref());
+            .or(credentials.access_token.as_deref());
 
         if let Some(key) = api_key {
             if let Ok(header_val) = HeaderValue::from_str(key) {

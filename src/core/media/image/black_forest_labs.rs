@@ -87,8 +87,8 @@ impl ImageAdapter for BlackForestLabsAdapter {
         }
         poll_headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
 
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(POLL_TIMEOUT_MS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(POLL_TIMEOUT_MS);
         loop {
             if std::time::Instant::now() > deadline {
                 return Err("BFL polling timeout".to_string());
@@ -103,10 +103,7 @@ impl ImageAdapter for BlackForestLabsAdapter {
             if !r.status().is_success() {
                 return Err(format!("BFL poll HTTP {}", r.status()));
             }
-            let s: Value = r
-                .json()
-                .await
-                .map_err(|e| format!("parse bfl poll: {e}"))?;
+            let s: Value = r.json().await.map_err(|e| format!("parse bfl poll: {e}"))?;
             match s.get("status").and_then(|v| v.as_str()) {
                 Some("Ready") => return Ok(ImageResponse::Json(s)),
                 Some("Error") | Some("Failed") => {
@@ -122,10 +119,7 @@ impl ImageAdapter for BlackForestLabsAdapter {
     }
 
     fn normalize(&self, body: &Value, _prompt: &str) -> Value {
-        if let Some(sample) = body
-            .pointer("/result/sample")
-            .and_then(|v| v.as_str())
-        {
+        if let Some(sample) = body.pointer("/result/sample").and_then(|v| v.as_str()) {
             return json!({"created": now_secs(), "data": [{"url": sample}]});
         }
         empty_normalized()

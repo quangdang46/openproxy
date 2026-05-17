@@ -130,10 +130,7 @@ pub fn resolve_retry_entry(entry: Option<&serde_json::Value>) -> RetryEntry {
             delay_ms: RetryEntry::DEFAULT_DELAY_MS,
         };
     }
-    let attempts = entry
-        .get("attempts")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+    let attempts = entry.get("attempts").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let delay_ms = entry
         .get("delayMs")
         .and_then(|v| v.as_u64())
@@ -144,7 +141,8 @@ pub fn resolve_retry_entry(entry: Option<&serde_json::Value>) -> RetryEntry {
 /// Inbound prompts containing any of these substrings are treated as
 /// disposable (filler) requests and may bypass the heavy provider routing
 /// path. Mirrors `SKIP_PATTERNS` in 9router.
-pub const SKIP_PATTERNS: &[&str] = &["Please write a 5-10 word title for the following conversation:"];
+pub const SKIP_PATTERNS: &[&str] =
+    &["Please write a 5-10 word title for the following conversation:"];
 
 /// Returns `true` if the request body matches any [`SKIP_PATTERNS`] entry.
 pub fn matches_skip_pattern(text: &str) -> bool {

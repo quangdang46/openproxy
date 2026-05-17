@@ -33,7 +33,11 @@ pub async fn dispatch(
         model,
         credentials,
     };
-    Some(handle_embeddings(client, adapter, request).await.map_err(Into::into))
+    Some(
+        handle_embeddings(client, adapter, request)
+            .await
+            .map_err(Into::into),
+    )
 }
 
 /// Look up the embedding adapter for a provider id. Falls back to the

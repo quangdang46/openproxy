@@ -1165,9 +1165,7 @@ async fn openclaw_settings_post_get_and_delete_match_openproxy_file_behavior() {
             Method::POST,
             "/api/cli-tools/openclaw-settings",
             Body::from(
-                format!(
-                    r#"{{"baseUrl":"https://proxy.example.com","apiKey":"sk-openproxy","model":"oa/gpt-4.1","agentModels":{{"agent-a":"oa/gpt-4.1-mini"}}}}"#
-                ),
+                r#"{"baseUrl":"https://proxy.example.com","apiKey":"sk-openproxy","model":"oa/gpt-4.1","agentModels":{"agent-a":"oa/gpt-4.1-mini"}}"#.to_string(),
             ),
         ))
         .await

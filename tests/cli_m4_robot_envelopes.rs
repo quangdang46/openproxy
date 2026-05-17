@@ -35,7 +35,7 @@ async fn boot_server() -> MockServer {
 fn op(server: &MockServer, args: &[&str]) -> std::process::Output {
     Command::cargo_bin("openproxy")
         .expect("locate openproxy binary")
-        .env("OPENPROXY_URL", &server.uri())
+        .env("OPENPROXY_URL", server.uri())
         .env("OPENPROXY_API_KEY", API_KEY)
         // Force a clean data dir so the CLI does not fall back to a real
         // local install on the test host.

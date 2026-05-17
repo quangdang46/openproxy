@@ -119,10 +119,7 @@ fn build_auth_headers(auth: SttAuthHeader, token: Option<&str>) -> Result<Header
     let (name, value) = match auth {
         SttAuthHeader::Bearer => (AUTHORIZATION, format!("Bearer {token}")),
         SttAuthHeader::Token => (AUTHORIZATION, format!("Token {token}")),
-        SttAuthHeader::XApiKey => (
-            HeaderName::from_static("x-api-key"),
-            token.to_string(),
-        ),
+        SttAuthHeader::XApiKey => (HeaderName::from_static("x-api-key"), token.to_string()),
         SttAuthHeader::Key => (AUTHORIZATION, format!("Key {token}")),
     };
     h.insert(
@@ -174,14 +171,9 @@ async fn upstream_err(res: reqwest::Response) -> SttError {
 /// Run an STT request end-to-end. Returns the transcribed text and the
 /// raw upstream body (so the caller can echo verbose JSON / SRT back to
 /// the client when requested).
-pub async fn handle_stt(
-    client: &Client,
-    request: SttRequest<'_>,
-) -> Result<SttResult, SttError> {
+pub async fn handle_stt(client: &Client, request: SttRequest<'_>) -> Result<SttResult, SttError> {
     if request.audio.is_empty() {
-        return Err(SttError::Validation(
-            "Missing required field: file".into(),
-        ));
+        return Err(SttError::Validation("Missing required field: file".into()));
     }
     if request.token.is_none() && !matches!(request.format, SttFormat::Deepgram) {
         // Most STT providers require auth; deepgram is the only one we
@@ -199,10 +191,7 @@ pub async fn handle_stt(
     }
 }
 
-async fn transcribe_deepgram(
-    client: &Client,
-    req: SttRequest<'_>,
-) -> Result<SttResult, SttError> {
+async fn transcribe_deepgram(client: &Client, req: SttRequest<'_>) -> Result<SttResult, SttError> {
     let mut url = reqwest::Url::parse(req.base_url)
         .map_err(|e| SttError::Validation(format!("deepgram url: {e}")))?;
     url.query_pairs_mut().append_pair("model", req.model);
@@ -383,11 +372,7 @@ async fn transcribe_huggingface(
     if req.model.contains("..") || req.model.contains("//") {
         return Err(SttError::Validation("Invalid model ID".into()));
     }
-    let url = format!(
-        "{}/{}",
-        req.base_url.trim_end_matches('/'),
-        req.model
-    );
+    let url = format!("{}/{}", req.base_url.trim_end_matches('/'), req.model);
     let mut headers = build_auth_headers(req.auth, req.token)?;
     let ct = resolve_audio_content_type(&req.filename, req.content_type.as_deref());
     headers.insert(

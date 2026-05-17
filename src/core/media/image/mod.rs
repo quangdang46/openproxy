@@ -26,7 +26,7 @@ mod sdwebui;
 mod stability_ai;
 
 pub use base::{
-    sleep, size_to_aspect_ratio, url_to_base64, ImageAdapter, ImageRequest, ImageResponse,
+    size_to_aspect_ratio, sleep, url_to_base64, ImageAdapter, ImageRequest, ImageResponse,
     ParseContext, POLL_INTERVAL_MS, POLL_TIMEOUT_MS,
 };
 pub use handler::{handle_image_generation, ImageHandlerError};

@@ -6,8 +6,8 @@ use reqwest::Client;
 use serde_json::{json, Value};
 
 use super::base::{
-    now_secs, size_to_aspect_ratio, sleep, ImageAdapter, ImageRequest, ImageResponse,
-    ParseContext, POLL_INTERVAL_MS, POLL_TIMEOUT_MS,
+    now_secs, size_to_aspect_ratio, sleep, ImageAdapter, ImageRequest, ImageResponse, ParseContext,
+    POLL_INTERVAL_MS, POLL_TIMEOUT_MS,
 };
 
 const BASE_URL: &str = "https://api.dev.runwayml.com/v1";
@@ -75,10 +75,7 @@ impl ImageAdapter for RunwaymlAdapter {
             });
             if let Some(img) = request.image().and_then(|v| v.as_str()) {
                 if let Some(obj) = req.as_object_mut() {
-                    obj.insert(
-                        "referenceImages".into(),
-                        json!([{"uri": img}]),
-                    );
+                    obj.insert("referenceImages".into(), json!([{"uri": img}]));
                 }
             }
             Ok(req)
@@ -102,8 +99,8 @@ impl ImageAdapter for RunwaymlAdapter {
             .to_string();
         let task_url = format!("{BASE_URL}/tasks/{id}");
 
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(POLL_TIMEOUT_MS);
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(POLL_TIMEOUT_MS);
         loop {
             if std::time::Instant::now() > deadline {
                 return Err("Runway polling timeout".to_string());

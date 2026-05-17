@@ -86,7 +86,12 @@ impl TtsAdapter for MinimaxAdapter {
             }
         });
 
-        let res = client.post(base).headers(headers).json(&body).send().await?;
+        let res = client
+            .post(base)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await?;
         let status = res.status();
         let raw = res.text().await.unwrap_or_default();
         let parsed: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
@@ -128,7 +133,9 @@ impl TtsAdapter for MinimaxAdapter {
             .and_then(|v| v.as_str())
             .ok_or_else(|| TtsError::Parse("MiniMax TTS returned no audio".into()))?
             .trim();
-        if audio_hex.is_empty() || audio_hex.len() % 2 != 0 || !audio_hex.chars().all(|c| c.is_ascii_hexdigit())
+        if audio_hex.is_empty()
+            || audio_hex.len() % 2 != 0
+            || !audio_hex.chars().all(|c| c.is_ascii_hexdigit())
         {
             return Err(TtsError::Parse("MiniMax TTS returned invalid audio".into()));
         }

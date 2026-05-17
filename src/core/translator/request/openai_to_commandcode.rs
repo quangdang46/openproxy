@@ -42,7 +42,10 @@ fn to_content_blocks(content: &Value) -> Vec<Value> {
                     if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
                         blocks.push(serde_json::json!({"type": "text", "text": t}));
                     }
-                } else if matches!(part.get("type").and_then(|v| v.as_str()), Some("image_url") | Some("image")) {
+                } else if matches!(
+                    part.get("type").and_then(|v| v.as_str()),
+                    Some("image_url") | Some("image")
+                ) {
                     blocks.push(serde_json::json!({"type": "text", "text": "[image omitted]"}));
                 } else if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
                     blocks.push(serde_json::json!({"type": "text", "text": t}));
@@ -61,7 +64,9 @@ fn convert_messages(messages: &[Value]) -> (Vec<Value>, String) {
     let mut system_texts = Vec::new();
 
     for m in messages {
-        if m.is_null() { continue; }
+        if m.is_null() {
+            continue;
+        }
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
         if role == "system" {
@@ -99,13 +104,17 @@ fn convert_messages(messages: &[Value]) -> (Vec<Value>, String) {
             if let Some(tool_calls) = m.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in tool_calls {
                     let fn_obj = tc.get("function").cloned().unwrap_or(Value::Null);
-                    let args = fn_obj.get("arguments").map(|v| {
-                        if let Some(s) = v.as_str() {
-                            serde_json::from_str(s).unwrap_or(Value::Object(serde_json::Map::new()))
-                        } else {
-                            v.clone()
-                        }
-                    }).unwrap_or(Value::Object(serde_json::Map::new()));
+                    let args = fn_obj
+                        .get("arguments")
+                        .map(|v| {
+                            if let Some(s) = v.as_str() {
+                                serde_json::from_str(s)
+                                    .unwrap_or(Value::Object(serde_json::Map::new()))
+                            } else {
+                                v.clone()
+                            }
+                        })
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
                     blocks.push(serde_json::json!({
                         "type": "tool-call",
                         "toolCallId": tc.get("id").and_then(|v| v.as_str()).unwrap_or(""),
@@ -135,10 +144,14 @@ fn convert_messages(messages: &[Value]) -> (Vec<Value>, String) {
 
 fn convert_tools(tools: Option<&Value>) -> Option<Vec<Value>> {
     let tools = tools.and_then(|v| v.as_array())?;
-    if tools.is_empty() { return None; }
+    if tools.is_empty() {
+        return None;
+    }
     let mut result = Vec::new();
     for t in tools {
-        if t.is_null() { continue; }
+        if t.is_null() {
+            continue;
+        }
         if t.get("type").and_then(|v| v.as_str()) == Some("function") {
             if let Some(fn_obj) = t.get("function") {
                 result.push(serde_json::json!({
@@ -147,7 +160,9 @@ fn convert_tools(tools: Option<&Value>) -> Option<Vec<Value>> {
                     "input_schema": fn_obj.get("parameters").cloned().unwrap_or(serde_json::json!({"type": "object"}))
                 }));
             }
-        } else if t.get("name").is_some() && (t.get("input_schema").is_some() || t.get("parameters").is_some()) {
+        } else if t.get("name").is_some()
+            && (t.get("input_schema").is_some() || t.get("parameters").is_some())
+        {
             result.push(serde_json::json!({
                 "name": t.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                 "description": t.get("description").and_then(|v| v.as_str()).unwrap_or(""),
@@ -155,7 +170,11 @@ fn convert_tools(tools: Option<&Value>) -> Option<Vec<Value>> {
             }));
         }
     }
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 pub fn openai_to_commandcode_request(
@@ -165,7 +184,10 @@ pub fn openai_to_commandcode_request(
     _credentials: Option<&Value>,
 ) -> bool {
     let (messages, system) = convert_messages(
-        body.get("messages").and_then(|v| v.as_array()).map(|a| a.as_slice()).unwrap_or(&[])
+        body.get("messages")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]),
     );
 
     let mut params = serde_json::json!({

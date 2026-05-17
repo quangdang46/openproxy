@@ -16,10 +16,7 @@ pub const GEMINI_CLI_API_CLIENT: &str = "google-genai-sdk/1.41.0 gl-node/v22.19.
 /// Build the User-Agent string Gemini CLI advertises for `model`.
 pub fn gemini_cli_user_agent(model: &str) -> String {
     let model = if model.is_empty() { "unknown" } else { model };
-    let os = match std::env::consts::OS {
-        "windows" => "windows",
-        other => other,
-    };
+    let os = std::env::consts::OS;
     format!(
         "GeminiCLI/{}/{} ({}; {})",
         GEMINI_CLI_VERSION,
@@ -207,8 +204,7 @@ pub fn load_code_assist_metadata() -> serde_json::Value {
 
 // ─── System prompts ──────────────────────────────────────────────────────
 
-pub const CLAUDE_SYSTEM_PROMPT: &str =
-    "You are Claude Code, Anthropic's official CLI for Claude.";
+pub const CLAUDE_SYSTEM_PROMPT: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 pub const ANTIGRAVITY_DEFAULT_SYSTEM: &str = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding.You are pair programming with a USER to solve their coding task. The task may require creating a new codebase, modifying or debugging an existing codebase, or simply answering a question.**Absolute paths only****Proactiveness**";
 
