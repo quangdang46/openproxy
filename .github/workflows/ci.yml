@@ -65,32 +65,15 @@ jobs:
           retention-days: 1
 
   # ──────────────────────────────────────────────────────────────────────
-  # JS unit tests under tests/unit/. These are translator and RTK
-  # regression suites that don't need the Rust binary to run.
+  # NOTE: tests/unit/*.test.js exists in the tree but imports `vitest`
+  # and resolves `../../open-sse/...` source modules — both leftovers
+  # from upstream decolua/9router (the Node project this repo was
+  # forked from before being rewritten in Rust). The JS source has
+  # since been deleted; only the test files remain. We intentionally
+  # do NOT run them in CI. Once they're either ported to native
+  # `node:test` against the Rust binary or deleted, replace this
+  # comment with an actual `js-tests` job.
   # ──────────────────────────────────────────────────────────────────────
-  js-tests:
-    name: JS unit tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 20
-
-      - name: Run unit tests
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-          tests=(tests/unit/*.test.js)
-          if [ ${#tests[@]} -eq 0 ]; then
-            echo "no JS unit tests found under tests/unit/"
-            exit 0
-          fi
-          # node --test discovers files via its own glob; we pass them
-          # explicitly so a future rename can't silently disable the suite.
-          node --test "${tests[@]}"
 
   # ──────────────────────────────────────────────────────────────────────
   # Rust: fmt + clippy + tests on Linux and macOS only.
