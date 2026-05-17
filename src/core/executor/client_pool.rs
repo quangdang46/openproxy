@@ -9,6 +9,7 @@ use hyper_rustls::{HttpsConnector, HttpsConnectorBuilder};
 use hyper_util::client::legacy::{connect::HttpConnector, Client as HyperClient};
 use hyper_util::rt::{TokioExecutor, TokioTimer};
 
+use crate::core::dns::MitmBypassResolver;
 use crate::core::proxy::ProxyTarget;
 use crate::core::tls::ensure_rustls_provider;
 
@@ -84,7 +85,12 @@ fn build_reqwest_client(
     let mut builder = reqwest::Client::builder()
         .pool_idle_timeout(CLIENT_POOL_IDLE_TIMEOUT)
         .pool_max_idle_per_host(CLIENT_POOL_MAX_IDLE_PER_HOST)
-        .tcp_keepalive(CLIENT_POOL_TCP_KEEPALIVE);
+        .tcp_keepalive(CLIENT_POOL_TCP_KEEPALIVE)
+        // MITM-bypass: route MITM_BYPASS_HOSTS through Google DNS so a
+        // hostile /etc/hosts entry can't redirect Codex/Cursor/Copilot/AWS
+        // CodeWhisperer endpoints to a local interceptor. Other hostnames
+        // fall through to the system resolver unchanged.
+        .dns_resolver(Arc::new(MitmBypassResolver::new()));
 
     if let Some(proxy) = proxy {
         if !proxy.url.is_empty() {

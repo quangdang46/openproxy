@@ -2,6 +2,7 @@ pub mod account_fallback;
 pub mod auth;
 pub mod combo;
 pub mod config;
+pub mod dns;
 pub mod executor;
 pub mod media;
 pub mod mitm;
