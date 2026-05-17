@@ -249,6 +249,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.topazlabs.com/v1"),
         ),
         (
+            "xiaomi-tokenplan",
+            ProviderConfig::openai("https://api.xiaomimimo.com/v1/chat/completions"),
+        ),
+        (
             "ollama",
             ProviderConfig::openai("https://api.ollama.com/v1/chat/completions"),
         ),
