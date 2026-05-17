@@ -847,6 +847,10 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
                 "ollama",
                 ProviderExecutorConfig::openai("https://api.ollama.com/v1"),
             ),
+            (
+                "inference-net",
+                ProviderExecutorConfig::openai("https://api.inference.net/v1"),
+            ),
         ])
     });
 
@@ -956,6 +960,7 @@ pub fn get_api_key_providers() -> Vec<&'static str> {
         "firecrawl",
         "topaz",
         "ollama",
+        "inference-net",
     ]
 }
 
