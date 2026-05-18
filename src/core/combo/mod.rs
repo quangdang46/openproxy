@@ -52,6 +52,19 @@ pub struct FallbackDecision {
     pub new_backoff_level: Option<u32>,
 }
 
+/// Whether a combo member model currently has capacity to serve a new request.
+///
+/// `Available` means at least one underlying provider account has a free
+/// in-flight slot and is not rate-limited / locked. `Busy` means every
+/// matching account is currently saturated, so picking this model would
+/// either fail fast (when all members are Busy) or just burn time on the
+/// inner per-account fallback before bouncing to the next combo member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCapacity {
+    Available,
+    Busy,
+}
+
 pub fn get_quota_cooldown(backoff_level: u32) -> Duration {
     let level = backoff_level.saturating_sub(1);
     let cooldown_ms = BACKOFF_BASE_MS.saturating_mul(2u64.saturating_pow(level));
@@ -167,17 +180,84 @@ pub async fn execute_combo_strategy<T, F, Fut>(
     models: &[String],
     combo_name: Option<&str>,
     strategy: ComboStrategy,
-    mut handle_single_model: F,
+    handle_single_model: F,
 ) -> Result<T, ComboExecutionError>
 where
     F: FnMut(&str) -> Fut,
     Fut: Future<Output = Result<T, ComboAttemptError>>,
 {
+    execute_combo_strategy_with_capacity(
+        models,
+        combo_name,
+        strategy,
+        |_| ModelCapacity::Available,
+        handle_single_model,
+    )
+    .await
+}
+
+/// Same as [`execute_combo_strategy`], but consults a capacity callback to
+/// short-circuit on saturated providers in `RoundRobin` mode.
+///
+/// When at least one rotated member reports `ModelCapacity::Available`, only
+/// those members are tried (in rotation order). Busy members are skipped
+/// entirely — otherwise a slow request against a saturated provider would
+/// pin the caller while it spins through the per-account inner fallback,
+/// which is the failure mode that makes multi-repo coding agents appear to
+/// hang. If every member is `Busy`, we fail fast with a 503 and surface
+/// the earliest known retry-after so the caller can back off instead of
+/// piling more load onto already-saturated providers.
+///
+/// `Fallback` strategy keeps its declared priority order — capacity is
+/// advisory only and we still attempt every member sequentially so the
+/// configured primary/secondary semantics are preserved.
+pub async fn execute_combo_strategy_with_capacity<T, F, Fut, C>(
+    models: &[String],
+    combo_name: Option<&str>,
+    strategy: ComboStrategy,
+    capacity_check: C,
+    mut handle_single_model: F,
+) -> Result<T, ComboExecutionError>
+where
+    F: FnMut(&str) -> Fut,
+    Fut: Future<Output = Result<T, ComboAttemptError>>,
+    C: Fn(&str) -> ModelCapacity,
+{
     let rotated = get_rotated_models(models, combo_name, strategy);
+
+    if strategy == ComboStrategy::RoundRobin && rotated.len() > 1 {
+        let available: Vec<String> = rotated
+            .iter()
+            .filter(|model| capacity_check(model.as_str()) == ModelCapacity::Available)
+            .cloned()
+            .collect();
+
+        if available.is_empty() {
+            return Err(ComboExecutionError {
+                status: 503,
+                message: "All combo providers are at max in-flight capacity".into(),
+                earliest_retry_after: None,
+            });
+        }
+
+        return iterate_combo_models(&available, &mut handle_single_model).await;
+    }
+
+    iterate_combo_models(&rotated, &mut handle_single_model).await
+}
+
+async fn iterate_combo_models<T, F, Fut>(
+    order: &[String],
+    handle_single_model: &mut F,
+) -> Result<T, ComboExecutionError>
+where
+    F: FnMut(&str) -> Fut,
+    Fut: Future<Output = Result<T, ComboAttemptError>>,
+{
     let mut last_error = None;
     let mut earliest_retry_after = None;
 
-    for model in &rotated {
+    for model in order {
         match handle_single_model(model).await {
             Ok(result) => return Ok(result),
             Err(error) => {
