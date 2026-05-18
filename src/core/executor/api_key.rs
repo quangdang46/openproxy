@@ -356,10 +356,7 @@ static API_KEY_PROVIDERS: Lazy<BTreeMap<&'static str, (&'static str, &'static st
                     "Authorization",
                 ),
             ),
-            (
-                "ollama-cloud",
-                ("https://api.ollama.com/v1", "Authorization"),
-            ),
+            ("ollama-cloud", ("https://ollama.com/v1", "Authorization")),
         ])
     });
 
