@@ -328,6 +328,11 @@
           "id": "coder-model",
           "name": "Qwen3.6 Coder Model",
           "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-next",
+          "name": "Qwen3 Coder Next",
+          "kind": "llm"
         }
       ]
     },
@@ -613,6 +618,11 @@
           "id": "MiniMax-M2.5",
           "name": "MiniMax M2.5",
           "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.5",
+          "name": "Claude Opus 4.5",
+          "kind": "llm"
         }
       ]
     },
@@ -707,6 +717,11 @@
         {
           "id": "kimi-latest",
           "name": "Kimi Latest",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi K2.6",
           "kind": "llm"
         }
       ]
@@ -1007,6 +1022,11 @@
           "id": "dall-e-2",
           "name": "DALL-E 2",
           "kind": "image"
+        },
+        {
+          "id": "whisper-1",
+          "name": "Whisper 1",
+          "kind": "stt"
         }
       ]
     },
@@ -1261,6 +1281,11 @@
         {
           "id": "kimi-latest",
           "name": "Kimi Latest",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi K2.6",
           "kind": "llm"
         }
       ]
@@ -1727,6 +1752,21 @@
           "id": "deepseek-reasoner",
           "name": "DeepSeek V3.2 Reasoner",
           "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro-max",
+          "name": "DeepSeek V4 Pro Max",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro-none",
+          "name": "DeepSeek V4 Pro None",
+          "kind": "llm"
         }
       ]
     },
@@ -1752,6 +1792,11 @@
           "id": "openai/gpt-oss-120b",
           "name": "GPT-OSS 120B",
           "kind": "llm"
+        },
+        {
+          "id": "whisper-large-v3",
+          "name": "Whisper Large V3",
+          "kind": "stt"
         }
       ]
     },
@@ -1952,6 +1997,11 @@
           "id": "nvidia/nv-embedqa-e5-v5",
           "name": "NV EmbedQA E5 v5",
           "kind": "embedding"
+        },
+        {
+          "id": "nvidia/parakeet-ctc-1.1b-asr",
+          "name": "Parakeet CTC 1.1B ASR",
+          "kind": "stt"
         }
       ]
     },
@@ -3172,6 +3222,86 @@
           "id": "mimo-v2.5-tts-voicedesign",
           "name": "MiMo V2.5 TTS Voice Design",
           "kind": "tts"
+        }
+      ]
+    },
+    {
+      "alias": "commandcode",
+      "models": [
+        {
+          "id": "deepseek/deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek/deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMaxAI/MiniMax-M2.7",
+          "name": "MiniMax M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMaxAI/MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3.6-Max-Preview",
+          "name": "Qwen3.6 Max Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3.6-Plus",
+          "name": "Qwen3.6 Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "stepfun/Step-3.5-Flash",
+          "name": "Step 3.5 Flash",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "alias": "deepgram",
+      "models": [
+        {
+          "id": "nova-3",
+          "name": "Nova 3",
+          "kind": "stt"
+        }
+      ]
+    },
+    {
+      "alias": "assemblyai",
+      "models": [
+        {
+          "id": "universal-3-pro",
+          "name": "Universal 3 Pro",
+          "kind": "stt"
         }
       ]
     }
