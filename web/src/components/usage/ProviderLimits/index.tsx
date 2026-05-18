@@ -287,21 +287,17 @@ export default function ProviderLimits() {
       const conns = await fetchConnections();
       setConnectionsLoading(false);
 
-      const oauthConnections = conns.filter(
-        (conn) =>
-          USAGE_SUPPORTED_PROVIDERS.includes(conn.provider) &&
-          conn.authType === "oauth",
-      );
+      const eligibleConnections = conns.filter(isUsageEligible);
 
       // Mark all as loading before fetching
       const loadingState: Record<string, boolean> = {};
-      oauthConnections.forEach((conn) => {
+      eligibleConnections.forEach((conn) => {
         loadingState[conn.id] = true;
       });
       setLoading(loadingState);
 
       await Promise.all(
-        oauthConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
+        eligibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
       );
       setLastUpdated(new Date());
     };
