@@ -659,7 +659,7 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             ),
             (
                 "ollama-cloud",
-                ProviderExecutorConfig::openai("https://api.ollama.com/v1"),
+                ProviderExecutorConfig::openai("https://ollama.com/v1"),
             ),
             (
                 "ollama-local",
@@ -845,7 +845,7 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             ),
             (
                 "ollama",
-                ProviderExecutorConfig::openai("https://api.ollama.com/v1"),
+                ProviderExecutorConfig::openai("https://ollama.com/v1"),
             ),
             (
                 "inference-net",
