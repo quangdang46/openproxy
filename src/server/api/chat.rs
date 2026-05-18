@@ -15,8 +15,8 @@ use serde_json::{json, Value};
 
 use crate::core::chat::RequestPlan;
 use crate::core::combo::{
-    check_fallback_error, execute_combo_strategy, get_combo_models_from_data, ComboAttemptError,
-    ComboExecutionError, ComboStrategy,
+    check_fallback_error, execute_combo_strategy_with_capacity, get_combo_models_from_data,
+    ComboAttemptError, ComboExecutionError, ComboStrategy, ModelCapacity,
 };
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
@@ -35,6 +35,13 @@ use super::auth_error_response;
 /// use for their keep-alive heartbeats (OpenAI sends a comment every ~30s,
 /// Anthropic every ~60s, Gemini every ~30s — 180s is well past any of them).
 const SSE_STALL_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Maximum number of concurrent in-flight requests per provider account.
+///
+/// Used both as the per-account slot cap inside
+/// [`forward_with_provider_fallback`] and as the round-robin capacity
+/// threshold when deciding whether a combo member is `Available` or `Busy`.
+const MAX_IN_FLIGHT_PER_ACCOUNT: usize = 10;
 
 pub async fn cors_options() -> Response {
     cors_preflight_response("GET, POST, OPTIONS")
@@ -202,10 +209,16 @@ async fn chat_completions_impl(
             let combo_body = body.clone();
             let combo_state = state.clone();
             let combo_api_key = presented_api_key.clone();
-            match execute_combo_strategy(
+            let capacity_snapshot = snapshot.clone();
+            let capacity_registry = state.account_registry.clone();
+            let capacity_check = move |combo_model: &str| -> ModelCapacity {
+                model_capacity(&capacity_snapshot, &capacity_registry, combo_model)
+            };
+            match execute_combo_strategy_with_capacity(
                 &combo_models,
                 Some(&combo_name),
                 strategy,
+                capacity_check,
                 move |combo_model| {
                     let state = combo_state.clone();
                     let body = combo_body.clone();
@@ -356,8 +369,12 @@ async fn forward_with_provider_fallback(
         let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
 
         let (rate_limit_remaining, rate_limit_reset) = registry.rate_limit_info(&connection.id);
-        let slot =
-            registry.acquire_slot(&connection.id, 10, rate_limit_remaining, rate_limit_reset);
+        let slot = registry.acquire_slot(
+            &connection.id,
+            MAX_IN_FLIGHT_PER_ACCOUNT,
+            rate_limit_remaining,
+            rate_limit_reset,
+        );
 
         let Some(_slot) = slot else {
             excluded.insert(connection.id.clone());
@@ -1017,6 +1034,49 @@ async fn proxy_dashboard_sse_with_usage_tracking(
     let text = extract_dashboard_assistant_text_from_bytes(&body_bytes);
     let sse_body = build_dashboard_sse_body(text.as_deref(), token_usage.as_ref());
     build_dashboard_sse_response(status, &headers, sse_body)
+}
+
+/// Peek-only capacity check for a single combo member model.
+///
+/// Mirrors the filtering in [`select_connection`] but does NOT acquire a slot:
+/// it just asks whether at least one eligible provider account has a free
+/// in-flight slot under [`MAX_IN_FLIGHT_PER_ACCOUNT`]. Used by the round-robin
+/// strategy to skip combo members whose backing providers are currently
+/// saturated, so we don't pin a coding agent's request on a provider that
+/// would either fail fast through the inner per-account fallback or block
+/// other repos' requests.
+///
+/// Returns `Available` for combo models we can't statically resolve to a
+/// specific provider (e.g. alias-only lookups that depend on runtime
+/// resolution) so we don't accidentally exclude them - the existing
+/// per-account fallback inside [`forward_with_provider_fallback`] still
+/// applies once we actually attempt the request.
+fn model_capacity(
+    snapshot: &AppDb,
+    registry: &crate::core::account_fallback::AccountRegistry,
+    combo_model: &str,
+) -> ModelCapacity {
+    let resolved = get_model_info(combo_model, snapshot);
+    let Some(provider) = resolved.provider.as_deref() else {
+        return ModelCapacity::Available;
+    };
+
+    let now = Utc::now();
+    let has_capacity = snapshot.provider_connections.iter().any(|connection| {
+        connection.provider == provider
+            && connection.is_active()
+            && connection_has_credentials(connection)
+            && connection_supports_model(connection, &resolved.model)
+            && !is_connection_rate_limited(connection, now)
+            && !is_model_locked(connection, &resolved.model, now)
+            && registry.in_flight_count(&connection.id) < MAX_IN_FLIGHT_PER_ACCOUNT
+    });
+
+    if has_capacity {
+        ModelCapacity::Available
+    } else {
+        ModelCapacity::Busy
+    }
 }
 
 fn select_connection(
