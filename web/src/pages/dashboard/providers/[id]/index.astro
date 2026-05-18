@@ -7,9 +7,13 @@ import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 export async function getStaticPaths() {
   // Pre-render the detail page for every known provider id so that
   // `/dashboard/providers/<id>` resolves in the static build.
-  // User-added compatible providers (`openai-compatible-*`, `anthropic-compatible-*`)
-  // are not pre-rendered; navigation to those works only in dev mode for now.
-  return Object.keys(AI_PROVIDERS).map((id) => ({ params: { id } }));
+  // The `_dynamic` placeholder generates a generic shell page that the
+  // Rust server can serve for user-added compatible providers whose UUIDs
+  // are unknown at build time (see dashboard/mod.rs dynamic-segment fallback).
+  return [
+    ...Object.keys(AI_PROVIDERS).map((id) => ({ params: { id } })),
+    { params: { id: '_dynamic' } },
+  ];
 }
 ---
 <Layout>

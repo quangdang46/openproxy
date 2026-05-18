@@ -103,6 +103,14 @@ async fn serve_embedded(uri: &Uri) -> Response {
         if let Some(resp) = lookup_embedded(&dir_candidate) {
             return resp;
         }
+        // Dynamic-segment fallback: for paths like `/dashboard/providers/<uuid>`
+        // where the final segment is a user-created ID unknown at build time,
+        // try a `_dynamic.html` placeholder page in the parent directory. The
+        // Astro build emits this file so the correct page shell (e.g.
+        // ProviderDetailPageClient) is served instead of the generic dashboard.
+        if let Some(resp) = dynamic_segment_fallback(candidate, |p| lookup_embedded(p)) {
+            return resp;
+        }
         // SPA fallback: requests without a file extension are client-router
         // routes. Serve the SPA shell so the JS router can take over.
         if let Some(resp) = lookup_embedded("dashboard.html") {
@@ -160,6 +168,24 @@ fn looks_like_asset(path: &str) -> bool {
         .is_some_and(|last| last.contains('.'))
 }
 
+/// For a path like `dashboard/providers/8d82774e-…`, try
+/// `dashboard/providers/_dynamic.html`. The Astro build emits this placeholder
+/// so that user-created provider UUIDs (unknown at build time) still get the
+/// correct page shell instead of the generic `dashboard.html` fallback.
+fn dynamic_segment_fallback<F>(candidate: &str, lookup: F) -> Option<Response>
+where
+    F: Fn(&str) -> Option<Response>,
+{
+    // Only attempt this for paths with at least two segments (parent + slug).
+    if let Some(parent) = candidate.rsplit_once('/').map(|(p, _)| p) {
+        let fallback = format!("{parent}/_dynamic.html");
+        if let Some(resp) = lookup(&fallback) {
+            return Some(resp);
+        }
+    }
+    None
+}
+
 fn cache_control_for(path: &str) -> &'static str {
     // HTML shells must not be cached: a stale shell breaks code-split bundles
     // after a redeploy. Other assets are content-hashed by the Astro build
@@ -190,6 +216,10 @@ async fn serve_from_disk(root: &Path, uri: &Uri) -> Response {
         }
         let dir_candidate = format!("{candidate}/index.html");
         if let Some(resp) = read_disk_asset(root, &dir_candidate) {
+            return resp;
+        }
+        // Dynamic-segment fallback (mirrors embedded mode logic above).
+        if let Some(resp) = dynamic_segment_fallback(candidate, |p| read_disk_asset(root, p)) {
             return resp;
         }
         if let Some(resp) = read_disk_asset(root, "dashboard.html") {
