@@ -851,6 +851,14 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
                 "inference-net",
                 ProviderExecutorConfig::openai("https://api.inference.net/v1"),
             ),
+            (
+                "vercel-ai-gateway",
+                ProviderExecutorConfig::openai("https://ai-gateway.vercel.sh/v1"),
+            ),
+            (
+                "xiaomi-tokenplan",
+                ProviderExecutorConfig::openai("https://api.xiaomimimo.com/v1"),
+            ),
         ])
     });
 
@@ -961,6 +969,8 @@ pub fn get_api_key_providers() -> Vec<&'static str> {
         "topaz",
         "ollama",
         "inference-net",
+        "vercel-ai-gateway",
+        "xiaomi-tokenplan",
     ]
 }
 
