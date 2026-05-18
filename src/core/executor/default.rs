@@ -180,7 +180,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "ollama-cloud",
-            ProviderConfig::openai("https://api.ollama.com/v1/chat/completions"),
+            ProviderConfig::openai("https://ollama.com/v1/chat/completions"),
         ),
         (
             "vertex",
@@ -262,7 +262,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "ollama",
-            ProviderConfig::openai("https://api.ollama.com/v1/chat/completions"),
+            ProviderConfig::openai("https://ollama.com/v1/chat/completions"),
         ),
         (
             "assemblyai",
