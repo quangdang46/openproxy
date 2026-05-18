@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use chrono::{Duration, Utc};
 use openproxy::core::combo::{
-    check_fallback_error, execute_combo_strategy, get_combo_models_from_data, get_quota_cooldown,
-    get_rotated_models, reset_combo_rotation, rotation_index, ComboAttemptError, ComboStrategy,
+    check_fallback_error, execute_combo_strategy, execute_combo_strategy_with_capacity,
+    get_combo_models_from_data, get_quota_cooldown, get_rotated_models, reset_combo_rotation,
+    rotation_index, ComboAttemptError, ComboStrategy, ModelCapacity,
 };
 use openproxy::types::Combo;
 
@@ -191,4 +192,103 @@ async fn combo_strategy_returns_earliest_retry_after_on_exhaustion() {
     assert_eq!(error.status, 503);
     assert_eq!(error.message, "no credentials");
     assert_eq!(error.earliest_retry_after, Some(early));
+}
+
+#[tokio::test]
+async fn round_robin_skips_busy_models_when_any_available() {
+    // RR rotation starts at "a"; "a" reports Busy, so we expect the handler
+    // to be invoked only with "b" (the first Available in rotation order)
+    // and never touch "a" or "c" (even though "c" is also Available).
+    let combo_name = "writer-skip-busy";
+    reset_combo_rotation(Some(combo_name));
+    let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = attempts.clone();
+
+    let result = execute_combo_strategy_with_capacity(
+        &models,
+        Some(combo_name),
+        ComboStrategy::RoundRobin,
+        |model| match model {
+            "a" => ModelCapacity::Busy,
+            _ => ModelCapacity::Available,
+        },
+        move |model| {
+            let seen = seen.clone();
+            let model = model.to_string();
+            async move {
+                seen.lock().push(model.clone());
+                Ok(model)
+            }
+        },
+    )
+    .await;
+
+    assert_eq!(result, Ok("b".to_string()));
+    assert_eq!(attempts.lock().clone(), vec!["b".to_string()]);
+}
+
+#[tokio::test]
+async fn round_robin_fails_fast_when_all_busy() {
+    // Every member reports Busy: the strategy must short-circuit with 503
+    // rather than burning latency on per-account fallback inside each
+    // saturated provider. This is the multi-repo "stuck agent" guard.
+    let combo_name = "writer-all-busy";
+    reset_combo_rotation(Some(combo_name));
+    let models = vec!["a".to_string(), "b".to_string()];
+
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(0usize));
+    let counter = attempts.clone();
+
+    let error = execute_combo_strategy_with_capacity(
+        &models,
+        Some(combo_name),
+        ComboStrategy::RoundRobin,
+        |_| ModelCapacity::Busy,
+        move |_model| {
+            let counter = counter.clone();
+            async move {
+                *counter.lock() += 1;
+                Ok::<_, ComboAttemptError>("should-not-run")
+            }
+        },
+    )
+    .await
+    .expect_err("expected 503 when every combo member is busy");
+
+    assert_eq!(error.status, 503);
+    assert!(error.message.to_lowercase().contains("capacity"));
+    assert_eq!(*attempts.lock(), 0);
+}
+
+#[tokio::test]
+async fn fallback_strategy_ignores_capacity_check() {
+    // Fallback semantics must preserve declared priority order: capacity
+    // is advisory only. "a" is Busy but it's the configured primary, so
+    // we still try it first.
+    let combo_name = "writer-fallback-keeps-order";
+    reset_combo_rotation(Some(combo_name));
+    let models = vec!["a".to_string(), "b".to_string()];
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = attempts.clone();
+
+    let result = execute_combo_strategy_with_capacity(
+        &models,
+        Some(combo_name),
+        ComboStrategy::Fallback,
+        |_| ModelCapacity::Busy,
+        move |model| {
+            let seen = seen.clone();
+            let model = model.to_string();
+            async move {
+                seen.lock().push(model.clone());
+                Ok(model)
+            }
+        },
+    )
+    .await;
+
+    assert_eq!(result, Ok("a".to_string()));
+    assert_eq!(attempts.lock().clone(), vec!["a".to_string()]);
 }
