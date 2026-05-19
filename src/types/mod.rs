@@ -3,6 +3,8 @@ use std::collections::BTreeMap;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::payload_rules::{PayloadRulesConfig, SystemPromptConfig};
+
 pub const DEFAULT_MITM_ROUTER_BASE: &str = "http://localhost:4623";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -353,6 +355,10 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub caveman_level: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub payload_rules: PayloadRulesConfig,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub system_prompt: SystemPromptConfig,
     #[serde(default, skip_serializing)]
     pub password: Option<String>,
     #[serde(flatten)]
@@ -387,6 +393,8 @@ impl Default for Settings {
             rtk_enabled: true,
             caveman_enabled: false,
             caveman_level: default_caveman_level(),
+            payload_rules: PayloadRulesConfig::default(),
+            system_prompt: SystemPromptConfig::default(),
             password: None,
             extra: BTreeMap::new(),
         }
@@ -400,6 +408,8 @@ impl Settings {
         }
 
         self.caveman_level = normalize_caveman_level_value(&self.caveman_level);
+        self.payload_rules.normalize();
+        self.system_prompt.normalize();
     }
 }
 

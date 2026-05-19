@@ -1,0 +1,10 @@
+---
+import Layout from '@/layouts/Layout.astro';
+import PayloadRulesPageClient from '@/components/PayloadRulesPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+---
+<Layout>
+  <DashboardLayout client:only="react">
+    <PayloadRulesPageClient client:only="react" />
+  </DashboardLayout>
+</Layout>
