@@ -80,9 +80,61 @@ async fn validate_provider(
         "chutes" => validate_bearer(&client, "https://llm.chutes.ai/v1/models", &api_key).await,
         "nvidia" => validate_bearer(&client, "https://integrate.api.nvidia.com/v1/models", &api_key).await,
         "xiaomi-mimo" => validate_bearer(&client, "https://api.xiaomimimo.com/v1/models", &api_key).await,
+        "xiaomi-tokenplan" => {
+            let region = req.provider_specific_data.as_ref()
+                .and_then(|d| d.get("region"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("sgp");
+            let base = match region {
+                "cn" => "https://token-plan-cn.xiaomimimo.com/v1",
+                "ams" => "https://token-plan-ams.xiaomimimo.com/v1",
+                _ => "https://token-plan-sgp.xiaomimimo.com/v1",
+            };
+            validate_bearer(&client, &format!("{base}/models"), &api_key).await
+        }
         "nanobanana" => validate_bearer(&client, "https://api.nanobananaapi.ai/v1/models", &api_key).await,
         "assemblyai" => validate_bearer(&client, "https://api.assemblyai.com/v1/account", &api_key).await,
         "ollama" => validate_bearer(&client, "https://ollama.com/api/tags", &api_key).await,
+        "aimlapi" => validate_bearer(&client, "https://api.aimlapi.com/v1/models", &api_key).await,
+        "modal" => validate_bearer(&client, "https://api.modal.com/v1/models", &api_key).await,
+        "reka" => validate_bearer(&client, "https://api.reka.ai/v1/models", &api_key).await,
+        "nlpcloud" => validate_bearer(&client, "https://api.nlpcloud.io/v1/gpu/chatbot", &api_key).await,
+        "bazaarlink" => validate_bearer(&client, "https://bazaarlink.ai/api/v1/models", &api_key).await,
+        "completions" => validate_bearer(&client, "https://completions.me/api/v1/models", &api_key).await,
+        "freetheai" => validate_bearer(&client, "https://api.freetheai.xyz/v1/models", &api_key).await,
+        "llm7" => validate_bearer(&client, "https://api.llm7.io/v1/models", &api_key).await,
+        "kluster" => validate_bearer(&client, "https://api.kluster.ai/v1/models", &api_key).await,
+        "predibase" => validate_bearer(&client, "https://serving.app.predibase.com/v1/models", &api_key).await,
+        "bytez" => validate_bearer(&client, "https://api.bytez.com/models/v2", &api_key).await,
+        "morph" => validate_bearer(&client, "https://api.morphllm.com/v1/models", &api_key).await,
+        "longcat" => validate_bearer(&client, "https://api.longcat.chat/openai/v1/models", &api_key).await,
+        "puter" => validate_bearer(&client, "https://api.puter.com/puterai/openai/v1/models", &api_key).await,
+        "scaleway" => validate_bearer(&client, "https://api.scaleway.ai/v1/models", &api_key).await,
+        "sambanova" => validate_bearer(&client, "https://api.sambanova.ai/v1/models", &api_key).await,
+        "nscale" => validate_bearer(&client, "https://inference.api.nscale.com/v1/models", &api_key).await,
+        "baseten" => validate_bearer(&client, "https://inference.baseten.co/v1/models", &api_key).await,
+        "publicai" => validate_bearer(&client, "https://api.publicai.co/v1/models", &api_key).await,
+        "nous-research" => validate_bearer(&client, "https://inference-api.nousresearch.com/v1/models", &api_key).await,
+        "glhf" => validate_bearer(&client, "https://glhf.chat/api/openai/v1/models", &api_key).await,
+        "uncloseai" => (true, None),
+        "enally" => {
+            match client.get("https://ai.enally.in/v1/models").header("x-api-key", &api_key).send().await {
+                Ok(resp) => (resp.status().is_success(), None),
+                Err(e) => (false, Some(e.to_string())),
+            }
+        }
+        "agentrouter" => {
+            match client.post("https://agentrouter.org/v1/messages")
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Content-Type", "application/json")
+                .json(&json!({"model": "test", "max_tokens": 1, "messages": [{"role": "user", "content": "test"}]}))
+                .send().await
+            {
+                Ok(resp) => (resp.status().as_u16() != 401, None),
+                Err(e) => (false, Some(e.to_string())),
+            }
+        }
 
         "xai" => {
             match client.get("https://api.x.ai/v1/models").header("Authorization", format!("Bearer {api_key}")).send().await {
