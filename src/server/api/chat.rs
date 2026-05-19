@@ -1102,7 +1102,36 @@ fn select_connection(
         .collect();
 
     candidates.sort_by_key(|connection| connection.priority.unwrap_or(999));
-    candidates.into_iter().next()
+    if let Some(connection) = candidates.into_iter().next() {
+        return Some(connection);
+    }
+
+    // No stored connection. Inject a virtual one for noAuth free providers
+    // (matches 9router's getProviderCredentials behavior). Lets OpenCode Free,
+    // edge-tts, google-tts, etc. route requests without manual setup.
+    if is_no_auth_provider(provider) && !excluded.contains("noauth") {
+        return Some(virtual_no_auth_connection(provider));
+    }
+
+    None
+}
+
+fn is_no_auth_provider(provider: &str) -> bool {
+    matches!(
+        provider,
+        "opencode" | "edge-tts" | "google-tts" | "local-device"
+    )
+}
+
+fn virtual_no_auth_connection(provider: &str) -> ProviderConnection {
+    let mut connection = ProviderConnection::default();
+    connection.id = "noauth".to_string();
+    connection.provider = provider.to_string();
+    connection.auth_type = "none".to_string();
+    connection.name = Some("Public".to_string());
+    connection.is_active = Some(true);
+    connection.access_token = Some("public".to_string());
+    connection
 }
 
 fn connection_has_credentials(connection: &ProviderConnection) -> bool {

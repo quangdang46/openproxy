@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 // import Image from "next/image";  // ported: next.js -> Astro+React
 import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard } from "@/shared/components";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, THINKING_CONFIG } from "@/shared/constants/providers";
-import { getModelsByProviderId } from "@/shared/constants/models";
+import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
 import ModelRow from "./ModelRow";
@@ -19,6 +19,7 @@ export default function ProviderDetailPageClient() {
   // useParams/useRouter shims for Astro (no Next.js runtime)
   const [params, setParams] = useState<{ id: string }>({ id: "" });
   const [mounted, setMounted] = useState<boolean>(false);
+  useEnsureCatalog();
   useEffect(() => {
     setMounted(true);
     setParams({ id: window.location.pathname.split("/").filter(Boolean).pop() || "" });

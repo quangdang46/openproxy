@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card, CardSkeleton } from "@/shared/components";
 import { CLI_TOOLS } from "@/shared/constants/cliTools";
-import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS } from "@/shared/constants/models";
+import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS, useEnsureCatalog } from "@/shared/constants/models";
 import { ClaudeToolCard, ClineToolCard, KiloToolCard, CodexToolCard, DroidToolCard, OpenClawToolCard, HermesToolCard, DefaultToolCard, OpenCodeToolCard, CoworkToolCard, MitmLinkCard } from "./cli-tools";
 import { MITM_TOOLS } from "@/shared/constants/cliTools";
 
@@ -27,6 +27,7 @@ interface CLIToolsPageClientProps {
 }
 
 export default function CLIToolsPageClient({ machineId }: CLIToolsPageClientProps) {
+  useEnsureCatalog();
   const [connections, setConnections] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [expandedTool, setExpandedTool] = useState<string | null>(null);
