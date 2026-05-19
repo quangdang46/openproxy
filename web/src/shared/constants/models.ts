@@ -1,36 +1,86 @@
-// Import directly from file to avoid pulling in server-side dependencies via index.js
-// export {
-//   PROVIDER_MODELS,
-//   getProviderModels,
-//   getDefaultModel,
-//   isValidModel as isValidModelCore,
-//   findModelName,
-//   getModelTargetFormat,
-//   getModelStrip,
-//   PROVIDER_ID_TO_ALIAS,
-//   getModelsByProviderId,
-//   getModelUpstreamId,
-//   getModelQuotaFamily
-// } from "open-sse/config/providerModels.jsx";
+// Model catalog accessors. The actual data is loaded asynchronously from the
+// Rust backend via GET /api/catalog (see src/core/model/provider_catalog.json,
+// served by api_catalog in src/server/api/mod.rs).
+//
+// useEnsureCatalog() is the React hook components call so they re-render when
+// the data arrives. The plain accessors below read the latest snapshot.
 
 import { AI_PROVIDERS, isOpenAICompatibleProvider } from "./providers";
-// import { PROVIDER_MODELS as MODELS } from "open-sse/config/providerModels.jsx";
-
+import { useCatalogStore, useEnsureCatalog } from "@/store/catalogStore";
 import type { Model } from "../../types";
 
-// Temporary stubs
-export const PROVIDER_MODELS: Record<string, Model[]> = {};
-export const getProviderModels = (): Model[] => [];
-export const getDefaultModel = (): string => "";
-export const isValidModelCore = (): boolean => true;
-export const findModelName = (): string => "";
-export const getModelTargetFormat = (): string => "";
-export const getModelStrip = (): string => "";
-export const PROVIDER_ID_TO_ALIAS: Record<string, string> = {};
-export const getModelsByProviderId = (): Model[] => [];
-export const getModelUpstreamId = (): string => "";
-export const getModelQuotaFamily = (): string => "";
-export const MODELS: Record<string, Model[]> = {};
+export { useEnsureCatalog };
+
+function snapshot() {
+  return useCatalogStore.getState();
+}
+
+function aliasFor(providerId: string): string {
+  const { providerIdToAlias } = snapshot();
+  return providerIdToAlias[providerId] || providerId;
+}
+
+export function getModelsByProviderId(providerId: string): Model[] {
+  const { modelsByAlias } = snapshot();
+  const alias = aliasFor(providerId);
+  return (modelsByAlias[alias] || []) as unknown as Model[];
+}
+
+export function getProviderModels(aliasOrId: string): Model[] {
+  const { modelsByAlias, providerIdToAlias } = snapshot();
+  // Treat the argument as either a provider id or alias.
+  const alias = providerIdToAlias[aliasOrId] || aliasOrId;
+  return (modelsByAlias[alias] || []) as unknown as Model[];
+}
+
+export function getDefaultModel(aliasOrId: string): string {
+  const models = getProviderModels(aliasOrId);
+  return models[0]?.id || "";
+}
+
+export function findModelName(aliasOrId: string, modelId: string): string {
+  const found = getProviderModels(aliasOrId).find((m) => m.id === modelId);
+  return found?.name || modelId;
+}
+
+export function getModelTargetFormat(_aliasOrId: string, _modelId: string): string {
+  return "";
+}
+
+export function getModelStrip(_aliasOrId: string, _modelId: string): string[] {
+  return [];
+}
+
+export function getModelUpstreamId(_aliasOrId: string, modelId: string): string {
+  return modelId;
+}
+
+export function getModelQuotaFamily(_aliasOrId: string, _modelId: string): string {
+  return "normal";
+}
+
+export const PROVIDER_MODELS: Record<string, Model[]> = new Proxy(
+  {},
+  {
+    get: (_target, key: string) => {
+      const { modelsByAlias } = snapshot();
+      return (modelsByAlias[key] || []) as unknown as Model[];
+    },
+    ownKeys: () => Object.keys(snapshot().modelsByAlias),
+    getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
+  }
+) as Record<string, Model[]>;
+
+export const PROVIDER_ID_TO_ALIAS: Record<string, string> = new Proxy(
+  {},
+  {
+    get: (_target, key: string) => snapshot().providerIdToAlias[key],
+    ownKeys: () => Object.keys(snapshot().providerIdToAlias),
+    getOwnPropertyDescriptor: () => ({ enumerable: true, configurable: true }),
+  }
+) as Record<string, string>;
+
+export const MODELS = PROVIDER_MODELS;
 
 // Providers that accept any model (passthrough)
 const PASSTHROUGH_PROVIDERS: Set<string> = new Set(
@@ -39,23 +89,30 @@ const PASSTHROUGH_PROVIDERS: Set<string> = new Set(
     .map(([key]) => key)
 );
 
-// Wrap isValidModel with passthrough providers
+export function isValidModelCore(aliasOrId: string, modelId: string): boolean {
+  const models = snapshot().modelsByAlias[aliasOrId];
+  if (!models) return false;
+  return models.some((m) => m.id === modelId);
+}
+
 export function isValidModel(aliasOrId: string, modelId: string): boolean {
   if (isOpenAICompatibleProvider(aliasOrId)) return true;
   if (PASSTHROUGH_PROVIDERS.has(aliasOrId)) return true;
-  const models = MODELS[aliasOrId];
-  if (!models) return false;
-  return models.some(m => m.id === modelId);
+  return isValidModelCore(aliasOrId, modelId);
 }
 
-// Interface for AI model entries
 interface AIModelEntry {
   provider: string;
   model: string;
   name: string;
 }
 
-// Legacy AI_MODELS for backward compatibility
-export const AI_MODELS: AIModelEntry[] = Object.entries(MODELS).flatMap(([alias, models]) =>
-  models.map(m => ({ provider: alias, model: m.id, name: m.name }))
-);
+// Legacy AI_MODELS for backward compatibility — built from the current snapshot.
+export const AI_MODELS: AIModelEntry[] = (() => {
+  const out: AIModelEntry[] = [];
+  const { modelsByAlias } = snapshot();
+  for (const [alias, models] of Object.entries(modelsByAlias)) {
+    for (const m of models) out.push({ provider: alias, model: m.id, name: m.name || m.id });
+  }
+  return out;
+})();
