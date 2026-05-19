@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { MITM_TOOLS } from "@/shared/constants/cliTools";
-import { getModelsByProviderId } from "@/shared/constants/models";
+import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { MitmServerCard, MitmToolCard } from "@/components/cli-tools";
 
@@ -16,6 +16,7 @@ interface MitmStatus {
 }
 
 export default function MitmPageClient() {
+  useEnsureCatalog();
   const [connections, setConnections] = useState<any[]>([]);
   const [apiKeys, setApiKeys] = useState<any[]>([]);
   const [modelAliases, setModelAliases] = useState<Record<string, any>>({});

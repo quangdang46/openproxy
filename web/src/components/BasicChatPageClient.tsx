@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Badge, Button } from "@/shared/components";
-import { getModelsByProviderId } from "@/shared/constants/models";
+import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { isAnthropicCompatibleProvider, isOpenAICompatibleProvider } from "@/shared/constants/providers";
 
 const STORAGE_KEYS: Record<string, string> = {
@@ -243,6 +243,7 @@ function pickPreferredModel(group: ProviderGroup | null): Model | null {
 }
 
 export default function BasicChatPageClient() {
+  useEnsureCatalog();
   const [providerGroups, setProviderGroups] = useState<ProviderGroup[]>([]);
   const [loadingData, setLoadingData] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string>("");

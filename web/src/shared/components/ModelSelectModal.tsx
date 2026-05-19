@@ -3,7 +3,7 @@
 import { useState, useMemo, useEffect } from "react";
 import Modal from "./Modal";
 import Button from "./Button";
-import { getModelsByProviderId } from "@/shared/constants/models";
+import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 import React from "react";
 
@@ -83,6 +83,7 @@ export default function ModelSelectModal({
   kindFilter = null,
   closeOnSelect = true,
 }: ModelSelectModalProps) {
+  useEnsureCatalog();
   // Filter activeProviders by serviceKinds when kindFilter set (e.g. "webSearch", "webFetch")
   const filteredActiveProviders = useMemo(() => {
     if (!kindFilter) return activeProviders;
