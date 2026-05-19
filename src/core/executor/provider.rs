@@ -857,7 +857,103 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             ),
             (
                 "xiaomi-tokenplan",
-                ProviderExecutorConfig::openai("https://api.xiaomimimo.com/v1"),
+                ProviderExecutorConfig::openai("https://token-plan-sgp.xiaomimimo.com/v1"),
+            ),
+            (
+                "agentrouter",
+                ProviderExecutorConfig::anthropic("https://agentrouter.org/v1"),
+            ),
+            (
+                "aimlapi",
+                ProviderExecutorConfig::openai("https://api.aimlapi.com/v1"),
+            ),
+            (
+                "modal",
+                ProviderExecutorConfig::openai("https://api.modal.com/v1"),
+            ),
+            (
+                "reka",
+                ProviderExecutorConfig::openai("https://api.reka.ai/v1"),
+            ),
+            (
+                "nlpcloud",
+                ProviderExecutorConfig::openai("https://api.nlpcloud.io/v1/gpu"),
+            ),
+            (
+                "bazaarlink",
+                ProviderExecutorConfig::openai("https://bazaarlink.ai/api/v1"),
+            ),
+            (
+                "completions",
+                ProviderExecutorConfig::openai("https://completions.me/api/v1"),
+            ),
+            (
+                "enally",
+                ProviderExecutorConfig::openai("https://ai.enally.in/v1"),
+            ),
+            (
+                "freetheai",
+                ProviderExecutorConfig::openai("https://api.freetheai.xyz/v1"),
+            ),
+            (
+                "llm7",
+                ProviderExecutorConfig::openai("https://api.llm7.io/v1"),
+            ),
+            (
+                "kluster",
+                ProviderExecutorConfig::openai("https://api.kluster.ai/v1"),
+            ),
+            (
+                "predibase",
+                ProviderExecutorConfig::openai("https://serving.app.predibase.com/v1"),
+            ),
+            (
+                "bytez",
+                ProviderExecutorConfig::openai("https://api.bytez.com"),
+            ),
+            (
+                "morph",
+                ProviderExecutorConfig::openai("https://api.morphllm.com/v1"),
+            ),
+            (
+                "longcat",
+                ProviderExecutorConfig::openai("https://api.longcat.chat/openai/v1"),
+            ),
+            (
+                "puter",
+                ProviderExecutorConfig::openai("https://api.puter.com/puterai/openai/v1"),
+            ),
+            (
+                "uncloseai",
+                ProviderExecutorConfig::openai("https://hermes.ai.unturf.com/v1"),
+            ),
+            (
+                "scaleway",
+                ProviderExecutorConfig::openai("https://api.scaleway.ai/v1"),
+            ),
+            (
+                "sambanova",
+                ProviderExecutorConfig::openai("https://api.sambanova.ai/v1"),
+            ),
+            (
+                "nscale",
+                ProviderExecutorConfig::openai("https://inference.api.nscale.com/v1"),
+            ),
+            (
+                "baseten",
+                ProviderExecutorConfig::openai("https://inference.baseten.co/v1"),
+            ),
+            (
+                "publicai",
+                ProviderExecutorConfig::openai("https://api.publicai.co/v1"),
+            ),
+            (
+                "nous-research",
+                ProviderExecutorConfig::openai("https://inference-api.nousresearch.com/v1"),
+            ),
+            (
+                "glhf",
+                ProviderExecutorConfig::openai("https://glhf.chat/api/openai/v1"),
             ),
         ])
     });
@@ -971,6 +1067,30 @@ pub fn get_api_key_providers() -> Vec<&'static str> {
         "inference-net",
         "vercel-ai-gateway",
         "xiaomi-tokenplan",
+        "agentrouter",
+        "aimlapi",
+        "modal",
+        "reka",
+        "nlpcloud",
+        "bazaarlink",
+        "completions",
+        "enally",
+        "freetheai",
+        "llm7",
+        "kluster",
+        "predibase",
+        "bytez",
+        "morph",
+        "longcat",
+        "puter",
+        "uncloseai",
+        "scaleway",
+        "sambanova",
+        "nscale",
+        "baseten",
+        "publicai",
+        "nous-research",
+        "glhf",
     ]
 }
 
