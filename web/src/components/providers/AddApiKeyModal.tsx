@@ -34,6 +34,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
 
   const isAzure = provider === "azure";
   const isCloudflareAi = provider === "cloudflare-ai";
+  const isXiaomiTokenplan = provider === "xiaomi-tokenplan";
 
   const [formData, setFormData] = useState({
     name: "",
@@ -49,6 +50,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     organization: "",
   });
   const [cloudflareData, setCloudflareData] = useState({ accountId: "" });
+  const [xiaomiRegion, setXiaomiRegion] = useState<string>("sgp");
   const [validating, setValidating] = useState<boolean>(false);
   const [validationResult, setValidationResult] = useState<"success" | "failed" | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
@@ -108,6 +110,9 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     }
     if (isCloudflareAi) {
       return { accountId: cloudflareData.accountId };
+    }
+    if (isXiaomiTokenplan) {
+      return { region: xiaomiRegion };
     }
     return undefined;
   };
@@ -315,6 +320,24 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
             />
             <p className="text-xs text-text-muted mt-2">
               Find your Account ID in the right sidebar of <a href="https://dash.cloudflare.com" target="_blank" rel="noopener noreferrer" className="text-primary underline">dash.cloudflare.com</a>
+            </p>
+          </div>
+        )}
+        {isXiaomiTokenplan && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
+            <h3 className="font-semibold mb-3 text-sm">Xiaomi MiMo Token Plan Region</h3>
+            <Select
+              label="Region"
+              value={xiaomiRegion}
+              onChange={(e: ChangeEvent<HTMLSelectElement>) => setXiaomiRegion(e.target.value)}
+              options={[
+                { value: "sgp", label: "Singapore" },
+                { value: "cn", label: "China" },
+                { value: "ams", label: "Europe" },
+              ]}
+            />
+            <p className="text-xs text-text-muted mt-2">
+              Token Plan keys are cluster-specific. Select the region matching your subscription.
             </p>
           </div>
         )}
