@@ -98,7 +98,7 @@ const INITIAL_PASSWORD = '123456';
 
         const data = await res.json();
 
-        if (res.ok && data.authenticated) {
+        if (res.ok && (data.success || data.authenticated)) {
           // Check if this is first login (default password)
           if (passwordInput.value === '{INITIAL_PASSWORD}') {
             firstLoginHint.classList.remove('hidden');
