@@ -243,6 +243,7 @@ function pickPreferredModel(group: ProviderGroup | null): Model | null {
 }
 
 export default function BasicChatPageClient() {
+  useEnsureCatalog();
   const [providerGroups, setProviderGroups] = useState<ProviderGroup[]>([]);
   const [loadingData, setLoadingData] = useState<boolean>(true);
   const [loadError, setLoadError] = useState<string>("");
@@ -1037,4 +1038,3 @@ export default function BasicChatPageClient() {
     </div>
   );
 }
-  useEnsureCatalog();

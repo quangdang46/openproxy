@@ -122,6 +122,7 @@ interface ModelsCardProps {
 // Self-contained card: shows models for a provider, filtered by optional `kindFilter`.
 // kindFilter: if provided, only shows models with matching type/kinds field.
 export default function ModelsCard({ providerId, kindFilter, providerAliasOverride }: ModelsCardProps) {
+  useEnsureCatalog();
   const { copied, copy } = useCopyToClipboard();
   const [modelAliases, setModelAliases] = useState<Record<string, string>>({});
   const [customModels, setCustomModels] = useState<Array<{ providerAlias: string; id: string; name?: string; type?: string }>>([]);
@@ -293,4 +294,3 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
     </>
   );
 }
-  useEnsureCatalog();

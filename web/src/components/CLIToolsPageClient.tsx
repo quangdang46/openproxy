@@ -27,6 +27,7 @@ interface CLIToolsPageClientProps {
 }
 
 export default function CLIToolsPageClient({ machineId }: CLIToolsPageClientProps) {
+  useEnsureCatalog();
   const [connections, setConnections] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [expandedTool, setExpandedTool] = useState<string | null>(null);
@@ -242,4 +243,3 @@ export default function CLIToolsPageClient({ machineId }: CLIToolsPageClientProp
     </div>
   );
 }
-  useEnsureCatalog();
