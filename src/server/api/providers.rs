@@ -75,9 +75,7 @@ fn filter_suggested_models(kind: &str, values: &[Value]) -> Result<Vec<Value>, S
     }
 }
 
-async fn get_suggested_models(
-    Query(query): Query<SuggestedModelsQuery>,
-) -> Response {
+async fn get_suggested_models(Query(query): Query<SuggestedModelsQuery>) -> Response {
     // Public route: matches 9router's UX. The endpoint is a pure passthrough
     // proxy that fetches a public provider models URL (e.g. opencode.ai,
     // openrouter.ai) and filters the response. No secrets are returned.

@@ -349,6 +349,12 @@ async fn main() -> anyhow::Result<()> {
                 }
                 return Ok(());
             }
+            Command::Sync { cmd } => {
+                let db = Db::load().await?;
+                let db = Arc::new(db);
+                openproxy::cli::sync::run(cmd.clone(), &db, ctx).await?;
+                return Ok(());
+            }
         }
     }
 

@@ -955,6 +955,14 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
                 "glhf",
                 ProviderExecutorConfig::openai("https://glhf.chat/api/openai/v1"),
             ),
+            (
+                "github-models",
+                ProviderExecutorConfig::openai("https://models.github.ai/inference"),
+            ),
+            (
+                "hackclub",
+                ProviderExecutorConfig::openai("https://ai.hackclub.com/proxy/v1"),
+            ),
         ])
     });
 
@@ -1091,6 +1099,7 @@ pub fn get_api_key_providers() -> Vec<&'static str> {
         "publicai",
         "nous-research",
         "glhf",
+        "github-models",
     ]
 }
 
@@ -1103,6 +1112,7 @@ pub fn get_free_providers() -> Vec<&'static str> {
         "nvidia",
         "ollama-cloud",
         "gemini",
+        "hackclub",
     ]
 }
 

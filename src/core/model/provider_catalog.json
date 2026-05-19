@@ -58,7 +58,9 @@
     "xiaomi-mimo": "xiaomi-mimo",
     "inference-net": "inference-net",
     "vercel-ai-gateway": "vercel-ai-gateway",
-    "xiaomi-tokenplan": "xiaomi-tokenplan"
+    "xiaomi-tokenplan": "xiaomi-tokenplan",
+    "github-models": "ghm",
+    "hackclub": "hc"
   },
   "providerModels": [
     {
@@ -3304,6 +3306,85 @@
           "kind": "stt"
         }
       ]
+    },
+    {
+      "alias": "ghm",
+      "models": [
+        {
+          "id": "openai/gpt-4.1",
+          "name": "GPT-4.1 (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-4o",
+          "name": "GPT-4o (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-4o-mini",
+          "name": "GPT-4o Mini (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/o1",
+          "name": "o1 (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/o3",
+          "name": "o3 (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/o4-mini",
+          "name": "o4-mini (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek/DeepSeek-R1",
+          "name": "DeepSeek R1 (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "meta/Llama-4-Maverick-17B-128E-Instruct",
+          "name": "Llama 4 Maverick (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "xai/grok-3",
+          "name": "Grok 3 (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "mistral-ai/Mistral-Medium-3",
+          "name": "Mistral Medium 3 (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/text-embedding-3-small",
+          "name": "Text Embedding 3 Small",
+          "kind": "embedding"
+        },
+        {
+          "id": "openai/text-embedding-3-large",
+          "name": "Text Embedding 3 Large",
+          "kind": "embedding"
+        },
+        {
+          "id": "cohere/Cohere-embed-v4",
+          "name": "Cohere Embed v4",
+          "kind": "embedding"
+        },
+        {
+          "id": "meta/Llama-4-Scout-17B-16E-Instruct",
+          "name": "Llama 4 Scout (Free)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "alias": "hc",
+      "models": []
     }
   ],
   "providers": [
@@ -4390,6 +4471,33 @@
         "mimo-v2.5-tts-voiceclone",
         "mimo-v2.5-tts-voicedesign"
       ],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "github-models",
+      "alias": "ghm",
+      "serviceKinds": [
+        "llm",
+        "embedding"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [
+        "openai/text-embedding-3-small",
+        "openai/text-embedding-3-large",
+        "cohere/Cohere-embed-v4"
+      ],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "hackclub",
+      "alias": "hc",
+      "serviceKinds": [
+        "llm"
+      ],
+      "ttsModels": [],
       "embeddingModels": [],
       "hasSearch": false,
       "hasFetch": false

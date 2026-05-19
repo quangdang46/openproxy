@@ -1,0 +1,4413 @@
+{
+  "source": "9router",
+  "ref": "v0.4.55",
+  "generatedAt": "2026-05-19T14:31:36.624Z",
+  "providerIdToAlias": {
+    "claude": "cc",
+    "gemini": "gemini",
+    "gemini-cli": "gc",
+    "codex": "cx",
+    "qwen": "qw",
+    "iflow": "if",
+    "qoder": "qoder",
+    "antigravity": "ag",
+    "openrouter": "openrouter",
+    "openai": "openai",
+    "vercel-ai-gateway": "vercel-ai-gateway",
+    "glm": "glm",
+    "glm-cn": "glm-cn",
+    "kimi": "kimi",
+    "minimax": "minimax",
+    "minimax-cn": "minimax-cn",
+    "alicode": "alicode",
+    "alicode-intl": "alicode-intl",
+    "volcengine-ark": "volcengine-ark",
+    "byteplus": "byteplus",
+    "github": "gh",
+    "kiro": "kr",
+    "cursor": "cu",
+    "kimi-coding": "kmc",
+    "kilocode": "kc",
+    "opencode": "oc",
+    "cline": "cl",
+    "nvidia": "nvidia",
+    "anthropic": "anthropic",
+    "deepseek": "deepseek",
+    "commandcode": "commandcode",
+    "groq": "groq",
+    "xai": "xai",
+    "mistral": "mistral",
+    "perplexity": "perplexity",
+    "together": "together",
+    "fireworks": "fireworks",
+    "cerebras": "cerebras",
+    "cohere": "cohere",
+    "nebius": "nebius",
+    "siliconflow": "siliconflow",
+    "hyperbolic": "hyperbolic",
+    "deepgram": "deepgram",
+    "assemblyai": "assemblyai",
+    "nanobanana": "nanobanana",
+    "chutes": "chutes",
+    "ollama": "ollama",
+    "ollama-local": "ollama-local",
+    "vertex": "vertex",
+    "vertex-partner": "vertex-partner",
+    "gitlab": "gitlab",
+    "codebuddy": "codebuddy",
+    "opencode-go": "opencode-go",
+    "grok-web": "grok-web",
+    "perplexity-web": "perplexity-web",
+    "azure": "azure",
+    "cloudflare-ai": "cloudflare-ai",
+    "xiaomi-mimo": "xiaomi-mimo",
+    "xiaomi-tokenplan": "xiaomi-tokenplan",
+    "agentrouter": "agentrouter",
+    "aimlapi": "aimlapi",
+    "novita": "novita",
+    "modal": "modal",
+    "reka": "reka",
+    "nlpcloud": "nlpcloud",
+    "bazaarlink": "bazaarlink",
+    "completions": "completions",
+    "enally": "enally",
+    "freetheai": "freetheai",
+    "llm7": "llm7",
+    "lepton": "lepton",
+    "kluster": "kluster",
+    "ai21": "ai21",
+    "inference-net": "inference-net",
+    "predibase": "predibase",
+    "bytez": "bytez",
+    "morph": "morph",
+    "longcat": "longcat",
+    "puter": "puter",
+    "uncloseai": "uncloseai",
+    "scaleway": "scaleway",
+    "deepinfra": "deepinfra",
+    "sambanova": "sambanova",
+    "nscale": "nscale",
+    "baseten": "baseten",
+    "publicai": "publicai",
+    "nous-research": "nous-research",
+    "glhf": "glhf",
+    "blackbox": "blackbox"
+  },
+  "providers": [
+    {
+      "id": "antigravity",
+      "alias": "ag",
+      "format": "antigravity",
+      "models": [
+        {
+          "id": "gemini-3.1-pro-high",
+          "name": "Gemini 3 Pro High",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.1-pro-low",
+          "name": "Gemini 3 Pro Low",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-flash",
+          "name": "Gemini 3 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4-6-thinking",
+          "name": "Claude Opus 4.6 Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-oss-120b-medium",
+          "name": "GPT OSS 120B Medium",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "agentrouter",
+      "alias": "agentrouter",
+      "format": "claude",
+      "baseUrl": "https://agentrouter.org/v1/messages",
+      "models": [
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude 4.6 Opus",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Claude 4.5 Haiku",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v3.2",
+          "name": "DeepSeek V3.2",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "ai21",
+      "alias": "ai21",
+      "format": "openai",
+      "baseUrl": "https://api.ai21.com/studio/v1/chat/completions",
+      "models": [
+        {
+          "id": "jamba-large",
+          "name": "Jamba 1.5 Large",
+          "kind": "llm"
+        },
+        {
+          "id": "jamba-mini",
+          "name": "Jamba 1.5 Mini",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "aimlapi",
+      "alias": "aimlapi",
+      "format": "openai",
+      "baseUrl": "https://api.aimlapi.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-3-5-sonnet-20241022",
+          "name": "Claude 3.5 Sonnet",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.0-flash-exp",
+          "name": "Gemini 2.0 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+          "name": "Llama 3.1 70B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "alicode",
+      "alias": "alicode",
+      "format": "openai",
+      "baseUrl": "https://coding.dashscope.aliyuncs.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "qwen3.5-plus",
+          "name": "Qwen3.5 Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-max-2026-01-23",
+          "name": "Qwen3 Max",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-next",
+          "name": "Qwen3 Coder Next",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-plus",
+          "name": "Qwen3 Coder Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "alicode-intl",
+      "alias": "alicode-intl",
+      "format": "openai",
+      "baseUrl": "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "qwen3.5-plus",
+          "name": "Qwen3.5 Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-next",
+          "name": "Qwen3 Coder Next",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-plus",
+          "name": "Qwen3 Coder Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "anthropic",
+      "alias": "anthropic",
+      "format": "claude",
+      "baseUrl": "https://api.anthropic.com/v1/messages",
+      "models": [
+        {
+          "id": "claude-sonnet-4-20250514",
+          "name": "Claude Sonnet 4",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4-20250514",
+          "name": "Claude Opus 4",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-3-5-sonnet-20241022",
+          "name": "Claude 3.5 Sonnet",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "assemblyai",
+      "alias": "assemblyai",
+      "format": "openai",
+      "baseUrl": "https://api.assemblyai.com/v1/audio/transcriptions",
+      "models": [
+        {
+          "id": "universal-3-pro",
+          "name": "Universal 3 Pro",
+          "kind": "stt"
+        },
+        {
+          "id": "universal-2",
+          "name": "Universal 2",
+          "kind": "stt"
+        }
+      ]
+    },
+    {
+      "id": "baseten",
+      "alias": "baseten",
+      "format": "openai",
+      "baseUrl": "https://inference.baseten.co/v1/chat/completions",
+      "models": [
+        {
+          "id": "deepseek-ai/DeepSeek-R1",
+          "name": "DeepSeek R1",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "bazaarlink",
+      "alias": "bazaarlink",
+      "format": "openai",
+      "baseUrl": "https://bazaarlink.ai/api/v1/chat/completions",
+      "models": [
+        {
+          "id": "auto:free",
+          "name": "Auto Free (Zero Cost)",
+          "kind": "llm"
+        },
+        {
+          "id": "auto",
+          "name": "Auto (Best Model)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "black-forest-labs",
+      "alias": "black-forest-labs",
+      "models": [
+        {
+          "id": "flux-pro-1.1",
+          "name": "FLUX Pro 1.1",
+          "kind": "image"
+        },
+        {
+          "id": "flux-pro-1.1-ultra",
+          "name": "FLUX Pro 1.1 Ultra",
+          "kind": "image"
+        },
+        {
+          "id": "flux-pro",
+          "name": "FLUX Pro",
+          "kind": "image"
+        },
+        {
+          "id": "flux-dev",
+          "name": "FLUX Dev",
+          "kind": "image"
+        },
+        {
+          "id": "flux-kontext-pro",
+          "name": "FLUX Kontext Pro (Edit)",
+          "kind": "image"
+        },
+        {
+          "id": "flux-kontext-max",
+          "name": "FLUX Kontext Max (Edit)",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "blackbox",
+      "alias": "blackbox",
+      "format": "openai",
+      "baseUrl": "https://api.blackbox.ai/chat/completions",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o mini",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4.6",
+          "name": "Claude Sonnet 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4.5",
+          "name": "Claude Sonnet 4.5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.6",
+          "name": "Claude Opus 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6 (Legacy)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6 (Legacy)",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek Chat",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v3-671b",
+          "name": "DeepSeek V3 671B",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-r1",
+          "name": "DeepSeek R1",
+          "kind": "llm"
+        },
+        {
+          "id": "o1",
+          "name": "OpenAI o1",
+          "kind": "llm"
+        },
+        {
+          "id": "o3-mini",
+          "name": "OpenAI o3-mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "Gemini 3 Flash Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-plus",
+          "name": "Qwen3 Coder Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-max",
+          "name": "Qwen3 Max",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-vl-plus",
+          "name": "Qwen3 VL Plus",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "byteplus",
+      "alias": "byteplus",
+      "format": "openai",
+      "baseUrl": "https://ark.ap-southeast.bytepluses.com/api/coding/v3/chat/completions",
+      "models": [
+        {
+          "id": "seed-2-0-pro-260328",
+          "name": "Seed 2.0 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "seed-2-0-code-preview-260328",
+          "name": "Seed 2.0 Code Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "seed-2-0-mini-260215",
+          "name": "Seed 2.0 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "seed-2-0-lite-260228",
+          "name": "Seed 2.0 Lite",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2-thinking-251104",
+          "name": "Kimi K2 Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4-7-251222",
+          "name": "GLM 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-oss-120b-250805",
+          "name": "GPT-OSS-120B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "bytez",
+      "alias": "bytez",
+      "format": "openai",
+      "baseUrl": "https://api.bytez.com/models/v2",
+      "models": [
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "mistralai/Mistral-7B-Instruct-v0.3",
+          "name": "Mistral 7B v0.3",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen2.5-72B-Instruct",
+          "name": "Qwen 2.5 72B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "claude",
+      "alias": "cc",
+      "format": "claude",
+      "baseUrl": "https://api.anthropic.com/v1/messages",
+      "models": [
+        {
+          "id": "claude-opus-4-7",
+          "name": "Claude Opus 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4-5-20251101",
+          "name": "Claude 4.5 Opus",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4-5-20250929",
+          "name": "Claude 4.5 Sonnet",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-haiku-4-5-20251001",
+          "name": "Claude 4.5 Haiku",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "cerebras",
+      "alias": "cerebras",
+      "format": "openai",
+      "baseUrl": "https://api.cerebras.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-oss-120b",
+          "name": "GPT OSS 120B",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-glm-4.7",
+          "name": "ZAI GLM 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "llama-3.3-70b",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "llama-4-scout-17b-16e-instruct",
+          "name": "Llama 4 Scout",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen-3-235b-a22b-instruct-2507",
+          "name": "Qwen3 235B A22B",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen-3-32b",
+          "name": "Qwen3 32B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "cline",
+      "alias": "cl",
+      "format": "openai",
+      "baseUrl": "https://api.cline.bot/api/v1/chat/completions",
+      "models": [
+        {
+          "id": "anthropic/claude-opus-4.7",
+          "name": "Claude Opus 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "anthropic/claude-sonnet-4.6",
+          "name": "Claude Sonnet 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "anthropic/claude-opus-4.6",
+          "name": "Claude Opus 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-5.3-codex",
+          "name": "GPT-5.3 Codex",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-5.4",
+          "name": "GPT-5.4",
+          "kind": "llm"
+        },
+        {
+          "id": "google/gemini-3.1-pro-preview",
+          "name": "Gemini 3.1 Pro Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "google/gemini-3.1-flash-lite-preview",
+          "name": "Gemini 3.1 Flash Lite Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "kwaipilot/kat-coder-pro",
+          "name": "KAT Coder Pro",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "cloudflare-ai",
+      "alias": "cloudflare-ai",
+      "format": "openai",
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts/{accountId}/ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "@cf/meta/llama-3.2-1b-instruct",
+          "name": "Llama 3.2 1B Instruct",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/meta/llama-3.2-3b-instruct",
+          "name": "Llama 3.2 3B Instruct",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/meta/llama-3.1-8b-instruct-fp8-fast",
+          "name": "Llama 3.1 8B Instruct FP8 Fast",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/meta/llama-3.1-8b-instruct-awq",
+          "name": "Llama 3.1 8B Instruct AWQ",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/mistralai/mistral-small-3.1-24b-instruct",
+          "name": "Mistral Small 3.1 24B Instruct",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/meta/llama-3.1-70b-instruct-fp8-fast",
+          "name": "Llama 3.1 70B Instruct FP8 Fast",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+          "name": "Llama 3.3 70B Instruct FP8 Fast",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/deepseek-ai/deepseek-r1-distill-qwen-32b",
+          "name": "DeepSeek R1 Distill Qwen 32B",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/moonshotai/kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/moonshotai/kimi-k2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/zai-org/glm-4.7-flash",
+          "name": "GLM 4.7 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/qwen/qwq-32b",
+          "name": "QwQ 32B",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/qwen/qwen2.5-coder-32b-instruct",
+          "name": "Qwen 2.5 Coder 32B Instruct",
+          "kind": "llm"
+        },
+        {
+          "id": "@cf/black-forest-labs/flux-2-klein-9b",
+          "name": "FLUX.2 Klein 9B",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/black-forest-labs/flux-2-klein-4b",
+          "name": "FLUX.2 Klein 4B",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/black-forest-labs/flux-2-dev",
+          "name": "FLUX.2 Dev",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/leonardo/lucid-origin",
+          "name": "Lucid Origin",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/leonardo/phoenix-1.0",
+          "name": "Phoenix 1.0",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/black-forest-labs/flux-1-schnell",
+          "name": "FLUX.1 Schnell",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/bytedance/stable-diffusion-xl-lightning",
+          "name": "SDXL Lightning",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/lykon/dreamshaper-8-lcm",
+          "name": "DreamShaper 8 LCM",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/runwayml/stable-diffusion-v1-5-img2img",
+          "name": "Stable Diffusion v1.5 Img2Img",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/runwayml/stable-diffusion-v1-5-inpainting",
+          "name": "Stable Diffusion v1.5 Inpainting",
+          "kind": "image"
+        },
+        {
+          "id": "@cf/stabilityai/stable-diffusion-xl-base-1.0",
+          "name": "SDXL Base 1.0",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "cohere",
+      "alias": "cohere",
+      "format": "openai",
+      "baseUrl": "https://api.cohere.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "command-r-plus-08-2024",
+          "name": "Command R+ (Aug 2024)",
+          "kind": "llm"
+        },
+        {
+          "id": "command-r-08-2024",
+          "name": "Command R (Aug 2024)",
+          "kind": "llm"
+        },
+        {
+          "id": "command-a-03-2025",
+          "name": "Command A (Mar 2025)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "comfyui",
+      "alias": "comfyui",
+      "models": [
+        {
+          "id": "flux-dev",
+          "name": "FLUX Dev",
+          "kind": "image"
+        },
+        {
+          "id": "sdxl",
+          "name": "SDXL",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "commandcode",
+      "alias": "commandcode",
+      "format": "commandcode",
+      "baseUrl": "https://api.commandcode.ai/alpha/generate",
+      "models": [
+        {
+          "id": "deepseek/deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek/deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMaxAI/MiniMax-M2.7",
+          "name": "MiniMax M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMaxAI/MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3.6-Max-Preview",
+          "name": "Qwen 3.6 Max Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3.6-Plus",
+          "name": "Qwen 3.6 Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "stepfun/Step-3.5-Flash",
+          "name": "Step 3.5 Flash",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "completions",
+      "alias": "completions",
+      "format": "openai",
+      "baseUrl": "https://completions.me/api/v1/chat/completions",
+      "models": [
+        {
+          "id": "claude-opus-4",
+          "name": "Claude Opus 4",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4",
+          "name": "Claude Sonnet 4",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "cursor",
+      "alias": "cu",
+      "format": "cursor",
+      "baseUrl": "https://api2.cursor.sh",
+      "models": [
+        {
+          "id": "default",
+          "name": "Auto (Server Picks)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-4.5-opus-high-thinking",
+          "name": "Claude 4.5 Opus High Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-4.5-opus-high",
+          "name": "Claude 4.5 Opus High",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-4.5-sonnet-thinking",
+          "name": "Claude 4.5 Sonnet Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-4.5-sonnet",
+          "name": "Claude 4.5 Sonnet",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-4.5-haiku",
+          "name": "Claude 4.5 Haiku",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-4.5-opus",
+          "name": "Claude 4.5 Opus",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2-codex",
+          "name": "GPT 5.2 Codex",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-4.6-opus-max",
+          "name": "Claude 4.6 Opus Max",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-4.6-sonnet-medium-thinking",
+          "name": "Claude 4.6 Sonnet Medium Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "Gemini 3 Flash Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2",
+          "name": "GPT 5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "name": "GPT 5.3 Codex",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "codex",
+      "alias": "cx",
+      "format": "openai-responses",
+      "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
+      "models": [
+        {
+          "id": "gpt-5.5",
+          "name": "GPT 5.5",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.5-review",
+          "name": "GPT 5.5 Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.4",
+          "name": "GPT 5.4",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.4-review",
+          "name": "GPT 5.4 Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "name": "GPT 5.3 Codex",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-review",
+          "name": "GPT 5.3 Codex Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-xhigh",
+          "name": "GPT 5.3 Codex (xHigh)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-xhigh-review",
+          "name": "GPT 5.3 Codex (xHigh) Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-high",
+          "name": "GPT 5.3 Codex (High)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-high-review",
+          "name": "GPT 5.3 Codex (High) Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-low",
+          "name": "GPT 5.3 Codex (Low)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-low-review",
+          "name": "GPT 5.3 Codex (Low) Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-none",
+          "name": "GPT 5.3 Codex (None)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-none-review",
+          "name": "GPT 5.3 Codex (None) Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-spark",
+          "name": "GPT 5.3 Codex Spark",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex-spark-review",
+          "name": "GPT 5.3 Codex Spark Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-codex-mini",
+          "name": "GPT 5.1 Codex Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-codex-mini-review",
+          "name": "GPT 5.1 Codex Mini Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-codex-mini-high",
+          "name": "GPT 5.1 Codex Mini (High)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-codex-mini-high-review",
+          "name": "GPT 5.1 Codex Mini (High) Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2-codex",
+          "name": "GPT 5.2 Codex",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2-codex-review",
+          "name": "GPT 5.2 Codex Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2",
+          "name": "GPT 5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2-review",
+          "name": "GPT 5.2 Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-codex-max",
+          "name": "GPT 5.1 Codex Max",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-codex-max-review",
+          "name": "GPT 5.1 Codex Max Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-codex",
+          "name": "GPT 5.1 Codex",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-codex-review",
+          "name": "GPT 5.1 Codex Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1",
+          "name": "GPT 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1-review",
+          "name": "GPT 5.1 Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5-codex",
+          "name": "GPT 5 Codex",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5-codex-review",
+          "name": "GPT 5 Codex Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5-codex-mini",
+          "name": "GPT 5 Codex Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5-codex-mini-review",
+          "name": "GPT 5 Codex Mini Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.5-image",
+          "name": "GPT 5.5 Image",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-5.4-image",
+          "name": "GPT 5.4 Image",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-5.3-image",
+          "name": "GPT 5.3 Image",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-5.2-image",
+          "name": "GPT 5.2 Image",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "deepgram",
+      "alias": "deepgram",
+      "format": "openai",
+      "baseUrl": "https://api.deepgram.com/v1/listen",
+      "models": [
+        {
+          "id": "nova-3",
+          "name": "Nova 3",
+          "kind": "stt"
+        },
+        {
+          "id": "nova-2",
+          "name": "Nova 2",
+          "kind": "stt"
+        },
+        {
+          "id": "whisper-large",
+          "name": "Whisper Large",
+          "kind": "stt"
+        }
+      ]
+    },
+    {
+      "id": "deepinfra",
+      "alias": "deepinfra",
+      "format": "openai",
+      "baseUrl": "https://api.deepinfra.com/v1/openai/chat/completions",
+      "models": [
+        {
+          "id": "meta-llama/Meta-Llama-3.1-70B-Instruct",
+          "name": "Llama 3.1 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-V3",
+          "name": "DeepSeek V3",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen2.5-72B-Instruct",
+          "name": "Qwen 2.5 72B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "deepseek",
+      "alias": "deepseek",
+      "format": "openai",
+      "baseUrl": "https://api.deepseek.com/chat/completions",
+      "models": [
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro-max",
+          "name": "DeepSeek V4 Pro Max",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro-none",
+          "name": "DeepSeek V4 Pro No Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek V3.2 Chat",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-reasoner",
+          "name": "DeepSeek V3.2 Reasoner",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "edge-tts",
+      "alias": "edge-tts",
+      "models": [
+        {
+          "id": "en-US-AriaNeural",
+          "name": "Aria (en-US)",
+          "kind": "tts"
+        },
+        {
+          "id": "en-US-GuyNeural",
+          "name": "Guy (en-US)",
+          "kind": "tts"
+        },
+        {
+          "id": "en-GB-SoniaNeural",
+          "name": "Sonia (en-GB)",
+          "kind": "tts"
+        },
+        {
+          "id": "vi-VN-HoaiMyNeural",
+          "name": "Hoai My (vi-VN)",
+          "kind": "tts"
+        },
+        {
+          "id": "vi-VN-NamMinhNeural",
+          "name": "Nam Minh (vi-VN)",
+          "kind": "tts"
+        },
+        {
+          "id": "zh-CN-XiaoxiaoNeural",
+          "name": "Xiaoxiao (zh-CN)",
+          "kind": "tts"
+        },
+        {
+          "id": "zh-CN-YunxiNeural",
+          "name": "Yunxi (zh-CN)",
+          "kind": "tts"
+        },
+        {
+          "id": "fr-FR-DeniseNeural",
+          "name": "Denise (fr-FR)",
+          "kind": "tts"
+        },
+        {
+          "id": "de-DE-KatjaNeural",
+          "name": "Katja (de-DE)",
+          "kind": "tts"
+        },
+        {
+          "id": "ja-JP-NanamiNeural",
+          "name": "Nanami (ja-JP)",
+          "kind": "tts"
+        },
+        {
+          "id": "ko-KR-SunHiNeural",
+          "name": "SunHi (ko-KR)",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "elevenlabs-tts-models",
+      "alias": "elevenlabs-tts-models",
+      "models": [
+        {
+          "id": "eleven_flash_v2_5",
+          "name": "Flash v2.5 (Fastest)",
+          "kind": "tts"
+        },
+        {
+          "id": "eleven_turbo_v2_5",
+          "name": "Turbo v2.5 (Fast)",
+          "kind": "tts"
+        },
+        {
+          "id": "eleven_multilingual_v2",
+          "name": "Multilingual v2 (Quality)",
+          "kind": "tts"
+        },
+        {
+          "id": "eleven_monolingual_v1",
+          "name": "Monolingual v1 (English)",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "enally",
+      "alias": "enally",
+      "format": "openai",
+      "baseUrl": "https://ai.enally.in/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-3-5-sonnet",
+          "name": "Claude 3.5 Sonnet",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "fal-ai",
+      "alias": "fal-ai",
+      "models": [
+        {
+          "id": "fal-ai/flux/schnell",
+          "name": "FLUX Schnell",
+          "kind": "image"
+        },
+        {
+          "id": "fal-ai/flux/dev",
+          "name": "FLUX Dev",
+          "kind": "image"
+        },
+        {
+          "id": "fal-ai/flux-pro/v1.1",
+          "name": "FLUX Pro v1.1",
+          "kind": "image"
+        },
+        {
+          "id": "fal-ai/flux-pro/v1.1-ultra",
+          "name": "FLUX Pro v1.1 Ultra",
+          "kind": "image"
+        },
+        {
+          "id": "fal-ai/recraft-v3",
+          "name": "Recraft V3",
+          "kind": "image"
+        },
+        {
+          "id": "fal-ai/ideogram/v2",
+          "name": "Ideogram V2",
+          "kind": "image"
+        },
+        {
+          "id": "fal-ai/stable-diffusion-v35-large",
+          "name": "SD 3.5 Large",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "fireworks",
+      "alias": "fireworks",
+      "format": "openai",
+      "baseUrl": "https://api.fireworks.ai/inference/v1/chat/completions",
+      "models": [
+        {
+          "id": "accounts/fireworks/models/deepseek-v3p1",
+          "name": "DeepSeek V3.1",
+          "kind": "llm"
+        },
+        {
+          "id": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "accounts/fireworks/models/qwen3-235b-a22b",
+          "name": "Qwen3 235B",
+          "kind": "llm"
+        },
+        {
+          "id": "nomic-ai/nomic-embed-text-v1.5",
+          "name": "Nomic Embed Text v1.5",
+          "kind": "embedding"
+        }
+      ]
+    },
+    {
+      "id": "freetheai",
+      "alias": "freetheai",
+      "format": "openai",
+      "baseUrl": "https://api.freetheai.xyz/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-3-5-sonnet",
+          "name": "Claude 3.5 Sonnet",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-1.5-pro",
+          "name": "Gemini 1.5 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek Chat",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "gemini-cli",
+      "alias": "gc",
+      "format": "gemini-cli",
+      "baseUrl": "https://cloudcode-pa.googleapis.com/v1internal",
+      "models": [
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "Gemini 3 Flash Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-pro-preview",
+          "name": "Gemini 3 Pro Preview",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "gemini",
+      "alias": "gemini",
+      "format": "gemini",
+      "baseUrl": "https://generativelanguage.googleapis.com/v1beta/models",
+      "models": [
+        {
+          "id": "gemini-3.1-pro-preview",
+          "name": "Gemini 3.1 Pro Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.1-flash-lite-preview",
+          "name": "Gemini 3.1 Flash Lite Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "Gemini 3 Flash Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.5-flash-lite",
+          "name": "Gemini 2.5 Flash Lite",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.0-flash-lite",
+          "name": "Gemini 2.0 Flash Lite",
+          "kind": "llm"
+        },
+        {
+          "id": "gemma-4-31b-it",
+          "name": "Gemma 4 31B IT",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-embedding-2-preview",
+          "name": "Gemini Embedding 2 Preview",
+          "kind": "embedding"
+        },
+        {
+          "id": "gemini-embedding-001",
+          "name": "Gemini Embedding 001",
+          "kind": "embedding"
+        },
+        {
+          "id": "text-embedding-005",
+          "name": "Text Embedding 005",
+          "kind": "embedding"
+        },
+        {
+          "id": "text-embedding-004",
+          "name": "Text Embedding 004 (Legacy)",
+          "kind": "embedding"
+        },
+        {
+          "id": "gemini-3.1-flash-image-preview",
+          "name": "Gemini 3.1 Flash Image (Nano Banana 2)",
+          "kind": "image"
+        },
+        {
+          "id": "gemini-3-pro-image-preview",
+          "name": "Gemini 3 Pro Image (Nano Banana Pro)",
+          "kind": "image"
+        },
+        {
+          "id": "gemini-2.5-flash-image",
+          "name": "Gemini 2.5 Flash Image (Nano Banana)",
+          "kind": "image"
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro (Best)",
+          "kind": "stt"
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "kind": "stt"
+        },
+        {
+          "id": "gemini-2.5-flash-lite",
+          "name": "Gemini 2.5 Flash Lite (Cheapest)",
+          "kind": "stt"
+        },
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "kind": "stt"
+        }
+      ]
+    },
+    {
+      "id": "gemini-tts-models",
+      "alias": "gemini-tts-models",
+      "models": [
+        {
+          "id": "gemini-2.5-flash-preview-tts",
+          "name": "Gemini 2.5 Flash TTS",
+          "kind": "tts"
+        },
+        {
+          "id": "gemini-2.5-pro-preview-tts",
+          "name": "Gemini 2.5 Pro TTS",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "gemini-tts-voices",
+      "alias": "gemini-tts-voices",
+      "models": [
+        {
+          "id": "Zephyr",
+          "name": "Zephyr",
+          "kind": "tts"
+        },
+        {
+          "id": "Puck",
+          "name": "Puck",
+          "kind": "tts"
+        },
+        {
+          "id": "Charon",
+          "name": "Charon",
+          "kind": "tts"
+        },
+        {
+          "id": "Kore",
+          "name": "Kore",
+          "kind": "tts"
+        },
+        {
+          "id": "Fenrir",
+          "name": "Fenrir",
+          "kind": "tts"
+        },
+        {
+          "id": "Leda",
+          "name": "Leda",
+          "kind": "tts"
+        },
+        {
+          "id": "Orus",
+          "name": "Orus",
+          "kind": "tts"
+        },
+        {
+          "id": "Aoede",
+          "name": "Aoede",
+          "kind": "tts"
+        },
+        {
+          "id": "Callirrhoe",
+          "name": "Callirrhoe",
+          "kind": "tts"
+        },
+        {
+          "id": "Autonoe",
+          "name": "Autonoe",
+          "kind": "tts"
+        },
+        {
+          "id": "Enceladus",
+          "name": "Enceladus",
+          "kind": "tts"
+        },
+        {
+          "id": "Iapetus",
+          "name": "Iapetus",
+          "kind": "tts"
+        },
+        {
+          "id": "Umbriel",
+          "name": "Umbriel",
+          "kind": "tts"
+        },
+        {
+          "id": "Algieba",
+          "name": "Algieba",
+          "kind": "tts"
+        },
+        {
+          "id": "Despina",
+          "name": "Despina",
+          "kind": "tts"
+        },
+        {
+          "id": "Erinome",
+          "name": "Erinome",
+          "kind": "tts"
+        },
+        {
+          "id": "Algenib",
+          "name": "Algenib",
+          "kind": "tts"
+        },
+        {
+          "id": "Rasalgethi",
+          "name": "Rasalgethi",
+          "kind": "tts"
+        },
+        {
+          "id": "Laomedeia",
+          "name": "Laomedeia",
+          "kind": "tts"
+        },
+        {
+          "id": "Achernar",
+          "name": "Achernar",
+          "kind": "tts"
+        },
+        {
+          "id": "Alnilam",
+          "name": "Alnilam",
+          "kind": "tts"
+        },
+        {
+          "id": "Schedar",
+          "name": "Schedar",
+          "kind": "tts"
+        },
+        {
+          "id": "Gacrux",
+          "name": "Gacrux",
+          "kind": "tts"
+        },
+        {
+          "id": "Pulcherrima",
+          "name": "Pulcherrima",
+          "kind": "tts"
+        },
+        {
+          "id": "Achird",
+          "name": "Achird",
+          "kind": "tts"
+        },
+        {
+          "id": "Zubenelgenubi",
+          "name": "Zubenelgenubi",
+          "kind": "tts"
+        },
+        {
+          "id": "Vindemiatrix",
+          "name": "Vindemiatrix",
+          "kind": "tts"
+        },
+        {
+          "id": "Sadachbia",
+          "name": "Sadachbia",
+          "kind": "tts"
+        },
+        {
+          "id": "Sadaltager",
+          "name": "Sadaltager",
+          "kind": "tts"
+        },
+        {
+          "id": "Sulafat",
+          "name": "Sulafat",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "github",
+      "alias": "gh",
+      "format": "openai",
+      "baseUrl": "https://api.githubcopilot.com/chat/completions",
+      "models": [
+        {
+          "id": "gpt-3.5-turbo",
+          "name": "GPT-3.5 Turbo",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4",
+          "name": "GPT-4",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4.1",
+          "name": "GPT-4.1",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5-mini",
+          "name": "GPT-5 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2",
+          "name": "GPT-5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2-codex",
+          "name": "GPT-5.2 Codex",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "name": "GPT-5.3 Codex",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "name": "GPT-5.4 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-haiku-4.5",
+          "name": "Claude Haiku 4.5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.5",
+          "name": "Claude Opus 4.5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4",
+          "name": "Claude Sonnet 4",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4.5",
+          "name": "Claude Sonnet 4.5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4.6",
+          "name": "Claude Sonnet 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.6",
+          "name": "Claude Opus 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.7",
+          "name": "Claude Opus 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "Gemini 3 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.1-pro-preview",
+          "name": "Gemini 3.1 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-code-fast-1",
+          "name": "Grok Code Fast 1",
+          "kind": "llm"
+        },
+        {
+          "id": "oswe-vscode-prime",
+          "name": "Raptor Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "goldeneye-free-auto",
+          "name": "GoldenEye",
+          "kind": "llm"
+        },
+        {
+          "id": "text-embedding-3-small",
+          "name": "Text Embedding 3 Small (GitHub)",
+          "kind": "embedding"
+        },
+        {
+          "id": "text-embedding-3-large",
+          "name": "Text Embedding 3 Large (GitHub)",
+          "kind": "embedding"
+        }
+      ]
+    },
+    {
+      "id": "glhf",
+      "alias": "glhf",
+      "format": "openai",
+      "baseUrl": "https://glhf.chat/api/openai/v1/chat/completions",
+      "models": [
+        {
+          "id": "hf:meta-llama/Meta-Llama-3.1-405B-Instruct",
+          "name": "Llama 3.1 405B",
+          "kind": "llm"
+        },
+        {
+          "id": "hf:meta-llama/Meta-Llama-3.1-70B-Instruct",
+          "name": "Llama 3.1 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "hf:Qwen/Qwen2.5-72B-Instruct",
+          "name": "Qwen 2.5 72B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "glm",
+      "alias": "glm",
+      "format": "claude",
+      "baseUrl": "https://api.z.ai/api/anthropic/v1/messages",
+      "models": [
+        {
+          "id": "glm-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.6v",
+          "name": "GLM 4.6V (Vision)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "glm-cn",
+      "alias": "glm-cn",
+      "format": "openai",
+      "baseUrl": "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
+      "models": [
+        {
+          "id": "glm-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM-4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.6",
+          "name": "GLM-4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.5-air",
+          "name": "GLM-4.5-Air",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "google-tts",
+      "alias": "google-tts",
+      "models": [
+        {
+          "id": "af",
+          "name": "Afrikaans",
+          "kind": "tts"
+        },
+        {
+          "id": "ar",
+          "name": "Arabic",
+          "kind": "tts"
+        },
+        {
+          "id": "bg",
+          "name": "Bulgarian",
+          "kind": "tts"
+        },
+        {
+          "id": "bn",
+          "name": "Bengali",
+          "kind": "tts"
+        },
+        {
+          "id": "bs",
+          "name": "Bosnian",
+          "kind": "tts"
+        },
+        {
+          "id": "ca",
+          "name": "Catalan",
+          "kind": "tts"
+        },
+        {
+          "id": "cs",
+          "name": "Czech",
+          "kind": "tts"
+        },
+        {
+          "id": "cy",
+          "name": "Welsh",
+          "kind": "tts"
+        },
+        {
+          "id": "da",
+          "name": "Danish",
+          "kind": "tts"
+        },
+        {
+          "id": "de",
+          "name": "German",
+          "kind": "tts"
+        },
+        {
+          "id": "el",
+          "name": "Greek",
+          "kind": "tts"
+        },
+        {
+          "id": "en",
+          "name": "English",
+          "kind": "tts"
+        },
+        {
+          "id": "eo",
+          "name": "Esperanto",
+          "kind": "tts"
+        },
+        {
+          "id": "es",
+          "name": "Spanish",
+          "kind": "tts"
+        },
+        {
+          "id": "et",
+          "name": "Estonian",
+          "kind": "tts"
+        },
+        {
+          "id": "fi",
+          "name": "Finnish",
+          "kind": "tts"
+        },
+        {
+          "id": "fr",
+          "name": "French",
+          "kind": "tts"
+        },
+        {
+          "id": "gu",
+          "name": "Gujarati",
+          "kind": "tts"
+        },
+        {
+          "id": "hi",
+          "name": "Hindi",
+          "kind": "tts"
+        },
+        {
+          "id": "hr",
+          "name": "Croatian",
+          "kind": "tts"
+        },
+        {
+          "id": "hu",
+          "name": "Hungarian",
+          "kind": "tts"
+        },
+        {
+          "id": "hy",
+          "name": "Armenian",
+          "kind": "tts"
+        },
+        {
+          "id": "id",
+          "name": "Indonesian",
+          "kind": "tts"
+        },
+        {
+          "id": "is",
+          "name": "Icelandic",
+          "kind": "tts"
+        },
+        {
+          "id": "it",
+          "name": "Italian",
+          "kind": "tts"
+        },
+        {
+          "id": "ja",
+          "name": "Japanese",
+          "kind": "tts"
+        },
+        {
+          "id": "jw",
+          "name": "Javanese",
+          "kind": "tts"
+        },
+        {
+          "id": "km",
+          "name": "Khmer",
+          "kind": "tts"
+        },
+        {
+          "id": "kn",
+          "name": "Kannada",
+          "kind": "tts"
+        },
+        {
+          "id": "ko",
+          "name": "Korean",
+          "kind": "tts"
+        },
+        {
+          "id": "la",
+          "name": "Latin",
+          "kind": "tts"
+        },
+        {
+          "id": "lv",
+          "name": "Latvian",
+          "kind": "tts"
+        },
+        {
+          "id": "mk",
+          "name": "Macedonian",
+          "kind": "tts"
+        },
+        {
+          "id": "ml",
+          "name": "Malayalam",
+          "kind": "tts"
+        },
+        {
+          "id": "mr",
+          "name": "Marathi",
+          "kind": "tts"
+        },
+        {
+          "id": "my",
+          "name": "Myanmar (Burmese)",
+          "kind": "tts"
+        },
+        {
+          "id": "ne",
+          "name": "Nepali",
+          "kind": "tts"
+        },
+        {
+          "id": "nl",
+          "name": "Dutch",
+          "kind": "tts"
+        },
+        {
+          "id": "no",
+          "name": "Norwegian",
+          "kind": "tts"
+        },
+        {
+          "id": "pl",
+          "name": "Polish",
+          "kind": "tts"
+        },
+        {
+          "id": "pt",
+          "name": "Portuguese",
+          "kind": "tts"
+        },
+        {
+          "id": "ro",
+          "name": "Romanian",
+          "kind": "tts"
+        },
+        {
+          "id": "ru",
+          "name": "Russian",
+          "kind": "tts"
+        },
+        {
+          "id": "si",
+          "name": "Sinhala",
+          "kind": "tts"
+        },
+        {
+          "id": "sk",
+          "name": "Slovak",
+          "kind": "tts"
+        },
+        {
+          "id": "sq",
+          "name": "Albanian",
+          "kind": "tts"
+        },
+        {
+          "id": "sr",
+          "name": "Serbian",
+          "kind": "tts"
+        },
+        {
+          "id": "su",
+          "name": "Sundanese",
+          "kind": "tts"
+        },
+        {
+          "id": "sv",
+          "name": "Swedish",
+          "kind": "tts"
+        },
+        {
+          "id": "sw",
+          "name": "Swahili",
+          "kind": "tts"
+        },
+        {
+          "id": "ta",
+          "name": "Tamil",
+          "kind": "tts"
+        },
+        {
+          "id": "te",
+          "name": "Telugu",
+          "kind": "tts"
+        },
+        {
+          "id": "th",
+          "name": "Thai",
+          "kind": "tts"
+        },
+        {
+          "id": "tl",
+          "name": "Filipino",
+          "kind": "tts"
+        },
+        {
+          "id": "tr",
+          "name": "Turkish",
+          "kind": "tts"
+        },
+        {
+          "id": "uk",
+          "name": "Ukrainian",
+          "kind": "tts"
+        },
+        {
+          "id": "ur",
+          "name": "Urdu",
+          "kind": "tts"
+        },
+        {
+          "id": "vi",
+          "name": "Vietnamese",
+          "kind": "tts"
+        },
+        {
+          "id": "zh-CN",
+          "name": "Chinese (Simplified)",
+          "kind": "tts"
+        },
+        {
+          "id": "zh-TW",
+          "name": "Chinese (Traditional)",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "grok-web",
+      "alias": "grok-web",
+      "format": "grok-web",
+      "authType": "cookie",
+      "baseUrl": "https://grok.com/rest/app-chat/conversations/new",
+      "models": [
+        {
+          "id": "grok-3",
+          "name": "Grok 3",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-3-mini",
+          "name": "Grok 3 Mini (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-3-thinking",
+          "name": "Grok 3 Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4",
+          "name": "Grok 4",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4-mini",
+          "name": "Grok 4 Mini (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4-thinking",
+          "name": "Grok 4 Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4-heavy",
+          "name": "Grok 4 Heavy (SuperGrok)",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.1-mini",
+          "name": "Grok 4.1 Mini (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.1-fast",
+          "name": "Grok 4.1 Fast",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.1-expert",
+          "name": "Grok 4.1 Expert",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.1-thinking",
+          "name": "Grok 4.1 Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.2",
+          "name": "Grok 4.2 (4.20 Beta)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "groq",
+      "alias": "groq",
+      "format": "openai",
+      "baseUrl": "https://api.groq.com/openai/v1/chat/completions",
+      "models": [
+        {
+          "id": "llama-3.3-70b-versatile",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/llama-4-maverick-17b-128e-instruct",
+          "name": "Llama 4 Maverick",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen/qwen3-32b",
+          "name": "Qwen3 32B",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-oss-120b",
+          "name": "GPT-OSS 120B",
+          "kind": "llm"
+        },
+        {
+          "id": "whisper-large-v3",
+          "name": "Whisper Large v3",
+          "kind": "stt"
+        },
+        {
+          "id": "whisper-large-v3-turbo",
+          "name": "Whisper Large v3 Turbo",
+          "kind": "stt"
+        },
+        {
+          "id": "distil-whisper-large-v3-en",
+          "name": "Distil Whisper Large v3 EN",
+          "kind": "stt"
+        }
+      ]
+    },
+    {
+      "id": "huggingface",
+      "alias": "huggingface",
+      "models": [
+        {
+          "id": "black-forest-labs/FLUX.1-schnell",
+          "name": "FLUX.1 Schnell",
+          "kind": "image"
+        },
+        {
+          "id": "stabilityai/stable-diffusion-xl-base-1.0",
+          "name": "SDXL Base 1.0",
+          "kind": "image"
+        },
+        {
+          "id": "openai/whisper-large-v3",
+          "name": "Whisper Large v3 (HF)",
+          "kind": "stt"
+        },
+        {
+          "id": "openai/whisper-small",
+          "name": "Whisper Small (HF)",
+          "kind": "stt"
+        }
+      ]
+    },
+    {
+      "id": "hyperbolic",
+      "alias": "hyperbolic",
+      "format": "openai",
+      "baseUrl": "https://api.hyperbolic.xyz/v1/chat/completions",
+      "models": [
+        {
+          "id": "Qwen/QwQ-32B",
+          "name": "QwQ 32B",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-R1",
+          "name": "DeepSeek R1",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-V3",
+          "name": "DeepSeek V3",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/Llama-3.2-3B-Instruct",
+          "name": "Llama 3.2 3B",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen2.5-72B-Instruct",
+          "name": "Qwen 2.5 72B",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen2.5-Coder-32B-Instruct",
+          "name": "Qwen 2.5 Coder 32B",
+          "kind": "llm"
+        },
+        {
+          "id": "NousResearch/Hermes-3-Llama-3.1-70B",
+          "name": "Hermes 3 70B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "iflow",
+      "alias": "if",
+      "format": "openai",
+      "baseUrl": "https://apis.iflow.cn/v1/chat/completions",
+      "models": [
+        {
+          "id": "qwen3-coder-plus",
+          "name": "Qwen3 Coder Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-max",
+          "name": "Qwen3 Max",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-vl-plus",
+          "name": "Qwen3 VL Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-max-preview",
+          "name": "Qwen3 Max Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-235b",
+          "name": "Qwen3 235B A22B",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-235b-a22b-instruct",
+          "name": "Qwen3 235B A22B Instruct",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-235b-a22b-thinking-2507",
+          "name": "Qwen3 235B A22B Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-32b",
+          "name": "Qwen3 32B",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2",
+          "name": "Kimi K2",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v3.2",
+          "name": "DeepSeek V3.2 Exp",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v3.1",
+          "name": "DeepSeek V3.1 Terminus",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v3",
+          "name": "DeepSeek V3 671B",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-r1",
+          "name": "DeepSeek R1",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "iflow-rome-30ba3b",
+          "name": "iFlow ROME",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "inference-net",
+      "alias": "inference-net",
+      "format": "openai",
+      "baseUrl": "https://api.inference.net/v1/chat/completions",
+      "models": [
+        {
+          "id": "meta-llama/llama-3.3-70b-instruct/fp-16",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek/deepseek-v3-0324",
+          "name": "DeepSeek V3",
+          "kind": "llm"
+        },
+        {
+          "id": "mistralai/mistral-nemo-12b-instruct/fp-16",
+          "name": "Mistral Nemo 12B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "kilocode",
+      "alias": "kc",
+      "format": "openai",
+      "baseUrl": "https://api.kilo.ai/api/openrouter/chat/completions",
+      "models": [
+        {
+          "id": "anthropic/claude-sonnet-4-20250514",
+          "name": "Claude Sonnet 4",
+          "kind": "llm"
+        },
+        {
+          "id": "anthropic/claude-opus-4-20250514",
+          "name": "Claude Opus 4",
+          "kind": "llm"
+        },
+        {
+          "id": "google/gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "google/gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-4.1",
+          "name": "GPT-4.1",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/o3",
+          "name": "o3",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek/deepseek-chat",
+          "name": "DeepSeek Chat",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek/deepseek-reasoner",
+          "name": "DeepSeek Reasoner",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "kimi",
+      "alias": "kimi",
+      "format": "claude",
+      "baseUrl": "https://api.kimi.com/coding/v1/messages",
+      "models": [
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5-thinking",
+          "name": "Kimi K2.5 Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-latest",
+          "name": "Kimi Latest",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "kluster",
+      "alias": "kluster",
+      "format": "openai",
+      "baseUrl": "https://api.kluster.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "deepseek-ai/DeepSeek-R1",
+          "name": "DeepSeek R1",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+          "name": "Llama 4 Maverick",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+          "name": "Llama 4 Scout",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3-235B-A22B-Instruct",
+          "name": "Qwen3 235B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "kimi-coding",
+      "alias": "kmc",
+      "format": "claude",
+      "baseUrl": "https://api.kimi.com/coding/v1/messages",
+      "models": [
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5-thinking",
+          "name": "Kimi K2.5 Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-latest",
+          "name": "Kimi Latest",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "kiro",
+      "alias": "kr",
+      "format": "kiro",
+      "baseUrl": "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+      "models": [
+        {
+          "id": "claude-sonnet-4.5",
+          "name": "Claude Sonnet 4.5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-haiku-4.5",
+          "name": "Claude Haiku 4.5",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-3.2",
+          "name": "DeepSeek 3.2",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-next",
+          "name": "Qwen3 Coder Next",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4.5-thinking",
+          "name": "Claude Sonnet 4.5 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-haiku-4.5-thinking",
+          "name": "Claude Haiku 4.5 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4.5-agentic",
+          "name": "Claude Sonnet 4.5 (Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-haiku-4.5-agentic",
+          "name": "Claude Haiku 4.5 (Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4.5-thinking-agentic",
+          "name": "Claude Sonnet 4.5 (Thinking + Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-haiku-4.5-thinking-agentic",
+          "name": "Claude Haiku 4.5 (Thinking + Agentic)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "lepton",
+      "alias": "lepton",
+      "format": "openai",
+      "baseUrl": "https://api.lepton.ai/api/v1/chat/completions",
+      "models": [
+        {
+          "id": "llama3-1-405b",
+          "name": "Llama 3.1 405B",
+          "kind": "llm"
+        },
+        {
+          "id": "llama3-1-70b",
+          "name": "Llama 3.1 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "llama3-1-8b",
+          "name": "Llama 3.1 8B",
+          "kind": "llm"
+        },
+        {
+          "id": "mixtral-8x7b",
+          "name": "Mixtral 8x7B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "llm7",
+      "alias": "llm7",
+      "format": "openai",
+      "baseUrl": "https://api.llm7.io/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "name": "GPT-4.1 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-1.5-flash",
+          "name": "Gemini 1.5 Flash",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "local-device",
+      "alias": "local-device",
+      "models": [
+        {
+          "id": "default",
+          "name": "System Default Voice",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "longcat",
+      "alias": "longcat",
+      "format": "openai",
+      "baseUrl": "https://api.longcat.chat/openai/v1/chat/completions",
+      "models": [
+        {
+          "id": "LongCat-Flash-Chat",
+          "name": "LongCat Flash Chat",
+          "kind": "llm"
+        },
+        {
+          "id": "LongCat-Flash-Thinking",
+          "name": "LongCat Flash Thinking",
+          "kind": "llm"
+        },
+        {
+          "id": "LongCat-Flash-Lite",
+          "name": "LongCat Flash Lite",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "minimax",
+      "alias": "minimax",
+      "format": "claude",
+      "baseUrl": "https://api.minimax.io/anthropic/v1/messages",
+      "models": [
+        {
+          "id": "MiniMax-M2.7",
+          "name": "MiniMax M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.1",
+          "name": "MiniMax M2.1",
+          "kind": "llm"
+        },
+        {
+          "id": "minimax-image-01",
+          "name": "MiniMax Image 01",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "minimax-cn",
+      "alias": "minimax-cn",
+      "format": "claude",
+      "baseUrl": "https://api.minimaxi.com/anthropic/v1/messages",
+      "models": [
+        {
+          "id": "MiniMax-M2.7",
+          "name": "MiniMax M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.1",
+          "name": "MiniMax M2.1",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "mistral",
+      "alias": "mistral",
+      "format": "openai",
+      "baseUrl": "https://api.mistral.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "mistral-large-latest",
+          "name": "Mistral Large 3",
+          "kind": "llm"
+        },
+        {
+          "id": "codestral-latest",
+          "name": "Codestral",
+          "kind": "llm"
+        },
+        {
+          "id": "mistral-medium-latest",
+          "name": "Mistral Medium 3",
+          "kind": "llm"
+        },
+        {
+          "id": "mistral-embed",
+          "name": "Mistral Embed",
+          "kind": "embedding"
+        }
+      ]
+    },
+    {
+      "id": "modal",
+      "alias": "modal",
+      "format": "openai",
+      "baseUrl": "https://api.modal.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "auto",
+          "name": "Auto (User-hosted)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "morph",
+      "alias": "morph",
+      "format": "openai",
+      "baseUrl": "https://api.morphllm.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "morph-v3-large",
+          "name": "Morph V3 Large",
+          "kind": "llm"
+        },
+        {
+          "id": "morph-v3-fast",
+          "name": "Morph V3 Fast",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "nanobanana",
+      "alias": "nanobanana",
+      "format": "openai",
+      "baseUrl": "https://api.nanobananaapi.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "nanobanana-flash",
+          "name": "NanoBanana Flash",
+          "kind": "image"
+        },
+        {
+          "id": "nanobanana-pro",
+          "name": "NanoBanana Pro",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "nebius",
+      "alias": "nebius",
+      "format": "openai",
+      "baseUrl": "https://api.studio.nebius.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct",
+          "name": "Llama 3.3 70B Instruct",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3-Embedding-8B",
+          "name": "Qwen3 Embedding 8B",
+          "kind": "embedding"
+        }
+      ]
+    },
+    {
+      "id": "nlpcloud",
+      "alias": "nlpcloud",
+      "format": "openai",
+      "baseUrl": "https://api.nlpcloud.io/v1/gpu/chatbot",
+      "models": [
+        {
+          "id": "chatdolphin",
+          "name": "ChatDolphin",
+          "kind": "llm"
+        },
+        {
+          "id": "dolphin",
+          "name": "Dolphin",
+          "kind": "llm"
+        },
+        {
+          "id": "finetuned-llama-3-70b",
+          "name": "Llama 3 70B (Finetuned)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "nous-research",
+      "alias": "nous-research",
+      "format": "openai",
+      "baseUrl": "https://inference-api.nousresearch.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "Hermes-4-405B",
+          "name": "Hermes 4 405B",
+          "kind": "llm"
+        },
+        {
+          "id": "Hermes-4-70B",
+          "name": "Hermes 4 70B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "novita",
+      "alias": "novita",
+      "format": "openai",
+      "baseUrl": "https://api.novita.ai/v3/openai/chat/completions",
+      "models": [
+        {
+          "id": "deepseek/deepseek-r1",
+          "name": "DeepSeek R1",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek/deepseek-v3",
+          "name": "DeepSeek V3",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/llama-3.3-70b-instruct",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen/qwen-2.5-72b-instruct",
+          "name": "Qwen 2.5 72B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "nscale",
+      "alias": "nscale",
+      "format": "openai",
+      "baseUrl": "https://inference.api.nscale.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen2.5-Coder-32B-Instruct",
+          "name": "Qwen 2.5 Coder 32B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "nvidia",
+      "alias": "nvidia",
+      "format": "openai",
+      "baseUrl": "https://integrate.api.nvidia.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "minimaxai/minimax-m2.7",
+          "name": "Minimax M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "z-ai/glm4.7",
+          "name": "GLM 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "nvidia/nv-embedqa-e5-v5",
+          "name": "NV EmbedQA E5 v5",
+          "kind": "embedding"
+        },
+        {
+          "id": "nvidia/parakeet-ctc-1.1b-asr",
+          "name": "Parakeet CTC 1.1B",
+          "kind": "stt"
+        }
+      ]
+    },
+    {
+      "id": "opencode",
+      "alias": "oc",
+      "format": "openai",
+      "baseUrl": "https://opencode.ai",
+      "models": []
+    },
+    {
+      "id": "ollama",
+      "alias": "ollama",
+      "format": "ollama",
+      "baseUrl": "https://ollama.com/api/chat",
+      "models": [
+        {
+          "id": "gpt-oss:120b",
+          "name": "GPT OSS 120B",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "minimax-m2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.7-flash",
+          "name": "GLM 4.7 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3.5",
+          "name": "Qwen3.5",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "openai",
+      "alias": "openai",
+      "format": "openai",
+      "baseUrl": "https://api.openai.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "name": "GPT-5.4 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.4-nano",
+          "name": "GPT-5.4 Nano",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.2",
+          "name": "GPT-5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.1",
+          "name": "GPT-5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5",
+          "name": "GPT-5",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5-mini",
+          "name": "GPT-5 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5-nano",
+          "name": "GPT-5 Nano",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4-turbo",
+          "name": "GPT-4 Turbo",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4.1",
+          "name": "GPT-4.1",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "name": "GPT-4.1 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4.1-nano",
+          "name": "GPT-4.1 Nano",
+          "kind": "llm"
+        },
+        {
+          "id": "o3",
+          "name": "O3",
+          "kind": "llm"
+        },
+        {
+          "id": "o3-mini",
+          "name": "O3 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "o3-pro",
+          "name": "O3 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "o4-mini",
+          "name": "O4 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "o1",
+          "name": "O1",
+          "kind": "llm"
+        },
+        {
+          "id": "o1-mini",
+          "name": "O1 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "text-embedding-3-large",
+          "name": "Text Embedding 3 Large",
+          "kind": "embedding"
+        },
+        {
+          "id": "text-embedding-3-small",
+          "name": "Text Embedding 3 Small",
+          "kind": "embedding"
+        },
+        {
+          "id": "text-embedding-ada-002",
+          "name": "Text Embedding Ada 002",
+          "kind": "embedding"
+        },
+        {
+          "id": "tts-1",
+          "name": "TTS-1",
+          "kind": "tts"
+        },
+        {
+          "id": "tts-1-hd",
+          "name": "TTS-1 HD",
+          "kind": "tts"
+        },
+        {
+          "id": "gpt-4o-mini-tts",
+          "name": "GPT-4o Mini TTS",
+          "kind": "tts"
+        },
+        {
+          "id": "whisper-1",
+          "name": "Whisper 1",
+          "kind": "stt"
+        },
+        {
+          "id": "gpt-4o-transcribe",
+          "name": "GPT-4o Transcribe",
+          "kind": "stt"
+        },
+        {
+          "id": "gpt-4o-mini-transcribe",
+          "name": "GPT-4o Mini Transcribe",
+          "kind": "stt"
+        },
+        {
+          "id": "gpt-image-1",
+          "name": "GPT Image 1",
+          "kind": "image"
+        },
+        {
+          "id": "dall-e-3",
+          "name": "DALL-E 3",
+          "kind": "image"
+        },
+        {
+          "id": "dall-e-2",
+          "name": "DALL-E 2",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "openai-tts-models",
+      "alias": "openai-tts-models",
+      "models": [
+        {
+          "id": "gpt-4o-mini-tts",
+          "name": "GPT-4o Mini TTS",
+          "kind": "tts"
+        },
+        {
+          "id": "tts-1-hd",
+          "name": "TTS-1 HD",
+          "kind": "tts"
+        },
+        {
+          "id": "tts-1",
+          "name": "TTS-1",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "openai-tts-voices",
+      "alias": "openai-tts-voices",
+      "models": [
+        {
+          "id": "alloy",
+          "name": "Alloy",
+          "kind": "tts"
+        },
+        {
+          "id": "ash",
+          "name": "Ash",
+          "kind": "tts"
+        },
+        {
+          "id": "ballad",
+          "name": "Ballad",
+          "kind": "tts"
+        },
+        {
+          "id": "cedar",
+          "name": "Cedar",
+          "kind": "tts"
+        },
+        {
+          "id": "coral",
+          "name": "Coral",
+          "kind": "tts"
+        },
+        {
+          "id": "echo",
+          "name": "Echo",
+          "kind": "tts"
+        },
+        {
+          "id": "fable",
+          "name": "Fable",
+          "kind": "tts"
+        },
+        {
+          "id": "marin",
+          "name": "Marin",
+          "kind": "tts"
+        },
+        {
+          "id": "nova",
+          "name": "Nova",
+          "kind": "tts"
+        },
+        {
+          "id": "onyx",
+          "name": "Onyx",
+          "kind": "tts"
+        },
+        {
+          "id": "sage",
+          "name": "Sage",
+          "kind": "tts"
+        },
+        {
+          "id": "shimmer",
+          "name": "Shimmer",
+          "kind": "tts"
+        },
+        {
+          "id": "verse",
+          "name": "Verse",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "opencode-go",
+      "alias": "opencode-go",
+      "format": "openai",
+      "baseUrl": "https://opencode.ai/zen/go/v1/chat/completions",
+      "models": [
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3.5-plus",
+          "name": "Qwen 3.5 Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3.6-plus",
+          "name": "Qwen 3.6 Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2-pro",
+          "name": "MiMo V2 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2-omni",
+          "name": "MiMo V2 Omni",
+          "kind": "llm"
+        },
+        {
+          "id": "minimax-m2.7",
+          "name": "MiniMax M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "minimax-m2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "openrouter",
+      "alias": "openrouter",
+      "format": "openai",
+      "baseUrl": "https://openrouter.ai/api/v1/chat/completions",
+      "models": [
+        {
+          "id": "openai/text-embedding-3-large",
+          "name": "OpenAI Text Embedding 3 Large",
+          "kind": "embedding"
+        },
+        {
+          "id": "openai/text-embedding-3-small",
+          "name": "OpenAI Text Embedding 3 Small",
+          "kind": "embedding"
+        },
+        {
+          "id": "openai/text-embedding-ada-002",
+          "name": "OpenAI Text Embedding Ada 002",
+          "kind": "embedding"
+        },
+        {
+          "id": "qwen/qwen3-embedding-8b",
+          "name": "Qwen3 Embedding 8B",
+          "kind": "embedding"
+        },
+        {
+          "id": "perplexity/pplx-embed-v1-4b",
+          "name": "Perplexity Embed V1 4B",
+          "kind": "embedding"
+        },
+        {
+          "id": "perplexity/pplx-embed-v1-0.6b",
+          "name": "Perplexity Embed V1 0.6B",
+          "kind": "embedding"
+        },
+        {
+          "id": "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+          "name": "NVIDIA Nemotron Embed VL 1B V2 (Free)",
+          "kind": "embedding"
+        },
+        {
+          "id": "openai/gpt-4o-mini-tts",
+          "name": "GPT-4o Mini TTS",
+          "kind": "tts"
+        },
+        {
+          "id": "openai/tts-1-hd",
+          "name": "TTS-1 HD",
+          "kind": "tts"
+        },
+        {
+          "id": "openai/tts-1",
+          "name": "TTS-1",
+          "kind": "tts"
+        },
+        {
+          "id": "openai/dall-e-3",
+          "name": "DALL-E 3 (via OpenRouter)",
+          "kind": "image"
+        },
+        {
+          "id": "openai/gpt-image-1",
+          "name": "GPT Image 1 (via OpenRouter)",
+          "kind": "image"
+        },
+        {
+          "id": "google/imagen-3.0-generate-002",
+          "name": "Imagen 3 (via OpenRouter)",
+          "kind": "image"
+        },
+        {
+          "id": "black-forest-labs/FLUX.1-schnell",
+          "name": "FLUX.1 Schnell (via OpenRouter)",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "openrouter-tts-models",
+      "alias": "openrouter-tts-models",
+      "models": [
+        {
+          "id": "openai/gpt-4o-mini-tts",
+          "name": "GPT-4o Mini TTS",
+          "kind": "tts"
+        },
+        {
+          "id": "openai/tts-1-hd",
+          "name": "TTS-1 HD",
+          "kind": "tts"
+        },
+        {
+          "id": "openai/tts-1",
+          "name": "TTS-1",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "openrouter-tts-voices",
+      "alias": "openrouter-tts-voices",
+      "models": [
+        {
+          "id": "alloy",
+          "name": "Alloy",
+          "kind": "tts"
+        },
+        {
+          "id": "ash",
+          "name": "Ash",
+          "kind": "tts"
+        },
+        {
+          "id": "ballad",
+          "name": "Ballad",
+          "kind": "tts"
+        },
+        {
+          "id": "cedar",
+          "name": "Cedar",
+          "kind": "tts"
+        },
+        {
+          "id": "coral",
+          "name": "Coral",
+          "kind": "tts"
+        },
+        {
+          "id": "echo",
+          "name": "Echo",
+          "kind": "tts"
+        },
+        {
+          "id": "fable",
+          "name": "Fable",
+          "kind": "tts"
+        },
+        {
+          "id": "marin",
+          "name": "Marin",
+          "kind": "tts"
+        },
+        {
+          "id": "nova",
+          "name": "Nova",
+          "kind": "tts"
+        },
+        {
+          "id": "onyx",
+          "name": "Onyx",
+          "kind": "tts"
+        },
+        {
+          "id": "sage",
+          "name": "Sage",
+          "kind": "tts"
+        },
+        {
+          "id": "shimmer",
+          "name": "Shimmer",
+          "kind": "tts"
+        },
+        {
+          "id": "verse",
+          "name": "Verse",
+          "kind": "tts"
+        }
+      ]
+    },
+    {
+      "id": "perplexity",
+      "alias": "perplexity",
+      "format": "openai",
+      "baseUrl": "https://api.perplexity.ai/chat/completions",
+      "models": [
+        {
+          "id": "sonar-pro",
+          "name": "Sonar Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "sonar",
+          "name": "Sonar",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "perplexity-web",
+      "alias": "perplexity-web",
+      "format": "perplexity-web",
+      "authType": "cookie",
+      "baseUrl": "https://www.perplexity.ai/rest/sse/perplexity_ask",
+      "models": [
+        {
+          "id": "pplx-auto",
+          "name": "Perplexity Auto (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "pplx-sonar",
+          "name": "Perplexity Sonar",
+          "kind": "llm"
+        },
+        {
+          "id": "pplx-gpt",
+          "name": "GPT-5.4 (via Perplexity)",
+          "kind": "llm"
+        },
+        {
+          "id": "pplx-gemini",
+          "name": "Gemini 3.1 Pro (via Perplexity)",
+          "kind": "llm"
+        },
+        {
+          "id": "pplx-sonnet",
+          "name": "Claude Sonnet 4.6 (via Perplexity)",
+          "kind": "llm"
+        },
+        {
+          "id": "pplx-opus",
+          "name": "Claude Opus 4.6 (via Perplexity)",
+          "kind": "llm"
+        },
+        {
+          "id": "pplx-nemotron",
+          "name": "Nemotron 3 Super (via Perplexity)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "predibase",
+      "alias": "predibase",
+      "format": "openai",
+      "baseUrl": "https://serving.app.predibase.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "llama-3-2-3b-instruct",
+          "name": "Llama 3.2 3B",
+          "kind": "llm"
+        },
+        {
+          "id": "llama-3-1-8b-instruct",
+          "name": "Llama 3.1 8B",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen2-5-7b-instruct",
+          "name": "Qwen 2.5 7B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "publicai",
+      "alias": "publicai",
+      "format": "openai",
+      "baseUrl": "https://api.publicai.co/v1/chat/completions",
+      "models": [
+        {
+          "id": "auto",
+          "name": "Auto (Community)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "puter",
+      "alias": "puter",
+      "format": "openai",
+      "baseUrl": "https://api.puter.com/puterai/openai/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-5",
+          "name": "GPT-5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4",
+          "name": "Claude Opus 4",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-pro-preview",
+          "name": "Gemini 3 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4",
+          "name": "Grok 4",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-chat",
+          "name": "DeepSeek V3",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "qwen",
+      "alias": "qw",
+      "format": "openai",
+      "baseUrl": "https://portal.qwen.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "qwen3-coder-plus",
+          "name": "Qwen3 Coder Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-flash",
+          "name": "Qwen3 Coder Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "vision-model",
+          "name": "Qwen3 Vision Model",
+          "kind": "llm"
+        },
+        {
+          "id": "coder-model",
+          "name": "Qwen3.6 Coder Model",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "recraft",
+      "alias": "recraft",
+      "models": [
+        {
+          "id": "recraftv3",
+          "name": "Recraft V3",
+          "kind": "image"
+        },
+        {
+          "id": "recraftv2",
+          "name": "Recraft V2",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "reka",
+      "alias": "reka",
+      "format": "openai",
+      "baseUrl": "https://api.reka.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "reka-flash-3",
+          "name": "Reka Flash 3",
+          "kind": "llm"
+        },
+        {
+          "id": "reka-edge-2603",
+          "name": "Reka Edge 2603",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "runwayml",
+      "alias": "runwayml",
+      "models": [
+        {
+          "id": "gen4_image",
+          "name": "Gen-4 Image",
+          "kind": "image"
+        },
+        {
+          "id": "gen4_image_turbo",
+          "name": "Gen-4 Image Turbo",
+          "kind": "image"
+        },
+        {
+          "id": "gen4_turbo",
+          "name": "Gen-4 Turbo",
+          "kind": "video"
+        },
+        {
+          "id": "gen3a_turbo",
+          "name": "Gen-3 Alpha Turbo",
+          "kind": "video"
+        }
+      ]
+    },
+    {
+      "id": "sambanova",
+      "alias": "sambanova",
+      "format": "openai",
+      "baseUrl": "https://api.sambanova.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "Meta-Llama-3.1-405B-Instruct",
+          "name": "Llama 3.1 405B",
+          "kind": "llm"
+        },
+        {
+          "id": "Meta-Llama-3.1-70B-Instruct",
+          "name": "Llama 3.1 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "Meta-Llama-3.1-8B-Instruct",
+          "name": "Llama 3.1 8B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "scaleway",
+      "alias": "scaleway",
+      "format": "openai",
+      "baseUrl": "https://api.scaleway.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "qwen3-235b-a22b-instruct-2507",
+          "name": "Qwen3 235B",
+          "kind": "llm"
+        },
+        {
+          "id": "llama-3.3-70b-instruct",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "mistral-small-3.1-24b-instruct-2503",
+          "name": "Mistral Small 3.1",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "sdwebui",
+      "alias": "sdwebui",
+      "models": [
+        {
+          "id": "stable-diffusion-v1-5",
+          "name": "Stable Diffusion v1.5",
+          "kind": "image"
+        },
+        {
+          "id": "sdxl-base-1.0",
+          "name": "SDXL Base 1.0",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "siliconflow",
+      "alias": "siliconflow",
+      "format": "openai",
+      "baseUrl": "https://api.siliconflow.cn/v1/chat/completions",
+      "models": [
+        {
+          "id": "deepseek-ai/DeepSeek-V3.2",
+          "name": "DeepSeek V3.2",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-V3.1",
+          "name": "DeepSeek V3.1",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-R1",
+          "name": "DeepSeek R1",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+          "name": "Qwen3 235B",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+          "name": "Qwen3 Coder 480B",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3-32B",
+          "name": "Qwen3 32B",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-4.7",
+          "name": "GLM 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-oss-120b",
+          "name": "GPT OSS 120B",
+          "kind": "llm"
+        },
+        {
+          "id": "baidu/ERNIE-4.5-300B-A47B",
+          "name": "ERNIE 4.5 300B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "stability-ai",
+      "alias": "stability-ai",
+      "models": [
+        {
+          "id": "stable-image-ultra",
+          "name": "Stable Image Ultra",
+          "kind": "image"
+        },
+        {
+          "id": "stable-image-core",
+          "name": "Stable Image Core",
+          "kind": "image"
+        },
+        {
+          "id": "sd3.5-large",
+          "name": "Stable Diffusion 3.5 Large",
+          "kind": "image"
+        },
+        {
+          "id": "sd3.5-large-turbo",
+          "name": "Stable Diffusion 3.5 Large Turbo",
+          "kind": "image"
+        },
+        {
+          "id": "sd3.5-medium",
+          "name": "Stable Diffusion 3.5 Medium",
+          "kind": "image"
+        }
+      ]
+    },
+    {
+      "id": "together",
+      "alias": "together",
+      "format": "openai",
+      "baseUrl": "https://api.together.xyz/v1/chat/completions",
+      "models": [
+        {
+          "id": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+          "name": "Llama 3.3 70B Turbo",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-R1",
+          "name": "DeepSeek R1",
+          "kind": "llm"
+        },
+        {
+          "id": "Qwen/Qwen3-235B-A22B",
+          "name": "Qwen3 235B",
+          "kind": "llm"
+        },
+        {
+          "id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+          "name": "Llama 4 Maverick",
+          "kind": "llm"
+        },
+        {
+          "id": "BAAI/bge-large-en-v1.5",
+          "name": "BGE Large EN v1.5",
+          "kind": "embedding"
+        },
+        {
+          "id": "togethercomputer/m2-bert-80M-8k-retrieval",
+          "name": "M2 BERT 80M 8K",
+          "kind": "embedding"
+        }
+      ]
+    },
+    {
+      "id": "uncloseai",
+      "alias": "uncloseai",
+      "format": "openai",
+      "baseUrl": "https://hermes.ai.unturf.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "auto",
+          "name": "Auto (Free)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o Mini",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "vertex",
+      "alias": "vertex",
+      "format": "vertex",
+      "baseUrl": "https://aiplatform.googleapis.com",
+      "models": [
+        {
+          "id": "gemini-3.1-pro-preview",
+          "name": "Gemini 3.1 Pro Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.1-flash-lite-preview",
+          "name": "Gemini 3.1 Flash Lite Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "Gemini 3 Flash Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "vertex-partner",
+      "alias": "vertex-partner",
+      "format": "openai",
+      "baseUrl": "https://aiplatform.googleapis.com",
+      "models": [
+        {
+          "id": "deepseek-ai/deepseek-v3.2-maas",
+          "name": "DeepSeek V3.2 (Vertex)",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen/qwen3-next-80b-a3b-thinking-maas",
+          "name": "Qwen3 Next 80B Thinking (Vertex)",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen/qwen3-next-80b-a3b-instruct-maas",
+          "name": "Qwen3 Next 80B Instruct (Vertex)",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/glm-5-maas",
+          "name": "GLM-5 (Vertex)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "volcengine-ark",
+      "alias": "volcengine-ark",
+      "format": "openai",
+      "baseUrl": "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
+      "models": [
+        {
+          "id": "Doubao-Seed-2.0-Code",
+          "name": "Doubao-Seed-2.0-Code",
+          "kind": "llm"
+        },
+        {
+          "id": "Doubao-Seed-2.0-pro",
+          "name": "Doubao-Seed-2.0-pro",
+          "kind": "llm"
+        },
+        {
+          "id": "Doubao-Seed-2.0-lite",
+          "name": "Doubao-Seed-2.0-lite",
+          "kind": "llm"
+        },
+        {
+          "id": "Doubao-Seed-Code",
+          "name": "Doubao-Seed-Code",
+          "kind": "llm"
+        },
+        {
+          "id": "GLM-5.1",
+          "name": "GLM-5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.7",
+          "name": "MiniMax-M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "Kimi-K2.6",
+          "name": "Kimi-K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax-M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "Kimi-K2.5",
+          "name": "Kimi-K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "GLM-4.7",
+          "name": "GLM-4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "DeepSeek-V3.2",
+          "name": "DeepSeek-V3.2",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "voyage-ai",
+      "alias": "voyage-ai",
+      "models": [
+        {
+          "id": "voyage-3-large",
+          "name": "Voyage 3 Large",
+          "kind": "embedding"
+        },
+        {
+          "id": "voyage-3.5",
+          "name": "Voyage 3.5",
+          "kind": "embedding"
+        },
+        {
+          "id": "voyage-3.5-lite",
+          "name": "Voyage 3.5 Lite",
+          "kind": "embedding"
+        },
+        {
+          "id": "voyage-code-3",
+          "name": "Voyage Code 3",
+          "kind": "embedding"
+        },
+        {
+          "id": "voyage-finance-2",
+          "name": "Voyage Finance 2",
+          "kind": "embedding"
+        },
+        {
+          "id": "voyage-law-2",
+          "name": "Voyage Law 2",
+          "kind": "embedding"
+        },
+        {
+          "id": "voyage-multilingual-2",
+          "name": "Voyage Multilingual 2",
+          "kind": "embedding"
+        }
+      ]
+    },
+    {
+      "id": "xai",
+      "alias": "xai",
+      "format": "openai",
+      "baseUrl": "https://api.x.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "grok-4",
+          "name": "Grok 4",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4-fast-reasoning",
+          "name": "Grok 4 Fast Reasoning",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-code-fast-1",
+          "name": "Grok Code Fast",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-3",
+          "name": "Grok 3",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "xiaomi-mimo",
+      "alias": "xiaomi-mimo",
+      "format": "openai",
+      "baseUrl": "https://api.xiaomimimo.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "mimo-v2.5-pro",
+          "name": "MiMo V2.5 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2.5",
+          "name": "MiMo V2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2-omni",
+          "name": "MiMo V2 Omni",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2-flash",
+          "name": "MiMo V2 Flash",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "xiaomi-tokenplan",
+      "alias": "xiaomi-tokenplan",
+      "format": "openai",
+      "baseUrl": "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "mimo-v2.5-pro",
+          "name": "MiMo V2.5 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2.5",
+          "name": "MiMo V2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2-pro",
+          "name": "MiMo V2 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2-omni",
+          "name": "MiMo V2 Omni",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2-tts",
+          "name": "MiMo V2 TTS",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2.5-tts",
+          "name": "MiMo V2.5 TTS",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2.5-tts-voiceclone",
+          "name": "MiMo V2.5 TTS Voice Clone",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-v2.5-tts-voicedesign",
+          "name": "MiMo V2.5 TTS Voice Design",
+          "kind": "llm"
+        }
+      ]
+    }
+  ]
+}

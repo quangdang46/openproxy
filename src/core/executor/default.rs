@@ -261,6 +261,14 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://token-plan-sgp.xiaomimimo.com/v1/chat/completions"),
         ),
         (
+            "github-models",
+            ProviderConfig::openai("https://models.github.ai/inference/chat/completions"),
+        ),
+        (
+            "hackclub",
+            ProviderConfig::openai("https://ai.hackclub.com/proxy/v1/chat/completions"),
+        ),
+        (
             "ollama",
             ProviderConfig::openai("https://ollama.com/v1/chat/completions"),
         ),
@@ -603,8 +611,8 @@ impl DefaultExecutor {
         }
 
         if self.provider == "xiaomi-tokenplan" {
-            let region = compatible_value(credentials.provider_specific_data.get("region"))
-                .unwrap_or("sgp");
+            let region =
+                compatible_value(credentials.provider_specific_data.get("region")).unwrap_or("sgp");
             let base = match region {
                 "cn" => "https://token-plan-cn.xiaomimimo.com/v1",
                 "ams" => "https://token-plan-ams.xiaomimimo.com/v1",
