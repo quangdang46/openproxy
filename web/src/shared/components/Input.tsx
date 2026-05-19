@@ -46,8 +46,8 @@ export default function Input({
           disabled={disabled}
           className={cn(
             "w-full h-10 py-2.5 px-3 text-[14px] text-ink bg-canvas rounded-mini-md",
-            "border border-hairline placeholder:text-steel",
-            "focus:outline-none focus:border-brand-blue-deep focus:ring-0 focus:[border-width:2px] focus:px-[11px]",
+            "border border-hairline placeholder:text-muted-soft",
+            "focus:outline-none focus:border-brand-coral focus:ring-2 focus:ring-brand-coral/25 focus:[border-width:1px]",
             "transition-colors duration-150 ease-out disabled:opacity-50 disabled:cursor-not-allowed",
             // iOS zoom fix
             "text-[16px] sm:text-[14px]",

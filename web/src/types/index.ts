@@ -238,7 +238,20 @@ export interface ApiError {
 
 // Component prop types
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: "primary" | "secondary" | "outline" | "ghost" | "danger" | "success";
+  /**
+   * Visual style. Claude editorial system uses scarce coral CTAs +
+   * cream-canvas secondaries; `primary-on-dark` / `secondary-on-dark`
+   * are reserved for content sitting on dark navy product surfaces.
+   */
+  variant?:
+    | "primary"
+    | "secondary"
+    | "outline"
+    | "ghost"
+    | "danger"
+    | "success"
+    | "primary-on-dark"
+    | "secondary-on-dark";
   size?: "sm" | "md" | "lg";
   icon?: string;
   iconRight?: string;

@@ -4,16 +4,16 @@ import { cn } from "@/shared/utils/cn";
 import React from "react";
 
 /**
- * MiniMax Badge variants:
- *   default  -> generic neutral chip on surface
- *   primary  -> coral product chip
- *   success  -> badge-success (pale-green confirmation)
- *   warning  -> warm warning chip (legacy)
- *   error    -> red error chip (legacy)
- *   info     -> brand-blue informational chip (legacy)
- *   new      -> badge-new (coral "NEW" / "Live")
- *   beta     -> badge-beta (pale-blue "BETA")
- *   code     -> badge-code (inline code-style chip, square corners)
+ * Claude editorial Badge variants:
+ *   default  -> cream pill on canvas (`surface-card` background)
+ *   primary  -> warm coral pill
+ *   success  -> warm green confirmation
+ *   warning  -> warm amber chip
+ *   error    -> warm red destructive chip
+ *   info     -> muted slate info chip
+ *   new      -> full coral fill with `NEW` / `BETA` semantics
+ *   beta     -> teal accent (status-dot tone) used for product previews
+ *   code     -> inline code-style chip with cream surface + mono type
  */
 type BadgeVariant =
   | "default"
@@ -37,15 +37,15 @@ interface BadgeProps {
 }
 
 const variants: Record<BadgeVariant, string> = {
-  default: "bg-surface-base text-slate",
-  primary: "bg-brand-coral/10 text-brand-coral",
+  default: "bg-surface-card text-body",
+  primary: "bg-brand-coral/15 text-brand-coral",
   success: "bg-success-bg text-success-text",
-  warning: "bg-yellow-500/12 text-yellow-700 dark:text-yellow-400",
+  warning: "bg-accent-amber/20 text-[color:var(--color-warning)]",
   error: "bg-[color:var(--color-danger)]/12 text-[color:var(--color-danger)]",
-  info: "bg-brand-blue-200 text-brand-blue-deep",
-  new: "bg-brand-coral text-on-dark",
-  beta: "bg-brand-blue-200 text-brand-blue-deep",
-  code: "bg-brand-blue-200 text-brand-blue-deep",
+  info: "bg-surface-card text-body-strong",
+  new: "bg-brand-coral text-on-primary",
+  beta: "bg-accent-teal/20 text-accent-teal",
+  code: "bg-surface-card text-body-strong border border-hairline font-mono",
 };
 
 const sizes: Record<BadgeSize, string> = {
