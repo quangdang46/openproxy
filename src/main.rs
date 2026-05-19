@@ -364,6 +364,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let db = Db::load().await?;
+    seed_default_api_key_if_missing(&db).await?;
     let db = Arc::new(db);
     spawn_watcher(db.clone());
     let state = AppState::new(db)
@@ -438,6 +439,35 @@ fn is_stdout_tty() -> bool {
     // Conservative default on non-Unix: assume interactive. Users on Windows
     // can opt out with --no-open if needed.
     true
+}
+
+async fn seed_default_api_key_if_missing(db: &Db) -> anyhow::Result<()> {
+    if !db.snapshot().api_keys.is_empty() {
+        return Ok(());
+    }
+
+    use openproxy::core::auth::generate_api_key_with_machine;
+    use openproxy::server::api::consistent_machine_id;
+    use openproxy::types::ApiKey;
+
+    let machine_id = consistent_machine_id();
+    let key = generate_api_key_with_machine(&machine_id);
+    let api_key = ApiKey {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "default".to_string(),
+        key: key.clone(),
+        machine_id: Some(machine_id),
+        is_active: Some(true),
+        created_at: Some(chrono::Utc::now().to_rfc3339()),
+        extra: std::collections::BTreeMap::new(),
+    };
+
+    db.update(|d| d.api_keys.push(api_key.clone())).await?;
+    tracing::info!(target: "openproxy", "seeded default API key (apiKeys was empty)");
+    eprintln!("  Default API key (saved to db.json):");
+    eprintln!("    {key}");
+    eprintln!();
+    Ok(())
 }
 
 /// Browser-friendly host: bind hosts like `0.0.0.0` are not resolvable in

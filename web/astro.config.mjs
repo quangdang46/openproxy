@@ -29,6 +29,15 @@ export default defineConfig({
   vite: {
     server: {
       hmr: false,
+      // Dev-only: forward backend API + asset routes to the Rust server on :4623
+      // so the dashboard works when running `astro dev` on :4624 against a
+      // separate `cargo run -- --port 4623` process.
+      proxy: {
+        '/api': { target: 'http://127.0.0.1:4623', changeOrigin: true },
+        '/v1': { target: 'http://127.0.0.1:4623', changeOrigin: true },
+        '/health': { target: 'http://127.0.0.1:4623', changeOrigin: true },
+        '/oauth': { target: 'http://127.0.0.1:4623', changeOrigin: true },
+      },
     },
     resolve: {
       alias: {

@@ -2,7 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { Card, Button, Modal } from "@/shared/components";
-import { getModelsByProviderId } from "@/shared/constants/models";
+import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
@@ -293,3 +293,4 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
     </>
   );
 }
+  useEnsureCatalog();

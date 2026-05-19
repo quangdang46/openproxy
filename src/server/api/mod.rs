@@ -55,6 +55,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/health", get(health))
         .route("/api/health", get(api_health))
+        .route("/api/catalog", get(api_catalog))
         .route("/v1/health", get(health))
         .merge(v1_api_chat::routes())
         .merge(v1_models::routes())
@@ -163,6 +164,17 @@ async fn health() -> Json<HealthResponse> {
 
 async fn api_health() -> Response {
     Json(json!({ "ok": true })).into_response()
+}
+
+async fn api_catalog() -> Response {
+    // Serve the embedded provider catalog as static JSON. Public (no auth)
+    // because it contains only model metadata that the dashboard renders.
+    static CATALOG_JSON: &str = include_str!("../../core/model/provider_catalog.json");
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        CATALOG_JSON,
+    )
+        .into_response()
 }
 
 async fn get_version_api() -> Response {
@@ -778,7 +790,7 @@ async fn create_key_api(
     }
 }
 
-fn consistent_machine_id() -> String {
+pub fn consistent_machine_id() -> String {
     let salt =
         std::env::var("MACHINE_ID_SALT").unwrap_or_else(|_| "endpoint-proxy-salt".to_string());
 

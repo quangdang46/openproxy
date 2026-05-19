@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { MITM_TOOLS } from "@/shared/constants/cliTools";
-import { getModelsByProviderId } from "@/shared/constants/models";
+import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { MitmServerCard, MitmToolCard } from "@/components/cli-tools";
 
@@ -124,3 +124,4 @@ export default function MitmPageClient() {
     </div>
   );
 }
+  useEnsureCatalog();
