@@ -16,6 +16,7 @@ interface MitmStatus {
 }
 
 export default function MitmPageClient() {
+  useEnsureCatalog();
   const [connections, setConnections] = useState<any[]>([]);
   const [apiKeys, setApiKeys] = useState<any[]>([]);
   const [modelAliases, setModelAliases] = useState<Record<string, any>>({});
@@ -124,4 +125,3 @@ export default function MitmPageClient() {
     </div>
   );
 }
-  useEnsureCatalog();
