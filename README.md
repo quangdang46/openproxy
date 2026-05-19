@@ -279,7 +279,18 @@ openproxy server start [--detach] [--no-open] [--port P]
 openproxy server status
 openproxy server stop
 openproxy server init              # mint the first admin API key
+
+openproxy sync 9router [--dry-run] [--prune]
+                                   # pull provider/model catalog from decolua/9router
+openproxy sync omniroute [--dry-run] [--prune]
+                                   # pull provider/model catalog from diegosouzapw/OmniRoute
 ```
+
+`openproxy sync` applies embedded snapshots of sister open-source routers
+into `customModels` of your `db.json`, tagged with `source` so a later
+`--prune` only removes entries it previously added. Maintainers refresh
+the snapshots via `node scripts/sync/normalize-sources.mjs`
+([scripts/sync/README.md](scripts/sync/README.md)).
 
 `openproxy --help` prints the full reference. Subcommands have their own `--help`.
 

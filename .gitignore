@@ -56,6 +56,7 @@ source/*
 .cursor/*
 docs/*
 !docs/ARCHITECTURE.md
+!docs/integrations/
 test/*
 bin/*
 open-sse/test/*

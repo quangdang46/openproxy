@@ -362,8 +362,7 @@ async fn fetch_provider_models_response(
                 .await
         }
         "reka" => {
-            fetch_first_party_openai_style_models(connection, "https://api.reka.ai/v1/models")
-                .await
+            fetch_first_party_openai_style_models(connection, "https://api.reka.ai/v1/models").await
         }
         "kluster" => {
             fetch_first_party_openai_style_models(connection, "https://api.kluster.ai/v1/models")
@@ -381,18 +380,12 @@ async fn fetch_provider_models_response(
             .await
         }
         "scaleway" => {
-            fetch_first_party_openai_style_models(
-                connection,
-                "https://api.scaleway.ai/v1/models",
-            )
-            .await
+            fetch_first_party_openai_style_models(connection, "https://api.scaleway.ai/v1/models")
+                .await
         }
         "sambanova" => {
-            fetch_first_party_openai_style_models(
-                connection,
-                "https://api.sambanova.ai/v1/models",
-            )
-            .await
+            fetch_first_party_openai_style_models(connection, "https://api.sambanova.ai/v1/models")
+                .await
         }
         "nscale" => {
             fetch_first_party_openai_style_models(
