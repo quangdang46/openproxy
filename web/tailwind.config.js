@@ -9,8 +9,12 @@ export default {
         // ----------------------------------------------------------
         // Claude brand & accent tones
         // ----------------------------------------------------------
-        'brand-coral': 'var(--color-brand-coral)',
-        'brand-coral-active': 'var(--color-brand-coral-active)',
+        // Coral + accents use channel-format CSS vars so Tailwind opacity
+        // modifiers (`bg-brand-coral/15`, `ring-brand-coral/30`) work.
+        'brand-coral': 'rgb(var(--color-brand-coral-rgb) / <alpha-value>)',
+        'brand-coral-active': 'rgb(var(--color-brand-coral-active-rgb) / <alpha-value>)',
+        'accent-teal': 'rgb(var(--color-accent-teal-rgb) / <alpha-value>)',
+        'accent-amber': 'rgb(var(--color-accent-amber-rgb) / <alpha-value>)',
         'brand-magenta': 'var(--color-brand-magenta)',
         'brand-blue': 'var(--color-brand-blue)',
         'brand-blue-deep': 'var(--color-brand-blue-deep)',
@@ -18,8 +22,6 @@ export default {
         'brand-blue-200': 'var(--color-brand-blue-200)',
         'brand-cyan': 'var(--color-brand-cyan)',
         'brand-purple': 'var(--color-brand-purple)',
-        'accent-teal': 'var(--color-accent-teal)',
-        'accent-amber': 'var(--color-accent-amber)',
 
         // Surface tokens
         canvas: 'var(--color-canvas)',

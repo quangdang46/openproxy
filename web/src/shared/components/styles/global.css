@@ -22,8 +22,16 @@
    ============================================================ */
 :root {
   /* ------------------------------------------------------------
-     Brand accents — coral is the primary brand voltage
+     Brand accents — coral is the primary brand voltage.
+     Channel-format (-rgb suffix) variants exist for Tailwind
+     opacity modifiers (`bg-brand-coral/15`, `ring-brand-coral/30`).
+     Keep the hex variants for raw CSS uses (`var(--color-brand-coral)`).
      ------------------------------------------------------------ */
+  --color-brand-coral-rgb: 204 120 92;
+  --color-brand-coral-active-rgb: 169 88 62;
+  --color-accent-teal-rgb: 93 184 166;
+  --color-accent-amber-rgb: 232 165 90;
+
   --color-brand-coral: #CC785C;
   --color-brand-coral-active: #A9583E;
   --color-brand-magenta: #B85068;
