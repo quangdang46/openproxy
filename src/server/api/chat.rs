@@ -24,6 +24,7 @@ use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
 use crate::core::translator::registry::{self, Format};
 use crate::core::translator::response_transform::{transform_sse_stream, transformer_for_provider};
+use crate::payload_rules::{apply_request_rules, apply_system_prompt};
 use crate::server::auth::{extract_api_key, require_api_key};
 use crate::server::state::AppState;
 use crate::types::{AppDb, ProviderConnection, TokenUsage};
@@ -180,7 +181,7 @@ async fn chat_completions_impl(
         }
     }
 
-    let Json(body) = match body {
+    let Json(mut body) = match body {
         Ok(body) => body,
         Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
     };
@@ -190,12 +191,23 @@ async fn chat_completions_impl(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .map(str::to_string)
     else {
         return json_error_response(StatusCode::BAD_REQUEST, "Missing model");
     };
+    let model_str = model_str.as_str();
 
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(model_str, &snapshot);
+
+    // Payload-rules + system-prompt override (OmniRoute-style).
+    // Applied here, after the model field has been validated but before
+    // we fan out into combo / direct dispatch — so both branches see the
+    // same transformed body. Wildcard matching uses the user-facing
+    // `model` field; the protocol tag is left empty for now (it can be
+    // wired in once we surface upstream protocol metadata at this layer).
+    apply_system_prompt(&mut body, &snapshot.settings.system_prompt);
+    apply_request_rules(&mut body, model_str, None, &snapshot.settings.payload_rules);
 
     match resolved.route_kind {
         ModelRouteKind::Combo => {

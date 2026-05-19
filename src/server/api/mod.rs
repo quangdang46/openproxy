@@ -23,6 +23,7 @@ mod provider_models;
 pub mod provider_nodes;
 mod provider_validate;
 pub mod providers;
+pub mod settings_payload_rules;
 pub mod shutdown;
 pub mod stt;
 pub mod tags;
@@ -156,6 +157,7 @@ pub fn routes() -> Router<AppState> {
         .merge(auth::routes())
         .merge(shutdown::routes())
         .merge(cli_tools::routes())
+        .merge(settings_payload_rules::routes())
 }
 
 async fn health() -> Json<HealthResponse> {
