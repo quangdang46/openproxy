@@ -6,8 +6,26 @@ import { APP_CONFIG, UPDATER_CONFIG } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import Button from "./Button";
+import AnthropicSpike from "./AnthropicSpike";
 import { ConfirmModal } from "./Modal";
 import React from "react";
+
+/**
+ * Shared style strings for sidebar nav items. The active treatment uses a
+ * coral left-rail marker against a cream `surface-card` pill — the
+ * Claude editorial signal of the current section without painting the
+ * full row coral.
+ */
+const NAV_ITEM_BASE =
+  "relative flex items-center gap-3 pl-4 pr-3 py-1.5 rounded-mini-md transition-colors group";
+const NAV_ITEM_ACTIVE =
+  "bg-surface-card text-ink font-medium before:content-[''] before:absolute before:left-0 before:top-1.5 before:bottom-1.5 before:w-[3px] before:rounded-r-full before:bg-brand-coral";
+const NAV_ITEM_INACTIVE = "text-body hover:bg-surface-soft hover:text-ink";
+
+const NAV_ITEM_NESTED_BASE =
+  "relative flex items-center gap-3 pl-6 pr-3 py-1.5 rounded-mini-md transition-colors group";
+const NAV_ITEM_NESTED_ACTIVE =
+  "bg-surface-card text-ink font-medium before:content-[''] before:absolute before:left-2 before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-r-full before:bg-brand-coral";
 
 const VISIBLE_MEDIA_KINDS = ["embedding", "image", "tts", "stt"];
 // Combined entry: webSearch + webFetch share one page at /dashboard/media-providers/web
@@ -162,17 +180,19 @@ export default function Sidebar({ onClose }: SidebarProps) {
           <div className="w-3 h-3 rounded-full bg-[#27C93F]" />
         </div>
 
-        {/* Logo */}
+        {/* Editorial wordmark — spike-mark glyph + serif headline */}
         <div className="px-6 py-4 flex flex-col gap-2">
-          <a href="/dashboard" className="flex items-center gap-3">
-            <div className="flex items-center justify-center size-9 rounded-mini-md bg-ink">
-              <span className="material-symbols-outlined text-on-primary text-[20px]">hub</span>
+          <a href="/dashboard" className="flex items-center gap-3 group">
+            <div className="flex items-center justify-center size-9 rounded-mini-md bg-surface-card border border-hairline">
+              <AnthropicSpike size={20} className="text-brand-coral" ariaLabel="OpenProxy mark" />
             </div>
-            <div className="flex flex-col">
-              <h1 className="text-[17px] font-semibold tracking-tight text-ink">
+            <div className="flex flex-col leading-tight">
+              <h1 className="font-serif text-[22px] font-normal tracking-[-0.02em] text-ink">
                 {APP_CONFIG.name}
               </h1>
-              <span className="text-[11px] text-stone">v{APP_CONFIG.version}</span>
+              <span className="text-[11px] text-muted-soft tracking-wide">
+                v{APP_CONFIG.version}
+              </span>
             </div>
           </a>
           {updateInfo && (
@@ -209,10 +229,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
               href={item.href}
               onClick={onClose}
               className={cn(
-                "flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
-                isActive(item.href)
-                  ? "bg-surface-base text-ink font-medium"
-                  : "text-charcoal hover:bg-surface-soft hover:text-ink"
+                NAV_ITEM_BASE,
+                isActive(item.href) ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
               )}
             >
               <span
@@ -228,8 +246,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
           ))}
 
           {/* System section */}
-          <div className="pt-3 mt-2 space-y-0.5">
-            <p className="px-3 text-[11px] font-semibold text-stone uppercase tracking-[0.08em] mb-2">
+          <div className="pt-4 mt-2 space-y-0.5">
+            <p className="px-4 type-caption-uppercase text-muted-soft mb-2">
               System
             </p>
 
@@ -237,10 +255,11 @@ export default function Sidebar({ onClose }: SidebarProps) {
             <button
               onClick={() => setMediaOpen((v) => !v)}
               className={cn(
-                "w-full flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
+                NAV_ITEM_BASE,
+                "w-full text-left",
                 pathname.startsWith("/dashboard/media-providers")
-                  ? "bg-surface-base text-ink font-medium"
-                  : "text-charcoal hover:bg-surface-soft hover:text-ink"
+                  ? NAV_ITEM_ACTIVE
+                  : NAV_ITEM_INACTIVE,
               )}
             >
               <span className="material-symbols-outlined text-[18px]">perm_media</span>
@@ -257,10 +276,10 @@ export default function Sidebar({ onClose }: SidebarProps) {
                     href={`/dashboard/media-providers/${kind.id}`}
                     onClick={onClose}
                     className={cn(
-                      "flex items-center gap-3 px-4 py-1.5 rounded-mini-sm transition-colors group",
+                      NAV_ITEM_NESTED_BASE,
                       pathname.startsWith(`/dashboard/media-providers/${kind.id}`)
-                        ? "bg-surface-base text-ink font-medium"
-                        : "text-charcoal hover:bg-surface-soft hover:text-ink"
+                        ? NAV_ITEM_NESTED_ACTIVE
+                        : NAV_ITEM_INACTIVE,
                     )}
                   >
                     <span className="material-symbols-outlined text-[16px]">{kind.icon}</span>
@@ -272,10 +291,10 @@ export default function Sidebar({ onClose }: SidebarProps) {
                   href={COMBINED_WEB_ITEM.href}
                   onClick={onClose}
                   className={cn(
-                    "flex items-center gap-3 px-4 py-1.5 rounded-mini-sm transition-colors group",
+                    NAV_ITEM_NESTED_BASE,
                     pathname.startsWith(COMBINED_WEB_ITEM.href)
-                      ? "bg-surface-base text-ink font-medium"
-                      : "text-charcoal hover:bg-surface-soft hover:text-ink"
+                      ? NAV_ITEM_NESTED_ACTIVE
+                      : NAV_ITEM_INACTIVE,
                   )}
                 >
                   <span className="material-symbols-outlined text-[16px]">{COMBINED_WEB_ITEM.icon}</span>
@@ -290,10 +309,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
                 href={item.href}
                 onClick={onClose}
                 className={cn(
-                  "flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
-                  isActive(item.href)
-                    ? "bg-surface-base text-ink font-medium"
-                    : "text-charcoal hover:bg-surface-soft hover:text-ink"
+                  NAV_ITEM_BASE,
+                  isActive(item.href) ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
                 )}
               >
                 <span
@@ -317,10 +334,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
                   href={item.href}
                   onClick={onClose}
                   className={cn(
-                    "flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
-                    isActive(item.href)
-                      ? "bg-surface-base text-ink font-medium"
-                      : "text-charcoal hover:bg-surface-soft hover:text-ink"
+                    NAV_ITEM_BASE,
+                    isActive(item.href) ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
                   )}
                 >
                   <span
@@ -341,10 +356,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
               href="/dashboard/profile"
               onClick={onClose}
               className={cn(
-                "flex items-center gap-3 px-3 py-1.5 rounded-mini-sm transition-colors group",
-                isActive("/dashboard/profile")
-                  ? "bg-surface-base text-ink font-medium"
-                  : "text-charcoal hover:bg-surface-soft hover:text-ink"
+                NAV_ITEM_BASE,
+                isActive("/dashboard/profile") ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
               )}
             >
               <span
@@ -364,11 +377,11 @@ export default function Sidebar({ onClose }: SidebarProps) {
         <div className="p-3 border-t border-hairline-soft">
           {/* Shutdown button */}
           <Button
-            variant="outline"
+            variant="secondary"
             fullWidth
             icon="power_settings_new"
             onClick={() => setShowShutdownModal(true)}
-            className="text-red-500 border-red-200 hover:bg-red-50 hover:border-red-300"
+            className="text-[color:var(--color-danger)] border-[color:var(--color-danger)]/30 hover:bg-[color:var(--color-danger)]/10 hover:border-[color:var(--color-danger)]/50"
           >
             Shutdown
           </Button>

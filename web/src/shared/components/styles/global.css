@@ -1,6 +1,12 @@
 /* Local Material Symbols (no Google Fonts) — vendored via `material-symbols` */
 @import url('material-symbols/outlined.css');
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Inter:wght@400;500;600;700&display=swap');
+/*
+ * Claude.com warm-editorial type system:
+ *   Display  — Instrument Serif (closest public match to Copernicus/Tiempos Headline)
+ *   Body     — Inter (humanist sans, weight 400/500)
+ *   Code     — JetBrains Mono (terminal + code blocks)
+ */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;1,400&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -9,88 +15,105 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ============================================================
-   OpenProxy palette — MiniMax design system
-   Stark black/white canvas + product brand accents (coral, magenta,
-   blue, purple). DM Sans primary, Inter fallback.
+   OpenProxy palette — Claude warm-editorial design system
+   Tinted cream canvas + signature coral primary + dark navy
+   product surfaces. Instrument Serif display, Inter body,
+   JetBrains Mono for code.
    ============================================================ */
 :root {
   /* ------------------------------------------------------------
-     MiniMax brand & product accents
+     Brand accents — coral is the primary brand voltage
      ------------------------------------------------------------ */
-  --color-brand-coral: #E2400D;
-  --color-brand-magenta: #D8266F;
-  --color-brand-blue: #1668EE;
-  --color-brand-blue-deep: #0040D8;
-  --color-brand-blue-700: #1F3DB7;
-  --color-brand-blue-200: #DCE7FB;
-  --color-brand-cyan: #5BD2F7;
-  --color-brand-purple: #6E3FF3;
+  --color-brand-coral: #CC785C;
+  --color-brand-coral-active: #A9583E;
+  --color-brand-magenta: #B85068;
+  --color-brand-blue: #4A86C2;
+  --color-brand-blue-deep: #2C5F95;
+  --color-brand-blue-700: #2C5F95;
+  --color-brand-blue-200: #DDE7F2;
+  --color-brand-cyan: #5DB8A6;
+  --color-brand-purple: #8C6FB5;
 
-  /* Coral as legacy "brand" scale for backward-compat with existing
-     bg-brand-500 / text-brand-600 utilities. Kept on the coral hue. */
-  --color-brand-50: #FCE9E2;
-  --color-brand-100: #F8C9B8;
-  --color-brand-200: #F2A488;
-  --color-brand-300: #EC7E58;
-  --color-brand-400: #E76434;
-  --color-brand-500: #E2400D;
-  --color-brand-600: #BD350B;
-  --color-brand-700: #962A09;
-  --color-brand-800: #6E1F06;
-  --color-brand-900: #461404;
+  /* Accent tones — used sparingly on category badges, status dots */
+  --color-accent-teal: #5DB8A6;
+  --color-accent-amber: #E8A55A;
+
+  /* Coral scale (legacy brand-*) — kept on the warm-coral hue so
+     existing `bg-brand-500` / `text-brand-600` utilities still work. */
+  --color-brand-50: #FBEFE8;
+  --color-brand-100: #F2DACA;
+  --color-brand-200: #E8C0A8;
+  --color-brand-300: #DCA384;
+  --color-brand-400: #D38C6E;
+  --color-brand-500: #CC785C;
+  --color-brand-600: #A9583E;
+  --color-brand-700: #884332;
+  --color-brand-800: #66331E;
+  --color-brand-900: #3F1F12;
 
   /* ------------------------------------------------------------
-     Surface tokens (light)
+     Surface tokens (light) — Claude warm cream system
      ------------------------------------------------------------ */
-  --color-canvas: #FFFFFF;
-  --color-surface-base: #F5F5F5;
-  --color-surface-soft: #F9F9F9;
-  --color-hairline: #E5E5E5;
-  --color-hairline-soft: #F0F0F0;
-  --color-footer-bg: #0A0A0A;
+  --color-canvas: #FAF9F5;
+  --color-surface-base: #F5F0E8;
+  --color-surface-soft: #F5F0E8;
+  --color-surface-card: #EFE9DE;
+  --color-surface-cream-strong: #E8E0D2;
+  --color-surface-dark: #181715;
+  --color-surface-dark-elevated: #252320;
+  --color-surface-dark-soft: #1F1E1B;
+  --color-hairline: #E6DFD8;
+  --color-hairline-soft: #EBE6DF;
+  --color-footer-bg: #181715;
 
-  /* Legacy aliases for unchanged components.
-     bg / surface / surface-2 / surface-3 still work but point at the
-     new MiniMax tokens. */
+  /* Legacy aliases — kept stable so existing `bg-surface` /
+     `bg-sidebar` / `border-border` utilities still resolve. */
   --color-bg: var(--color-canvas);
   --color-bg-alt: var(--color-surface-soft);
   --color-surface: var(--color-canvas);
-  --color-surface-2: var(--color-surface-base);
-  --color-surface-3: var(--color-hairline);
-  --color-sidebar: var(--color-surface-soft);
+  --color-surface-2: var(--color-surface-card);
+  --color-surface-3: var(--color-surface-cream-strong);
+  --color-sidebar: var(--color-canvas);
 
   --color-border: var(--color-hairline);
   --color-border-subtle: var(--color-hairline-soft);
 
   /* ------------------------------------------------------------
-     Text tokens (light)
+     Text tokens (light) — warm dark ink
      ------------------------------------------------------------ */
-  --color-ink: #0A0A0A;
+  --color-ink: #141413;
   --color-ink-strong: #000000;
-  --color-charcoal: #1F1F1F;
-  --color-slate: #4A4A4A;
-  --color-steel: #707070;
-  --color-stone: #8A8A8A;
-  --color-muted: #B0B0B0;
+  --color-charcoal: #252523;
+  --color-body-strong: #252523;
+  --color-body: #3D3D3A;
+  --color-slate: #3D3D3A;
+  --color-steel: #6C6A64;
+  --color-stone: #6C6A64;
+  --color-muted: #6C6A64;
+  --color-muted-soft: #8E8B82;
   --color-on-primary: #FFFFFF;
-  --color-on-dark: #FFFFFF;
+  --color-on-dark: #FAF9F5;
+  --color-on-dark-soft: #A09D96;
 
-  /* Legacy aliases — primary becomes near-black per MiniMax spec. */
-  --color-primary: var(--color-ink);
-  --color-primary-hover: var(--color-charcoal);
+  /* Coral is the primary CTA color. Legacy `bg-primary` /
+     `text-primary` utilities now resolve to the signature coral. */
+  --color-primary: var(--color-brand-coral);
+  --color-primary-hover: var(--color-brand-coral-active);
+  --color-primary-active: var(--color-brand-coral-active);
+  --color-primary-disabled: #E6DFD8;
   --color-text: var(--color-ink);
   --color-text-main: var(--color-ink);
-  --color-text-muted: var(--color-slate);
-  --color-text-subtle: var(--color-steel);
+  --color-text-muted: var(--color-body);
+  --color-text-subtle: var(--color-muted);
 
   /* ------------------------------------------------------------
-     Status
+     Status — warm semantic colors
      ------------------------------------------------------------ */
-  --color-success-bg: #E8F8E8;
-  --color-success-text: #168A1F;
-  --color-danger: #D45656;
-  --color-success: #168A1F;
-  --color-warning: #F59E0B;
+  --color-success-bg: #E9F2EA;
+  --color-success-text: #2F7A4A;
+  --color-danger: #C64545;
+  --color-success: #5DB872;
+  --color-warning: #D4A017;
   --color-info: var(--color-brand-blue);
 
   /* ------------------------------------------------------------
@@ -127,95 +150,115 @@
   --space-hero: 96px;
 
   /* ------------------------------------------------------------
-     Shadow / elevation
+     Shadow / elevation — warm, low-key per editorial spec
      ------------------------------------------------------------ */
-  --shadow-soft: 0 1px 2px 0 rgba(0, 0, 0, 0.04);
-  --shadow-card: 0 4px 6px 0 rgba(0, 0, 0, 0.08);
-  --shadow-atmospheric: 0 0 22px 0 rgba(0, 0, 0, 0.08);
-  --shadow-modal: 0 12px 16px -4px rgba(36, 36, 36, 0.08);
-  --shadow-focus: 0 0 0 3px rgba(0, 64, 216, 0.18);
+  --shadow-soft: 0 1px 2px 0 rgba(20, 20, 19, 0.05);
+  --shadow-card: 0 1px 3px 0 rgba(20, 20, 19, 0.08);
+  --shadow-atmospheric: 0 0 24px 0 rgba(20, 20, 19, 0.06);
+  --shadow-modal: 0 12px 24px -8px rgba(20, 20, 19, 0.12);
+  --shadow-focus: 0 0 0 3px rgba(204, 120, 92, 0.22);
   --shadow-elevated: var(--shadow-card);
   --shadow-elev: var(--shadow-card);
   --shadow-warm: var(--shadow-atmospheric);
 
   /* ------------------------------------------------------------
-     Typography
+     Typography — Claude editorial split
      ------------------------------------------------------------ */
-  --font-sans: 'DM Sans', 'Inter', -apple-system, BlinkMacSystemFont,
-    'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    Roboto, 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-serif: 'Instrument Serif', 'Tiempos Headline', 'EB Garamond',
+    'Garamond', 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo,
+    Consolas, monospace;
 
   color-scheme: light;
 }
 
 .dark {
-  /* Keep all MiniMax brand accents identical in dark mode. */
-  --color-brand-coral: #E2400D;
-  --color-brand-magenta: #D8266F;
-  --color-brand-blue: #2F7AF7;
-  --color-brand-blue-deep: #0F4FE8;
-  --color-brand-blue-700: #2745C2;
-  --color-brand-blue-200: rgba(220, 231, 251, 0.16);
-  --color-brand-cyan: #5BD2F7;
-  --color-brand-purple: #8C5FFF;
+  /* Coral stays warm in dark mode — it's the signature voltage. */
+  --color-brand-coral: #D88B70;
+  --color-brand-coral-active: #CC785C;
+  --color-brand-magenta: #C76A82;
+  --color-brand-blue: #6B9DD6;
+  --color-brand-blue-deep: #4A86C2;
+  --color-brand-blue-700: #4A86C2;
+  --color-brand-blue-200: rgba(221, 231, 242, 0.16);
+  --color-brand-cyan: #6FC9B7;
+  --color-brand-purple: #A089C8;
 
-  --color-brand-50: #2C0F02;
-  --color-brand-100: #461404;
-  --color-brand-200: #6E1F06;
-  --color-brand-300: #962A09;
-  --color-brand-400: #BD350B;
-  --color-brand-500: #E2400D;
-  --color-brand-600: #EC7E58;
-  --color-brand-700: #F2A488;
-  --color-brand-800: #F8C9B8;
-  --color-brand-900: #FCE9E2;
+  --color-accent-teal: #6FC9B7;
+  --color-accent-amber: #EBB670;
 
-  /* Dark surfaces */
-  --color-canvas: #0E0E0E;
-  --color-surface-base: #1A1A1A;
-  --color-surface-soft: #161616;
-  --color-hairline: #2A2A2A;
-  --color-hairline-soft: #1F1F1F;
+  --color-brand-50: #3F1F12;
+  --color-brand-100: #66331E;
+  --color-brand-200: #884332;
+  --color-brand-300: #A9583E;
+  --color-brand-400: #BC6A52;
+  --color-brand-500: #CC785C;
+  --color-brand-600: #D88B70;
+  --color-brand-700: #E0A185;
+  --color-brand-800: #ECC2AB;
+  --color-brand-900: #F6E0D2;
+
+  /* Dark surfaces — mirror the cream system but inverted */
+  --color-canvas: #181715;
+  --color-surface-base: #1F1E1B;
+  --color-surface-soft: #1F1E1B;
+  --color-surface-card: #252320;
+  --color-surface-cream-strong: #2E2B26;
+  --color-surface-dark: #0F0E0D;
+  --color-surface-dark-elevated: #252320;
+  --color-surface-dark-soft: #1F1E1B;
+  --color-hairline: #2C2A26;
+  --color-hairline-soft: #232120;
+  --color-footer-bg: #0F0E0D;
 
   --color-bg: var(--color-canvas);
   --color-bg-alt: var(--color-surface-soft);
-  --color-surface: #1A1A1A;
-  --color-surface-2: #232323;
-  --color-surface-3: #303030;
-  --color-sidebar: var(--color-surface-soft);
+  --color-surface: var(--color-canvas);
+  --color-surface-2: var(--color-surface-card);
+  --color-surface-3: var(--color-surface-cream-strong);
+  --color-sidebar: var(--color-canvas);
 
   --color-border: var(--color-hairline);
   --color-border-subtle: var(--color-hairline-soft);
 
-  /* Dark text */
-  --color-ink: #F4F4F4;
+  /* Dark text — warm cream off-white */
+  --color-ink: #FAF9F5;
   --color-ink-strong: #FFFFFF;
-  --color-charcoal: #E0E0E0;
-  --color-slate: #B5B5B5;
-  --color-steel: #909090;
-  --color-stone: #6E6E6E;
-  --color-muted: #4A4A4A;
-  --color-on-primary: #0A0A0A;
-  --color-on-dark: #FFFFFF;
+  --color-charcoal: #EDEAE2;
+  --color-body-strong: #EDEAE2;
+  --color-body: #C8C4BB;
+  --color-slate: #C8C4BB;
+  --color-steel: #A09D96;
+  --color-stone: #A09D96;
+  --color-muted: #A09D96;
+  --color-muted-soft: #807D77;
+  --color-on-primary: #FFFFFF;
+  --color-on-dark: #FAF9F5;
+  --color-on-dark-soft: #A09D96;
 
-  --color-primary: var(--color-ink);
-  --color-primary-hover: var(--color-charcoal);
+  --color-primary: var(--color-brand-coral);
+  --color-primary-hover: var(--color-brand-coral-active);
+  --color-primary-active: var(--color-brand-coral-active);
+  --color-primary-disabled: #3A3733;
   --color-text: var(--color-ink);
   --color-text-main: var(--color-ink);
-  --color-text-muted: var(--color-slate);
-  --color-text-subtle: var(--color-steel);
+  --color-text-muted: var(--color-body);
+  --color-text-subtle: var(--color-muted);
 
-  --color-success-bg: rgba(22, 138, 31, 0.18);
-  --color-success-text: #5DD167;
-  --color-danger: #EF6A6A;
-  --color-success: #5DD167;
-  --color-warning: #FBBF24;
+  --color-success-bg: rgba(93, 184, 114, 0.18);
+  --color-success-text: #7FD191;
+  --color-danger: #DC7777;
+  --color-success: #7FD191;
+  --color-warning: #E8C166;
   --color-info: var(--color-brand-blue);
 
   --shadow-soft: 0 1px 2px 0 rgba(0, 0, 0, 0.4);
-  --shadow-card: 0 4px 6px 0 rgba(0, 0, 0, 0.5);
-  --shadow-atmospheric: 0 0 22px 0 rgba(0, 0, 0, 0.5);
-  --shadow-modal: 0 12px 16px -4px rgba(0, 0, 0, 0.55);
-  --shadow-focus: 0 0 0 3px rgba(47, 122, 247, 0.32);
+  --shadow-card: 0 1px 3px 0 rgba(0, 0, 0, 0.5);
+  --shadow-atmospheric: 0 0 24px 0 rgba(0, 0, 0, 0.5);
+  --shadow-modal: 0 12px 24px -8px rgba(0, 0, 0, 0.55);
+  --shadow-focus: 0 0 0 3px rgba(216, 139, 112, 0.32);
   --shadow-elevated: var(--shadow-card);
   --shadow-elev: var(--shadow-card);
   --shadow-warm: var(--shadow-atmospheric);
@@ -241,8 +284,9 @@ select {
 }
 
 @theme inline {
-  /* MiniMax brand accents */
+  /* Claude brand accents */
   --color-brand-coral: var(--color-brand-coral);
+  --color-brand-coral-active: var(--color-brand-coral-active);
   --color-brand-magenta: var(--color-brand-magenta);
   --color-brand-blue: var(--color-brand-blue);
   --color-brand-blue-deep: var(--color-brand-blue-deep);
@@ -250,6 +294,8 @@ select {
   --color-brand-blue-200: var(--color-brand-blue-200);
   --color-brand-cyan: var(--color-brand-cyan);
   --color-brand-purple: var(--color-brand-purple);
+  --color-accent-teal: var(--color-accent-teal);
+  --color-accent-amber: var(--color-accent-amber);
 
   /* Brand scale (legacy compat) */
   --color-brand-50: var(--color-brand-50);
@@ -267,6 +313,11 @@ select {
   --color-canvas: var(--color-canvas);
   --color-surface-base: var(--color-surface-base);
   --color-surface-soft: var(--color-surface-soft);
+  --color-surface-card: var(--color-surface-card);
+  --color-surface-cream-strong: var(--color-surface-cream-strong);
+  --color-surface-dark: var(--color-surface-dark);
+  --color-surface-dark-elevated: var(--color-surface-dark-elevated);
+  --color-surface-dark-soft: var(--color-surface-dark-soft);
   --color-hairline: var(--color-hairline);
   --color-hairline-soft: var(--color-hairline-soft);
   --color-footer-bg: var(--color-footer-bg);
@@ -275,16 +326,22 @@ select {
   --color-ink: var(--color-ink);
   --color-ink-strong: var(--color-ink-strong);
   --color-charcoal: var(--color-charcoal);
+  --color-body-strong: var(--color-body-strong);
+  --color-body: var(--color-body);
   --color-slate: var(--color-slate);
   --color-steel: var(--color-steel);
   --color-stone: var(--color-stone);
   --color-muted: var(--color-muted);
+  --color-muted-soft: var(--color-muted-soft);
   --color-on-primary: var(--color-on-primary);
   --color-on-dark: var(--color-on-dark);
+  --color-on-dark-soft: var(--color-on-dark-soft);
 
   /* Legacy semantic aliases */
   --color-primary: var(--color-primary);
   --color-primary-hover: var(--color-primary-hover);
+  --color-primary-active: var(--color-primary-active);
+  --color-primary-disabled: var(--color-primary-disabled);
   --color-bg: var(--color-bg);
   --color-bg-alt: var(--color-bg-alt);
   --color-surface: var(--color-surface);
@@ -306,18 +363,17 @@ select {
   --color-info: var(--color-info);
 
   /* Static fallbacks */
-  --color-bg-light: #FFFFFF;
-  --color-bg-dark: #0E0E0E;
-  --color-surface-light: #FFFFFF;
-  --color-surface-dark: #1A1A1A;
-  --color-sidebar-light: #F9F9F9;
-  --color-sidebar-dark: #161616;
-  --color-border-light: #E5E5E5;
-  --color-border-dark: #2A2A2A;
-  --color-text-main-light: #0A0A0A;
-  --color-text-main-dark: #F4F4F4;
-  --color-text-muted-light: #4A4A4A;
-  --color-text-muted-dark: #B5B5B5;
+  --color-bg-light: #FAF9F5;
+  --color-bg-dark: #181715;
+  --color-surface-light: #FAF9F5;
+  --color-sidebar-light: #FAF9F5;
+  --color-sidebar-dark: #181715;
+  --color-border-light: #E6DFD8;
+  --color-border-dark: #2C2A26;
+  --color-text-main-light: #141413;
+  --color-text-main-dark: #FAF9F5;
+  --color-text-muted-light: #3D3D3A;
+  --color-text-muted-dark: #C8C4BB;
 
   /* Radius */
   --radius-xs: var(--radius-xs);
@@ -344,6 +400,8 @@ select {
 
   /* Font */
   --font-sans: var(--font-sans);
+  --font-serif: var(--font-serif);
+  --font-mono: var(--font-mono);
 }
 
 /* ============================================================
@@ -358,40 +416,79 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* MiniMax tightens hero/display leading & letter-spacing. */
+/* Editorial slab-serif display headings — Claude / Anthropic voice.
+   Negative letter-spacing is intentional and non-negotiable. */
 h1, h2, h3 {
   letter-spacing: -0.01em;
 }
+.font-display, .type-display-xl, .type-display-lg, .type-display-md, .type-display-sm,
+h1.font-display, h2.font-display, h3.font-display, .display-serif {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  letter-spacing: -0.02em;
+}
 
-/* Selection — ink (not brand) per MiniMax monochrome canvas. */
+/* Code blocks pick up JetBrains Mono via the font-mono utility. */
+code, pre, kbd, samp {
+  font-family: var(--font-mono);
+}
+
+/* Selection — warm coral tint on cream canvas. */
 ::selection {
-  background-color: rgba(10, 10, 10, 0.18);
+  background-color: rgba(204, 120, 92, 0.22);
   color: var(--color-ink);
 }
 .dark ::selection {
-  background-color: rgba(244, 244, 244, 0.18);
+  background-color: rgba(216, 139, 112, 0.28);
   color: var(--color-ink);
 }
 
-/* iOS keyboard accent — uses brand-blue-deep (form activation color). */
+/* iOS keyboard accent — uses coral (the brand voltage). */
 input, textarea {
-  accent-color: var(--color-brand-blue-deep);
+  accent-color: var(--color-brand-coral);
 }
 
 /* ============================================================
-   Typography utilities — MiniMax scale
+   Typography utilities — Claude editorial scale
+
+   The display tokens render in Instrument Serif at weight 400 with
+   negative tracking (the editorial voice). Title + body tokens stay
+   in Inter sans for readability.
    ============================================================ */
 .type-hero-display {
+  font-family: var(--font-serif);
   font-size: 80px;
-  line-height: 1.10;
+  line-height: 1.05;
   letter-spacing: -2px;
-  font-weight: 600;
+  font-weight: 400;
+}
+.type-display-xl {
+  font-family: var(--font-serif);
+  font-size: 64px;
+  line-height: 1.05;
+  letter-spacing: -1.5px;
+  font-weight: 400;
 }
 .type-display-lg {
-  font-size: 56px;
+  font-family: var(--font-serif);
+  font-size: 48px;
   line-height: 1.10;
-  letter-spacing: -1.5px;
-  font-weight: 600;
+  letter-spacing: -1px;
+  font-weight: 400;
+}
+.type-display-md {
+  font-family: var(--font-serif);
+  font-size: 36px;
+  line-height: 1.15;
+  letter-spacing: -0.5px;
+  font-weight: 400;
+}
+.type-display-sm {
+  font-family: var(--font-serif);
+  font-size: 28px;
+  line-height: 1.20;
+  letter-spacing: -0.3px;
+  font-weight: 400;
 }
 .type-heading-lg {
   font-size: 40px;
@@ -410,10 +507,25 @@ input, textarea {
   line-height: 1.30;
   font-weight: 600;
 }
+.type-title-lg {
+  font-size: 22px;
+  line-height: 1.30;
+  font-weight: 500;
+}
 .type-card-title {
   font-size: 20px;
   line-height: 1.40;
   font-weight: 600;
+}
+.type-title-md {
+  font-size: 18px;
+  line-height: 1.40;
+  font-weight: 500;
+}
+.type-title-sm {
+  font-size: 16px;
+  line-height: 1.40;
+  font-weight: 500;
 }
 .type-subtitle {
   font-size: 18px;
@@ -442,13 +554,20 @@ input, textarea {
 }
 .type-caption {
   font-size: 13px;
-  line-height: 1.70;
-  font-weight: 400;
+  line-height: 1.40;
+  font-weight: 500;
 }
 .type-caption-bold {
   font-size: 13px;
-  line-height: 1.50;
+  line-height: 1.40;
   font-weight: 600;
+}
+.type-caption-uppercase {
+  font-size: 12px;
+  line-height: 1.40;
+  letter-spacing: 1.5px;
+  font-weight: 500;
+  text-transform: uppercase;
 }
 .type-micro {
   font-size: 12px;
@@ -457,8 +576,14 @@ input, textarea {
 }
 .type-button-md {
   font-size: 14px;
-  line-height: 1.40;
-  font-weight: 600;
+  line-height: 1.0;
+  font-weight: 500;
+}
+.type-code {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.60;
+  font-weight: 400;
 }
 
 /* ============================================================
@@ -497,34 +622,56 @@ input, textarea {
 }
 
 /* ============================================================
-   Reusable card chrome (MiniMax: flat-with-borders default)
+   Reusable card chrome — Claude editorial (flat color-block first)
    ============================================================ */
 .card-soft {
   background-color: var(--color-canvas);
   border: 1px solid var(--color-hairline);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
+}
+.card-cream {
+  background-color: var(--color-surface-card);
+  border: 1px solid var(--color-hairline-soft);
+  border-radius: var(--radius-lg);
+}
+.card-dark {
+  background-color: var(--color-surface-dark);
+  color: var(--color-on-dark);
+  border-radius: var(--radius-lg);
+}
+.card-coral {
+  background-color: var(--color-brand-coral);
+  color: var(--color-on-primary);
+  border-radius: var(--radius-lg);
 }
 .card-elev {
   background-color: var(--color-canvas);
   border: 1px solid var(--color-hairline);
   box-shadow: var(--shadow-card);
-  border-radius: var(--radius-xl);
+  border-radius: var(--radius-lg);
 }
 
-/* Hero gradient (compat) */
+/* Editorial hero gradient — cream wash, no harsh top */
 .bg-hero-gradient {
   background: linear-gradient(180deg, var(--color-surface-soft) 0%, var(--color-canvas) 100%);
 }
 
-/* macOS Vibrancy */
+/* macOS Vibrancy — warm cream translucency */
 .bg-vibrancy {
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  background: rgba(255, 255, 255, 0.72);
+  background: rgba(250, 249, 245, 0.78);
 }
 .dark .bg-vibrancy {
-  background: rgba(26, 26, 26, 0.72);
+  background: rgba(24, 23, 21, 0.78);
 }
+
+/* On-dark surface helpers — used inside dark product mockup cards */
+.on-dark {
+  background-color: var(--color-surface-dark);
+  color: var(--color-on-dark);
+}
+.on-dark .text-muted-on-dark { color: var(--color-on-dark-soft); }
 
 /* macOS Traffic Lights */
 .traffic-lights {
@@ -585,12 +732,12 @@ button {
 
 @keyframes border-glow {
   0%, 100% {
-    box-shadow: 0 0 5px rgba(226, 64, 13, 0.3), 0 0 10px rgba(226, 64, 13, 0.2);
-    border-color: rgba(226, 64, 13, 0.5);
+    box-shadow: 0 0 5px rgba(204, 120, 92, 0.30), 0 0 10px rgba(204, 120, 92, 0.20);
+    border-color: rgba(204, 120, 92, 0.50);
   }
   50% {
-    box-shadow: 0 0 10px rgba(226, 64, 13, 0.5), 0 0 20px rgba(226, 64, 13, 0.3);
-    border-color: rgba(226, 64, 13, 0.8);
+    box-shadow: 0 0 10px rgba(204, 120, 92, 0.50), 0 0 20px rgba(204, 120, 92, 0.30);
+    border-color: rgba(204, 120, 92, 0.80);
   }
 }
 .animate-border-glow { animation: border-glow 2s ease-in-out infinite; }
@@ -612,18 +759,18 @@ button {
 .animate-slide-in-top { animation: slideInFromTop 0.2s ease-out; }
 
 /* ============================================================
-   Landing-grid utility (used as faint background on dashboard)
+   Landing-grid utility (warm cream grid, faint on the canvas)
    ============================================================ */
 .landing-grid {
   background-image:
-    linear-gradient(to right, rgba(10, 10, 10, 0.04) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(10, 10, 10, 0.04) 1px, transparent 1px);
+    linear-gradient(to right, rgba(20, 20, 19, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(20, 20, 19, 0.035) 1px, transparent 1px);
   background-size: 32px 32px;
   mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
   -webkit-mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
 }
 .dark .landing-grid {
   background-image:
-    linear-gradient(to right, rgba(244, 244, 244, 0.04) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(244, 244, 244, 0.04) 1px, transparent 1px);
+    linear-gradient(to right, rgba(250, 249, 245, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(250, 249, 245, 0.04) 1px, transparent 1px);
 }
