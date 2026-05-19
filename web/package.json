@@ -38,7 +38,7 @@
     "ora": "^9.1.0",
     "prop-types": "^15.8.1",
     "proper-lockfile": "^4.1.2",
-    "react": "19.2.4",
+    "react": "19.2.6",
     "react-dom": "19.2.4",
     "react-is": "^16.13.1",
     "recharts": "^3.7.0",
