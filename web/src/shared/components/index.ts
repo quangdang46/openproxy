@@ -34,6 +34,7 @@ export { default as NoAuthProxyCard } from "./NoAuthProxyCard";
 export { default as SegmentedControl } from "./SegmentedControl";
 export { default as Tooltip } from "./Tooltip";
 export { default as ProviderInfoCard } from "./ProviderInfoCard";
+export { default as AnthropicSpike } from "./AnthropicSpike";
 
 // Layouts
 export * from "./layouts";

@@ -206,7 +206,7 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
   };
 
   return (
-    <header className="shrink-0 flex items-center justify-between gap-3 px-4 lg:px-8 pt-3 pb-3 border-b border-hairline-soft bg-canvas/95 backdrop-blur-xl lg:bg-canvas lg:backdrop-blur-none z-20">
+    <header className="shrink-0 flex items-center justify-between gap-3 px-4 lg:px-8 pt-4 pb-4 border-b border-hairline-soft bg-canvas/95 backdrop-blur-xl lg:bg-canvas lg:backdrop-blur-none z-20">
       {/* Mobile menu button */}
       <div className="flex items-center gap-3 lg:hidden shrink-0">
         {showMenuButton && (
@@ -236,7 +236,7 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
                 {crumb.href ? (
                   <a
                     href={crumb.href}
-                    className="text-slate hover:text-ink transition-colors text-[13px] font-medium"
+                    className="text-muted hover:text-ink transition-colors text-[13px] font-medium"
                   >
                     {crumb.label}
                   </a>
@@ -251,7 +251,7 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
                         fallbackText={crumb.label.slice(0, 2).toUpperCase()}
                       />
                     )}
-                    <h1 className="text-[18px] lg:text-[28px] font-semibold text-ink tracking-tight truncate leading-tight">
+                    <h1 className="font-serif font-normal text-[20px] lg:text-[30px] tracking-[-0.02em] text-ink truncate leading-tight">
                       {translate(crumb.label)}
                     </h1>
                   </div>
@@ -263,16 +263,16 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
           <div>
             <div className="flex items-center gap-2.5">
               {icon && (
-                <span className="material-symbols-outlined text-ink text-xl lg:text-2xl">
+                <span className="material-symbols-outlined text-brand-coral text-xl lg:text-2xl">
                   {icon}
                 </span>
               )}
-              <h1 className="text-[18px] lg:text-[28px] font-semibold tracking-tight truncate text-ink leading-tight">
+              <h1 className="font-serif font-normal text-[20px] lg:text-[30px] tracking-[-0.02em] text-ink truncate leading-tight">
                 {translate(title)}
               </h1>
             </div>
             {description && (
-              <p className="hidden lg:block text-[13px] text-slate truncate mt-0.5">
+              <p className="hidden lg:block text-[13px] text-muted truncate mt-1">
                 {translate(description)}
               </p>
             )}
@@ -311,7 +311,7 @@ function HeaderSearchInput() {
         placeholder={placeholder}
         value={query}
         onChange={(e) => setQuery(e.target.value)}
-        className="pl-7 pr-2.5 py-1.5 w-[180px] md:w-[220px] rounded border border-hairline bg-surface text-[12px] text-ink placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-primary/50"
+        className="pl-7 pr-2.5 py-1.5 w-[180px] md:w-[220px] rounded-mini-md border border-hairline bg-canvas text-[12px] text-ink placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-brand-coral/30 focus:border-brand-coral/60"
       />
       {query && (
         <button

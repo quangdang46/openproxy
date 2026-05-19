@@ -7,9 +7,10 @@ export default {
     extend: {
       colors: {
         // ----------------------------------------------------------
-        // MiniMax brand & product accents
+        // Claude brand & accent tones
         // ----------------------------------------------------------
         'brand-coral': 'var(--color-brand-coral)',
+        'brand-coral-active': 'var(--color-brand-coral-active)',
         'brand-magenta': 'var(--color-brand-magenta)',
         'brand-blue': 'var(--color-brand-blue)',
         'brand-blue-deep': 'var(--color-brand-blue-deep)',
@@ -17,11 +18,18 @@ export default {
         'brand-blue-200': 'var(--color-brand-blue-200)',
         'brand-cyan': 'var(--color-brand-cyan)',
         'brand-purple': 'var(--color-brand-purple)',
+        'accent-teal': 'var(--color-accent-teal)',
+        'accent-amber': 'var(--color-accent-amber)',
 
         // Surface tokens
         canvas: 'var(--color-canvas)',
         'surface-base': 'var(--color-surface-base)',
         'surface-soft': 'var(--color-surface-soft)',
+        'surface-card': 'var(--color-surface-card)',
+        'surface-cream-strong': 'var(--color-surface-cream-strong)',
+        'surface-dark': 'var(--color-surface-dark)',
+        'surface-dark-elevated': 'var(--color-surface-dark-elevated)',
+        'surface-dark-soft': 'var(--color-surface-dark-soft)',
         hairline: 'var(--color-hairline)',
         'hairline-soft': 'var(--color-hairline-soft)',
         'footer-bg': 'var(--color-footer-bg)',
@@ -30,12 +38,16 @@ export default {
         ink: 'var(--color-ink)',
         'ink-strong': 'var(--color-ink-strong)',
         charcoal: 'var(--color-charcoal)',
+        'body-strong': 'var(--color-body-strong)',
+        body: 'var(--color-body)',
         slate: 'var(--color-slate)',
         steel: 'var(--color-steel)',
         stone: 'var(--color-stone)',
         muted: 'var(--color-muted)',
+        'muted-soft': 'var(--color-muted-soft)',
         'on-primary': 'var(--color-on-primary)',
         'on-dark': 'var(--color-on-dark)',
+        'on-dark-soft': 'var(--color-on-dark-soft)',
 
         // Status
         'success-bg': 'var(--color-success-bg)',
@@ -59,6 +71,8 @@ export default {
         primary: {
           DEFAULT: 'var(--color-primary)',
           hover: 'var(--color-primary-hover)',
+          active: 'var(--color-primary-active)',
+          disabled: 'var(--color-primary-disabled)',
         },
         bg: {
           DEFAULT: 'var(--color-bg)',
@@ -120,7 +134,10 @@ export default {
         focus: 'var(--shadow-focus)',
       },
       fontFamily: {
-        sans: 'var(--font-sans)',
+        sans: ['var(--font-sans)'],
+        serif: ['var(--font-serif)'],
+        mono: ['var(--font-mono)'],
+        display: ['var(--font-serif)'],
       },
     },
   },
