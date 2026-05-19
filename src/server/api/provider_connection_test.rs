@@ -723,8 +723,8 @@ async fn test_api_key_connection(
             .await
         }
         "xiaomi-tokenplan" => {
-            let region = provider_specific_string(connection, "region")
-                .unwrap_or("sgp".to_string());
+            let region =
+                provider_specific_string(connection, "region").unwrap_or("sgp".to_string());
             let base = match region.as_str() {
                 "cn" => "https://token-plan-cn.xiaomimimo.com/v1",
                 "ams" => "https://token-plan-ams.xiaomimimo.com/v1",

@@ -230,6 +230,34 @@ Stop after verification if you only needed a smoke test:
 openproxy server stop
 ```
 
+## 7 · Sync provider catalog from upstream routers (optional)
+
+OpenProxy ships with an embedded snapshot of provider/model catalogs from
+two sister open-source routers — [9router](https://github.com/decolua/9router)
+and [OmniRoute](https://github.com/diegosouzapw/OmniRoute). The `sync`
+subcommand applies those snapshots to the user's `db.json` so new models
+land in `customModels` without manual edits.
+
+```bash
+# Preview what would change
+openproxy --robot sync 9router --dry-run
+openproxy --robot sync omniroute --dry-run
+
+# Apply
+openproxy sync 9router
+openproxy sync omniroute
+
+# Remove entries we previously synced that are no longer in the upstream
+openproxy sync 9router --prune
+```
+
+Synced models are tagged in `customModels[].source` so a subsequent
+`--prune` only touches entries this command put there — built-in models
+and user-added customModels are never affected.
+
+Maintainers refresh the embedded snapshots by running
+`node scripts/sync/normalize-sources.mjs` (see `scripts/sync/README.md`).
+
 ## Common failure modes & fixes
 
 | Symptom | Fix |
