@@ -333,6 +333,95 @@ async fn fetch_provider_models_response(
             )
             .await
         }
+        "xiaomi-mimo" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.xiaomimimo.com/v1/models",
+            )
+            .await
+        }
+        "xiaomi-tokenplan" => {
+            let region = connection
+                .provider_specific_data
+                .get("region")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sgp");
+            let base = match region {
+                "cn" => "https://token-plan-cn.xiaomimimo.com/v1",
+                "ams" => "https://token-plan-ams.xiaomimimo.com/v1",
+                _ => "https://token-plan-sgp.xiaomimimo.com/v1",
+            };
+            fetch_first_party_openai_style_models(connection, &format!("{base}/models")).await
+        }
+        "aimlapi" => {
+            fetch_first_party_openai_style_models(connection, "https://api.aimlapi.com/v1/models")
+                .await
+        }
+        "modal" => {
+            fetch_first_party_openai_style_models(connection, "https://api.modal.com/v1/models")
+                .await
+        }
+        "reka" => {
+            fetch_first_party_openai_style_models(connection, "https://api.reka.ai/v1/models")
+                .await
+        }
+        "kluster" => {
+            fetch_first_party_openai_style_models(connection, "https://api.kluster.ai/v1/models")
+                .await
+        }
+        "morph" => {
+            fetch_first_party_openai_style_models(connection, "https://api.morphllm.com/v1/models")
+                .await
+        }
+        "longcat" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.longcat.chat/openai/v1/models",
+            )
+            .await
+        }
+        "scaleway" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.scaleway.ai/v1/models",
+            )
+            .await
+        }
+        "sambanova" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.sambanova.ai/v1/models",
+            )
+            .await
+        }
+        "nscale" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://inference.api.nscale.com/v1/models",
+            )
+            .await
+        }
+        "baseten" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://inference.baseten.co/v1/models",
+            )
+            .await
+        }
+        "nous-research" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://inference-api.nousresearch.com/v1/models",
+            )
+            .await
+        }
+        "glhf" => {
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://glhf.chat/api/openai/v1/models",
+            )
+            .await
+        }
         other => Err(RouteError::bad_request(format!(
             "Provider {other} does not support models listing"
         ))),

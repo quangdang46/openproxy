@@ -722,6 +722,23 @@ async fn test_api_key_connection(
             )
             .await
         }
+        "xiaomi-tokenplan" => {
+            let region = provider_specific_string(connection, "region")
+                .unwrap_or("sgp".to_string());
+            let base = match region.as_str() {
+                "cn" => "https://token-plan-cn.xiaomimimo.com/v1",
+                "ams" => "https://token-plan-ams.xiaomimimo.com/v1",
+                _ => "https://token-plan-sgp.xiaomimimo.com/v1",
+            };
+            simple_get_bearer_test(
+                state,
+                connection,
+                effective_proxy,
+                &format!("{base}/models"),
+                "Invalid API key",
+            )
+            .await
+        }
         "grok-web" => test_grok_web_connection(state, connection, effective_proxy).await,
         "perplexity-web" => {
             test_perplexity_web_connection(state, connection, effective_proxy).await

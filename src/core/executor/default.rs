@@ -258,7 +258,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "xiaomi-tokenplan",
-            ProviderConfig::openai("https://api.xiaomimimo.com/v1/chat/completions"),
+            ProviderConfig::openai("https://token-plan-sgp.xiaomimimo.com/v1/chat/completions"),
         ),
         (
             "ollama",
@@ -267,6 +267,102 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         (
             "assemblyai",
             ProviderConfig::openai("https://api.assemblyai.com/v2"),
+        ),
+        (
+            "agentrouter",
+            ProviderConfig::anthropic("https://agentrouter.org/v1/messages"),
+        ),
+        (
+            "aimlapi",
+            ProviderConfig::openai("https://api.aimlapi.com/v1/chat/completions"),
+        ),
+        (
+            "modal",
+            ProviderConfig::openai("https://api.modal.com/v1/chat/completions"),
+        ),
+        (
+            "reka",
+            ProviderConfig::openai("https://api.reka.ai/v1/chat/completions"),
+        ),
+        (
+            "nlpcloud",
+            ProviderConfig::openai("https://api.nlpcloud.io/v1/gpu/chatbot"),
+        ),
+        (
+            "bazaarlink",
+            ProviderConfig::openai("https://bazaarlink.ai/api/v1/chat/completions"),
+        ),
+        (
+            "completions",
+            ProviderConfig::openai("https://completions.me/api/v1/chat/completions"),
+        ),
+        (
+            "enally",
+            ProviderConfig::openai("https://ai.enally.in/v1/chat/completions"),
+        ),
+        (
+            "freetheai",
+            ProviderConfig::openai("https://api.freetheai.xyz/v1/chat/completions"),
+        ),
+        (
+            "llm7",
+            ProviderConfig::openai("https://api.llm7.io/v1/chat/completions"),
+        ),
+        (
+            "kluster",
+            ProviderConfig::openai("https://api.kluster.ai/v1/chat/completions"),
+        ),
+        (
+            "predibase",
+            ProviderConfig::openai("https://serving.app.predibase.com/v1/chat/completions"),
+        ),
+        (
+            "bytez",
+            ProviderConfig::openai("https://api.bytez.com/models/v2"),
+        ),
+        (
+            "morph",
+            ProviderConfig::openai("https://api.morphllm.com/v1/chat/completions"),
+        ),
+        (
+            "longcat",
+            ProviderConfig::openai("https://api.longcat.chat/openai/v1/chat/completions"),
+        ),
+        (
+            "puter",
+            ProviderConfig::openai("https://api.puter.com/puterai/openai/v1/chat/completions"),
+        ),
+        (
+            "uncloseai",
+            ProviderConfig::openai("https://hermes.ai.unturf.com/v1/chat/completions"),
+        ),
+        (
+            "scaleway",
+            ProviderConfig::openai("https://api.scaleway.ai/v1/chat/completions"),
+        ),
+        (
+            "sambanova",
+            ProviderConfig::openai("https://api.sambanova.ai/v1/chat/completions"),
+        ),
+        (
+            "nscale",
+            ProviderConfig::openai("https://inference.api.nscale.com/v1/chat/completions"),
+        ),
+        (
+            "baseten",
+            ProviderConfig::openai("https://inference.baseten.co/v1/chat/completions"),
+        ),
+        (
+            "publicai",
+            ProviderConfig::openai("https://api.publicai.co/v1/chat/completions"),
+        ),
+        (
+            "nous-research",
+            ProviderConfig::openai("https://inference-api.nousresearch.com/v1/chat/completions"),
+        ),
+        (
+            "glhf",
+            ProviderConfig::openai("https://glhf.chat/api/openai/v1/chat/completions"),
         ),
     ])
 });
@@ -506,6 +602,17 @@ impl DefaultExecutor {
             ));
         }
 
+        if self.provider == "xiaomi-tokenplan" {
+            let region = compatible_value(credentials.provider_specific_data.get("region"))
+                .unwrap_or("sgp");
+            let base = match region {
+                "cn" => "https://token-plan-cn.xiaomimimo.com/v1",
+                "ams" => "https://token-plan-ams.xiaomimimo.com/v1",
+                _ => "https://token-plan-sgp.xiaomimimo.com/v1",
+            };
+            return Ok(format!("{base}/chat/completions"));
+        }
+
         if self.config.base_url.contains("{accountId}") {
             let account_id =
                 compatible_value(credentials.provider_specific_data.get("accountId")).ok_or(
@@ -516,7 +623,7 @@ impl DefaultExecutor {
 
         if matches!(
             self.provider.as_str(),
-            "claude" | "glm" | "kimi" | "minimax" | "minimax-cn" | "kimi-coding"
+            "claude" | "glm" | "kimi" | "minimax" | "minimax-cn" | "kimi-coding" | "agentrouter"
         ) {
             return Ok(format!("{}?beta=true", self.config.base_url));
         }
@@ -597,7 +704,7 @@ impl DefaultExecutor {
 
             if matches!(
                 self.provider.as_str(),
-                "glm" | "kimi" | "minimax" | "minimax-cn"
+                "glm" | "kimi" | "minimax" | "minimax-cn" | "agentrouter" | "enally"
             ) {
                 headers.insert("x-api-key", HeaderValue::from_str(token)?);
             } else {
