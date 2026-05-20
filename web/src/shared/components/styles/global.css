@@ -183,9 +183,14 @@
 }
 
 .dark {
-  /* Coral stays warm in dark mode — it's the signature voltage. */
+  /* Coral stays warm in dark mode — it's the signature voltage.
+     The `*-rgb` channel-format variants must stay in lockstep with the hex
+     versions so Tailwind opacity modifiers (e.g. `bg-primary/10`,
+     `border-primary/30`) resolve to the correct dark-mode coral. */
   --color-brand-coral: #D88B70;
   --color-brand-coral-active: #CC785C;
+  --color-brand-coral-rgb: 216 139 112;
+  --color-brand-coral-active-rgb: 204 120 92;
   --color-brand-magenta: #C76A82;
   --color-brand-blue: #6B9DD6;
   --color-brand-blue-deep: #4A86C2;
@@ -217,8 +222,11 @@
   --color-surface-dark: #0F0E0D;
   --color-surface-dark-elevated: #252320;
   --color-surface-dark-soft: #1F1E1B;
-  --color-hairline: #2C2A26;
-  --color-hairline-soft: #232120;
+  /* Hairlines in dark mode — lifted from #2C2A26/#232120 so bordered
+     cards (MITM, model inputs, model-list rows) have enough contrast
+     against the warm-dark canvas to be visible without overpowering. */
+  --color-hairline: #3D3A35;
+  --color-hairline-soft: #322F2A;
   --color-footer-bg: #0F0E0D;
 
   --color-bg: var(--color-canvas);

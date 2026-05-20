@@ -193,7 +193,7 @@ export default function MitmToolCard({
           <div className="mt-4 pt-4 border-t border-border flex flex-col gap-4">
             {/* Hosts */}
             {mitmHosts.length > 0 && (
-              <div className="mt-2 rounded-md border border-border bg-surface/50 px-2 py-1.5">
+              <div className="mt-2 rounded-md border border-border bg-black/[0.03] dark:bg-white/[0.03] px-2 py-1.5">
                 <p className="text-[10px] font-medium tracking-wide text-text-main/80 mb-1">
                   Edit hosts file manually to add the following entries:
                 </p>

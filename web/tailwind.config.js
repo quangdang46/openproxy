@@ -70,10 +70,14 @@ export default {
           800: 'var(--color-brand-800)',
           900: 'var(--color-brand-900)',
         },
+        // `primary` must use the channel-format CSS vars so Tailwind opacity
+        // modifiers (`bg-primary/10`, `border-primary/30`) actually compile —
+        // pointing it at the hex `var(--color-primary)` silently dropped the
+        // `/N` modifier in Tailwind v3, falling back to a gray-200 border.
         primary: {
-          DEFAULT: 'var(--color-primary)',
-          hover: 'var(--color-primary-hover)',
-          active: 'var(--color-primary-active)',
+          DEFAULT: 'rgb(var(--color-brand-coral-rgb) / <alpha-value>)',
+          hover: 'rgb(var(--color-brand-coral-active-rgb) / <alpha-value>)',
+          active: 'rgb(var(--color-brand-coral-active-rgb) / <alpha-value>)',
           disabled: 'var(--color-primary-disabled)',
         },
         bg: {
