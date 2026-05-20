@@ -258,9 +258,7 @@ async fn restore_rejects_path_traversal() {
                 .uri("/api/db-backups/restore")
                 .header("authorization", format!("Bearer {TEST_KEY}"))
                 .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({ "backupId": "../db.json" }).to_string(),
-                ))
+                .body(Body::from(json!({ "backupId": "../db.json" }).to_string()))
                 .unwrap(),
         )
         .await

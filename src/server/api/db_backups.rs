@@ -57,8 +57,10 @@ async fn create_handler(State(state): State<AppState>, headers: HeaderMap) -> Re
 
     match manager(&state).create(BackupReason::Manual).await {
         Ok(Some(info)) => Json(json!({ "created": true, "backup": info })).into_response(),
-        Ok(None) => Json(json!({ "created": false, "message": "Backup skipped (db missing or invalid)" }))
-            .into_response(),
+        Ok(None) => {
+            Json(json!({ "created": false, "message": "Backup skipped (db missing or invalid)" }))
+                .into_response()
+        }
         Err(err) => internal_error(err),
     }
 }
@@ -279,11 +281,9 @@ enum ImportError {
 impl ImportError {
     fn into_response(self) -> Response {
         match self {
-            ImportError::BadRequest(msg) => (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": msg })),
-            )
-                .into_response(),
+            ImportError::BadRequest(msg) => {
+                (StatusCode::BAD_REQUEST, Json(json!({ "error": msg }))).into_response()
+            }
         }
     }
 }
