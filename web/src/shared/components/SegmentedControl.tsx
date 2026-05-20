@@ -89,7 +89,11 @@ export default function SegmentedControl({
                 "shrink-0 rounded-full font-semibold transition-colors leading-none",
                 sizes[size],
                 active
-                  ? "bg-ink text-on-primary border border-ink"
+                  // text-canvas inverts with bg-ink so the active pill is
+                  // dark-on-cream in light mode and cream-on-dark in dark
+                  // mode. The previous `text-on-primary` was always #fff,
+                  // which collided with the inverted dark-mode ink.
+                  ? "bg-ink text-canvas border border-ink"
                   : "bg-canvas text-steel border border-hairline hover:text-ink hover:border-ink/40"
               )}
             >
