@@ -1,0 +1,10 @@
+---
+import Layout from '@/layouts/Layout.astro';
+import DbBackupsPageClient from '@/components/DbBackupsPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+---
+<Layout>
+  <DashboardLayout client:only="react">
+    <DbBackupsPageClient client:only="react" />
+  </DashboardLayout>
+</Layout>
