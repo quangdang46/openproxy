@@ -5,6 +5,7 @@ pub mod cli_tools;
 pub mod cloud_credentials;
 pub mod cloud_sync;
 pub mod compat;
+pub mod db_backups;
 pub mod locale;
 pub mod mcp;
 pub mod media;
@@ -158,6 +159,7 @@ pub fn routes() -> Router<AppState> {
         .merge(shutdown::routes())
         .merge(cli_tools::routes())
         .merge(settings_payload_rules::routes())
+        .merge(db_backups::routes())
 }
 
 async fn health() -> Json<HealthResponse> {

@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::types::{AppDb, Combo, ModelAliasTarget, ProviderConnection, ProviderNode, UsageDb};
 
+pub mod backups;
 pub mod watcher;
 
 #[derive(Debug, Clone, Default)]
@@ -153,6 +154,22 @@ impl Db {
         write_json_atomic(&self.usage_path, &next).await?;
         let next = Arc::new(next);
         self.usage_snapshot.store(next.clone());
+        Ok(next)
+    }
+
+    /// Atomically replace the in-memory and on-disk app db with the value
+    /// produced by `make_next`. Used by the backup-restore / import flows
+    /// where the entire payload comes from a foreign snapshot.
+    pub async fn replace_app_db<F>(&self, make_next: F) -> anyhow::Result<Arc<AppDb>>
+    where
+        F: FnOnce() -> AppDb,
+    {
+        let _guard = self.write_lock.write().await;
+        let mut next = make_next();
+        next.normalize();
+        write_json_atomic(&self.db_path, &next).await?;
+        let next = Arc::new(next);
+        self.snapshot.store(next.clone());
         Ok(next)
     }
 }
