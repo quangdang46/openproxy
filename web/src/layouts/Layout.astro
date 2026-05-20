@@ -25,6 +25,44 @@ const { title: pageTitle = 'OpenProxy - AI Infrastructure Management' } = Astro.
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="theme-color" content="#0a0a0a" />
     <title>{pageTitle}</title>
+    <!--
+      Apply the persisted theme synchronously before first paint to avoid a
+      flash of light-mode background on multi-page navigation. The Zustand
+      `persist` middleware stores `{"state":{"theme":"dark"},"version":N}`
+      under localStorage key `theme`; "system" falls back to the OS
+      preference. Inline because external scripts paint too late.
+    -->
+    <script is:inline>
+      (function () {
+        try {
+          var raw = localStorage.getItem("theme");
+          var theme = "system";
+          if (raw) {
+            try {
+              var parsed = JSON.parse(raw);
+              if (parsed && parsed.state && parsed.state.theme) theme = parsed.state.theme;
+            } catch (_) {
+              theme = raw;
+            }
+          }
+          var isDark =
+            theme === "dark" ||
+            (theme === "system" &&
+              window.matchMedia &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (isDark) {
+            document.documentElement.classList.add("dark");
+            document.documentElement.style.backgroundColor = "#181715";
+            document.documentElement.style.colorScheme = "dark";
+          } else {
+            document.documentElement.style.backgroundColor = "#FAF9F5";
+            document.documentElement.style.colorScheme = "light";
+          }
+        } catch (_) {
+          /* swallow — defaults to light if storage is inaccessible */
+        }
+      })();
+    </script>
   </head>
   <body class="font-sans antialiased">
     <ThemeProvider client:load>
