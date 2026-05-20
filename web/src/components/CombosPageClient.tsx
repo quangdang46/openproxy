@@ -293,15 +293,28 @@ function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled,
 interface ModelItemProps {
   index: number;
   model: string;
-  isFirst: boolean;
-  isLast: boolean;
+  isDragging: boolean;
+  isDragOver: boolean;
   onEdit: (newVal: string) => void;
-  onMoveUp: () => void;
-  onMoveDown: () => void;
+  onDragStart: (index: number) => void;
+  onDragEnter: (index: number) => void;
+  onDragEnd: () => void;
+  onDrop: (index: number, from: number | null) => void;
   onRemove: () => void;
 }
 
-function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown, onRemove }: ModelItemProps) {
+function ModelItem({
+  index,
+  model,
+  isDragging,
+  isDragOver,
+  onEdit,
+  onDragStart,
+  onDragEnter,
+  onDragEnd,
+  onDrop,
+  onRemove,
+}: ModelItemProps) {
   const [editing, setEditing] = useState<boolean>(false);
   const [draft, setDraft] = useState<string>(model);
 
@@ -318,7 +331,44 @@ function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown
   };
 
   return (
-    <div className="group flex min-w-0 items-center gap-1.5 rounded-md bg-black/[0.02] px-2 py-1 transition-colors hover:bg-black/[0.04] dark:bg-white/[0.02] dark:hover:bg-white/[0.04]">
+    <div
+      draggable={!editing}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData("text/plain", String(index));
+        onDragStart(index);
+      }}
+      onDragEnter={(e) => {
+        e.preventDefault();
+        onDragEnter(index);
+      }}
+      onDragOver={(e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={(e) => {
+        e.preventDefault();
+        const fromStr = e.dataTransfer.getData("text/plain");
+        const from = fromStr === "" ? NaN : Number(fromStr);
+        onDrop(index, Number.isFinite(from) ? from : null);
+      }}
+      onDragEnd={onDragEnd}
+      className={`group flex min-w-0 items-center gap-1.5 rounded-md bg-black/[0.02] px-2 py-1 transition-all hover:bg-black/[0.04] dark:bg-white/[0.02] dark:hover:bg-white/[0.04] ${
+        isDragging ? "opacity-40" : ""
+      } ${
+        isDragOver && !isDragging
+          ? "ring-2 ring-primary/60 ring-offset-1 ring-offset-bg dark:ring-offset-canvas"
+          : ""
+      }`}
+    >
+      {/* Drag handle */}
+      <span
+        className="material-symbols-outlined text-text-muted/70 cursor-grab active:cursor-grabbing text-[14px] shrink-0 hover:text-primary"
+        title="Drag to reorder"
+      >
+        drag_indicator
+      </span>
+
       {/* Index badge */}
       <span className="text-[10px] font-medium text-text-muted w-3 text-center shrink-0">{index + 1}</span>
 
@@ -341,26 +391,6 @@ function ModelItem({ index, model, isFirst, isLast, onEdit, onMoveUp, onMoveDown
           {model}
         </div>
       )}
-
-      {/* Priority arrows */}
-      <div className="flex shrink-0 items-center gap-0.5">
-        <button
-          onClick={onMoveUp}
-          disabled={isFirst}
-          className={`p-0.5 rounded ${isFirst ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`}
-          title="Move up"
-        >
-          <span className="material-symbols-outlined text-[12px]">arrow_upward</span>
-        </button>
-        <button
-          onClick={onMoveDown}
-          disabled={isLast}
-          className={`p-0.5 rounded ${isLast ? "text-text-muted/20 cursor-not-allowed" : "text-text-muted hover:text-primary hover:bg-black/5 dark:hover:bg-white/5"}`}
-          title="Move down"
-        >
-          <span className="material-symbols-outlined text-[12px]">arrow_downward</span>
-        </button>
-      </div>
 
       {/* Remove */}
       <button
@@ -391,6 +421,8 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   const [saving, setSaving] = useState<boolean>(false);
   const [nameError, setNameError] = useState<string>("");
   const [modelAliases, setModelAliases] = useState<Record<string, any>>({});
+  const [dragIndex, setDragIndex] = useState<number | null>(null);
+  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
 
   const fetchModalData = async () => {
     try {
@@ -437,18 +469,12 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
     setModels(models.filter((_, i) => i !== index));
   };
 
-  const handleMoveUp = (index: number) => {
-    if (index === 0) return;
-    const newModels = [...models];
-    [newModels[index - 1], newModels[index]] = [newModels[index], newModels[index - 1]];
-    setModels(newModels);
-  };
-
-  const handleMoveDown = (index: number) => {
-    if (index === models.length - 1) return;
-    const newModels = [...models];
-    [newModels[index], newModels[index + 1]] = [newModels[index + 1], newModels[index]];
-    setModels(newModels);
+  const handleReorder = (from: number, to: number) => {
+    if (from === to || from < 0 || to < 0 || from >= models.length || to >= models.length) return;
+    const next = [...models];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    setModels(next);
   };
 
   const handleSave = async () => {
@@ -498,15 +524,25 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
                     key={index}
                     index={index}
                     model={model}
-                    isFirst={index === 0}
-                    isLast={index === models.length - 1}
+                    isDragging={dragIndex === index}
+                    isDragOver={dragOverIndex === index}
                     onEdit={(newVal) => {
                       const updated = [...models];
                       updated[index] = newVal;
                       setModels(updated);
                     }}
-                    onMoveUp={() => handleMoveUp(index)}
-                    onMoveDown={() => handleMoveDown(index)}
+                    onDragStart={setDragIndex}
+                    onDragEnter={setDragOverIndex}
+                    onDragEnd={() => {
+                      setDragIndex(null);
+                      setDragOverIndex(null);
+                    }}
+                    onDrop={(target, from) => {
+                      const src = from ?? dragIndex;
+                      if (src !== null && src !== undefined) handleReorder(src, target);
+                      setDragIndex(null);
+                      setDragOverIndex(null);
+                    }}
                     onRemove={() => handleRemoveModel(index)}
                   />
                 ))}

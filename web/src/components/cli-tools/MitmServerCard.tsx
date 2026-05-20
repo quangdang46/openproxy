@@ -188,7 +188,7 @@ export default function MitmServerCard({ apiKeys, cloudEnabled, onStatusChange }
           </div>
 
           {/* Purpose & How it works */}
-          <div className="px-2 py-2 rounded-lg bg-surface/50 border border-border/50 flex flex-col gap-2">
+          <div className="px-2 py-2 rounded-lg bg-black/[0.03] dark:bg-white/[0.03] border border-border flex flex-col gap-2">
             <p className="text-[11px] text-text-muted leading-relaxed">
               <span className="font-medium text-text-main">Purpose:</span> Use Antigravity IDE & GitHub Copilot → with ANY provider/model from OpenProxy
             </p>
