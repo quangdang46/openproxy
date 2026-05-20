@@ -373,6 +373,7 @@ async fn main() -> anyhow::Result<()> {
     seed_default_api_key_if_missing(&db).await?;
     let db = Arc::new(db);
     spawn_watcher(db.clone());
+    spawn_auto_backup(db.clone());
     let state = AppState::new(db)
         .with_dashboard_sidecar_url(cli.dashboard_sidecar_url.clone())
         .with_web_dir(cli.web_dir.clone());
@@ -445,6 +446,42 @@ fn is_stdout_tty() -> bool {
     // Conservative default on non-Unix: assume interactive. Users on Windows
     // can opt out with --no-open if needed.
     true
+}
+
+/// Background task that snapshots `db.json` once per hour. The throttle and
+/// retention are enforced inside `BackupManager::create` / `cleanup`, so the
+/// loop just nudges the manager on a fixed interval. Honors
+/// `DISABLE_AUTO_BACKUP=1`.
+fn spawn_auto_backup(db: Arc<Db>) {
+    use openproxy::db::backups::{BackupManager, BackupReason};
+
+    if BackupManager::is_auto_disabled() {
+        tracing::info!(target: "openproxy::db::backups", "auto-backup disabled via DISABLE_AUTO_BACKUP");
+        return;
+    }
+
+    tokio::spawn(async move {
+        // Small startup delay so the very first request doesn't compete with
+        // a fresh-DB snapshot.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let mgr = BackupManager::new(&db.data_dir);
+        loop {
+            match mgr.create(BackupReason::Auto).await {
+                Ok(Some(info)) => tracing::debug!(
+                    target: "openproxy::db::backups",
+                    id = %info.id,
+                    "auto backup created"
+                ),
+                Ok(None) => {}
+                Err(err) => tracing::warn!(
+                    target: "openproxy::db::backups",
+                    error = %err,
+                    "auto backup failed"
+                ),
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+        }
+    });
 }
 
 async fn seed_default_api_key_if_missing(db: &Db) -> anyhow::Result<()> {
