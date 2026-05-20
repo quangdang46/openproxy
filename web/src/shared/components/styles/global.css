@@ -217,8 +217,11 @@
   --color-surface-dark: #0F0E0D;
   --color-surface-dark-elevated: #252320;
   --color-surface-dark-soft: #1F1E1B;
-  --color-hairline: #2C2A26;
-  --color-hairline-soft: #232120;
+  /* Hairlines in dark mode — lifted from #2C2A26/#232120 so bordered
+     cards (MITM, model inputs, model-list rows) have enough contrast
+     against the warm-dark canvas to be visible without overpowering. */
+  --color-hairline: #3D3A35;
+  --color-hairline-soft: #322F2A;
   --color-footer-bg: #0F0E0D;
 
   --color-bg: var(--color-canvas);
