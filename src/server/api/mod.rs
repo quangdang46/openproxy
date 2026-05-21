@@ -135,6 +135,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/nodes", post(create_node_api))
         .route("/api/combos", get(list_combos_api))
         .route("/api/combos", post(create_combo_api))
+        .route(
+            "/api/combos/test-model",
+            post(provider_model_tests::test_combo_model),
+        )
         .route("/api/keys", get(list_keys_api))
         .route("/api/keys", post(create_key_api))
         .route("/api/proxy-pools", get(list_pools_api))
@@ -686,6 +690,7 @@ async fn create_combo_api(
         id,
         name: name.to_string(),
         models: req.models,
+        disabled_models: Vec::new(),
         kind: req.kind.filter(|kind| !kind.is_empty()),
         created_at: Some(now.clone()),
         updated_at: Some(now),

@@ -8,7 +8,7 @@ use axum::{
     Json,
 };
 use futures_util::future::join_all;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::time::timeout;
 
@@ -209,6 +209,105 @@ async fn ping_model(
         latency_ms,
         error,
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ComboTestModelRequest {
+    /// `<provider-prefix>/<model-id>` exactly as it would appear in a
+    /// combo's `models` list. Tested via a real
+    /// `chat::chat_completions` call with `max_tokens=1`, mirroring the
+    /// per-connection `test_provider_models` behaviour so the same
+    /// status/latency semantics apply.
+    pub(super) model: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ComboTestModelResponse {
+    pub(super) model: String,
+    pub(super) ok: bool,
+    pub(super) latency_ms: u64,
+    pub(super) error: Option<String>,
+}
+
+/// `POST /api/combos/test-model` — quick health check for a single
+/// `<prefix>/<model-id>` combo member. Used by the combo edit modal to
+/// give the operator a per-row test icon without having to know which
+/// connection backs each combo entry.
+///
+/// The actual request shape (`max_tokens=1`, single `"hi"` message,
+/// non-streaming, 15s timeout, treat both `200 OK` and `400 Bad Request`
+/// as "model responded") deliberately matches [`ping_model`] so the two
+/// surfaces produce comparable results.
+pub(super) async fn test_combo_model(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<ComboTestModelRequest>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let model = req.model.trim();
+    if model.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "`model` is required" })),
+        )
+            .into_response();
+    }
+
+    let api_key = internal_api_key(&state);
+    let start = Instant::now();
+    let mut ping_headers = HeaderMap::new();
+    if let Some(api_key) = api_key.as_deref() {
+        if let Ok(value) = HeaderValue::from_str(&format!("Bearer {api_key}")) {
+            ping_headers.insert(AUTHORIZATION, value);
+        }
+    }
+
+    let body = json!({
+        "model": model,
+        "max_tokens": 1,
+        "stream": false,
+        "messages": [{ "role": "user", "content": "hi" }]
+    });
+
+    let response = match timeout(
+        MODEL_TEST_TIMEOUT,
+        chat::chat_completions(State(state.clone()), ping_headers, Ok(Json(body))),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            return Json(ComboTestModelResponse {
+                model: model.to_string(),
+                ok: false,
+                latency_ms: start.elapsed().as_millis() as u64,
+                error: Some("Request timed out".to_string()),
+            })
+            .into_response();
+        }
+    };
+
+    let latency_ms = start.elapsed().as_millis() as u64;
+    let status = response.status();
+    let ok = status == StatusCode::OK || status == StatusCode::BAD_REQUEST;
+    let error = if ok {
+        None
+    } else {
+        Some(read_error_text(response, status).await)
+    };
+
+    Json(ComboTestModelResponse {
+        model: model.to_string(),
+        ok,
+        latency_ms,
+        error,
+    })
+    .into_response()
 }
 
 async fn read_error_text(response: Response, status: StatusCode) -> String {
