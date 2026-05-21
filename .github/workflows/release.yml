@@ -218,114 +218,123 @@ jobs:
           prerelease: false
 
   # ──────────────────────────────────────────────────────────────────────
-  # 3) Publish npm packages.
+  # 3) Publish npm packages — TEMPORARILY DISABLED.
   #
-  # Uses NPM_TOKEN (automation token) for authentication.
-  # The token must be a Classic Automation token or Granular token with
-  # bypass 2FA enabled.
+  # The npm side of the release is currently turned off. Reasons:
+  #   - The NPM_TOKEN secret in this repo no longer has publish access to
+  #     the @openprx scope (every release since v0.1.1 failed here with
+  #     "404 Not Found - PUT" on the platform packages).
+  #   - The packages on the registry (@openprx/openproxy and its four
+  #     platform sub-packages) are stuck at 0.1.1 until the token is
+  #     rotated. See README.md install instructions and `gh secret list`.
   #
-  # Order is non-negotiable:
-  #   a) stage binaries into packages/platform/<target>/bin/openproxy
-  #   b) publish all 4 platform packages
-  #   c) wait for npm registry propagation
-  #   d) publish the meta `@openprx/openproxy` package
+  # To re-enable:
+  #   1. Mint a fresh "Automation" classic token (or a granular token with
+  #      publish access scoped to @openprx/*) at npmjs.com/settings/~/tokens.
+  #   2. Update the NPM_TOKEN secret on this repo.
+  #   3. Uncomment the `publish-npm:` block below.
+  #   4. Re-tag (or run `gh workflow run release.yml`) to verify.
   #
-  # Setup: `npm org create openprx` (first time).
+  # Setup once (first time): `npm org create openprx`.
+  #
+  # The `id-token: write` permission at the top of this file is only
+  # needed for `npm publish --provenance`; harmless to leave while the
+  # job is disabled.
   # ──────────────────────────────────────────────────────────────────────
-  publish-npm:
-    name: Publish to npm
-    needs: [release]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          registry-url: https://registry.npmjs.org
-
-      - name: Download release tarballs
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Stage binaries into platform packages
-        run: |
-          set -euo pipefail
-          # GITHUB_REF_NAME is the tag, e.g. v0.1.0. The script strips the leading "v".
-          node scripts/stage-npm-binaries.mjs "${GITHUB_REF_NAME}" --artifacts dist
-          # Confirm staging worked.
-          for d in packages/platform/*/; do
-            ls -lh "$d/bin/openproxy"
-          done
-
-      - name: Publish platform packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          for d in packages/platform/*/; do
-            echo "::group::Publish $(basename "$d")"
-            # --provenance produces a signed npm attestation against this
-            # workflow run; requires the `id-token: write` permission set
-            # at the top of this file.
-            (cd "$d" && npm publish --access public --provenance)
-            echo "::endgroup::"
-          done
-
-      - name: Wait for npm registry propagation
-        shell: bash
-        run: |
-          set -euo pipefail
-          # The meta package's optionalDependencies reference the platform
-          # packages by name + exact version. npm refuses to publish if any
-          # referenced version isn't yet available, so we poll the registry
-          # for each platform package instead of sleeping a fixed amount.
-          TAG="${GITHUB_REF_NAME#v}"
-          PACKAGES=(
-            "@openprx/openproxy-linux-x64"
-            "@openprx/openproxy-linux-arm64"
-            "@openprx/openproxy-darwin-x64"
-            "@openprx/openproxy-darwin-arm64"
-          )
-          for pkg in "${PACKAGES[@]}"; do
-            echo "::group::Waiting for ${pkg}@${TAG}"
-            for attempt in $(seq 1 60); do
-              if npm view "${pkg}@${TAG}" version >/dev/null 2>&1; then
-                echo "found after ${attempt} attempt(s)"
-                break
-              fi
-              if [ "$attempt" -eq 60 ]; then
-                echo "::error::${pkg}@${TAG} did not appear within 120s"
-                exit 1
-              fi
-              sleep 2
-            done
-            echo "::endgroup::"
-          done
-
-      - name: Publish meta package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: packages/openproxy
-        run: npm publish --access public --provenance
-
-      # Smoke test: install the just-published meta package on a fresh
-      # runner via `npm install -g` and execute `--version`. Catches
-      # publishing accidents (missing bin, broken optionalDependencies,
-      # binary that segfaults at boot) before a user does.
-      - name: Smoke test published package
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="${GITHUB_REF_NAME#v}"
-          npm install -g "@openprx/openproxy@${TAG}"
-          OUT=$(openproxy --version 2>&1 || true)
-          echo "openproxy --version: $OUT"
-          if ! echo "$OUT" | grep -q "$TAG"; then
-            echo "::error::openproxy --version does not contain ${TAG}: ${OUT}"
-            exit 1
-          fi
+  # publish-npm:
+  #   name: Publish to npm
+  #   needs: [release]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #
+  #     - name: Install Node.js
+  #       uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 22
+  #         registry-url: https://registry.npmjs.org
+  #
+  #     - name: Download release tarballs
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         path: dist
+  #         merge-multiple: true
+  #
+  #     - name: Stage binaries into platform packages
+  #       run: |
+  #         set -euo pipefail
+  #         # GITHUB_REF_NAME is the tag, e.g. v0.1.0. The script strips the leading "v".
+  #         node scripts/stage-npm-binaries.mjs "${GITHUB_REF_NAME}" --artifacts dist
+  #         # Confirm staging worked.
+  #         for d in packages/platform/*/; do
+  #           ls -lh "$d/bin/openproxy"
+  #         done
+  #
+  #     - name: Publish platform packages
+  #       env:
+  #         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  #       run: |
+  #         set -euo pipefail
+  #         for d in packages/platform/*/; do
+  #           echo "::group::Publish $(basename "$d")"
+  #           # --provenance produces a signed npm attestation against this
+  #           # workflow run; requires the `id-token: write` permission set
+  #           # at the top of this file.
+  #           (cd "$d" && npm publish --access public --provenance)
+  #           echo "::endgroup::"
+  #         done
+  #
+  #     - name: Wait for npm registry propagation
+  #       shell: bash
+  #       run: |
+  #         set -euo pipefail
+  #         # The meta package's optionalDependencies reference the platform
+  #         # packages by name + exact version. npm refuses to publish if any
+  #         # referenced version isn't yet available, so we poll the registry
+  #         # for each platform package instead of sleeping a fixed amount.
+  #         TAG="${GITHUB_REF_NAME#v}"
+  #         PACKAGES=(
+  #           "@openprx/openproxy-linux-x64"
+  #           "@openprx/openproxy-linux-arm64"
+  #           "@openprx/openproxy-darwin-x64"
+  #           "@openprx/openproxy-darwin-arm64"
+  #         )
+  #         for pkg in "${PACKAGES[@]}"; do
+  #           echo "::group::Waiting for ${pkg}@${TAG}"
+  #           for attempt in $(seq 1 60); do
+  #             if npm view "${pkg}@${TAG}" version >/dev/null 2>&1; then
+  #               echo "found after ${attempt} attempt(s)"
+  #               break
+  #             fi
+  #             if [ "$attempt" -eq 60 ]; then
+  #               echo "::error::${pkg}@${TAG} did not appear within 120s"
+  #               exit 1
+  #             fi
+  #             sleep 2
+  #           done
+  #           echo "::endgroup::"
+  #         done
+  #
+  #     - name: Publish meta package
+  #       env:
+  #         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  #       working-directory: packages/openproxy
+  #       run: npm publish --access public --provenance
+  #
+  #     # Smoke test: install the just-published meta package on a fresh
+  #     # runner via `npm install -g` and execute `--version`. Catches
+  #     # publishing accidents (missing bin, broken optionalDependencies,
+  #     # binary that segfaults at boot) before a user does.
+  #     - name: Smoke test published package
+  #       env:
+  #         NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+  #       run: |
+  #         set -euo pipefail
+  #         TAG="${GITHUB_REF_NAME#v}"
+  #         npm install -g "@openprx/openproxy@${TAG}"
+  #         OUT=$(openproxy --version 2>&1 || true)
+  #         echo "openproxy --version: $OUT"
+  #         if ! echo "$OUT" | grep -q "$TAG"; then
+  #           echo "::error::openproxy --version does not contain ${TAG}: ${OUT}"
+  #           exit 1
+  #         fi
