@@ -57,21 +57,26 @@ curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install
   | bash -s -- --version v0.1.0 --easy-mode --verify
 ```
 
-### 1b. npm (any platform with Node ≥ 18)
+### 1b. Windows (PowerShell 5.1+, x86_64)
 
-```bash
-npm install -g @openprx/openproxy
+```powershell
+irm "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.ps1" | iex
 ```
 
-The shim resolves the platform-specific binary via `optionalDependencies` (`@openprx/openproxy-{linux,darwin}-{x64,arm64}`). If your package manager was run with `--no-optional` / `--ignore-optional`, reinstall with `--force` or install the platform package directly.
+Drops `openproxy.exe` at `$env:USERPROFILE\.local\bin`. Pass flags by downloading first:
 
-### 1c. Windows
+```powershell
+irm "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.ps1" -OutFile install.ps1
+.\install.ps1 -Version v0.1.7 -EasyMode -Verify
+```
 
-No prebuilt binary. Either:
+`-EasyMode` appends the install dir to the *user* PATH; open a new shell for the change to take effect.
 
-- Install under WSL2 and use 1a.
-- Use the npm package from a Windows Node install: `npm install -g @openprx/openproxy`.
-- `--from-source` (requires Rust + Node + pnpm in the Windows shell).
+### 1c. Other / unsupported platforms
+
+- Alpine / musl outside of `linux-x86_64` and `linux-aarch64`: build from source (`--from-source` flag on `install.sh`).
+- Windows on ARM64: not yet published — build from source or open an issue.
+- Anything else: clone the repo and run `cargo build --release --locked`.
 
 ### Verify
 
@@ -266,9 +271,9 @@ Maintainers refresh the embedded snapshots by running
 | `401 on /v1/*` | Wrong bearer; re-issue with `openproxy key add` or fall back to the admin key from `server init`. |
 | `db.json already exists at … (use --force to overwrite)` | Data dir is pre-populated. **Ask the user before passing `--force`** — it wipes existing config. |
 | `installer: could not resolve latest version` | No GitHub Release tags published yet. Pass `--version vX.Y.Z` or `--from-source`. |
-| `npm install -g @openprx/openproxy` → `E404` | npm package not yet published in the current registry. Use the curl installer (1a) instead. |
+| `npm install -g @openprx/openproxy` → `E404` | npm publish path is currently disabled (registry stuck at 0.1.1). Use the curl installer (1a) on Linux/macOS or the PowerShell installer (1b) on Windows. |
 | `unsupported platform "linux-musl"` | Alpine etc. — use `--from-source`. |
-| `unsupported OS: …` from installer | Use the npm package (1b) or `--from-source`. |
+| `unsupported OS: …` from installer | Use the PowerShell installer (1b) on Windows or `--from-source`. |
 | OAuth callback fails in headless env | Use API-key providers, or open the dashboard from a graphical session. |
 | `openproxy doctor` reports `server not running` | `openproxy server start --detach --no-open`. |
 | Dashboard blank / stale assets | Hard reload (`Ctrl+Shift+R`). Check `/health` returns 200. |

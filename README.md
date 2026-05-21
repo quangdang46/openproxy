@@ -43,12 +43,14 @@ There is no cloud component required. All state lives in `~/.openproxy/db.json`.
 ```bash
 # Linux / macOS — x86_64 + aarch64
 curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash
-
-# Or via npm (any platform with Node 18+)
-npm install -g @openprx/openproxy
 ```
 
-Both pull the same prebuilt binary from the same GitHub release. The curl path drops the binary at `~/.local/bin/openproxy`. The npm path uses `optionalDependencies` to install only the platform binary that matches your machine.
+```powershell
+# Windows (PowerShell 5.1+, x86_64)
+irm "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.ps1" | iex
+```
+
+Both pull the same prebuilt binary from the same GitHub release. The Linux/macOS curl path drops the binary at `~/.local/bin/openproxy`. The Windows PowerShell path drops `openproxy.exe` at `%USERPROFILE%\.local\bin`.
 
 ```bash
 openproxy
@@ -166,8 +168,9 @@ error, and report the captured admin API key back to me at the end.
    a) Linux / macOS, x86_64 or aarch64 (preferred):
           curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash
           export PATH="$HOME/.local/bin:$PATH"
-   b) Any platform with Node >= 18 (use if (a) fails or on Windows):
-          npm install -g @openprx/openproxy
+   b) Windows, x86_64 (PowerShell 5.1+):
+          irm "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.ps1" | iex
+          $env:Path = "$env:USERPROFILE\.local\bin;" + $env:Path
 
 3. Initialize a data dir and capture the admin API key. Use --robot so the
    output is JSON; never re-run with --force without my explicit approval:
