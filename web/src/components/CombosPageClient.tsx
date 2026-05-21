@@ -12,6 +12,7 @@ interface Combo {
   id: string;
   name: string;
   models: string[];
+  disabledModels?: string[];
   kind?: string;
 }
 
@@ -19,6 +20,26 @@ interface Provider {
   id: string;
   provider: string;
   isActive?: boolean;
+}
+
+// Per-row result of the `/api/combos/test-model` ping. We keep it in the
+// edit modal's local state only; the backend doesn't persist it because
+// "did this model just respond?" is meaningful for ~seconds, not across
+// sessions.
+type ModelTestStatus = "idle" | "testing" | "ok" | "failed";
+
+interface ModelTestResult {
+  status: ModelTestStatus;
+  latencyMs?: number;
+  error?: string;
+}
+
+// Snapshot of `GET /api/combos/{id}/health` — purely UI surface so the
+// operator can see which members are currently auto-quarantined after a
+// recent failure and how long until they get retried.
+interface ComboHealthEntry {
+  model: string;
+  remainingSeconds: number;
 }
 
 export default function CombosPage() {
@@ -77,7 +98,10 @@ export default function CombosPage() {
     }
   };
 
-  const handleUpdate = async (id: string, data: { name: string; models: string[] }) => {
+  const handleUpdate = async (
+    id: string,
+    data: { name: string; models: string[]; disabledModels?: string[] },
+  ) => {
     try {
       const res = await fetch(`/api/combos/${id}`, {
         method: "PUT",
@@ -217,6 +241,34 @@ interface ComboCardProps {
 }
 
 function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled, onToggleRoundRobin }: ComboCardProps) {
+  const [health, setHealth] = useState<ComboHealthEntry[]>([]);
+
+  // Poll the combo's quarantine state so the "cooling down" pill on the
+  // card reflects the backend without having to open the edit modal.
+  // Cheap call (in-memory map lookup) so 15s is plenty.
+  useEffect(() => {
+    let cancelled = false;
+    const fetchHealth = async () => {
+      try {
+        const res = await fetch(`/api/combos/${combo.id}/health`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setHealth(data.quarantined || []);
+      } catch {
+        // silent — re-tried by interval
+      }
+    };
+    fetchHealth();
+    const interval = setInterval(fetchHealth, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [combo.id]);
+
+  const disabled = combo.disabledModels || [];
+  const quarantined = health;
+
   return (
     <Card padding="sm" className="group">
       <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -230,14 +282,56 @@ function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled,
               {combo.models.length === 0 ? (
                 <span className="text-xs text-text-muted italic">No models</span>
               ) : (
-                combo.models.slice(0, 3).map((model, index) => (
-                  <code key={index} className="max-w-full truncate rounded bg-black/5 px-1.5 py-0.5 font-mono text-[10px] text-text-muted dark:bg-white/5 sm:max-w-[220px]">
-                    {model}
-                  </code>
-                ))
+                combo.models.slice(0, 3).map((model, index) => {
+                  const isDisabled = disabled.includes(model);
+                  const isQuarantined = quarantined.some((q) => q.model === model);
+                  return (
+                    <code
+                      key={index}
+                      className={`max-w-full truncate rounded px-1.5 py-0.5 font-mono text-[10px] sm:max-w-[220px] ${
+                        isDisabled
+                          ? "bg-red-500/10 text-red-500 line-through"
+                          : isQuarantined
+                            ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
+                            : "bg-black/5 text-text-muted dark:bg-white/5"
+                      }`}
+                      title={
+                        isDisabled
+                          ? "Disabled — never dispatched"
+                          : isQuarantined
+                            ? "Cooling down after recent failure"
+                            : undefined
+                      }
+                    >
+                      {model}
+                    </code>
+                  );
+                })
               )}
               {combo.models.length > 3 && (
                 <span className="text-[10px] text-text-muted">+{combo.models.length - 3} more</span>
+              )}
+              {(disabled.length > 0 || quarantined.length > 0) && (
+                <div className="ml-1 flex items-center gap-1">
+                  {disabled.length > 0 && (
+                    <span
+                      className="inline-flex items-center gap-0.5 rounded bg-red-500/10 px-1 py-0.5 text-[10px] font-medium text-red-500"
+                      title={`${disabled.length} model(s) muted by you`}
+                    >
+                      <span className="material-symbols-outlined text-[10px]">block</span>
+                      {disabled.length}
+                    </span>
+                  )}
+                  {quarantined.length > 0 && (
+                    <span
+                      className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                      title={`${quarantined.length} model(s) cooling down after recent failure`}
+                    >
+                      <span className="material-symbols-outlined text-[10px]">schedule</span>
+                      {quarantined.length}
+                    </span>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -295,7 +389,16 @@ interface ModelItemProps {
   model: string;
   isDragging: boolean;
   isDragOver: boolean;
+  // Per-combo-member health state. `disabled` is the persisted manual
+  // mute that the dispatcher enforces; `testResult` is transient state
+  // from clicking the test icon; `quarantineSeconds` is how long the
+  // server says the model is auto-quarantined after a recent failure.
+  disabled: boolean;
+  testResult: ModelTestResult;
+  quarantineSeconds?: number;
   onEdit: (newVal: string) => void;
+  onToggleDisabled: () => void;
+  onTest: () => void;
   onDragStart: (index: number) => void;
   onDragEnter: (index: number) => void;
   onDragEnd: () => void;
@@ -308,7 +411,12 @@ function ModelItem({
   model,
   isDragging,
   isDragOver,
+  disabled,
+  testResult,
+  quarantineSeconds,
   onEdit,
+  onToggleDisabled,
+  onTest,
   onDragStart,
   onDragEnter,
   onDragEnd,
@@ -353,9 +461,11 @@ function ModelItem({
         onDrop(index, Number.isFinite(from) ? from : null);
       }}
       onDragEnd={onDragEnd}
-      className={`group flex min-w-0 items-center gap-1.5 rounded-md bg-black/[0.02] px-2 py-1 transition-all hover:bg-black/[0.04] dark:bg-white/[0.02] dark:hover:bg-white/[0.04] ${
-        isDragging ? "opacity-40" : ""
-      } ${
+      className={`group flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 transition-all ${
+        disabled
+          ? "bg-red-500/[0.05] hover:bg-red-500/[0.08] dark:bg-red-500/[0.08] dark:hover:bg-red-500/[0.12]"
+          : "bg-black/[0.02] hover:bg-black/[0.04] dark:bg-white/[0.02] dark:hover:bg-white/[0.04]"
+      } ${isDragging ? "opacity-40" : ""} ${
         isDragOver && !isDragging
           ? "ring-2 ring-primary/60 ring-offset-1 ring-offset-bg dark:ring-offset-canvas"
           : ""
@@ -384,13 +494,87 @@ function ModelItem({
         />
       ) : (
         <div
-          className="min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs text-text-main hover:bg-black/5 dark:hover:bg-white/5"
+          className={`min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs hover:bg-black/5 dark:hover:bg-white/5 ${
+            disabled ? "text-text-muted line-through" : "text-text-main"
+          }`}
           onClick={() => setEditing(true)}
-          title="Click to edit"
+          title={disabled ? `${model} — disabled, never dispatched` : "Click to edit"}
         >
           {model}
         </div>
       )}
+
+      {/* Test status badge (only shown after a test run) */}
+      {testResult.status === "ok" && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded bg-emerald-500/10 px-1 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0"
+          title={`Last test ok in ${testResult.latencyMs}ms`}
+        >
+          <span className="material-symbols-outlined text-[10px]">check_circle</span>
+          {testResult.latencyMs}ms
+        </span>
+      )}
+      {testResult.status === "failed" && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded bg-red-500/10 px-1 py-0.5 text-[10px] font-medium text-red-500 shrink-0 max-w-[160px] truncate"
+          title={testResult.error || "Test failed"}
+        >
+          <span className="material-symbols-outlined text-[10px]">error</span>
+          {testResult.error ? testResult.error.slice(0, 24) : "failed"}
+        </span>
+      )}
+
+      {/* Auto-quarantine indicator (server-driven) */}
+      {!disabled && quarantineSeconds !== undefined && quarantineSeconds > 0 && (
+        <span
+          className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400 shrink-0"
+          title={`Auto-quarantined after recent failure. Retries unlock in ${quarantineSeconds}s.`}
+        >
+          <span className="material-symbols-outlined text-[10px]">schedule</span>
+          {quarantineSeconds}s
+        </span>
+      )}
+
+      {/* Test */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onTest();
+        }}
+        disabled={testResult.status === "testing"}
+        className={`p-0.5 rounded transition-all ${
+          testResult.status === "testing"
+            ? "text-primary animate-pulse"
+            : "text-text-muted hover:text-primary hover:bg-primary/10"
+        }`}
+        title={testResult.status === "testing" ? "Testing…" : "Test this model"}
+      >
+        <span className="material-symbols-outlined text-[12px]">
+          {testResult.status === "testing" ? "progress_activity" : "speed"}
+        </span>
+      </button>
+
+      {/* Mute / unmute */}
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleDisabled();
+        }}
+        className={`p-0.5 rounded transition-all ${
+          disabled
+            ? "text-red-500 hover:bg-red-500/10"
+            : "text-text-muted hover:text-amber-600 hover:bg-amber-500/10"
+        }`}
+        title={
+          disabled
+            ? "Re-enable this combo member"
+            : "Disable — keep in list but never dispatch to it"
+        }
+      >
+        <span className="material-symbols-outlined text-[12px]">
+          {disabled ? "block" : "visibility"}
+        </span>
+      </button>
 
       {/* Remove */}
       <button
@@ -408,7 +592,7 @@ interface ComboFormModalProps {
   isOpen: boolean;
   combo?: Combo | null;
   onClose: () => void;
-  onSave: (data: { name: string; models: string[] }) => void;
+  onSave: (data: { name: string; models: string[]; disabledModels?: string[] }) => void;
   activeProviders: Provider[];
   kindFilter?: string | null;
 }
@@ -417,12 +601,17 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   // Initialize state with combo values - key prop on parent handles reset on remount
   const [name, setName] = useState<string>(combo?.name || "");
   const [models, setModels] = useState<string[]>(combo?.models || []);
+  const [disabledModels, setDisabledModels] = useState<string[]>(combo?.disabledModels || []);
   const [showModelSelect, setShowModelSelect] = useState<boolean>(false);
   const [saving, setSaving] = useState<boolean>(false);
   const [nameError, setNameError] = useState<string>("");
   const [modelAliases, setModelAliases] = useState<Record<string, any>>({});
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  // Map of `<model>` → last test result; local to this modal lifecycle.
+  const [testResults, setTestResults] = useState<Record<string, ModelTestResult>>({});
+  // Map of `<model>` → remaining auto-quarantine seconds (server-driven).
+  const [quarantine, setQuarantine] = useState<Record<string, number>>({});
 
   const fetchModalData = async () => {
     try {
@@ -435,9 +624,79 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
     }
   };
 
+  // Refresh combo health (auto-quarantine map) so the modal mirrors what
+  // the dispatcher would do on the next request. We only do this in edit
+  // mode — the create flow doesn't have an id to look up yet.
+  const fetchHealth = useCallback(async () => {
+    if (!combo?.id) return;
+    try {
+      const res = await fetch(`/api/combos/${combo.id}/health`);
+      if (!res.ok) return;
+      const data = await res.json();
+      const next: Record<string, number> = {};
+      for (const entry of data.quarantined || []) {
+        next[entry.model] = entry.remainingSeconds;
+      }
+      setQuarantine(next);
+    } catch {
+      // silent
+    }
+  }, [combo?.id]);
+
   useEffect(() => {
-    if (isOpen) fetchModalData();
-  }, [isOpen]);
+    if (isOpen) {
+      fetchModalData();
+      fetchHealth();
+    }
+  }, [isOpen, fetchHealth]);
+
+  const runTest = async (model: string) => {
+    setTestResults((prev) => ({ ...prev, [model]: { status: "testing" } }));
+    try {
+      const res = await fetch("/api/combos/test-model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model }),
+      });
+      const data = await res.json();
+      setTestResults((prev) => ({
+        ...prev,
+        [model]: {
+          status: data.ok ? "ok" : "failed",
+          latencyMs: data.latencyMs,
+          error: data.error,
+        },
+      }));
+    } catch (error) {
+      setTestResults((prev) => ({
+        ...prev,
+        [model]: {
+          status: "failed",
+          error: error instanceof Error ? error.message : "Test failed",
+        },
+      }));
+    }
+  };
+
+  const runTestAll = async () => {
+    await Promise.all(models.map((model) => runTest(model)));
+  };
+
+  const clearQuarantine = async () => {
+    if (!combo?.id) return;
+    try {
+      await fetch(`/api/combos/${combo.id}/health`, { method: "DELETE" });
+      await fetchHealth();
+    } catch (error) {
+      console.error("Error clearing quarantine:", error);
+    }
+  };
+
+  const toggleDisabled = (model: string) => {
+    setDisabledModels((prev) =>
+      prev.includes(model) ? prev.filter((m) => m !== model) : [...prev, model],
+    );
+  };
 
   const validateName = (value: string): boolean => {
     if (!value.trim()) {
@@ -480,11 +739,16 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   const handleSave = async () => {
     if (!validateName(name)) return;
     setSaving(true);
-    await onSave({ name: name.trim(), models });
+    // Filter `disabledModels` down to only members that are still in the
+    // configured list — anything removed via the trash icon shouldn't
+    // linger in the disabled set on disk.
+    const cleanedDisabled = disabledModels.filter((m) => models.includes(m));
+    await onSave({ name: name.trim(), models, disabledModels: cleanedDisabled });
     setSaving(false);
   };
 
   const isEdit = !!combo;
+  const hasQuarantine = Object.keys(quarantine).length > 0;
 
   return (
     <>
@@ -510,7 +774,33 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
 
           {/* Models */}
           <div>
-            <label className="text-sm font-medium mb-1.5 block">Models</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-sm font-medium block">Models</label>
+              {models.length > 0 && (
+                <div className="flex items-center gap-1">
+                  {hasQuarantine && isEdit && (
+                    <button
+                      type="button"
+                      onClick={clearQuarantine}
+                      className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-500/10 dark:text-amber-400"
+                      title="Clear the auto-quarantine cooldowns so the dispatcher retries those members on the next request."
+                    >
+                      <span className="material-symbols-outlined text-[12px]">refresh</span>
+                      Clear cooldowns
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={runTestAll}
+                    className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/5 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/10"
+                    title="Ping every member with max_tokens=1 to spot broken ones quickly."
+                  >
+                    <span className="material-symbols-outlined text-[12px]">speed</span>
+                    Test all
+                  </button>
+                </div>
+              )}
+            </div>
 
             {models.length === 0 ? (
               <div className="text-center py-4 border border-dashed border-black/10 dark:border-white/10 rounded-lg bg-black/[0.01] dark:bg-white/[0.01]">
@@ -526,11 +816,21 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
                     model={model}
                     isDragging={dragIndex === index}
                     isDragOver={dragOverIndex === index}
+                    disabled={disabledModels.includes(model)}
+                    testResult={testResults[model] || { status: "idle" }}
+                    quarantineSeconds={quarantine[model]}
                     onEdit={(newVal) => {
                       const updated = [...models];
                       updated[index] = newVal;
+                      // Migrate disabled flag if the user renamed in
+                      // place so we don't strand the old entry.
+                      setDisabledModels((prev) =>
+                        prev.map((m) => (m === model ? newVal : m)),
+                      );
                       setModels(updated);
                     }}
+                    onToggleDisabled={() => toggleDisabled(model)}
+                    onTest={() => runTest(model)}
                     onDragStart={setDragIndex}
                     onDragEnter={setDragOverIndex}
                     onDragEnd={() => {

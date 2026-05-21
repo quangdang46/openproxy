@@ -231,6 +231,13 @@ pub struct Combo {
     pub name: String,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub models: Vec<String>,
+    /// Combo members the operator has explicitly muted. The dispatcher
+    /// filters these out *before* rotation / capacity / iteration, so a
+    /// "known bad" model can stay in the configured list (for visibility
+    /// or quick re-enable) without ever being dispatched to. Empty by
+    /// default.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub disabled_models: Vec<String>,
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default)]
