@@ -92,6 +92,10 @@ jobs:
             runner: macos-latest
             use_cross: false
             suffix: macos-aarch64
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            use_cross: false
+            suffix: windows-x86_64
     steps:
       - uses: actions/checkout@v4
 
@@ -138,6 +142,7 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       - name: Strip binary
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -150,7 +155,9 @@ jobs:
           fi
           ls -lh "$BIN"
 
-      - name: Package
+      # Linux + macOS: tar.gz with the binary + LICENSE + README at the top level.
+      - name: Package (tar.gz)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -172,6 +179,29 @@ jobs:
           fi
           ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
 
+      # Windows: .zip with openproxy.exe + LICENSE + README at the top level.
+      # install.ps1 expects this exact layout (`Expand-Archive` + walk to find
+      # openproxy.exe).
+      - name: Package (zip)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $Version = $env:GITHUB_REF_NAME
+          $Stage   = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP "stage-$Version") -Force
+          Copy-Item "target/${{ matrix.target }}/release/openproxy.exe" (Join-Path $Stage "openproxy.exe")
+          if (Test-Path LICENSE)   { Copy-Item LICENSE   (Join-Path $Stage "LICENSE") }
+          if (Test-Path README.md) { Copy-Item README.md (Join-Path $Stage "README.md") }
+
+          $Archive = "openproxy-$Version-${{ matrix.suffix }}.zip"
+          # Compress-Archive across the staged contents, not the dir itself,
+          # so the archive root matches the tar.gz layout on the other targets.
+          Compress-Archive -Path (Join-Path $Stage '*') -DestinationPath $Archive -Force
+          $hash = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLower()
+          # Match the GNU sha256sum output format: "<hash>  <filename>"
+          "$hash  $Archive" | Out-File -FilePath "$Archive.sha256" -Encoding ascii -NoNewline
+          Get-Item $Archive, "$Archive.sha256" | Format-Table Name, Length
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -179,6 +209,8 @@ jobs:
           path: |
             openproxy-*.tar.gz
             openproxy-*.tar.gz.sha256
+            openproxy-*.zip
+            openproxy-*.zip.sha256
           if-no-files-found: error
           retention-days: 7
 
@@ -203,7 +235,11 @@ jobs:
           set -euo pipefail
           cd dist
           # One canonical sums file in addition to the per-archive sidecars.
-          sha256sum openproxy-*.tar.gz > SHA256SUMS
+          # Globs that match nothing are pruned by shopt -s nullglob; without
+          # that, sha256sum would error if a target type wasn't built.
+          shopt -s nullglob
+          archives=( openproxy-*.tar.gz openproxy-*.zip )
+          sha256sum "${archives[@]}" > SHA256SUMS
           cat SHA256SUMS
 
       - name: Create GitHub Release
@@ -212,6 +248,8 @@ jobs:
           files: |
             dist/openproxy-*.tar.gz
             dist/openproxy-*.tar.gz.sha256
+            dist/openproxy-*.zip
+            dist/openproxy-*.zip.sha256
             dist/SHA256SUMS
           generate_release_notes: true
           draft: false

@@ -166,7 +166,9 @@ detect_platform() {
         Linux*)  os="linux";;
         Darwin*) os="macos";;
         MINGW*|MSYS*|CYGWIN*)
-            die "Windows is not yet supported as a prebuilt release. Try --from-source, or use the npm package: npm install -g @openprx/openproxy";;
+            die "Windows isn't supported by install.sh. Use install.ps1 from native PowerShell:
+  irm \"https://raw.githubusercontent.com/${OWNER}/${REPO}/main/install.ps1\" | iex
+or run install.sh inside WSL2.";;
         *) die "unsupported OS: $(uname -s)";;
     esac
     case "$(uname -m)" in
