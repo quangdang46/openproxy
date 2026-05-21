@@ -1,6 +1,6 @@
 {
   "name": "@openprx/openproxy-darwin-arm64",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "description": "OpenProxy native binary for darwin arm64. Installed automatically as an optional dependency of the openproxy meta package.",
   "homepage": "https://github.com/quangdang46/openproxy#readme",
   "repository": {
