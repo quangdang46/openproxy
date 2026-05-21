@@ -16,7 +16,8 @@ use serde_json::{json, Value};
 use crate::core::chat::RequestPlan;
 use crate::core::combo::{
     check_fallback_error, execute_combo_strategy_with_capacity, get_combo_models_from_data,
-    ComboAttemptError, ComboExecutionError, ComboStrategy, ModelCapacity,
+    get_disabled_members_for_combo, mark_combo_member_quarantined, ComboAttemptError,
+    ComboExecutionError, ComboStrategy, ModelCapacity,
 };
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
@@ -217,6 +218,7 @@ async fn chat_completions_impl(
                 return json_error_response(StatusCode::BAD_REQUEST, "Unknown combo model");
             };
 
+            let disabled_members = get_disabled_members_for_combo(&combo_name, &snapshot.combos);
             let strategy = combo_strategy_for(&snapshot, &combo_name);
             let combo_body = body.clone();
             let combo_state = state.clone();
@@ -226,47 +228,80 @@ async fn chat_completions_impl(
             let capacity_check = move |combo_model: &str| -> ModelCapacity {
                 model_capacity(&capacity_snapshot, &capacity_registry, combo_model)
             };
-            match execute_combo_strategy_with_capacity(
-                &combo_models,
-                Some(&combo_name),
-                strategy,
-                capacity_check,
-                move |combo_model| {
-                    let state = combo_state.clone();
-                    let body = combo_body.clone();
-                    let combo_model = combo_model.to_string();
-                    let api_key = combo_api_key.clone();
-                    // Re-resolve provider/model for this combo entry so each
-                    // iteration dispatches against the correct provider node
-                    // (e.g. "custom/gpt-fail" -> provider "node-openai", model "gpt-fail").
-                    let inner_snapshot = state.db.snapshot();
-                    let combo_resolved = get_model_info(&combo_model, &inner_snapshot);
-                    let combo_provider_str = combo_resolved
-                        .provider
-                        .as_deref()
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let resolved_model = combo_resolved.model.clone();
-                    let combo_plan =
-                        RequestPlan::new(endpoint, &body, &combo_provider_str, &resolved_model);
-                    let plan_for_combo = combo_plan.clone();
-                    async move {
-                        execute_single_model(
-                            &state,
-                            &body,
-                            &resolved_model,
-                            api_key.as_deref(),
-                            endpoint,
-                            &plan_for_combo,
-                        )
-                        .await
-                    }
-                },
-            )
-            .await
-            {
+            // Track every member we attempted so that on a full combo
+            // failure (the closure returned `Err` for every member) we
+            // can register them in the auto-quarantine map. Anything in
+            // this list bubbled up an error, so quarantining them stops
+            // the very next request from immediately re-attempting the
+            // same broken member and making the CLI agent hang.
+            let attempted_members: std::sync::Arc<parking_lot::Mutex<Vec<String>>> =
+                std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let combo_name_for_quarantine = combo_name.clone();
+            let result = {
+                let attempted_members = attempted_members.clone();
+                execute_combo_strategy_with_capacity(
+                    &combo_models,
+                    Some(&combo_name),
+                    strategy,
+                    &disabled_members,
+                    capacity_check,
+                    move |combo_model| {
+                        let state = combo_state.clone();
+                        let body = combo_body.clone();
+                        let combo_model = combo_model.to_string();
+                        let api_key = combo_api_key.clone();
+                        attempted_members.lock().push(combo_model.clone());
+                        // Re-resolve provider/model for this combo entry so each
+                        // iteration dispatches against the correct provider node
+                        // (e.g. "custom/gpt-fail" -> provider "node-openai", model "gpt-fail").
+                        let inner_snapshot = state.db.snapshot();
+                        let combo_resolved = get_model_info(&combo_model, &inner_snapshot);
+                        let combo_provider_str = combo_resolved
+                            .provider
+                            .as_deref()
+                            .unwrap_or("unknown")
+                            .to_string();
+                        let resolved_model = combo_resolved.model.clone();
+                        let combo_plan =
+                            RequestPlan::new(endpoint, &body, &combo_provider_str, &resolved_model);
+                        let plan_for_combo = combo_plan.clone();
+                        async move {
+                            execute_single_model(
+                                &state,
+                                &body,
+                                &resolved_model,
+                                api_key.as_deref(),
+                                endpoint,
+                                &plan_for_combo,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await
+            };
+            match result {
                 Ok(response) => response,
-                Err(error) => combo_error_response(error),
+                Err(error) => {
+                    // Auto-quarantine every combo member we just tried so
+                    // the next request doesn't immediately reroll the same
+                    // failure. We reuse `check_fallback_error`'s cooldown
+                    // so the TTL matches the per-account lock that
+                    // `forward_with_provider_fallback` just applied — this
+                    // is the "hook / pre-gate" that stops the CLI agent
+                    // from appearing to hang on a known-broken combo
+                    // member.
+                    let cooldown = check_fallback_error(error.status, &error.message, 0).cooldown;
+                    let attempted = attempted_members.lock().clone();
+                    for member in attempted {
+                        mark_combo_member_quarantined(
+                            &combo_name_for_quarantine,
+                            &member,
+                            cooldown,
+                        );
+                    }
+                    combo_error_response(error)
+                }
             }
         }
         ModelRouteKind::Direct => {

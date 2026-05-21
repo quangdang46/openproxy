@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
@@ -16,6 +16,14 @@ const BACKOFF_BASE_MS: u64 = 2_000;
 const BACKOFF_MAX_MS: u64 = 5 * 60 * 1_000;
 
 static COMBO_ROTATION_STATE: Lazy<Mutex<HashMap<String, usize>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// In-memory quarantine map keyed by `(combo_name, model)`. Members get
+/// added when [`mark_combo_member_quarantined`] is called and removed
+/// either when the TTL expires or via [`clear_combo_member_quarantine`] /
+/// [`clear_combo_quarantine`]. Lives alongside `COMBO_ROTATION_STATE` so
+/// the dispatcher can consult it without per-request DB I/O.
+static COMBO_MEMBER_QUARANTINE: Lazy<Mutex<HashMap<(String, String), Instant>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -165,6 +173,68 @@ pub fn rotation_index(combo_name: &str) -> Option<usize> {
     COMBO_ROTATION_STATE.lock().get(combo_name).copied()
 }
 
+/// Mark a single `(combo_name, model)` pair as quarantined for `ttl`.
+///
+/// This is used by the chat dispatcher when *every* underlying account
+/// for a combo member has just failed: rather than letting the next
+/// request hit the same broken model immediately, we record it here so
+/// [`execute_combo_strategy_with_capacity`] can skip it on subsequent
+/// calls until the TTL elapses. This is in-memory only (matches the
+/// existing `COMBO_ROTATION_STATE` semantics) and resets on restart.
+pub fn mark_combo_member_quarantined(combo_name: &str, model: &str, ttl: Duration) {
+    let until = Instant::now() + ttl;
+    let mut guard = COMBO_MEMBER_QUARANTINE.lock();
+    guard.insert((combo_name.to_string(), model.to_string()), until);
+}
+
+/// Clear quarantine for a specific `(combo_name, model)` pair.
+pub fn clear_combo_member_quarantine(combo_name: &str, model: &str) {
+    let mut guard = COMBO_MEMBER_QUARANTINE.lock();
+    guard.remove(&(combo_name.to_string(), model.to_string()));
+}
+
+/// Clear all quarantined members for a combo (e.g. after the operator
+/// edited the member list).
+pub fn clear_combo_quarantine(combo_name: &str) {
+    let mut guard = COMBO_MEMBER_QUARANTINE.lock();
+    guard.retain(|(name, _), _| name != combo_name);
+}
+
+/// Returns members currently quarantined for `combo_name` together with
+/// the absolute `Instant` their cooldown expires. Stale entries are
+/// pruned as a side effect.
+pub fn combo_quarantine_for(combo_name: &str) -> Vec<(String, Instant)> {
+    let now = Instant::now();
+    let mut guard = COMBO_MEMBER_QUARANTINE.lock();
+    guard.retain(|_, until| *until > now);
+    guard
+        .iter()
+        .filter_map(|((name, model), until)| {
+            if name == combo_name {
+                Some((model.clone(), *until))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn quarantined_members(combo_name: &str) -> HashSet<String> {
+    let now = Instant::now();
+    let mut guard = COMBO_MEMBER_QUARANTINE.lock();
+    guard.retain(|_, until| *until > now);
+    guard
+        .iter()
+        .filter_map(|((name, model), _)| {
+            if name == combo_name {
+                Some(model.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 pub fn get_combo_models_from_data(model_str: &str, combos: &[Combo]) -> Option<Vec<String>> {
     if model_str.contains('/') {
         return None;
@@ -174,6 +244,16 @@ pub fn get_combo_models_from_data(model_str: &str, combos: &[Combo]) -> Option<V
         .iter()
         .find(|combo| combo.name == model_str && !combo.models.is_empty())
         .map(|combo| combo.models.clone())
+}
+
+/// Returns the set of disabled members for a combo by name, or empty if
+/// the combo doesn't exist.
+pub fn get_disabled_members_for_combo(combo_name: &str, combos: &[Combo]) -> Vec<String> {
+    combos
+        .iter()
+        .find(|combo| combo.name == combo_name)
+        .map(|combo| combo.disabled_models.clone())
+        .unwrap_or_default()
 }
 
 pub async fn execute_combo_strategy<T, F, Fut>(
@@ -190,6 +270,7 @@ where
         models,
         combo_name,
         strategy,
+        &[],
         |_| ModelCapacity::Available,
         handle_single_model,
     )
@@ -197,7 +278,21 @@ where
 }
 
 /// Same as [`execute_combo_strategy`], but consults a capacity callback to
-/// short-circuit on saturated providers in `RoundRobin` mode.
+/// short-circuit on saturated providers in `RoundRobin` mode and applies
+/// two additional pre-gates that skip combo members *before* dispatch:
+///
+/// 1. **`disabled_members`** — explicit operator-supplied list of combo
+///    members to never dispatch to. Filtered out in both `Fallback` and
+///    `RoundRobin`. This is the "manual bypass" knob exposed via the UI
+///    when a member is known to be broken but the operator wants to keep
+///    it in the configured list (for visibility / quick re-enable)
+///    instead of removing it.
+/// 2. **Auto-quarantine** — `(combo_name, model)` pairs registered via
+///    [`mark_combo_member_quarantined`]. Used by the chat dispatcher to
+///    park a member for the same cooldown duration `check_fallback_error`
+///    already returns when every underlying account has just failed, so
+///    the next request doesn't immediately retry a known-broken model
+///    and make the CLI agent appear to hang.
 ///
 /// When at least one rotated member reports `ModelCapacity::Available`, only
 /// those members are tried (in rotation order). Busy members are skipped
@@ -208,13 +303,16 @@ where
 /// the earliest known retry-after so the caller can back off instead of
 /// piling more load onto already-saturated providers.
 ///
-/// `Fallback` strategy keeps its declared priority order — capacity is
-/// advisory only and we still attempt every member sequentially so the
-/// configured primary/secondary semantics are preserved.
+/// `Fallback` strategy keeps its declared priority order for capacity —
+/// capacity is advisory only and we still attempt every non-disabled,
+/// non-quarantined member sequentially so the configured primary/
+/// secondary semantics are preserved. Disabled/quarantined members are
+/// *always* skipped regardless of strategy.
 pub async fn execute_combo_strategy_with_capacity<T, F, Fut, C>(
     models: &[String],
     combo_name: Option<&str>,
     strategy: ComboStrategy,
+    disabled_members: &[String],
     capacity_check: C,
     mut handle_single_model: F,
 ) -> Result<T, ComboExecutionError>
@@ -223,7 +321,40 @@ where
     Fut: Future<Output = Result<T, ComboAttemptError>>,
     C: Fn(&str) -> ModelCapacity,
 {
-    let rotated = get_rotated_models(models, combo_name, strategy);
+    // Manual disable + auto-quarantine pre-gate. Applied to the raw
+    // member list *before* rotation so the round-robin index doesn't
+    // burn turns on members that will never be dispatched to.
+    let mut skip: HashSet<String> = disabled_members.iter().cloned().collect();
+    if let Some(name) = combo_name {
+        skip.extend(quarantined_members(name));
+    }
+
+    let active: Vec<String> = models
+        .iter()
+        .filter(|model| !skip.contains(model.as_str()))
+        .cloned()
+        .collect();
+
+    if active.is_empty() {
+        // Distinguish "operator muted everything" from "transient
+        // quarantine" so the caller can decide whether to surface a
+        // 4xx vs 503.
+        let only_quarantine = !models.is_empty()
+            && disabled_members.is_empty()
+            && combo_name.is_some()
+            && models.iter().all(|m| skip.contains(m));
+        return Err(ComboExecutionError {
+            status: if only_quarantine { 503 } else { 400 },
+            message: if only_quarantine {
+                "All combo members are currently quarantined after recent failures".into()
+            } else {
+                "All combo members are disabled".into()
+            },
+            earliest_retry_after: None,
+        });
+    }
+
+    let rotated = get_rotated_models(&active, combo_name, strategy);
 
     if strategy == ComboStrategy::RoundRobin && rotated.len() > 1 {
         let available: Vec<String> = rotated

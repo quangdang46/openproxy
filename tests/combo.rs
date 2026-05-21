@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 
 use chrono::{Duration, Utc};
 use openproxy::core::combo::{
-    check_fallback_error, execute_combo_strategy, execute_combo_strategy_with_capacity,
-    get_combo_models_from_data, get_quota_cooldown, get_rotated_models, reset_combo_rotation,
+    check_fallback_error, clear_combo_member_quarantine, clear_combo_quarantine,
+    execute_combo_strategy, execute_combo_strategy_with_capacity, get_combo_models_from_data,
+    get_quota_cooldown, get_rotated_models, mark_combo_member_quarantined, reset_combo_rotation,
     rotation_index, ComboAttemptError, ComboStrategy, ModelCapacity,
 };
 use openproxy::types::Combo;
@@ -13,6 +14,7 @@ fn combo(name: &str, models: &[&str]) -> Combo {
         id: format!("{name}-id"),
         name: name.to_string(),
         models: models.iter().map(|value| value.to_string()).collect(),
+        disabled_models: Vec::new(),
         kind: None,
         created_at: None,
         updated_at: None,
@@ -210,6 +212,7 @@ async fn round_robin_skips_busy_models_when_any_available() {
         &models,
         Some(combo_name),
         ComboStrategy::RoundRobin,
+        &[],
         |model| match model {
             "a" => ModelCapacity::Busy,
             _ => ModelCapacity::Available,
@@ -245,6 +248,7 @@ async fn round_robin_fails_fast_when_all_busy() {
         &models,
         Some(combo_name),
         ComboStrategy::RoundRobin,
+        &[],
         |_| ModelCapacity::Busy,
         move |_model| {
             let counter = counter.clone();
@@ -277,6 +281,7 @@ async fn fallback_strategy_ignores_capacity_check() {
         &models,
         Some(combo_name),
         ComboStrategy::Fallback,
+        &[],
         |_| ModelCapacity::Busy,
         move |model| {
             let seen = seen.clone();
@@ -291,4 +296,186 @@ async fn fallback_strategy_ignores_capacity_check() {
 
     assert_eq!(result, Ok("a".to_string()));
     assert_eq!(attempts.lock().clone(), vec!["a".to_string()]);
+}
+
+#[tokio::test]
+async fn fallback_skips_explicitly_disabled_members() {
+    // The "manual bypass" knob: if the operator put `a` in the disabled
+    // list, the dispatcher must skip it entirely even in Fallback mode
+    // and dispatch to `b` first. This is what stops the CLI agent from
+    // hanging on a known-broken combo member while keeping it visible
+    // in the configured member list.
+    let combo_name = "writer-disabled-skip-fallback";
+    reset_combo_rotation(Some(combo_name));
+    let models = vec!["a".to_string(), "b".to_string()];
+    let disabled = vec!["a".to_string()];
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = attempts.clone();
+
+    let result = execute_combo_strategy_with_capacity(
+        &models,
+        Some(combo_name),
+        ComboStrategy::Fallback,
+        &disabled,
+        |_| ModelCapacity::Available,
+        move |model| {
+            let seen = seen.clone();
+            let model = model.to_string();
+            async move {
+                seen.lock().push(model.clone());
+                Ok(model)
+            }
+        },
+    )
+    .await;
+
+    assert_eq!(result, Ok("b".to_string()));
+    assert_eq!(attempts.lock().clone(), vec!["b".to_string()]);
+}
+
+#[tokio::test]
+async fn round_robin_skips_explicitly_disabled_members() {
+    // Same pre-gate must also apply to round-robin so the rotation
+    // index never lands on a muted member.
+    let combo_name = "writer-disabled-skip-rr";
+    reset_combo_rotation(Some(combo_name));
+    let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+    let disabled = vec!["b".to_string()];
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = attempts.clone();
+
+    // Three RR ticks should visit only `a` and `c`, never `b`.
+    for _ in 0..3 {
+        let seen_inner = seen.clone();
+        let _ = execute_combo_strategy_with_capacity(
+            &models,
+            Some(combo_name),
+            ComboStrategy::RoundRobin,
+            &disabled,
+            |_| ModelCapacity::Available,
+            move |model| {
+                let seen = seen_inner.clone();
+                let model = model.to_string();
+                async move {
+                    seen.lock().push(model.clone());
+                    Ok(model)
+                }
+            },
+        )
+        .await;
+    }
+
+    let visited = attempts.lock().clone();
+    assert!(!visited.contains(&"b".to_string()), "got {visited:?}");
+    assert!(visited.contains(&"a".to_string()), "got {visited:?}");
+    assert!(visited.contains(&"c".to_string()), "got {visited:?}");
+}
+
+#[tokio::test]
+async fn all_disabled_returns_clear_error() {
+    // Edge case: every member is muted. The dispatcher must surface a
+    // clear error instead of falling through with zero attempts.
+    let combo_name = "writer-all-disabled";
+    reset_combo_rotation(Some(combo_name));
+    let models = vec!["a".to_string(), "b".to_string()];
+    let disabled = vec!["a".to_string(), "b".to_string()];
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(0usize));
+    let counter = attempts.clone();
+
+    let error = execute_combo_strategy_with_capacity(
+        &models,
+        Some(combo_name),
+        ComboStrategy::Fallback,
+        &disabled,
+        |_| ModelCapacity::Available,
+        move |_model| {
+            let counter = counter.clone();
+            async move {
+                *counter.lock() += 1;
+                Ok::<_, ComboAttemptError>("should-not-run")
+            }
+        },
+    )
+    .await
+    .expect_err("expected error when every combo member is disabled");
+
+    assert_eq!(error.status, 400);
+    assert!(error.message.to_lowercase().contains("disabled"));
+    assert_eq!(*attempts.lock(), 0);
+}
+
+#[tokio::test]
+async fn quarantined_members_are_skipped_until_ttl_expires() {
+    // The auto pre-gate: once a member is registered in the quarantine
+    // map, subsequent combo dispatches must skip it until the TTL
+    // elapses. This is what stops "broken model → retry → broken
+    // model → retry" from making the CLI agent appear to hang.
+    let combo_name = "writer-quarantine-skip";
+    reset_combo_rotation(Some(combo_name));
+    clear_combo_quarantine(combo_name);
+    let models = vec!["a".to_string(), "b".to_string()];
+
+    mark_combo_member_quarantined(combo_name, "a", std::time::Duration::from_secs(30));
+
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = attempts.clone();
+
+    let result = execute_combo_strategy_with_capacity(
+        &models,
+        Some(combo_name),
+        ComboStrategy::Fallback,
+        &[],
+        |_| ModelCapacity::Available,
+        move |model| {
+            let seen = seen.clone();
+            let model = model.to_string();
+            async move {
+                seen.lock().push(model.clone());
+                Ok(model)
+            }
+        },
+    )
+    .await;
+
+    assert_eq!(result, Ok("b".to_string()));
+    assert_eq!(attempts.lock().clone(), vec!["b".to_string()]);
+
+    // Cleanup so we don't pollute global state for sibling tests.
+    clear_combo_member_quarantine(combo_name, "a");
+}
+
+#[tokio::test]
+async fn quarantine_clear_restores_member_to_rotation() {
+    // After `clear_combo_member_quarantine`, the member must be visible
+    // to the dispatcher again — confirms the cleanup path used by both
+    // the UI "Clear cooldowns" button and the rotation reset on edit.
+    let combo_name = "writer-quarantine-clear";
+    reset_combo_rotation(Some(combo_name));
+    clear_combo_quarantine(combo_name);
+    let models = vec!["a".to_string()];
+
+    mark_combo_member_quarantined(combo_name, "a", std::time::Duration::from_secs(30));
+    clear_combo_member_quarantine(combo_name, "a");
+
+    let attempts = std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let seen = attempts.clone();
+
+    let result = execute_combo_strategy_with_capacity(
+        &models,
+        Some(combo_name),
+        ComboStrategy::Fallback,
+        &[],
+        |_| ModelCapacity::Available,
+        move |model| {
+            let seen = seen.clone();
+            let model = model.to_string();
+            async move {
+                seen.lock().push(model.clone());
+                Ok(model)
+            }
+        },
+    )
+    .await;
+
+    assert_eq!(result, Ok("a".to_string()));
 }

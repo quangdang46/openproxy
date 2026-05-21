@@ -522,6 +522,7 @@ async fn chat_completions_uses_combo_fallback_across_models() {
         id: "combo-1".into(),
         name: "writer".into(),
         models: vec!["custom/gpt-fail".into(), "custom/gpt-pass".into()],
+        disabled_models: Vec::new(),
         kind: None,
         created_at: None,
         updated_at: None,
