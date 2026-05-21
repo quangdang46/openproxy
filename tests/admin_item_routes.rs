@@ -93,6 +93,7 @@ fn combo() -> Combo {
         id: "combo-1".into(),
         name: "writer".into(),
         models: vec!["openai/gpt-4o-mini".into()],
+        disabled_models: Vec::new(),
         kind: None,
         created_at: None,
         updated_at: None,
