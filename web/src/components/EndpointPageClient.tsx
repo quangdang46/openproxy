@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from "react";
 import type { ChangeEvent } from "react";
 import { Card, Button, Input, Modal, CardSkeleton, Toggle } from "@/shared/components";
+import { ConfirmModal } from "@/shared/components/Modal";
+import { useNotificationStore } from "@/store/notificationStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
 interface TunnelBenefit {
@@ -124,6 +126,12 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   // API key visibility toggle state
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
 
+  // Delete / pause confirmation targets (ConfirmModal replaces the old
+  // browser confirm() and matches the rest of the dashboard chrome).
+  const [deleteKeyTarget, setDeleteKeyTarget] = useState<ApiKey | null>(null);
+  const [pauseKeyTarget, setPauseKeyTarget] = useState<ApiKey | null>(null);
+
+  const notify = useNotificationStore();
   const { copied, copy } = useCopyToClipboard();
 
   // Auto-scroll install log
@@ -655,22 +663,24 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
     }
   };
 
-  const handleDeleteKey = async (id: string): Promise<void> => {
-    if (!confirm("Delete this API key?")) return;
-
+  const deleteKey = async (id: string): Promise<void> => {
     try {
       const res = await fetch(`/api/keys/${id}`, { method: "DELETE" });
       if (res.ok) {
-        setKeys(keys.filter((k) => k.id !== id));
+        setKeys((prev) => prev.filter((k) => k.id !== id));
         // Clean up visibility state
-        setVisibleKeys(prev => {
+        setVisibleKeys((prev) => {
           const next = new Set(prev);
           next.delete(id);
           return next;
         });
+        notify.success("API key deleted");
+      } else {
+        notify.error("Failed to delete API key");
       }
     } catch (error) {
       console.log("Error deleting key:", error);
+      notify.error("Failed to delete API key");
     }
   };
 
@@ -887,12 +897,8 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                 message={
                   !requireLogin
                     ? "Require login is disabled — anyone can access your dashboard via tunnel."
-                    : "Dashboard uses the default password — change it in Profile settings."
+                    : "Dashboard uses the default password — set a strong one in your config."
                 }
-                action={{
-                  label: !requireLogin ? "Enable" : "Change password",
-                  href: "/dashboard/profile",
-                }}
               />
             )}
           </div>
@@ -1067,9 +1073,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                     checked={key.isActive ?? true}
                     onChange={(checked: boolean) => {
                       if (key.isActive && !checked) {
-                        if (confirm(`Pause API key "${key.name}"?\n\nThis key will stop working immediately but can be resumed later.`)) {
-                          handleToggleKey(key.id, checked);
-                        }
+                        setPauseKeyTarget(key);
                       } else {
                         handleToggleKey(key.id, checked);
                       }
@@ -1077,7 +1081,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                     title={key.isActive ? "Pause key" : "Resume key"}
                   />
                   <button
-                    onClick={() => handleDeleteKey(key.id)}
+                    onClick={() => setDeleteKeyTarget(key)}
                     className="p-2 hover:bg-red-500/10 rounded text-red-500 opacity-0 group-hover:opacity-100 transition-all"
                   >
                     <span className="material-symbols-outlined text-[18px]">delete</span>
@@ -1307,6 +1311,34 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
           </div>
         </div>
       </Modal>
+
+      <ConfirmModal
+        isOpen={!!deleteKeyTarget}
+        onClose={() => setDeleteKeyTarget(null)}
+        onConfirm={async () => {
+          if (!deleteKeyTarget) return;
+          await deleteKey(deleteKeyTarget.id);
+          setDeleteKeyTarget(null);
+        }}
+        title="Delete API key"
+        message={deleteKeyTarget ? <>Delete API key <code>{deleteKeyTarget.name}</code>? This cannot be undone.</> : null}
+        confirmText="Delete"
+        variant="danger"
+      />
+
+      <ConfirmModal
+        isOpen={!!pauseKeyTarget}
+        onClose={() => setPauseKeyTarget(null)}
+        onConfirm={async () => {
+          if (!pauseKeyTarget) return;
+          await handleToggleKey(pauseKeyTarget.id, false);
+          setPauseKeyTarget(null);
+        }}
+        title="Pause API key"
+        message={pauseKeyTarget ? <>Pause API key <code>{pauseKeyTarget.name}</code>? This key will stop working immediately but can be resumed later.</> : null}
+        confirmText="Pause"
+        variant="danger"
+      />
     </div>
   );
 }

@@ -204,8 +204,27 @@ export default function ProvidersPageClient() {
     );
   };
 
+  // Count connections per authType so we can grey out the Test All button
+  // when there's nothing to test (e.g. user hasn't added an OAuth account
+  // yet — pressing Test All would just spin uselessly).
+  const oauthCount = connections.filter((c) => c.authType === "oauth").length;
+  const freeCount = connections.filter((c) => c.authType === "free").length;
+  const apikeyCount = connections.filter((c) => c.authType === "apikey").length;
+
   const handleBatchTest = async (mode, providerId = null) => {
     if (testingMode) return;
+    if (mode === "oauth" && oauthCount === 0) {
+      notify.warning("No OAuth providers connected", "Nothing to test");
+      return;
+    }
+    if (mode === "free" && freeCount === 0) {
+      notify.warning("No free providers connected", "Nothing to test");
+      return;
+    }
+    if (mode === "apikey" && apikeyCount === 0) {
+      notify.warning("No API key providers connected", "Nothing to test");
+      return;
+    }
     setTestingMode(mode === "provider" ? providerId : mode);
     setTestResults(null);
     try {
@@ -376,13 +395,13 @@ export default function ProvidersPageClient() {
             <ModelAvailabilityBadge />
             <button
               onClick={() => handleBatchTest("oauth")}
-              disabled={!!testingMode}
-              className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 ${
+              disabled={!!testingMode || oauthCount === 0}
+              title={oauthCount === 0 ? "Connect an OAuth provider first" : "Test all OAuth connections"}
+              className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
                 testingMode === "oauth"
                   ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                   : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
               }`}
-              title="Test all OAuth connections"
               aria-label="Test all OAuth connections"
             >
               <span
@@ -418,13 +437,13 @@ export default function ProvidersPageClient() {
           </h2>
           <button
             onClick={() => handleBatchTest("free")}
-            disabled={!!testingMode}
-            className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 ${
+            disabled={!!testingMode || freeCount === 0}
+            title={freeCount === 0 ? "Enable a free provider first" : "Test all Free connections"}
+            className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
               testingMode === "free"
                 ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                 : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
             }`}
-            title="Test all Free connections"
             aria-label="Test all Free provider connections"
           >
             <span
@@ -469,13 +488,13 @@ export default function ProvidersPageClient() {
           </h2>
           <button
             onClick={() => handleBatchTest("apikey")}
-            disabled={!!testingMode}
-            className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 ${
+            disabled={!!testingMode || apikeyCount === 0}
+            title={apikeyCount === 0 ? "Add an API key provider first" : "Test all API Key connections"}
+            className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
               testingMode === "apikey"
                 ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                 : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
             }`}
-            title="Test all API Key connections"
             aria-label="Test all API Key connections"
           >
             <span

@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal } from "@/shared/components";
+import { ConfirmModal } from "@/shared/components/Modal";
+import { useNotificationStore } from "@/store/notificationStore";
 
 // ── CooldownTimer ──────────────────────────────────────────────
 interface CooldownTimerProps {
@@ -330,8 +332,11 @@ export default function ConnectionsCard({ providerId, isOAuth = false }: Connect
   const [showAddModal, setShowAddModal] = useState<boolean>(false);
   const [showEditModal, setShowEditModal] = useState<boolean>(false);
   const [selectedConnection, setSelectedConnection] = useState<Connection | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Connection | null>(null);
+  const [deleting, setDeleting] = useState<boolean>(false);
   const [providerStrategy, setProviderStrategy] = useState<string | null>(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState<string>("1");
+  const notify = useNotificationStore();
 
   const fetch_ = useCallback(async () => {
     try {
@@ -381,12 +386,28 @@ export default function ConnectionsCard({ providerId, isOAuth = false }: Connect
     } catch { await fetch_(); }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this connection?")) return;
+  const handleDelete = (connection: Connection) => {
+    setDeleteTarget(connection);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
-      if (res.ok) setConnections((prev) => prev.filter((c) => c.id !== id));
-    } catch (e) { console.log("delete error:", e); }
+      const res = await fetch(`/api/providers/${deleteTarget.id}`, { method: "DELETE" });
+      if (res.ok) {
+        setConnections((prev) => prev.filter((c) => c.id !== deleteTarget.id));
+        notify.success("Connection deleted");
+      } else {
+        notify.error("Failed to delete connection");
+      }
+    } catch (e) {
+      console.log("delete error:", e);
+      notify.error("Failed to delete connection");
+    } finally {
+      setDeleting(false);
+      setDeleteTarget(null);
+    }
   };
 
   const handleToggleActive = async (id: string, isActive: boolean) => {
@@ -469,7 +490,7 @@ export default function ConnectionsCard({ providerId, isOAuth = false }: Connect
                   onToggleActive={(isActive) => handleToggleActive(conn.id, isActive)}
                   onUpdateProxy={(poolId) => handleUpdateProxy(conn.id, poolId)}
                   onEdit={() => { setSelectedConnection(conn); setShowEditModal(true); }}
-                  onDelete={() => handleDelete(conn.id)}
+                  onDelete={() => handleDelete(conn)}
                 />
               ))}
             </div>
@@ -498,6 +519,16 @@ export default function ConnectionsCard({ providerId, isOAuth = false }: Connect
         proxyPools={proxyPools}
         onSave={handleUpdateConnection}
         onClose={() => setShowEditModal(false)}
+      />
+      <ConfirmModal
+        isOpen={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={confirmDelete}
+        title="Delete connection"
+        message={deleteTarget ? <>Are you sure you want to delete connection <code>{deleteTarget.name || deleteTarget.id}</code>? This cannot be undone.</> : null}
+        confirmText="Delete"
+        variant="danger"
+        loading={deleting}
       />
     </>
   );

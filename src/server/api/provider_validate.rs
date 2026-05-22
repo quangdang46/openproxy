@@ -272,9 +272,57 @@ async fn validate_provider(
             if base_url.ends_with("/messages") {
                 base_url = base_url[..base_url.len()-9].to_string();
             }
-            let url = if base_url.is_empty() { "https://api.anthropic.com/v1/messages".to_string() } else { format!("{}/messages", base_url) };
-            match client.post(&url).header("x-api-key", &api_key).header("anthropic-version", "2023-06-01").header("Authorization", format!("Bearer {api_key}")).send().await {
-                Ok(resp) => (resp.status().is_success(), None),
+            // Fall back to the provider's well-known Anthropic-compatible
+            // endpoint so a user who hasn't configured a custom node still
+            // gets a real validation instead of being routed at Anthropic.
+            let url = if !base_url.is_empty() {
+                format!("{}/messages", base_url)
+            } else {
+                match p {
+                    "glm" => "https://api.z.ai/api/anthropic/v1/messages".to_string(),
+                    "kimi" => "https://api.kimi.com/coding/v1/messages".to_string(),
+                    "minimax" => "https://api.minimax.io/anthropic/v1/messages".to_string(),
+                    "minimax-cn" => "https://api.minimaxi.com/anthropic/v1/messages".to_string(),
+                    _ => "https://api.anthropic.com/v1/messages".to_string(),
+                }
+            };
+            // GLM/Kimi/MiniMax accept either x-api-key or Bearer; send a
+            // minimal `ping` so the upstream actually executes auth (a HEAD
+            // or empty POST tends to return 4xx that isn't auth-related).
+            let body = json!({
+                "model": match p {
+                    "glm" => "glm-4.5-flash",
+                    "kimi" => "kimi-k2.5",
+                    "minimax" | "minimax-cn" => "minimax-m2",
+                    _ => "claude-3-5-haiku-20241022",
+                },
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            });
+            match client.post(&url)
+                .header("x-api-key", &api_key)
+                .header("anthropic-version", "2023-06-01")
+                .header("Authorization", format!("Bearer {api_key}"))
+                .json(&body)
+                .send().await {
+                Ok(resp) => {
+                    let status = resp.status();
+                    // Treat any non-auth 2xx/4xx as proof the key works:
+                    // some upstreams 400 on the dummy body but still validate
+                    // the key. Only 401/403 mean the key is wrong.
+                    let code = status.as_u16();
+                    if code == 401 || code == 403 { (false, Some("Invalid API key".into())) }
+                    else if status.is_success() || (400..500).contains(&code) && code != 429 {
+                        let body_text = resp.text().await.unwrap_or_default();
+                        let body_lower = body_text.to_lowercase();
+                        let looks_auth = body_lower.contains("invalid api key")
+                            || body_lower.contains("unauthorized")
+                            || body_lower.contains("authentication failed");
+                        (!looks_auth, if looks_auth { Some("Invalid API key".into()) } else { None })
+                    } else {
+                        (status.is_success(), None)
+                    }
+                },
                 Err(e) => (false, Some(e.to_string())),
             }
         }

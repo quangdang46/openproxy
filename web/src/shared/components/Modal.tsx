@@ -24,7 +24,7 @@ export default function Modal({
   children,
   footer,
   size = "md",
-  closeOnOverlay = true,
+  closeOnOverlay = false,
   showCloseButton = true,
   showTrafficLights = true,
   className,
