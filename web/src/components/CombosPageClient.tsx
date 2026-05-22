@@ -2,6 +2,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, Toggle } from "@/shared/components";
+import { ConfirmModal } from "@/shared/components/Modal";
+import { useNotificationStore } from "@/store/notificationStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 
@@ -49,6 +51,9 @@ export default function CombosPage() {
   const [editingCombo, setEditingCombo] = useState<Combo | null>(null);
   const [activeProviders, setActiveProviders] = useState<Provider[]>([]);
   const [comboStrategies, setComboStrategies] = useState<Record<string, any>>({});
+  const [deleteTarget, setDeleteTarget] = useState<Combo | null>(null);
+  const [deleting, setDeleting] = useState<boolean>(false);
+  const notify = useNotificationStore();
   const { copied, copy } = useCopyToClipboard();
 
   useEffect(() => {
@@ -89,12 +94,14 @@ export default function CombosPage() {
       if (res.ok) {
         await fetchData();
         setShowCreateModal(false);
+        notify.success(`Combo "${data.name}" created`);
       } else {
         const err = await res.json();
-        alert(err.error || "Failed to create combo");
+        notify.error(err.error || "Failed to create combo");
       }
     } catch (error) {
       console.log("Error creating combo:", error);
+      notify.error("Failed to create combo");
     }
   };
 
@@ -111,23 +118,34 @@ export default function CombosPage() {
       if (res.ok) {
         await fetchData();
         setEditingCombo(null);
+        notify.success(`Combo "${data.name}" updated`);
       } else {
         const err = await res.json();
-        alert(err.error || "Failed to update combo");
+        notify.error(err.error || "Failed to update combo");
       }
     } catch (error) {
       console.log("Error updating combo:", error);
+      notify.error("Failed to update combo");
     }
   };
 
-  const handleDelete = async (id: string) => {
-    if (!confirm("Delete this combo?")) return;
+  const handleDelete = (combo: Combo) => {
+    setDeleteTarget(combo);
+  };
+
+  const confirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      const res = await fetch(`/api/combos/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/combos/${deleteTarget.id}`, { method: "DELETE" });
       if (res.ok) {
-        setCombos(combos.filter(c => c.id !== id));
+        setCombos(combos.filter(c => c.id !== deleteTarget.id));
+        notify.success(`Combo "${deleteTarget.name}" deleted`);
+      } else {
+        notify.error("Failed to delete combo");
       }
     } catch (error) {
+      notify.error("Failed to delete combo");
       console.log("Error deleting combo:", error);
     }
   };
@@ -200,7 +218,7 @@ export default function CombosPage() {
               copied={copied}
               onCopy={copy}
               onEdit={() => setEditingCombo(combo)}
-              onDelete={() => handleDelete(combo.id)}
+              onDelete={() => handleDelete(combo)}
               roundRobinEnabled={comboStrategies[combo.name]?.fallbackStrategy === "round-robin"}
               onToggleRoundRobin={(enabled) => handleToggleRoundRobin(combo.name, enabled)}
             />
@@ -225,6 +243,21 @@ export default function CombosPage() {
         onClose={() => setEditingCombo(null)}
         onSave={(data) => handleUpdate(editingCombo.id, data)}
         activeProviders={activeProviders}
+      />
+
+      <ConfirmModal
+        isOpen={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        onConfirm={async () => {
+          await confirmDelete();
+          setDeleteTarget(null);
+          setDeleting(false);
+        }}
+        title="Delete combo"
+        message={deleteTarget ? <>Are you sure you want to delete combo <code>{deleteTarget.name}</code>? This cannot be undone.</> : null}
+        confirmText="Delete"
+        variant="danger"
+        loading={deleting}
       />
     </div>
   );
@@ -718,10 +751,14 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
     else setNameError("");
   };
 
+  // Toggle in/out of combo so the modal can stay open while operators
+  // pick several models, including unpicking ones added by mistake.
   const handleAddModel = (model: { value: string }) => {
-    if (!models.includes(model.value)) {
-      setModels([...models, model.value]);
-    }
+    setModels((prev) =>
+      prev.includes(model.value)
+        ? prev.filter((m) => m !== model.value)
+        : [...prev, model.value],
+    );
   };
 
   const handleRemoveModel = (index: number) => {
@@ -756,6 +793,7 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
         isOpen={isOpen}
         onClose={onClose}
         title={isEdit ? "Edit Combo" : "Create Combo"}
+        size="lg"
       >
         <div className="flex flex-col gap-3">
           {/* Name */}
@@ -881,9 +919,11 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
         isOpen={showModelSelect}
         onClose={() => setShowModelSelect(false)}
         onSelect={handleAddModel}
+        selectedModel={models}
+        closeOnSelect={false}
         activeProviders={activeProviders}
         modelAliases={modelAliases}
-        title="Add Model to Combo"
+        title="Add Models to Combo"
         kindFilter={kindFilter}
       />
     </>

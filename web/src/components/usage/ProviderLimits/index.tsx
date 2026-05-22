@@ -7,6 +7,8 @@ import Toggle from "@/shared/components/Toggle";
 import { parseQuotaData, calculatePercentage } from "./utils";
 import Card from "@/shared/components/Card";
 import { EditConnectionModal } from "@/shared/components";
+import { ConfirmModal } from "@/shared/components/Modal";
+import { useNotificationStore } from "@/store/notificationStore";
 import { USAGE_SUPPORTED_PROVIDERS, USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
 
 interface Connection {
@@ -54,6 +56,8 @@ export default function ProviderLimits() {
   const [countdown, setCountdown] = useState<number>(60);
   const [connectionsLoading, setConnectionsLoading] = useState<boolean>(true);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
+  const notify = useNotificationStore();
   const [togglingId, setTogglingId] = useState<string | null>(null);
   const [showEditModal, setShowEditModal] = useState<boolean>(false);
   const [selectedConnection, setSelectedConnection] = useState<Connection | null>(null);
@@ -164,8 +168,13 @@ export default function ProviderLimits() {
     [fetchQuota],
   );
 
-  const handleDeleteConnection = useCallback(async (id: string) => {
-    if (!confirm("Delete this connection?")) return;
+  const handleDeleteConnection = useCallback((id: string) => {
+    setDeleteConfirmId(id);
+  }, []);
+
+  const confirmDeleteConnection = useCallback(async () => {
+    const id = deleteConfirmId;
+    if (!id) return;
     setDeletingId(id);
     try {
       const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
@@ -186,13 +195,18 @@ export default function ProviderLimits() {
           delete next[id];
           return next;
         });
+        notify.success("Connection deleted");
+      } else {
+        notify.error("Failed to delete connection");
       }
     } catch (error) {
       console.error("Error deleting connection:", error);
+      notify.error("Failed to delete connection");
     } finally {
       setDeletingId(null);
+      setDeleteConfirmId(null);
     }
-  }, []);
+  }, [deleteConfirmId, notify]);
 
   const handleToggleConnectionActive = useCallback(async (id: string, isActive: boolean) => {
     setTogglingId(id);
@@ -778,6 +792,17 @@ export default function ProviderLimits() {
           setShowEditModal(false);
           setSelectedConnection(null);
         }}
+      />
+
+      <ConfirmModal
+        isOpen={!!deleteConfirmId}
+        onClose={() => deletingId ? undefined : setDeleteConfirmId(null)}
+        onConfirm={confirmDeleteConnection}
+        title="Delete connection"
+        message="Are you sure you want to delete this connection? This action cannot be undone."
+        confirmText="Delete"
+        variant="danger"
+        loading={deletingId !== null}
       />
     </div>
   );

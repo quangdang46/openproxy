@@ -552,6 +552,7 @@ async fn test_model(
                 .into_response();
             }
 
+            // OpenAI-style response: { choices: [...] }
             let has_choices = parsed
                 .as_ref()
                 .and_then(|value| value.get("choices"))
@@ -559,10 +560,30 @@ async fn test_model(
                 .map(|choices| !choices.is_empty())
                 .unwrap_or(false);
 
+            // Claude / Anthropic-style response: { content: [...], stop_reason }
+            // forwarded through the proxy as-is. Treat a non-empty `content`
+            // array as a successful round-trip too (Bug 8).
+            let has_anthropic_content = parsed
+                .as_ref()
+                .and_then(|value| value.get("content"))
+                .and_then(Value::as_array)
+                .map(|content| !content.is_empty())
+                .unwrap_or(false);
+
+            // Gemini-style response: { candidates: [...] }
+            let has_gemini_candidates = parsed
+                .as_ref()
+                .and_then(|value| value.get("candidates"))
+                .and_then(Value::as_array)
+                .map(|c| !c.is_empty())
+                .unwrap_or(false);
+
+            let ok_completion = has_choices || has_anthropic_content || has_gemini_candidates;
+
             Json(TestModelResponse {
-                ok: has_choices,
+                ok: ok_completion,
                 latency_ms: Some(latency_ms),
-                error: (!has_choices)
+                error: (!ok_completion)
                     .then(|| "Provider returned no completion choices for this model".to_string()),
                 status: Some(status),
             })

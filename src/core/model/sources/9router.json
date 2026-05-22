@@ -1,7 +1,7 @@
 {
   "source": "9router",
-  "ref": "v0.4.55",
-  "generatedAt": "2026-05-19T14:31:36.624Z",
+  "ref": "v0.4.59-1-ge1b821d",
+  "generatedAt": "2026-05-21T15:40:41.710Z",
   "providerIdToAlias": {
     "claude": "cc",
     "gemini": "gemini",
@@ -3210,8 +3210,18 @@
           "kind": "llm"
         },
         {
+          "id": "kimi-k2.6:cloud",
+          "name": "Kimi K2.6 (Cloud)",
+          "kind": "llm"
+        },
+        {
           "id": "glm-5",
           "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5.1:cloud",
+          "name": "GLM 5.1 (Cloud)",
           "kind": "llm"
         },
         {
@@ -3220,13 +3230,33 @@
           "kind": "llm"
         },
         {
+          "id": "minimax-m2.7:cloud",
+          "name": "MiniMax M2.7 (Cloud)",
+          "kind": "llm"
+        },
+        {
           "id": "glm-4.7-flash",
           "name": "GLM 4.7 Flash",
           "kind": "llm"
         },
         {
+          "id": "deepseek-v4-flash:cloud",
+          "name": "DeepSeek V4 Flash (Cloud)",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro:cloud",
+          "name": "DeepSeek V4 Pro (Cloud)",
+          "kind": "llm"
+        },
+        {
           "id": "qwen3.5",
           "name": "Qwen3.5",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3.5:cloud",
+          "name": "Qwen3.5 (Cloud)",
           "kind": "llm"
         }
       ]
@@ -4330,6 +4360,11 @@
           "id": "grok-3",
           "name": "Grok 3",
           "kind": "llm"
+        },
+        {
+          "id": "grok-2-image-1212",
+          "name": "Grok 2 Image",
+          "kind": "image"
         }
       ]
     },

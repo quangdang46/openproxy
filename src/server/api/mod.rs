@@ -389,10 +389,25 @@ async fn list_providers_api(State(state): State<AppState>, headers: HeaderMap) -
     }
 
     let snapshot = state.db.snapshot();
-    let connections: Vec<_> = snapshot
+    let connections: Vec<Value> = snapshot
         .provider_connections
         .iter()
-        .map(redact_provider_connection)
+        .map(|c| {
+            // Stamp `hasApiKey` so the dashboard can render an "on file"
+            // pill without needing the secret itself. The key is still
+            // redacted out of the payload via redact_provider_connection.
+            let has_api_key = c.api_key.as_deref().is_some_and(|k| !k.is_empty())
+                || c.provider_specific_data
+                    .get("apiKey")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+            let mut value =
+                serde_json::to_value(redact_provider_connection(c)).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = value.as_object_mut() {
+                obj.insert("hasApiKey".into(), Value::Bool(has_api_key));
+            }
+            value
+        })
         .collect();
     Json(json!({ "connections": connections })).into_response()
 }

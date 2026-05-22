@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Button } from "@/shared/components";
+import { useNotificationStore } from "@/store/notificationStore";
 
 interface CompatibleModelRowProps {
   modelId: string;
@@ -99,6 +100,7 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
   const [importing, setImporting] = useState<boolean>(false);
   const [testingModelId, setTestingModelId] = useState<string | null>(null);
   const [modelTestResults, setModelTestResults] = useState<Record<string, "ok" | "error">>({});
+  const notify = useNotificationStore();
 
   const handleTestModel = async (modelId: string) => {
     if (testingModelId) return;
@@ -149,7 +151,7 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
     const modelId = newModel.trim();
     const resolvedAlias = resolveAlias(modelId);
     if (!resolvedAlias) {
-      alert("All suggested aliases already exist. Please choose a different model or remove conflicting aliases.");
+      notify.warning("All suggested aliases already exist. Please choose a different model or remove conflicting aliases.");
       return;
     }
 
@@ -174,12 +176,12 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
       const res = await fetch(`/api/providers/${activeConnection.id}/models`);
       const data = await res.json();
       if (!res.ok) {
-        alert(data.error || "Failed to import models");
+        notify.error(data.error || "Failed to import models");
         return;
       }
       const models = data.models || [];
       if (models.length === 0) {
-        alert("No models returned from /models.");
+        notify.warning("No models returned from /models.");
         return;
       }
       let importedCount = 0;
@@ -192,7 +194,9 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
         importedCount += 1;
       }
       if (importedCount === 0) {
-        alert("No new models were added.");
+        notify.info("No new models were added.");
+      } else {
+        notify.success(`Imported ${importedCount} model(s).`);
       }
     } catch (error) {
       console.log("Error importing models:", error);

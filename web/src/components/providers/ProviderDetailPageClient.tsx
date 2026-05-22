@@ -3,6 +3,8 @@ import { useState, useEffect, useCallback } from "react";
 // import Link from "next/link";  // ported: next.js -> Astro+React
 // import Image from "next/image";  // ported: next.js -> Astro+React
 import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard } from "@/shared/components";
+import { ConfirmModal } from "@/shared/components/Modal";
+import { useNotificationStore } from "@/store/notificationStore";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, THINKING_CONFIG } from "@/shared/constants/providers";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
@@ -58,6 +60,12 @@ export default function ProviderDetailPageClient() {
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
   const [disabledModelIds, setDisabledModelIds] = useState([]);
   const { copied, copy } = useCopyToClipboard();
+  const notify = useNotificationStore();
+  const [deleteConnTarget, setDeleteConnTarget] = useState<any>(null);
+  const [deletingConn, setDeletingConn] = useState<boolean>(false);
+  const [deleteNodeTarget, setDeleteNodeTarget] = useState<{ name: string; type: string } | null>(null);
+  const [deletingNode, setDeletingNode] = useState<boolean>(false);
+  const [disableAllTarget, setDisableAllTarget] = useState<string[] | null>(null);
 
   const providerInfo = providerNode
     ? {
@@ -117,18 +125,31 @@ export default function ProviderDetailPageClient() {
     }
   };
 
-  const handleDisableAll = async (ids) => {
+  const handleDisableAll = (ids) => {
     if (!ids.length) return;
-    if (!confirm(`Disable all ${ids.length} model(s)?`)) return;
+    setDisableAllTarget(ids);
+  };
+
+  const confirmDisableAll = async () => {
+    const ids = disableAllTarget;
+    if (!ids || !ids.length) return;
     try {
       const res = await fetch("/api/models/disabled", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providerAlias: providerStorageAlias, ids }),
       });
-      if (res.ok) await fetchDisabledModels();
+      if (res.ok) {
+        await fetchDisabledModels();
+        notify.success(`Disabled ${ids.length} model(s)`);
+      } else {
+        notify.error("Failed to disable models");
+      }
     } catch (error) {
       console.log("Error disabling all models:", error);
+      notify.error("Failed to disable models");
+    } finally {
+      setDisableAllTarget(null);
     }
   };
 
@@ -326,7 +347,7 @@ export default function ProviderDetailPageClient() {
         await fetchAliases();
       } else {
         const data = await res.json();
-        alert(data.error || "Failed to set alias");
+        notify.error(data.error || "Failed to set alias");
       }
     } catch (error) {
       console.log("Error setting alias:", error);
@@ -346,15 +367,28 @@ export default function ProviderDetailPageClient() {
     }
   };
 
-  const handleDelete = async (id) => {
-    if (!confirm("Delete this connection?")) return;
+  const handleDelete = (connection) => {
+    setDeleteConnTarget(connection);
+  };
+
+  const confirmDeleteConnection = async () => {
+    const target = deleteConnTarget;
+    if (!target) return;
+    setDeletingConn(true);
     try {
-      const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/providers/${target.id}`, { method: "DELETE" });
       if (res.ok) {
-        setConnections(connections.filter(c => c.id !== id));
+        setConnections((prev) => prev.filter((c) => c.id !== target.id));
+        notify.success("Connection deleted");
+      } else {
+        notify.error("Failed to delete connection");
       }
     } catch (error) {
       console.log("Error deleting connection:", error);
+      notify.error("Failed to delete connection");
+    } finally {
+      setDeletingConn(false);
+      setDeleteConnTarget(null);
     }
   };
 
@@ -522,7 +556,7 @@ export default function ProviderDetailPageClient() {
           failed += 1;
         }
       }
-      if (failed > 0) alert(`Updated with ${failed} failed request(s).`);
+      if (failed > 0) notify.error(`Updated with ${failed} failed request(s).`);
       await fetchConnections();
       setShowBulkProxyModal(false);
     } finally {
@@ -538,7 +572,7 @@ export default function ProviderDetailPageClient() {
   const handleApplyOneToOne = () => {
     const activePools = proxyPools.filter((p) => p.isActive === true);
     if (activePools.length === 0) {
-      alert("No active proxy pools available.");
+      notify.warning("No active proxy pools available.");
       return;
     }
     const targets = connections.map((c, i) => ({
@@ -588,7 +622,7 @@ export default function ProviderDetailPageClient() {
                   setSelectedConnection(conn);
                   setShowEditModal(true);
                 }}
-                onDelete={() => handleDelete(conn.id)}
+                onDelete={() => handleDelete(conn)}
               />
             </div>
           </div>
@@ -963,17 +997,10 @@ export default function ProviderDetailPageClient() {
                 size="sm"
                 variant="secondary"
                 icon="delete"
-                onClick={async () => {
-                  if (!confirm(`Delete this ${isAnthropicCompatible ? "Anthropic" : "OpenAI"} Compatible node?`)) return;
-                  try {
-                    const res = await fetch(`/api/provider-nodes/${providerId}`, { method: "DELETE" });
-                    if (res.ok) {
-                      router.push("/dashboard/providers");
-                    }
-                  } catch (error) {
-                    console.log("Error deleting provider node:", error);
-                  }
-                }}
+                onClick={() => setDeleteNodeTarget({
+                  name: providerInfo?.name || providerId,
+                  type: isAnthropicCompatible ? "Anthropic" : "OpenAI",
+                })}
                 className="w-full sm:w-auto"
               >
                 Delete
@@ -1240,6 +1267,53 @@ export default function ProviderDetailPageClient() {
           onClose={() => setShowAddCustomModel(false)}
         />
       )}
+      <ConfirmModal
+        isOpen={!!deleteConnTarget}
+        onClose={() => setDeleteConnTarget(null)}
+        onConfirm={confirmDeleteConnection}
+        title="Delete connection"
+        message={deleteConnTarget ? <>Are you sure you want to delete connection <code>{deleteConnTarget.name || deleteConnTarget.email || deleteConnTarget.id}</code>? This cannot be undone.</> : null}
+        confirmText="Delete"
+        variant="danger"
+        loading={deletingConn}
+      />
+      <ConfirmModal
+        isOpen={!!deleteNodeTarget}
+        onClose={() => setDeleteNodeTarget(null)}
+        onConfirm={async () => {
+          if (!deleteNodeTarget) return;
+          setDeletingNode(true);
+          try {
+            const res = await fetch(`/api/provider-nodes/${providerId}`, { method: "DELETE" });
+            if (res.ok) {
+              notify.success("Compatible node deleted");
+              router.push("/dashboard/providers");
+            } else {
+              notify.error("Failed to delete node");
+            }
+          } catch (error) {
+            console.log("Error deleting provider node:", error);
+            notify.error("Failed to delete node");
+          } finally {
+            setDeletingNode(false);
+            setDeleteNodeTarget(null);
+          }
+        }}
+        title="Delete compatible node"
+        message={deleteNodeTarget ? <>Delete this {deleteNodeTarget.type} Compatible node <code>{deleteNodeTarget.name}</code>?</> : null}
+        confirmText="Delete"
+        variant="danger"
+        loading={deletingNode}
+      />
+      <ConfirmModal
+        isOpen={!!disableAllTarget}
+        onClose={() => setDisableAllTarget(null)}
+        onConfirm={confirmDisableAll}
+        title="Disable all models"
+        message={disableAllTarget ? <>Disable all <strong>{disableAllTarget.length}</strong> model(s) for this provider?</> : null}
+        confirmText="Disable all"
+        variant="danger"
+      />
     </div>
   );
 }
