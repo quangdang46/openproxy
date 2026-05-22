@@ -1,6 +1,6 @@
 {
   "name": "@openprx/openproxy",
-  "version": "0.1.6",
+  "version": "0.1.0",
   "description": "OpenProxy — single-binary AI router with embedded web dashboard. Routes Claude Code, Codex, Cursor, Cline, and other AI CLI tools to 40+ providers with auto-fallback and quota tracking.",
   "keywords": [
     "ai",
@@ -33,9 +33,9 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@openprx/openproxy-linux-x64": "0.1.6",
-    "@openprx/openproxy-linux-arm64": "0.1.6",
-    "@openprx/openproxy-darwin-x64": "0.1.6",
-    "@openprx/openproxy-darwin-arm64": "0.1.6"
+    "@openprx/openproxy-linux-x64": "0.1.0",
+    "@openprx/openproxy-linux-arm64": "0.1.0",
+    "@openprx/openproxy-darwin-x64": "0.1.0",
+    "@openprx/openproxy-darwin-arm64": "0.1.0"
   }
 }
