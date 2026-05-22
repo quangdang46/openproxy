@@ -8,6 +8,7 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import Button from "./Button";
 import AnthropicSpike from "./AnthropicSpike";
 import { ConfirmModal } from "./Modal";
+import { useNotificationStore } from "@/store/notificationStore";
 import React from "react";
 
 /**
@@ -96,6 +97,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
   const [updateInfo, setUpdateInfo] = useState<{ latestVersion: string } | null>(null);
   const [showUpdateModal, setShowUpdateModal] = useState(false);
   const [isUpdating, setIsUpdating] = useState(false);
+  const notify = useNotificationStore();
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [enableTranslator, setEnableTranslator] = useState(false);
   const { copied, copy } = useCopyToClipboard(2000);
@@ -132,7 +134,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
       const res = await fetch("/api/version/update", { method: "POST" });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
-        alert(data.message || "Update failed. Please run the install command manually.");
+        notify.error(data.message || "Update failed. Please run the install command manually.");
         setIsUpdating(false);
         return;
       }
@@ -352,26 +354,6 @@ export default function Sidebar({ onClose }: SidebarProps) {
                 </a>
               ) : null;
             })}
-
-            {/* Settings */}
-            <a
-              href="/dashboard/profile"
-              onClick={onClose}
-              className={cn(
-                NAV_ITEM_BASE,
-                isActive("/dashboard/profile") ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
-              )}
-            >
-              <span
-                className={cn(
-                  "material-symbols-outlined text-[18px]",
-                  isActive("/dashboard/profile") ? "fill-1" : ""
-                )}
-              >
-                settings
-              </span>
-              <span className="text-[13px]">Settings</span>
-            </a>
           </div>
         </nav>
 

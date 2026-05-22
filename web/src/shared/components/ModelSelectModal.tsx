@@ -62,7 +62,7 @@ interface ModelSelectModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSelect: (model: Model) => void;
-  selectedModel?: string;
+  selectedModel?: string | string[];
   activeProviders?: ActiveProvider[];
   title?: string;
   modelAliases?: Record<string, string>;
@@ -420,7 +420,9 @@ export default function ModelSelectModal({
             </div>
             <div className="flex flex-wrap gap-1.5">
               {filteredCombos.map((combo) => {
-                const isSelected = selectedModel === combo.name;
+                const isSelected = Array.isArray(selectedModel)
+                  ? selectedModel.includes(combo.name)
+                  : selectedModel === combo.name;
                 return (
                   <button
                     key={combo.id}
@@ -460,7 +462,9 @@ export default function ModelSelectModal({
 
             <div className="flex flex-wrap gap-1.5">
               {group.models.map((model) => {
-                const isSelected = selectedModel === model.value;
+                const isSelected = Array.isArray(selectedModel)
+                  ? selectedModel.includes(model.value)
+                  : selectedModel === model.value;
                 const isPlaceholder = model.isPlaceholder;
                 return (
                   <button

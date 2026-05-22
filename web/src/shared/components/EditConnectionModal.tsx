@@ -23,6 +23,8 @@ interface Connection {
   authType?: string;
   provider?: string;
   providerSpecificData?: ProviderSpecificData;
+  /** Server-side flag — true if a key is already on file (never includes the secret). */
+  hasApiKey?: boolean;
 }
 
 interface ProxyPool {
@@ -219,19 +221,33 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
                 type="password"
                 value={formData.apiKey}
                 onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
-                placeholder="Enter new API key"
-                hint="Leave blank to keep the current API key."
+                placeholder={connection.hasApiKey ? "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 (saved — leave blank to keep)" : "Enter new API key"}
+                hint={connection.hasApiKey
+                  ? "A key is already stored. Leave blank to keep it, or type a new one to replace."
+                  : "Required."}
                 className="flex-1"
               />
               <div className="pt-6">
-                <Button onClick={handleValidate} disabled={!formData.apiKey || validating || saving} variant="secondary">
-                  {validating ? "Checking..." : "Check"}
+                <Button
+                  onClick={connection.hasApiKey && !formData.apiKey ? handleTest : handleValidate}
+                  disabled={(!formData.apiKey && !connection.hasApiKey) || validating || saving || testing}
+                  variant="secondary"
+                >
+                  {validating || testing ? "Checking..." : "Check"}
                 </Button>
               </div>
             </div>
+            {connection.hasApiKey && !formData.apiKey && (
+              <Badge variant="info">Key on file</Badge>
+            )}
             {validationResult && (
               <Badge variant={validationResult === "success" ? "success" : "error"}>
                 {validationResult === "success" ? "Valid" : "Invalid"}
+              </Badge>
+            )}
+            {testResult && !validationResult && (
+              <Badge variant={testResult === "success" ? "success" : "error"}>
+                {testResult === "success" ? "Saved key works" : "Saved key failed test"}
               </Badge>
             )}
           </>
