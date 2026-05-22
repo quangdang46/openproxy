@@ -2201,8 +2201,18 @@
           "kind": "llm"
         },
         {
+          "id": "kimi-k2.6:cloud",
+          "name": "Kimi K2.6 (Cloud)",
+          "kind": "llm"
+        },
+        {
           "id": "glm-5",
           "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5.1:cloud",
+          "name": "GLM 5.1 (Cloud)",
           "kind": "llm"
         },
         {
@@ -2211,13 +2221,33 @@
           "kind": "llm"
         },
         {
+          "id": "minimax-m2.7:cloud",
+          "name": "MiniMax M2.7 (Cloud)",
+          "kind": "llm"
+        },
+        {
           "id": "glm-4.7-flash",
           "name": "GLM 4.7 Flash",
           "kind": "llm"
         },
         {
+          "id": "deepseek-v4-flash:cloud",
+          "name": "DeepSeek V4 Flash (Cloud)",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro:cloud",
+          "name": "DeepSeek V4 Pro (Cloud)",
+          "kind": "llm"
+        },
+        {
           "id": "qwen3.5",
           "name": "Qwen3.5",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3.5:cloud",
+          "name": "Qwen3.5 (Cloud)",
           "kind": "llm"
         }
       ]

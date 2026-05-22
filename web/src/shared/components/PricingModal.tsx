@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from "react";
 import { getDefaultPricing, formatCost } from "@/shared/constants/pricing";
+import { useNotificationStore } from "@/store/notificationStore";
+import { ConfirmModal } from "./Modal";
 
 interface PricingModalProps {
   isOpen: boolean;
@@ -13,6 +15,8 @@ export default function PricingModal({ isOpen, onClose, onSave }: PricingModalPr
   const [pricingData, setPricingData] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
+  const notify = useNotificationStore();
 
   useEffect(() => {
     if (isOpen) {
@@ -68,28 +72,34 @@ export default function PricingModal({ isOpen, onClose, onSave }: PricingModalPr
         onClose();
       } else {
         const error = await response.json();
-        alert(`Failed to save pricing: ${error.error}`);
+        notify.error(`Failed to save pricing: ${error.error}`);
       }
     } catch (error) {
       console.error("Failed to save pricing:", error);
-      alert("Failed to save pricing");
+      notify.error("Failed to save pricing");
     } finally {
       setSaving(false);
     }
   };
 
-  const handleReset = async () => {
-    if (!confirm("Reset all pricing to defaults? This cannot be undone.")) return;
+  const handleReset = () => {
+    setResetOpen(true);
+  };
 
+  const confirmReset = async () => {
+    setResetOpen(false);
     try {
       const response = await fetch("/api/pricing", { method: "DELETE" });
       if (response.ok) {
         const defaults = getDefaultPricing();
         setPricingData(defaults);
+        notify.success("Pricing reset to defaults");
+      } else {
+        notify.error("Failed to reset pricing");
       }
     } catch (error) {
       console.error("Failed to reset pricing:", error);
-      alert("Failed to reset pricing");
+      notify.error("Failed to reset pricing");
     }
   };
 
@@ -209,6 +219,15 @@ export default function PricingModal({ isOpen, onClose, onSave }: PricingModalPr
           </div>
         </div>
       </div>
+      <ConfirmModal
+        isOpen={resetOpen}
+        onClose={() => setResetOpen(false)}
+        onConfirm={confirmReset}
+        title="Reset pricing?"
+        message="Reset all pricing to defaults? This cannot be undone."
+        confirmText="Reset"
+        variant="danger"
+      />
     </div>
   );
 }

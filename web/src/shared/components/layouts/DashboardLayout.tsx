@@ -13,24 +13,32 @@ interface DashboardLayoutProps {
 function getToastStyle(type: string) {
   if (type === "success") {
     return {
-      wrapper: "border-success-text/30 bg-success-bg text-success-text",
+      wrapper: "bg-surface border border-hairline before:bg-success-text",
+      iconColor: "text-success-text",
+      titleColor: "text-ink",
       icon: "check_circle",
     };
   }
   if (type === "error") {
     return {
-      wrapper: "border-[color:var(--color-danger)]/30 bg-[color:var(--color-danger)]/10 text-[color:var(--color-danger)]",
+      wrapper: "bg-surface border border-hairline before:bg-brand-coral",
+      iconColor: "text-brand-coral",
+      titleColor: "text-ink",
       icon: "error",
     };
   }
   if (type === "warning") {
     return {
-      wrapper: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+      wrapper: "bg-surface border border-hairline before:bg-accent-amber",
+      iconColor: "text-accent-amber",
+      titleColor: "text-ink",
       icon: "warning",
     };
   }
   return {
-    wrapper: "border-brand-blue-deep/30 bg-brand-blue-200 text-brand-blue-deep",
+    wrapper: "bg-surface border border-hairline before:bg-brand-blue-deep",
+    iconColor: "text-brand-blue-deep",
+    titleColor: "text-ink",
     icon: "info",
   };
 }
@@ -43,6 +51,10 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
   useEffect(() => {
     setMounted(true);
     setPathname(window.location.pathname);
+    document.body.classList.add("dashboard-ready");
+    return () => {
+      document.body.classList.remove("dashboard-ready");
+    };
   }, []);
 
   const notifications = useNotificationStore((state) => state.notifications);
@@ -56,19 +68,19 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
           return (
             <div
               key={n.id}
-              className={`rounded-mini-md border px-3 py-2 shadow-modal backdrop-blur-sm ${style.wrapper}`}
+              className={`relative overflow-hidden rounded-mini-md pl-4 pr-3 py-3 shadow-modal before:absolute before:left-0 before:top-0 before:bottom-0 before:w-[3px] ${style.wrapper}`}
             >
-              <div className="flex items-start gap-2">
-                <span className="material-symbols-outlined text-[18px] leading-5">{style.icon}</span>
+              <div className="flex items-start gap-2.5">
+                <span className={`material-symbols-outlined text-[20px] leading-5 ${style.iconColor}`}>{style.icon}</span>
                 <div className="min-w-0 flex-1">
-                  {n.title ? <p className="text-xs font-semibold mb-0.5">{n.title}</p> : null}
-                  <p className="text-xs whitespace-pre-wrap break-words">{n.message}</p>
+                  {n.title ? <p className={`text-[13px] font-semibold mb-0.5 ${style.titleColor}`}>{n.title}</p> : null}
+                  <p className="text-[12px] leading-snug text-text-muted whitespace-pre-wrap break-words">{n.message}</p>
                 </div>
                 {n.dismissible ? (
                   <button
                     type="button"
                     onClick={() => removeNotification(n.id)}
-                    className="text-current/70 hover:text-current"
+                    className="text-text-muted hover:text-ink transition-colors"
                     aria-label="Dismiss notification"
                   >
                     <span className="material-symbols-outlined text-[16px]">close</span>

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { Button } from "@/shared/components";
+import { useNotificationStore } from "@/store/notificationStore";
 
 interface PassthroughModelRowProps {
   modelId: string;
@@ -97,6 +98,7 @@ interface PassthroughModelsSectionProps {
 export default function PassthroughModelsSection({ providerAlias, modelAliases, copied, onCopy, onSetAlias, onDeleteAlias }: PassthroughModelsSectionProps) {
   const [newModel, setNewModel] = useState<string>("");
   const [adding, setAdding] = useState<boolean>(false);
+  const notify = useNotificationStore();
 
   // Filter aliases for this provider - models are persisted via alias
   const providerAliases = Object.entries(modelAliases).filter(
@@ -122,7 +124,7 @@ export default function PassthroughModelsSection({ providerAlias, modelAliases, 
     
     // Check if alias already exists
     if (modelAliases[defaultAlias]) {
-      alert(`Alias "${defaultAlias}" already exists. Please use a different model or edit existing alias.`);
+      notify.warning(`Alias "${defaultAlias}" already exists. Please use a different model or edit existing alias.`);
       return;
     }
     

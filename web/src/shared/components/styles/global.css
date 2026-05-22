@@ -790,3 +790,53 @@ button {
     linear-gradient(to right, rgba(250, 249, 245, 0.04) 1px, transparent 1px),
     linear-gradient(to bottom, rgba(250, 249, 245, 0.04) 1px, transparent 1px);
 }
+
+/* ============================================================
+   Dashboard SSR skeleton — prevents the brief "menu jump" on
+   first paint while the React dashboard layout hydrates. The
+   React layout adds .dashboard-ready on <body> once mounted,
+   which fades the skeleton out.
+   ============================================================ */
+#dashboard-skeleton {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  background-color: var(--color-canvas);
+  z-index: 0;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 200ms ease;
+}
+#dashboard-skeleton .ds-sidebar {
+  display: none;
+  width: 18rem;
+  flex-direction: column;
+  border-right: 1px solid var(--color-hairline-soft);
+  padding: 1.5rem 1rem;
+  gap: 0.75rem;
+}
+@media (min-width: 1024px) {
+  #dashboard-skeleton .ds-sidebar { display: flex; }
+}
+#dashboard-skeleton .ds-sidebar-head {
+  height: 2.5rem;
+  width: 60%;
+  border-radius: 8px;
+  background-color: var(--color-surface-card);
+}
+#dashboard-skeleton .ds-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+#dashboard-skeleton .ds-sidebar-item {
+  height: 1.75rem;
+  border-radius: 8px;
+  background-color: var(--color-surface-soft);
+}
+#dashboard-skeleton .ds-main { flex: 1 1 auto; }
+body.dashboard-ready #dashboard-skeleton {
+  opacity: 0;
+  pointer-events: none;
+}

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Card } from "@/shared/components";
+import { ConfirmModal } from "@/shared/components/Modal";
 
 // ──────────────────────────────────────────────────────────────────────
 // Types — mirror src/db/backups.rs and src/server/api/db_backups.rs.
@@ -67,6 +68,9 @@ export default function DbBackupsPageClient() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<StatusMessage | null>(null);
   const [pendingRestore, setPendingRestore] = useState<BackupInfo | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<BackupInfo | null>(null);
+  const [pendingCleanup, setPendingCleanup] = useState<boolean>(false);
+  const [pendingImport, setPendingImport] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchList = useCallback(async () => {
@@ -113,30 +117,37 @@ export default function DbBackupsPageClient() {
     }
   }, [fetchList]);
 
-  const handleDelete = useCallback(
-    async (id: string) => {
-      if (!confirm(`Delete backup ${id}?`)) return;
-      setBusy(true);
-      setStatus(null);
-      try {
-        const res = await fetch(`/api/db-backups/${encodeURIComponent(id)}`, { method: "DELETE" });
-        if (!res.ok) throw new Error(`Server returned ${res.status}`);
-        setStatus({ type: "success", text: "Backup deleted." });
-        await fetchList();
-      } catch (err) {
-        setStatus({
-          type: "error",
-          text: err instanceof Error ? `Failed to delete: ${err.message}` : "Failed to delete",
-        });
-      } finally {
-        setBusy(false);
-      }
-    },
-    [fetchList]
-  );
+  const handleDelete = useCallback((backup: BackupInfo) => {
+    setPendingDelete(backup);
+  }, []);
 
-  const handleCleanup = useCallback(async () => {
-    if (!confirm("Prune backups using the current retention settings?")) return;
+  const confirmDelete = useCallback(async () => {
+    const target = pendingDelete;
+    if (!target) return;
+    setPendingDelete(null);
+    setBusy(true);
+    setStatus(null);
+    try {
+      const res = await fetch(`/api/db-backups/${encodeURIComponent(target.id)}`, { method: "DELETE" });
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      setStatus({ type: "success", text: "Backup deleted." });
+      await fetchList();
+    } catch (err) {
+      setStatus({
+        type: "error",
+        text: err instanceof Error ? `Failed to delete: ${err.message}` : "Failed to delete",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [pendingDelete, fetchList]);
+
+  const handleCleanup = useCallback(() => {
+    setPendingCleanup(true);
+  }, []);
+
+  const confirmCleanup = useCallback(async () => {
+    setPendingCleanup(false);
     setBusy(true);
     setStatus(null);
     try {
@@ -211,42 +222,42 @@ export default function DbBackupsPageClient() {
       const file = event.target.files?.[0];
       event.target.value = "";
       if (!file) return;
-      if (
-        !confirm(
-          `Import ${file.name}? This replaces the current database. A pre-import snapshot will be created automatically.`
-        )
-      ) {
-        return;
-      }
-      setBusy(true);
-      setStatus(null);
-      try {
-        const form = new FormData();
-        form.append("file", file);
-        const res = await fetch("/api/db-backups/import", { method: "POST", body: form });
-        if (!res.ok) {
-          const text = await res.text();
-          throw new Error(text || `Server returned ${res.status}`);
-        }
-        const json = await res.json();
-        setStatus({
-          type: "success",
-          text: `Imported ${file.name} — ${json?.providerCount ?? 0} providers, ${
-            json?.comboCount ?? 0
-          } combos, ${json?.apiKeyCount ?? 0} API keys.`,
-        });
-        await fetchList();
-      } catch (err) {
-        setStatus({
-          type: "error",
-          text: err instanceof Error ? `Import failed: ${err.message}` : "Import failed",
-        });
-      } finally {
-        setBusy(false);
-      }
+      setPendingImport(file);
     },
-    [fetchList]
+    []
   );
+
+  const confirmImport = useCallback(async () => {
+    const file = pendingImport;
+    if (!file) return;
+    setPendingImport(null);
+    setBusy(true);
+    setStatus(null);
+    try {
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/db-backups/import", { method: "POST", body: form });
+      if (!res.ok) {
+        const text = await res.text();
+        throw new Error(text || `Server returned ${res.status}`);
+      }
+      const json = await res.json();
+      setStatus({
+        type: "success",
+        text: `Imported ${file.name} — ${json?.providerCount ?? 0} providers, ${
+          json?.comboCount ?? 0
+        } combos, ${json?.apiKeyCount ?? 0} API keys.`,
+      });
+      await fetchList();
+    } catch (err) {
+      setStatus({
+        type: "error",
+        text: err instanceof Error ? `Import failed: ${err.message}` : "Import failed",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }, [pendingImport, fetchList]);
 
   const backups = data?.backups ?? [];
 
@@ -357,7 +368,7 @@ export default function DbBackupsPageClient() {
                         </Button>
                         <Button
                           variant="secondary"
-                          onClick={() => void handleDelete(b.id)}
+                          onClick={() => handleDelete(b)}
                           disabled={busy}
                         >
                           Delete
@@ -371,36 +382,61 @@ export default function DbBackupsPageClient() {
         </div>
       </Card>
 
-      {pendingRestore && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-          onClick={() => setPendingRestore(null)}
-        >
-          <div
-            className="max-w-md rounded-lg bg-surface-card p-6 shadow-xl"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h2 className="text-lg font-semibold text-ink">Restore snapshot?</h2>
-            <p className="mt-2 text-sm text-body">
+      <ConfirmModal
+        isOpen={!!pendingRestore}
+        onClose={() => setPendingRestore(null)}
+        onConfirm={confirmRestore}
+        title="Restore snapshot?"
+        message={pendingRestore ? (
+          <>
+            <p>
               This will replace the current database with the contents of{" "}
               <span className="font-mono">{pendingRestore.id}</span>. A pre-restore safety
               snapshot will be created first.
             </p>
-            <p className="mt-2 text-sm text-body">
+            <p className="mt-2">
               {pendingRestore.providerCount} providers · {pendingRestore.comboCount} combos ·{" "}
               {pendingRestore.apiKeyCount} API keys.
             </p>
-            <div className="mt-4 flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setPendingRestore(null)}>
-                Cancel
-              </Button>
-              <Button onClick={() => void confirmRestore()} disabled={busy}>
-                Restore
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+          </>
+        ) : null}
+        confirmText="Restore"
+        variant="danger"
+        loading={busy}
+      />
+
+      <ConfirmModal
+        isOpen={!!pendingDelete}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={confirmDelete}
+        title="Delete backup?"
+        message={pendingDelete ? <>Delete snapshot <span className="font-mono">{pendingDelete.id}</span>? This cannot be undone.</> : null}
+        confirmText="Delete"
+        variant="danger"
+        loading={busy}
+      />
+
+      <ConfirmModal
+        isOpen={pendingCleanup}
+        onClose={() => setPendingCleanup(false)}
+        onConfirm={confirmCleanup}
+        title="Prune backups?"
+        message="Prune backups using the current retention settings? Snapshots beyond the retention window will be removed."
+        confirmText="Prune"
+        variant="danger"
+        loading={busy}
+      />
+
+      <ConfirmModal
+        isOpen={!!pendingImport}
+        onClose={() => setPendingImport(null)}
+        onConfirm={confirmImport}
+        title="Import database?"
+        message={pendingImport ? <>Import <span className="font-mono">{pendingImport.name}</span>? This replaces the current database. A pre-import snapshot will be created automatically.</> : null}
+        confirmText="Import"
+        variant="danger"
+        loading={busy}
+      />
     </div>
   );
 }
