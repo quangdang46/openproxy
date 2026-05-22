@@ -401,8 +401,8 @@ async fn list_providers_api(State(state): State<AppState>, headers: HeaderMap) -
                     .get("apiKey")
                     .and_then(|v| v.as_str())
                     .is_some_and(|s| !s.is_empty());
-            let mut value = serde_json::to_value(redact_provider_connection(c))
-                .unwrap_or_else(|_| json!({}));
+            let mut value =
+                serde_json::to_value(redact_provider_connection(c)).unwrap_or_else(|_| json!({}));
             if let Some(obj) = value.as_object_mut() {
                 obj.insert("hasApiKey".into(), Value::Bool(has_api_key));
             }
