@@ -35,7 +35,7 @@
   "optionalDependencies": {
     "@openprx/openproxy-linux-x64": "0.1.0",
     "@openprx/openproxy-linux-arm64": "0.1.0",
-    "@openprx/openproxy-darwin-x64": "0.1.0",
+    "@openprx/openproxy-darwin-x64": "0.1.1",
     "@openprx/openproxy-darwin-arm64": "0.1.0"
   }
 }
