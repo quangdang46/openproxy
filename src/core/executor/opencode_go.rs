@@ -4,6 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYP
 use serde_json::Value;
 
 use crate::core::proxy::ProxyTarget;
+use crate::core::translator::helpers::openai_helper::normalize_developer_role;
 use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
@@ -145,6 +146,9 @@ impl OpenCodeGoExecutor {
     ) -> Result<OpenCodeGoExecutorResponse, OpenCodeGoExecutorError> {
         let url = self.build_url(&request.model);
         let headers = self.build_headers(&request.credentials, request.stream, &request.model);
+
+        // Normalize developer→system role for providers that reject role:developer (DeepSeek, etc.)
+        normalize_developer_role(&mut request.body);
 
         let client = self.pool.get("opencode-go", request.proxy.as_ref())?;
         let response = client

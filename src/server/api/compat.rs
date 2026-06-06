@@ -97,7 +97,7 @@ async fn forward_compat(
 
     match mode {
         CompatMode::Responses { .. } => with_cors_response(convert_to_responses_api(response).await),
-        CompatMode::Messages => with_cors_response(response),
+        CompatMode::Messages => with_cors_response(convert_to_messages_api(response).await),
     }
 }
 
@@ -767,6 +767,465 @@ fn openai_chunk_to_responses(
                 "response": skeleton,
             }),
         ));
+    }
+
+    frames
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// Anthropic Messages API format converter
+// ══════════════════════════════════════════════════════════════════════════
+
+/// Convert an OpenAI chat-completion response (streaming or non-streaming) to
+/// the Anthropic Messages API format.
+async fn convert_to_messages_api(response: Response) -> Response {
+    let status = response.status();
+    if !status.is_success() {
+        return response;
+    }
+
+    let is_sse = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream") || ct.contains("text/plain"));
+
+    if !is_sse {
+        let (parts, body) = response.into_parts();
+        let body_bytes = match body.collect().await {
+            Ok(col) => col.to_bytes(),
+            Err(_) => return Response::from_parts(parts, Body::empty()),
+        };
+        let Ok(chat_completion) = serde_json::from_slice::<Value>(&body_bytes) else {
+            return Response::from_parts(parts, Body::from(body_bytes));
+        };
+        let messages_json = chat_completion_to_messages_json(&chat_completion);
+        return Json(messages_json).into_response();
+    }
+
+    let (parts, body) = response.into_parts();
+    let data_stream = body.into_data_stream();
+    let converted = async_stream::stream! {
+        let buf = &mut String::new();
+        let mut conv_state = MessagesSseState::new();
+
+        let mut stream = data_stream;
+        loop {
+            let next = stream.next().await;
+            match next {
+                Some(Ok(chunk)) => {
+                    let chunk_str = String::from_utf8_lossy(&chunk);
+                    buf.push_str(&chunk_str);
+
+                    loop {
+                        if let Some(frame_end) = buf.find("\n\n") {
+                            let frame = buf[..frame_end].to_string();
+                            buf.drain(..frame_end + 2);
+
+                            let frame = frame.trim();
+                            if frame.is_empty() || frame.starts_with(':') {
+                                continue;
+                            }
+
+                            let json_str = frame.strip_prefix("data:").unwrap_or(&frame).trim();
+                            if json_str == "[DONE]" {
+                                break;
+                            }
+
+                            if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
+                                let events = openai_chunk_to_messages(&mut conv_state, &chunk_value);
+                                for event_bytes in events {
+                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Some(Err(_)) | None => break,
+            }
+        }
+
+        // Send message_stop if not already sent
+        if !conv_state.stop_sent {
+            conv_state.stop_sent = true;
+            yield Ok::<Bytes, std::io::Error>(Bytes::from("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"));
+        }
+    };
+
+    let body = Body::from_stream(converted);
+    let mut resp = Response::new(body);
+    *resp.status_mut() = status;
+
+    for (name, value) in &parts.headers {
+        if name.as_str() != "content-length"
+            && name.as_str() != "content-type"
+            && name.as_str() != "transfer-encoding"
+        {
+            resp.headers_mut().insert(name, value.clone());
+        }
+    }
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+
+    resp
+}
+
+/// Map OpenAI finish_reason to Anthropic stop_reason.
+fn stop_reason_map(finish_reason: Option<&str>) -> Value {
+    match finish_reason {
+        Some("stop") => json!("end_turn"),
+        Some("length") => json!("max_tokens"),
+        Some("tool_calls") => json!("tool_use"),
+        Some(other) => json!(other),
+        None => Value::Null,
+    }
+}
+
+/// Convert OpenAI usage to Anthropic usage format.
+fn usage_to_anthropic(usage: Option<&Value>) -> Option<Value> {
+    let usage = usage?;
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    Some(json!({
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }))
+}
+
+/// Convert a completed chat-completion JSON object to Anthropic Messages API JSON.
+fn chat_completion_to_messages_json(source: &Value) -> Value {
+    let msg_id = source
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|id| {
+            if id.starts_with("chatcmpl-") {
+                format!("msg_{}", &id[9..])
+            } else {
+                format!("msg_{}", id)
+            }
+        })
+        .unwrap_or_else(|| format!("msg_{:x}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+    let model = source.get("model").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut content = Vec::new();
+    let mut stop_reason = Value::Null;
+    let mut usage = None;
+
+    if let Some(choices) = source.get("choices").and_then(|v| v.as_array()) {
+        if let Some(first_choice) = choices.first() {
+            stop_reason = stop_reason_map(first_choice.get("finish_reason").and_then(|v| v.as_str()));
+
+            if let Some(message) = first_choice.get("message") {
+                // reasoning_content → thinking block
+                if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()) {
+                    if !reasoning.is_empty() {
+                        content.push(json!({
+                            "type": "thinking",
+                            "thinking": reasoning,
+                            "signature": null,
+                        }));
+                    }
+                }
+
+                let text = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                if !text.is_empty() {
+                    content.push(json!({
+                        "type": "text",
+                        "text": text,
+                    }));
+                }
+            }
+        }
+    }
+
+    if content.is_empty() {
+        content.push(json!({
+            "type": "text",
+            "text": "",
+        }));
+    }
+
+    if let Some(u) = source.get("usage") {
+        usage = usage_to_anthropic(Some(u));
+    }
+
+    json!({
+        "id": msg_id,
+        "type": "message",
+        "role": "assistant",
+        "content": content,
+        "model": model,
+        "stop_reason": stop_reason,
+        "stop_sequence": null,
+        "usage": usage,
+    })
+}
+
+/// State machine for streaming chat.completion.chunk → Anthropic Messages API SSE.
+struct MessagesSseState {
+    started: bool,
+    msg_id: String,
+    model: String,
+
+    // Thinking block state
+    thinking_started: bool,
+    thinking_buf: String,
+    thinking_stopped: bool,
+
+    // Text block state
+    text_started: bool,
+    text_buf: String,
+    text_stopped: bool,
+
+    // Block index counter
+    block_idx: usize,
+
+    // Whether final events were sent
+    stop_sent: bool,
+}
+
+impl MessagesSseState {
+    fn new() -> Self {
+        Self {
+            started: false,
+            msg_id: String::new(),
+            model: String::new(),
+            thinking_started: false,
+            thinking_buf: String::new(),
+            thinking_stopped: false,
+            text_started: false,
+            text_buf: String::new(),
+            text_stopped: false,
+            block_idx: 0,
+            stop_sent: false,
+        }
+    }
+}
+
+/// Format an Anthropic Messages API SSE event frame.
+fn format_messages_sse_event(event: &str, data: &Value) -> Vec<u8> {
+    let json_str = serde_json::to_string(data).unwrap_or_default();
+    format!("event: {event}\ndata: {json_str}\n\n")
+        .into_bytes()
+}
+
+/// Convert a single chat.completion.chunk to Anthropic Messages API SSE events.
+fn openai_chunk_to_messages(
+    state: &mut MessagesSseState,
+    chunk: &Value,
+) -> Vec<Vec<u8>> {
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+
+    // ── Initialize on first chunk ──────────────────────────────────────────
+    if !state.started {
+        state.started = true;
+        state.msg_id = chunk
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|id| {
+                if id.starts_with("chatcmpl-") {
+                    format!("msg_{}", &id[9..])
+                } else {
+                    format!("msg_{}", id)
+                }
+            })
+            .unwrap_or_else(|| format!("msg_{:x}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        state.model = chunk
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // emit message_start
+        frames.push(format_messages_sse_event(
+            "message_start",
+            &json!({
+                "type": "message_start",
+                "message": {
+                    "id": state.msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": state.model,
+                    "stop_reason": null,
+                    "stop_sequence": null,
+                    "usage": { "input_tokens": 0, "output_tokens": 0 },
+                },
+            }),
+        ));
+    }
+
+    let Some(choices) = chunk.get("choices").and_then(|v| v.as_array()) else {
+        return frames;
+    };
+
+    for choice in choices {
+        let delta = choice
+            .get("delta")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let delta = Value::Object(delta);
+        let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str());
+
+        // ── Reasoning / thinking content ──────────────────────────────────────
+        if let Some(reasoning) = delta
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .filter(|r| !r.is_empty())
+        {
+            if !state.thinking_started {
+                state.thinking_started = true;
+                let idx = state.block_idx;
+                state.block_idx += 1;
+                frames.push(format_messages_sse_event(
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": {
+                            "type": "thinking",
+                            "thinking": "",
+                            "signature": null,
+                        },
+                    }),
+                ));
+            }
+
+            state.thinking_buf.push_str(reasoning);
+            let thinking_idx = if state.thinking_started && !state.text_started {
+                0
+            } else {
+                0
+            };
+            frames.push(format_messages_sse_event(
+                "content_block_delta",
+                &json!({
+                    "type": "content_block_delta",
+                    "index": thinking_idx,
+                    "delta": {
+                        "type": "thinking_delta",
+                        "thinking": reasoning,
+                    },
+                }),
+            ));
+        }
+
+        // ── Text content ──────────────────────────────────────────────────────
+        if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+            // Close thinking block if we're transitioning to text
+            if state.thinking_started && !state.thinking_stopped {
+                state.thinking_stopped = true;
+                frames.push(format_messages_sse_event(
+                    "content_block_stop",
+                    &json!({
+                        "type": "content_block_stop",
+                        "index": 0,
+                    }),
+                ));
+            }
+
+            if !state.text_started {
+                state.text_started = true;
+                let idx = state.block_idx;
+                state.block_idx += 1;
+                frames.push(format_messages_sse_event(
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": {
+                            "type": "text",
+                            "text": "",
+                        },
+                    }),
+                ));
+            }
+
+            state.text_buf.push_str(content);
+            if !content.is_empty() {
+                let text_idx = if state.thinking_started { 1 } else { 0 };
+                frames.push(format_messages_sse_event(
+                    "content_block_delta",
+                    &json!({
+                        "type": "content_block_delta",
+                        "index": text_idx,
+                        "delta": {
+                            "type": "text_delta",
+                            "text": content,
+                        },
+                    }),
+                ));
+            }
+        }
+
+        // ── Finish reason → close blocks + message_delta + message_stop ──────
+        if finish_reason.is_some() && !state.stop_sent {
+            // Close text block if open
+            if state.text_started && !state.text_stopped {
+                state.text_stopped = true;
+                let text_idx = if state.thinking_started { 1 } else { 0 };
+                frames.push(format_messages_sse_event(
+                    "content_block_stop",
+                    &json!({
+                        "type": "content_block_stop",
+                        "index": text_idx,
+                    }),
+                ));
+            }
+
+            // Close thinking block if still open
+            if state.thinking_started && !state.thinking_stopped {
+                state.thinking_stopped = true;
+                frames.push(format_messages_sse_event(
+                    "content_block_stop",
+                    &json!({
+                        "type": "content_block_stop",
+                        "index": 0,
+                    }),
+                ));
+            }
+
+            let stop_reason = stop_reason_map(finish_reason);
+            let usage = chunk
+                .get("usage")
+                .and_then(|u| usage_to_anthropic(Some(u)))
+                .unwrap_or(json!({ "input_tokens": 0, "output_tokens": 0 }));
+
+            frames.push(format_messages_sse_event(
+                "message_delta",
+                &json!({
+                    "type": "message_delta",
+                    "delta": {
+                        "stop_reason": stop_reason,
+                        "stop_sequence": null,
+                    },
+                    "usage": usage,
+                }),
+            ));
+
+            state.stop_sent = true;
+            frames.push(format_messages_sse_event(
+                "message_stop",
+                &json!({
+                    "type": "message_stop",
+                }),
+            ));
+        }
     }
 
     frames
