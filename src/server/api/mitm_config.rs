@@ -402,10 +402,117 @@ export default async function handler(req) {
 }
 "#;
 
+// ── POST /api/proxy-pools/cloudflare-deploy ────────────────────
+
+const RELAY_WORKER_CODE_CLOUDFLARE: &str = r#"
+export default {
+  async fetch(request, env, ctx) {
+    const target = request.headers.get("x-relay-target");
+    const relayPath = request.headers.get("x-relay-path") || "/";
+
+    if (!target) {
+      return new Response(JSON.stringify({ error: "Missing x-relay-target header" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    const targetUrl = target.replace(/\/$/, "") + relayPath;
+    const newRequestInit = {
+      method: request.method,
+      headers: new Headers(request.headers),
+    };
+
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      newRequestInit.body = request.body;
+      newRequestInit.duplex = "half";
+    }
+
+    newRequestInit.headers.delete("x-relay-target");
+    newRequestInit.headers.delete("x-relay-path");
+    newRequestInit.headers.delete("host");
+
+    try {
+      const response = await fetch(targetUrl, newRequestInit);
+      return new Response(response.body, {
+        status: response.status,
+        headers: response.headers,
+      });
+    } catch (error) {
+      return new Response(JSON.stringify({ error: error.message }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      });
+    }
+  },
+};
+"#;
+
+// ── POST /api/proxy-pools/deno-deploy ────────────────────────────
+
+const DENO_V2_API: &str = "https://api.deno.com/v2";
+
+const DENO_RELAY_CODE: &str = r#"Deno.serve(async (request) => {
+  const target = request.headers.get("x-relay-target");
+  const relayPath = request.headers.get("x-relay-path") || "/";
+
+  if (!target) {
+    return new Response(JSON.stringify({ error: "Missing x-relay-target header" }), {
+      status: 400,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  const targetUrl = target.replace(/\/$/, "") + relayPath;
+  const newHeaders = new Headers(request.headers);
+  newHeaders.delete("x-relay-target");
+  newHeaders.delete("x-relay-path");
+  newHeaders.delete("host");
+
+  const init = {
+    method: request.method,
+    headers: newHeaders,
+  };
+
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    init.body = request.body;
+    init.duplex = "half";
+  }
+
+  try {
+    const response = await fetch(targetUrl, init);
+    return new Response(response.body, {
+      status: response.status,
+      headers: response.headers,
+    });
+  } catch (error) {
+    return new Response(JSON.stringify({ error: error.message }), {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    });
+  }
+});"#;
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct VercelDeployRequest {
     vercel_token: Option<String>,
+    project_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudflareDeployRequest {
+    cloudflare_account_id: Option<String>,
+    cloudflare_api_token: Option<String>,
+    project_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DenoDeployRequest {
+    deno_token: Option<String>,
+    org_domain: Option<String>,
     project_name: Option<String>,
 }
 
@@ -672,6 +779,560 @@ fn vercel_deploy_failed_response(message: String) -> axum::response::Response {
         .into_response()
 }
 
+// ── POST /api/proxy-pools/cloudflare-deploy ──────────────────────────
+
+async fn cloudflare_deploy(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<CloudflareDeployRequest>,
+) -> axum::response::Response {
+    use crate::types::ProxyPool;
+
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let Some(account_id) = body
+        .cloudflare_account_id
+        .as_deref()
+        .filter(|v| !v.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Cloudflare Account ID is required"
+            })),
+        )
+            .into_response();
+    };
+
+    let Some(api_token) = body
+        .cloudflare_api_token
+        .as_deref()
+        .filter(|v| !v.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Cloudflare API Token is required"
+            })),
+        )
+            .into_response();
+    };
+
+    let project_name = body
+        .project_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_vercel_project_name);
+
+    let client = reqwest::Client::new();
+
+    // 1. Upload Worker Script via multipart form
+    let worker_script_url = format!(
+        "https://api.cloudflare.com/client/v4/accounts/{}/workers/scripts/{}",
+        account_id, project_name
+    );
+
+    let metadata_value = serde_json::json!({
+        "main_module": "index.js",
+        "compatibility_date": "2024-03-20",
+        "observability": { "enabled": true }
+    });
+
+    let upload_form = reqwest::multipart::Form::new()
+        .part(
+            "index.js",
+            reqwest::multipart::Part::stream(RELAY_WORKER_CODE_CLOUDFLARE.as_bytes().to_vec())
+                .file_name("index.js")
+                .mime_str("application/javascript+module")
+                .unwrap(),
+        )
+        .part(
+            "metadata",
+            reqwest::multipart::Part::stream(
+                serde_json::to_vec(&metadata_value).unwrap_or_default(),
+            )
+            .file_name("metadata.json")
+            .mime_str("application/json")
+            .unwrap(),
+        );
+
+    let upload_res = match client
+        .put(&worker_script_url)
+        .bearer_auth(api_token)
+        .multipart(upload_form)
+        .send()
+        .await
+    {
+        Ok(res) => res,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to upload Worker to Cloudflare: {}", err)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !upload_res.status().is_success() {
+        let status = StatusCode::from_u16(upload_res.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let error_body: Value = upload_res
+            .json()
+            .await
+            .unwrap_or_else(|_| serde_json::json!({}));
+        let error_message = error_body
+            .get("errors")
+            .and_then(|arr| arr.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|e| e.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("Failed to upload Worker to Cloudflare");
+
+        return (
+            status,
+            Json(serde_json::json!({
+                "error": error_message
+            })),
+        )
+            .into_response();
+    }
+
+    // 2. Enable workers.dev subdomain for the script
+    let _ = client
+        .post(format!("{worker_script_url}/subdomain"))
+        .bearer_auth(api_token)
+        .json(&serde_json::json!({ "enabled": true }))
+        .send()
+        .await;
+
+    // 3. Get the workers.dev subdomain for the account
+    let deploy_url = match client
+        .get(format!(
+            "https://api.cloudflare.com/client/v4/accounts/{account_id}/workers/subdomain"
+        ))
+        .bearer_auth(api_token)
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let subdomain_data: Value = resp.json().await.unwrap_or_default();
+            subdomain_data
+                .get("result")
+                .and_then(|r| r.get("subdomain"))
+                .and_then(Value::as_str)
+                .map(|subdomain| {
+                    format!("https://{project_name}.{subdomain}.workers.dev")
+                })
+                .unwrap_or_default()
+        }
+        _ => String::new(),
+    };
+
+    if deploy_url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Worker deployed but failed to retrieve workers.dev subdomain. Make sure you have setup a workers.dev subdomain in Cloudflare Dashboard."
+            })),
+        )
+            .into_response();
+    }
+
+    // 4. Create proxy pool entry with type cloudflare
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut proxy_pool = ProxyPool::default();
+    proxy_pool.id = uuid::Uuid::new_v4().to_string();
+    proxy_pool.name = project_name.clone();
+    proxy_pool.proxy_url = deploy_url.clone();
+    proxy_pool.no_proxy = String::new();
+    proxy_pool.r#type = "cloudflare".to_string();
+    proxy_pool.is_active = Some(true);
+    proxy_pool.strict_proxy = Some(false);
+    proxy_pool.test_status = Some("unknown".to_string());
+    proxy_pool.last_tested_at = None;
+    proxy_pool.last_error = None;
+    proxy_pool.created_at = Some(now.clone());
+    proxy_pool.updated_at = Some(now);
+
+    let save_result = state
+        .db
+        .update(|db| {
+            db.proxy_pools.push(proxy_pool.clone());
+        })
+        .await;
+
+    match save_result {
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "proxyPool": proxy_pool,
+                "deployUrl": deploy_url
+            })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to save proxy pool: {}", err)
+            })),
+        )
+            .into_response(),
+    }
+}
+
+// ── POST /api/proxy-pools/deno-deploy ─────────────────────────────
+
+fn deno_api_base_url() -> String {
+    std::env::var("OPENPROXY_DENO_API_BASE_URL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DENO_V2_API.to_string())
+}
+
+fn default_deno_project_name() -> String {
+    let now_ms = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    format!("relay-{}", to_base36(now_ms))
+}
+
+async fn deno_deploy(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<DenoDeployRequest>,
+) -> axum::response::Response {
+    use crate::types::ProxyPool;
+
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let Some(deno_token) = body
+        .deno_token
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Deno Deploy API token is required"
+            })),
+        )
+            .into_response();
+    };
+
+    let Some(org_domain) = body
+        .org_domain
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Organization domain is required"
+            })),
+        )
+            .into_response();
+    };
+
+    let project_name = body
+        .project_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(default_deno_project_name);
+
+    let client = reqwest::Client::new();
+    let api_base_url = deno_api_base_url();
+
+    // 1. Create the app on Deno Deploy
+    let create_app_res = match client
+        .post(format!("{api_base_url}/apps"))
+        .bearer_auth(deno_token)
+        .json(&serde_json::json!({
+            "slug": project_name,
+            "labels": { "custom.kind": "9router-relay" },
+            "config": {
+                "install": "deno install",
+                "runtime": {
+                    "type": "dynamic",
+                    "entrypoint": "main.ts",
+                },
+            },
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to create Deno Deploy app: {}", error)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !create_app_res.status().is_success() {
+        let status = StatusCode::from_u16(create_app_res.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let error_text = create_app_res
+            .text()
+            .await
+            .unwrap_or_default();
+
+        if status == StatusCode::CONFLICT {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("App \"{}\" already exists. Choose a different name.", project_name)
+                })),
+            )
+                .into_response();
+        }
+
+        return (
+            status,
+            Json(serde_json::json!({
+                "error": format!("Failed to create app ({}): {}", status.as_u16(), error_text)
+            })),
+        )
+            .into_response();
+    }
+
+    let app: Value = match create_app_res.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to parse app response: {}", error)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let app_id = app
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("undefined")
+        .to_string();
+
+    // 2. Deploy the relay code to the app
+    let deploy_res = match client
+        .post(format!("{api_base_url}/apps/{app_id}/deploy"))
+        .bearer_auth(deno_token)
+        .json(&serde_json::json!({
+            "assets": {
+                "main.ts": {
+                    "kind": "file",
+                    "content": DENO_RELAY_CODE,
+                    "encoding": "utf-8",
+                },
+            },
+        }))
+        .send()
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            // Cleanup: delete the created app
+            let _ = client
+                .delete(format!("{api_base_url}/apps/{app_id}"))
+                .bearer_auth(deno_token)
+                .send()
+                .await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to deploy to Deno Deploy: {}", error)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    if !deploy_res.status().is_success() {
+        let status = StatusCode::from_u16(deploy_res.status().as_u16())
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let error_text = deploy_res
+            .text()
+            .await
+            .unwrap_or_default();
+        // Cleanup: delete the created app
+        let _ = client
+            .delete(format!("{api_base_url}/apps/{app_id}"))
+            .bearer_auth(deno_token)
+            .send()
+            .await;
+        return (
+            status,
+            Json(serde_json::json!({
+                "error": format!("Deploy failed ({}): {}", status.as_u16(), error_text)
+            })),
+        )
+            .into_response();
+    }
+
+    // 3. Extract revision ID and poll for success
+    let revision: Value = match deploy_res.json().await {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = client
+                .delete(format!("{api_base_url}/apps/{app_id}"))
+                .bearer_auth(deno_token)
+                .send()
+                .await;
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to parse deploy response: {}", error)
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let revision_id = revision
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("undefined");
+
+    // Poll revision status every 2s up to 60s
+    const POLL_INTERVAL_MS: u64 = 2_000;
+    const POLL_MAX_MS: u64 = 60_000;
+    let poll_started_at = std::time::Instant::now();
+
+    let mut status = revision
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let mut deploy_succeeded = false;
+
+    while (status == "queued" || status == "building")
+        && poll_started_at.elapsed().as_millis() < u128::from(POLL_MAX_MS)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(POLL_INTERVAL_MS)).await;
+
+        let status_res = match client
+            .get(format!("{api_base_url}/revisions/{revision_id}"))
+            .bearer_auth(deno_token)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => break,
+        };
+
+        if !status_res.status().is_success() {
+            break;
+        }
+
+        let status_data: Value = match status_res.json().await {
+            Ok(value) => value,
+            Err(_) => break,
+        };
+
+        status = status_data
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+
+        if status == "succeeded" {
+            deploy_succeeded = true;
+            break;
+        }
+
+        if status == "failed" {
+            break;
+        }
+    }
+
+    if !deploy_succeeded {
+        // Cleanup: delete the created app
+        let _ = client
+            .delete(format!("{api_base_url}/apps/{app_id}"))
+            .bearer_auth(deno_token)
+            .send()
+            .await;
+
+        if status == "failed" {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Deploy failed with status: failed"
+                })),
+            )
+                .into_response();
+        }
+
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "Deploy timed out after 60 seconds"
+            })),
+        )
+            .into_response();
+    }
+
+    // 4. Construct the deploy URL
+    let org_slug = org_domain.split('.').next().unwrap_or(org_domain);
+    let deploy_url = format!("https://{}.{}.deno.net", project_name, org_slug);
+
+    // 5. Create proxy pool entry with type deno
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut proxy_pool = ProxyPool::default();
+    proxy_pool.id = uuid::Uuid::new_v4().to_string();
+    proxy_pool.name = project_name.clone();
+    proxy_pool.proxy_url = deploy_url.clone();
+    proxy_pool.no_proxy = String::new();
+    proxy_pool.r#type = "deno".to_string();
+    proxy_pool.is_active = Some(true);
+    proxy_pool.strict_proxy = Some(false);
+    proxy_pool.test_status = Some("unknown".to_string());
+    proxy_pool.last_tested_at = None;
+    proxy_pool.last_error = None;
+    proxy_pool.created_at = Some(now.clone());
+    proxy_pool.updated_at = Some(now);
+
+    let save_result = state
+        .db
+        .update(|db| {
+            db.proxy_pools.push(proxy_pool.clone());
+        })
+        .await;
+
+    match save_result {
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "proxyPool": proxy_pool,
+                "deployUrl": deploy_url
+            })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to save proxy pool: {}", err)
+            })),
+        )
+            .into_response(),
+    }
+}
+
 // ── POST /api/proxy-pools/{id}/test ────────────────────────────────────
 
 async fn test_pool(
@@ -695,7 +1356,7 @@ async fn test_pool(
         )
             .into_response(),
         Some(pool) => {
-            let test_result = if pool.r#type == "vercel" {
+            let test_result = if pool.r#type == "vercel" || pool.r#type == "cloudflare" || pool.r#type == "deno" {
                 test_vercel_relay(&pool.proxy_url, 10_000).await
             } else {
                 test_proxy_url(&pool.proxy_url, None, None).await
@@ -917,6 +1578,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/mitm/start", post(start_mitm))
         .route("/api/mitm/stop", post(stop_mitm))
         .route("/api/proxy-pools/vercel-deploy", post(vercel_deploy))
+        .route("/api/proxy-pools/cloudflare-deploy", post(cloudflare_deploy))
+        .route("/api/proxy-pools/deno-deploy", post(deno_deploy))
         .route("/api/proxy-pools/{id}/test", post(test_pool))
 }
 

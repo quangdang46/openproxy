@@ -191,7 +191,7 @@ fn schema_for(resource: &str) -> Option<Value> {
                 "id": {"type": "string"},
                 "name": {"type": "string"},
                 "proxyUrl": {"type": "string"},
-                "type": {"type": "string", "enum": ["http", "https", "socks5"], "default": "http"},
+                "type": {"type": "string", "enum": ["http", "https", "socks5", "vercel", "cloudflare", "deno"], "default": "http"},
                 "isActive": {"type": "boolean", "default": true},
                 "strictProxy": {"type": "boolean", "default": false}
             }
