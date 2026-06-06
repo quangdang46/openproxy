@@ -95,6 +95,12 @@ async-stream = "0.3"
 
 # RSA for JWT signing
 rsa = "0.9"
+
+# AES-CBC encryption + supporting crates
+aes = "0.8"
+cbc = "0.1"
+md-5 = "0.10"
+pkcs8 = "0.10"
 time = "0.3"
 
 # Client identity
