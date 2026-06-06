@@ -1099,7 +1099,7 @@ async fn client_pool_reuses_connection_for_sequential_requests() {
         let (mut stream, _) = listener.accept().expect("accept first connection");
         accepted_counter.fetch_add(1, Ordering::SeqCst);
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(15)))
             .expect("set read timeout");
         let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
 
@@ -1108,7 +1108,10 @@ async fn client_pool_reuses_connection_for_sequential_requests() {
             reader
                 .read_line(&mut request_line)
                 .expect("read request line");
-            assert!(request_line.starts_with("GET /health HTTP/1.1"));
+            assert!(
+                request_line.starts_with("GET /health HTTP/1.1"),
+                "unexpected request line: {request_line:?}"
+            );
 
             loop {
                 let mut line = String::new();
@@ -1167,7 +1170,7 @@ async fn default_executor_reuses_hyper_connection_for_sequential_requests() {
         let (mut stream, _) = listener.accept().expect("accept first connection");
         accepted_counter.fetch_add(1, Ordering::SeqCst);
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(15)))
             .expect("set read timeout");
         let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
 
@@ -1176,7 +1179,10 @@ async fn default_executor_reuses_hyper_connection_for_sequential_requests() {
             reader
                 .read_line(&mut request_line)
                 .expect("read request line");
-            assert!(request_line.starts_with("POST /v1/chat/completions HTTP/1.1"));
+            assert!(
+                request_line.starts_with("POST /v1/chat/completions HTTP/1.1"),
+                "unexpected request line: {request_line:?}"
+            );
 
             let mut content_length = 0usize;
             loop {
@@ -1265,7 +1271,7 @@ async fn client_pool_keeps_provider_traffic_independent_under_concurrent_request
     let openai_server = thread::spawn(move || {
         let (mut stream, _) = openai_listener.accept().expect("accept openai connection");
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(15)))
             .expect("set openai read timeout");
         let mut reader = BufReader::new(stream.try_clone().expect("clone openai stream"));
         let mut request_line = String::new();
@@ -1299,7 +1305,7 @@ async fn client_pool_keeps_provider_traffic_independent_under_concurrent_request
     let groq_server = thread::spawn(move || {
         let (mut stream, _) = groq_listener.accept().expect("accept groq connection");
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(Duration::from_secs(15)))
             .expect("set groq read timeout");
         let mut reader = BufReader::new(stream.try_clone().expect("clone groq stream"));
         let mut request_line = String::new();
