@@ -739,7 +739,81 @@ impl DefaultExecutor {
     }
 
     pub fn transform_request(&self, body: &Value) -> Value {
-        body.clone()
+        self.apply_json_schema_fallback(body)
+    }
+
+    /// Fallback json_schema -> json_object for openai-compatible providers
+    /// without native Structured Output support.
+    ///
+    /// When `response_format.type` is `"json_schema"`, this method:
+    /// 1. Extracts the JSON schema
+    /// 2. Injects schema instructions into the system message
+    /// 3. Downgrades `response_format` to `{"type": "json_object"}`
+    fn apply_json_schema_fallback(&self, body: &Value) -> Value {
+        let is_openai_compatible = self
+            .provider_node
+            .as_ref()
+            .is_some_and(|node| node.r#type == "openai-compatible");
+
+        if !is_openai_compatible {
+            return body.clone();
+        }
+
+        let response_format = match body.get("response_format") {
+            Some(rf) => rf,
+            None => return body.clone(),
+        };
+
+        if response_format.get("type").and_then(Value::as_str) != Some("json_schema") {
+            return body.clone();
+        }
+
+        let schema = match response_format
+            .get("json_schema")
+            .and_then(|s| s.get("schema"))
+        {
+            Some(s) => s,
+            None => return body.clone(),
+        };
+
+        let schema_json = serde_json::to_string_pretty(schema).unwrap_or_default();
+        let prompt = format!(
+            "You must respond with valid JSON that strictly follows this JSON schema:\n```json\n{schema_json}\n```\nRespond ONLY with the JSON object, no other text."
+        );
+
+        let mut new_body = body.clone();
+
+        if let Some(messages) = new_body.get_mut("messages").and_then(Value::as_array_mut) {
+            let sys_idx = messages
+                .iter()
+                .position(|m| m.get("role").and_then(Value::as_str) == Some("system"));
+
+            if let Some(idx) = sys_idx {
+                let sys = &mut messages[idx];
+                if let Some(content) = sys.get_mut("content") {
+                    if content.is_string() {
+                        let existing = content.as_str().unwrap_or("");
+                        *content = Value::String(format!("{existing}\n\n{prompt}"));
+                    } else if let Some(arr) = content.as_array_mut() {
+                        arr.push(serde_json::json!({
+                            "type": "text",
+                            "text": format!("\n\n{prompt}")
+                        }));
+                    }
+                }
+            } else {
+                messages.insert(
+                    0,
+                    serde_json::json!({
+                        "role": "system",
+                        "content": prompt
+                    }),
+                );
+            }
+        }
+
+        new_body["response_format"] = serde_json::json!({"type": "json_object"});
+        new_body
     }
 
     pub async fn execute(

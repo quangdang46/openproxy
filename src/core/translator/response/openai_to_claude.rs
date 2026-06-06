@@ -12,6 +12,105 @@ use serde_json::{json, Map, Value};
 /// way back so the response surfaces the caller's original name.
 const CLAUDE_OAUTH_TOOL_PREFIX: &str = "proxy_";
 
+// ── tool-argument sanitization ─────────────────────────────────────────
+
+/// Sanitize tool call arguments to fix bad params from non-Anthropic models.
+/// Mirrors the upstream JS `sanitizeToolArgs`.
+fn sanitize_tool_args(tool_name: &str, args_json: &str) -> String {
+    let Ok(mut args) = serde_json::from_str::<Value>(args_json) else {
+        return args_json.to_string();
+    };
+    let name = tool_name
+        .strip_prefix(CLAUDE_OAUTH_TOOL_PREFIX)
+        .unwrap_or(tool_name);
+    if name == "Read" {
+        sanitize_read_args(&mut args);
+    }
+    serde_json::to_string(&args).unwrap_or_else(|_| args_json.to_string())
+}
+
+/// Coerce and clamp `Read` tool arguments so that string-typed numeric
+/// fields become numbers and out-of-range values are corrected.
+fn sanitize_read_args(args: &mut Value) {
+    // Coerce string limit → number
+    if let Some(limit) = args.get("limit") {
+        if limit.is_string() {
+            if let Some(s) = limit.as_str() {
+                if s.parse::<u64>().is_ok() {
+                    if let Ok(n) = serde_json::from_str::<Value>(s) {
+                        args["limit"] = n;
+                    }
+                }
+            }
+        }
+    }
+    // Coerce string offset → number (allow negative sign in pattern)
+    if let Some(offset) = args.get("offset") {
+        if offset.is_string() {
+            if let Some(s) = offset.as_str() {
+                if s.parse::<i64>().is_ok() {
+                    if let Ok(n) = serde_json::from_str::<Value>(s) {
+                        args["offset"] = n;
+                    }
+                }
+            }
+        }
+    }
+
+    // Clamp limit to 1..=2000
+    if let Some(limit) = args.get("limit").and_then(|v| v.as_i64()) {
+        if limit > 2000 {
+            args["limit"] = Value::from(2000);
+        } else if limit < 1 {
+            if let Some(obj) = args.as_object_mut() {
+                obj.remove("limit");
+            }
+        }
+    }
+
+    // Clamp offset >= 0
+    if let Some(offset) = args.get("offset").and_then(|v| v.as_i64()) {
+        if offset < 0 {
+            args["offset"] = Value::from(0);
+        }
+    }
+
+    // Remove `pages` if not a valid PDF pages arg
+    if args.get("pages").is_some() {
+        let file_path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        let pages = args.get("pages").and_then(|v| v.as_str()).unwrap_or("");
+        if !is_valid_pdf_pages_arg(file_path, pages) {
+            if let Some(obj) = args.as_object_mut() {
+                obj.remove("pages");
+            }
+        }
+    }
+}
+
+/// Returns `true` when `file_path` ends with `.pdf` (case-insensitive) and
+/// `pages` matches the pattern `\d+(-\d+)?`.
+fn is_valid_pdf_pages_arg(file_path: &str, pages: &str) -> bool {
+    if !file_path.to_lowercase().ends_with(".pdf") {
+        return false;
+    }
+    if pages.is_empty() {
+        return false;
+    }
+    // Validate pages format: digits optionally followed by -digits
+    let mut parts = pages.splitn(2, '-');
+    let start_valid = parts
+        .next()
+        .map(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+        .unwrap_or(false);
+    if !start_valid {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(end) => !end.is_empty() && end.chars().all(|c| c.is_ascii_digit()),
+    }
+}
+
 /// Convert one OpenAI chat-completion chunk into zero or more Claude SSE
 /// events. `state` is the per-stream scratch space.
 pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) -> Vec<Value> {
@@ -236,21 +335,22 @@ pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) 
                 }));
             }
 
-            // Subsequent argument chunks.
+            // Subsequent argument chunks — buffer instead of streaming so
+            // we can sanitize the full args at finish time.
             if let Some(args) = tc.pointer("/function/arguments").and_then(|v| v.as_str()) {
                 if !args.is_empty() {
-                    let block_idx = state
+                    let tool_info = state
                         .get("toolCalls")
                         .and_then(|v| v.as_object())
-                        .and_then(|m| m.get(&idx.to_string()))
-                        .and_then(|v| v.get("blockIndex"))
-                        .and_then(|v| v.as_u64());
-                    if let Some(block_idx) = block_idx {
-                        results.push(json!({
-                            "type": "content_block_delta",
-                            "index": block_idx,
-                            "delta": {"type": "input_json_delta", "partial_json": args}
-                        }));
+                        .and_then(|m| m.get(&idx.to_string()));
+                    if tool_info.is_some() {
+                        let key = format!("argBuf_{idx}");
+                        let buffered = state
+                            .get(&key)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        state.insert(key, Value::String(format!("{buffered}{args}")));
                     }
                 }
             }
@@ -262,18 +362,34 @@ pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) 
         stop_thinking_block(state, &mut results);
         stop_text_block(state, &mut results);
 
-        // Close every open tool block.
-        let tool_blocks: Vec<u64> = state
+        // Emit buffered + sanitized tool args, then close every open tool block.
+        let tool_entries: Vec<(u64, String, u64)> = state
             .get("toolCalls")
             .and_then(|v| v.as_object())
             .map(|m| {
-                m.values()
-                    .filter_map(|v| v.get("blockIndex").and_then(|n| n.as_u64()))
+                m.iter()
+                    .filter_map(|(k, v)| {
+                        let block_idx = v.get("blockIndex").and_then(|n| n.as_u64())?;
+                        let name = v.get("name").and_then(|n| n.as_str()).unwrap_or("");
+                        let idx: u64 = k.parse().ok()?;
+                        Some((idx, name.to_string(), block_idx))
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        for bi in tool_blocks {
-            results.push(json!({"type": "content_block_stop", "index": bi}));
+        for (idx, name, block_idx) in tool_entries {
+            let key = format!("argBuf_{idx}");
+            if let Some(buffered) = state.get(&key).and_then(|v| v.as_str()) {
+                if !buffered.is_empty() {
+                    let sanitized = sanitize_tool_args(&name, buffered);
+                    results.push(json!({
+                        "type": "content_block_delta",
+                        "index": block_idx,
+                        "delta": {"type": "input_json_delta", "partial_json": sanitized}
+                    }));
+                }
+            }
+            results.push(json!({"type": "content_block_stop", "index": block_idx}));
         }
 
         state.insert(
@@ -501,5 +617,218 @@ mod tests {
             })
             .expect("tool start");
         assert_eq!(tool_start["content_block"]["name"], "my_tool");
+    }
+
+    // ── sanitize_tool_args tests ────────────────────────────────────────
+
+    #[test]
+    fn sanitize_returns_original_on_invalid_json() {
+        let result = sanitize_tool_args("Read", "not json");
+        assert_eq!(result, "not json");
+    }
+
+    #[test]
+    fn sanitize_read_coerces_string_limit_to_number() {
+        let result = sanitize_tool_args("Read", r#"{"limit":"50","file_path":"/tmp/f.txt"}"#);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["limit"], 50);
+    }
+
+    #[test]
+    fn sanitize_read_coerces_string_offset_to_number() {
+        let result = sanitize_tool_args("Read", r#"{"offset":"100","file_path":"/tmp/f.txt"}"#);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["offset"], 100);
+    }
+
+    #[test]
+    fn sanitize_read_clamps_limit_over_2000() {
+        let result = sanitize_tool_args("Read", r#"{"limit":5000,"file_path":"/tmp/f.txt"}"#);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["limit"], 2000);
+    }
+
+    #[test]
+    fn sanitize_read_removes_limit_below_1() {
+        let result = sanitize_tool_args("Read", r#"{"limit":0,"file_path":"/tmp/f.txt"}"#);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("limit").is_none());
+    }
+
+    #[test]
+    fn sanitize_read_clamps_negative_offset_to_zero() {
+        let result = sanitize_tool_args("Read", r#"{"offset":-5,"file_path":"/tmp/f.txt"}"#);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["offset"], 0);
+    }
+
+    #[test]
+    fn sanitize_read_removes_pages_for_non_pdf() {
+        let result = sanitize_tool_args(
+            "Read",
+            r#"{"file_path":"/tmp/f.txt","pages":"1-3"}"#,
+        );
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("pages").is_none());
+    }
+
+    #[test]
+    fn sanitize_read_keeps_valid_pdf_pages() {
+        let result = sanitize_tool_args(
+            "Read",
+            r#"{"file_path":"/tmp/f.pdf","pages":"1-3"}"#,
+        );
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["pages"], "1-3");
+    }
+
+    #[test]
+    fn sanitize_read_keeps_single_page_number() {
+        let result = sanitize_tool_args(
+            "Read",
+            r#"{"file_path":"/tmp/doc.PDF","pages":"5"}"#,
+        );
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["pages"], "5");
+    }
+
+    #[test]
+    fn sanitize_read_removes_pages_with_invalid_format() {
+        let result = sanitize_tool_args(
+            "Read",
+            r#"{"file_path":"/tmp/f.pdf","pages":"abc"}"#,
+        );
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("pages").is_none());
+    }
+
+    #[test]
+    fn sanitize_read_removes_pages_when_no_file_path() {
+        let result = sanitize_tool_args("Read", r#"{"pages":"1"}"#);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert!(parsed.get("pages").is_none());
+    }
+
+    #[test]
+    fn sanitize_non_read_tool_passes_through() {
+        let input = r#"{"limit":"50","offset":"-3"}"#;
+        let result = sanitize_tool_args("WebSearch", input);
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        // Should not coerce — WebSearch is not Read
+        assert_eq!(parsed["limit"], "50");
+        assert_eq!(parsed["offset"], "-3");
+    }
+
+    #[test]
+    fn sanitize_read_with_proxy_prefix() {
+        let result = sanitize_tool_args(
+            "proxy_Read",
+            r#"{"limit":"50","file_path":"/tmp/f.txt"}"#,
+        );
+        let parsed: Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["limit"], 50);
+    }
+
+    // ── is_valid_pdf_pages_arg tests ────────────────────────────────────
+
+    #[test]
+    fn valid_pdf_pages_single_page() {
+        assert!(is_valid_pdf_pages_arg("/tmp/doc.pdf", "1"));
+    }
+
+    #[test]
+    fn valid_pdf_pages_range() {
+        assert!(is_valid_pdf_pages_arg("/tmp/doc.pdf", "1-5"));
+    }
+
+    #[test]
+    fn valid_pdf_pages_case_insensitive_ext() {
+        assert!(is_valid_pdf_pages_arg("/tmp/doc.PDF", "3"));
+    }
+
+    #[test]
+    fn invalid_pages_non_pdf_extension() {
+        assert!(!is_valid_pdf_pages_arg("/tmp/doc.txt", "1"));
+    }
+
+    #[test]
+    fn invalid_pages_empty_string() {
+        assert!(!is_valid_pdf_pages_arg("/tmp/doc.pdf", ""));
+    }
+
+    #[test]
+    fn invalid_pages_letters() {
+        assert!(!is_valid_pdf_pages_arg("/tmp/doc.pdf", "abc"));
+    }
+
+    #[test]
+    fn invalid_pages_no_file_path() {
+        assert!(!is_valid_pdf_pages_arg("", "1"));
+    }
+
+    // ── integration: tool args are buffered and sanitized at finish ─────
+
+    #[test]
+    fn tool_call_read_limit_sanitized_at_finish() {
+        let events = [
+            json!({"id": "chatcmpl-a", "model": "gpt-5", "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_r",
+                        "type": "function",
+                        "function": {"name": "Read", "arguments": ""}
+                    }]
+                }
+            }]}),
+            json!({"choices": [{"index": 0, "delta": {
+                "tool_calls": [{"index": 0, "function": {"arguments": r#"{"limit":"9999","file_path":"/tmp/f.txt"}"#}}]
+            }}]}),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        ];
+        let out = run(&events);
+
+        let json_delta = out
+            .iter()
+            .find(|v| {
+                v["type"] == "content_block_delta" && v["delta"]["type"] == "input_json_delta"
+            })
+            .expect("input_json_delta");
+        let partial: Value =
+            serde_json::from_str(json_delta["delta"]["partial_json"].as_str().unwrap()).unwrap();
+        assert_eq!(partial["limit"], 2000);
+    }
+
+    #[test]
+    fn tool_call_read_pages_removed_for_non_pdf() {
+        let events = [
+            json!({"id": "chatcmpl-a", "model": "gpt-5", "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_p",
+                        "type": "function",
+                        "function": {"name": "Read", "arguments": ""}
+                    }]
+                }
+            }]}),
+            json!({"choices": [{"index": 0, "delta": {
+                "tool_calls": [{"index": 0, "function": {"arguments": r#"{"file_path":"/tmp/f.txt","pages":"1-3"}"#}}]
+            }}]}),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}),
+        ];
+        let out = run(&events);
+
+        let json_delta = out
+            .iter()
+            .find(|v| {
+                v["type"] == "content_block_delta" && v["delta"]["type"] == "input_json_delta"
+            })
+            .expect("input_json_delta");
+        let partial: Value =
+            serde_json::from_str(json_delta["delta"]["partial_json"].as_str().unwrap()).unwrap();
+        assert!(partial.get("pages").is_none());
     }
 }

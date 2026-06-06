@@ -1,7 +1,7 @@
 {
   "source": "9router",
-  "ref": "v0.4.59-1-ge1b821d",
-  "generatedAt": "2026-05-21T15:40:41.710Z",
+  "ref": "v0.4.66-1-gcce8a50",
+  "generatedAt": "2026-06-06T05:12:09.116Z",
   "providerIdToAlias": {
     "claude": "cc",
     "gemini": "gemini",
@@ -9,7 +9,7 @@
     "codex": "cx",
     "qwen": "qw",
     "iflow": "if",
-    "qoder": "qoder",
+    "qoder": "qd",
     "antigravity": "ag",
     "openrouter": "openrouter",
     "openai": "openai",
@@ -100,33 +100,48 @@
       "format": "antigravity",
       "models": [
         {
-          "id": "gemini-3.1-pro-high",
-          "name": "Gemini 3 Pro High",
+          "id": "gemini-3.5-flash-extra-low",
+          "name": "Gemini 3.5 Flash (Extra Low)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3-flash-agent",
+          "name": "Gemini 3.5 Flash (High)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.5-flash-low",
+          "name": "Gemini 3.5 Flash (Medium)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-pro-agent",
+          "name": "Gemini 3.1 Pro (High)",
           "kind": "llm"
         },
         {
           "id": "gemini-3.1-pro-low",
-          "name": "Gemini 3 Pro Low",
+          "name": "Gemini 3.1 Pro (Low)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4-6-thinking",
+          "name": "Claude Opus 4.6 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-oss-120b-medium",
+          "name": "GPT-OSS 120B (Medium)",
           "kind": "llm"
         },
         {
           "id": "gemini-3-flash",
           "name": "Gemini 3 Flash",
-          "kind": "llm"
-        },
-        {
-          "id": "claude-sonnet-4-6",
-          "name": "Claude Sonnet 4.6",
-          "kind": "llm"
-        },
-        {
-          "id": "claude-opus-4-6-thinking",
-          "name": "Claude Opus 4.6 Thinking",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-oss-120b-medium",
-          "name": "GPT OSS 120B Medium",
           "kind": "llm"
         }
       ]
@@ -579,6 +594,11 @@
       "format": "claude",
       "baseUrl": "https://api.anthropic.com/v1/messages",
       "models": [
+        {
+          "id": "claude-opus-4-8",
+          "name": "Claude Opus 4.8",
+          "kind": "llm"
+        },
         {
           "id": "claude-opus-4-7",
           "name": "Claude Opus 4.7",
@@ -1060,6 +1080,16 @@
           "kind": "llm"
         },
         {
+          "id": "gpt-5.4-mini",
+          "name": "GPT 5.4 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.4-mini-review",
+          "name": "GPT 5.4 Mini Review",
+          "kind": "llm"
+        },
+        {
           "id": "gpt-5.3-codex",
           "name": "GPT 5.3 Codex",
           "kind": "llm"
@@ -1120,96 +1150,6 @@
           "kind": "llm"
         },
         {
-          "id": "gpt-5.1-codex-mini",
-          "name": "GPT 5.1 Codex Mini",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1-codex-mini-review",
-          "name": "GPT 5.1 Codex Mini Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1-codex-mini-high",
-          "name": "GPT 5.1 Codex Mini (High)",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1-codex-mini-high-review",
-          "name": "GPT 5.1 Codex Mini (High) Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.2-codex",
-          "name": "GPT 5.2 Codex",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.2-codex-review",
-          "name": "GPT 5.2 Codex Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.2",
-          "name": "GPT 5.2",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.2-review",
-          "name": "GPT 5.2 Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1-codex-max",
-          "name": "GPT 5.1 Codex Max",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1-codex-max-review",
-          "name": "GPT 5.1 Codex Max Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1-codex",
-          "name": "GPT 5.1 Codex",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1-codex-review",
-          "name": "GPT 5.1 Codex Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1",
-          "name": "GPT 5.1",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.1-review",
-          "name": "GPT 5.1 Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5-codex",
-          "name": "GPT 5 Codex",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5-codex-review",
-          "name": "GPT 5 Codex Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5-codex-mini",
-          "name": "GPT 5 Codex Mini",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5-codex-mini-review",
-          "name": "GPT 5 Codex Mini Review",
-          "kind": "llm"
-        },
-        {
           "id": "gpt-5.5-image",
           "name": "GPT 5.5 Image",
           "kind": "image"
@@ -1222,11 +1162,6 @@
         {
           "id": "gpt-5.3-image",
           "name": "GPT 5.3 Image",
-          "kind": "image"
-        },
-        {
-          "id": "gpt-5.2-image",
-          "name": "GPT 5.2 Image",
           "kind": "image"
         }
       ]
@@ -3210,18 +3145,8 @@
           "kind": "llm"
         },
         {
-          "id": "kimi-k2.6:cloud",
-          "name": "Kimi K2.6 (Cloud)",
-          "kind": "llm"
-        },
-        {
           "id": "glm-5",
           "name": "GLM 5",
-          "kind": "llm"
-        },
-        {
-          "id": "glm-5.1:cloud",
-          "name": "GLM 5.1 (Cloud)",
           "kind": "llm"
         },
         {
@@ -3230,33 +3155,13 @@
           "kind": "llm"
         },
         {
-          "id": "minimax-m2.7:cloud",
-          "name": "MiniMax M2.7 (Cloud)",
-          "kind": "llm"
-        },
-        {
           "id": "glm-4.7-flash",
           "name": "GLM 4.7 Flash",
           "kind": "llm"
         },
         {
-          "id": "deepseek-v4-flash:cloud",
-          "name": "DeepSeek V4 Flash (Cloud)",
-          "kind": "llm"
-        },
-        {
-          "id": "deepseek-v4-pro:cloud",
-          "name": "DeepSeek V4 Pro (Cloud)",
-          "kind": "llm"
-        },
-        {
           "id": "qwen3.5",
           "name": "Qwen3.5",
-          "kind": "llm"
-        },
-        {
-          "id": "qwen3.5:cloud",
-          "name": "Qwen3.5 (Cloud)",
           "kind": "llm"
         }
       ]
@@ -3881,6 +3786,69 @@
       ]
     },
     {
+      "id": "qoder",
+      "alias": "qd",
+      "format": "openai",
+      "baseUrl": "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation",
+      "models": [
+        {
+          "id": "auto",
+          "name": "Qoder Auto",
+          "kind": "llm"
+        },
+        {
+          "id": "ultimate",
+          "name": "Qoder Ultimate",
+          "kind": "llm"
+        },
+        {
+          "id": "performance",
+          "name": "Qoder Performance",
+          "kind": "llm"
+        },
+        {
+          "id": "efficient",
+          "name": "Qoder Efficient",
+          "kind": "llm"
+        },
+        {
+          "id": "lite",
+          "name": "Qoder Lite",
+          "kind": "llm"
+        },
+        {
+          "id": "qmodel",
+          "name": "Qwen 3.6 Plus (Qoder)",
+          "kind": "llm"
+        },
+        {
+          "id": "dmodel",
+          "name": "DeepSeek V4 Pro (Qoder)",
+          "kind": "llm"
+        },
+        {
+          "id": "dfmodel",
+          "name": "DeepSeek V4 Flash (Qoder)",
+          "kind": "llm"
+        },
+        {
+          "id": "gm51model",
+          "name": "GLM 5.1 (Qoder)",
+          "kind": "llm"
+        },
+        {
+          "id": "kmodel",
+          "name": "Kimi K2.6 (Qoder)",
+          "kind": "llm"
+        },
+        {
+          "id": "mmodel",
+          "name": "MiniMax M2.7 (Qoder)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
       "id": "qwen",
       "alias": "qw",
       "format": "openai",
@@ -4258,6 +4226,16 @@
           "kind": "llm"
         },
         {
+          "id": "DeepSeek-V4-Flash",
+          "name": "DeepSeek-V4-Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "DeepSeek-V4-Pro",
+          "name": "DeepSeek-V4-Pro",
+          "kind": "llm"
+        },
+        {
           "id": "GLM-5.1",
           "name": "GLM-5.1",
           "kind": "llm"
@@ -4270,26 +4248,6 @@
         {
           "id": "Kimi-K2.6",
           "name": "Kimi-K2.6",
-          "kind": "llm"
-        },
-        {
-          "id": "MiniMax-M2.5",
-          "name": "MiniMax-M2.5",
-          "kind": "llm"
-        },
-        {
-          "id": "Kimi-K2.5",
-          "name": "Kimi-K2.5",
-          "kind": "llm"
-        },
-        {
-          "id": "GLM-4.7",
-          "name": "GLM-4.7",
-          "kind": "llm"
-        },
-        {
-          "id": "DeepSeek-V3.2",
-          "name": "DeepSeek-V3.2",
           "kind": "llm"
         }
       ]
