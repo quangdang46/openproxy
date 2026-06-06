@@ -127,7 +127,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   const [modelAliases, setModelAliases] = useState<Record<string, string>>({});
   const [customModels, setCustomModels] = useState<Array<{ providerAlias: string; id: string; name?: string; type?: string }>>([]);
   const [modelTestResults, setModelTestResults] = useState<Record<string, "ok" | "error">>({});
-  const [testingModelId, setTestingModelId] = useState<string | null>(null);
+  const [testingModelIds, setTestingModelIds] = useState(new Set<string>());
   const [testError, setTestError] = useState<string>("");
   const [showAddCustomModel, setShowAddCustomModel] = useState<boolean>(false);
   const [connections, setConnections] = useState<Array<{ provider: string }>>([]);
@@ -192,8 +192,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   };
 
   const handleTestModel = async (modelId: string) => {
-    if (testingModelId) return;
-    setTestingModelId(modelId);
+    setTestingModelIds((prev) => new Set(prev).add(modelId));
     try {
       const res = await fetch("/api/models/test", {
         method: "POST",
@@ -206,7 +205,13 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
     } catch {
       setModelTestResults((prev) => ({ ...prev, [modelId]: "error" }));
       setTestError("Network error");
-    } finally { setTestingModelId(null); }
+    } finally {
+      setTestingModelIds((prev) => {
+        const next = new Set(prev);
+        next.delete(modelId);
+        return next;
+      });
+    }
   };
 
   // Built-in models — filter by kindFilter if provided
@@ -251,7 +256,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
                 onDeleteAlias={() => handleDeleteAlias(existingAlias!)}
                 testStatus={modelTestResults[model.id]}
                 onTest={connections.length > 0 ? () => handleTestModel(model.id) : undefined}
-                isTesting={testingModelId === model.id}
+                isTesting={testingModelIds.has(model.id)}
                 isFree={model.isFree}
               />
             );
@@ -268,7 +273,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
               onDeleteAlias={() => handleDeleteCustomModel(model.id)}
               testStatus={modelTestResults[model.id]}
               onTest={connections.length > 0 ? () => handleTestModel(model.id) : undefined}
-              isTesting={testingModelId === model.id}
+              isTesting={testingModelIds.has(model.id)}
               isCustom
             />
           ))}

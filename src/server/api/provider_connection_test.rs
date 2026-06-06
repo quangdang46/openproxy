@@ -464,7 +464,7 @@ async fn test_api_key_connection(
             .await
         }
         "minimax" => {
-            anthropic_like_status_test(
+            bearer_anthropic_like_status_test(
                 state,
                 connection,
                 effective_proxy,
@@ -475,7 +475,7 @@ async fn test_api_key_connection(
             .await
         }
         "minimax-cn" => {
-            anthropic_like_status_test(
+            bearer_anthropic_like_status_test(
                 state,
                 connection,
                 effective_proxy,
@@ -1136,6 +1136,41 @@ async fn anthropic_like_status_test(
         url: url.to_string(),
         headers: vec![
             ("x-api-key".to_string(), api_key),
+            ("anthropic-version".to_string(), "2023-06-01".to_string()),
+            ("content-type".to_string(), "application/json".to_string()),
+        ],
+        body: Some(PreparedBody::Json(json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{ "role": "user", "content": "test" }]
+        }))),
+    };
+
+    status_test_excluding(
+        state,
+        connection,
+        effective_proxy,
+        request,
+        &[StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN],
+        error_message,
+    )
+    .await
+}
+
+async fn bearer_anthropic_like_status_test(
+    state: &AppState,
+    connection: &ProviderConnection,
+    effective_proxy: &EffectiveProxy,
+    url: &str,
+    model: &str,
+    error_message: &str,
+) -> ConnectionTestResult {
+    let api_key = connection.api_key.clone().unwrap_or_default();
+    let request = PreparedRequest {
+        method: Method::POST,
+        url: url.to_string(),
+        headers: vec![
+            ("Authorization".to_string(), format!("Bearer {api_key}")),
             ("anthropic-version".to_string(), "2023-06-01".to_string()),
             ("content-type".to_string(), "application/json".to_string()),
         ],
