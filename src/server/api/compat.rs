@@ -948,6 +948,32 @@ fn chat_completion_to_messages_json(source: &Value) -> Value {
                         "text": text,
                     }));
                 }
+
+                // Convert OpenAI tool_calls to Anthropic tool_use blocks
+                if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                    for tc in tool_calls {
+                        let tc_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                        let name = tc
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let args_str = tc
+                            .get("function")
+                            .and_then(|f| f.get("arguments"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("{}");
+                        let input: Value =
+                            serde_json::from_str(args_str).unwrap_or(Value::Object(Map::new()));
+
+                        content.push(json!({
+                            "type": "tool_use",
+                            "id": tc_id,
+                            "name": name,
+                            "input": input,
+                        }));
+                    }
+                }
             }
         }
     }
@@ -996,6 +1022,15 @@ struct MessagesSseState {
 
     // Whether final events were sent
     stop_sent: bool,
+
+    // Tool call streaming state
+    // Each tool call is tracked by its index in the delta's tool_calls array.
+    // Vectors are grown on demand when a new index appears.
+    toolcall_active: Vec<bool>,         // per-index: content_block_start emitted?
+    toolcall_ids: Vec<String>,          // per-index: tool call id
+    toolcall_names: Vec<String>,        // per-index: tool call name
+    toolcall_args: Vec<String>,         // per-index: accumulated arguments JSON
+    toolcall_start_indices: Vec<usize>, // per-index: block_idx at content_block_start
 }
 
 impl MessagesSseState {
@@ -1012,7 +1047,28 @@ impl MessagesSseState {
             text_stopped: false,
             block_idx: 0,
             stop_sent: false,
+            toolcall_active: Vec::new(),
+            toolcall_ids: Vec::new(),
+            toolcall_names: Vec::new(),
+            toolcall_args: Vec::new(),
+            toolcall_start_indices: Vec::new(),
         }
+    }
+
+    /// Ensure tool call vectors are large enough for the given index.
+    fn ensure_toolcall_idx(&mut self, idx: usize) {
+        while self.toolcall_active.len() <= idx {
+            self.toolcall_active.push(false);
+            self.toolcall_ids.push(String::new());
+            self.toolcall_names.push(String::new());
+            self.toolcall_args.push(String::new());
+            self.toolcall_start_indices.push(0);
+        }
+    }
+
+    /// True if any tool call is currently active (started but not finished).
+    fn has_active_toolcalls(&self) -> bool {
+        self.toolcall_active.iter().any(|&a| a)
     }
 }
 
@@ -1127,54 +1183,145 @@ fn openai_chunk_to_messages(
 
         // ── Text content ──────────────────────────────────────────────────────
         if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-            // Close thinking block if we're transitioning to text
+            // Skip empty content deltas when tool calls are being streamed
+            // (DeepSeek sends content:"" alongside finish_reason:"tool_calls")
+            let skip_empty = state.has_active_toolcalls() && content.is_empty();
+            if !skip_empty {
+                // Close thinking block if we're transitioning to text
+                if state.thinking_started && !state.thinking_stopped {
+                    state.thinking_stopped = true;
+                    frames.push(format_messages_sse_event(
+                        "content_block_stop",
+                        &json!({
+                            "type": "content_block_stop",
+                            "index": 0,
+                        }),
+                    ));
+                }
+
+                if !state.text_started {
+                    state.text_started = true;
+                    let idx = state.block_idx;
+                    state.block_idx += 1;
+                    frames.push(format_messages_sse_event(
+                        "content_block_start",
+                        &json!({
+                            "type": "content_block_start",
+                            "index": idx,
+                            "content_block": {
+                                "type": "text",
+                                "text": "",
+                            },
+                        }),
+                    ));
+                }
+
+                state.text_buf.push_str(content);
+                if !content.is_empty() {
+                    let text_idx = if state.thinking_started { 1 } else { 0 };
+                    frames.push(format_messages_sse_event(
+                        "content_block_delta",
+                        &json!({
+                            "type": "content_block_delta",
+                            "index": text_idx,
+                            "delta": {
+                                "type": "text_delta",
+                                "text": content,
+                            },
+                        }),
+                    ));
+                }
+            }
+        }
+
+        // ── Tool calls ──────────────────────────────────────────────────────
+        // OpenAI streams tool_calls in the delta. Convert to Anthropic tool_use
+        // content blocks with input_json_delta for streaming arguments.
+        if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+            // Close thinking block if open (use a simple flag to avoid double-close)
             if state.thinking_started && !state.thinking_stopped {
                 state.thinking_stopped = true;
                 frames.push(format_messages_sse_event(
                     "content_block_stop",
-                    &json!({
-                        "type": "content_block_stop",
-                        "index": 0,
-                    }),
+                    &json!({"type": "content_block_stop", "index": 0}),
                 ));
             }
 
-            if !state.text_started {
-                state.text_started = true;
-                let idx = state.block_idx;
-                state.block_idx += 1;
-                frames.push(format_messages_sse_event(
-                    "content_block_start",
-                    &json!({
-                        "type": "content_block_start",
-                        "index": idx,
-                        "content_block": {
-                            "type": "text",
-                            "text": "",
-                        },
-                    }),
-                ));
-            }
+            for tc in tool_calls {
+                let tcidx = tc.get("index").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+                state.ensure_toolcall_idx(tcidx);
 
-            state.text_buf.push_str(content);
-            if !content.is_empty() {
-                let text_idx = if state.thinking_started { 1 } else { 0 };
-                frames.push(format_messages_sse_event(
-                    "content_block_delta",
-                    &json!({
-                        "type": "content_block_delta",
-                        "index": text_idx,
-                        "delta": {
-                            "type": "text_delta",
-                            "text": content,
-                        },
-                    }),
-                ));
+                // First chunk: has id + function.name → emit content_block_start
+                if let Some(id) = tc.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                    if !state.toolcall_active[tcidx] {
+                        let name = tc
+                            .get("function")
+                            .and_then(|f| f.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+
+                        state.toolcall_active[tcidx] = true;
+                        state.toolcall_ids[tcidx] = id.to_string();
+                        state.toolcall_names[tcidx] = name.to_string();
+
+                        let idx = state.block_idx;
+                        state.block_idx += 1;
+                        state.toolcall_start_indices[tcidx] = idx;
+
+                        frames.push(format_messages_sse_event(
+                            "content_block_start",
+                            &json!({
+                                "type": "content_block_start",
+                                "index": idx,
+                                "content_block": {
+                                    "type": "tool_use",
+                                    "id": id,
+                                    "name": name,
+                                },
+                            }),
+                        ));
+                    }
+                }
+
+                // Subsequent chunks: arguments delta → emit content_block_delta (input_json_delta)
+                if let Some(args) = tc
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(|v| v.as_str())
+                {
+                    if !args.is_empty() && state.toolcall_active[tcidx] {
+                        state.toolcall_args[tcidx].push_str(args);
+                        let tcidx_start = state.toolcall_start_indices[tcidx];
+                        frames.push(format_messages_sse_event(
+                            "content_block_delta",
+                            &json!({
+                                "type": "content_block_delta",
+                                "index": tcidx_start,
+                                "delta": {
+                                    "type": "input_json_delta",
+                                    "partial_json": args,
+                                },
+                            }),
+                        ));
+                    }
+                }
             }
         }
 
         // ── Finish reason → close blocks + message_delta + message_stop ──────
         if finish_reason.is_some() && !state.stop_sent {
+            // Close tool call blocks
+            for tcidx in 0..state.toolcall_active.len() {
+                if state.toolcall_active[tcidx] {
+                    state.toolcall_active[tcidx] = false;
+                    let tcidx_start = state.toolcall_start_indices[tcidx];
+                    frames.push(format_messages_sse_event(
+                        "content_block_stop",
+                        &json!({"type": "content_block_stop", "index": tcidx_start}),
+                    ));
+                }
+            }
+
             // Close text block if open
             if state.text_started && !state.text_stopped {
                 state.text_stopped = true;
@@ -1249,6 +1396,9 @@ fn normalize_body(mut body: Value, mode: CompatMode) -> Value {
             if let Some(messages) = fields.get_mut("messages") {
                 normalize_messages_value(messages);
             }
+
+            normalize_tools(fields);
+            normalize_tool_choice(fields);
         }
         CompatMode::Responses { compact } => {
             if compact {
@@ -1279,10 +1429,109 @@ fn normalize_body(mut body: Value, mode: CompatMode) -> Value {
             if let Some(messages) = fields.get_mut("messages") {
                 normalize_messages_value(messages);
             }
+
+            normalize_tools(fields);
+            normalize_tool_choice(fields);
         }
     }
 
     body
+}
+
+/// Detect whether a tool definition is in Anthropic format (has bare `name`/`input_schema`)
+/// and convert it to OpenAI function format (`type:function`, `function:{name,description,parameters}`).
+/// If the tool is already in OpenAI format or has no recognizable structure, leave it unchanged.
+fn normalize_tools(fields: &mut Map<String, Value>) {
+    let Some(tools) = fields.get("tools").and_then(|v| v.as_array()).cloned() else {
+        return;
+    };
+
+    let converted: Vec<Value> = tools
+        .into_iter()
+        .map(|tool| {
+            let is_already_openai = tool.get("type").and_then(|v| v.as_str()) == Some("function")
+                || tool.get("function").is_some();
+            if is_already_openai {
+                return tool;
+            }
+
+            let has_name = tool.get("name").and_then(|v| v.as_str()).is_some();
+            let has_input_schema = tool.get("input_schema").is_some();
+            if !has_name || !has_input_schema {
+                return tool;
+            }
+
+            let name = tool.get("name").cloned().unwrap_or(Value::Null);
+            let description = tool
+                .get("description")
+                .cloned()
+                .unwrap_or(Value::String(String::new()));
+            let parameters = tool
+                .get("input_schema")
+                .cloned()
+                .unwrap_or(Value::Object(Map::new()));
+
+            json!({
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                }
+            })
+        })
+        .collect();
+
+    if converted.iter().any(|t| t.get("type").and_then(|v| v.as_str()) == Some("function")) {
+        fields.insert("tools".to_string(), Value::Array(converted));
+    }
+}
+
+/// Convert Anthropic-style tool_choice to OpenAI-style tool_choice.
+///
+/// Anthropic: `{"type":"auto"}`, `{"type":"any"}`, `{"type":"tool","name":"xxx"}`
+/// OpenAI:   `"auto"`,            `"required"`,     `{"type":"function","function":{"name":"xxx"}}`
+///
+/// If tool_choice is already a plain string or valid OpenAI object, leave it unchanged.
+fn normalize_tool_choice(fields: &mut Map<String, Value>) {
+    let Some(tc) = fields.get("tool_choice").cloned() else {
+        return;
+    };
+
+    if tc.is_string() {
+        return;
+    }
+
+    let Some(obj) = tc.as_object() else {
+        return;
+    };
+
+    let tc_type = obj.get("type").and_then(|v| v.as_str());
+    let name = obj.get("name").and_then(|v| v.as_str());
+
+    match tc_type {
+        Some("auto") => {
+            fields.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+        }
+        Some("any") => {
+            fields.insert(
+                "tool_choice".to_string(),
+                Value::String("required".to_string()),
+            );
+        }
+        Some("tool") if name.is_some() => {
+            fields.insert(
+                "tool_choice".to_string(),
+                json!({
+                    "type": "function",
+                    "function": { "name": name }
+                }),
+            );
+        }
+        _ => {
+            // Already in OpenAI format or unrecognized — leave unchanged
+        }
+    }
 }
 
 fn prepend_system_message(fields: &mut Map<String, Value>, content: Value) {
@@ -1713,5 +1962,97 @@ mod tests {
         assert_eq!(resp["output"][0]["content"][0]["text"], "Step by step thinking...");
         assert_eq!(resp["output"][0]["content"][1]["type"], "output_text");
         assert_eq!(resp["output"][0]["content"][1]["text"], "Final answer");
+    }
+
+
+    fn normalize_tools_converts_anthropic_to_openai() {
+        let mut map = Map::new();
+        map.insert("tools".to_string(), json!([
+            {
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "location": { "type": "string" } },
+                    "required": ["location"]
+                }
+            }
+        ]));
+        map.insert("tool_choice".to_string(), json!({"type": "auto"}));
+
+        normalize_tools(&mut map);
+        normalize_tool_choice(&mut map);
+
+        let tools = map.get("tools").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "get_weather");
+        assert_eq!(tools[0]["function"]["description"], "Get weather");
+        assert!(tools[0]["function"]["parameters"]["properties"]["location"].is_object());
+
+        let tc = map.get("tool_choice").unwrap();
+        assert_eq!(tc, "auto");
+    }
+
+
+    fn normalize_tools_leaves_openai_format_unchanged() {
+        let mut map = Map::new();
+        map.insert("tools".to_string(), json!([
+            {
+                "type": "function",
+                "function": {
+                    "name": "existing_tool",
+                    "description": "Already in correct format",
+                    "parameters": { "type": "object", "properties": {} }
+                }
+            }
+        ]));
+
+        normalize_tools(&mut map);
+
+        let tools = map.get("tools").and_then(|v| v.as_array()).unwrap();
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "existing_tool");
+    }
+
+
+    fn normalize_tool_choice_converts_any_to_required() {
+        let mut map = Map::new();
+        map.insert("tool_choice".to_string(), json!({"type": "any"}));
+        normalize_tool_choice(&mut map);
+        assert_eq!(map.get("tool_choice").unwrap(), "required");
+    }
+
+
+    fn normalize_tool_choice_converts_tool_with_name() {
+        let mut map = Map::new();
+        map.insert("tool_choice".to_string(), json!({"type": "tool", "name": "my_func"}));
+        normalize_tool_choice(&mut map);
+        let tc = map.get("tool_choice").unwrap();
+        assert_eq!(tc["type"], "function");
+        assert_eq!(tc["function"]["name"], "my_func");
+    }
+
+
+    fn normalize_body_converts_anthropic_tools_in_messages_mode() {
+        let body = json!({
+            "model": "claude-sonnet-4",
+            "system": "Be helpful",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "tools": [
+                {
+                    "name": "my_tool",
+                    "description": "The tool",
+                    "input_schema": { "type": "object", "properties": {} }
+                }
+            ],
+            "tool_choice": {"type": "any"}
+        });
+
+        let normalized = normalize_body(body, CompatMode::Messages);
+        let tools = normalized["tools"].as_array().unwrap();
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "my_tool");
+        assert_eq!(normalized["tool_choice"], "required");
     }
 }
