@@ -1416,6 +1416,7 @@ async fn write_opencode_settings(
     let effective_subagent_model = req
         .subagent_model
         .clone()
+        .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| models[0].clone());
 
     let provider = config
@@ -2074,7 +2075,7 @@ fn opencode_config_path() -> PathBuf {
     home_dir()
         .join(".config")
         .join("opencode")
-        .join("opencode.json")
+        .join("opencode.jsonc")
 }
 
 fn openclaw_settings_path() -> PathBuf {
