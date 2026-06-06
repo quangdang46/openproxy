@@ -1,8 +1,16 @@
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use bytes::Bytes;
+use chrono::Utc;
+use futures_util::StreamExt;
+use http_body_util::BodyExt;
 use serde_json::{json, Map, Value};
 
 use crate::server::state::AppState;
@@ -84,10 +92,689 @@ async fn forward_compat(
         CompatMode::Responses { compact: false } => Some("/v1/responses"),
         CompatMode::Responses { compact: true } => Some("/v1/responses/compact"),
     };
-    with_cors_response(
-        chat::chat_completions_for_endpoint(state, headers, Ok(Json(normalized)), endpoint).await,
-    )
+    let response =
+        chat::chat_completions_for_endpoint(state, headers, Ok(Json(normalized)), endpoint).await;
+
+    match mode {
+        CompatMode::Responses { .. } => with_cors_response(convert_to_responses_api(response).await),
+        CompatMode::Messages => with_cors_response(response),
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Responses API SSE format conversion
+// ---------------------------------------------------------------------------
+
+/// Convert an OpenAI chat-completion response (streaming or non-streaming) to
+/// the OpenAI Responses API format.
+async fn convert_to_responses_api(response: Response) -> Response {
+    let status = response.status();
+    if !status.is_success() {
+        return response;
+    }
+
+    let is_sse = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream") || ct.contains("text/plain"));
+
+    if !is_sse {
+        // Non-streaming — collect the whole body and convert the JSON.
+        // Read the body, then reconstruct the response if parsing fails.
+        let (parts, body) = response.into_parts();
+        let body_bytes = match body.collect().await {
+            Ok(col) => col.to_bytes(),
+            Err(_) => return Response::from_parts(parts, Body::empty()),
+        };
+        let Ok(chat_completion) = serde_json::from_slice::<Value>(&body_bytes) else {
+            return Response::from_parts(parts, Body::from(body_bytes));
+        };
+        let Ok(chat_completion) = serde_json::from_slice::<Value>(&body_bytes) else {
+            return (status, body_bytes).into_response();
+        };
+        let responses_json = chat_completion_to_responses_json(&chat_completion);
+        return Json(responses_json).into_response();
+    }
+
+    // Streaming — wrap the body through the SSE converter
+    let (parts, body) = response.into_parts();
+    let state = ResponsesSseState::new();
+    let data_stream = body.into_data_stream();
+    let converted = async_stream::stream! {
+        // Token-buffer re-assembly: SSE frames can be split across TCP segments
+        // or combined in a single chunk. We assemble whole `data: ...` frames
+        // and pass complete JSON to the converter.
+        let buf = &mut String::new();
+        let mut conv_state = ResponsesSseState::new();
+
+        #[allow(unused_mut)]
+        let mut stream = data_stream;
+        loop {
+            let next = stream.next().await;
+            match next {
+                Some(Ok(chunk)) => {
+                    let chunk_str = String::from_utf8_lossy(&chunk);
+                    buf.push_str(&chunk_str);
+
+                    // Process complete SSE frames from the buffer.
+                    // Each frame is `data: {...}\n\n` or `data: [DONE]\n\n` or `: heartbeat\n\n`.
+                    loop {
+                        if let Some(frame_end) = buf.find("\n\n") {
+                            let frame = buf[..frame_end].to_string();
+                            buf.drain(..frame_end + 2);
+
+                            let frame = frame.trim();
+                            if frame.is_empty() || frame.starts_with(':') {
+                                continue; // heartbeat or comment
+                            }
+
+                            let json_str = frame.strip_prefix("data:").unwrap_or(&frame).trim();
+                            if json_str == "[DONE]" {
+                                break;
+                            }
+
+                            if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
+                                let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
+                                for event_bytes in events {
+                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                                }
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                Some(Err(_)) | None => break,
+            }
+        }
+    };
+
+    let body = Body::from_stream(converted);
+    let mut resp = Response::new(body);
+    *resp.status_mut() = status;
+
+    // Copy original headers except content-type (we keep it as event-stream)
+    for (name, value) in &parts.headers {
+        if name.as_str() != "content-length" && name.as_str() != "content-type" && name.as_str() != "transfer-encoding" {
+            resp.headers_mut().insert(name, value.clone());
+        }
+    }
+    resp.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    resp.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-cache"),
+    );
+
+    resp
+}
+
+/// Convert a completed chat-completion JSON object to a Responses API JSON object.
+/// Used for non-streaming responses.
+fn chat_completion_to_responses_json(source: &Value) -> Value {
+    let response_id = source
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|id| {
+            if id.starts_with("chatcmpl-") {
+                format!("resp_{}", &id[9..])
+            } else {
+                format!("resp_{}", id)
+            }
+        })
+        .unwrap_or_else(|| format!("resp_{:x}", Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+    let created = source
+        .get("created")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| Utc::now().timestamp());
+    let model = source.get("model").and_then(|v| v.as_str()).unwrap_or("");
+
+    let mut output = Vec::new();
+    let mut usage = None;
+
+    if let Some(choices) = source.get("choices").and_then(|v| v.as_array()) {
+        for (idx, choice) in choices.iter().enumerate() {
+            let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str());
+            if let Some(message) = choice.get("message") {
+                let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("assistant");
+                let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+
+                // Build content parts array
+                let mut content_parts = Vec::new();
+
+                // Reasoning content (non-standard field like DeepSeek)
+                if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()) {
+                    if !reasoning.is_empty() {
+                        content_parts.push(json!({
+                            "id": format!("item_{}_reasoning", idx),
+                            "type": "summary_text",
+                            "text": reasoning,
+                        }));
+                    }
+                }
+
+                content_parts.push(json!({
+                    "id": format!("item_{}_text", idx),
+                    "type": "output_text",
+                    "text": content,
+                    "annotations": [],
+                }));
+
+                let item = json!({
+                    "id": format!("item_{}", idx),
+                    "type": "message",
+                    "role": role,
+                    "status": if finish_reason.is_some() { "completed" } else { "in_progress" },
+                    "content": content_parts,
+                });
+                output.push(item);
+            }
+        }
+    }
+
+    if let Some(u) = source.get("usage") {
+        usage = Some(u.clone());
+    }
+
+    let mut resp = json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": created,
+        "status": "completed",
+        "model": model,
+        "output": output,
+    });
+
+    if let Some(u) = usage {
+        resp.as_object_mut()
+            .unwrap()
+            .insert("usage".to_string(), u);
+    }
+
+    resp
+}
+
+/// State machine that tracks the SSE conversion from chat.completion.chunk
+/// events to Responses API events.
+struct ResponsesSseState {
+    started: bool,
+    response_id: String,
+    created: i64,
+    model: String,
+    seq: u64,
+    // Per-choice-index tracking
+    msg_item_added: HashMap<usize, bool>,
+    msg_content_added: HashMap<usize, bool>,
+    msg_text_buf: HashMap<usize, String>,
+    msg_item_done: HashMap<usize, bool>,
+    added_item_id_map: HashMap<usize, String>,
+    added_content_part_id_map: HashMap<usize, String>,
+    // Reasoning tracking
+    reasoning_id: Option<String>,
+    reasoning_buf: Option<String>,
+    reasoning_done: bool,
+    reasoning_item_added: bool,
+    reasoning_content_added: bool,
+    // Global state
+    completed_sent: bool,
+}
+
+impl ResponsesSseState {
+    fn new() -> Self {
+        Self {
+            started: false,
+            response_id: String::new(),
+            created: 0,
+            model: String::new(),
+            seq: 0,
+            msg_item_added: HashMap::new(),
+            msg_content_added: HashMap::new(),
+            msg_text_buf: HashMap::new(),
+            msg_item_done: HashMap::new(),
+            added_item_id_map: HashMap::new(),
+            added_content_part_id_map: HashMap::new(),
+            reasoning_id: None,
+            reasoning_buf: None,
+            reasoning_done: false,
+            reasoning_item_added: false,
+            reasoning_content_added: false,
+            completed_sent: false,
+        }
+    }
+}
+
+static RESP_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+fn generate_response_id() -> String {
+    let n = RESP_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("resp_{:x}", n)
+}
+
+fn response_skeleton(state: &ResponsesSseState) -> Value {
+    let mut resp = json!({
+        "id": state.response_id,
+        "object": "response",
+        "created_at": state.created,
+        "status": "in_progress",
+    });
+    if !state.model.is_empty() {
+        resp.as_object_mut()
+            .unwrap()
+            .insert("model".to_string(), json!(state.model));
+    }
+    resp
+}
+
+/// Format a single SSE frame for a Responses API event.
+fn format_sse_event(event: &str, data: &Value) -> Vec<u8> {
+    let json_str = serde_json::to_string(data).unwrap_or_default();
+    format!("event: {event}\ndata: {json_str}\n\n")
+        .into_bytes()
+}
+
+/// Convert a single chat.completion.chunk JSON to zero or more Responses API
+/// SSE event frames (as raw bytes).
+fn openai_chunk_to_responses(
+    state: &mut ResponsesSseState,
+    chunk: &Value,
+) -> Vec<Vec<u8>> {
+    let mut frames: Vec<Vec<u8>> = Vec::new();
+
+    // ── Initialisation ────────────────────────────────────────────────
+    if !state.started {
+        state.started = true;
+        state.response_id = chunk
+            .get("id")
+            .and_then(|v| v.as_str())
+            .map(|id| {
+                if id.starts_with("chatcmpl-") {
+                    format!("resp_{}", &id[9..])
+                } else {
+                    generate_response_id()
+                }
+            })
+            .unwrap_or_else(generate_response_id);
+        state.created = chunk
+            .get("created")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_else(|| Utc::now().timestamp());
+        state.model = chunk
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        state.seq += 1;
+        frames.push(format_sse_event(
+            "response.created",
+            &json!({
+                "type": "response.created",
+                "response": response_skeleton(state),
+            }),
+        ));
+
+        state.seq += 1;
+        frames.push(format_sse_event(
+            "response.in_progress",
+            &json!({
+                "type": "response.in_progress",
+                "response": response_skeleton(state),
+            }),
+        ));
+    }
+
+    // ── Process choices ──────────────────────────────────────────────
+    let Some(choices) = chunk.get("choices").and_then(|v| v.as_array()) else {
+        return frames;
+    };
+
+    for choice in choices {
+        let index = choice
+            .get("index")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as usize;
+        let delta = choice
+            .get("delta")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let delta = Value::Object(delta);
+        let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str());
+
+        // ── Reasoning content ────────────────────────────────────────
+        if let Some(reasoning) = delta
+            .get("reasoning_content")
+            .and_then(|v| v.as_str())
+            .filter(|r| !r.is_empty())
+        {
+            if !state.reasoning_item_added {
+                state.reasoning_item_added = true;
+                let rid = generate_response_id();
+                state.reasoning_id = Some(rid.clone());
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.output_item.added",
+                    &json!({
+                        "type": "response.output_item.added",
+                        "part_index": index,
+                        "item": {
+                            "id": rid,
+                            "type": "reasoning",
+                            "status": "in_progress",
+                            "role": "assistant",
+                        },
+                    }),
+                ));
+            }
+
+            if !state.reasoning_content_added {
+                state.reasoning_content_added = true;
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.reasoning_summary_part.added",
+                    &json!({
+                        "type": "response.reasoning_summary_part.added",
+                        "part_index": index,
+                        "part": {
+                            "id": format!("reasoning_part_{}", state.seq),
+                            "type": "summary_text",
+                        },
+                    }),
+                ));
+            }
+
+            state.seq += 1;
+            state.reasoning_buf.get_or_insert_with(String::new).push_str(reasoning);
+            frames.push(format_sse_event(
+                "response.reasoning_summary_text.delta",
+                &json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "delta": reasoning,
+                }),
+            ));
+        }
+
+        // ── Regular text content ─────────────────────────────────────
+        if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+            if !state.msg_item_added.contains_key(&index)
+                || !state.msg_item_added[&index]
+            {
+                state.msg_item_added.insert(index, true);
+                let item_id = generate_response_id();
+                state.added_item_id_map.insert(index, item_id.clone());
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.output_item.added",
+                    &json!({
+                        "type": "response.output_item.added",
+                        "part_index": index,
+                        "item": {
+                            "id": item_id,
+                            "type": "message",
+                            "status": "in_progress",
+                            "role": "assistant",
+                            "content": [],
+                        },
+                    }),
+                ));
+            }
+
+            if !state.msg_content_added.contains_key(&index)
+                || !state.msg_content_added[&index]
+            {
+                state.msg_content_added.insert(index, true);
+                let part_id = generate_response_id();
+                state.added_content_part_id_map.insert(index, part_id.clone());
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.content_part.added",
+                    &json!({
+                        "type": "response.content_part.added",
+                        "part_index": index,
+                        "part": {
+                            "id": part_id,
+                            "type": "output_text",
+                            "text": "",
+                            "annotations": [],
+                        },
+                    }),
+                ));
+            }
+
+            let buf = state
+                .msg_text_buf
+                .entry(index)
+                .or_insert_with(String::new);
+            buf.push_str(content);
+            // Only emit delta events for non-empty content to avoid
+            // flooding the client with empty frames (many providers
+            // send empty content chunks during streaming).
+            if !content.is_empty() {
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.output_text.delta",
+                    &json!({
+                        "type": "response.output_text.delta",
+                        "delta": content,
+                    }),
+                ));
+            }
+        }
+
+        // ── Finish reason ────────────────────────────────────────────
+        if let Some(_reason) = finish_reason {
+            // Close reasoning if we actually emitted reasoning events
+            if !state.reasoning_done && state.reasoning_item_added {
+                let reasoning_text = state
+                    .reasoning_buf
+                    .as_ref()
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                state.reasoning_done = true;
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.reasoning_summary_text.done",
+                    &json!({
+                        "type": "response.reasoning_summary_text.done",
+                        "part_index": index,
+                        "text": reasoning_text,
+                    }),
+                ));
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.content_part.done",
+                    &json!({
+                        "type": "response.content_part.done",
+                        "part_index": index,
+                        "part": {
+                            "id": state
+                                .added_content_part_id_map
+                                .get(&index)
+                                .map(|s| s.as_str())
+                                .unwrap_or(""),
+                            "type": "summary_text",
+                        },
+                    }),
+                ));
+            }
+
+            // Close message text
+            if !state.msg_item_done.contains_key(&index)
+                || !state.msg_item_done[&index]
+            {
+                let text = state
+                    .msg_text_buf
+                    .get(&index)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let part_id = state
+                    .added_content_part_id_map
+                    .get(&index)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+                let item_id = state
+                    .added_item_id_map
+                    .get(&index)
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
+
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.output_text.done",
+                    &json!({
+                        "type": "response.output_text.done",
+                        "part_index": index,
+                        "text": text,
+                    }),
+                ));
+
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.content_part.done",
+                    &json!({
+                        "type": "response.content_part.done",
+                        "part_index": index,
+                        "part": {
+                            "id": part_id,
+                            "type": "output_text",
+                            "text": text,
+                            "annotations": [],
+                        },
+                    }),
+                ));
+
+                state.seq += 1;
+                frames.push(format_sse_event(
+                    "response.output_item.done",
+                    &json!({
+                        "type": "response.output_item.done",
+                        "part_index": index,
+                        "item": {
+                            "id": item_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "id": part_id,
+                                    "type": "output_text",
+                                    "text": text,
+                                    "annotations": [],
+                                }
+                            ],
+                        },
+                    }),
+                ));
+
+                state.msg_item_done.insert(index, true);
+            }
+        }
+    }
+
+    // ── Usage + completed (last chunk) ──────────────────────────────
+    let usage_in_chunk = chunk.get("usage").filter(|v| !v.is_null());
+    let has_finish_reason = chunk
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|c| c.get("finish_reason").and_then(|v| v.as_str()).is_some())
+        });
+
+    if usage_in_chunk.is_some() || (has_finish_reason && !state.completed_sent) {
+        state.completed_sent = true;
+
+        // Build final output array with all choices
+        let mut output = Vec::new();
+        for &idx in state.msg_item_done.keys() {
+            let text = state
+                .msg_text_buf
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let part_id = state
+                .added_content_part_id_map
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let item_id = state
+                .added_item_id_map
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            output.push(json!({
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {
+                        "id": part_id,
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": [],
+                    }
+                ],
+            }));
+        }
+
+        // If we had reasoning output, include it too
+        if state.reasoning_item_added {
+            let reasoning_text = state
+                .reasoning_buf
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let reasoning_id = state
+                .reasoning_id
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            output.insert(
+                0,
+                json!({
+                    "id": reasoning_id,
+                    "type": "reasoning",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "id": format!("{}_summary", reasoning_id),
+                            "type": "summary_text",
+                            "text": reasoning_text,
+                        }
+                    ],
+                }),
+            );
+        }
+
+        let mut skeleton = response_skeleton(state);
+        let obj = skeleton.as_object_mut().unwrap();
+        obj.insert("status".to_string(), json!("completed"));
+        if !output.is_empty() {
+            obj.insert("output".to_string(), json!(output));
+        }
+        if let Some(usage) = usage_in_chunk {
+            obj.insert("usage".to_string(), usage.clone());
+        }
+
+        state.seq += 1;
+        frames.push(format_sse_event(
+            "response.completed",
+            &json!({
+                "type": "response.completed",
+                "response": skeleton,
+            }),
+        ));
+    }
+
+    frames
+}
+
+// ---------------------------------------------------------------------------
+// Body normalisation (unchanged below this line)
+// ---------------------------------------------------------------------------
 
 fn normalize_body(mut body: Value, mode: CompatMode) -> Value {
     let Some(fields) = body.as_object_mut() else {
@@ -414,5 +1101,158 @@ mod tests {
         });
 
         assert_eq!(count_request_chars(&request), 10);
+    }
+
+    // ── Responses API SSE conversion tests ──────────────────────────
+
+    #[test]
+    fn openai_chunk_to_responses_starts_with_created_event() {
+        let mut state = ResponsesSseState::new();
+        let chunk = json!({
+            "id": "chatcmpl-abc123",
+            "object": "chat.completion.chunk",
+            "created": 1712345678,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "delta": { "role": "assistant", "content": "Hello" },
+                "finish_reason": null
+            }]
+        });
+
+        let frames = openai_chunk_to_responses(&mut state, &chunk);
+        let all_frames = frames.concat();
+        let sse = String::from_utf8_lossy(&all_frames);
+
+        assert!(sse.contains("event: response.created\n"), "should emit response.created");
+        assert!(sse.contains("event: response.in_progress\n"), "should emit response.in_progress");
+        assert!(sse.contains("event: response.output_item.added\n"), "should emit output_item.added");
+        assert!(sse.contains("event: response.content_part.added\n"), "should emit content_part.added");
+        assert!(sse.contains("event: response.output_text.delta\n"), "should emit output_text.delta");
+        assert!(sse.contains("\"delta\":\"Hello\""), "delta should contain 'Hello'");
+    }
+
+    #[test]
+    fn openai_chunk_to_responses_completes_on_finish_reason() {
+        let mut state = ResponsesSseState::new();
+        let chunk1 = json!({
+            "id": "chatcmpl-abc123",
+            "object": "chat.completion.chunk",
+            "created": 1712345678,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "delta": { "role": "assistant", "content": "Hi" },
+                "finish_reason": null
+            }]
+        });
+        let chunk2 = json!({
+            "id": "chatcmpl-abc123",
+            "object": "chat.completion.chunk",
+            "created": 1712345678,
+            "model": "gpt-4o-mini",
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12 }
+        });
+
+        let _ = openai_chunk_to_responses(&mut state, &chunk1);
+        let frames = openai_chunk_to_responses(&mut state, &chunk2);
+        let all_frames = frames.concat();
+        let sse = String::from_utf8_lossy(&all_frames);
+
+        assert!(sse.contains("event: response.output_text.done\n"), "should emit output_text.done");
+        assert!(sse.contains("event: response.content_part.done\n"), "should emit content_part.done");
+        assert!(sse.contains("event: response.output_item.done\n"), "should emit output_item.done");
+        assert!(sse.contains("event: response.completed\n"), "should emit completed");
+        assert!(sse.contains("\"total_tokens\":12"), "usage should be included");
+    }
+
+    #[test]
+    fn openai_chunk_to_responses_handles_reasoning_content() {
+        let mut state = ResponsesSseState::new();
+        let chunk = json!({
+            "id": "chatcmpl-def456",
+            "object": "chat.completion.chunk",
+            "created": 1712345678,
+            "model": "deepseek-chat",
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "reasoning_content": "Let me think..."
+                },
+                "finish_reason": null
+            }]
+        });
+
+        let frames = openai_chunk_to_responses(&mut state, &chunk);
+        let all_frames = frames.concat();
+        let sse = String::from_utf8_lossy(&all_frames);
+
+        assert!(sse.contains("event: response.reasoning_summary_text.delta\n"), "should emit reasoning delta");
+        assert!(sse.contains("\"delta\":\"Let me think...\""), "reasoning delta content");
+    }
+
+    #[test]
+    fn chat_completion_to_responses_json_converts_non_streaming() {
+        let chat = json!({
+            "id": "chatcmpl-xyz789",
+            "object": "chat.completion",
+            "created": 1712345678,
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello there!"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8 }
+        });
+
+        let resp = chat_completion_to_responses_json(&chat);
+
+        assert_eq!(resp["object"], "response");
+        assert_eq!(resp["status"], "completed");
+        assert_eq!(resp["model"], "gpt-4o");
+        assert_eq!(resp["output"][0]["type"], "message");
+        assert_eq!(resp["output"][0]["content"][0]["type"], "output_text");
+        assert_eq!(resp["output"][0]["content"][0]["text"], "Hello there!");
+        assert_eq!(resp["usage"]["total_tokens"], 8);
+    }
+
+    #[test]
+    fn chat_completion_to_responses_json_includes_reasoning() {
+        let chat = json!({
+            "id": "chatcmpl-rst000",
+            "object": "chat.completion",
+            "created": 1712345678,
+            "model": "deepseek-r1",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Final answer",
+                    "reasoning_content": "Step by step thinking..."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": { "total_tokens": 42 }
+        });
+
+        let resp = chat_completion_to_responses_json(&chat);
+
+        assert_eq!(resp["output"][0]["type"], "message");
+        assert_eq!(resp["output"][0]["content"].as_array().unwrap().len(), 2,
+            "should have both reasoning and text content parts");
+        assert_eq!(resp["output"][0]["content"][0]["type"], "summary_text");
+        assert_eq!(resp["output"][0]["content"][0]["text"], "Step by step thinking...");
+        assert_eq!(resp["output"][0]["content"][1]["type"], "output_text");
+        assert_eq!(resp["output"][0]["content"][1]["text"], "Final answer");
     }
 }
