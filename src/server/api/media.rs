@@ -79,7 +79,7 @@ async fn audio_voices(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": {
-                        "message": format!("provider must be one of: elevenlabs, deepgram, inworld, edge-tts, local-device"),
+                        "message": "provider must be one of: elevenlabs, deepgram, inworld, edge-tts, local-device",
                         "type": "invalid_request_error"
                     }
                 })),

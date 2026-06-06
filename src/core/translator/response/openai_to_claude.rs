@@ -664,40 +664,28 @@ mod tests {
 
     #[test]
     fn sanitize_read_removes_pages_for_non_pdf() {
-        let result = sanitize_tool_args(
-            "Read",
-            r#"{"file_path":"/tmp/f.txt","pages":"1-3"}"#,
-        );
+        let result = sanitize_tool_args("Read", r#"{"file_path":"/tmp/f.txt","pages":"1-3"}"#);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert!(parsed.get("pages").is_none());
     }
 
     #[test]
     fn sanitize_read_keeps_valid_pdf_pages() {
-        let result = sanitize_tool_args(
-            "Read",
-            r#"{"file_path":"/tmp/f.pdf","pages":"1-3"}"#,
-        );
+        let result = sanitize_tool_args("Read", r#"{"file_path":"/tmp/f.pdf","pages":"1-3"}"#);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["pages"], "1-3");
     }
 
     #[test]
     fn sanitize_read_keeps_single_page_number() {
-        let result = sanitize_tool_args(
-            "Read",
-            r#"{"file_path":"/tmp/doc.PDF","pages":"5"}"#,
-        );
+        let result = sanitize_tool_args("Read", r#"{"file_path":"/tmp/doc.PDF","pages":"5"}"#);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["pages"], "5");
     }
 
     #[test]
     fn sanitize_read_removes_pages_with_invalid_format() {
-        let result = sanitize_tool_args(
-            "Read",
-            r#"{"file_path":"/tmp/f.pdf","pages":"abc"}"#,
-        );
+        let result = sanitize_tool_args("Read", r#"{"file_path":"/tmp/f.pdf","pages":"abc"}"#);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert!(parsed.get("pages").is_none());
     }
@@ -721,10 +709,7 @@ mod tests {
 
     #[test]
     fn sanitize_read_with_proxy_prefix() {
-        let result = sanitize_tool_args(
-            "proxy_Read",
-            r#"{"limit":"50","file_path":"/tmp/f.txt"}"#,
-        );
+        let result = sanitize_tool_args("proxy_Read", r#"{"limit":"50","file_path":"/tmp/f.txt"}"#);
         let parsed: Value = serde_json::from_str(&result).unwrap();
         assert_eq!(parsed["limit"], 50);
     }

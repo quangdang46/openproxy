@@ -926,9 +926,7 @@ async fn cloudflare_deploy(
                 .get("result")
                 .and_then(|r| r.get("subdomain"))
                 .and_then(Value::as_str)
-                .map(|subdomain| {
-                    format!("https://{project_name}.{subdomain}.workers.dev")
-                })
+                .map(|subdomain| format!("https://{project_name}.{subdomain}.workers.dev"))
                 .unwrap_or_default()
         }
         _ => String::new(),
@@ -1011,11 +1009,7 @@ async fn deno_deploy(
         return response;
     }
 
-    let Some(deno_token) = body
-        .deno_token
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(deno_token) = body.deno_token.as_deref().filter(|value| !value.is_empty()) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -1025,11 +1019,7 @@ async fn deno_deploy(
             .into_response();
     };
 
-    let Some(org_domain) = body
-        .org_domain
-        .as_deref()
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(org_domain) = body.org_domain.as_deref().filter(|value| !value.is_empty()) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
@@ -1083,10 +1073,7 @@ async fn deno_deploy(
     if !create_app_res.status().is_success() {
         let status = StatusCode::from_u16(create_app_res.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let error_text = create_app_res
-            .text()
-            .await
-            .unwrap_or_default();
+        let error_text = create_app_res.text().await.unwrap_or_default();
 
         if status == StatusCode::CONFLICT {
             return (
@@ -1164,10 +1151,7 @@ async fn deno_deploy(
     if !deploy_res.status().is_success() {
         let status = StatusCode::from_u16(deploy_res.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-        let error_text = deploy_res
-            .text()
-            .await
-            .unwrap_or_default();
+        let error_text = deploy_res.text().await.unwrap_or_default();
         // Cleanup: delete the created app
         let _ = client
             .delete(format!("{api_base_url}/apps/{app_id}"))
@@ -1356,7 +1340,10 @@ async fn test_pool(
         )
             .into_response(),
         Some(pool) => {
-            let test_result = if pool.r#type == "vercel" || pool.r#type == "cloudflare" || pool.r#type == "deno" {
+            let test_result = if pool.r#type == "vercel"
+                || pool.r#type == "cloudflare"
+                || pool.r#type == "deno"
+            {
                 test_vercel_relay(&pool.proxy_url, 10_000).await
             } else {
                 test_proxy_url(&pool.proxy_url, None, None).await
@@ -1578,7 +1565,10 @@ pub fn routes() -> Router<AppState> {
         .route("/api/mitm/start", post(start_mitm))
         .route("/api/mitm/stop", post(stop_mitm))
         .route("/api/proxy-pools/vercel-deploy", post(vercel_deploy))
-        .route("/api/proxy-pools/cloudflare-deploy", post(cloudflare_deploy))
+        .route(
+            "/api/proxy-pools/cloudflare-deploy",
+            post(cloudflare_deploy),
+        )
         .route("/api/proxy-pools/deno-deploy", post(deno_deploy))
         .route("/api/proxy-pools/{id}/test", post(test_pool))
 }
