@@ -1709,7 +1709,10 @@ fn resolve_effective_proxy(state: &AppState, connection: &ProviderConnection) ->
             if proxy_pool.is_active.unwrap_or(false) {
                 let proxy_url = proxy_pool.proxy_url.trim();
                 if !proxy_url.is_empty() {
-                    if proxy_pool.r#type == "vercel" || proxy_pool.r#type == "cloudflare" || proxy_pool.r#type == "deno" {
+                    if proxy_pool.r#type == "vercel"
+                        || proxy_pool.r#type == "cloudflare"
+                        || proxy_pool.r#type == "deno"
+                    {
                         return EffectiveProxy {
                             connection_proxy_enabled: false,
                             connection_proxy_url: String::new(),

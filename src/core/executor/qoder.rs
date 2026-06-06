@@ -167,7 +167,10 @@ impl QoderExecutor {
     }
 
     /// AES-128-CBC encrypt with PKCS7 padding, IV = key bytes, returns base64.
-    fn aes_cbc_encrypt_base64(plaintext: &[u8], key_str: &str) -> Result<String, QoderExecutorError> {
+    fn aes_cbc_encrypt_base64(
+        plaintext: &[u8],
+        key_str: &str,
+    ) -> Result<String, QoderExecutorError> {
         let key_bytes = key_str.as_bytes();
         if key_bytes.len() != 16 {
             return Err(QoderExecutorError::CryptoError(format!(
@@ -185,9 +188,7 @@ impl QoderExecutor {
         let padded_len = plaintext.len() + padding_len;
         let mut padded = vec![0u8; padded_len + block_size]; // extra block for potential padding expansion
         padded[..plaintext.len()].copy_from_slice(plaintext);
-        for i in plaintext.len()..padded_len {
-            padded[i] = padding_len as u8;
-        }
+        padded[plaintext.len()..padded_len].fill(padding_len as u8);
 
         let encryptor = Aes128CbcEnc::new(key_bytes.into(), iv.into());
         let encrypted = encryptor
@@ -413,17 +414,15 @@ impl QoderExecutor {
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            "Accept",
-            HeaderValue::from_static("text/event-stream"),
-        );
+        headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
         headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         // gzip triggers signature validation on Qoder's CDN; force identity.
         headers.insert("Accept-Encoding", HeaderValue::from_static("identity"));
 
         headers.insert(
             "Authorization",
-            HeaderValue::from_str(&cosy.authorization).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.authorization)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Key",
@@ -439,63 +438,78 @@ impl QoderExecutor {
         );
         headers.insert(
             "Cosy-Version",
-            HeaderValue::from_str(&cosy.cosy_version).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_version)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Machineid",
-            HeaderValue::from_str(&cosy.cosy_machineid).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_machineid)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Machinetoken",
-            HeaderValue::from_str(&cosy.cosy_machinetoken).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_machinetoken)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Machinetype",
-            HeaderValue::from_str(&cosy.cosy_machinetype).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_machinetype)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Machineos",
-            HeaderValue::from_str(&cosy.cosy_machineos).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_machineos)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Clienttype",
-            HeaderValue::from_str(&cosy.cosy_clienttype).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_clienttype)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Clientip",
-            HeaderValue::from_str(&cosy.cosy_clientip).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_clientip)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Bodyhash",
-            HeaderValue::from_str(&cosy.cosy_bodyhash).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_bodyhash)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Bodylength",
-            HeaderValue::from_str(&cosy.cosy_bodylength).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_bodylength)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Sigpath",
-            HeaderValue::from_str(&cosy.cosy_sigpath).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_sigpath)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Data-Policy",
-            HeaderValue::from_str(&cosy.cosy_data_policy).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_data_policy)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Organization-Id",
-            HeaderValue::from_str(&cosy.cosy_organization_id).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_organization_id)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Cosy-Organization-Tags",
-            HeaderValue::from_str(&cosy.cosy_organization_tags).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.cosy_organization_tags)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "Login-Version",
-            HeaderValue::from_str(&cosy.login_version).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.login_version)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
         headers.insert(
             "X-Request-Id",
-            HeaderValue::from_str(&cosy.x_request_id).unwrap_or_else(|_| HeaderValue::from_static("")),
+            HeaderValue::from_str(&cosy.x_request_id)
+                .unwrap_or_else(|_| HeaderValue::from_static("")),
         );
 
         Ok(headers)
@@ -619,10 +633,7 @@ impl QoderExecutor {
         let last_user = Self::last_user_text(&messages);
 
         let psd = &credentials.provider_specific_data;
-        let user_id = psd
-            .get("userId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let user_id = psd.get("userId").and_then(|v| v.as_str()).unwrap_or("");
 
         // Stable session ID from user + model
         let session_id = Self::stable_hash(b"qoder-session", &[user_id, qoder_key]);
@@ -662,10 +673,7 @@ impl QoderExecutor {
             .and_then(|v| v.as_u64())
             .unwrap_or(32768);
 
-        let tools = body
-            .get("tools")
-            .cloned()
-            .unwrap_or(Value::Array(vec![]));
+        let tools = body.get("tools").cloned().unwrap_or(Value::Array(vec![]));
 
         Ok(serde_json::json!({
             "request_id": Uuid::new_v4().to_string(),
@@ -761,11 +769,7 @@ impl QoderExecutor {
         let creds = QoderCreds {
             user_id,
             auth_token: access_token,
-            name: request
-                .credentials
-                .display_name
-                .clone()
-                .unwrap_or_default(),
+            name: request.credentials.display_name.clone().unwrap_or_default(),
             email: request.credentials.email.clone().unwrap_or_default(),
             machine_id,
         };

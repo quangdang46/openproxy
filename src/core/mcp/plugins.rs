@@ -86,7 +86,7 @@ pub fn is_allowed_command(cmd: &str) -> bool {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or(cmd);
-    ALLOWED_MCP_COMMANDS.iter().any(|a| *a == base)
+    ALLOWED_MCP_COMMANDS.contains(&base)
 }
 
 /// In-memory cache of custom plugins. Survives across requests but resets on
