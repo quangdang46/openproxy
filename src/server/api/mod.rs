@@ -969,7 +969,7 @@ async fn create_pool_api(
     pool.proxy_url = proxy_url.to_string();
     pool.no_proxy = req.no_proxy.unwrap_or_default().trim().to_string();
     pool.r#type = match req.r#type.as_deref() {
-        Some("http" | "vercel") => req.r#type.unwrap(),
+        Some("http" | "vercel" | "cloudflare" | "deno") => req.r#type.unwrap(),
         _ => "http".to_string(),
     };
     pool.is_active = Some(req.is_active.unwrap_or(true));
