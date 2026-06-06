@@ -91,3 +91,4 @@ gitbooks/*
 /packages/platform/*/bin/openproxy.exe
 .ms/
 HANDOFF.md
+.ntm/
