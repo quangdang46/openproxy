@@ -112,7 +112,7 @@ fn droid_settings_path(home: &Path) -> PathBuf {
 }
 
 fn opencode_config_path(home: &Path) -> PathBuf {
-    home.join(".config").join("opencode").join("opencode.json")
+    home.join(".config").join("opencode").join("opencode.jsonc")
 }
 
 fn openclaw_settings_path(home: &Path) -> PathBuf {

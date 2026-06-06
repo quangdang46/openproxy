@@ -142,7 +142,7 @@ impl OpenCodeGoExecutor {
 
     pub async fn execute_request(
         &self,
-        request: OpenCodeGoExecutionRequest,
+        mut request: OpenCodeGoExecutionRequest,
     ) -> Result<OpenCodeGoExecutorResponse, OpenCodeGoExecutorError> {
         let url = self.build_url(&request.model);
         let headers = self.build_headers(&request.credentials, request.stream, &request.model);
