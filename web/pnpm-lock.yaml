@@ -48,8 +48,8 @@ importers:
         specifier: ^18.0.1
         version: 18.0.3
       material-symbols:
-        specifier: ^0.44.8
-        version: 0.44.8
+        specifier: ^0.44.12
+        version: 0.44.12
       monaco-editor:
         specifier: ^0.55.1
         version: 0.55.1
@@ -2158,8 +2158,8 @@ packages:
     engines: {node: '>= 20'}
     hasBin: true
 
-  material-symbols@0.44.8:
-    resolution: {integrity: sha512-drWG88gPlJXmvQrpSc3zKxjzysuvD7ayoGDJecUTr5tt0l4URh3XhDqKjKjCC773oYfTi39ljEzk+CZ6ereikg==}
+  material-symbols@0.44.12:
+    resolution: {integrity: sha512-lZkS9BwISNU2Jbup+IlwZrr9z1oAK6zx38qPpe7mNzkXwiIEnQaxPz1Sf3bNZ0MX15LNlJQNjKI3MWLgmo83+Q==}
 
   math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
@@ -5443,7 +5443,7 @@ snapshots:
 
   marked@18.0.3: {}
 
-  material-symbols@0.44.8: {}
+  material-symbols@0.44.12: {}
 
   math-intrinsics@1.1.0: {}
 
