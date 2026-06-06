@@ -18,7 +18,6 @@ web/node_modules/
 .agents/
 
 # Distribution-only artifacts (not needed in image)
-packages/
 scripts/
 install.sh
 shell-completions/

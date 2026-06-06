@@ -8,7 +8,6 @@
 <p align="center">
   <a href="https://github.com/quangdang46/openproxy/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/quangdang46/openproxy/actions/workflows/ci.yml/badge.svg?branch=main" /></a>
   <a href="https://github.com/quangdang46/openproxy/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/quangdang46/openproxy?display_name=tag&sort=semver&label=release&color=brightgreen" /></a>
-  <a href="https://www.npmjs.com/package/@openprx/openproxy"><img alt="npm" src="https://img.shields.io/badge/npm-%40openprx%2Fopenproxy-CB3837?logo=npm&logoColor=white" /></a>
   <a href="https://github.com/quangdang46/openproxy/blob/main/README.md#license"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
   <a href="#install"><img alt="Install" src="https://img.shields.io/badge/install-curl%20%7C%20npm-1e90ff" /></a>
 </p>
