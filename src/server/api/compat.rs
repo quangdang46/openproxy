@@ -96,7 +96,9 @@ async fn forward_compat(
         chat::chat_completions_for_endpoint(state, headers, Ok(Json(normalized)), endpoint).await;
 
     match mode {
-        CompatMode::Responses { .. } => with_cors_response(convert_to_responses_api(response).await),
+        CompatMode::Responses { .. } => {
+            with_cors_response(convert_to_responses_api(response).await)
+        }
         CompatMode::Messages => with_cors_response(convert_to_messages_api(response).await),
     }
 }
@@ -196,7 +198,10 @@ async fn convert_to_responses_api(response: Response) -> Response {
 
     // Copy original headers except content-type (we keep it as event-stream)
     for (name, value) in &parts.headers {
-        if name.as_str() != "content-length" && name.as_str() != "content-type" && name.as_str() != "transfer-encoding" {
+        if name.as_str() != "content-length"
+            && name.as_str() != "content-type"
+            && name.as_str() != "transfer-encoding"
+        {
             resp.headers_mut().insert(name, value.clone());
         }
     }
@@ -204,10 +209,8 @@ async fn convert_to_responses_api(response: Response) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
     );
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache"),
-    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
 
     resp
 }
@@ -239,8 +242,14 @@ fn chat_completion_to_responses_json(source: &Value) -> Value {
         for (idx, choice) in choices.iter().enumerate() {
             let finish_reason = choice.get("finish_reason").and_then(|v| v.as_str());
             if let Some(message) = choice.get("message") {
-                let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("assistant");
-                let content = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let role = message
+                    .get("role")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("assistant");
+                let content = message
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
 
                 // Build content parts array
                 let mut content_parts = Vec::new();
@@ -289,9 +298,7 @@ fn chat_completion_to_responses_json(source: &Value) -> Value {
     });
 
     if let Some(u) = usage {
-        resp.as_object_mut()
-            .unwrap()
-            .insert("usage".to_string(), u);
+        resp.as_object_mut().unwrap().insert("usage".to_string(), u);
     }
 
     resp
@@ -371,16 +378,12 @@ fn response_skeleton(state: &ResponsesSseState) -> Value {
 /// Format a single SSE frame for a Responses API event.
 fn format_sse_event(event: &str, data: &Value) -> Vec<u8> {
     let json_str = serde_json::to_string(data).unwrap_or_default();
-    format!("event: {event}\ndata: {json_str}\n\n")
-        .into_bytes()
+    format!("event: {event}\ndata: {json_str}\n\n").into_bytes()
 }
 
 /// Convert a single chat.completion.chunk JSON to zero or more Responses API
 /// SSE event frames (as raw bytes).
-fn openai_chunk_to_responses(
-    state: &mut ResponsesSseState,
-    chunk: &Value,
-) -> Vec<Vec<u8>> {
+fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Vec<Vec<u8>> {
     let mut frames: Vec<Vec<u8>> = Vec::new();
 
     // ── Initialisation ────────────────────────────────────────────────
@@ -432,10 +435,7 @@ fn openai_chunk_to_responses(
     };
 
     for choice in choices {
-        let index = choice
-            .get("index")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as usize;
+        let index = choice.get("index").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
         let delta = choice
             .get("delta")
             .and_then(|v| v.as_object())
@@ -487,7 +487,10 @@ fn openai_chunk_to_responses(
             }
 
             state.seq += 1;
-            state.reasoning_buf.get_or_insert_with(String::new).push_str(reasoning);
+            state
+                .reasoning_buf
+                .get_or_insert_with(String::new)
+                .push_str(reasoning);
             frames.push(format_sse_event(
                 "response.reasoning_summary_text.delta",
                 &json!({
@@ -499,9 +502,7 @@ fn openai_chunk_to_responses(
 
         // ── Regular text content ─────────────────────────────────────
         if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-            if !state.msg_item_added.contains_key(&index)
-                || !state.msg_item_added[&index]
-            {
+            if !state.msg_item_added.contains_key(&index) || !state.msg_item_added[&index] {
                 state.msg_item_added.insert(index, true);
                 let item_id = generate_response_id();
                 state.added_item_id_map.insert(index, item_id.clone());
@@ -522,12 +523,12 @@ fn openai_chunk_to_responses(
                 ));
             }
 
-            if !state.msg_content_added.contains_key(&index)
-                || !state.msg_content_added[&index]
-            {
+            if !state.msg_content_added.contains_key(&index) || !state.msg_content_added[&index] {
                 state.msg_content_added.insert(index, true);
                 let part_id = generate_response_id();
-                state.added_content_part_id_map.insert(index, part_id.clone());
+                state
+                    .added_content_part_id_map
+                    .insert(index, part_id.clone());
                 state.seq += 1;
                 frames.push(format_sse_event(
                     "response.content_part.added",
@@ -544,10 +545,7 @@ fn openai_chunk_to_responses(
                 ));
             }
 
-            let buf = state
-                .msg_text_buf
-                .entry(index)
-                .or_insert_with(String::new);
+            let buf = state.msg_text_buf.entry(index).or_insert_with(String::new);
             buf.push_str(content);
             // Only emit delta events for non-empty content to avoid
             // flooding the client with empty frames (many providers
@@ -602,9 +600,7 @@ fn openai_chunk_to_responses(
             }
 
             // Close message text
-            if !state.msg_item_done.contains_key(&index)
-                || !state.msg_item_done[&index]
-            {
+            if !state.msg_item_done.contains_key(&index) || !state.msg_item_done[&index] {
                 let text = state
                     .msg_text_buf
                     .get(&index)
@@ -675,14 +671,15 @@ fn openai_chunk_to_responses(
 
     // ── Usage + completed (last chunk) ──────────────────────────────
     let usage_in_chunk = chunk.get("usage").filter(|v| !v.is_null());
-    let has_finish_reason = chunk
-        .get("choices")
-        .and_then(|v| v.as_array())
-        .is_some_and(|choices| {
-            choices
-                .iter()
-                .any(|c| c.get("finish_reason").and_then(|v| v.as_str()).is_some())
-        });
+    let has_finish_reason =
+        chunk
+            .get("choices")
+            .and_then(|v| v.as_array())
+            .is_some_and(|choices| {
+                choices
+                    .iter()
+                    .any(|c| c.get("finish_reason").and_then(|v| v.as_str()).is_some())
+            });
 
     if usage_in_chunk.is_some() || (has_finish_reason && !state.completed_sent) {
         state.completed_sent = true;
@@ -870,10 +867,8 @@ async fn convert_to_messages_api(response: Response) -> Response {
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/event-stream"),
     );
-    resp.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("no-cache"),
-    );
+    resp.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
 
     resp
 }
@@ -927,7 +922,8 @@ fn chat_completion_to_messages_json(source: &Value) -> Value {
 
     if let Some(choices) = source.get("choices").and_then(|v| v.as_array()) {
         if let Some(first_choice) = choices.first() {
-            stop_reason = stop_reason_map(first_choice.get("finish_reason").and_then(|v| v.as_str()));
+            stop_reason =
+                stop_reason_map(first_choice.get("finish_reason").and_then(|v| v.as_str()));
 
             if let Some(message) = first_choice.get("message") {
                 // reasoning_content → thinking block
@@ -941,7 +937,10 @@ fn chat_completion_to_messages_json(source: &Value) -> Value {
                     }
                 }
 
-                let text = message.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let text = message
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if !text.is_empty() {
                     content.push(json!({
                         "type": "text",
@@ -1026,10 +1025,10 @@ struct MessagesSseState {
     // Tool call streaming state
     // Each tool call is tracked by its index in the delta's tool_calls array.
     // Vectors are grown on demand when a new index appears.
-    toolcall_active: Vec<bool>,         // per-index: content_block_start emitted?
-    toolcall_ids: Vec<String>,          // per-index: tool call id
-    toolcall_names: Vec<String>,        // per-index: tool call name
-    toolcall_args: Vec<String>,         // per-index: accumulated arguments JSON
+    toolcall_active: Vec<bool>,  // per-index: content_block_start emitted?
+    toolcall_ids: Vec<String>,   // per-index: tool call id
+    toolcall_names: Vec<String>, // per-index: tool call name
+    toolcall_args: Vec<String>,  // per-index: accumulated arguments JSON
     toolcall_start_indices: Vec<usize>, // per-index: block_idx at content_block_start
 }
 
@@ -1075,15 +1074,11 @@ impl MessagesSseState {
 /// Format an Anthropic Messages API SSE event frame.
 fn format_messages_sse_event(event: &str, data: &Value) -> Vec<u8> {
     let json_str = serde_json::to_string(data).unwrap_or_default();
-    format!("event: {event}\ndata: {json_str}\n\n")
-        .into_bytes()
+    format!("event: {event}\ndata: {json_str}\n\n").into_bytes()
 }
 
 /// Convert a single chat.completion.chunk to Anthropic Messages API SSE events.
-fn openai_chunk_to_messages(
-    state: &mut MessagesSseState,
-    chunk: &Value,
-) -> Vec<Vec<u8>> {
+fn openai_chunk_to_messages(state: &mut MessagesSseState, chunk: &Value) -> Vec<Vec<u8>> {
     let mut frames: Vec<Vec<u8>> = Vec::new();
 
     // ── Initialize on first chunk ──────────────────────────────────────────
@@ -1252,7 +1247,11 @@ fn openai_chunk_to_messages(
                 state.ensure_toolcall_idx(tcidx);
 
                 // First chunk: has id + function.name → emit content_block_start
-                if let Some(id) = tc.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                if let Some(id) = tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                {
                     if !state.toolcall_active[tcidx] {
                         let name = tc
                             .get("function")
@@ -1482,7 +1481,10 @@ fn normalize_tools(fields: &mut Map<String, Value>) {
         })
         .collect();
 
-    if converted.iter().any(|t| t.get("type").and_then(|v| v.as_str()) == Some("function")) {
+    if converted
+        .iter()
+        .any(|t| t.get("type").and_then(|v| v.as_str()) == Some("function"))
+    {
         fields.insert("tools".to_string(), Value::Array(converted));
     }
 }
@@ -1832,12 +1834,30 @@ mod tests {
         let all_frames = frames.concat();
         let sse = String::from_utf8_lossy(&all_frames);
 
-        assert!(sse.contains("event: response.created\n"), "should emit response.created");
-        assert!(sse.contains("event: response.in_progress\n"), "should emit response.in_progress");
-        assert!(sse.contains("event: response.output_item.added\n"), "should emit output_item.added");
-        assert!(sse.contains("event: response.content_part.added\n"), "should emit content_part.added");
-        assert!(sse.contains("event: response.output_text.delta\n"), "should emit output_text.delta");
-        assert!(sse.contains("\"delta\":\"Hello\""), "delta should contain 'Hello'");
+        assert!(
+            sse.contains("event: response.created\n"),
+            "should emit response.created"
+        );
+        assert!(
+            sse.contains("event: response.in_progress\n"),
+            "should emit response.in_progress"
+        );
+        assert!(
+            sse.contains("event: response.output_item.added\n"),
+            "should emit output_item.added"
+        );
+        assert!(
+            sse.contains("event: response.content_part.added\n"),
+            "should emit content_part.added"
+        );
+        assert!(
+            sse.contains("event: response.output_text.delta\n"),
+            "should emit output_text.delta"
+        );
+        assert!(
+            sse.contains("\"delta\":\"Hello\""),
+            "delta should contain 'Hello'"
+        );
     }
 
     #[test]
@@ -1872,11 +1892,26 @@ mod tests {
         let all_frames = frames.concat();
         let sse = String::from_utf8_lossy(&all_frames);
 
-        assert!(sse.contains("event: response.output_text.done\n"), "should emit output_text.done");
-        assert!(sse.contains("event: response.content_part.done\n"), "should emit content_part.done");
-        assert!(sse.contains("event: response.output_item.done\n"), "should emit output_item.done");
-        assert!(sse.contains("event: response.completed\n"), "should emit completed");
-        assert!(sse.contains("\"total_tokens\":12"), "usage should be included");
+        assert!(
+            sse.contains("event: response.output_text.done\n"),
+            "should emit output_text.done"
+        );
+        assert!(
+            sse.contains("event: response.content_part.done\n"),
+            "should emit content_part.done"
+        );
+        assert!(
+            sse.contains("event: response.output_item.done\n"),
+            "should emit output_item.done"
+        );
+        assert!(
+            sse.contains("event: response.completed\n"),
+            "should emit completed"
+        );
+        assert!(
+            sse.contains("\"total_tokens\":12"),
+            "usage should be included"
+        );
     }
 
     #[test]
@@ -1901,8 +1936,14 @@ mod tests {
         let all_frames = frames.concat();
         let sse = String::from_utf8_lossy(&all_frames);
 
-        assert!(sse.contains("event: response.reasoning_summary_text.delta\n"), "should emit reasoning delta");
-        assert!(sse.contains("\"delta\":\"Let me think...\""), "reasoning delta content");
+        assert!(
+            sse.contains("event: response.reasoning_summary_text.delta\n"),
+            "should emit reasoning delta"
+        );
+        assert!(
+            sse.contains("\"delta\":\"Let me think...\""),
+            "reasoning delta content"
+        );
     }
 
     #[test]
@@ -1956,28 +1997,36 @@ mod tests {
         let resp = chat_completion_to_responses_json(&chat);
 
         assert_eq!(resp["output"][0]["type"], "message");
-        assert_eq!(resp["output"][0]["content"].as_array().unwrap().len(), 2,
-            "should have both reasoning and text content parts");
+        assert_eq!(
+            resp["output"][0]["content"].as_array().unwrap().len(),
+            2,
+            "should have both reasoning and text content parts"
+        );
         assert_eq!(resp["output"][0]["content"][0]["type"], "summary_text");
-        assert_eq!(resp["output"][0]["content"][0]["text"], "Step by step thinking...");
+        assert_eq!(
+            resp["output"][0]["content"][0]["text"],
+            "Step by step thinking..."
+        );
         assert_eq!(resp["output"][0]["content"][1]["type"], "output_text");
         assert_eq!(resp["output"][0]["content"][1]["text"], "Final answer");
     }
 
-
     fn normalize_tools_converts_anthropic_to_openai() {
         let mut map = Map::new();
-        map.insert("tools".to_string(), json!([
-            {
-                "name": "get_weather",
-                "description": "Get weather",
-                "input_schema": {
-                    "type": "object",
-                    "properties": { "location": { "type": "string" } },
-                    "required": ["location"]
+        map.insert(
+            "tools".to_string(),
+            json!([
+                {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": { "location": { "type": "string" } },
+                        "required": ["location"]
+                    }
                 }
-            }
-        ]));
+            ]),
+        );
         map.insert("tool_choice".to_string(), json!({"type": "auto"}));
 
         normalize_tools(&mut map);
@@ -1994,19 +2043,21 @@ mod tests {
         assert_eq!(tc, "auto");
     }
 
-
     fn normalize_tools_leaves_openai_format_unchanged() {
         let mut map = Map::new();
-        map.insert("tools".to_string(), json!([
-            {
-                "type": "function",
-                "function": {
-                    "name": "existing_tool",
-                    "description": "Already in correct format",
-                    "parameters": { "type": "object", "properties": {} }
+        map.insert(
+            "tools".to_string(),
+            json!([
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "existing_tool",
+                        "description": "Already in correct format",
+                        "parameters": { "type": "object", "properties": {} }
+                    }
                 }
-            }
-        ]));
+            ]),
+        );
 
         normalize_tools(&mut map);
 
@@ -2015,7 +2066,6 @@ mod tests {
         assert_eq!(tools[0]["function"]["name"], "existing_tool");
     }
 
-
     fn normalize_tool_choice_converts_any_to_required() {
         let mut map = Map::new();
         map.insert("tool_choice".to_string(), json!({"type": "any"}));
@@ -2023,16 +2073,17 @@ mod tests {
         assert_eq!(map.get("tool_choice").unwrap(), "required");
     }
 
-
     fn normalize_tool_choice_converts_tool_with_name() {
         let mut map = Map::new();
-        map.insert("tool_choice".to_string(), json!({"type": "tool", "name": "my_func"}));
+        map.insert(
+            "tool_choice".to_string(),
+            json!({"type": "tool", "name": "my_func"}),
+        );
         normalize_tool_choice(&mut map);
         let tc = map.get("tool_choice").unwrap();
         assert_eq!(tc["type"], "function");
         assert_eq!(tc["function"]["name"], "my_func");
     }
-
 
     fn normalize_body_converts_anthropic_tools_in_messages_mode() {
         let body = json!({
