@@ -246,7 +246,10 @@ async fn validate_provider(
             }
         }
 
-        // OpenAI-compatible: use provider node baseUrl
+        "opencode-go" => {
+            validate_bearer(&client, "https://opencode.ai/zen/go/v1/models", &api_key).await
+        }
+
         p if is_openai_compatible(p) => {
             let snapshot = state.db.snapshot();
             let base_url = snapshot.provider_nodes.iter()

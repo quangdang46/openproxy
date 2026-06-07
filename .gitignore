@@ -88,3 +88,6 @@ gitbooks/*
 .ms/
 HANDOFF.md
 .ntm/
+
+# Rust compiler ICE logs
+rustc-ice-*.txt

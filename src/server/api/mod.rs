@@ -68,6 +68,10 @@ pub fn routes() -> Router<AppState> {
             post(chat::chat_completions).options(chat::cors_options),
         )
         .route(
+            "/chat/completions",
+            post(chat::chat_completions).options(chat::cors_options),
+        )
+        .route(
             "/api/dashboard/chat/completions",
             post(chat::dashboard_chat_completions),
         )
@@ -76,7 +80,15 @@ pub fn routes() -> Router<AppState> {
             post(compat::messages).options(compat::cors_options),
         )
         .route(
+            "/messages",
+            post(compat::messages).options(compat::cors_options),
+        )
+        .route(
             "/v1/messages/count_tokens",
+            post(compat::count_tokens).options(compat::cors_options),
+        )
+        .route(
+            "/messages/count_tokens",
             post(compat::count_tokens).options(compat::cors_options),
         )
         .route(

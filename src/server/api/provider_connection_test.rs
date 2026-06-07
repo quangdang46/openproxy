@@ -743,6 +743,17 @@ async fn test_api_key_connection(
         "perplexity-web" => {
             test_perplexity_web_connection(state, connection, effective_proxy).await
         }
+        "opencode-go" => {
+            openai_chat_status_test(
+                state,
+                connection,
+                effective_proxy,
+                "https://opencode.ai/zen/go/v1/chat/completions",
+                "deepseek-v4-flash",
+                "Invalid API key",
+            )
+            .await
+        }
         _ => invalid("Provider test not supported"),
     };
 
