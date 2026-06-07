@@ -54,8 +54,12 @@ pub async fn chat_completions(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    let model = body.as_ref().ok().and_then(|b| b.get("model").and_then(|m| m.as_str()));
-    let _log = crate::server::request_logger::RequestLog::start("POST", "/v1/chat/completions", model);
+    let model = body
+        .as_ref()
+        .ok()
+        .and_then(|b| b.get("model").and_then(|m| m.as_str()));
+    let _log =
+        crate::server::request_logger::RequestLog::start("POST", "/v1/chat/completions", model);
     let response = with_cors_response(
         chat_completions_for_endpoint(state, headers, body, Some("/v1/chat/completions")).await,
     );

@@ -121,7 +121,7 @@ fn openclaw_settings_path(home: &Path) -> PathBuf {
 
 #[tokio::test]
 async fn claude_settings_get_reports_not_installed_without_binary_or_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -151,7 +151,7 @@ async fn claude_settings_get_reports_not_installed_without_binary_or_config() {
 
 #[tokio::test]
 async fn claude_settings_post_get_and_delete_match_openproxy_behavior() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -253,7 +253,7 @@ async fn claude_settings_post_get_and_delete_match_openproxy_behavior() {
 
 #[tokio::test]
 async fn hermes_settings_get_reports_not_installed_without_binary_or_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -283,7 +283,7 @@ async fn hermes_settings_get_reports_not_installed_without_binary_or_config() {
 
 #[tokio::test]
 async fn hermes_settings_post_get_and_delete_preserve_other_files() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -374,7 +374,7 @@ async fn hermes_settings_post_get_and_delete_preserve_other_files() {
 
 #[tokio::test]
 async fn codex_settings_get_reports_not_installed_without_binary_or_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -404,7 +404,7 @@ async fn codex_settings_get_reports_not_installed_without_binary_or_config() {
 
 #[tokio::test]
 async fn codex_settings_post_get_and_delete_match_openproxy_file_behavior() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -521,7 +521,7 @@ async fn codex_settings_post_get_and_delete_match_openproxy_file_behavior() {
 
 #[tokio::test]
 async fn copilot_settings_get_reports_installed_without_existing_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
 
@@ -552,7 +552,7 @@ async fn copilot_settings_get_reports_installed_without_existing_config() {
 
 #[tokio::test]
 async fn copilot_settings_post_get_and_delete_match_openproxy_file_behavior() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
 
@@ -674,7 +674,7 @@ async fn copilot_settings_post_get_and_delete_match_openproxy_file_behavior() {
 
 #[tokio::test]
 async fn droid_settings_get_reports_not_installed_without_binary_or_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -704,7 +704,7 @@ async fn droid_settings_get_reports_not_installed_without_binary_or_config() {
 
 #[tokio::test]
 async fn droid_settings_post_get_and_delete_match_openproxy_file_behavior() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -828,7 +828,7 @@ async fn droid_settings_post_get_and_delete_match_openproxy_file_behavior() {
 
 #[tokio::test]
 async fn opencode_settings_get_reports_not_installed_without_binary_or_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -858,7 +858,7 @@ async fn opencode_settings_get_reports_not_installed_without_binary_or_config() 
 
 #[tokio::test]
 async fn opencode_settings_post_patch_and_delete_match_openproxy_file_behavior() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -1067,7 +1067,7 @@ async fn opencode_settings_post_patch_and_delete_match_openproxy_file_behavior()
 
 #[tokio::test]
 async fn openclaw_settings_get_reports_not_installed_without_binary_or_config() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());
@@ -1097,7 +1097,7 @@ async fn openclaw_settings_get_reports_not_installed_without_binary_or_config() 
 
 #[tokio::test]
 async fn openclaw_settings_post_get_and_delete_match_openproxy_file_behavior() {
-    let _lock = ENV_LOCK.lock().unwrap();
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = tempdir().unwrap();
     let path = tempdir().unwrap();
     let _home = EnvVarGuard::set_path("HOME", home.path());

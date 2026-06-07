@@ -66,8 +66,14 @@ pub fn routes() -> Router<AppState> {
         .nest(
             "/v1/v1/models",
             Router::new()
-                .route("/", get(v1_models::list_default_models).options(v1_models::cors_options))
-                .route("/info", get(v1_models::models_info).options(v1_models::cors_options))
+                .route(
+                    "/",
+                    get(v1_models::list_default_models).options(v1_models::cors_options),
+                )
+                .route(
+                    "/info",
+                    get(v1_models::models_info).options(v1_models::cors_options),
+                )
                 .route(
                     "/{kind}",
                     get(v1_models::list_models_by_kind).options(v1_models::cors_options),

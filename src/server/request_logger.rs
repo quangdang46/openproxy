@@ -52,10 +52,7 @@ impl RequestLog {
                 "\x1b[36m[{}] 📥 {} {} model={}\x1b[0m",
                 time, method, path, m
             )),
-            None => log_both(&format!(
-                "\x1b[36m[{}] 📥 {} {}\x1b[0m",
-                time, method, path
-            )),
+            None => log_both(&format!("\x1b[36m[{}] 📥 {} {}\x1b[0m", time, method, path)),
         }
         Self {
             method,

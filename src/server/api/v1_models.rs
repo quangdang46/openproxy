@@ -37,7 +37,7 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/models/info", get(models_info).options(cors_options))
 }
 
- pub async fn cors_options() -> Response {
+pub async fn cors_options() -> Response {
     cors_preflight_response("GET, OPTIONS")
 }
 
@@ -570,7 +570,7 @@ struct ModelCard {
 }
 
 /// GET /v1/models/info?model={model_id}
- pub async fn models_info(
+pub async fn models_info(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
