@@ -3,6 +3,33 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Platform-conditional path helpers — mirror the production logic in
+/// `src/server/api/cli_tools/cowork_settings.rs` so tests produce the
+/// same config paths that the API endpoint returns on every OS.
+mod platform {
+    use std::path::{Path, PathBuf};
+
+    pub fn claude_root(home: &Path) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            home.join("Library")
+                .join("Application Support")
+                .join("Claude")
+        } else {
+            home.join(".config").join("Claude")
+        }
+    }
+
+    pub fn cowork_root(home: &Path) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            home.join("Library")
+                .join("Application Support")
+                .join("Claude-3p")
+        } else {
+            home.join(".config").join("Claude-3p")
+        }
+    }
+}
+
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use once_cell::sync::Lazy;
@@ -79,12 +106,12 @@ impl Drop for HomeEnvGuard {
     }
 }
 
-fn linux_claude_root(home: &Path) -> PathBuf {
-    home.join(".config").join("Claude")
+fn claude_root(home: &Path) -> PathBuf {
+    platform::claude_root(home)
 }
 
-fn linux_cowork_root(home: &Path) -> PathBuf {
-    home.join(".config").join("Claude-3p")
+fn cowork_root(home: &Path) -> PathBuf {
+    platform::cowork_root(home)
 }
 
 #[tokio::test]
@@ -141,12 +168,12 @@ async fn cowork_settings_post_bootstraps_and_get_reads_config() {
 
     let config_path = PathBuf::from(json["configPath"].as_str().unwrap());
     assert!(config_path.exists());
-    assert!(linux_cowork_root(home.path())
+    assert!(cowork_root(home.path())
         .join("configLibrary")
         .join("_meta.json")
         .exists());
 
-    let desktop_config = linux_claude_root(home.path()).join("claude_desktop_config.json");
+    let desktop_config = claude_root(home.path()).join("claude_desktop_config.json");
     let desktop_json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(desktop_config).unwrap()).unwrap();
     assert_eq!(desktop_json["deploymentMode"], "3p");

@@ -3,6 +3,28 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+/// Platform-conditional path helpers — mirror the production logic in
+/// `src/server/api/cli_tools.rs` so tests produce the same config paths
+/// that the API endpoint returns on every OS.
+mod platform {
+    use std::path::{Path, PathBuf};
+
+    pub fn copilot_config_path(home: &Path) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            home.join("Library")
+                .join("Application Support")
+                .join("Code")
+                .join("User")
+                .join("chatLanguageModels.json")
+        } else {
+            home.join(".config")
+                .join("Code")
+                .join("User")
+                .join("chatLanguageModels.json")
+        }
+    }
+}
+
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use once_cell::sync::Lazy;
@@ -101,10 +123,7 @@ fn codex_auth_path(home: &Path) -> PathBuf {
 }
 
 fn copilot_config_path(home: &Path) -> PathBuf {
-    home.join(".config")
-        .join("Code")
-        .join("User")
-        .join("chatLanguageModels.json")
+    platform::copilot_config_path(home)
 }
 
 fn droid_settings_path(home: &Path) -> PathBuf {
