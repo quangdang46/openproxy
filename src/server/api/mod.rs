@@ -59,8 +59,20 @@ pub fn routes() -> Router<AppState> {
         .route("/api/health", get(api_health))
         .route("/api/catalog", get(api_catalog))
         .route("/v1/health", get(health))
+        .route("/v1/v1/health", get(health))
         .merge(v1_api_chat::routes())
         .merge(v1_models::routes())
+        // Duplicate v1_models routes under /v1/v1 prefix
+        .nest(
+            "/v1/v1/models",
+            Router::new()
+                .route("/", get(v1_models::list_default_models).options(v1_models::cors_options))
+                .route("/info", get(v1_models::models_info).options(v1_models::cors_options))
+                .route(
+                    "/{kind}",
+                    get(v1_models::list_models_by_kind).options(v1_models::cors_options),
+                ),
+        )
         .merge(v1beta::routes())
         .merge(web_fetch::routes())
         .route(
@@ -69,6 +81,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/chat/completions",
+            post(chat::chat_completions).options(chat::cors_options),
+        )
+        .route(
+            "/v1/v1/chat/completions",
             post(chat::chat_completions).options(chat::cors_options),
         )
         .route(
@@ -84,6 +100,10 @@ pub fn routes() -> Router<AppState> {
             post(compat::messages).options(compat::cors_options),
         )
         .route(
+            "/v1/v1/messages",
+            post(compat::messages).options(compat::cors_options),
+        )
+        .route(
             "/v1/messages/count_tokens",
             post(compat::count_tokens).options(compat::cors_options),
         )
@@ -92,7 +112,15 @@ pub fn routes() -> Router<AppState> {
             post(compat::count_tokens).options(compat::cors_options),
         )
         .route(
+            "/v1/v1/messages/count_tokens",
+            post(compat::count_tokens).options(compat::cors_options),
+        )
+        .route(
             "/v1/responses",
+            post(compat::responses).options(compat::cors_options),
+        )
+        .route(
+            "/v1/v1/responses",
             post(compat::responses).options(compat::cors_options),
         )
         .route(
@@ -100,7 +128,15 @@ pub fn routes() -> Router<AppState> {
             post(compat::responses_compact).options(compat::cors_options),
         )
         .route(
+            "/v1/v1/responses/compact",
+            post(compat::responses_compact).options(compat::cors_options),
+        )
+        .route(
             "/v1/audio/transcriptions",
+            post(stt::audio_transcriptions).options(stt::cors_options),
+        )
+        .route(
+            "/v1/v1/audio/transcriptions",
             post(stt::audio_transcriptions).options(stt::cors_options),
         )
         .route(
@@ -108,7 +144,15 @@ pub fn routes() -> Router<AppState> {
             post(media::audio_speech).options(media::cors_options),
         )
         .route(
+            "/v1/v1/audio/speech",
+            post(media::audio_speech).options(media::cors_options),
+        )
+        .route(
             "/v1/embeddings",
+            post(media::embeddings).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/embeddings",
             post(media::embeddings).options(media::cors_options),
         )
         .route(
@@ -116,7 +160,15 @@ pub fn routes() -> Router<AppState> {
             post(media::images_generations).options(media::cors_options),
         )
         .route(
+            "/v1/v1/images/generations",
+            post(media::images_generations).options(media::cors_options),
+        )
+        .route(
             "/v1/search",
+            post(media::search).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/search",
             post(media::search).options(media::cors_options),
         )
         .merge(cloud_sync::routes())

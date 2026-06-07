@@ -37,15 +37,15 @@ pub fn routes() -> Router<AppState> {
         .route("/v1/models/info", get(models_info).options(cors_options))
 }
 
-async fn cors_options() -> Response {
+ pub async fn cors_options() -> Response {
     cors_preflight_response("GET, OPTIONS")
 }
 
-async fn list_default_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub async fn list_default_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
     list_models_for_kinds(state, headers, &[LLM_KIND]).await
 }
 
-async fn list_models_by_kind(
+pub async fn list_models_by_kind(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(kind): Path<String>,
@@ -570,7 +570,7 @@ struct ModelCard {
 }
 
 /// GET /v1/models/info?model={model_id}
-async fn models_info(
+ pub async fn models_info(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
