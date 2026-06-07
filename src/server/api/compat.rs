@@ -26,7 +26,11 @@ pub async fn messages(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    forward_compat(state, headers, body, CompatMode::Messages).await
+    let model = body.as_ref().ok().and_then(|b| b.get("model").and_then(|m| m.as_str()));
+    let _log = crate::server::request_logger::RequestLog::start("POST", "/v1/messages", model);
+    let response = forward_compat(state, headers, body, CompatMode::Messages).await;
+    _log.finish(response.status().as_u16());
+    response
 }
 
 pub async fn responses(
@@ -34,13 +38,17 @@ pub async fn responses(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    forward_compat(
+    let model = body.as_ref().ok().and_then(|b| b.get("model").and_then(|m| m.as_str()));
+    let _log = crate::server::request_logger::RequestLog::start("POST", "/v1/responses", model);
+    let response = forward_compat(
         state,
         headers,
         body,
         CompatMode::Responses { compact: false },
     )
-    .await
+    .await;
+    _log.finish(response.status().as_u16());
+    response
 }
 
 pub async fn responses_compact(
@@ -48,13 +56,17 @@ pub async fn responses_compact(
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    forward_compat(
+    let model = body.as_ref().ok().and_then(|b| b.get("model").and_then(|m| m.as_str()));
+    let _log = crate::server::request_logger::RequestLog::start("POST", "/v1/responses/compact", model);
+    let response = forward_compat(
         state,
         headers,
         body,
         CompatMode::Responses { compact: true },
     )
-    .await
+    .await;
+    _log.finish(response.status().as_u16());
+    response
 }
 
 pub async fn count_tokens(body: Result<Json<Value>, JsonRejection>) -> Response {
