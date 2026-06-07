@@ -533,10 +533,30 @@ fn default_executor_builds_claude_headers_for_compatible_passthrough_matrix() {
         let headers = executor
             .build_headers("claude-sonnet", &connection(provider), false)
             .expect("claude-compatible headers");
-        assert_eq!(
-            headers["x-api-key"], "sk-test",
-            "{provider} credential header"
-        );
+        // Each claude-compatible passthrough provider uses either x-api-key (glm, kimi) or
+        // Bearer auth (minimax, minimax-cn) as their credential header.
+        match provider {
+            "glm" | "kimi" => {
+                assert_eq!(
+                    headers["x-api-key"], "sk-test",
+                    "{provider} x-api-key header"
+                );
+                assert!(
+                    headers.get("authorization").is_none(),
+                    "{provider} — should not have Bearer auth when using x-api-key"
+                );
+            }
+            _ => {
+                assert!(
+                    headers.get("x-api-key").is_none(),
+                    "{provider} — should not have x-api-key when using Bearer auth"
+                );
+                assert_eq!(
+                    headers["authorization"], "Bearer sk-test",
+                    "{provider} authorization header"
+                );
+            }
+        }
         assert_eq!(
             headers["anthropic-version"], "2023-06-01",
             "{provider} version header"
@@ -544,10 +564,6 @@ fn default_executor_builds_claude_headers_for_compatible_passthrough_matrix() {
         assert_eq!(
             headers["anthropic-beta"], "claude-code-20250219,interleaved-thinking-2025-05-14",
             "{provider} beta header"
-        );
-        assert!(
-            headers.get("authorization").is_none(),
-            "{provider} auth mode"
         );
     }
 }
