@@ -154,9 +154,15 @@ fn minimax_num(model: &Value, snake: &str, camel: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn minimax_pct(model: &Value, snake: &str, camel: &str) -> Option<f64> {
+    minimax_field(model, snake, camel)
+        .and_then(|v| v.as_f64())
+        .filter(|v| *v > 0.0)
+}
+
 fn is_text_quota_model(name: &str) -> bool {
     let n = name.trim().to_lowercase();
-    n.starts_with("minimax-m") || n.starts_with("coding-plan")
+    n.starts_with("minimax-m") || n.starts_with("coding-plan") || n == "general"
 }
 
 fn build_minimax_quota(
@@ -355,12 +361,28 @@ pub async fn fetch_minimax_quota(api_key: &str, provider: &str) -> Value {
                 "current_interval_total_count",
                 "currentIntervalTotalCount",
             );
-            let count = minimax_num(
+            let count_raw = minimax_num(
                 session_model,
                 "current_interval_usage_count",
                 "currentIntervalUsageCount",
             )
             .max(0.0);
+            let count_pct = minimax_pct(
+                session_model,
+                "current_interval_remaining_percent",
+                "currentIntervalRemainingPercent",
+            );
+            // When the API returns percent-only fields (shared quota pools),
+            // normalize total=100 and treat the percent value as remaining.
+            let (effective_total, effective_count, effective_remaining_mode) = if total == 0.0 {
+                if let Some(pct) = count_pct {
+                    (100.0, pct, true)
+                } else {
+                    (total, count_raw, count_is_remaining)
+                }
+            } else {
+                (total, count_raw, count_is_remaining)
+            };
             let reset_at = minimax_reset_at(
                 session_model,
                 captured_at_ms,
@@ -371,7 +393,7 @@ pub async fn fetch_minimax_quota(api_key: &str, provider: &str) -> Value {
             );
             quotas.insert(
                 "session (5h)".to_string(),
-                build_minimax_quota(total, count, reset_at, count_is_remaining),
+                build_minimax_quota(effective_total, effective_count, reset_at, effective_remaining_mode),
             );
         }
 
@@ -383,13 +405,27 @@ pub async fn fetch_minimax_quota(api_key: &str, provider: &str) -> Value {
                 "current_weekly_total_count",
                 "currentWeeklyTotalCount",
             );
-            if weekly_total > 0.0 {
-                let count = minimax_num(
-                    weekly_model,
-                    "current_weekly_usage_count",
-                    "currentWeeklyUsageCount",
-                )
-                .max(0.0);
+            let weekly_count_raw = minimax_num(
+                weekly_model,
+                "current_weekly_usage_count",
+                "currentWeeklyUsageCount",
+            )
+            .max(0.0);
+            let weekly_count_pct = minimax_pct(
+                weekly_model,
+                "current_weekly_remaining_percent",
+                "currentWeeklyRemainingPercent",
+            );
+            let (w_total, w_count, w_remaining) = if weekly_total == 0.0 {
+                if let Some(pct) = weekly_count_pct {
+                    (100.0, pct, true)
+                } else {
+                    (weekly_total, weekly_count_raw, count_is_remaining)
+                }
+            } else {
+                (weekly_total, weekly_count_raw, count_is_remaining)
+            };
+            if w_total > 0.0 {
                 let reset_at = minimax_reset_at(
                     weekly_model,
                     captured_at_ms,
@@ -400,7 +436,7 @@ pub async fn fetch_minimax_quota(api_key: &str, provider: &str) -> Value {
                 );
                 quotas.insert(
                     "weekly (7d)".to_string(),
-                    build_minimax_quota(weekly_total, count, reset_at, count_is_remaining),
+                    build_minimax_quota(w_total, w_count, reset_at, w_remaining),
                 );
             }
         }
