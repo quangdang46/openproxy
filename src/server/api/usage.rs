@@ -447,7 +447,13 @@ async fn get_connection_usage(
         }
     }
 
-    let message = live_message.unwrap_or_else(|| usage_message_for_provider(&connection.provider));
+    // When quotas are populated, skip the generic fallback message so the
+    // frontend renders the QuotaTable instead of a text-only message.
+    let message = if !live_quotas.as_object().map_or(true, |o| o.is_empty()) {
+        live_message.unwrap_or_default()
+    } else {
+        live_message.unwrap_or_else(|| usage_message_for_provider(&connection.provider))
+    };
 
     Json(ConnectionUsageResponse {
         connection_id,
