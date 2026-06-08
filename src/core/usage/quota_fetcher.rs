@@ -545,13 +545,14 @@ pub async fn fetch_github_quota(access_token: &str, _provider: &str) -> Value {
 
     let client = http_client();
 
-    // /copilot_internal/v2/usage reports the premium-request allowance and
-    // monthly reset timestamp for the signed-in Copilot subscription.
-    let usage_resp = match client
-        .get("https://api.github.com/copilot_internal/v2/usage")
+    let resp = match client
+        .get("https://api.github.com/copilot_internal/user")
         .header("Authorization", format!("token {access_token}"))
         .header("Accept", "application/json")
-        .header("User-Agent", "GitHubCopilotChat/0.38.0")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .header("User-Agent", "GitHubCopilotChat/0.26.7")
+        .header("Editor-Version", "vscode/1.100.0")
+        .header("Editor-Plugin-Version", "copilot-chat/0.26.7")
         .send()
         .await
     {
@@ -559,7 +560,7 @@ pub async fn fetch_github_quota(access_token: &str, _provider: &str) -> Value {
         Err(e) => return json!({ "message": format!("GitHub error: {e}") }),
     };
 
-    let status = usage_resp.status();
+    let status = resp.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
         return json!({ "message": "GitHub access token invalid or expired." });
     }
@@ -569,70 +570,139 @@ pub async fn fetch_github_quota(access_token: &str, _provider: &str) -> Value {
         });
     }
 
-    let body: Value = match usage_resp.json().await {
+    let body: Value = match resp.json().await {
         Ok(v) => v,
         Err(e) => return json!({ "message": format!("GitHub error: {e}") }),
     };
 
-    // /user is a cheap validity check that also surfaces the login handle.
-    // Failure here is non-fatal: the dashboard still gets the quota numbers.
-    let username = match async {
-        let resp = client
-            .get("https://api.github.com/user")
-            .header("Authorization", format!("token {access_token}"))
-            .header("Accept", "application/json")
-            .header("User-Agent", "GitHubCopilotChat/0.38.0")
-            .send()
-            .await?;
-        resp.json::<Value>().await
-    }
-    .await
-    {
-        Ok(user) => user
-            .get("login")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        Err(_) => None,
-    };
-
-    let premium = body.get("premium_requests");
-    let allowance = premium
-        .and_then(|p| p.get("allowance"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let consumed = premium
-        .and_then(|p| p.get("consumed"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-
-    // Reset time appears at the top level as `quota_reset` (epoch seconds) and
-    // is also mirrored on the premium_requests object. Prefer the explicit
-    // top-level field when present.
-    let reset_at = body
-        .get("quota_reset")
-        .and_then(parse_reset_time)
-        .or_else(|| premium.and_then(|p| p.get("reset")).and_then(parse_reset_time));
-
-    // Quota snapshot is reported as remaining, not used. Some users see
-    // `quota_remaining` only on plans that have a separate chat pool.
-    let chat_remaining = body.get("quota_remaining").and_then(|v| v.as_f64());
+    let username = body
+        .get("login")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            body.get("copilot_plan")
+                .and_then(|p| p.get("user_login"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
 
     let mut quotas = serde_json::Map::new();
-    if allowance > 0.0 {
-        quotas.insert(
-            "premium requests".to_string(),
-            build_quota_entry(consumed, allowance, reset_at.clone()),
-        );
+
+    if let Some(snapshots) = body.get("quota_snapshots").and_then(|v| v.as_object()) {
+        let paid_keys = [
+            ("chat", "chat"),
+            ("completions", "completions"),
+            ("premium_interactions", "premium interactions"),
+        ];
+        for (key, label) in paid_keys {
+            let entry = match snapshots.get(key) {
+                Some(e) => e,
+                None => continue,
+            };
+            let entitlement = entry
+                .get("entitlement")
+                .and_then(|v| v.as_f64())
+                .or_else(|| entry.get("quota").and_then(|v| v.as_f64()))
+                .unwrap_or(0.0);
+            let remaining = entry
+                .get("remaining")
+                .and_then(|v| v.as_f64())
+                .or_else(|| entry.get("quota_remaining").and_then(|v| v.as_f64()))
+                .unwrap_or(0.0);
+            if entitlement <= 0.0 {
+                continue;
+            }
+            let used = (entitlement - remaining).max(0.0).min(entitlement);
+            let entry_reset = entry
+                .get("reset_date")
+                .and_then(parse_reset_time)
+                .or_else(|| entry.get("quota_reset").and_then(parse_reset_time));
+            quotas.insert(label.to_string(), build_quota_entry(used, entitlement, entry_reset));
+        }
     }
-    if let Some(remaining) = chat_remaining {
-        // Chat pool: GitHub does not document a separate total, so we treat
-        // `quota_remaining` as both remaining and effective total (1.0 unit
-        // per request). The dashboard will surface a "1 / 1" cell that flips
-        // to 0 / 1 once the user exhausts the chat pool.
-        quotas.insert(
-            "chat quota".to_string(),
-            build_quota_entry(1.0 - remaining, 1.0, reset_at),
-        );
+
+    if quotas.is_empty() {
+        if let Some(monthly) = body.get("monthly_quotas").and_then(|v| v.as_object()) {
+            for (key, val) in monthly {
+                let used = val
+                    .get("used")
+                    .or_else(|| val.get("used_quotas"))
+                    .or_else(|| val.get("usedQuotas"))
+                    .and_then(|v| match v {
+                        Value::Object(map) => map
+                            .get(key)
+                            .and_then(|n| n.as_f64())
+                            .or_else(|| map.values().next().and_then(|n| n.as_f64())),
+                        _ => v.as_f64(),
+                    })
+                    .unwrap_or(0.0);
+                let total = val
+                    .get("limit")
+                    .or_else(|| val.get("monthly_limit"))
+                    .or_else(|| val.get("total"))
+                    .and_then(|v| match v {
+                        Value::Object(map) => map
+                            .get(key)
+                            .and_then(|n| n.as_f64())
+                            .or_else(|| map.values().next().and_then(|n| n.as_f64())),
+                        _ => v.as_f64(),
+                    })
+                    .unwrap_or(0.0);
+                if total <= 0.0 {
+                    continue;
+                }
+                let entry_reset = val
+                    .get("reset_date")
+                    .or_else(|| val.get("quota_reset"))
+                    .and_then(parse_reset_time);
+                quotas.insert(
+                    format!("monthly {key}"),
+                    build_quota_entry(used, total, entry_reset),
+                );
+            }
+        }
+    }
+
+    if quotas.is_empty() {
+        if let Some(limited) = body.get("limited_user_quotas").and_then(|v| v.as_object()) {
+            for (key, val) in limited {
+                let used = val
+                    .get("used")
+                    .or_else(|| val.get("used_quotas"))
+                    .or_else(|| val.get("usedQuotas"))
+                    .and_then(|v| match v {
+                        Value::Object(map) => map
+                            .get(key)
+                            .and_then(|n| n.as_f64())
+                            .or_else(|| map.values().next().and_then(|n| n.as_f64())),
+                        _ => v.as_f64(),
+                    })
+                    .unwrap_or(0.0);
+                let total = val
+                    .get("limit")
+                    .or_else(|| val.get("monthly_limit"))
+                    .or_else(|| val.get("total"))
+                    .and_then(|v| match v {
+                        Value::Object(map) => map
+                            .get(key)
+                            .and_then(|n| n.as_f64())
+                            .or_else(|| map.values().next().and_then(|n| n.as_f64())),
+                        _ => v.as_f64(),
+                    })
+                    .unwrap_or(0.0);
+                if total <= 0.0 {
+                    continue;
+                }
+                let entry_reset = val
+                    .get("reset_date")
+                    .or_else(|| val.get("quota_reset"))
+                    .and_then(parse_reset_time);
+                quotas.insert(
+                    format!("limited {key}"),
+                    build_quota_entry(used, total, entry_reset),
+                );
+            }
+        }
     }
 
     if quotas.is_empty() {
@@ -651,176 +721,229 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
     }
 
     let client = http_client();
-    let mut last_error: Option<String> = None;
 
-    let urls: &[&str] = &[
-        "https://api.openai.com/v1/organization/usage",
-        "https://api.openai.com/dashboard/billing/usage",
-    ];
+    let response = match client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .bearer_auth(access_token)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Codex error: {e}") }),
+    };
 
-    for (index, url) in urls.iter().enumerate() {
-        let can_fallback = index + 1 < urls.len();
-        let response = match client
-            .get(*url)
-            .bearer_auth(access_token)
-            .header("Accept", "application/json")
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => {
-                last_error = Some(e.to_string());
-                if can_fallback {
-                    continue;
-                }
-                break;
-            }
-        };
-
-        let status = response.status();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            return json!({ "message": "Invalid or expired Codex token" });
-        }
-
-        if !status.is_success() {
-            let err = format!("Codex quota endpoint error ({})", status.as_u16());
-            last_error = Some(err.clone());
-            let transient = matches!(status.as_u16(), 404 | 405) || status.as_u16() >= 500;
-            if transient && can_fallback {
-                continue;
-            }
-            return json!({ "message": format!("Codex connected. {err}") });
-        }
-
-        let body: Value = match response.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                last_error = Some(e.to_string());
-                if can_fallback {
-                    continue;
-                }
-                return json!({ "message": format!("Codex error: {e}") });
-            }
-        };
-
-        let mut quotas = serde_json::Map::new();
-
-        if let Some(total_granted) = body
-            .get("total_granted")
-            .and_then(|v| v.as_f64())
-            .or_else(|| body.get("totalGranted").and_then(|v| v.as_f64()))
-        {
-            let total_used = body
-                .get("total_used")
-                .and_then(|v| v.as_f64())
-                .or_else(|| body.get("totalUsed").and_then(|v| v.as_f64()))
-                .unwrap_or(0.0);
-            let reset_at = body
-                .get("access_until")
-                .and_then(parse_reset_time)
-                .or_else(|| body.get("accessUntil").and_then(parse_reset_time));
-            quotas.insert(
-                "session".to_string(),
-                build_quota_entry(total_used, total_granted, reset_at),
-            );
-        }
-
-        if let Some(buckets) = body.get("bucket_limits").and_then(|v| v.as_array()) {
-            for (i, bucket) in buckets.iter().enumerate() {
-                let used = bucket
-                    .get("used")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
-                let total = bucket
-                    .get("limit")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
-                if total <= 0.0 {
-                    continue;
-                }
-                let reset_at = bucket
-                    .get("reset_at")
-                    .and_then(parse_reset_time)
-                    .or_else(|| bucket.get("resetAt").and_then(parse_reset_time));
-                let key = format!("bucket_{i}");
-                quotas.insert(key, build_quota_entry(used, total, reset_at));
-            }
-        }
-
-        if let Some(line_items) = body
-            .get("line_items")
-            .and_then(|v| v.as_array())
-            .or_else(|| body.get("lineItems").and_then(|v| v.as_array()))
-        {
-            let mut total_cost: f64 = 0.0;
-            for item in line_items {
-                let cost = item
-                    .get("cost")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
-                total_cost += cost;
-            }
-            if total_cost > 0.0 {
-                let hard_limit = body
-                    .get("hard_limit_usd")
-                    .and_then(|v| v.as_f64())
-                    .or_else(|| body.get("hardLimitUsd").and_then(|v| v.as_f64()))
-                    .unwrap_or(0.0);
-                let reset_at = body
-                    .get("access_until")
-                    .and_then(parse_reset_time)
-                    .or_else(|| body.get("accessUntil").and_then(parse_reset_time));
-                if hard_limit > 0.0 {
-                    quotas.insert(
-                        "billing".to_string(),
-                        build_quota_entry(total_cost, hard_limit, reset_at),
-                    );
-                }
-            }
-        }
-
-        if !quotas.is_empty() {
-            return json!({ "quotas": Value::Object(quotas) });
-        }
-
-        if can_fallback {
-            last_error = Some("no quota fields found in response".to_string());
-            continue;
-        }
-        break;
+    let status = response.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return json!({ "message": "Invalid or expired Codex token" });
+    }
+    if !status.is_success() {
+        return json!({
+            "message": format!("Codex quota API error ({}).", status.as_u16())
+        });
     }
 
-    let _ = last_error;
-    json!({ "message": "Codex connected. Quota data not available via this endpoint." })
+    let body: Value = match response.json().await {
+        Ok(v) => v,
+        Err(e) => return json!({ "message": format!("Codex error: {e}") }),
+    };
+
+    let mut quotas = serde_json::Map::new();
+
+    if let Some(plan) = body.get("plan_type").and_then(|v| v.as_str()) {
+        if !plan.is_empty() {
+            quotas.insert(
+                "plan".to_string(),
+                json!({
+                    "used": 0.0,
+                    "total": 0.0,
+                    "remaining": 0.0,
+                    "remainingPercentage": 0.0,
+                    "resetAt": Value::Null,
+                    "unlimited": false,
+                    "label": plan,
+                }),
+            );
+        }
+    }
+
+    if let Some(snapshot) = body.get("rate_limit") {
+        append_codex_quota_windows(&mut quotas, "", snapshot);
+    }
+
+    if let Some(review) = get_codex_review_rate_limit(&body) {
+        append_codex_quota_windows(&mut quotas, "code review ", &review);
+    }
+
+    if quotas.is_empty() {
+        return json!({ "message": "Codex connected. No quota data was returned." });
+    }
+
+    json!({ "quotas": Value::Object(quotas) })
 }
 
-pub async fn fetch_gemini_cli_quota(access_token: &str, _provider: &str) -> Value {
+fn format_codex_window(window: &Value) -> Option<Value> {
+    let used_percent = window
+        .get("used_percent")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        .clamp(0.0, 100.0);
+    let reset_at = window
+        .get("reset_at")
+        .or_else(|| window.get("resetAt"))
+        .and_then(parse_reset_time);
+    let window_minutes = window
+        .get("window_minutes")
+        .or_else(|| window.get("windowMinutes"))
+        .and_then(|v| v.as_i64());
+    let unlimited = window
+        .get("unlimited")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    Some(build_quota_entry_with_meta(
+        used_percent,
+        100.0,
+        reset_at,
+        unlimited,
+        window_minutes,
+    ))
+}
+
+fn build_quota_entry_with_meta(
+    used: f64,
+    total: f64,
+    reset_at: Option<String>,
+    unlimited: bool,
+    window_minutes: Option<i64>,
+) -> Value {
+    let safe_total = total.max(0.0);
+    let used_clamped = used.max(0.0).min(safe_total);
+    let remaining = (safe_total - used_clamped).max(0.0);
+    let remaining_pct = if safe_total > 0.0 {
+        ((remaining / safe_total) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    json!({
+        "used": used_clamped,
+        "total": safe_total,
+        "remaining": remaining,
+        "remainingPercentage": remaining_pct,
+        "resetAt": reset_at,
+        "unlimited": unlimited,
+        "windowMinutes": window_minutes,
+    })
+}
+
+fn append_codex_quota_windows(quotas: &mut serde_json::Map<String, Value>, prefix: &str, snapshot: &Value) {
+    if let Some(primary) = snapshot.get("primary_window") {
+        if let Some(entry) = format_codex_window(primary) {
+            quotas.insert(format!("{prefix}session"), entry);
+        }
+    }
+    if let Some(secondary) = snapshot.get("secondary_window") {
+        if let Some(entry) = format_codex_window(secondary) {
+            quotas.insert(format!("{prefix}weekly"), entry);
+        }
+    }
+}
+
+fn get_codex_review_rate_limit(data: &Value) -> Option<Value> {
+    if let Some(v) = data.get("code_review_rate_limit") {
+        return Some(v.clone());
+    }
+    if let Some(map) = data.get("rate_limits_by_limit_id").and_then(|v| v.as_object()) {
+        if let Some(v) = map.get("code_review") {
+            return Some(v.clone());
+        }
+    }
+    if let Some(limits) = data.get("additional_rate_limits").and_then(|v| v.as_array()) {
+        for limit in limits {
+            if limit
+                .get("limit_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "code_review")
+                .unwrap_or(false)
+            {
+                return Some(limit.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Normalise a `cloudaicompanionProject` value to its string ID.
+/// Google sometimes returns this as a bare string and sometimes as
+/// `{ "id": "..." }`; handle both.
+fn normalize_cloud_code_project_id(value: &Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(obj) = value.as_object() {
+        if let Some(s) = obj.get("id").and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+        if let Some(s) = obj.get("name").and_then(|v| v.as_str()) {
+            if !s.is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+    None
+}
+
+pub async fn fetch_gemini_cli_quota(
+    access_token: &str,
+    _provider: &str,
+    provider_specific_data: &std::collections::BTreeMap<String, Value>,
+) -> Value {
     if access_token.is_empty() {
         return json!({ "message": "Gemini CLI access token not available." });
     }
 
     let client = http_client();
 
-    let load_body = load_code_assist(
-        &client,
-        access_token,
-        cloud_code_metadata(),
-        &[("x-goog-api-client", "gl-rust/1.0.0")],
-    )
-    .await;
+    // 9router order: prefer the OAuth-stored projectId, then fall back to
+    // loadCodeAssist → cloudaicompanionProject.
+    let mut project_id: Option<String> = provider_specific_data
+        .get("projectId")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
-    let project_id = match load_body {
-        Ok(value) => value
-            .get("cloudProject")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        Err(e) => {
-            if e.contains("401") || e.contains("403") {
-                return json!({ "message": "Gemini CLI access token invalid or expired." });
+    if project_id.is_none() {
+        let load_body = load_code_assist(
+            &client,
+            access_token,
+            cloud_code_metadata(),
+            &[("x-goog-api-client", "gl-rust/1.0.0")],
+            None,
+        )
+        .await;
+
+        match load_body {
+            Ok(value) => {
+                project_id = value
+                    .get("cloudaicompanionProject")
+                    .and_then(normalize_cloud_code_project_id)
+                    .or_else(|| {
+                        value
+                            .get("cloudProject")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    });
             }
-            return json!({ "message": format!("Gemini CLI error: {e}") });
+            Err(e) => {
+                if e.contains("401") || e.contains("403") {
+                    return json!({ "message": "Gemini CLI access token invalid or expired." });
+                }
+                return json!({ "message": format!("Gemini CLI error: {e}") });
+            }
         }
-    };
+    }
 
     let project_id = match project_id {
         Some(id) if !id.is_empty() => id,
@@ -860,33 +983,39 @@ pub async fn fetch_gemini_cli_quota(access_token: &str, _provider: &str) -> Valu
         Err(e) => return json!({ "message": format!("Gemini CLI error: {e}") }),
     };
 
-    let limits = body
-        .get("usageLimits")
+    let buckets = body
+        .get("buckets")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
 
-    if limits.is_empty() {
+    if buckets.is_empty() {
         return json!({ "message": "Gemini CLI connected. No quota data was returned." });
     }
 
     let mut quotas = serde_json::Map::new();
-    for limit in &limits {
-        let quota_id = limit
-            .get("quotaId")
+    for bucket in &buckets {
+        let model_id = bucket
+            .get("modelId")
             .and_then(|v| v.as_str())
-            .unwrap_or("quota")
+            .unwrap_or("model")
             .to_string();
-        let used = limit
-            .get("used")
+        let reset_at = bucket.get("resetTime").and_then(parse_reset_time);
+
+        // remainingFraction is a float 0..1. Map to a 1000-unit pool so the
+        // dashboard's percent display stays precise.
+        let fraction = bucket
+            .get("remainingFraction")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let total = limit
-            .get("limit")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let reset_at = limit.get("resetTime").and_then(parse_reset_time);
-        quotas.insert(quota_id, build_quota_entry(used, total, reset_at));
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let total = 1000.0;
+        let remaining = (total * fraction).round();
+        let used = (total - remaining).max(0.0);
+        quotas.insert(
+            model_id,
+            build_quota_entry(used, total, reset_at),
+        );
     }
 
     json!({ "quotas": Value::Object(quotas) })
@@ -896,18 +1025,34 @@ pub async fn fetch_gemini_cli_quota(access_token: &str, _provider: &str) -> Valu
 ///
 /// POSTs to `cloudcode-pa.googleapis.com/v1internal:loadCodeAssist` with the
 /// given body and extra headers. Returns the parsed JSON body on 200.
+///
+/// `extra_body` is merged into the top-level JSON body (shallow merge) so
+/// callers can add `mode: 1` or other fields without rewriting the helper.
 async fn load_code_assist(
     client: &reqwest::Client,
     access_token: &str,
     body: Value,
     extra_headers: &[(&str, &str)],
+    extra_body: Option<&Value>,
 ) -> Result<Value, String> {
     let url = format!("{CLOUD_CODE_BASE}:loadCodeAssist");
+    let final_body = match extra_body {
+        Some(extra) if extra.is_object() => {
+            let mut merged = body;
+            if let (Some(merged_obj), Some(extra_obj)) = (merged.as_object_mut(), extra.as_object()) {
+                for (k, v) in extra_obj {
+                    merged_obj.insert(k.clone(), v.clone());
+                }
+            }
+            merged
+        }
+        _ => body,
+    };
     let mut req = client
         .post(&url)
         .bearer_auth(access_token)
         .header("Content-Type", "application/json")
-        .json(&body);
+        .json(&final_body);
     for (k, v) in extra_headers {
         req = req.header(*k, *v);
     }
@@ -921,137 +1066,85 @@ async fn load_code_assist(
 }
 
 /// Fetch Qoder OAuth subscription quota.
-///
-/// Tries the most likely quota endpoint(s) on the Qoder API with the user's
-/// OAuth bearer token. Qoder is a newer AI coding tool whose exact quota
-/// contract is not yet stable, so we probe a small set of candidates and
-/// return a helpful message if none of them expose quota data.
 pub async fn fetch_qoder_quota(access_token: &str, _provider: &str) -> Value {
     if access_token.is_empty() {
         return json!({ "message": "Invalid or expired Qoder token" });
     }
 
     let client = http_client();
-    const CANDIDATE_URLS: &[&str] = &[
-        "https://api.qoder.ai/v1/usage",
-        "https://api.qoder.ai/v1/quota",
-        "https://api.qoder.ai/v1/account/quota",
-    ];
+    let response = match client
+        .get("https://openapi.qoder.sh/api/v2/quota/usage")
+        .bearer_auth(access_token)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Qoder error: {e}") }),
+    };
 
-    let mut last_status: Option<u16> = None;
-    let mut last_body = String::new();
-
-    for url in CANDIDATE_URLS {
-        let response = match client
-            .get(*url)
-            .bearer_auth(access_token)
-            .header("Accept", "application/json")
-            .send()
-            .await
-        {
-            Ok(r) => r,
-            Err(e) => return json!({ "message": format!("Qoder error: {e}") }),
-        };
-
-        let status = response.status();
-        let status_code = status.as_u16();
-        let raw_text = response.text().await.unwrap_or_default();
-
-        if status_code == 401 || status_code == 403 {
-            return json!({ "message": "Invalid or expired Qoder token" });
-        }
-
-        if status_code == 404 || status_code == 405 {
-            last_status = Some(status_code);
-            last_body = raw_text;
-            continue;
-        }
-
-        if !status.is_success() {
-            return json!({
-                "message": format!("Qoder quota API error ({}).", status_code)
-            });
-        }
-
-        let body: Value = match serde_json::from_str(&raw_text) {
-            Ok(v) => v,
-            Err(_) => {
-                last_status = Some(status_code);
-                last_body = raw_text;
-                continue;
-            }
-        };
-
-        let data = body.get("data").cloned().unwrap_or_else(|| body.clone());
-
-        let total = data
-            .get("total")
-            .or_else(|| data.get("quota"))
-            .or_else(|| data.get("limit"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let used = data
-            .get("used")
-            .or_else(|| data.get("usage"))
-            .or_else(|| data.get("consumed"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let remaining = data
-            .get("remaining")
-            .or_else(|| data.get("left"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let reset_at = parse_reset_time(
-            data.get("reset_at")
-                .or_else(|| data.get("resets_at"))
-                .or_else(|| data.get("resetAt"))
-                .unwrap_or(&Value::Null),
-        );
-
-        if total <= 0.0 && used <= 0.0 && remaining <= 0.0 {
-            last_status = Some(status_code);
-            last_body = raw_text;
-            continue;
-        }
-
-        // Qoder's contract is not yet stable: some endpoints return only
-        // (used, remaining) without an explicit total. When that happens,
-        // derive total so build_quota_entry's remaining/percentage math
-        // stays accurate.
-        let effective_total = if total > 0.0 {
-            total
-        } else {
-            used + remaining
-        };
-        let effective_used = if used > 0.0 {
-            used
-        } else if total > 0.0 && remaining >= 0.0 {
-            (total - remaining).max(0.0)
-        } else {
-            0.0
-        };
-
-        let mut quotas = serde_json::Map::new();
-        quotas.insert(
-            "session".to_string(),
-            build_quota_entry(effective_used, effective_total, reset_at),
-        );
-
-        return json!({ "quotas": Value::Object(quotas) });
+    let status = response.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return json!({ "message": "Invalid or expired Qoder token" });
+    }
+    if !status.is_success() {
+        return json!({
+            "message": format!("Qoder quota API error ({}).", status.as_u16())
+        });
     }
 
-    let detail = match last_status {
-        Some(code) if code == 404 || code == 405 => {
-            "Qoder connected. Quota endpoint not available; the Qoder API contract may have changed."
-                .to_string()
-        }
-        Some(code) => format!("Qoder quota API error ({}).", code),
-        None if last_body.is_empty() => {
-            "Qoder connected. No quota data was returned by the upstream API.".to_string()
-        }
-        None => format!("Qoder connected. No quota data was returned: {}", last_body),
+    let body: Value = match response.json().await {
+        Ok(v) => v,
+        Err(e) => return json!({ "message": format!("Qoder error: {e}") }),
     };
-    json!({ "message": detail })
+
+    let reset_at = body
+        .get("expiresAt")
+        .or_else(|| body.get("expires_at"))
+        .or_else(|| body.get("reset_at"))
+        .and_then(parse_reset_time);
+
+    let mut quotas = serde_json::Map::new();
+
+    if let Some(user) = body.get("userQuota") {
+        let total = user
+            .get("total")
+            .or_else(|| user.get("limit"))
+            .or_else(|| user.get("quota"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let used = user
+            .get("used")
+            .or_else(|| user.get("usage"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        if total > 0.0 || used > 0.0 {
+            quotas.insert("user".to_string(), build_quota_entry(used, total, reset_at.clone()));
+        }
+    }
+
+    if let Some(org) = body.get("orgResourcePackage") {
+        let total = org
+            .get("total")
+            .or_else(|| org.get("limit"))
+            .or_else(|| org.get("quota"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let used = org
+            .get("used")
+            .or_else(|| org.get("usage"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        if total > 0.0 || used > 0.0 {
+            quotas.insert("org".to_string(), build_quota_entry(used, total, reset_at.clone()));
+        }
+    }
+
+    if quotas.is_empty() {
+        return json!({ "message": "Qoder connected. No quota data was returned." });
+    }
+
+    json!({ "quotas": Value::Object(quotas) })
 }
 
 pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
@@ -1063,6 +1156,7 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
     let response = match client
         .get("https://api.anthropic.com/v1/oauth/token/quota")
         .bearer_auth(access_token)
+        .header("anthropic-version", "2023-06-01")
         .header("anthropic-beta", "oauth-2025-04-20")
         .header("Accept", "application/json")
         .send()
@@ -1087,124 +1181,252 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
         Err(e) => return json!({ "message": format!("Claude error: {e}") }),
     };
 
-    let total = body
-        .get("quota")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let used = body
-        .get("quota_usage")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let reset_at = parse_reset_time(body.get("resets_at").unwrap_or(&Value::Null));
+    let mut quotas = serde_json::Map::new();
 
-    if total <= 0.0 {
-        return json!({ "message": "Claude connected. No quota data available." });
+    if let Some(five_hour) = body.get("five_hour") {
+        let utilization = five_hour
+            .get("utilization")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            .clamp(0.0, 100.0);
+        let reset_at = five_hour
+            .get("resets_at")
+            .or_else(|| five_hour.get("reset_at"))
+            .and_then(parse_reset_time);
+        quotas.insert(
+            "session (5h)".to_string(),
+            build_quota_entry(utilization, 100.0, reset_at),
+        );
     }
 
-    let mut quotas = serde_json::Map::new();
-    quotas.insert(
-        "session".to_string(),
-        build_quota_entry(used, total, reset_at),
-    );
+    if let Some(seven_day) = body.get("seven_day") {
+        let utilization = seven_day
+            .get("utilization")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            .clamp(0.0, 100.0);
+        let reset_at = seven_day
+            .get("resets_at")
+            .or_else(|| seven_day.get("reset_at"))
+            .and_then(parse_reset_time);
+        quotas.insert(
+            "weekly (7d)".to_string(),
+            build_quota_entry(utilization, 100.0, reset_at),
+        );
+    }
+
+    if let Some(obj) = body.as_object() {
+        for (key, value) in obj {
+            if !key.starts_with("seven_day_") {
+                continue;
+            }
+            let model = key.trim_start_matches("seven_day_").trim_start_matches("_");
+            if model.is_empty() {
+                continue;
+            }
+            let utilization = value
+                .get("utilization")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                .clamp(0.0, 100.0);
+            let reset_at = value
+                .get("resets_at")
+                .or_else(|| value.get("reset_at"))
+                .and_then(parse_reset_time);
+            quotas.insert(
+                format!("weekly {model} (7d)"),
+                build_quota_entry(utilization, 100.0, reset_at),
+            );
+        }
+    }
+
+    if quotas.is_empty() {
+        return json!({ "message": "Claude connected. No quota data was returned." });
+    }
 
     json!({ "quotas": Value::Object(quotas) })
 }
 
-const KIRO_ENDPOINTS: &[&str] = &[
-    "https://kiro.ai/api/quota",
-    "https://kiro.ai/api/usage",
-    "https://kiro.ai/api/user",
-];
+const KIRO_DEFAULT_PROFILE_ARN: &str =
+    "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX";
+const KIRO_AGENTIC_URL: &str = "https://codewhisperer.us-east-1.amazonaws.com";
+const KIRO_Q_URL: &str = "https://q.us-east-1.amazonaws.com";
 
-pub async fn fetch_kiro_quota(access_token: &str, _provider: &str) -> Value {
+fn kiro_resolve_profile_arn(
+    provider_specific_data: &std::collections::BTreeMap<String, Value>,
+) -> String {
+    provider_specific_data
+        .get("profileArn")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(KIRO_DEFAULT_PROFILE_ARN)
+        .to_string()
+}
+
+pub async fn fetch_kiro_quota(
+    access_token: &str,
+    _provider: &str,
+    provider_specific_data: &std::collections::BTreeMap<String, Value>,
+) -> Value {
     if access_token.is_empty() {
         return json!({ "message": "Invalid or expired Kiro token" });
     }
 
     let client = http_client();
-    let mut last_error: Option<String> = None;
+    let profile_arn = kiro_resolve_profile_arn(provider_specific_data);
+    let mut quotas = serde_json::Map::new();
 
-    for url in KIRO_ENDPOINTS {
-        let response = match client
-            .get(*url)
+    let user_agent = "aws-sdk-js/1.0.0 KiroIDE";
+    let mut tried_post = false;
+    let mut tried_q = false;
+    let mut primary_body: Option<Value> = None;
+
+    let primary_url = format!(
+        "{KIRO_AGENTIC_URL}/getUsageLimits?isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
+    );
+    if let Ok(resp) = client
+        .get(&primary_url)
+        .bearer_auth(access_token)
+        .header("x-amz-user-agent", user_agent)
+        .header("user-agent", user_agent)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        if resp.status().is_success() {
+            if let Ok(body) = resp.json::<Value>().await {
+                primary_body = Some(body);
+            }
+        }
+    }
+
+    if primary_body.is_none() {
+        tried_post = true;
+        let post_body = json!({
+            "origin": "AI_EDITOR",
+            "profileArn": profile_arn,
+            "resourceType": "AGENTIC_REQUEST",
+        });
+        if let Ok(resp) = client
+            .post(KIRO_AGENTIC_URL)
+            .bearer_auth(access_token)
+            .header("Content-Type", "application/x-amz-json-1.0")
+            .header("x-amz-target", "AmazonCodeWhispererService.GetUsageLimits")
+            .header("Accept", "application/json")
+            .json(&post_body)
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<Value>().await {
+                    primary_body = Some(body);
+                }
+            }
+        }
+    }
+
+    if primary_body.is_none() {
+        tried_q = true;
+        let q_url = format!(
+            "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&profileArn={profile_arn}&resourceType=AGENTIC_REQUEST"
+        );
+        if let Ok(resp) = client
+            .get(&q_url)
             .bearer_auth(access_token)
             .header("Accept", "application/json")
             .send()
             .await
         {
-            Ok(r) => r,
-            Err(e) => {
-                last_error = Some(e.to_string());
-                continue;
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<Value>().await {
+                    primary_body = Some(body);
+                }
             }
-        };
-
-        let status = response.status();
-        if status.as_u16() == 401 || status.as_u16() == 403 {
-            return json!({ "message": "Invalid or expired Kiro token" });
         }
-        if !status.is_success() {
-            last_error = Some(format!("HTTP {}", status.as_u16()));
-            continue;
-        }
-
-        let body: Value = match response.json().await {
-            Ok(v) => v,
-            Err(e) => {
-                last_error = Some(e.to_string());
-                continue;
-            }
-        };
-
-        let data = body.get("data").unwrap_or(&body);
-        let total = data
-            .get("quota")
-            .or_else(|| data.get("quota_limit"))
-            .or_else(|| data.get("total"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        if total <= 0.0 {
-            continue;
-        }
-
-        let used = data
-            .get("usage")
-            .or_else(|| data.get("used"))
-            .or_else(|| data.get("quota_usage"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let reset_at = parse_reset_time(
-            data.get("reset_at")
-                .or_else(|| data.get("resets_at"))
-                .or_else(|| data.get("resetAt"))
-                .unwrap_or(&Value::Null),
-        );
-        let plan = data
-            .get("subscription")
-            .or_else(|| data.get("plan"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let mut quotas = serde_json::Map::new();
-        quotas.insert(
-            "session".to_string(),
-            build_quota_entry(used, total, reset_at),
-        );
-
-        let mut result = serde_json::Map::new();
-        result.insert("quotas".to_string(), Value::Object(quotas));
-        if let Some(plan_name) = plan {
-            result.insert("plan".to_string(), Value::String(plan_name));
-        }
-        return Value::Object(result);
     }
 
-    json!({
-        "message": last_error
-            .map(|e| format!("Kiro quota API error ({e})."))
-            .unwrap_or_else(|| "Kiro quota API error.".to_string())
-    })
+    let body = match primary_body {
+        Some(b) => b,
+        None => {
+            return json!({
+                "message": format!(
+                    "Kiro connected. Quota endpoints unreachable (tried primary={} post={} q={}).",
+                    !tried_post, tried_post, tried_q
+                )
+            });
+        }
+    };
+
+    let reset_at = body
+        .get("nextDateReset")
+        .or_else(|| body.get("next_date_reset"))
+        .or_else(|| body.get("reset_at"))
+        .and_then(parse_reset_time);
+
+    if let Some(breakdown) = body.get("usageBreakdownList").and_then(|v| v.as_array()) {
+        for entry in breakdown {
+            let key = entry
+                .get("resourceType")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_lowercase())
+                .unwrap_or_else(|| "agentic_request".to_string());
+            let used = entry
+                .get("currentUsageWithPrecision")
+                .or_else(|| entry.get("currentUsage"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            let total = entry
+                .get("usageLimitWithPrecision")
+                .or_else(|| entry.get("usageLimit"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            if total > 0.0 || used > 0.0 {
+                quotas.insert(key, build_quota_entry(used, total, reset_at.clone()));
+            }
+        }
+    }
+
+    if let Some(trial) = body.get("freeTrialInfo") {
+        let used = trial
+            .get("currentUsageWithPrecision")
+            .or_else(|| trial.get("currentUsage"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let total = trial
+            .get("usageLimitWithPrecision")
+            .or_else(|| trial.get("usageLimit"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let trial_reset = trial
+            .get("freeTrialExpiry")
+            .and_then(parse_reset_time)
+            .or_else(|| reset_at.clone());
+        if total > 0.0 || used > 0.0 {
+            quotas.insert(
+                "free trial".to_string(),
+                build_quota_entry(used, total, trial_reset),
+            );
+        }
+    }
+
+    if quotas.is_empty() {
+        return json!({ "message": "Kiro connected. No quota data was returned." });
+    }
+
+    json!({ "quotas": Value::Object(quotas) })
 }
+
+const ANTIGRAVITY_IMPORTANT_MODELS: &[&str] = &[
+    "gemini-3-flash-agent",
+    "gemini-3.5-flash-low",
+    "gemini-3.5-flash-extra-low",
+    "gemini-pro-agent",
+    "gemini-3.1-pro-low",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6-thinking",
+    "gpt-oss-120b-medium",
+    "gemini-3-flash",
+];
 
 pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Value {
     if access_token.is_empty() {
@@ -1215,11 +1437,19 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
     let user_agent = antigravity_user_agent();
     let metadata = cloud_code_metadata();
 
+    let extra_headers = [
+        ("User-Agent", user_agent.as_str()),
+        ("X-Client-Name", "antigravity"),
+        ("X-Client-Version", "1.107.0"),
+        ("x-request-source", "local"),
+    ];
+
     let load_body = match load_code_assist(
         &client,
         access_token,
         metadata,
-        &[("User-Agent", &user_agent)],
+        &extra_headers,
+        Some(&json!({ "mode": 1 })),
     )
     .await
     {
@@ -1232,13 +1462,16 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         }
     };
 
-    let project_id = match load_body.get("cloudProject").and_then(|v| v.as_str()) {
-        Some(p) if !p.is_empty() => p.to_string(),
-        _ => {
-            return json!({
-                "message": "Antigravity connected. No cloud project was returned by loadCodeAssist."
-            });
-        }
+    let project_id = match load_body.get("cloudaicompanionProject").and_then(normalize_cloud_code_project_id) {
+        Some(p) => p,
+        None => match load_body.get("cloudProject").and_then(|v| v.as_str()) {
+            Some(p) if !p.is_empty() => p.to_string(),
+            _ => {
+                return json!({
+                    "message": "Antigravity connected. No cloud project was returned by loadCodeAssist."
+                });
+            }
+        },
     };
 
     let url = format!("{CLOUD_CODE_BASE}:fetchAvailableModels?projectId={project_id}");
@@ -1247,6 +1480,9 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         .bearer_auth(access_token)
         .header("Content-Type", "application/json")
         .header("User-Agent", &user_agent)
+        .header("X-Client-Name", "antigravity")
+        .header("X-Client-Version", "1.107.0")
+        .header("x-request-source", "local")
         .json(&json!({}))
         .send()
         .await
@@ -1270,68 +1506,48 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         Err(e) => return json!({ "message": format!("Antigravity error: {e}") }),
     };
 
-    let models = body
+    let models_map = body
         .get("models")
-        .and_then(|v| v.as_array())
+        .and_then(|v| v.as_object())
         .cloned()
         .unwrap_or_default();
 
     let mut quotas = serde_json::Map::new();
-    for model in &models {
-        let name = model
-            .get("name")
-            .and_then(|v| v.as_str())
-            .or_else(|| model.get("displayName").and_then(|v| v.as_str()))
-            .or_else(|| model.get("id").and_then(|v| v.as_str()))
-            .map(|s| s.to_string());
-        let Some(name) = name else { continue };
+    for (model_id, info) in &models_map {
+        if info
+            .get("isInternal")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        if !ANTIGRAVITY_IMPORTANT_MODELS.iter().any(|m| m == model_id) {
+            continue;
+        }
 
-        let quota = match model.get("quotaInfo").or_else(|| model.get("quota")) {
+        let quota = match info.get("quotaInfo") {
             Some(q) => q,
             None => continue,
         };
 
-        let total = quota
-            .get("totalCount")
-            .or_else(|| quota.get("total"))
-            .or_else(|| quota.get("limit"))
-            .or_else(|| quota.get("quota"))
+        let reset_at = quota
+            .get("resetTime")
+            .or_else(|| quota.get("reset_at"))
+            .and_then(parse_reset_time);
+
+        let fraction = quota
+            .get("remainingFraction")
             .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let used = quota
-            .get("usedCount")
-            .or_else(|| quota.get("used"))
-            .or_else(|| quota.get("usage"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let remaining = quota
-            .get("remainingCount")
-            .or_else(|| quota.get("remaining"))
-            .and_then(|v| v.as_f64());
-        let reset_at = parse_reset_time(
-            quota
-                .get("resetTime")
-                .or_else(|| quota.get("reset_at"))
-                .or_else(|| quota.get("resets_at"))
-                .or_else(|| quota.get("resetAt"))
-                .unwrap_or(&Value::Null),
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let total = 1000.0;
+        let remaining = (total * fraction).round();
+        let used = (total - remaining).max(0.0);
+
+        quotas.insert(
+            model_id.clone(),
+            build_quota_entry(used, total, reset_at),
         );
-
-        let (effective_total, effective_used) = if let Some(remaining) = remaining {
-            if total > 0.0 {
-                (total, used.max(0.0).min(total))
-            } else {
-                (used + remaining, used.max(0.0))
-            }
-        } else {
-            (total, used)
-        };
-
-        if effective_total <= 0.0 && effective_used <= 0.0 {
-            continue;
-        }
-
-        quotas.insert(name, build_quota_entry(effective_used, effective_total, reset_at));
     }
 
     if quotas.is_empty() {
