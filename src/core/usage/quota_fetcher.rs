@@ -621,85 +621,37 @@ pub async fn fetch_github_quota(access_token: &str, _provider: &str) -> Value {
         }
     }
 
+    // Free/limited plan: `monthly_quotas` holds totals, `limited_user_quotas` holds used amounts.
+    // Both are flat number maps: { "chat": <number>, "completions": <number>, ... }.
     if quotas.is_empty() {
-        if let Some(monthly) = body.get("monthly_quotas").and_then(|v| v.as_object()) {
-            for (key, val) in monthly {
-                let used = val
-                    .get("used")
-                    .or_else(|| val.get("used_quotas"))
-                    .or_else(|| val.get("usedQuotas"))
-                    .and_then(|v| match v {
-                        Value::Object(map) => map
-                            .get(key)
-                            .and_then(|n| n.as_f64())
-                            .or_else(|| map.values().next().and_then(|n| n.as_f64())),
-                        _ => v.as_f64(),
-                    })
-                    .unwrap_or(0.0);
-                let total = val
-                    .get("limit")
-                    .or_else(|| val.get("monthly_limit"))
-                    .or_else(|| val.get("total"))
-                    .and_then(|v| match v {
-                        Value::Object(map) => map
-                            .get(key)
-                            .and_then(|n| n.as_f64())
-                            .or_else(|| map.values().next().and_then(|n| n.as_f64())),
-                        _ => v.as_f64(),
-                    })
-                    .unwrap_or(0.0);
-                if total <= 0.0 {
-                    continue;
+        let monthly = body
+            .get("monthly_quotas")
+            .and_then(|v| v.as_object());
+        let limited = body
+            .get("limited_user_quotas")
+            .and_then(|v| v.as_object());
+        if monthly.is_some() || limited.is_some() {
+            let monthly = monthly.cloned().unwrap_or_default();
+            let limited = limited.cloned().unwrap_or_default();
+            let reset_at = body
+                .get("limited_user_reset_date")
+                .and_then(parse_reset_time);
+            let mut keys: Vec<String> = monthly.keys().map(|k| k.to_string()).collect();
+            for k in limited.keys() {
+                if !keys.contains(k) {
+                    keys.push(k.to_string());
                 }
-                let entry_reset = val
-                    .get("reset_date")
-                    .or_else(|| val.get("quota_reset"))
-                    .and_then(parse_reset_time);
-                quotas.insert(
-                    format!("monthly {key}"),
-                    build_quota_entry(used, total, entry_reset),
-                );
             }
-        }
-    }
-
-    if quotas.is_empty() {
-        if let Some(limited) = body.get("limited_user_quotas").and_then(|v| v.as_object()) {
-            for (key, val) in limited {
-                let used = val
-                    .get("used")
-                    .or_else(|| val.get("used_quotas"))
-                    .or_else(|| val.get("usedQuotas"))
-                    .and_then(|v| match v {
-                        Value::Object(map) => map
-                            .get(key)
-                            .and_then(|n| n.as_f64())
-                            .or_else(|| map.values().next().and_then(|n| n.as_f64())),
-                        _ => v.as_f64(),
-                    })
-                    .unwrap_or(0.0);
-                let total = val
-                    .get("limit")
-                    .or_else(|| val.get("monthly_limit"))
-                    .or_else(|| val.get("total"))
-                    .and_then(|v| match v {
-                        Value::Object(map) => map
-                            .get(key)
-                            .and_then(|n| n.as_f64())
-                            .or_else(|| map.values().next().and_then(|n| n.as_f64())),
-                        _ => v.as_f64(),
-                    })
-                    .unwrap_or(0.0);
-                if total <= 0.0 {
+            for key in &keys {
+                let total = monthly.get(key.as_str()).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let used = limited.get(key.as_str()).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                if total <= 0.0 && used <= 0.0 {
                     continue;
                 }
-                let entry_reset = val
-                    .get("reset_date")
-                    .or_else(|| val.get("quota_reset"))
-                    .and_then(parse_reset_time);
+                let effective_total = if total > 0.0 { total } else { used };
                 quotas.insert(
-                    format!("limited {key}"),
-                    build_quota_entry(used, total, entry_reset),
+                    key.clone(),
+                    build_quota_entry(used, effective_total, reset_at.clone()),
                 );
             }
         }
@@ -767,7 +719,14 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
         }
     }
 
-    if let Some(snapshot) = body.get("rate_limit") {
+    let normal_rl = body.get("rate_limit")
+        .or_else(|| body.get("rate_limits"))
+        .or_else(|| {
+            body.get("rate_limits_by_limit_id")
+                .and_then(|m| m.as_object())
+                .and_then(|m| m.get("codex"))
+        });
+    if let Some(snapshot) = normal_rl {
         append_codex_quota_windows(&mut quotas, "", snapshot);
     }
 
@@ -782,9 +741,19 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
     json!({ "quotas": Value::Object(quotas) })
 }
 
+fn codex_rate_limit_body(snapshot: &Value) -> &Value {
+    if let Some(rl) = snapshot.get("rate_limit") {
+        if rl.is_object() {
+            return rl;
+        }
+    }
+    snapshot
+}
+
 fn format_codex_window(window: &Value) -> Option<Value> {
     let used_percent = window
         .get("used_percent")
+        .or_else(|| window.get("percent_used"))
         .and_then(|v| v.as_f64())
         .unwrap_or(0.0)
         .clamp(0.0, 100.0);
@@ -836,14 +805,33 @@ fn build_quota_entry_with_meta(
 }
 
 fn append_codex_quota_windows(quotas: &mut serde_json::Map<String, Value>, prefix: &str, snapshot: &Value) {
-    if let Some(primary) = snapshot.get("primary_window") {
-        if let Some(entry) = format_codex_window(primary) {
-            quotas.insert(format!("{prefix}session"), entry);
+    let rl = codex_rate_limit_body(snapshot);
+    let primary = rl.get("primary_window")
+        .or_else(|| rl.get("primary"))
+        .or_else(|| snapshot.get("primary_window"))
+        .or_else(|| snapshot.get("primary"));
+    if let Some(p) = primary {
+        if let Some(entry) = format_codex_window(p) {
+            let key = if prefix.is_empty() {
+                "session".to_string()
+            } else {
+                format!("{prefix}_session")
+            };
+            quotas.insert(key, entry);
         }
     }
-    if let Some(secondary) = snapshot.get("secondary_window") {
-        if let Some(entry) = format_codex_window(secondary) {
-            quotas.insert(format!("{prefix}weekly"), entry);
+    let secondary = rl.get("secondary_window")
+        .or_else(|| rl.get("secondary"))
+        .or_else(|| snapshot.get("secondary_window"))
+        .or_else(|| snapshot.get("secondary"));
+    if let Some(s) = secondary {
+        if let Some(entry) = format_codex_window(s) {
+            let key = if prefix.is_empty() {
+                "weekly".to_string()
+            } else {
+                format!("{prefix}_weekly")
+            };
+            quotas.insert(key, entry);
         }
     }
 }
@@ -852,19 +840,26 @@ fn get_codex_review_rate_limit(data: &Value) -> Option<Value> {
     if let Some(v) = data.get("code_review_rate_limit") {
         return Some(v.clone());
     }
+    if let Some(v) = data.get("review_rate_limit") {
+        return Some(v.clone());
+    }
     if let Some(map) = data.get("rate_limits_by_limit_id").and_then(|v| v.as_object()) {
-        if let Some(v) = map.get("code_review") {
-            return Some(v.clone());
+        for key in &["code_review", "codex_review", "review"] {
+            if let Some(v) = map.get(*key) {
+                return Some(v.clone());
+            }
         }
     }
     if let Some(limits) = data.get("additional_rate_limits").and_then(|v| v.as_array()) {
         for limit in limits {
-            if limit
-                .get("limit_id")
+            let id = limit
+                .get("limit_name")
+                .or_else(|| limit.get("metered_feature"))
+                .or_else(|| limit.get("id"))
                 .and_then(|v| v.as_str())
-                .map(|s| s == "code_review")
-                .unwrap_or(false)
-            {
+                .unwrap_or("")
+                .to_lowercase();
+            if id.contains("review") {
                 return Some(limit.clone());
             }
         }
@@ -960,7 +955,7 @@ pub async fn fetch_gemini_cli_quota(
         .bearer_auth(access_token)
         .header("Content-Type", "application/json")
         .header("x-goog-api-client", "gl-rust/1.0.0")
-        .json(&json!({}))
+        .json(&json!({ "project": project_id }))
         .send()
         .await
     {
@@ -1381,31 +1376,31 @@ pub async fn fetch_kiro_quota(
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
             if total > 0.0 || used > 0.0 {
-                quotas.insert(key, build_quota_entry(used, total, reset_at.clone()));
+                quotas.insert(key.clone(), build_quota_entry(used, total, reset_at.clone()));
             }
-        }
-    }
 
-    if let Some(trial) = body.get("freeTrialInfo") {
-        let used = trial
-            .get("currentUsageWithPrecision")
-            .or_else(|| trial.get("currentUsage"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let total = trial
-            .get("usageLimitWithPrecision")
-            .or_else(|| trial.get("usageLimit"))
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        let trial_reset = trial
-            .get("freeTrialExpiry")
-            .and_then(parse_reset_time)
-            .or_else(|| reset_at.clone());
-        if total > 0.0 || used > 0.0 {
-            quotas.insert(
-                "free trial".to_string(),
-                build_quota_entry(used, total, trial_reset),
-            );
+            if let Some(trial) = entry.get("freeTrialInfo") {
+                let free_used = trial
+                    .get("currentUsageWithPrecision")
+                    .or_else(|| trial.get("currentUsage"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let free_total = trial
+                    .get("usageLimitWithPrecision")
+                    .or_else(|| trial.get("usageLimit"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let trial_reset = trial
+                    .get("freeTrialExpiry")
+                    .and_then(parse_reset_time)
+                    .or_else(|| reset_at.clone());
+                if free_total > 0.0 || free_used > 0.0 {
+                    quotas.insert(
+                        format!("{key}_freetrial"),
+                        build_quota_entry(free_used, free_total, trial_reset),
+                    );
+                }
+            }
         }
     }
 
@@ -1483,7 +1478,7 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         .header("X-Client-Name", "antigravity")
         .header("X-Client-Version", "1.107.0")
         .header("x-request-source", "local")
-        .json(&json!({}))
+        .json(&json!({ "project": project_id }))
         .send()
         .await
     {
