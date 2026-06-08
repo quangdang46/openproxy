@@ -19,7 +19,7 @@ use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker
 use crate::server::state::AppState;
 use crate::server::usage_live::UsageEvent;
 use crate::server::usage_stream::{build_usage_stats, UsagePeriod, UsageStatsPayload};
-use crate::types::{TokenUsage, UsageDb, UsageEntry};
+use crate::types::{ProviderConnection, TokenUsage, UsageDb, UsageEntry};
 
 fn require_usage_access(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
     super::require_dashboard_or_management_api_key(headers, state)
@@ -27,6 +27,32 @@ fn require_usage_access(headers: &HeaderMap, state: &AppState) -> Result<(), Res
 
 fn is_usage_apikey_provider(provider: &str) -> bool {
     matches!(provider, "glm" | "glm-cn" | "minimax" | "minimax-cn")
+}
+
+/// Dispatch to the correct OAuth quota fetcher for `connection`. Returns
+/// `{}` for providers that don't expose a live quota endpoint.
+pub async fn fetch_oauth_quota(connection: &ProviderConnection) -> Value {
+    let token = match connection
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(t) => t,
+        None => return serde_json::json!({}),
+    };
+    let provider = connection.provider.as_str();
+    let psd = &connection.provider_specific_data;
+    match provider {
+        "github" | "github-copilot" => fetch_github_quota(token, provider).await,
+        "claude" => fetch_claude_quota(token, provider).await,
+        "codex" => fetch_codex_quota(token, provider).await,
+        "kiro" => fetch_kiro_quota(token, provider, psd).await,
+        "gemini-cli" => fetch_gemini_cli_quota(token, provider, psd).await,
+        "antigravity" => fetch_antigravity_quota(token, provider).await,
+        "qoder" => fetch_qoder_quota(token, provider).await,
+        _ => serde_json::json!({}),
+    }
 }
 
 fn usage_message_for_provider(provider: &str) -> String {
@@ -444,29 +470,12 @@ async fn get_connection_usage(
     }
 
     if is_oauth {
-        if let Some(token) = connection
-            .access_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            let provider = connection.provider.clone();
-            let result = match provider.as_str() {
-                "github" | "github-copilot" => fetch_github_quota(token, &provider).await,
-                "claude" => fetch_claude_quota(token, &provider).await,
-                "codex" => fetch_codex_quota(token, &provider).await,
-                "kiro" => fetch_kiro_quota(token, &provider).await,
-                "gemini-cli" => fetch_gemini_cli_quota(token, &provider).await,
-                "antigravity" => fetch_antigravity_quota(token, &provider).await,
-                "qoder" => fetch_qoder_quota(token, &provider).await,
-                _ => serde_json::json!({}),
-            };
-            if let Some(quotas) = result.get("quotas") {
-                live_quotas = quotas.clone();
-            }
-            if let Some(msg) = result.get("message").and_then(|v| v.as_str()) {
-                live_message = Some(msg.to_string());
-            }
+        let result = fetch_oauth_quota(connection).await;
+        if let Some(quotas) = result.get("quotas") {
+            live_quotas = quotas.clone();
+        }
+        if let Some(msg) = result.get("message").and_then(|v| v.as_str()) {
+            live_message = Some(msg.to_string());
         }
     }
 
