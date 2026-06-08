@@ -10,7 +10,11 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::time::{self, Duration};
 
-use crate::core::usage::quota_fetcher::{fetch_glm_quota, fetch_minimax_quota};
+use crate::core::usage::quota_fetcher::{
+    fetch_antigravity_quota, fetch_claude_quota, fetch_codex_quota, fetch_github_quota,
+    fetch_glm_quota, fetch_gemini_cli_quota, fetch_kiro_quota, fetch_minimax_quota,
+    fetch_qoder_quota,
+};
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::server::state::AppState;
 use crate::server::usage_live::UsageEvent;
@@ -27,15 +31,6 @@ fn is_usage_apikey_provider(provider: &str) -> bool {
 
 fn usage_message_for_provider(provider: &str) -> String {
     match provider {
-        "github" => "GitHub Copilot connected. Usage tracked per request.".to_string(),
-        "gemini-cli" => {
-            "Gemini CLI uses Google Cloud quotas. Check Google Cloud Console for details."
-                .to_string()
-        }
-        "antigravity" => "Antigravity connected. Usage tracked per request.".to_string(),
-        "claude" => "Claude connected. Usage tracked per request.".to_string(),
-        "codex" => "Codex connected. Check OpenAI dashboard for usage.".to_string(),
-        "kiro" => "Kiro connected. Usage tracked per request.".to_string(),
         "qwen" => "Qwen connected. Usage tracked per request.".to_string(),
         "iflow" => "iFlow connected. Usage tracked per request.".to_string(),
         "ollama" => "Ollama Cloud uses a free tier with light usage limits (resets every 5h & 7d). For detailed usage tracking, visit ollama.com/settings/keys.".to_string(),
@@ -160,8 +155,9 @@ async fn stream_usage_stats(State(state): State<AppState>, headers: HeaderMap) -
                                 let payload = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".to_string());
                                 cached_stats = Some(stats);
                                 yield Ok(Bytes::from(format!("data: {}\n\n", payload)));
-                            }
-                        }
+        }
+    }
+
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                             let fresh = build_dashboard_usage_stats(&stream_state, period).await;
                             let payload = serde_json::to_string(&fresh).unwrap_or_else(|_| "{}".to_string());
@@ -447,9 +443,36 @@ async fn get_connection_usage(
         }
     }
 
+    if is_oauth {
+        if let Some(token) = connection
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let provider = connection.provider.clone();
+            let result = match provider.as_str() {
+                "github" | "github-copilot" => fetch_github_quota(token, &provider).await,
+                "claude" => fetch_claude_quota(token, &provider).await,
+                "codex" => fetch_codex_quota(token, &provider).await,
+                "kiro" => fetch_kiro_quota(token, &provider).await,
+                "gemini-cli" => fetch_gemini_cli_quota(token, &provider).await,
+                "antigravity" => fetch_antigravity_quota(token, &provider).await,
+                "qoder" => fetch_qoder_quota(token, &provider).await,
+                _ => serde_json::json!({}),
+            };
+            if let Some(quotas) = result.get("quotas") {
+                live_quotas = quotas.clone();
+            }
+            if let Some(msg) = result.get("message").and_then(|v| v.as_str()) {
+                live_message = Some(msg.to_string());
+            }
+        }
+    }
+
     // When quotas are populated, skip the generic fallback message so the
     // frontend renders the QuotaTable instead of a text-only message.
-    let message = if !live_quotas.as_object().map_or(true, |o| o.is_empty()) {
+    let message = if live_quotas.as_object().is_some_and(|o| !o.is_empty()) {
         live_message.unwrap_or_default()
     } else {
         live_message.unwrap_or_else(|| usage_message_for_provider(&connection.provider))
