@@ -731,7 +731,7 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
     }
 
     if let Some(review) = get_codex_review_rate_limit(&body) {
-        append_codex_quota_windows(&mut quotas, "code review ", &review);
+        append_codex_quota_windows(&mut quotas, "review", &review);
     }
 
     if quotas.is_empty() {
@@ -1149,7 +1149,7 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
 
     let client = http_client();
     let response = match client
-        .get("https://api.anthropic.com/v1/oauth/token/quota")
+        .get("https://api.anthropic.com/api/oauth/usage")
         .bearer_auth(access_token)
         .header("anthropic-version", "2023-06-01")
         .header("anthropic-beta", "oauth-2025-04-20")
