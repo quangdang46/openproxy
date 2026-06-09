@@ -729,6 +729,7 @@ mod tests {
         assert!(body["request"].get("safetySettings").is_none());
     }
 
+    #[test]
     fn flat_body_gets_wrapped_in_request_envelope() {
         let mut body = json!({
             "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
