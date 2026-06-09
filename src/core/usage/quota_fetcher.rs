@@ -393,7 +393,12 @@ pub async fn fetch_minimax_quota(api_key: &str, provider: &str) -> Value {
             );
             quotas.insert(
                 "session (5h)".to_string(),
-                build_minimax_quota(effective_total, effective_count, reset_at, effective_remaining_mode),
+                build_minimax_quota(
+                    effective_total,
+                    effective_count,
+                    reset_at,
+                    effective_remaining_mode,
+                ),
             );
         }
 
@@ -617,19 +622,18 @@ pub async fn fetch_github_quota(access_token: &str, _provider: &str) -> Value {
                 .get("reset_date")
                 .and_then(parse_reset_time)
                 .or_else(|| entry.get("quota_reset").and_then(parse_reset_time));
-            quotas.insert(label.to_string(), build_quota_entry(used, entitlement, entry_reset));
+            quotas.insert(
+                label.to_string(),
+                build_quota_entry(used, entitlement, entry_reset),
+            );
         }
     }
 
     // Free/limited plan: `monthly_quotas` holds totals, `limited_user_quotas` holds used amounts.
     // Both are flat number maps: { "chat": <number>, "completions": <number>, ... }.
     if quotas.is_empty() {
-        let monthly = body
-            .get("monthly_quotas")
-            .and_then(|v| v.as_object());
-        let limited = body
-            .get("limited_user_quotas")
-            .and_then(|v| v.as_object());
+        let monthly = body.get("monthly_quotas").and_then(|v| v.as_object());
+        let limited = body.get("limited_user_quotas").and_then(|v| v.as_object());
         if monthly.is_some() || limited.is_some() {
             let monthly = monthly.cloned().unwrap_or_default();
             let limited = limited.cloned().unwrap_or_default();
@@ -643,8 +647,14 @@ pub async fn fetch_github_quota(access_token: &str, _provider: &str) -> Value {
                 }
             }
             for key in &keys {
-                let total = monthly.get(key.as_str()).and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let used = limited.get(key.as_str()).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let total = monthly
+                    .get(key.as_str())
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let used = limited
+                    .get(key.as_str())
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
                 if total <= 0.0 && used <= 0.0 {
                     continue;
                 }
@@ -719,7 +729,8 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
         }
     }
 
-    let normal_rl = body.get("rate_limit")
+    let normal_rl = body
+        .get("rate_limit")
         .or_else(|| body.get("rate_limits"))
         .or_else(|| {
             body.get("rate_limits_by_limit_id")
@@ -804,9 +815,14 @@ fn build_quota_entry_with_meta(
     })
 }
 
-fn append_codex_quota_windows(quotas: &mut serde_json::Map<String, Value>, prefix: &str, snapshot: &Value) {
+fn append_codex_quota_windows(
+    quotas: &mut serde_json::Map<String, Value>,
+    prefix: &str,
+    snapshot: &Value,
+) {
     let rl = codex_rate_limit_body(snapshot);
-    let primary = rl.get("primary_window")
+    let primary = rl
+        .get("primary_window")
         .or_else(|| rl.get("primary"))
         .or_else(|| snapshot.get("primary_window"))
         .or_else(|| snapshot.get("primary"));
@@ -820,7 +836,8 @@ fn append_codex_quota_windows(quotas: &mut serde_json::Map<String, Value>, prefi
             quotas.insert(key, entry);
         }
     }
-    let secondary = rl.get("secondary_window")
+    let secondary = rl
+        .get("secondary_window")
         .or_else(|| rl.get("secondary"))
         .or_else(|| snapshot.get("secondary_window"))
         .or_else(|| snapshot.get("secondary"));
@@ -843,14 +860,20 @@ fn get_codex_review_rate_limit(data: &Value) -> Option<Value> {
     if let Some(v) = data.get("review_rate_limit") {
         return Some(v.clone());
     }
-    if let Some(map) = data.get("rate_limits_by_limit_id").and_then(|v| v.as_object()) {
+    if let Some(map) = data
+        .get("rate_limits_by_limit_id")
+        .and_then(|v| v.as_object())
+    {
         for key in &["code_review", "codex_review", "review"] {
             if let Some(v) = map.get(*key) {
                 return Some(v.clone());
             }
         }
     }
-    if let Some(limits) = data.get("additional_rate_limits").and_then(|v| v.as_array()) {
+    if let Some(limits) = data
+        .get("additional_rate_limits")
+        .and_then(|v| v.as_array())
+    {
         for limit in limits {
             let id = limit
                 .get("limit_name")
@@ -1007,10 +1030,7 @@ pub async fn fetch_gemini_cli_quota(
         let total = 1000.0;
         let remaining = (total * fraction).round();
         let used = (total - remaining).max(0.0);
-        quotas.insert(
-            model_id,
-            build_quota_entry(used, total, reset_at),
-        );
+        quotas.insert(model_id, build_quota_entry(used, total, reset_at));
     }
 
     json!({ "quotas": Value::Object(quotas) })
@@ -1034,7 +1054,8 @@ async fn load_code_assist(
     let final_body = match extra_body {
         Some(extra) if extra.is_object() => {
             let mut merged = body;
-            if let (Some(merged_obj), Some(extra_obj)) = (merged.as_object_mut(), extra.as_object()) {
+            if let (Some(merged_obj), Some(extra_obj)) = (merged.as_object_mut(), extra.as_object())
+            {
                 for (k, v) in extra_obj {
                     merged_obj.insert(k.clone(), v.clone());
                 }
@@ -1114,7 +1135,10 @@ pub async fn fetch_qoder_quota(access_token: &str, _provider: &str) -> Value {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         if total > 0.0 || used > 0.0 {
-            quotas.insert("user".to_string(), build_quota_entry(used, total, reset_at.clone()));
+            quotas.insert(
+                "user".to_string(),
+                build_quota_entry(used, total, reset_at.clone()),
+            );
         }
     }
 
@@ -1131,7 +1155,10 @@ pub async fn fetch_qoder_quota(access_token: &str, _provider: &str) -> Value {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         if total > 0.0 || used > 0.0 {
-            quotas.insert("org".to_string(), build_quota_entry(used, total, reset_at.clone()));
+            quotas.insert(
+                "org".to_string(),
+                build_quota_entry(used, total, reset_at.clone()),
+            );
         }
     }
 
@@ -1376,7 +1403,10 @@ pub async fn fetch_kiro_quota(
                 .and_then(|v| v.as_f64())
                 .unwrap_or(0.0);
             if total > 0.0 || used > 0.0 {
-                quotas.insert(key.clone(), build_quota_entry(used, total, reset_at.clone()));
+                quotas.insert(
+                    key.clone(),
+                    build_quota_entry(used, total, reset_at.clone()),
+                );
             }
 
             if let Some(trial) = entry.get("freeTrialInfo") {
@@ -1457,7 +1487,10 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         }
     };
 
-    let project_id = match load_body.get("cloudaicompanionProject").and_then(normalize_cloud_code_project_id) {
+    let project_id = match load_body
+        .get("cloudaicompanionProject")
+        .and_then(normalize_cloud_code_project_id)
+    {
         Some(p) => p,
         None => match load_body.get("cloudProject").and_then(|v| v.as_str()) {
             Some(p) if !p.is_empty() => p.to_string(),
@@ -1539,10 +1572,7 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         let remaining = (total * fraction).round();
         let used = (total - remaining).max(0.0);
 
-        quotas.insert(
-            model_id.clone(),
-            build_quota_entry(used, total, reset_at),
-        );
+        quotas.insert(model_id.clone(), build_quota_entry(used, total, reset_at));
     }
 
     if quotas.is_empty() {
