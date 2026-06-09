@@ -11,9 +11,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::time::{self, Duration};
 
 use crate::core::usage::quota_fetcher::{
-    fetch_antigravity_quota, fetch_claude_quota, fetch_codex_quota, fetch_github_quota,
-    fetch_glm_quota, fetch_gemini_cli_quota, fetch_kiro_quota, fetch_minimax_quota,
-    fetch_qoder_quota,
+    fetch_antigravity_quota, fetch_claude_quota, fetch_codex_quota, fetch_gemini_cli_quota,
+    fetch_github_quota, fetch_glm_quota, fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::server::state::AppState;

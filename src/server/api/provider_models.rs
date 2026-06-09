@@ -1494,14 +1494,20 @@ mod tests {
         assert_eq!(expanded[0].extra.get("rateMultiplier").unwrap(), "1.0");
         assert!(expanded[0].extra.get("originalModelId").is_none());
 
-        for (idx, variant) in ["thinking", "agentic", "thinking-agentic"].iter().enumerate() {
+        for (idx, variant) in ["thinking", "agentic", "thinking-agentic"]
+            .iter()
+            .enumerate()
+        {
             let model = &expanded[idx + 1];
             assert_eq!(model.name, "Amazon Nova Pro v1.0");
             assert_eq!(
                 model.extra.get("originalModelId"),
                 Some(&Value::String("amazon-nova-pro-v1.0".to_string()))
             );
-            assert_eq!(model.extra.get("variant"), Some(&Value::String((*variant).to_string())));
+            assert_eq!(
+                model.extra.get("variant"),
+                Some(&Value::String((*variant).to_string()))
+            );
             assert_eq!(
                 model.extra.get("rateMultiplier"),
                 Some(&Value::String("1.0".to_string()))
