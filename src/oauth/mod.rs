@@ -79,7 +79,11 @@ pub mod pkce {
     use super::*;
 
     pub fn generate_code_verifier() -> String {
-        let mut random_bytes = [0u8; 32];
+        generate_code_verifier_with_len(32)
+    }
+
+    pub fn generate_code_verifier_with_len(bytes: usize) -> String {
+        let mut random_bytes = vec![0u8; bytes];
         rand::thread_rng().fill_bytes(&mut random_bytes);
         base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random_bytes)
     }
@@ -189,6 +193,21 @@ pub mod providers {
         }
     }
 
+    pub fn xai() -> OAuthProviderConfig {
+        OAuthProviderConfig {
+            auth_url: "https://auth.x.ai/oauth2/authorize".to_string(),
+            token_url: "https://auth.x.ai/oauth2/token".to_string(),
+            scopes: vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+                "openai:write:grok-cli:access".to_string(),
+            ],
+            uses_pkce: true,
+            extra_params: [("response_type".to_string(), "code".to_string())].into(),
+        }
+    }
+
     pub fn github() -> OAuthProviderConfig {
         OAuthProviderConfig {
             auth_url: "https://github.com/login/device/code".to_string(),
@@ -266,6 +285,7 @@ pub mod providers {
             "claude" => Some(claude()),
             "codex" => Some(codex()),
             "gitlab" => Some(gitlab()),
+            "xai" => Some(xai()),
             "github" => Some(github()),
             "kiro" => Some(kiro()),
             "kimi-coding" => Some(kimi_coding()),
