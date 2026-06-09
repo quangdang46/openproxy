@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
@@ -11,6 +12,7 @@ use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::server::api::oauth::{get_refresh_lock_key, REFRESH_LOCKS};
 use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
@@ -891,6 +893,17 @@ fn codex_token_url() -> String {
 }
 
 async fn refresh_codex_token(refresh_token: &str) -> Result<RefreshResult, String> {
+    // Per-token lock prevents Auth0 `refresh_token_reused` errors from concurrent refreshes
+    let lock_key = get_refresh_lock_key("codex", refresh_token);
+    let lock_arc = {
+        let mut locks = REFRESH_LOCKS.lock().unwrap();
+        locks
+            .entry(lock_key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _permit = lock_arc.lock().await;
+
     let client = http_client().map_err(|error| error.message)?;
     let request = client
         .post(codex_token_url())

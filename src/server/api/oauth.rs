@@ -20,7 +20,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::str;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::Duration;
+use once_cell::sync::Lazy;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -96,6 +98,11 @@ const KIRO_GRANT_TYPES: &[&str] = &[
     "refresh_token",
 ];
 const CODEX_PROXY_TIMEOUT_MS: u64 = 300_000;
+
+/// Per-provider refresh locks to prevent Auth0 `refresh_token_reused` errors.
+/// Key = `"{provider}:{connection_id}"`, value = mutex for mutual exclusion.
+pub(crate) static REFRESH_LOCKS: Lazy<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| StdMutex::new(HashMap::new()));
 
 #[derive(Clone, Default)]
 pub struct CodexProxyState {
@@ -509,6 +516,10 @@ fn generate_state() -> String {
 
 fn get_provider_config(provider: &str) -> Option<OAuthProviderConfig> {
     providers::get_config(provider)
+}
+
+pub(crate) fn get_refresh_lock_key(provider: &str, stable_id: &str) -> String {
+    format!("{}:{}", provider, stable_id)
 }
 
 fn is_pkce_provider(provider: &str) -> bool {
@@ -4272,6 +4283,18 @@ pub async fn refresh_token(
             )
         }
     };
+
+    // Per-token lock prevents Auth0 `refresh_token_reused` errors from concurrent refreshes
+    let stable_id = connection.map(|c| c.id.clone()).unwrap_or_default();
+    let lock_key = get_refresh_lock_key(&provider, &stable_id);
+    let lock_arc = {
+        let mut locks = REFRESH_LOCKS.lock().unwrap();
+        locks
+            .entry(lock_key)
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _permit = lock_arc.lock().await;
 
     let client = reqwest::Client::new();
     let params = [
