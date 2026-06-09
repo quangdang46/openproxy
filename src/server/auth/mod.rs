@@ -6,6 +6,9 @@ use crate::core::auth::{parse_api_key, CLI_TOKEN_HEADER};
 use crate::db::Db;
 use crate::types::ApiKey;
 
+pub mod login_limiter;
+pub mod oidc;
+
 pub const API_KEY_HEADER: &str = "x-api-key";
 pub const AUTHORIZATION_HEADER: &str = "authorization";
 pub const AUTH_COOKIE_NAME: &str = "auth_token";

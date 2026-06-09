@@ -6,11 +6,14 @@ use tokio::sync::RwLock;
 
 use crate::core::account_fallback::AccountRegistry;
 use crate::core::executor::ClientPool;
+use crate::core::mitm::server::MitmProxyHandle;
 use crate::core::tunnel::TunnelManager;
 use crate::core::usage::UsageTracker;
 use crate::db::Db;
 use crate::oauth::pending::PendingFlowStore;
 use crate::server::api::oauth::CodexProxyState;
+use crate::server::auth::login_limiter::LoginLimiter;
+use crate::server::auth::oidc::OidcClient;
 use crate::server::console_logs::{shared_console_log_buffer, ConsoleLogBuffer};
 use crate::server::usage_live::UsageLiveState;
 
@@ -35,6 +38,16 @@ pub struct AppState {
     pub sessions: Arc<RwLock<HashMap<String, SessionInfo>>>,
     pub codex_proxy: Arc<CodexProxyState>,
 
+    /// Progressive lockout store for `POST /api/auth/login`. Tracks failed
+    /// attempts per client IP and escalates lockout duration on repeat
+    /// offenders (see `login_limiter.rs` for the exact schedule).
+    pub login_limiter: Arc<LoginLimiter>,
+
+    /// OIDC SSO client. `Some` when `OIDC_ISSUER`, `OIDC_CLIENT_ID`,
+    /// and `OIDC_CLIENT_SECRET` are all set at boot; `None` otherwise
+    /// (the `/api/auth/oidc/*` routes return 400 in that case).
+    pub oidc_client: Option<Arc<OidcClient>>,
+
     /// Optional reverse-proxy target for the dashboard.
     ///
     /// When `Some`, all dashboard fallback requests are forwarded to this URL
@@ -57,6 +70,10 @@ pub struct AppState {
     ///   2. `web_dir` — disk
     ///   3. embedded assets (default)
     pub web_dir: Option<PathBuf>,
+
+    /// Live MITM proxy listener handle, when one is running. Drop or
+    /// `stop()` to shut it down. `None` while the proxy is not running.
+    pub mitm_handle: Arc<tokio::sync::Mutex<Option<MitmProxyHandle>>>,
 }
 
 impl AppState {
@@ -74,9 +91,12 @@ impl AppState {
             usage_live: Arc::new(UsageLiveState::new()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             codex_proxy: Arc::new(CodexProxyState::new()),
+            login_limiter: Arc::new(LoginLimiter::new()),
+            oidc_client: None,
             dashboard_sidecar_url: None,
             dashboard_client: None,
             web_dir: None,
+            mitm_handle: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -101,6 +121,50 @@ impl AppState {
     /// assets. Sidecar mode (if set) still wins.
     pub fn with_web_dir(mut self, path: Option<PathBuf>) -> Self {
         self.web_dir = path;
+        self
+    }
+
+    /// Initialize the OIDC SSO client from `OIDC_ISSUER`, `OIDC_CLIENT_ID`,
+    /// `OIDC_CLIENT_SECRET`, and `OIDC_REDIRECT_URI` env vars. Runs
+    /// `OidcClient::discover` (an HTTP round-trip to the IdP's
+    /// `/.well-known/openid-configuration` document) — that's why this
+    /// is async and a separate call from `AppState::new`.
+    ///
+    /// Missing env vars, network errors, and malformed discovery
+    /// documents all leave `oidc_client = None` and log a warning.
+    /// The OIDC routes will then return 400.
+    pub async fn init_oidc_from_env(mut self) -> Self {
+        let issuer = std::env::var("OIDC_ISSUER").ok();
+        let client_id = std::env::var("OIDC_CLIENT_ID").ok();
+        let client_secret = std::env::var("OIDC_CLIENT_SECRET").ok();
+        let redirect_uri = std::env::var("OIDC_REDIRECT_URI")
+            .unwrap_or_else(|_| "http://127.0.0.1:4623/api/auth/oidc/callback".to_string());
+
+        self.oidc_client = match (issuer, client_id, client_secret) {
+            (Some(issuer), Some(client_id), Some(client_secret))
+                if !issuer.is_empty() && !client_id.is_empty() && !client_secret.is_empty() =>
+            {
+                match OidcClient::discover(&issuer, &client_id, &client_secret, &redirect_uri).await
+                {
+                    Ok(client) => {
+                        tracing::info!(issuer = %client.issuer, "OIDC SSO client initialized");
+                        Some(Arc::new(client))
+                    }
+                    Err(error) => {
+                        tracing::error!(?error, "failed to initialize OIDC SSO client");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
+        self
+    }
+
+    /// Inject a pre-built [`OidcClient`]. Used by tests and by callers
+    /// that want to bypass the env-var contract.
+    pub fn with_oidc_client(mut self, client: Option<Arc<OidcClient>>) -> Self {
+        self.oidc_client = client;
         self
     }
 
