@@ -96,6 +96,9 @@ async-stream = "0.3"
 # RSA for JWT signing
 rsa = "0.9"
 
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
+rustls-pemfile = "2"
+
 # AES-CBC encryption + supporting crates
 aes = "0.8"
 cbc = "0.1"
