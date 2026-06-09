@@ -39,6 +39,46 @@ pub const ANTIGRAVITY_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
 /// asks for; matches the upstream JS implementation.
 const MAX_ANTIGRAVITY_OUTPUT_TOKENS: u64 = 16_384;
 
+/// Suffix appended to every client tool name when forwarding to Antigravity.
+/// Mirrors 9router's `cloakTools()` behaviour.
+const ANTIGRAVITY_TOOL_SUFFIX: &str = "_ide";
+
+/// 21 decoy tool declarations injected by 9router's `cloakTools()` so the
+/// forwarded payload matches what a real Antigravity IDE client would send.
+const AG_DECOY_TOOLS: &[(&str, &str)] = &[
+    ("data_loss_prevention_test_tool_ide", "This tool is currently unavailable"),
+    ("projects_test_tool", "This tool is currently unavailable"),
+    ("test_tool_get_calendar_events_ide", "This tool is currently unavailable"),
+    ("test_tool_create_calendar_event_ide", "This tool is currently unavailable"),
+    ("test_tool_get_calendar_freebusy_ide", "This tool is currently unavailable"),
+    ("test_tool_update_calendar_event_ide", "This tool is currently unavailable"),
+    ("test_tool_delete_calendar_event_ide", "This tool is currently unavailable"),
+    ("test_tool_find_birthdays_ide", "This tool is currently unavailable"),
+    ("test_tool_get_user_location_ide", "This tool is currently unavailable"),
+    ("projects/locations/global/getFunction_ide", "This tool is currently unavailable"),
+    ("access_context_manager_access_policies_test_permissions_ide", "This tool is currently unavailable"),
+    ("ad_sharepoint_online_lookup_item_ide", "This tool is currently unavailable"),
+    ("ad_sharepoint_online_lookup_list_ide", "This tool is currently unavailable"),
+    ("ad_sharepoint_online_search_ide", "This tool is currently unavailable"),
+    ("analytics_google_data_export_ide", "This tool is currently unavailable"),
+    ("audit_manager_find_assets_ide", "This tool is currently unavailable"),
+    ("auto_ml_tables_test_integration_timing_ide", "This tool is currently unavailable"),
+    ("big_query_bi_engine_get_bi_engine_model_ide", "This tool is currently unavailable"),
+    ("big_query_data_policy_service_test_iam_permissions_ide", "This tool is currently unavailable"),
+    ("big_query_connection_service_test_iam_permissions_ide", "This tool is currently unavailable"),
+    ("vision_api_detect_text_ide", "This tool is currently unavailable"),
+];
+
+/// Tool names 9router always injects (with `_ide` suffix already applied) so
+/// the forwarded payload looks like it came from a real Antigravity IDE.
+const AG_DEFAULT_TOOLS: &[&str] = &[
+    "code_tool_ide",
+    "terminal_ide",
+    "google_search_ide",
+    "google_drive_ide",
+    "google_calendar_ide",
+];
+
 #[derive(Clone)]
 pub struct AntigravityExecutor {
     pool: Arc<ClientPool>,
@@ -189,6 +229,112 @@ impl AntigravityExecutor {
         s.chars().take(64).collect()
     }
 
+    /// Port of 9router's `cloakTools()`:
+    /// 1. Append `ANTIGRAVITY_TOOL_SUFFIX` to every existing function name
+    ///    *before* sanitization runs.
+    /// 2. Inject all [`AG_DECOY_TOOLS`] as new function declarations.
+    /// 3. Ensure every name in [`AG_DEFAULT_TOOLS`] is present (added with
+    ///    a generic "Access …" description if missing).
+    ///
+    /// Operates on the raw `tools` array (shape: `[{functionDeclarations: ...}]`)
+    /// as it appears in the inbound request body. Caller is expected to run
+    /// this **before** the sanitize+merge loop so the `_ide` suffix is treated
+    /// as part of the name.
+    fn cloak_tools(tools: &mut Value) {
+        let Some(groups) = tools.as_array_mut() else {
+            return;
+        };
+
+        // Make sure at least one group exists so we have somewhere to inject.
+        if groups.is_empty() {
+            groups.push(json!({"functionDeclarations": []}));
+        }
+
+        // Collect every existing function name (lower-cased) so we can dedupe
+        // AG_DEFAULT_TOOLS entries without scanning twice.
+        let mut existing_names: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+
+        // Step 1 + collect existing names.
+        for group in groups.iter_mut() {
+            let Some(decls) = group
+                .get_mut("functionDeclarations")
+                .and_then(|v| v.as_array_mut())
+            else {
+                continue;
+            };
+            for decl in decls.iter_mut() {
+                let Some(obj) = decl.as_object_mut() else {
+                    continue;
+                };
+                let raw_name = obj
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !raw_name.is_empty() {
+                    let new_name = format!("{raw_name}{ANTIGRAVITY_TOOL_SUFFIX}");
+                    existing_names.insert(new_name.to_ascii_lowercase());
+                    obj.insert("name".into(), Value::String(new_name));
+                }
+            }
+        }
+
+        // Step 2: inject decoy tools into the first group's declarations.
+        let first_group_has_decls = groups[0]
+            .get("functionDeclarations")
+            .map(|v| v.is_array())
+            .unwrap_or(false);
+        if !first_group_has_decls {
+            groups[0]
+                .as_object_mut()
+                .unwrap()
+                .insert("functionDeclarations".into(), Value::Array(Vec::new()));
+        }
+        let first_decls = groups[0]
+            .get_mut("functionDeclarations")
+            .and_then(|v| v.as_array_mut())
+            .expect("functionDeclarations array just ensured");
+        for (name, description) in AG_DECOY_TOOLS {
+            first_decls.push(json!({
+                "name": name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string", "description": "Brief explanation"}
+                    },
+                    "required": ["reason"]
+                }
+            }));
+            existing_names.insert(name.to_ascii_lowercase());
+        }
+
+        // Step 3: ensure every AG_DEFAULT_TOOLS name is present.
+        for tool_name in AG_DEFAULT_TOOLS {
+            if existing_names.contains(*tool_name) {
+                continue;
+            }
+            // tool_name already carries the `_ide` suffix (e.g. `code_tool_ide`).
+            let stripped = tool_name
+                .strip_suffix(ANTIGRAVITY_TOOL_SUFFIX)
+                .unwrap_or(tool_name);
+            let description = format!("Access {stripped} for your development environment");
+            first_decls.push(json!({
+                "name": tool_name,
+                "description": description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "reason": {"type": "string", "description": "Brief explanation"}
+                    },
+                    "required": ["reason"]
+                }
+            }));
+            existing_names.insert(tool_name.to_ascii_lowercase());
+        }
+    }
+
     /// Perform the inbound-request transformation matching `transformRequest`
     /// in 9router's antigravity.js. Mutates `body` in place and returns the
     /// derived session id so caller can pass it through to headers.
@@ -250,6 +396,12 @@ impl AntigravityExecutor {
             }
 
             // Sanitize and merge tool function declarations into a single group.
+            // Cloak first so the `_ide` suffix is part of the name when
+            // `sanitize_function_name` runs below.
+            if let Some(tools) = request_obj.get_mut("tools") {
+                Self::cloak_tools(tools);
+            }
+
             let merged_tools: Option<Vec<Value>> = if let Some(tools) =
                 request_obj.get("tools").and_then(|v| v.as_array()).cloned()
             {
@@ -508,10 +660,25 @@ mod tests {
         let groups = body["request"]["tools"].as_array().unwrap();
         assert_eq!(groups.len(), 1);
         let decls = groups[0]["functionDeclarations"].as_array().unwrap();
-        assert_eq!(decls.len(), 2);
-        assert_eq!(decls[0]["name"], "a");
-        // Sanitized: `b!?` -> `b__`
-        assert_eq!(decls[1]["name"], "b__");
+        // 2 original tools + 21 decoys + 5 default tools = 28.
+	assert_eq!(decls.len(), 28);
+
+	let names: Vec<&str> = decls
+	    .as_slice()
+	    .iter()
+	    .filter_map(|d| d.get("name").and_then(|v| v.as_str()))
+	    .collect();
+	assert!(
+	    names.contains(&"a_ide"),
+	    "expected a_ide to be in merged decls"
+	);
+	assert!(
+	    names.contains(&"b___ide"),
+	    "expected b___ide to be in merged decls"
+	);
+	for required in ["code_tool_ide", "terminal_ide", "google_search_ide", "google_drive_ide", "google_calendar_ide"] {
+	    assert!(names.contains(&required), "missing default tool: {required}");
+	}
         // toolConfig set when tools are present.
         assert_eq!(
             body["request"]["toolConfig"]["functionCallingConfig"]["mode"],

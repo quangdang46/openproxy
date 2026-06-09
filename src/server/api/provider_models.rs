@@ -29,6 +29,9 @@ const KIRO_AUTH_SERVICE: &str = "https://prod.us-east-1.auth.desktop.kiro.dev";
 const KIRO_MODELS_URL: &str = "https://codewhisperer.us-east-1.amazonaws.com";
 const KIRO_MODELS_TARGET: &str = "AmazonCodeWhispererService.ListAvailableModels";
 
+const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_STALE_DAYS: i64 = 8;
+
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModel {
@@ -195,7 +198,7 @@ async fn fetch_provider_models_response(
         "codex" => {
             let token = primary_token(connection)
                 .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
-            fetch_codex_models(connection, &token).await
+            fetch_codex_models(state, connection, &token).await
         }
         "antigravity" => {
             let token = primary_token(connection)
@@ -516,7 +519,7 @@ async fn fetch_gemini_api_models(
     ))
 }
 
-async fn fetch_codex_models(
+async fn fetch_codex_models_with_token(
     connection: &ProviderConnection,
     token: &str,
 ) -> Result<ProviderModelsResponse, RouteError> {
@@ -534,6 +537,33 @@ async fn fetch_codex_models(
         append_codex_review_models(parse_openai_style_models(&payload)),
         None,
     ))
+}
+
+fn is_codex_token_stale(created_at: Option<&str>) -> bool {
+    let Some(raw) = created_at else {
+        return false;
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        return false;
+    };
+    let age = Utc::now() - parsed.with_timezone(&Utc);
+    age > ChronoDuration::days(CODEX_STALE_DAYS)
+}
+
+async fn fetch_codex_models(
+    state: &AppState,
+    connection: &ProviderConnection,
+    token: &str,
+) -> Result<ProviderModelsResponse, RouteError> {
+    if is_codex_token_stale(connection.created_at.as_deref()) {
+        if let Some(refresh_token) = connection.refresh_token.as_deref() {
+            if let Ok(refreshed) = refresh_google_token(refresh_token, CODEX_CLIENT_ID, "").await {
+                persist_refreshed_credentials(state, connection, &refreshed).await;
+                return fetch_codex_models_with_token(connection, &refreshed.access_token).await;
+            }
+        }
+    }
+    fetch_codex_models_with_token(connection, token).await
 }
 
 async fn fetch_antigravity_models(
@@ -750,7 +780,7 @@ async fn fetch_kiro_models(
     let payload = fetch_json(request)
         .await
         .map_err(fetch_json_error_message)?;
-    Ok(payload
+    let models: Vec<ProviderModel> = payload
         .get("models")
         .and_then(Value::as_array)
         .into_iter()
@@ -791,7 +821,8 @@ async fn fetch_kiro_models(
                 extra,
             })
         })
-        .collect())
+        .collect();
+    Ok(expand_kiro_model_variants(models))
 }
 
 async fn send_gemini_cli_models_request(
@@ -1067,6 +1098,36 @@ fn append_codex_review_models(models: Vec<ProviderModel>) -> Vec<ProviderModel> 
         }
     }
 
+    expanded
+}
+
+fn expand_kiro_model_variants(models: Vec<ProviderModel>) -> Vec<ProviderModel> {
+    let mut expanded = Vec::with_capacity(models.len() * 4);
+    for model in models {
+        let base_id = model.id.clone();
+        let base_name = model.name.clone();
+        let base_extra = model.extra.clone();
+
+        expanded.push(model);
+
+        let make_variant = |suffix: &str, variant: &str| -> ProviderModel {
+            let mut extra = base_extra.clone();
+            extra.insert(
+                "originalModelId".to_string(),
+                Value::String(base_id.clone()),
+            );
+            extra.insert("variant".to_string(), Value::String(variant.to_string()));
+            ProviderModel {
+                id: format!("{base_id}{suffix}"),
+                name: base_name.clone(),
+                extra,
+            }
+        };
+
+        expanded.push(make_variant("-tinking", "thinking"));
+        expanded.push(make_variant("-agentic", "agentic"));
+        expanded.push(make_variant("-tinking-agentic", "thinking-agentic"));
+    }
     expanded
 }
 
@@ -1347,6 +1408,50 @@ mod tests {
                 extra: BTreeMap::new(),
             }]
         );
+    }
+
+    #[test]
+    fn test_expand_kiro_model_variants() {
+        let original = ProviderModel {
+            id: "amazon-nova-pro-v1.0".to_string(),
+            name: "Amazon Nova Pro v1.0".to_string(),
+            extra: BTreeMap::from([(
+                "rateMultiplier".to_string(),
+                Value::String("1.0".to_string()),
+            )]),
+        };
+
+        let expanded = expand_kiro_model_variants(vec![original]);
+        assert_eq!(expanded.len(), 4);
+
+        let ids: Vec<&str> = expanded.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "amazon-nova-pro-v1.0",
+                "amazon-nova-pro-v1.0-tinking",
+                "amazon-nova-pro-v1.0-agentic",
+                "amazon-nova-pro-v1.0-tinking-agentic",
+            ]
+        );
+
+        assert_eq!(expanded[0].name, "Amazon Nova Pro v1.0");
+        assert_eq!(expanded[0].extra.get("rateMultiplier").unwrap(), "1.0");
+        assert!(expanded[0].extra.get("originalModelId").is_none());
+
+        for (idx, variant) in ["thinking", "agentic", "thinking-agentic"].iter().enumerate() {
+            let model = &expanded[idx + 1];
+            assert_eq!(model.name, "Amazon Nova Pro v1.0");
+            assert_eq!(
+                model.extra.get("originalModelId"),
+                Some(&Value::String("amazon-nova-pro-v1.0".to_string()))
+            );
+            assert_eq!(model.extra.get("variant"), Some(&Value::String((*variant).to_string())));
+            assert_eq!(
+                model.extra.get("rateMultiplier"),
+                Some(&Value::String("1.0".to_string()))
+            );
+        }
     }
 
     #[test]

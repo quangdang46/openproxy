@@ -24,6 +24,19 @@ const KIRO_API_ENDPOINT: &str = "https://api.kiro.ai/v1";
 const KIRO_REGION: &str = "us-east-1";
 const KIRO_SERVICE: &str = "bedrock";
 
+fn normalize_kiro_model(model: &str) -> String {
+    if let Some(stripped) = model.strip_suffix("-tinking-agentic") {
+        return stripped.to_string();
+    }
+    if let Some(stripped) = model.strip_suffix("-tinking") {
+        return stripped.to_string();
+    }
+    if let Some(stripped) = model.strip_suffix("-agentic") {
+        return stripped.to_string();
+    }
+    model.to_string()
+}
+
 pub struct KiroExecutorResponse {
     pub response: super::UpstreamResponse,
     pub url: String,
@@ -135,6 +148,7 @@ impl KiroExecutor {
 
     pub fn build_url(&self, model: &str, stream: bool) -> String {
         let action = if stream { "stream" } else { "invoke" };
+        let model = normalize_kiro_model(model);
         format!(
             "{}/{model}/{action}",
             KIRO_API_ENDPOINT.trim_end_matches('/')
@@ -411,5 +425,25 @@ mod tests {
     fn test_generate_nonce() {
         let nonce = generate_nonce();
         assert_eq!(nonce.len(), 32);
+    }
+
+    #[test]
+    fn test_normalize_kiro_model() {
+        assert_eq!(
+            normalize_kiro_model("amazon-nova-pro-v1.0-tinking-agentic"),
+            "amazon-nova-pro-v1.0"
+        );
+        assert_eq!(
+            normalize_kiro_model("amazon-nova-pro-v1.0-tinking"),
+            "amazon-nova-pro-v1.0"
+        );
+        assert_eq!(
+            normalize_kiro_model("amazon-nova-pro-v1.0-agentic"),
+            "amazon-nova-pro-v1.0"
+        );
+        assert_eq!(
+            normalize_kiro_model("amazon-nova-pro-v1.0"),
+            "amazon-nova-pro-v1.0"
+        );
     }
 }
