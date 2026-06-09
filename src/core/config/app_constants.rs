@@ -164,6 +164,7 @@ pub static AG_DEFAULT_TOOLS: Lazy<BTreeSet<&'static str>> = Lazy::new(|| {
         "view_content_chunk",
         "view_file",
         "write_to_file",
+        "mcp_sequential-thinking_sequentialthinking",
     ]
     .into_iter()
     .collect()
