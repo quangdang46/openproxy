@@ -443,6 +443,7 @@ async fn start_mitm(
 
     let config = mitm::server::MitmProxyConfig {
         ca_cert: Arc::new(ca_material.cert),
+        ca_key: Arc::new(ca_material.key),
         ca_cert_pem: cert_pem.clone(),
         ca_key_pem: key_pem.clone(),
         capture_dir: capture_dir.clone(),

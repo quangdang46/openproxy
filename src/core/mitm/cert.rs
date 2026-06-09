@@ -104,3 +104,26 @@ fn extract_first_cert_der(pem: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Err
         .ok_or("no certificate found in PEM")??;
     Ok(first.to_vec())
 }
+
+/// Build a tokio-rustls TlsAcceptor that presents a leaf cert for `hostname`,
+/// signed by the given CA material. Used by the MITM CONNECT handler to perform
+/// TLS interception on the client side of the tunnel.
+pub fn build_tls_acceptor(
+    ca_cert: &Certificate,
+    ca_key: &KeyPair,
+    hostname: &str,
+) -> Result<tokio_rustls::TlsAcceptor, Box<dyn std::error::Error>> {
+    let (leaf_pem, leaf_key_pem) = sign_leaf(ca_cert, ca_key, hostname)?;
+
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut &leaf_pem[..])
+            .collect::<Result<Vec<_>, _>>()?;
+    let key = rustls_pemfile::private_key(&mut &leaf_key_pem[..])?
+        .ok_or("no private key in leaf cert")?;
+
+    let server_config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)?;
+
+    Ok(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config)))
+}
