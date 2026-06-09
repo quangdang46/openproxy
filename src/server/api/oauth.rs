@@ -10,6 +10,7 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
     Engine,
 };
+use once_cell::sync::Lazy;
 use rand::RngCore;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -22,7 +23,6 @@ use std::str;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
-use once_cell::sync::Lazy;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -47,6 +47,7 @@ const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_SCOPE: &str = "openid profile email offline_access";
+const XAI_CLIENT_ID: &str = "b1a00492-073a-073a-47ea-816f-4c329264a828";
 const CODEX_FIXED_PORT: u64 = 1455;
 const CODEX_CALLBACK_PATH: &str = "/auth/callback";
 const GEMINI_CLIENT_ID: &str =
@@ -501,6 +502,12 @@ fn generate_code_verifier() -> String {
     URL_SAFE_NO_PAD.encode(random_bytes)
 }
 
+fn generate_code_verifier_with_len(bytes: usize) -> String {
+    let mut random_bytes = vec![0u8; bytes];
+    rand::thread_rng().fill_bytes(&mut random_bytes);
+    URL_SAFE_NO_PAD.encode(random_bytes)
+}
+
 fn generate_code_challenge(verifier: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(verifier.as_bytes());
@@ -523,7 +530,7 @@ pub(crate) fn get_refresh_lock_key(provider: &str, stable_id: &str) -> String {
 }
 
 fn is_pkce_provider(provider: &str) -> bool {
-    matches!(provider, "claude" | "codex" | "gitlab")
+    matches!(provider, "claude" | "codex" | "gitlab" | "xai")
 }
 
 fn is_device_code_provider(provider: &str) -> bool {
@@ -3772,7 +3779,11 @@ pub async fn start_oauth_flow(
         }
     };
 
-    let code_verifier = generate_code_verifier();
+    let code_verifier = if provider == "xai" {
+        generate_code_verifier_with_len(96)
+    } else {
+        generate_code_verifier()
+    };
     let code_challenge = generate_code_challenge(&code_verifier);
     let state_value = generate_state();
 
@@ -3781,8 +3792,13 @@ pub async fn start_oauth_flow(
         .as_deref()
         .unwrap_or("http://localhost:4623/oauth/callback");
 
+    let client_id = if provider == "xai" {
+        XAI_CLIENT_ID
+    } else {
+        "openproxy"
+    };
     let auth_url =
-        provider_config.build_auth_url("openproxy", redirect_uri, &state_value, &code_challenge);
+        provider_config.build_auth_url(client_id, redirect_uri, &state_value, &code_challenge);
 
     let now = now_secs();
     let flow = PendingOAuthFlow {
