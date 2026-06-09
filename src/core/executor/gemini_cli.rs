@@ -4,6 +4,9 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYP
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::core::config::app_constants::{
+    INTERNAL_REQUEST_HEADER_NAME, INTERNAL_REQUEST_HEADER_VALUE,
+};
 use crate::core::proxy::ProxyTarget;
 use crate::types::{ProviderConnection, ProviderNode};
 
@@ -134,6 +137,10 @@ impl GeminiCliExecutor {
         headers.insert(
             "X-Goog-Api-Client",
             HeaderValue::from_static(GEMINI_CLI_API_CLIENT),
+        );
+        headers.insert(
+            INTERNAL_REQUEST_HEADER_NAME,
+            HeaderValue::from_static(INTERNAL_REQUEST_HEADER_VALUE),
         );
 
         if stream {
