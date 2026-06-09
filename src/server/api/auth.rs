@@ -149,7 +149,15 @@ pub async fn login(
 /// HttpOnly cookies; and 302-redirects to the IdP's `authorization_endpoint`.
 ///
 /// Returns 400 when OIDC is not configured (no `OIDC_*` env vars at boot).
-pub async fn oidc_login(State(state): State<AppState>) -> Response {
+pub async fn oidc_login(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    // Apply login rate limiter to prevent DoS against the IdP redirect.
+    let client_ip = client_ip_from_headers(&headers);
+    if let Err(LockoutError::Locked { retry_after_secs }) =
+        state.login_limiter.check_and_record(client_ip, false)
+    {
+        return lockout_response(retry_after_secs);
+    }
+
     let client = match state.oidc_client.as_ref() {
         Some(c) => c.clone(),
         None => {
@@ -267,6 +275,7 @@ pub async fn oidc_callback(
         Ok(r) => r,
         Err(error) => {
             tracing::warn!(?error, "OIDC token exchange failed");
+            let _ = state.login_limiter.check_and_record(client_ip, false);
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "error": "Token exchange failed" })),
@@ -278,6 +287,7 @@ pub async fn oidc_callback(
     let id_token = match token_resp.get("id_token").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => {
+            let _ = state.login_limiter.check_and_record(client_ip, false);
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "No id_token in token response" })),
@@ -290,6 +300,7 @@ pub async fn oidc_callback(
         Ok(j) => j,
         Err(error) => {
             tracing::warn!(?error, "OIDC JWKS fetch failed");
+            let _ = state.login_limiter.check_and_record(client_ip, false);
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "error": "Failed to fetch JWKS" })),
@@ -302,6 +313,7 @@ pub async fn oidc_callback(
         Ok(c) => c,
         Err(error) => {
             tracing::warn!(?error, "OIDC id_token verification failed");
+            let _ = state.login_limiter.check_and_record(client_ip, false);
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "ID token verification failed" })),

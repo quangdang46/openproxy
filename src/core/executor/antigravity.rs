@@ -254,10 +254,9 @@ impl AntigravityExecutor {
             .map(|v| v.is_array())
             .unwrap_or(false);
         if !first_group_has_decls {
-            groups[0]
-                .as_object_mut()
-                .unwrap()
-                .insert("functionDeclarations".into(), Value::Array(Vec::new()));
+            if let Some(obj) = groups[0].as_object_mut() {
+                obj.insert("functionDeclarations".into(), Value::Array(Vec::new()));
+            }
         }
         let first_decls = groups[0]
             .get_mut("functionDeclarations")
