@@ -8,7 +8,9 @@ use axum::{
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use crate::core::mitm;
 use crate::server::auth::require_api_key;
 use crate::server::state::AppState;
 
@@ -235,13 +237,41 @@ async fn generate_cert(
         return crate::server::api::auth_error_response(e);
     }
 
-    let timestamp = chrono::Utc::now().timestamp();
-    let fingerprint = format!("{:016x}", timestamp.unsigned_abs() ^ 0xDEADBEEFCAFEBABE);
+    let ca_dir = state.db.data_dir.join("mitm");
+    let (cert_path, key_path) = match mitm::cert::generate_ca_persisted(&ca_dir) {
+        Ok(paths) => paths,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to generate CA certificate: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let cert_pem = match std::fs::read(&cert_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to read generated cert: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let fingerprint = mitm::cert::sha256_fingerprint(&cert_pem);
+    let now_str = chrono::Utc::now().to_rfc3339();
     let expires_at = chrono::Utc::now() + chrono::Duration::days(365);
     let expires_at_str = expires_at.to_rfc3339();
-    let now_str = chrono::Utc::now().to_rfc3339();
+    let timestamp = chrono::Utc::now().timestamp();
+    let cert_pem_string = String::from_utf8_lossy(&cert_pem).to_string();
 
-    match state
+    let update_result = state
         .db
         .update(|db| {
             db.provider_nodes
@@ -258,9 +288,17 @@ async fn generate_cert(
                 Value::String(fingerprint.clone()),
             );
             extra.insert("generatedAt".to_string(), Value::String(now_str.clone()));
+            extra.insert(
+                "certPath".to_string(),
+                Value::String(cert_path.to_string_lossy().to_string()),
+            );
+            extra.insert(
+                "keyPath".to_string(),
+                Value::String(key_path.to_string_lossy().to_string()),
+            );
 
             db.provider_nodes.push(crate::types::ProviderNode {
-                id: format!("mitm-cert-{}", timestamp),
+                id: format!("mitm-cert-{timestamp}"),
                 r#type: "mitm-cert".to_string(),
                 name: "MITM CA Certificate".to_string(),
                 prefix: None,
@@ -271,26 +309,32 @@ async fn generate_cert(
                 extra,
             });
         })
-        .await
-    {
-        Ok(_) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "success": true,
-                "message": "MITM certificate generated",
-                "fingerprint": fingerprint,
-                "expiresAt": expires_at_str
-            })),
-        )
-            .into_response(),
-        Err(err) => (
+        .await;
+
+    if let Err(err) = update_result {
+        return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
-                "error": format!("Failed to generate cert: {}", err)
+                "error": format!("Failed to persist cert metadata: {err}")
             })),
         )
-            .into_response(),
+            .into_response();
     }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "message": "MITM certificate generated",
+            "certificate": cert_pem_string,
+            "certPath": cert_path.to_string_lossy(),
+            "keyPath": key_path.to_string_lossy(),
+            "fingerprint": fingerprint,
+            "expiresAt": expires_at_str,
+            "generatedAt": now_str
+        })),
+    )
+        .into_response()
 }
 
 // ── POST /api/mitm/start ──────────────────────────────────────────────
@@ -316,13 +360,127 @@ async fn start_mitm(
             .into_response();
     }
 
+    {
+        let guard = state.mitm_handle.lock().await;
+        if let Some(handle) = guard.as_ref() {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "message": "MITM proxy already running",
+                    "port": handle.port(),
+                    "bindAddr": handle.bind_addr(),
+                    "activeRoutes": snapshot.mitm_alias.len(),
+                    "routerBaseUrl": snapshot.settings.mitm_router_base_url
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    let ca_dir = state.db.data_dir.join("mitm");
+    let (cert_path, key_path) = match mitm::cert::generate_ca_persisted(&ca_dir) {
+        Ok(paths) => paths,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to provision MITM CA: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let cert_pem = match std::fs::read(&cert_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to read MITM CA cert: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+    let key_pem = match std::fs::read(&key_path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to read MITM CA key: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let ca_material = match mitm::cert::generate_ca() {
+        Ok(material) => material,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to load MITM CA in memory: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let capture_dir = state.db.data_dir.join("mitm-captures");
+    if let Err(e) = std::fs::create_dir_all(&capture_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to create capture dir: {e}")
+            })),
+        )
+            .into_response();
+    }
+
+    let config = mitm::server::MitmProxyConfig {
+        ca_cert: Arc::new(ca_material.cert),
+        ca_cert_pem: cert_pem.clone(),
+        ca_key_pem: key_pem.clone(),
+        capture_dir: capture_dir.clone(),
+        state: state.clone(),
+    };
+
+    let handle = match mitm::server::start_mitm_proxy(config).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to start MITM proxy listener: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let port = handle.port();
+    let bind_addr = handle.bind_addr().to_string();
+
+    {
+        let mut guard = state.mitm_handle.lock().await;
+        *guard = Some(handle);
+    }
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "success": true,
             "message": "MITM proxy active",
+            "port": port,
+            "bindAddr": bind_addr,
             "activeRoutes": snapshot.mitm_alias.len(),
-            "routerBaseUrl": snapshot.settings.mitm_router_base_url
+            "routerBaseUrl": snapshot.settings.mitm_router_base_url,
+            "certPath": cert_path.to_string_lossy(),
+            "captureDir": capture_dir.to_string_lossy()
         })),
     )
         .into_response()
@@ -338,25 +496,46 @@ async fn stop_mitm(
         return crate::server::api::auth_error_response(e);
     }
 
-    match state
+    let stopped_port = {
+        let mut guard = state.mitm_handle.lock().await;
+        if let Some(mut handle) = guard.take() {
+            let port = handle.port();
+            handle.stop().await;
+            Some(port)
+        } else {
+            None
+        }
+    };
+
+    let clear_result = state
         .db
         .update(|db| {
             db.mitm_alias.clear();
         })
-        .await
-    {
-        Ok(_) => (
+        .await;
+
+    match (stopped_port, clear_result) {
+        (Some(port), Ok(_)) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "success": true,
-                "message": "MITM proxy stopped, all routes cleared"
+                "message": "MITM proxy stopped, all routes cleared",
+                "port": port
             })),
         )
             .into_response(),
-        Err(err) => (
+        (None, Ok(_)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "message": "MITM proxy was not running, all routes cleared"
+            })),
+        )
+            .into_response(),
+        (_, Err(err)) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
-                "error": format!("Failed to stop MITM proxy: {}", err)
+                "error": format!("Failed to stop MITM proxy: {err}")
             })),
         )
             .into_response(),

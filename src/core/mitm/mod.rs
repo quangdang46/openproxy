@@ -4,6 +4,10 @@ use std::collections::BTreeMap;
 
 use crate::types::Settings;
 
+pub mod capture;
+pub mod cert;
+pub mod server;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MitmTarget {
     pub name: String,
