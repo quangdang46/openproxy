@@ -14,6 +14,7 @@ tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 hyper = { version = "1.5", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 hyper-rustls = { version = "0.27", features = ["http2"] }
+tokio-rustls = "0.26"
 rustls = "0.23"
 
 # HTTP client (complex - OAuth, proxy)

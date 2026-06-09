@@ -2,13 +2,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rcgen::Certificate;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use rcgen::{Certificate, KeyPair};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
 use super::capture::CaptureSink;
+use super::cert;
 use crate::server::state::AppState;
 
 pub struct MitmProxyHandle {
@@ -43,6 +44,7 @@ impl Drop for MitmProxyHandle {
 
 pub struct MitmProxyConfig {
     pub ca_cert: Arc<Certificate>,
+    pub ca_key: Arc<KeyPair>,
     pub ca_cert_pem: Vec<u8>,
     pub ca_key_pem: Vec<u8>,
     pub capture_dir: PathBuf,
@@ -62,15 +64,17 @@ pub async fn start_mitm_proxy(
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
     let capture = CaptureSink::new(config.capture_dir.clone());
     let ca_cert = config.ca_cert.clone();
+    let ca_key = config.ca_key.clone();
     let state = config.state.clone();
-    let _ = (config.ca_cert_pem, config.ca_key_pem);
+    // Keep PEM data available for per-host leaf cert generation
+    // (loaded on demand from disk via the persisted CA files)
 
     tokio::spawn(async move {
         tokio::select! {
             _ = &mut shutdown_rx => {
                 info!("MITM proxy shutdown signal received");
             }
-            _ = accept_loop(listener, ca_cert, capture, state) => {
+            _ = accept_loop(listener, ca_cert, ca_key, capture, state) => {
                 info!("MITM proxy accept loop exited");
             }
         }
@@ -86,6 +90,7 @@ pub async fn start_mitm_proxy(
 async fn accept_loop(
     listener: TcpListener,
     ca_cert: Arc<Certificate>,
+    ca_key: Arc<KeyPair>,
     capture: CaptureSink,
     state: AppState,
 ) {
@@ -94,10 +99,11 @@ async fn accept_loop(
             Ok((stream, peer)) => {
                 debug!(peer = %peer, "MITM proxy accepted connection");
                 let ca_cert = ca_cert.clone();
+                let ca_key = ca_key.clone();
                 let capture = capture.clone();
                 let state = state.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(stream, ca_cert, capture, state).await {
+                    if let Err(e) = handle_client(stream, ca_cert, ca_key, capture, state).await {
                         warn!(error = %e, "MITM client handler failed");
                     }
                 });
@@ -111,49 +117,96 @@ async fn accept_loop(
 
 async fn handle_client(
     client_stream: TcpStream,
-    _ca_cert: Arc<Certificate>,
+    ca_cert: Arc<Certificate>,
+    ca_key: Arc<KeyPair>,
     capture: CaptureSink,
     _state: AppState,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let (read_half, mut write_half) = client_stream.into_split();
-    let mut reader = BufReader::new(read_half);
-
-    let request_line = match read_request_line(&mut reader).await? {
-        Some(line) => line,
-        None => {
-            debug!("MITM client closed connection before sending a request");
-            return Ok(());
+    let (method, target) = {
+        let buf = peek_first_line(&client_stream).await?;
+        match buf {
+            Some(line) => parse_request_line(&line),
+            None => return Ok(()),
         }
     };
-
-    let (method, target) = parse_request_line(&request_line);
 
     if method.eq_ignore_ascii_case("CONNECT") {
         let (host, port) = match parse_host_port(&target) {
             Some(parts) => parts,
             None => {
-                let _ = write_half
+                let mut stream = client_stream;
+                let _ = stream
                     .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
                     .await;
                 return Ok(());
             }
         };
-        handle_connect(reader, write_half, host, port, capture).await
+        handle_connect(client_stream, host, port, ca_cert, ca_key, capture).await
     } else {
-        handle_plain_http(&mut reader, &mut write_half, &method, &target, capture).await
+        let mut stream = client_stream;
+        let _ = stream
+            .write_all(
+                b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .await;
+        Ok(())
     }
 }
 
+/// Peek at the first line (request line) from a TcpStream without consuming
+/// any bytes, so the stream can later be handed to the TLS acceptor.
+async fn peek_first_line(
+    stream: &TcpStream,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let mut buf = vec![0u8; 4096];
+    let n = stream.peek(&mut buf).await?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let end = buf[..n]
+        .iter()
+        .position(|&b| b == b'\n')
+        .unwrap_or(n);
+    if end == 0 {
+        return Ok(None);
+    }
+    let line = String::from_utf8_lossy(&buf[..end])
+        .trim_end_matches('\r')
+        .to_string();
+    if line.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(line))
+}
+
 async fn handle_connect(
-    mut reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
-    mut client_write: tokio::net::tcp::OwnedWriteHalf,
+    mut client_stream: TcpStream,
     host: String,
     port: u16,
+    ca_cert: Arc<Certificate>,
+    ca_key: Arc<KeyPair>,
     capture: CaptureSink,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    drain_headers(&mut reader).await?;
+    // Drain remaining CONNECT headers (everything after the request line)
+    let mut byte = [0u8; 1];
+    let mut prev_was_nl = false;
+    loop {
+        let n = client_stream.read(&mut byte).await?;
+        if n == 0 {
+            return Ok(());
+        }
+        if byte[0] == b'\n' {
+            if prev_was_nl {
+                break; // blank line ends CONNECT headers
+            }
+            prev_was_nl = true;
+        } else if byte[0] != b'\r' {
+            prev_was_nl = false;
+        }
+    }
 
-    let target = match TcpStream::connect((host.as_str(), port)).await {
+    // Connect to the upstream server
+    let upstream = match TcpStream::connect((host.as_str(), port)).await {
         Ok(stream) => stream,
         Err(e) => {
             warn!(host = %host, port, error = %e, "MITM upstream connect failed");
@@ -163,29 +216,49 @@ async fn handle_connect(
                 body.len(),
                 body
             );
-            let _ = client_write.write_all(response.as_bytes()).await;
+            let _ = client_stream.write_all(response.as_bytes()).await;
             return Ok(());
         }
     };
 
+    // Tell the client the CONNECT tunnel is established
     let established = b"HTTP/1.1 200 Connection Established\r\n\r\n";
-    if let Err(e) = client_write.write_all(established).await {
+    if let Err(e) = client_stream.write_all(established).await {
         warn!(error = %e, "Failed to send 200 Connection Established to client");
         return Ok(());
     }
 
-    let (mut target_read, mut target_write) = target.into_split();
-    let mut client_read = reader.into_inner();
+    // Perform TLS accept on the client side using a forged leaf cert
+    // for the target hostname, signed by the MITM CA.
+    let acceptor = match cert::build_tls_acceptor(&ca_cert, &ca_key, &host) {
+        Ok(a) => a,
+        Err(e) => {
+            warn!(host = %host, error = %e, "Failed to build TLS acceptor");
+            return Ok(());
+        }
+    };
+
+    let tls_stream = match acceptor.accept(client_stream).await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!(host = %host, error = %e, "TLS accept failed (client may not expect MITM)");
+            return Ok(());
+        }
+    };
+
+    // Split the TLS stream and upstream into read/write halves for pumping
+    let (mut tls_read, mut tls_write) = tokio::io::split(tls_stream);
+    let (mut up_read, mut up_write) = upstream.into_split();
 
     let timestamp = current_timestamp();
-    let cap_a = capture.clone();
     let host_a = host.clone();
+    let cap_a = capture.clone();
     let ts_a = timestamp.clone();
 
-    let c_to_t = tokio::spawn(async move {
-        pump_stream(
-            &mut client_read,
-            &mut target_write,
+    let c_to_u = tokio::spawn(async move {
+        pump_captured(
+            &mut tls_read,
+            &mut up_write,
             &cap_a,
             &host_a,
             "req",
@@ -194,10 +267,10 @@ async fn handle_connect(
         .await
     });
 
-    let t_to_c = tokio::spawn(async move {
-        pump_stream(
-            &mut target_read,
-            &mut client_write,
+    let u_to_c = tokio::spawn(async move {
+        pump_captured(
+            &mut up_read,
+            &mut tls_write,
             &capture,
             &host,
             "resp",
@@ -206,11 +279,11 @@ async fn handle_connect(
         .await
     });
 
-    let _ = tokio::join!(c_to_t, t_to_c);
+    let _ = tokio::join!(c_to_u, u_to_c);
     Ok(())
 }
 
-async fn pump_stream<R, W>(
+async fn pump_captured<R, W>(
     reader: &mut R,
     writer: &mut W,
     capture: &CaptureSink,
@@ -243,65 +316,11 @@ where
     }
 }
 
-async fn handle_plain_http<R, W>(
-    reader: &mut R,
-    writer: &mut W,
-    method: &str,
-    target: &str,
-    capture: CaptureSink,
-) -> Result<(), Box<dyn std::error::Error>>
-where
-    R: tokio::io::AsyncBufRead + Unpin,
-    W: tokio::io::AsyncWrite + Unpin,
-{
-    let mut header_buf = Vec::new();
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            break;
-        }
-        if line == "\r\n" || line == "\n" {
-            break;
-        }
-        header_buf.extend_from_slice(line.as_bytes());
-    }
-
-    let body = match parse_content_length(&header_buf) {
-        Some(content_length) => {
-            let mut buf = vec![0u8; content_length.min(64 * 1024)];
-            tokio::io::AsyncReadExt::read_exact(reader, &mut buf).await?;
-            buf
-        }
-        None => Vec::new(),
-    };
-
-    let timestamp = current_timestamp();
-    let captured = format!(
-        "{} {}\n{}\n",
-        method,
-        target,
-        String::from_utf8_lossy(&header_buf)
-    );
-    let mut payload = captured.into_bytes();
-    payload.extend_from_slice(&body);
-    let _ = capture.capture_request(target, &timestamp, &payload).await;
-
-    let response = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-    writer.write_all(response).await?;
-    writer.shutdown().await?;
-    Ok(())
-}
-
-async fn read_request_line<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<Option<String>, std::io::Error> {
-    let mut line = String::new();
-    let n = reader.read_line(&mut line).await?;
-    if n == 0 {
-        return Ok(None);
-    }
-    Ok(Some(line.trim_end_matches(['\r', '\n']).to_string()))
+async fn read_from_stream(
+    stream: &mut TcpStream,
+    buf: &mut [u8],
+) -> std::io::Result<usize> {
+    stream.read(buf).await
 }
 
 fn parse_request_line(line: &str) -> (String, String) {
@@ -317,34 +336,6 @@ fn parse_host_port(target: &str) -> Option<(String, u16)> {
         None => (target.to_string(), 443u16),
     };
     Some((host, port))
-}
-
-async fn drain_headers<R: tokio::io::AsyncBufRead + Unpin>(
-    reader: &mut R,
-) -> Result<(), std::io::Error> {
-    loop {
-        let mut line = String::new();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            return Ok(());
-        }
-        if line == "\r\n" || line == "\n" {
-            return Ok(());
-        }
-    }
-}
-
-fn parse_content_length(headers: &[u8]) -> Option<usize> {
-    let text = String::from_utf8_lossy(headers);
-    for line in text.lines() {
-        let mut parts = line.splitn(2, ':');
-        let name = parts.next()?.trim();
-        let value = parts.next()?.trim();
-        if name.eq_ignore_ascii_case("content-length") {
-            return value.parse().ok();
-        }
-    }
-    None
 }
 
 fn current_timestamp() -> String {
