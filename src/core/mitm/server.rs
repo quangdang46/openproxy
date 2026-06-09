@@ -316,13 +316,6 @@ where
     }
 }
 
-async fn read_from_stream(
-    stream: &mut TcpStream,
-    buf: &mut [u8],
-) -> std::io::Result<usize> {
-    stream.read(buf).await
-}
-
 fn parse_request_line(line: &str) -> (String, String) {
     let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or("").to_string();
@@ -331,11 +324,23 @@ fn parse_request_line(line: &str) -> (String, String) {
 }
 
 fn parse_host_port(target: &str) -> Option<(String, u16)> {
-    let (host, port) = match target.rsplit_once(':') {
-        Some((h, p)) => (h.to_string(), p.parse::<u16>().ok()?),
-        None => (target.to_string(), 443u16),
-    };
-    Some((host, port))
+    // Handle IPv6 bracket notation: [::1]:443 or [::1]
+    if let Some(rest) = target.strip_prefix('[') {
+        let (host, port_str) = rest.split_once(']')?;
+        let port = if let Some(p) = port_str.strip_prefix(':') {
+            p.parse::<u16>().ok()?
+        } else if port_str.is_empty() {
+            443u16
+        } else {
+            return None;
+        };
+        return Some((format!("[{}]", host), port));
+    }
+    // Standard host:port or bare host
+    match target.rsplit_once(':') {
+        Some((h, p)) => Some((h.to_string(), p.parse::<u16>().ok()?)),
+        None => Some((target.to_string(), 443u16)),
+    }
 }
 
 fn current_timestamp() -> String {

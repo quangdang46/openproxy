@@ -526,6 +526,15 @@ impl AntigravityExecutor {
             })?
             .to_string();
 
+        // The translator pipeline (OpenAi → openai_to_gemini_cli_request) produces a flat
+        // body {contents, tools, ...}.  Antigravity's Cloud Code endpoint requires the
+        // Gemini-like body wrapped in a {"request": body} envelope.  If the body doesn't
+        // already have a "request" key, wrap it here.
+        if request.body.get("request").is_none() {
+            let inner = std::mem::replace(&mut request.body, Value::Null);
+            request.body = json!({"request": inner});
+        }
+
         let session_id = Self::transform_request(&mut request.body, &request.credentials)?;
         let url = Self::build_url(request.stream);
         let headers = Self::build_headers(&access_token, request.stream, Some(&session_id))?;
