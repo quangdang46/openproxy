@@ -375,6 +375,8 @@ async fn main() -> anyhow::Result<()> {
     spawn_watcher(db.clone());
     spawn_auto_backup(db.clone());
     let state = AppState::new(db)
+        .init_oidc_from_env()
+        .await
         .with_dashboard_sidecar_url(cli.dashboard_sidecar_url.clone())
         .with_web_dir(cli.web_dir.clone());
     let app = openproxy::build_app(state);
