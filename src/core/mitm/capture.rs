@@ -41,7 +41,11 @@ impl CaptureSink {
         let dir = self.capture_dir.join(sanitize_host(host));
         tokio::fs::create_dir_all(&dir).await?;
         let path = dir.join(filename);
-        let mut file = tokio::fs::File::create(&path).await?;
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .await?;
         file.write_all(data).await?;
         file.flush().await?;
         Ok(path)

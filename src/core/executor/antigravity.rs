@@ -729,6 +729,53 @@ mod tests {
         AntigravityExecutor::transform_request(&mut body, &creds).unwrap();
         assert!(body["request"].get("safetySettings").is_none());
     }
+
+    fn flat_body_gets_wrapped_in_request_envelope() {
+        let mut body = json!({
+            "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
+            "tools": [{"functionDeclarations": [{"name": "my_tool", "parameters": {"type": "object"}}]}]
+        });
+
+        if body.get("request").is_none() {
+            let inner = std::mem::replace(&mut body, Value::Null);
+            body = json!({"request": inner});
+        }
+
+        let creds = ProviderConnection::default();
+        AntigravityExecutor::transform_request(&mut body, &creds).unwrap();
+
+        assert!(
+            body.get("request").is_some(),
+            "body should have request envelope"
+        );
+
+        let tools = body["request"]["tools"].as_array().expect("tools array");
+        let decls = tools[0]["functionDeclarations"]
+            .as_array()
+            .expect("functionDeclarations");
+        let names: Vec<&str> = decls
+            .iter()
+            .filter_map(|d| d.get("name").and_then(|v| v.as_str()))
+            .collect();
+
+        assert!(
+            names.contains(&"my_tool_ide"),
+            "client tool should have _ide suffix"
+        );
+
+        for base in crate::core::config::app_constants::AG_DEFAULT_TOOLS.iter() {
+            let required = format!("{base}_ide");
+            assert!(
+                names.contains(&required.as_str()),
+                "missing default tool: {required}"
+            );
+        }
+
+        assert_eq!(
+            body["request"]["contents"][0]["role"], "user",
+            "contents should be preserved after wrapping"
+        );
+    }
 }
 
 // `ProviderConnection` derives `Default` upstream — we just rely on that

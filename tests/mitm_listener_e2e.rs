@@ -22,20 +22,15 @@ async fn spawn_upstream() -> SocketAddr {
     let addr = listener.local_addr().unwrap();
 
     tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((mut stream, _peer)) => {
-                    // Read any request data
-                    let mut buf = [0u8; 4096];
-                    let _ = stream.read(&mut buf).await;
+        while let Ok((mut stream, _peer)) = listener.accept().await {
+            // Read any request data
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf).await;
 
-                    // Write a canned HTTP response
-                    let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello\n";
-                    let _ = stream.write_all(resp).await;
-                    let _ = stream.flush().await;
-                }
-                Err(_) => break,
-            }
+            // Write a canned HTTP response
+            let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\n\r\nhello\n";
+            let _ = stream.write_all(resp).await;
+            let _ = stream.flush().await;
         }
     });
     addr
@@ -45,9 +40,10 @@ async fn spawn_upstream() -> SocketAddr {
 /// client can complete the TLS handshake with the MITM proxy).
 fn tls_client_config(ca_cert_pem: &[u8]) -> Arc<rustls::ClientConfig> {
     let mut root_store = rustls::RootCertStore::empty();
-    let certs: Vec<rustls::pki_types::CertificateDer> = rustls_pemfile::certs(&mut &ca_cert_pem[..])
-        .collect::<Result<Vec<_>, _>>()
-        .expect("valid CA cert PEM");
+    let certs: Vec<rustls::pki_types::CertificateDer> =
+        rustls_pemfile::certs(&mut &ca_cert_pem[..])
+            .collect::<Result<Vec<_>, _>>()
+            .expect("valid CA cert PEM");
     for cert in certs {
         root_store.add(cert).expect("CA cert added to root store");
     }
@@ -123,19 +119,19 @@ async fn mitm_tls_e2e_round_trip() {
 
     // ── 9. Wrap in TLS using MITM's CA cert ──
     let tls_connector = tokio_rustls::TlsConnector::from(tls_client_config(&ca_cert_pem));
-    let server_name = rustls::pki_types::ServerName::try_from("127.0.0.1")
-        .expect("valid ServerName");
-    let mut tls_stream = timeout(Duration::from_secs(5), tls_connector.connect(server_name, proxy_stream))
-        .await
-        .expect("TLS handshake timeout")
-        .expect("TLS handshake");
+    let server_name =
+        rustls::pki_types::ServerName::try_from("127.0.0.1").expect("valid ServerName");
+    let mut tls_stream = timeout(
+        Duration::from_secs(5),
+        tls_connector.connect(server_name, proxy_stream),
+    )
+    .await
+    .expect("TLS handshake timeout")
+    .expect("TLS handshake");
 
     // ── 10. Send HTTP GET through the tunnel ──
     let get_req = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    tls_stream
-        .write_all(get_req)
-        .await
-        .expect("write HTTP GET");
+    tls_stream.write_all(get_req).await.expect("write HTTP GET");
     tls_stream.flush().await.expect("flush");
 
     // ── 11. Read HTTP response ──
@@ -180,4 +176,40 @@ async fn mitm_tls_e2e_round_trip() {
     }
     assert!(has_req, "expected request capture file, found none");
     assert!(has_resp, "expected response capture file, found none");
+
+    if let Ok(entries) = capture_dir.read_dir() {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with("127.0.0.1") {
+                if let Ok(files) = entry.path().read_dir() {
+                    for file in files.flatten() {
+                        let fname = file.file_name().to_string_lossy().to_string();
+                        if fname.starts_with("req-") {
+                            let content = std::fs::read_to_string(file.path())
+                                .expect("read req capture file");
+                            assert!(
+                                content.contains("GET"),
+                                "captured request should contain GET, got: {content:?}"
+                            );
+                            assert!(
+                                content.contains("HTTP/1.1"),
+                                "captured request should contain HTTP/1.1, got: {content:?}"
+                            );
+                        }
+                        if fname.starts_with("resp-") {
+                            let content = std::fs::read_to_string(file.path())
+                                .expect("read resp capture file");
+                            assert!(
+                                content.contains("200 OK"),
+                                "captured response should contain 200 OK, got: {content:?}"
+                            );
+                            assert!(
+                                content.contains("hello"),
+                                "captured response should contain hello, got: {content:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

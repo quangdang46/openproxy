@@ -116,8 +116,7 @@ pub fn build_tls_acceptor(
     let (leaf_pem, leaf_key_pem) = sign_leaf(ca_cert, ca_key, hostname)?;
 
     let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pemfile::certs(&mut &leaf_pem[..])
-            .collect::<Result<Vec<_>, _>>()?;
+        rustls_pemfile::certs(&mut &leaf_pem[..]).collect::<Result<Vec<_>, _>>()?;
     let key = rustls_pemfile::private_key(&mut &leaf_key_pem[..])?
         .ok_or("no private key in leaf cert")?;
 
@@ -125,5 +124,7 @@ pub fn build_tls_acceptor(
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
 
-    Ok(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(server_config)))
+    Ok(tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(
+        server_config,
+    )))
 }

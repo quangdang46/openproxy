@@ -135,9 +135,7 @@ async fn handle_client(
             Some(parts) => parts,
             None => {
                 let mut stream = client_stream;
-                let _ = stream
-                    .write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n")
-                    .await;
+                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
                 return Ok(());
             }
         };
@@ -155,18 +153,13 @@ async fn handle_client(
 
 /// Peek at the first line (request line) from a TcpStream without consuming
 /// any bytes, so the stream can later be handed to the TLS acceptor.
-async fn peek_first_line(
-    stream: &TcpStream,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
+async fn peek_first_line(stream: &TcpStream) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let mut buf = vec![0u8; 4096];
     let n = stream.peek(&mut buf).await?;
     if n == 0 {
         return Ok(None);
     }
-    let end = buf[..n]
-        .iter()
-        .position(|&b| b == b'\n')
-        .unwrap_or(n);
+    let end = buf[..n].iter().position(|&b| b == b'\n').unwrap_or(n);
     if end == 0 {
         return Ok(None);
     }
@@ -256,15 +249,7 @@ async fn handle_connect(
     let ts_a = timestamp.clone();
 
     let c_to_u = tokio::spawn(async move {
-        pump_captured(
-            &mut tls_read,
-            &mut up_write,
-            &cap_a,
-            &host_a,
-            "req",
-            &ts_a,
-        )
-        .await
+        pump_captured(&mut tls_read, &mut up_write, &cap_a, &host_a, "req", &ts_a).await
     });
 
     let u_to_c = tokio::spawn(async move {
@@ -334,7 +319,7 @@ fn parse_host_port(target: &str) -> Option<(String, u16)> {
         } else {
             return None;
         };
-        return Some((format!("[{}]", host), port));
+        return Some((host.to_string(), port));
     }
     // Standard host:port or bare host
     match target.rsplit_once(':') {
