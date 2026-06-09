@@ -25,10 +25,10 @@ const KIRO_REGION: &str = "us-east-1";
 const KIRO_SERVICE: &str = "bedrock";
 
 fn normalize_kiro_model(model: &str) -> String {
-    if let Some(stripped) = model.strip_suffix("-tinking-agentic") {
+    if let Some(stripped) = model.strip_suffix("-thinking-agentic") {
         return stripped.to_string();
     }
-    if let Some(stripped) = model.strip_suffix("-tinking") {
+    if let Some(stripped) = model.strip_suffix("-thinking") {
         return stripped.to_string();
     }
     if let Some(stripped) = model.strip_suffix("-agentic") {
@@ -430,11 +430,11 @@ mod tests {
     #[test]
     fn test_normalize_kiro_model() {
         assert_eq!(
-            normalize_kiro_model("amazon-nova-pro-v1.0-tinking-agentic"),
+            normalize_kiro_model("amazon-nova-pro-v1.0-thinking-agentic"),
             "amazon-nova-pro-v1.0"
         );
         assert_eq!(
-            normalize_kiro_model("amazon-nova-pro-v1.0-tinking"),
+            normalize_kiro_model("amazon-nova-pro-v1.0-thinking"),
             "amazon-nova-pro-v1.0"
         );
         assert_eq!(

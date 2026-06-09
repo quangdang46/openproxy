@@ -539,15 +539,15 @@ async fn fetch_codex_models_with_token(
     ))
 }
 
-fn is_codex_token_stale(created_at: Option<&str>) -> bool {
-    let Some(raw) = created_at else {
+fn is_codex_token_stale(timestamp_str: Option<&str>) -> bool {
+    let Some(raw) = timestamp_str else {
         return false;
     };
     let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) else {
         return false;
     };
     let age = Utc::now() - parsed.with_timezone(&Utc);
-    age > ChronoDuration::days(CODEX_STALE_DAYS)
+    age >= ChronoDuration::days(CODEX_STALE_DAYS)
 }
 
 async fn fetch_codex_models(
@@ -555,9 +555,9 @@ async fn fetch_codex_models(
     connection: &ProviderConnection,
     token: &str,
 ) -> Result<ProviderModelsResponse, RouteError> {
-    if is_codex_token_stale(connection.created_at.as_deref()) {
+    if is_codex_token_stale(connection.updated_at.as_deref()) {
         if let Some(refresh_token) = connection.refresh_token.as_deref() {
-            if let Ok(refreshed) = refresh_google_token(refresh_token, CODEX_CLIENT_ID, "").await {
+            if let Ok(refreshed) = refresh_codex_token(refresh_token).await {
                 persist_refreshed_credentials(state, connection, &refreshed).await;
                 return fetch_codex_models_with_token(connection, &refreshed.access_token).await;
             }
@@ -883,6 +883,45 @@ async fn refresh_google_token(
     })
 }
 
+fn codex_token_url() -> String {
+    std::env::var("OPENPROXY_CODEX_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "https://auth.openai.com/oauth/token".to_string())
+}
+
+async fn refresh_codex_token(refresh_token: &str) -> Result<RefreshResult, String> {
+    let client = http_client().map_err(|error| error.message)?;
+    let request = client
+        .post(codex_token_url())
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(ACCEPT, "application/json")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", CODEX_CLIENT_ID),
+        ]);
+
+    let payload = fetch_json(request)
+        .await
+        .map_err(fetch_json_error_message)?;
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| "Codex refresh response did not include access_token".to_string())?;
+
+    Ok(RefreshResult {
+        access_token: access_token.to_string(),
+        refresh_token: payload
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        expires_in: payload.get("expires_in").and_then(Value::as_i64),
+    })
+}
+
 async fn refresh_kiro_token(
     refresh_token: &str,
     provider_specific_data: &BTreeMap<String, Value>,
@@ -1107,6 +1146,7 @@ fn expand_kiro_model_variants(models: Vec<ProviderModel>) -> Vec<ProviderModel> 
         let base_id = model.id.clone();
         let base_name = model.name.clone();
         let base_extra = model.extra.clone();
+        let is_auto = base_id == "auto" || base_id.contains("auto");
 
         expanded.push(model);
 
@@ -1124,9 +1164,11 @@ fn expand_kiro_model_variants(models: Vec<ProviderModel>) -> Vec<ProviderModel> 
             }
         };
 
-        expanded.push(make_variant("-tinking", "thinking"));
-        expanded.push(make_variant("-agentic", "agentic"));
-        expanded.push(make_variant("-tinking-agentic", "thinking-agentic"));
+        expanded.push(make_variant("-thinking", "thinking"));
+        if !is_auto {
+            expanded.push(make_variant("-agentic", "agentic"));
+            expanded.push(make_variant("-thinking-agentic", "thinking-agentic"));
+        }
     }
     expanded
 }
@@ -1429,9 +1471,9 @@ mod tests {
             ids,
             vec![
                 "amazon-nova-pro-v1.0",
-                "amazon-nova-pro-v1.0-tinking",
+                "amazon-nova-pro-v1.0-thinking",
                 "amazon-nova-pro-v1.0-agentic",
-                "amazon-nova-pro-v1.0-tinking-agentic",
+                "amazon-nova-pro-v1.0-thinking-agentic",
             ]
         );
 
@@ -1452,6 +1494,29 @@ mod tests {
                 Some(&Value::String("1.0".to_string()))
             );
         }
+    }
+
+    #[test]
+    fn test_expand_kiro_model_variants_skips_agentic_for_auto() {
+        // Bare "auto" id: only base + -thinking (no -agentic or -thinking-agentic).
+        let auto_model = ProviderModel {
+            id: "auto".to_string(),
+            name: "Auto".to_string(),
+            extra: BTreeMap::new(),
+        };
+        let expanded = expand_kiro_model_variants(vec![auto_model]);
+        let ids: Vec<&str> = expanded.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["auto", "auto-thinking"]);
+
+        // "default-auto" (id containing "auto") gets the same treatment.
+        let default_auto = ProviderModel {
+            id: "default-auto".to_string(),
+            name: "Default Auto".to_string(),
+            extra: BTreeMap::new(),
+        };
+        let expanded = expand_kiro_model_variants(vec![default_auto]);
+        let ids: Vec<&str> = expanded.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["default-auto", "default-auto-thinking"]);
     }
 
     #[test]
