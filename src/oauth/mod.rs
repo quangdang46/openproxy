@@ -547,25 +547,7 @@ pub mod device_code {
     }
 }
 
-pub mod token_refresh {
-    use super::*;
-
-    pub fn needs_refresh(expires_at: &Option<String>) -> bool {
-        let Some(expires_at) = expires_at else {
-            return true;
-        };
-
-        match chrono::DateTime::parse_from_rfc3339(expires_at) {
-            Ok(expires_at) => {
-                let expires_at = expires_at.with_timezone(&chrono::Utc);
-                let now = chrono::Utc::now();
-                let buffer = chrono::Duration::milliseconds(TOKEN_EXPIRY_BUFFER_MS as i64);
-                expires_at - buffer < now
-            }
-            Err(_) => true,
-        }
-    }
-}
+pub mod token_refresh;
 
 pub fn needs_refresh(expires_at: &Option<String>) -> bool {
     token_refresh::needs_refresh(expires_at)
