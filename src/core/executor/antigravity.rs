@@ -24,9 +24,10 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYP
 use serde_json::{json, Map, Value};
 
 use crate::core::config::app_constants::{
-    ag_chat_user_agent, AG_DEFAULT_TOOLS, INTERNAL_REQUEST_HEADER_NAME,
-    INTERNAL_REQUEST_HEADER_VALUE,
+    ag_chat_user_agent, cloud_code_api, load_code_assist_metadata, AG_DEFAULT_TOOLS,
+    INTERNAL_REQUEST_HEADER_NAME, INTERNAL_REQUEST_HEADER_VALUE,
 };
+use crate::core::utils::project_id_cache;
 use crate::core::proxy::ProxyTarget;
 use crate::core::utils::session_manager::derive_session_id;
 use crate::types::{ProviderConnection, ProviderNode};
@@ -164,6 +165,147 @@ impl AntigravityExecutor {
         }
 
         Ok(headers)
+    }
+
+    /// Build the Client-Metadata + api-client headers that Antigravity's
+    /// Cloud Code endpoint expects. These are sent alongside the standard
+    /// auth headers produced by [`build_headers`].
+    ///
+    /// - `User-Agent: google-api-nodejs-client/9.15.1`
+    /// - `X-Goog-Api-Client: google-cloud-sdk vscode_cloudshelleditor/0.1`
+    /// - `Client-Metadata: {"ideType":9,"platform":<enum>,"pluginType":2}`
+    pub fn build_antigravity_headers() -> Result<HeaderMap, AntigravityExecutorError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "User-Agent",
+            HeaderValue::from_static("google-api-nodejs-client/9.15.1"),
+        );
+        headers.insert(
+            "X-Goog-Api-Client",
+            HeaderValue::from_static("google-cloud-sdk vscode_cloudshelleditor/0.1"),
+        );
+        let metadata = json!({
+            "ideType": 9,
+            "platform": crate::core::config::app_constants::current_platform() as u8,
+            "pluginType": 2,
+        });
+        headers.insert(
+            "Client-Metadata",
+            HeaderValue::from_str(&serde_json::to_string(&metadata)?)?,
+        );
+        Ok(headers)
+    }
+
+    /// Resolve the project ID for the given Antigravity connection.
+    ///
+    /// 1. Check the [`ProjectIdCache`] first (5-minute TTL).
+    /// 2. On cache miss: POST `loadCodeAssist`, extract the project id
+    ///    from the response, cache it, and return.
+    /// 3. Returns an empty string if the lookup fails (caller should
+    ///    proceed without a project id in that case).
+    pub async fn get_project_id(
+        connection_id: &str,
+        access_token: &str,
+    ) -> String {
+        // Check cache.
+        if let Some(pid) = project_id_cache::get_cached_project_id(connection_id) {
+            return pid;
+        }
+
+        // Cache miss: call loadCodeAssist.
+        let client = reqwest::Client::new();
+        let metadata = load_code_assist_metadata();
+        let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+
+        let response = client
+            .post(cloud_code_api::LOAD_CODE_ASSIST)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "google-api-nodejs-client/9.15.1")
+            .header(
+                "X-Goog-Api-Client",
+                "google-cloud-sdk vscode_cloudshelleditor/0.1",
+            )
+            .header("Client-Metadata", &metadata_json)
+            .json(&json!({ "metadata": metadata }))
+            .send()
+            .await;
+
+        match response {
+            Ok(resp) if resp.status().is_success() => {
+                if let Ok(payload) = resp.json::<Value>().await {
+                    if let Some(pid) =
+                        crate::core::utils::project_id_cache::extract_google_project_id(&payload)
+                    {
+                        project_id_cache::set_cached_project_id(connection_id, pid.clone());
+                        return pid;
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        String::new()
+    }
+
+    /// POST `onboardUser` and poll (5 s interval, up to 10 attempts) until
+    /// the server responds with `{"done": true}`.
+    ///
+    /// This is a best-effort fire-and-forget call: network errors silently
+    /// return `Ok(())` so the caller is never blocked by an unreachable
+    /// onboard endpoint.
+    pub async fn on_user_onboard(
+        access_token: &str,
+        project_id: &str,
+    ) -> Result<(), AntigravityExecutorError> {
+        let client = reqwest::Client::new();
+        let metadata = load_code_assist_metadata();
+        let metadata_json = serde_json::to_string(&metadata).unwrap_or_default();
+        let onboard_url = cloud_code_api::ONBOARD_USER;
+
+        for attempt in 0..10 {
+            let response = client
+                .post(onboard_url)
+                .header("Authorization", format!("Bearer {access_token}"))
+                .header("Content-Type", "application/json")
+                .header("User-Agent", "google-api-nodejs-client/9.15.1")
+                .header(
+                    "X-Goog-Api-Client",
+                    "google-cloud-sdk vscode_cloudshelleditor/0.1",
+                )
+                .header("Client-Metadata", &metadata_json)
+                .json(&json!({
+                    "tierId": "legacy-tier",
+                    "projectId": project_id,
+                    "metadata": metadata,
+                }))
+                .send()
+                .await;
+
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let result = resp.json::<Value>().await.unwrap_or(Value::Null);
+                    if result.get("done").and_then(Value::as_bool) == Some(true) {
+                        tracing::info!(
+                            "antigravity onboardUser succeeded after {} poll(s)",
+                            attempt + 1
+                        );
+                        return Ok(());
+                    }
+                }
+                Err(_) => {
+                    // Network error during onboard is non-fatal — the API
+                    // will onboard on first request anyway.
+                    return Ok(());
+                }
+                _ => {}
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+
+        tracing::warn!("antigravity onboardUser did not complete after 10 polls");
+        Ok(())
     }
 
     /// Sanitize a tool function name so it matches Gemini's allowed
@@ -534,9 +676,40 @@ impl AntigravityExecutor {
             request.body = json!({"request": inner});
         }
 
+        // Resolve the project ID (cached or via loadCodeAssist) and inject
+        // it into the request body so the upstream sees a valid GCP project.
+        let connection_id = request
+            .credentials
+            .email
+            .as_deref()
+            .or_else(|| request.credentials.id.as_str().into())
+            .unwrap_or("");
+        let project_id = Self::get_project_id(connection_id, &access_token).await;
+        if !project_id.is_empty() {
+            if let Some(req) = request.body.get_mut("request").and_then(|v| v.as_object_mut()) {
+                req.insert("projectId".into(), Value::String(project_id.clone()));
+            }
+        }
+
+        // Spawn best-effort onboardUser notification in the background so
+        // it does not block the critical path.
+        if !project_id.is_empty() {
+            let at = access_token.clone();
+            let pid = project_id.clone();
+            tokio::spawn(async move {
+                let _ = Self::on_user_onboard(&at, &pid).await;
+            });
+        }
+
         let session_id = Self::transform_request(&mut request.body, &request.credentials)?;
         let url = Self::build_url(request.stream);
-        let headers = Self::build_headers(&access_token, request.stream, Some(&session_id))?;
+        let mut headers = Self::build_headers(&access_token, request.stream, Some(&session_id))?;
+
+        // Add Antigravity-specific headers (Client-Metadata, etc.).
+        let ag_headers = Self::build_antigravity_headers()?;
+        for (key, value) in ag_headers.iter() {
+            headers.insert(key, value.clone());
+        }
 
         let client = self.pool.get("antigravity", request.proxy.as_ref())?;
         let response = client
@@ -776,7 +949,43 @@ mod tests {
             "contents should be preserved after wrapping"
         );
     }
-}
 
-// `ProviderConnection` derives `Default` upstream — we just rely on that
-// inside the unit tests above.
+    #[test]
+    fn build_antigravity_headers_sets_expected_statics() {
+        let headers = AntigravityExecutor::build_antigravity_headers().unwrap();
+        assert_eq!(
+            headers.get("User-Agent").and_then(|v| v.to_str().ok()),
+            Some("google-api-nodejs-client/9.15.1")
+        );
+        assert_eq!(
+            headers.get("X-Goog-Api-Client").and_then(|v| v.to_str().ok()),
+            Some("google-cloud-sdk vscode_cloudshelleditor/0.1")
+        );
+        // Client-Metadata should be valid JSON.
+        let cm = headers
+            .get("Client-Metadata")
+            .and_then(|v| v.to_str().ok())
+            .expect("Client-Metadata header present");
+        let parsed: serde_json::Value =
+            serde_json::from_str(cm).expect("Client-Metadata is valid JSON");
+        assert_eq!(parsed["ideType"], 9);
+        assert!(parsed["platform"].is_number());
+        assert_eq!(parsed["pluginType"], 2);
+    }
+
+    #[test]
+    fn build_antigravity_headers_platform_detection() {
+        let headers = AntigravityExecutor::build_antigravity_headers().unwrap();
+        let cm = headers
+            .get("Client-Metadata")
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(cm).unwrap();
+        let platform = parsed["platform"].as_u64().unwrap();
+        // Platform should be a valid AgPlatform value (1-5 or 0 for unknown).
+        assert!(
+            platform <= 5,
+            "platform value {platform} is in expected range"
+        );
+    }
+}
