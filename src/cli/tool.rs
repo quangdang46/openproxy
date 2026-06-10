@@ -109,7 +109,7 @@ pub async fn run(cmd: ToolCmd, cfg: &ResolvedConfig, ctx: OutputCtx) -> anyhow::
 /// Supported per-tool integration names. The server endpoint is
 /// `/api/cli-tools/<name>-settings`.
 const SUPPORTED_TOOLS: &[&str] = &[
-    "claude", "codex", "copilot", "openclaw", "hermes", "cowork", "opencode", "droid",
+    "claude", "codex", "continue", "copilot", "openclaw", "hermes", "cowork", "opencode", "droid",
 ];
 
 fn settings_path(name: &str) -> Option<String> {
@@ -456,6 +456,10 @@ mod tests {
         assert_eq!(
             settings_path("hermes"),
             Some("/api/cli-tools/hermes-settings".to_string())
+        );
+        assert_eq!(
+            settings_path("continue"),
+            Some("/api/cli-tools/continue-settings".to_string())
         );
         assert!(settings_path("bogus").is_none());
     }
