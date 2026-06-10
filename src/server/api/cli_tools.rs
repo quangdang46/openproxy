@@ -22,9 +22,331 @@ use serde_json::{json, Value};
 use tokio::{fs, process::Command};
 use toml::{map::Map as TomlMap, Value as TomlValue};
 
+use once_cell::sync::Lazy;
+
 use crate::server::state::AppState;
 
 const MAX_OUTPUT_SIZE: usize = 64 * 1024; // 64KB max output
+
+/// Configuration type for a CLI tool
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ConfigType {
+    /// Environment variable based configuration (e.g., Claude Code)
+    Env,
+    /// Custom settings file configuration (e.g., Codex, Droid)
+    Custom,
+    /// Guide-based configuration (e.g., Cursor, Cline, Continue, Roo)
+    Guide,
+}
+
+/// A step in a guide-based CLI tool configuration
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuideStep {
+    pub step: usize,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub desc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub copyable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r#type: Option<String>,
+}
+
+/// Default model entry for a CLI tool
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DefaultModelInfo {
+    pub alias: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<String>,
+}
+
+/// A note attached to a CLI tool
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolNote {
+    pub r#type: String,
+    pub text: String,
+}
+
+/// Metadata for a CLI tool in the registry
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliToolMeta {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub config_type: ConfigType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env_vars: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub settings_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guide_steps: Option<Vec<GuideStep>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_aliases: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_models: Option<Vec<DefaultModelInfo>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<ToolNote>>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub requires_external_url: Option<bool>,
+}
+
+/// Static registry of all known CLI tools. Ordered by priority / popularity.
+pub static CLI_TOOLS: Lazy<Vec<CliToolMeta>> = Lazy::new(|| {
+    vec![
+        // ── Claude Code ──────────────────────────────────────────────────
+        CliToolMeta {
+            id: "claude".into(),
+            name: "Claude Code".into(),
+            description: "Anthropic Claude Code CLI (env-based)".into(),
+            config_type: ConfigType::Env,
+            env_vars: Some(vec![
+                "ANTHROPIC_BASE_URL".into(),
+                "ANTHROPIC_API_KEY".into(),
+                "ANTHROPIC_AUTH_TOKEN".into(),
+                "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
+                "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
+            ]),
+            settings_file: Some("~/.claude/settings.json".into()),
+            guide_steps: None,
+            model_aliases: Some(vec![
+                "default".into(),
+                "sonnet".into(),
+                "opus".into(),
+                "haiku".into(),
+                "opusplan".into(),
+            ]),
+            default_models: Some(vec![
+                DefaultModelInfo {
+                    alias: "opus".into(),
+                    name: "Claude Opus".into(),
+                    env_key: Some("ANTHROPIC_DEFAULT_OPUS_MODEL".into()),
+                    default_value: Some("cc/claude-opus-4-6".into()),
+                },
+                DefaultModelInfo {
+                    alias: "sonnet".into(),
+                    name: "Claude Sonnet".into(),
+                    env_key: Some("ANTHROPIC_DEFAULT_SONNET_MODEL".into()),
+                    default_value: Some("cc/claude-sonnet-4-6".into()),
+                },
+                DefaultModelInfo {
+                    alias: "haiku".into(),
+                    name: "Claude Haiku".into(),
+                    env_key: Some("ANTHROPIC_DEFAULT_HAIKU_MODEL".into()),
+                    default_value: Some("cc/claude-haiku-4-5-20251001".into()),
+                },
+            ]),
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── OpenAI Codex CLI ─────────────────────────────────────────────
+        CliToolMeta {
+            id: "codex".into(),
+            name: "OpenAI Codex CLI".into(),
+            description: "OpenAI Codex CLI (custom config)".into(),
+            config_type: ConfigType::Custom,
+            env_vars: Some(vec![
+                "OPENAI_API_KEY".into(),
+                "OPENAI_BASE_URL".into(),
+            ]),
+            settings_file: Some("~/.codex/config.toml".into()),
+            guide_steps: None,
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── Cursor ───────────────────────────────────────────────────────
+        CliToolMeta {
+            id: "cursor".into(),
+            name: "Cursor".into(),
+            description: "Cursor AI Code Editor (guide-based, requires external URL)".into(),
+            config_type: ConfigType::Guide,
+            env_vars: None,
+            settings_file: None,
+            guide_steps: Some(vec![
+                GuideStep { step: 1, title: "Open Settings".into(), desc: Some("Go to Settings → Models".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 2, title: "Enable OpenAI API".into(), desc: Some("Enable \"OpenAI API key\" option".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 3, title: "Base URL".into(), desc: None, value: Some("{{baseUrl}}".into()), copyable: Some(true), r#type: None },
+                GuideStep { step: 4, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
+                GuideStep { step: 5, title: "Add Custom Model".into(), desc: Some("Click \"View All Model\" → \"Add Custom Model\"".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 6, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
+            ]),
+            model_aliases: None,
+            default_models: None,
+            notes: Some(vec![
+                ToolNote { r#type: "warning".into(), text: "Requires Cursor Pro account to use this feature.".into() },
+                ToolNote { r#type: "cloudCheck".into(), text: "Cursor routes requests through its own server, so local endpoint is not supported. Please enable Tunnel or Cloud Endpoint in Settings.".into() },
+            ]),
+            requires_external_url: Some(true),
+        },
+
+        // ── Cline ────────────────────────────────────────────────────────
+        CliToolMeta {
+            id: "cline".into(),
+            name: "Cline".into(),
+            description: "Cline AI Coding Assistant (VS Code extension)".into(),
+            config_type: ConfigType::Custom,
+            env_vars: None,
+            settings_file: None,
+            guide_steps: Some(vec![
+                GuideStep { step: 1, title: "Open Settings".into(), desc: Some("Go to Cline Settings panel".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 2, title: "Select Provider".into(), desc: Some("Choose API Provider → OpenAI Compatible".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 3, title: "Base URL".into(), desc: None, value: Some("{{baseUrl}}/v1".into()), copyable: Some(true), r#type: None },
+                GuideStep { step: 4, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
+                GuideStep { step: 5, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
+            ]),
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── Continue ─────────────────────────────────────────────────────
+        CliToolMeta {
+            id: "continue".into(),
+            name: "Continue".into(),
+            description: "Continue AI Assistant (VS Code / JetBrains)".into(),
+            config_type: ConfigType::Guide,
+            env_vars: None,
+            settings_file: Some("~/.continue/config.json".into()),
+            guide_steps: Some(vec![
+                GuideStep { step: 1, title: "Open Config".into(), desc: Some("Open Continue configuration file".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 2, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
+                GuideStep { step: 3, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
+                GuideStep { step: 4, title: "Add Model Config".into(), desc: Some("Add the following configuration to your models array:".into()), value: None, copyable: None, r#type: None },
+            ]),
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── Roo ──────────────────────────────────────────────────────────
+        CliToolMeta {
+            id: "roo".into(),
+            name: "Roo".into(),
+            description: "Roo AI Assistant (VS Code extension)".into(),
+            config_type: ConfigType::Guide,
+            env_vars: None,
+            settings_file: None,
+            guide_steps: Some(vec![
+                GuideStep { step: 1, title: "Open Settings".into(), desc: Some("Go to Roo Settings panel".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 2, title: "Select Provider".into(), desc: Some("Choose API Provider → Ollama".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 3, title: "Base URL".into(), desc: None, value: Some("{{baseUrl}}".into()), copyable: Some(true), r#type: None },
+                GuideStep { step: 4, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
+                GuideStep { step: 5, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
+            ]),
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── Kilo Code ────────────────────────────────────────────────────
+        CliToolMeta {
+            id: "kilo".into(),
+            name: "Kilo Code".into(),
+            description: "Kilo Code AI Assistant (VS Code extension)".into(),
+            config_type: ConfigType::Custom,
+            env_vars: None,
+            settings_file: None,
+            guide_steps: Some(vec![
+                GuideStep { step: 1, title: "Open Settings".into(), desc: Some("Go to Kilo Code Settings panel".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 2, title: "Select Provider".into(), desc: Some("Choose API Provider → OpenAI Compatible".into()), value: None, copyable: None, r#type: None },
+                GuideStep { step: 3, title: "Base URL".into(), desc: None, value: Some("{{baseUrl}}/v1".into()), copyable: Some(true), r#type: None },
+                GuideStep { step: 4, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
+                GuideStep { step: 5, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
+            ]),
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── Hermes Agent ─────────────────────────────────────────────────
+        CliToolMeta {
+            id: "hermes".into(),
+            name: "Hermes Agent".into(),
+            description: "Nous Research self-improving AI agent".into(),
+            config_type: ConfigType::Custom,
+            env_vars: None,
+            settings_file: Some("~/.hermes/settings.json".into()),
+            guide_steps: None,
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── Factory Droid ────────────────────────────────────────────────
+        CliToolMeta {
+            id: "droid".into(),
+            name: "Factory Droid".into(),
+            description: "Factory Droid AI Assistant".into(),
+            config_type: ConfigType::Custom,
+            env_vars: None,
+            settings_file: Some("~/.factory/settings.json".into()),
+            guide_steps: None,
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── Open Claw ────────────────────────────────────────────────────
+        CliToolMeta {
+            id: "openclaw".into(),
+            name: "Open Claw".into(),
+            description: "Open Claw AI Assistant (one-click apply)".into(),
+            config_type: ConfigType::Custom,
+            env_vars: None,
+            settings_file: None,
+            guide_steps: None,
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+
+        // ── Claude Cowork ────────────────────────────────────────────────
+        CliToolMeta {
+            id: "cowork".into(),
+            name: "Claude Cowork".into(),
+            description: "Claude Desktop Cowork (third-party inference)".into(),
+            config_type: ConfigType::Custom,
+            env_vars: None,
+            settings_file: Some("~/Library/Application Support/Claude/Cowork.json".into()),
+            guide_steps: None,
+            model_aliases: None,
+            default_models: None,
+            notes: None,
+            requires_external_url: None,
+        },
+    ]
+});
+
+/// Return a reference to the full CLI tools registry
+pub fn list_all_cli_tools() -> &'static Vec<CliToolMeta> {
+    &CLI_TOOLS
+}
+
+/// Look up a single CLI tool by its id
+pub fn find_cli_tool(id: &str) -> Option<&'static CliToolMeta> {
+    CLI_TOOLS.iter().find(|t| t.id == id)
+}
 
 /// CLI command execution request
 #[derive(Debug, Deserialize)]
@@ -73,33 +395,18 @@ pub async fn list_tools(State(state): State<AppState>, headers: HeaderMap) -> Re
         return response;
     }
 
-    let tools = vec![
-        CliToolInfo {
-            name: "provider-list".to_string(),
-            description: "List all provider connections and nodes".to_string(),
-            category: "provider".to_string(),
-        },
-        CliToolInfo {
-            name: "key-list".to_string(),
-            description: "List all API keys".to_string(),
-            category: "key".to_string(),
-        },
-        CliToolInfo {
-            name: "pool-list".to_string(),
-            description: "List all proxy pools".to_string(),
-            category: "pool".to_string(),
-        },
-        CliToolInfo {
-            name: "pool-status".to_string(),
-            description: "Get status of a specific proxy pool".to_string(),
-            category: "pool".to_string(),
-        },
-        CliToolInfo {
-            name: "route".to_string(),
-            description: "Execute a model routing request directly".to_string(),
-            category: "route".to_string(),
-        },
-    ];
+    let tools: Vec<CliToolInfo> = CLI_TOOLS
+        .iter()
+        .map(|meta| CliToolInfo {
+            name: meta.id.clone(),
+            description: meta.description.clone(),
+            category: match meta.config_type {
+                ConfigType::Env => "env".to_string(),
+                ConfigType::Custom => "custom".to_string(),
+                ConfigType::Guide => "guide".to_string(),
+            },
+        })
+        .collect();
 
     Json(CliToolsListResponse { tools }).into_response()
 }
@@ -296,6 +603,17 @@ pub async fn get_help(State(state): State<AppState>, headers: HeaderMap) -> Resp
         return response;
     }
 
+    let tools: Vec<Value> = CLI_TOOLS
+        .iter()
+        .map(|meta| {
+            json!({
+                "name": meta.id,
+                "description": meta.description,
+                "configType": meta.config_type,
+            })
+        })
+        .collect();
+
     Json(json!({
         "help": "CLI Tools API",
         "endpoints": {
@@ -304,12 +622,7 @@ pub async fn get_help(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "POST /api/cli-tools/run/{tool_name}": "Run a specific tool",
             "GET /api/cli-tools/help": "Show this help"
         },
-        "tools": [
-            {"name": "provider-list", "description": "List provider connections"},
-            {"name": "key-list", "description": "List API keys"},
-            {"name": "pool-list", "description": "List proxy pools"},
-            {"name": "pool-status", "description": "Get pool status (args: [pool_name])"}
-        ]
+        "tools": tools,
     }))
     .into_response()
 }
