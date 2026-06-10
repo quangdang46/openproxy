@@ -14,6 +14,7 @@ mod kiro;
 mod ollama;
 mod opencode;
 mod opencode_go;
+mod project_id_cache;
 mod provider;
 mod qoder;
 mod qwen;

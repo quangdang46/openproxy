@@ -10,7 +10,7 @@ use std::time::Duration;
 
 // ─── Gemini CLI ────────────────────────────────────────────────────────────
 
-pub const GEMINI_CLI_VERSION: &str = "0.31.0";
+pub const GEMINI_CLI_VERSION: &str = "0.34.0";
 pub const GEMINI_CLI_API_CLIENT: &str = "google-genai-sdk/1.41.0 gl-node/v22.19.0";
 
 /// Build the User-Agent string Gemini CLI advertises for `model`.
@@ -18,12 +18,24 @@ pub fn gemini_cli_user_agent(model: &str) -> String {
     let model = if model.is_empty() { "unknown" } else { model };
     let os = std::env::consts::OS;
     format!(
-        "GeminiCLI/{}/{} ({}; {})",
+        "gemini-cli/{}/{} ({}; {}; terminal)",
         GEMINI_CLI_VERSION,
         model,
         os,
         std::env::consts::ARCH
     )
+}
+
+/// Build the Client-Metadata JSON value for Gemini CLI Bearer requests.
+/// - ideType: 9 (same as Antigravity/Cloud Code)
+/// - platform: detected from current host
+/// - pluginType: 2 (Gemini)
+pub fn gemini_cli_client_metadata() -> serde_json::Value {
+    json!({
+        "ideType": IdeType::Antigravity as u8,
+        "platform": current_platform() as u8,
+        "pluginType": AgPluginType::Gemini as u8,
+    })
 }
 
 // ─── GitHub Copilot ────────────────────────────────────────────────────────
@@ -315,7 +327,8 @@ mod tests {
     #[test]
     fn user_agent_contains_version_and_model() {
         let ua = gemini_cli_user_agent("gemini-3-pro");
-        assert!(ua.contains("GeminiCLI/0.31.0"));
+        assert!(ua.contains("gemini-cli/0.34.0"));
         assert!(ua.contains("gemini-3-pro"));
+        assert!(ua.contains("terminal"));
     }
 }
