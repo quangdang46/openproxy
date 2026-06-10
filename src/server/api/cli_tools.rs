@@ -2,6 +2,7 @@ mod claude_settings;
 mod cline_settings;
 mod codex_settings;
 mod cowork_settings;
+mod cursor_settings;
 mod hermes_settings;
 mod kilo_settings;
 
@@ -2429,6 +2430,7 @@ pub fn routes() -> Router<AppState> {
         .merge(claude_settings::routes())
         .merge(cline_settings::routes())
         .merge(cowork_settings::routes())
+        .merge(cursor_settings::routes())
         .merge(hermes_settings::routes())
         .merge(kilo_settings::routes())
         .merge(codex_settings::routes())
