@@ -4,6 +4,7 @@ mod codex_settings;
 mod cowork_settings;
 mod cursor_settings;
 mod hermes_settings;
+mod droid_settings;
 mod kilo_settings;
 
 use std::collections::BTreeMap;
@@ -726,107 +727,6 @@ async fn delete_copilot_settings(State(state): State<AppState>, headers: HeaderM
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Droid Settings Endpoints
-// GET/POST/DELETE /api/cli-tools/droid-settings
-// ═══════════════════════════════════════════════════════════════════════════
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DroidSettingsRequest {
-    pub base_url: String,
-    pub api_key: Option<String>,
-    pub model: Option<String>,
-    pub models: Option<Vec<String>>,
-    pub active_model: Option<String>,
-}
-
-async fn get_droid_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
-        return response;
-    }
-
-    let installed = check_droid_installed().await;
-    if !installed {
-        return Json(json!({
-            "installed": false,
-            "settings": Value::Null,
-            "message": "Factory Droid CLI is not installed",
-        }))
-        .into_response();
-    }
-
-    match read_droid_settings().await {
-        Ok(settings) => {
-            let has_openproxy = settings.as_ref().is_some_and(has_openproxy_droid_settings);
-            Json(json!({
-                "installed": true,
-                "settings": settings,
-                "hasOpenProxy": has_openproxy,
-                "settingsPath": droid_settings_path().to_string_lossy().to_string(),
-            }))
-            .into_response()
-        }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Failed to check droid settings: {error}") })),
-        )
-            .into_response(),
-    }
-}
-
-async fn save_droid_settings(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<DroidSettingsRequest>,
-) -> Response {
-    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
-        return response;
-    }
-
-    let models = req.models.clone().unwrap_or_else(|| {
-        req.model
-            .clone()
-            .map(|model| vec![model])
-            .unwrap_or_default()
-    });
-    if req.base_url.trim().is_empty() || models.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "baseUrl and at least one model are required" })),
-        )
-            .into_response();
-    }
-
-    match write_droid_settings(&req, &models).await {
-        Ok(settings_path) => Json(json!({
-            "success": true,
-            "message": "Factory Droid settings applied successfully!",
-            "settingsPath": settings_path,
-        }))
-        .into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Failed to update droid settings: {error}") })),
-        )
-            .into_response(),
-    }
-}
-
-async fn delete_droid_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
-        return response;
-    }
-
-    match reset_droid_settings().await {
-        Ok(payload) => Json(payload).into_response(),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Failed to reset droid settings: {error}") })),
-        )
-            .into_response(),
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // OpenCode Settings Endpoints
@@ -1126,14 +1026,6 @@ async fn read_copilot_config() -> anyhow::Result<Option<Value>> {
     read_json_optional(&copilot_config_path()).await
 }
 
-async fn check_droid_installed() -> bool {
-    command_exists("droid", true).await || fs::metadata(droid_settings_path()).await.is_ok()
-}
-
-async fn read_droid_settings() -> anyhow::Result<Option<Value>> {
-    read_json_optional(&droid_settings_path()).await
-}
-
 async fn check_opencode_installed() -> bool {
     command_exists("opencode", true).await || fs::metadata(opencode_config_path()).await.is_ok()
 }
@@ -1232,136 +1124,6 @@ async fn reset_copilot_settings() -> anyhow::Result<Value> {
     Ok(json!({
         "success": true,
         "message": "OpenProxy removed from Copilot config",
-    }))
-}
-
-async fn write_droid_settings(
-    req: &DroidSettingsRequest,
-    models: &[String],
-) -> anyhow::Result<String> {
-    let settings_path = droid_settings_path();
-    if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent).await?;
-    }
-
-    let mut settings = match fs::read_to_string(&settings_path).await {
-        Ok(existing) => parse_json_object_or_default(&existing),
-        Err(_) => serde_json::Map::new(),
-    };
-
-    let custom_models_value = settings.remove("customModels");
-    let mut custom_models = match custom_models_value {
-        Some(Value::Array(entries)) => entries,
-        Some(Value::Null) | None => Vec::new(),
-        Some(_) => {
-            return Err(anyhow::anyhow!("customModels must be an array"));
-        }
-    };
-    custom_models.retain(|entry| {
-        !entry
-            .get("id")
-            .and_then(Value::as_str)
-            .is_some_and(|id| id.starts_with("custom:OpenProxy"))
-    });
-
-    let normalized_base_url = normalize_v1_base_url(&req.base_url);
-    let api_key = req
-        .api_key
-        .clone()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "your_api_key".to_string());
-
-    let default_index = match req.active_model.as_deref() {
-        Some("") => None,
-        Some(active_model) => Some(
-            models
-                .iter()
-                .position(|model| model == active_model)
-                .unwrap_or(0),
-        ),
-        None => Some(0),
-    };
-
-    for (index, model) in models.iter().enumerate() {
-        if model.is_empty() {
-            continue;
-        }
-        custom_models.push(json!({
-            "model": model,
-            "id": format!("custom:OpenProxy-{index}"),
-            "index": index,
-            "baseUrl": normalized_base_url,
-            "apiKey": api_key,
-            "displayName": model,
-            "maxOutputTokens": 131072,
-            "noImageSupport": false,
-            "provider": "openai",
-        }));
-    }
-
-    // Intentionally matches openproxy's whole-array reordering behavior, including
-    // pre-existing non-OpenProxy entries that may shift indexes.
-    if let Some(default_index) = default_index {
-        if default_index < custom_models.len() {
-            let default_entry = custom_models.remove(default_index);
-            custom_models.insert(0, default_entry);
-            for (index, entry) in custom_models.iter_mut().enumerate() {
-                if let Some(object) = entry.as_object_mut() {
-                    object.insert("index".to_string(), Value::from(index));
-                }
-            }
-        }
-    }
-
-    settings.insert("customModels".to_string(), Value::Array(custom_models));
-    fs::write(
-        &settings_path,
-        serde_json::to_vec_pretty(&Value::Object(settings))?,
-    )
-    .await?;
-    Ok(settings_path.to_string_lossy().to_string())
-}
-
-async fn reset_droid_settings() -> anyhow::Result<Value> {
-    let settings_path = droid_settings_path();
-    let mut settings = match fs::read_to_string(&settings_path).await {
-        Ok(existing) => parse_json_object_or_default(&existing),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(json!({
-                "success": true,
-                "message": "No settings file to reset",
-            }));
-        }
-        Err(error) => return Err(error.into()),
-    };
-
-    if let Some(custom_models_value) = settings.remove("customModels") {
-        let mut custom_models = match custom_models_value {
-            Value::Array(entries) => entries,
-            Value::Null => Vec::new(),
-            _ => {
-                return Err(anyhow::anyhow!("customModels must be an array"));
-            }
-        };
-        custom_models.retain(|entry| {
-            !entry
-                .get("id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id.starts_with("custom:OpenProxy"))
-        });
-        if !custom_models.is_empty() {
-            settings.insert("customModels".to_string(), Value::Array(custom_models));
-        }
-    }
-
-    fs::write(
-        &settings_path,
-        serde_json::to_vec_pretty(&Value::Object(settings))?,
-    )
-    .await?;
-    Ok(json!({
-        "success": true,
-        "message": "OpenProxy settings removed successfully",
     }))
 }
 
@@ -1958,20 +1720,6 @@ fn has_openproxy_copilot_config(config: &Value) -> bool {
     get_openproxy_copilot_entry(config).is_some()
 }
 
-fn has_openproxy_droid_settings(settings: &Value) -> bool {
-    settings
-        .get("customModels")
-        .and_then(Value::as_array)
-        .is_some_and(|entries| {
-            entries.iter().any(|entry| {
-                entry
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id.starts_with("custom:OpenProxy"))
-            })
-        })
-}
-
 fn has_openproxy_openclaw_settings(settings: &Value) -> bool {
     settings
         .get("models")
@@ -2038,10 +1786,6 @@ fn copilot_config_path() -> PathBuf {
             .join("User")
             .join("chatLanguageModels.json")
     }
-}
-
-fn droid_settings_path() -> PathBuf {
-    home_dir().join(".factory").join("settings.json")
 }
 
 fn opencode_config_path() -> PathBuf {
@@ -2432,6 +2176,7 @@ pub fn routes() -> Router<AppState> {
         .merge(cowork_settings::routes())
         .merge(cursor_settings::routes())
         .merge(hermes_settings::routes())
+        .merge(droid_settings::routes())
         .merge(kilo_settings::routes())
         .merge(codex_settings::routes())
         .route("/api/cli-tools", get(list_tools))
@@ -2453,12 +2198,6 @@ pub fn routes() -> Router<AppState> {
                 .post(save_opencode_settings)
                 .patch(patch_opencode_settings)
                 .delete(delete_opencode_settings),
-        )
-        .route(
-            "/api/cli-tools/droid-settings",
-            get(get_droid_settings)
-                .post(save_droid_settings)
-                .delete(delete_droid_settings),
         )
         .route(
             "/api/cli-tools/openclaw-settings",
