@@ -25,6 +25,7 @@ pub enum Format {
     Kiro,
     Cursor,
     Ollama,
+    CommandCode,
 }
 
 impl Format {
@@ -43,6 +44,7 @@ impl Format {
             "kiro" => Some(Self::Kiro),
             "cursor" => Some(Self::Cursor),
             "ollama" => Some(Self::Ollama),
+            "commandcode" | "command-code" => Some(Self::CommandCode),
             _ => None,
         }
     }
@@ -61,6 +63,7 @@ impl Format {
             Self::Kiro => "kiro",
             Self::Cursor => "cursor",
             Self::Ollama => "ollama",
+            Self::CommandCode => "commandcode",
         }
     }
 
@@ -99,6 +102,8 @@ pub struct ResponseTransformState {
     pub ollama: OllamaResponseState,
     /// Kiro streaming state
     pub kiro: KiroResponseState,
+    /// CommandCode streaming state
+    pub commandcode: CommandCodeResponseState,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -156,6 +161,18 @@ pub struct KiroResponseState {
     pub current_event_type: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CommandCodeResponseState {
+    pub response_id: Option<String>,
+    pub created: Option<i64>,
+    pub model: Option<String>,
+    pub chunk_index: u64,
+    pub tool_index: u64,
+    pub tool_index_by_id: serde_json::Map<String, Value>,
+    pub finish_reason: Option<String>,
+    pub usage: Option<Value>,
+}
+
 /// Detect source format from request body structure.
 /// Mirrors open-sse/services/provider.js:detectFormat() logic.
 /// Priority: Responses > Antigravity > Gemini > OpenAI-specific fields > Claude hints > default OpenAI.
@@ -178,12 +195,17 @@ pub fn detect_source_format(body: &Value) -> Format {
         return Format::Antigravity;
     }
 
-    // 3. Gemini format: has `contents[]` or `systemInstruction[]`
+    // 3. CommandCode: has `threadId` and `params.messages` instead of top-level `messages`
+    if body.get("threadId").is_some() && body.get("params").and_then(|p| p.get("messages")).is_some() {
+        return Format::CommandCode;
+    }
+
+    // 4. Gemini format: has `contents[]` or `systemInstruction[]`
     if body.get("contents").is_some() || body.get("systemInstruction").is_some() {
         return Format::Gemini;
     }
 
-    // 4. OpenAI-specific indicators (fields that never appear in Claude format)
+    // 5. OpenAI-specific indicators (fields that never appear in Claude format)
     if body.get("stream_options").is_some()
         || body.get("response_format").is_some()
         || body.get("logprobs").is_some()
@@ -197,7 +219,7 @@ pub fn detect_source_format(body: &Value) -> Format {
         return Format::OpenAi;
     }
 
-    // 5. Claude-specific indicators
+    // 6. Claude-specific indicators
     // Check first message for Claude-style content types
     if let Some(messages) = body.get("messages").and_then(Value::as_array) {
         if let Some(first) = messages.first() {
@@ -223,7 +245,7 @@ pub fn detect_source_format(body: &Value) -> Format {
         }
     }
 
-    // 6. Default to OpenAI
+    // 7. Default to OpenAI
     Format::OpenAi
 }
 
@@ -255,6 +277,7 @@ pub fn get_target_format_for_provider(provider: &str) -> Format {
         "kiro" => Format::Kiro,
         "ollama" | "ollama-local" | "ollama-cloud" => Format::Ollama,
         "antigravity" => Format::Antigravity,
+        "commandcode" | "command-code" => Format::CommandCode,
         // All OpenAI-compatible providers default to OpenAI
         _ => Format::OpenAi,
     }
@@ -444,12 +467,14 @@ pub fn global_registry() -> &'static TranslationRegistry {
         chat_to_openai_responses_request, openai_responses_to_chat_request,
     };
     use crate::core::translator::request::openai_to_claude::openai_to_claude_request;
+    use crate::core::translator::request::openai_to_commandcode::openai_to_commandcode_request;
     use crate::core::translator::request::openai_to_cursor::openai_to_cursor_request;
     use crate::core::translator::request::openai_to_gemini::openai_to_gemini_cli_request;
     use crate::core::translator::request::openai_to_gemini::openai_to_gemini_request;
     use crate::core::translator::request::openai_to_kiro::openai_to_kiro_request;
     use crate::core::translator::request::openai_to_ollama::openai_to_ollama_request;
     use crate::core::translator::request::openai_to_vertex::openai_to_vertex_request;
+    use crate::core::translator::response::commandcode_to_openai::commandcode_to_openai_response;
 
     REGISTRY.get_or_init(|| {
         let mut reg = TranslationRegistry::new();
@@ -529,6 +554,16 @@ pub fn global_registry() -> &'static TranslationRegistry {
             Format::OpenAi,
             Format::Codex,
             chat_to_openai_responses_request as RequestTransformFn,
+        );
+        reg.register_request(
+            Format::OpenAi,
+            Format::CommandCode,
+            openai_to_commandcode_request as RequestTransformFn,
+        );
+        reg.register_response(
+            Format::CommandCode,
+            Format::OpenAi,
+            commandcode_to_openai_response as ResponseTransformFn,
         );
 
         reg
