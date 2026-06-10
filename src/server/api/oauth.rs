@@ -1046,8 +1046,7 @@ async fn store_connection(
     let provider_config = get_provider_config(provider);
     let _client_id = provider_config
         .as_ref()
-        .and_then(|c| c.extra_params.get("client_id"))
-        .map(|v| v.as_str())
+        .and_then(|c| c.get_param("client_id"))
         .unwrap_or("openproxy")
         .to_string();
 
@@ -1062,8 +1061,7 @@ async fn store_connection(
         .or_else(|| {
             provider_config
                 .as_ref()
-                .and_then(|c| c.extra_params.get("redirect_uri"))
-                .map(|v| v.as_str())
+                .and_then(|c| c.get_param("redirect_uri"))
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| "http://localhost:4623/oauth/callback".to_string());
@@ -3995,9 +3993,7 @@ pub async fn start_device_code(
         }
     } else {
         let client_id = provider_config
-            .extra_params
-            .get("client_id")
-            .map(|v| v.as_str())
+            .get_param("client_id")
             .unwrap_or("openproxy")
             .to_string();
 
@@ -4143,9 +4139,7 @@ pub async fn poll_device_code(
 
     let user_code = flow.user_code.clone().unwrap_or_default();
     let interval = provider_config
-        .extra_params
-        .get("interval")
-        .map(|v| v.as_str())
+        .get_param("interval")
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(5);
 
@@ -4204,9 +4198,7 @@ pub async fn poll_device_code(
         Err(e) => {
             if e.error == "authorization_pending" || e.error == "slow_down" {
                 let retry_after = provider_config
-                    .extra_params
-                    .get("interval")
-                    .map(|v| v.as_str())
+                    .get_param("interval")
                     .and_then(|s| s.parse::<u64>().ok())
                     .unwrap_or(5);
                 return Json(PollResponse {
@@ -4322,7 +4314,7 @@ pub async fn refresh_token(
     ];
 
     let resp = match client
-        .post(&provider_config.token_url)
+        .post(provider_config.token_url)
         .form(&params)
         .send()
         .await

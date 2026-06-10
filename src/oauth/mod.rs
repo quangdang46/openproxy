@@ -8,13 +8,12 @@
 use base64::Engine;
 use rand::RngCore;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use url::form_urlencoded;
 
 pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 
 pub mod kiro;
 pub mod pending;
+pub mod providers;
 #[cfg(test)]
 pub mod tests;
 #[cfg(test)]
@@ -27,62 +26,12 @@ pub mod antigravity;
 pub mod openai;
 pub mod qoder;
 
+pub use providers::OAuthProviderConfig;
+
 pub enum OAuthFlowKind {
     AuthorizationCodePkce,
     DeviceCode,
     ImportToken,
-}
-
-pub struct OAuthProviderConfig {
-    pub auth_url: String,
-    pub token_url: String,
-    pub scopes: Vec<String>,
-    pub uses_pkce: bool,
-    pub extra_params: BTreeMap<String, String>,
-}
-
-impl OAuthProviderConfig {
-    pub fn build_auth_url(
-        &self,
-        client_id: &str,
-        redirect_uri: &str,
-        state: &str,
-        code_challenge: &str,
-    ) -> String {
-        let mut pairs: Vec<(String, String)> = vec![
-            ("client_id".to_string(), client_id.to_string()),
-            ("redirect_uri".to_string(), redirect_uri.to_string()),
-            ("response_type".to_string(), "code".to_string()),
-            ("state".to_string(), state.to_string()),
-        ];
-
-        if self.uses_pkce {
-            pairs.push(("code_challenge".to_string(), code_challenge.to_string()));
-            pairs.push(("code_challenge_method".to_string(), "S256".to_string()));
-        }
-
-        if !self.scopes.is_empty() {
-            pairs.push(("scope".to_string(), self.scopes.join(" ")));
-        }
-
-        for (key, value) in &self.extra_params {
-            pairs.push((key.clone(), value.clone()));
-        }
-
-        let query_string = pairs
-            .iter()
-            .map(|(k, v)| {
-                format!(
-                    "{}={}",
-                    k,
-                    form_urlencoded::byte_serialize(v.as_bytes()).collect::<String>()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("&");
-
-        format!("{}?{}", self.auth_url, query_string)
-    }
 }
 
 pub mod pkce {
@@ -162,149 +111,7 @@ pub struct RefreshRequest {
     pub scopes: Vec<String>,
 }
 
-pub mod providers {
-    use super::*;
-
-    pub fn claude() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://auth.claude.ai/authorize".to_string(),
-            token_url: "https://auth.claude.ai/token".to_string(),
-            scopes: vec!["read".to_string(), "connect".to_string()],
-            uses_pkce: true,
-            extra_params: [("response_type".to_string(), "code".to_string())].into(),
-        }
-    }
-
-    pub fn codex() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://codex.ai/oauth/authorize".to_string(),
-            token_url: "https://codex.ai/oauth/token".to_string(),
-            scopes: vec![
-                "openid".to_string(),
-                "profile".to_string(),
-                "email".to_string(),
-            ],
-            uses_pkce: true,
-            extra_params: [
-                ("response_type".to_string(), "code".to_string()),
-                ("prompt".to_string(), "select_account".to_string()),
-            ]
-            .into(),
-        }
-    }
-
-    pub fn gitlab() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://gitlab.com/oauth/authorize".to_string(),
-            token_url: "https://gitlab.com/oauth/token".to_string(),
-            scopes: vec!["api".to_string(), "read_user".to_string()],
-            uses_pkce: true,
-            extra_params: [("response_type".to_string(), "code".to_string())].into(),
-        }
-    }
-
-    pub fn xai() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://auth.x.ai/oauth2/authorize".to_string(),
-            token_url: "https://auth.x.ai/oauth2/token".to_string(),
-            scopes: vec![
-                "openid".to_string(),
-                "profile".to_string(),
-                "email".to_string(),
-                "openai:write:grok-cli:access".to_string(),
-            ],
-            uses_pkce: true,
-            extra_params: [("response_type".to_string(), "code".to_string())].into(),
-        }
-    }
-
-    pub fn github() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://github.com/login/device/code".to_string(),
-            token_url: "https://github.com/login/oauth/access_token".to_string(),
-            scopes: vec!["read:user".to_string(), "repo".to_string()],
-            uses_pkce: false,
-            extra_params: [("scope".to_string(), "read:user repo".to_string())].into(),
-        }
-    }
-
-    pub fn kiro() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://kiro.ai/oauth/device/code".to_string(),
-            token_url: "https://kiro.ai/oauth/token".to_string(),
-            scopes: vec!["openid".to_string(), "profile".to_string()],
-            uses_pkce: false,
-            extra_params: [
-                ("scope".to_string(), "openid profile".to_string()),
-                ("oauth_extension".to_string(), "pkce".to_string()),
-            ]
-            .into(),
-        }
-    }
-
-    pub fn kimi_coding() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://api.moonshot.cn/kimi-device/oauth/device/code".to_string(),
-            token_url: "https://api.moonshot.cn/kimi-device/oauth/token".to_string(),
-            scopes: vec!["kimi:read".to_string()],
-            uses_pkce: false,
-            extra_params: [("client_id".to_string(), "kimi-coding-openproxy".to_string())].into(),
-        }
-    }
-
-    pub fn kilocode() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://api.kilo.ai/oauth/device/code".to_string(),
-            token_url: "https://api.kilo.ai/oauth/token".to_string(),
-            scopes: vec!["read".to_string()],
-            uses_pkce: false,
-            extra_params: [
-                ("scope".to_string(), "read".to_string()),
-                ("client_id".to_string(), "kilocode-openproxy".to_string()),
-            ]
-            .into(),
-        }
-    }
-
-    pub fn codebuddy() -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: "https://copilot.tencent.com/oauth/device/code".to_string(),
-            token_url: "https://copilot.tencent.com/oauth/token".to_string(),
-            scopes: vec!["read".to_string()],
-            uses_pkce: false,
-            extra_params: [
-                ("scope".to_string(), "read".to_string()),
-                ("client_id".to_string(), "codebuddy-openproxy".to_string()),
-            ]
-            .into(),
-        }
-    }
-
-    pub fn gitlab_with_baseurl(base_url: &str) -> OAuthProviderConfig {
-        OAuthProviderConfig {
-            auth_url: format!("{}/oauth/authorize", base_url.trim_end_matches('/')),
-            token_url: format!("{}/oauth/token", base_url.trim_end_matches('/')),
-            scopes: vec!["api".to_string(), "read_user".to_string()],
-            uses_pkce: true,
-            extra_params: [("response_type".to_string(), "code".to_string())].into(),
-        }
-    }
-
-    pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
-        match provider {
-            "claude" => Some(claude()),
-            "codex" => Some(codex()),
-            "gitlab" => Some(gitlab()),
-            "xai" => Some(xai()),
-            "github" => Some(github()),
-            "kiro" => Some(kiro()),
-            "kimi-coding" => Some(kimi_coding()),
-            "kilocode" => Some(kilocode()),
-            "codebuddy" => Some(codebuddy()),
-            _ => None,
-        }
-    }
-}
+// Providers module is now in its own file: providers.rs
 
 pub mod device_code {
     use super::*;
@@ -319,7 +126,7 @@ pub mod device_code {
             ("scope", &provider_config.scopes.join(" ")),
         ];
         let response = client
-            .post(&provider_config.auth_url)
+            .post(provider_config.authorize_url)
             .form(&params)
             .send()
             .await
@@ -359,15 +166,13 @@ pub mod device_code {
                 (
                     "client_id",
                     provider_config
-                        .extra_params
-                        .get("client_id")
-                        .map(|s| s.as_str())
+                        .get_param("client_id")
                         .unwrap_or("openproxy"),
                 ),
                 ("device_code", device_code),
             ];
             let response = client
-                .post(&provider_config.token_url)
+                .post(provider_config.token_url)
                 .form(&params)
                 .send()
                 .await
@@ -431,7 +236,7 @@ pub mod device_code {
         ];
 
         let response = client
-            .post(&provider_config.token_url)
+            .post(provider_config.token_url)
             .form(&params)
             .send()
             .await
