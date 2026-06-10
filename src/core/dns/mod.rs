@@ -36,11 +36,16 @@ use tokio::time::timeout;
 /// Mirrors the JS const of the same name in
 /// `open-sse/utils/proxyFetch.js`.
 pub const MITM_BYPASS_HOSTS: &[&str] = &[
+    // Antigravity Cloud Code
     "cloudcode-pa.googleapis.com",
     "daily-cloudcode-pa.googleapis.com",
+    "cloudcode-pa.sandbox.googleapis.com",
+    // GitHub Copilot (individual, NOT VSCode extension domain `api.githubcopilot.com`)
     "api.individual.githubcopilot.com",
+    // Kiro / AWS CodeWhisperer
     "q.us-east-1.amazonaws.com",
     "codewhisperer.us-east-1.amazonaws.com",
+    // Cursor
     "api2.cursor.sh",
 ];
 

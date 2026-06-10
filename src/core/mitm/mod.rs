@@ -181,13 +181,26 @@ impl MitmInterceptor {
 
 pub const MITM_TARGET_PROVIDERS: &[&str] = &["antigravity", "copilot", "kiro"];
 
+/// Model IDs that MUST NOT be re-routed through the MITM proxy. These are
+/// IDE-internal models that the CLI uses for completion/indexing (e.g. `tab_*`)
+/// and sending them through the MITM tunnel would break the editor experience.
+pub const MODEL_NO_MAP: &[&str] = &["tab_"];
+
 pub fn is_mitm_provider(provider: &str) -> bool {
     MITM_TARGET_PROVIDERS.contains(&provider)
+}
+
+/// Returns true iff `model` should NOT be re-routed through the MITM proxy.
+/// These are IDE-internal models (e.g. `tab_*` for completion/indexing) that
+/// must always bypass the MITM tunnel.
+pub fn is_model_no_map(model: &str) -> bool {
+    MODEL_NO_MAP.iter().any(|prefix| model.starts_with(prefix))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn mitm_target_creation() {
@@ -204,6 +217,12 @@ mod tests {
         );
         assert_eq!(detect_provider_from_target("copilot-proxy"), "github");
         assert_eq!(detect_provider_from_target("kiro-east"), "kiro");
+        // AG abbreviation
+        assert_eq!(detect_provider_from_target("ag-proxy"), "antigravity");
+        // GH abbreviation
+        assert_eq!(detect_provider_from_target("gh-proxy"), "github");
+        // KR abbreviation
+        assert_eq!(detect_provider_from_target("kr-proxy"), "kiro");
     }
 
     #[test]
@@ -243,5 +262,170 @@ mod tests {
         assert!(is_mitm_provider("copilot"));
         assert!(is_mitm_provider("kiro"));
         assert!(!is_mitm_provider("openai"));
+        assert!(!is_mitm_provider(""));
+    }
+
+    #[test]
+    fn model_no_map_matches_tab_models() {
+        // `tab_*` models must be excluded from MITM re-routing
+        assert!(is_model_no_map("tab_close"));
+        assert!(is_model_no_map("tab_complete"));
+        assert!(is_model_no_map("tab_index"));
+        assert!(is_model_no_map("tab_suggestion"));
+        // Non-tab models must NOT be excluded
+        assert!(!is_model_no_map("gemini-3.5-flash-low"));
+        assert!(!is_model_no_map("claude-sonnet-4-6"));
+        assert!(!is_model_no_map("gpt-4o"));
+        assert!(!is_model_no_map(""));
+    }
+
+    #[test]
+    fn mitm_target_providers_exhaustive() {
+        let expected: std::collections::HashSet<&str> =
+            ["antigravity", "copilot", "kiro"].into();
+        let actual: std::collections::HashSet<&str> =
+            MITM_TARGET_PROVIDERS.iter().copied().collect();
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn model_no_map_prefixes_only() {
+        // MODEL_NO_MAP should be prefix matches, not substring/suffix
+        for prefix in MODEL_NO_MAP {
+            assert!(is_model_no_map(prefix));
+            assert!(is_model_no_map(&format!("{}something", prefix)));
+            assert!(!is_model_no_map(&format!("something{}", prefix)));
+        }
+    }
+
+    #[test]
+    fn mitm_interceptor_transform_request_saves_original_model() {
+        let config = MitmRouteConfig {
+            request_transform: true,
+            ..Default::default()
+        };
+        let mut body = json!({"model": "gemini-3.5-flash-low"});
+        MitmInterceptor::transform_request("antigravity", &mut body, &config);
+        assert_eq!(body["original_model"], "gemini-3.5-flash-low");
+        assert_eq!(body["model"], "gemini-3.5-flash-low");
+    }
+
+    #[test]
+    fn mitm_interceptor_transform_request_skipped_when_disabled() {
+        let config = MitmRouteConfig {
+            request_transform: false,
+            ..Default::default()
+        };
+        let mut body = json!({"model": "gemini-3.5-flash-low"});
+        MitmInterceptor::transform_request("antigravity", &mut body, &config);
+        // original_model must NOT be inserted when transforms are disabled
+        assert!(body.get("original_model").is_none());
+    }
+
+    #[test]
+    fn mitm_interceptor_build_forward_url_with_path_prefix() {
+        let config = MitmRouteConfig {
+            upstream_url: "https://api.antigravity.ai".to_string(),
+            path_prefix: Some("/v1internal".to_string()),
+            request_transform: false,
+            response_transform: false,
+        };
+        let url = MitmInterceptor::build_forward_url("antigravity", &config, "/streamGenerateContent");
+        assert_eq!(
+            url,
+            "https://api.antigravity.ai/v1internal/streamGenerateContent"
+        );
+    }
+
+    #[test]
+    fn mitm_interceptor_build_forward_url_without_path_prefix() {
+        let config = MitmRouteConfig {
+            upstream_url: "https://api.githubcopilot.com".to_string(),
+            path_prefix: None,
+            request_transform: false,
+            response_transform: false,
+        };
+        let url = MitmInterceptor::build_forward_url("copilot", &config, "/chat/completions");
+        assert_eq!(
+            url,
+            "https://api.githubcopilot.com/chat/completions"
+        );
+    }
+
+    #[test]
+    fn mitm_interceptor_build_forward_url_trailing_slash_base() {
+        let config = MitmRouteConfig {
+            upstream_url: "https://q.us-east-1.amazonaws.com/".to_string(),
+            path_prefix: None,
+            request_transform: false,
+            response_transform: false,
+        };
+        let url = MitmInterceptor::build_forward_url("kiro", &config, "/q/generateAssistantResponse");
+        assert_eq!(
+            url,
+            "https://q.us-east-1.amazonaws.com/q/generateAssistantResponse"
+        );
+    }
+
+    #[test]
+    fn mitm_build_forward_url_both_with_trailing_slash() {
+        let config = MitmRouteConfig {
+            upstream_url: "https://api.antigravity.ai/".to_string(),
+            path_prefix: Some("/v1internal/".to_string()),
+            request_transform: false,
+            response_transform: false,
+        };
+        let url = MitmInterceptor::build_forward_url("antigravity", &config, "/streamGenerateContent");
+        // Both trailing slashes trimmed: base + prefix = one /
+        assert_eq!(
+            url,
+            "https://api.antigravity.ai/v1internal//streamGenerateContent"
+        );
+    }
+
+    #[test]
+    fn mitm_state_has_no_target_for_unknown_provider() {
+        let state = MitmState::new();
+        assert!(!state.has_target_for_provider("unknown"));
+        assert!(state.get_targets_for_provider("unknown").is_empty());
+    }
+
+    #[test]
+    fn mitm_state_multiple_targets_per_provider() {
+        let mut alias: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        alias.insert("antigravity-main".to_string(), BTreeMap::new());
+        alias.insert("antigravity-backup".to_string(), BTreeMap::new());
+
+        let settings = Settings::default();
+        let state = MitmState::from_db(&alias, &settings);
+
+        assert!(state.has_target_for_provider("antigravity"));
+        let targets = state.get_targets_for_provider("antigravity");
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[test]
+    fn mitm_state_route_by_name() {
+        let mut alias: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        alias.insert(
+            "copilot-proxy".to_string(),
+            BTreeMap::from([
+                (
+                    "upstreamUrl".to_string(),
+                    "https://api.individual.githubcopilot.com".to_string(),
+                ),
+                ("pathPrefix".to_string(), "/v1".to_string()),
+            ]),
+        );
+
+        let settings = Settings::default();
+        let state = MitmState::from_db(&alias, &settings);
+
+        let route = state.get_route("copilot-proxy").expect("route exists");
+        assert_eq!(
+            route.upstream_url,
+            "https://api.individual.githubcopilot.com"
+        );
+        assert_eq!(route.path_prefix.as_deref(), Some("/v1"));
     }
 }
