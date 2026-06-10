@@ -37,6 +37,8 @@ use crate::server::auth::{extract_api_key, require_api_key};
 use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
+use crate::core::utils::project_id_cache;
+
 const PKCE_FLOW_TTL_SECS: i64 = 600;
 const DEVICE_FLOW_TTL_SECS: i64 = 900;
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -4356,6 +4358,16 @@ pub async fn refresh_token(
             "storage_error",
             &provider,
         );
+    }
+
+    // When the antigravity access token is refreshed the cached project ID
+    // may become stale (e.g. if the underlying GCP project changed or the
+    // token scope was updated).  Invalidate it so the next executor call
+    // re-fetches from the loadCodeAssist endpoint.
+    if provider == "antigravity" {
+        if let Some(conn) = connection {
+            project_id_cache::invalidate_cached_project_id(&conn.id);
+        }
     }
 
     Json(RefreshResponse {
