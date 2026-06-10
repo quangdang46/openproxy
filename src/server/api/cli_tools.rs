@@ -1,5 +1,6 @@
 mod claude_settings;
 mod cline_settings;
+mod continue_settings;
 mod cowork_settings;
 mod hermes_settings;
 mod kilo_settings;
@@ -2421,6 +2422,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .merge(claude_settings::routes())
         .merge(cline_settings::routes())
+        .merge(continue_settings::routes())
         .merge(cowork_settings::routes())
         .merge(hermes_settings::routes())
         .merge(kilo_settings::routes())
