@@ -13,6 +13,7 @@ use url::form_urlencoded;
 
 pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 
+pub mod kiro;
 pub mod pending;
 #[cfg(test)]
 pub mod tests;
