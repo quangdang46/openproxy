@@ -108,7 +108,7 @@ pkcs8 = "0.10"
 time = "0.3"
 
 # Client identity
-whoami = "1"
+whoami = "2"
 
 # CLI: file system watcher for hot-reload of db.json from CLI writes
 notify = "8"
