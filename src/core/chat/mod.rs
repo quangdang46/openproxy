@@ -15,7 +15,9 @@
 
 use serde_json::Value;
 
+use crate::core::translator::caveman::inject_caveman;
 use crate::core::translator::registry::{self, Format};
+use crate::types::Settings;
 
 /// Result of planning a request before dispatch.
 #[derive(Debug, Clone)]
@@ -81,6 +83,27 @@ pub fn plan_request(
     // TODO: detect bypass patterns
 
     plan
+}
+
+/// Apply preprocessing steps (caveman prompt injection) to the request body.
+///
+/// This should be called after translation but before dispatch, corresponding
+/// to step 5 in the pipeline: "Apply preprocessing (RTK, caveman)".
+///
+/// Returns `true` if any modification was made.
+pub fn apply_preprocessing(
+    body: &mut Value,
+    settings: &Settings,
+    source_format: &Format,
+    plan: &RequestPlan,
+) -> bool {
+    if settings.caveman_enabled {
+        let injected = inject_caveman(body, source_format, &settings.caveman_level);
+        if injected {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

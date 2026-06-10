@@ -5,6 +5,7 @@ pub enum TranslationFormat {
     Gemini,
 }
 
+pub mod caveman;
 pub mod helpers;
 pub mod registry;
 pub mod request;
