@@ -17,6 +17,13 @@ pub mod pending;
 #[cfg(test)]
 pub mod tests;
 
+// New OAuth service modules (added in p1.2-missing-oauth)
+pub mod xai;
+pub mod gemini_cli;
+pub mod antigravity;
+pub mod openai;
+pub mod qoder;
+
 pub enum OAuthFlowKind {
     AuthorizationCodePkce,
     DeviceCode,
@@ -551,6 +558,11 @@ pub mod token_refresh {
     use super::*;
 
     pub fn needs_refresh(expires_at: &Option<String>) -> bool {
+        needs_refresh_with_lead(expires_at, TOKEN_EXPIRY_BUFFER_MS)
+    }
+
+    /// Check if a token needs refresh with a custom lead time in milliseconds.
+    pub fn needs_refresh_with_lead(expires_at: &Option<String>, lead_ms: u64) -> bool {
         let Some(expires_at) = expires_at else {
             return true;
         };
@@ -559,7 +571,7 @@ pub mod token_refresh {
             Ok(expires_at) => {
                 let expires_at = expires_at.with_timezone(&chrono::Utc);
                 let now = chrono::Utc::now();
-                let buffer = chrono::Duration::milliseconds(TOKEN_EXPIRY_BUFFER_MS as i64);
+                let buffer = chrono::Duration::milliseconds(lead_ms as i64);
                 expires_at - buffer < now
             }
             Err(_) => true,
