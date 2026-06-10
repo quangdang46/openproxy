@@ -594,6 +594,8 @@ pub fn expires_at_from_seconds(expires_in: i64) -> String {
 // Cursor import module - for importing tokens from Cursor's SQLite config.db
 pub mod cursor_import {
     use crate::oauth::{expires_at_from_seconds, TokenResponse};
+    use base64::Engine;
+    use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 
     #[derive(Clone)]
     pub struct CursorTokens {
@@ -640,6 +642,57 @@ pub mod cursor_import {
             token_type: Some("Bearer".to_string()),
             scope: None,
         }
+    }
+
+    /// Generate a jyh checksum from a machine_id.
+    ///
+    /// Encodes the current Unix timestamp by XOR-ing each byte with a
+    /// rolling key starting at 165, then emits `base64(encoded),machine_id`.
+    pub fn generate_checksum(machine_id: &str) -> String {
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let mut key: u8 = 165;
+        let mut encoded: Vec<u8> = Vec::new();
+        for b in timestamp.bytes() {
+            encoded.push(b ^ key);
+            key = ((key as u16 + b as u16) & 0xff) as u8;
+        }
+        format!(
+            "{},{}",
+            base64::engine::general_purpose::STANDARD.encode(&encoded),
+            machine_id
+        )
+    }
+
+    /// Build headers for Cursor API requests.
+    ///
+    /// Includes Bearer authorization, the jyh checksum, and client metadata
+    /// (version, type, OS, architecture).
+    pub fn build_headers(access_token: &str, machine_id: &str) -> HeaderMap {
+        let checksum = generate_checksum(machine_id);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", access_token))
+                .expect("valid bearer token header"),
+        );
+        headers.insert(
+            "x-cursor-checksum",
+            HeaderValue::from_str(&checksum).expect("valid checksum header"),
+        );
+        headers.insert(
+            "x-cursor-client-version",
+            HeaderValue::from_static("3.1.0"),
+        );
+        headers.insert("x-cursor-client-type", HeaderValue::from_static("ide"));
+        headers.insert(
+            "x-cursor-client-os",
+            HeaderValue::from_str(std::env::consts::OS).expect("valid OS header"),
+        );
+        headers.insert(
+            "x-cursor-client-arch",
+            HeaderValue::from_str(std::env::consts::ARCH).expect("valid arch header"),
+        );
+        headers
     }
 }
 
