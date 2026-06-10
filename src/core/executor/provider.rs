@@ -516,7 +516,11 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
                 "perplexity",
                 ProviderExecutorConfig::openai("https://api.perplexity.ai/chat/completions"),
             ),
-            ("xai", ProviderExecutorConfig::openai("https://api.x.ai/v1")),
+            (
+                "xai",
+                ProviderExecutorConfig::openai("https://api.x.ai/v1")
+                    .with_header("User-Agent", "grok-cli/9router"),
+            ),
             (
                 "nvidia",
                 ProviderExecutorConfig::openai("https://integrate.api.nvidia.com/v1"),

@@ -19,6 +19,7 @@ mod provider;
 mod qoder;
 mod qwen;
 mod vertex;
+mod xai;
 
 pub use antigravity::{
     AntigravityExecutionRequest, AntigravityExecutor, AntigravityExecutorError,
@@ -85,6 +86,9 @@ pub use qoder::{QoderExecutionRequest, QoderExecutor, QoderExecutorError, QoderE
 pub use qwen::{QwenExecutionRequest, QwenExecutor, QwenExecutorError, QwenExecutorResponse};
 pub use vertex::{
     VertexExecutionRequest, VertexExecutor, VertexExecutorError, VertexExecutorResponse,
+};
+pub use xai::{
+    XaiExecutionRequest, XaiExecutor, XaiExecutorError, XaiExecutorResponse,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
