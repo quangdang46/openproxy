@@ -128,6 +128,7 @@ wiremock = "0.6"
 assert_cmd = "2"
 predicates = "3"
 insta = { version = "1", features = ["json", "yaml"] }
+mockito = "1"
 
 [[bin]]
 name = "openproxy"
