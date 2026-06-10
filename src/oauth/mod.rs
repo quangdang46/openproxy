@@ -16,6 +16,8 @@ pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 pub mod pending;
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod test_helpers;
 
 pub enum OAuthFlowKind {
     AuthorizationCodePkce,

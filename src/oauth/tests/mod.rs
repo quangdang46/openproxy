@@ -2,6 +2,9 @@
 
 use super::*;
 
+pub mod oauth_url_tests;
+pub mod token_refresh_tests;
+
 mod pkce_extended_tests {
     use crate::oauth::pkce;
 
@@ -305,48 +308,6 @@ mod kiro_device_flow_tests {
             client_secret: "".to_string(),
         };
         assert!(kiro_flow.device_code.verification_uri_complete.is_some());
-    }
-}
-
-mod token_refresh_tests {
-    use crate::oauth::token_refresh;
-    use chrono::Utc;
-
-    #[test]
-    fn test_needs_refresh_none_expires_at() {
-        assert!(token_refresh::needs_refresh(&None));
-    }
-
-    #[test]
-    fn test_needs_refresh_expired() {
-        let past = "2020-01-01T00:00:00Z";
-        assert!(token_refresh::needs_refresh(&Some(past.to_string())));
-    }
-
-    #[test]
-    fn test_needs_refresh_not_expired() {
-        let future = "2099-12-31T23:59:59Z";
-        assert!(!token_refresh::needs_refresh(&Some(future.to_string())));
-    }
-
-    #[test]
-    fn test_needs_refresh_invalid_format() {
-        let invalid = "not-a-date";
-        assert!(token_refresh::needs_refresh(&Some(invalid.to_string())));
-    }
-
-    #[test]
-    fn test_needs_refresh_within_buffer() {
-        let now = Utc::now();
-        // Token that expired 4 minutes ago (within 5 minute buffer)
-        let nearly_expired = (now - chrono::Duration::minutes(4)).to_rfc3339();
-        assert!(token_refresh::needs_refresh(&Some(nearly_expired)));
-    }
-
-    #[test]
-    fn test_needs_refresh_far_future() {
-        let far_future = (Utc::now() + chrono::Duration::hours(24)).to_rfc3339();
-        assert!(!token_refresh::needs_refresh(&Some(far_future)));
     }
 }
 
