@@ -3,6 +3,7 @@ mod cline_settings;
 mod cowork_settings;
 mod hermes_settings;
 mod kilo_settings;
+mod openclaw_settings;
 
 use std::collections::BTreeMap;
 use std::env;
@@ -2424,6 +2425,7 @@ pub fn routes() -> Router<AppState> {
         .merge(cowork_settings::routes())
         .merge(hermes_settings::routes())
         .merge(kilo_settings::routes())
+        .merge(openclaw_settings::routes())
         .route("/api/cli-tools", get(list_tools))
         .route("/api/cli-tools/execute", post(execute_command))
         .route("/api/cli-tools/run/{tool_name}", post(run_tool))
