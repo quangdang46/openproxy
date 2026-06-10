@@ -1,10 +1,8 @@
 mod claude_settings;
 mod cline_settings;
-mod codex_settings;
+mod continue_settings;
 mod cowork_settings;
-mod cursor_settings;
 mod hermes_settings;
-mod droid_settings;
 mod kilo_settings;
 
 use std::collections::BTreeMap;
@@ -23,332 +21,11 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::{fs, process::Command};
-
-use once_cell::sync::Lazy;
+use toml::{map::Map as TomlMap, Value as TomlValue};
 
 use crate::server::state::AppState;
 
 const MAX_OUTPUT_SIZE: usize = 64 * 1024; // 64KB max output
-
-/// Configuration type for a CLI tool
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ConfigType {
-    /// Environment variable based configuration (e.g., Claude Code)
-    Env,
-    /// Custom settings file configuration (e.g., Codex, Droid)
-    Custom,
-    /// Guide-based configuration (e.g., Cursor, Cline, Continue, Roo)
-    Guide,
-}
-
-/// A step in a guide-based CLI tool configuration
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GuideStep {
-    pub step: usize,
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub desc: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub copyable: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub r#type: Option<String>,
-}
-
-/// Default model entry for a CLI tool
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DefaultModelInfo {
-    pub alias: String,
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub env_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_value: Option<String>,
-}
-
-/// A note attached to a CLI tool
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolNote {
-    pub r#type: String,
-    pub text: String,
-}
-
-/// Metadata for a CLI tool in the registry
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CliToolMeta {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub config_type: ConfigType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub env_vars: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub settings_file: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub guide_steps: Option<Vec<GuideStep>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model_aliases: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_models: Option<Vec<DefaultModelInfo>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notes: Option<Vec<ToolNote>>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub requires_external_url: Option<bool>,
-}
-
-/// Static registry of all known CLI tools. Ordered by priority / popularity.
-pub static CLI_TOOLS: Lazy<Vec<CliToolMeta>> = Lazy::new(|| {
-    vec![
-        // ── Claude Code ──────────────────────────────────────────────────
-        CliToolMeta {
-            id: "claude".into(),
-            name: "Claude Code".into(),
-            description: "Anthropic Claude Code CLI (env-based)".into(),
-            config_type: ConfigType::Env,
-            env_vars: Some(vec![
-                "ANTHROPIC_BASE_URL".into(),
-                "ANTHROPIC_API_KEY".into(),
-                "ANTHROPIC_AUTH_TOKEN".into(),
-                "ANTHROPIC_DEFAULT_OPUS_MODEL".into(),
-                "ANTHROPIC_DEFAULT_SONNET_MODEL".into(),
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL".into(),
-            ]),
-            settings_file: Some("~/.claude/settings.json".into()),
-            guide_steps: None,
-            model_aliases: Some(vec![
-                "default".into(),
-                "sonnet".into(),
-                "opus".into(),
-                "haiku".into(),
-                "opusplan".into(),
-            ]),
-            default_models: Some(vec![
-                DefaultModelInfo {
-                    alias: "opus".into(),
-                    name: "Claude Opus".into(),
-                    env_key: Some("ANTHROPIC_DEFAULT_OPUS_MODEL".into()),
-                    default_value: Some("cc/claude-opus-4-6".into()),
-                },
-                DefaultModelInfo {
-                    alias: "sonnet".into(),
-                    name: "Claude Sonnet".into(),
-                    env_key: Some("ANTHROPIC_DEFAULT_SONNET_MODEL".into()),
-                    default_value: Some("cc/claude-sonnet-4-6".into()),
-                },
-                DefaultModelInfo {
-                    alias: "haiku".into(),
-                    name: "Claude Haiku".into(),
-                    env_key: Some("ANTHROPIC_DEFAULT_HAIKU_MODEL".into()),
-                    default_value: Some("cc/claude-haiku-4-5-20251001".into()),
-                },
-            ]),
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── OpenAI Codex CLI ─────────────────────────────────────────────
-        CliToolMeta {
-            id: "codex".into(),
-            name: "OpenAI Codex CLI".into(),
-            description: "OpenAI Codex CLI (custom config)".into(),
-            config_type: ConfigType::Custom,
-            env_vars: Some(vec![
-                "OPENAI_API_KEY".into(),
-                "OPENAI_BASE_URL".into(),
-            ]),
-            settings_file: Some("~/.codex/config.toml".into()),
-            guide_steps: None,
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── Cursor ───────────────────────────────────────────────────────
-        CliToolMeta {
-            id: "cursor".into(),
-            name: "Cursor".into(),
-            description: "Cursor AI Code Editor (guide-based, requires external URL)".into(),
-            config_type: ConfigType::Guide,
-            env_vars: None,
-            settings_file: None,
-            guide_steps: Some(vec![
-                GuideStep { step: 1, title: "Open Settings".into(), desc: Some("Go to Settings → Models".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 2, title: "Enable OpenAI API".into(), desc: Some("Enable \"OpenAI API key\" option".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 3, title: "Base URL".into(), desc: None, value: Some("{{baseUrl}}".into()), copyable: Some(true), r#type: None },
-                GuideStep { step: 4, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
-                GuideStep { step: 5, title: "Add Custom Model".into(), desc: Some("Click \"View All Model\" → \"Add Custom Model\"".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 6, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
-            ]),
-            model_aliases: None,
-            default_models: None,
-            notes: Some(vec![
-                ToolNote { r#type: "warning".into(), text: "Requires Cursor Pro account to use this feature.".into() },
-                ToolNote { r#type: "cloudCheck".into(), text: "Cursor routes requests through its own server, so local endpoint is not supported. Please enable Tunnel or Cloud Endpoint in Settings.".into() },
-            ]),
-            requires_external_url: Some(true),
-        },
-
-        // ── Cline ────────────────────────────────────────────────────────
-        CliToolMeta {
-            id: "cline".into(),
-            name: "Cline".into(),
-            description: "Cline AI Coding Assistant (VS Code extension)".into(),
-            config_type: ConfigType::Custom,
-            env_vars: None,
-            settings_file: None,
-            guide_steps: Some(vec![
-                GuideStep { step: 1, title: "Open Settings".into(), desc: Some("Go to Cline Settings panel".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 2, title: "Select Provider".into(), desc: Some("Choose API Provider → OpenAI Compatible".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 3, title: "Base URL".into(), desc: None, value: Some("{{baseUrl}}/v1".into()), copyable: Some(true), r#type: None },
-                GuideStep { step: 4, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
-                GuideStep { step: 5, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
-            ]),
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── Continue ─────────────────────────────────────────────────────
-        CliToolMeta {
-            id: "continue".into(),
-            name: "Continue".into(),
-            description: "Continue AI Assistant (VS Code / JetBrains)".into(),
-            config_type: ConfigType::Guide,
-            env_vars: None,
-            settings_file: Some("~/.continue/config.json".into()),
-            guide_steps: Some(vec![
-                GuideStep { step: 1, title: "Open Config".into(), desc: Some("Open Continue configuration file".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 2, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
-                GuideStep { step: 3, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
-                GuideStep { step: 4, title: "Add Model Config".into(), desc: Some("Add the following configuration to your models array:".into()), value: None, copyable: None, r#type: None },
-            ]),
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── Roo ──────────────────────────────────────────────────────────
-        CliToolMeta {
-            id: "roo".into(),
-            name: "Roo".into(),
-            description: "Roo AI Assistant (VS Code extension)".into(),
-            config_type: ConfigType::Guide,
-            env_vars: None,
-            settings_file: None,
-            guide_steps: Some(vec![
-                GuideStep { step: 1, title: "Open Settings".into(), desc: Some("Go to Roo Settings panel".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 2, title: "Select Provider".into(), desc: Some("Choose API Provider → Ollama".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 3, title: "Base URL".into(), desc: None, value: Some("{{baseUrl}}".into()), copyable: Some(true), r#type: None },
-                GuideStep { step: 4, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
-                GuideStep { step: 5, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
-            ]),
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── Kilo Code ────────────────────────────────────────────────────
-        CliToolMeta {
-            id: "kilo".into(),
-            name: "Kilo Code".into(),
-            description: "Kilo Code AI Assistant (VS Code extension)".into(),
-            config_type: ConfigType::Custom,
-            env_vars: None,
-            settings_file: None,
-            guide_steps: Some(vec![
-                GuideStep { step: 1, title: "Open Settings".into(), desc: Some("Go to Kilo Code Settings panel".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 2, title: "Select Provider".into(), desc: Some("Choose API Provider → OpenAI Compatible".into()), value: None, copyable: None, r#type: None },
-                GuideStep { step: 3, title: "Base URL".into(), desc: None, value: Some("{{baseUrl}}/v1".into()), copyable: Some(true), r#type: None },
-                GuideStep { step: 4, title: "API Key".into(), desc: None, value: None, copyable: None, r#type: Some("apiKeySelector".into()) },
-                GuideStep { step: 5, title: "Select Model".into(), desc: None, value: None, copyable: None, r#type: Some("modelSelector".into()) },
-            ]),
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── Hermes Agent ─────────────────────────────────────────────────
-        CliToolMeta {
-            id: "hermes".into(),
-            name: "Hermes Agent".into(),
-            description: "Nous Research self-improving AI agent".into(),
-            config_type: ConfigType::Custom,
-            env_vars: None,
-            settings_file: Some("~/.hermes/settings.json".into()),
-            guide_steps: None,
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── Factory Droid ────────────────────────────────────────────────
-        CliToolMeta {
-            id: "droid".into(),
-            name: "Factory Droid".into(),
-            description: "Factory Droid AI Assistant".into(),
-            config_type: ConfigType::Custom,
-            env_vars: None,
-            settings_file: Some("~/.factory/settings.json".into()),
-            guide_steps: None,
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── Open Claw ────────────────────────────────────────────────────
-        CliToolMeta {
-            id: "openclaw".into(),
-            name: "Open Claw".into(),
-            description: "Open Claw AI Assistant (one-click apply)".into(),
-            config_type: ConfigType::Custom,
-            env_vars: None,
-            settings_file: None,
-            guide_steps: None,
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-
-        // ── Claude Cowork ────────────────────────────────────────────────
-        CliToolMeta {
-            id: "cowork".into(),
-            name: "Claude Cowork".into(),
-            description: "Claude Desktop Cowork (third-party inference)".into(),
-            config_type: ConfigType::Custom,
-            env_vars: None,
-            settings_file: Some("~/Library/Application Support/Claude/Cowork.json".into()),
-            guide_steps: None,
-            model_aliases: None,
-            default_models: None,
-            notes: None,
-            requires_external_url: None,
-        },
-    ]
-});
-
-/// Return a reference to the full CLI tools registry
-pub fn list_all_cli_tools() -> &'static Vec<CliToolMeta> {
-    &CLI_TOOLS
-}
-
-/// Look up a single CLI tool by its id
-pub fn find_cli_tool(id: &str) -> Option<&'static CliToolMeta> {
-    CLI_TOOLS.iter().find(|t| t.id == id)
-}
 
 /// CLI command execution request
 #[derive(Debug, Deserialize)]
@@ -397,18 +74,33 @@ pub async fn list_tools(State(state): State<AppState>, headers: HeaderMap) -> Re
         return response;
     }
 
-    let tools: Vec<CliToolInfo> = CLI_TOOLS
-        .iter()
-        .map(|meta| CliToolInfo {
-            name: meta.id.clone(),
-            description: meta.description.clone(),
-            category: match meta.config_type {
-                ConfigType::Env => "env".to_string(),
-                ConfigType::Custom => "custom".to_string(),
-                ConfigType::Guide => "guide".to_string(),
-            },
-        })
-        .collect();
+    let tools = vec![
+        CliToolInfo {
+            name: "provider-list".to_string(),
+            description: "List all provider connections and nodes".to_string(),
+            category: "provider".to_string(),
+        },
+        CliToolInfo {
+            name: "key-list".to_string(),
+            description: "List all API keys".to_string(),
+            category: "key".to_string(),
+        },
+        CliToolInfo {
+            name: "pool-list".to_string(),
+            description: "List all proxy pools".to_string(),
+            category: "pool".to_string(),
+        },
+        CliToolInfo {
+            name: "pool-status".to_string(),
+            description: "Get status of a specific proxy pool".to_string(),
+            category: "pool".to_string(),
+        },
+        CliToolInfo {
+            name: "route".to_string(),
+            description: "Execute a model routing request directly".to_string(),
+            category: "route".to_string(),
+        },
+    ];
 
     Json(CliToolsListResponse { tools }).into_response()
 }
@@ -605,17 +297,6 @@ pub async fn get_help(State(state): State<AppState>, headers: HeaderMap) -> Resp
         return response;
     }
 
-    let tools: Vec<Value> = CLI_TOOLS
-        .iter()
-        .map(|meta| {
-            json!({
-                "name": meta.id,
-                "description": meta.description,
-                "configType": meta.config_type,
-            })
-        })
-        .collect();
-
     Json(json!({
         "help": "CLI Tools API",
         "endpoints": {
@@ -624,11 +305,125 @@ pub async fn get_help(State(state): State<AppState>, headers: HeaderMap) -> Resp
             "POST /api/cli-tools/run/{tool_name}": "Run a specific tool",
             "GET /api/cli-tools/help": "Show this help"
         },
-        "tools": tools,
+        "tools": [
+            {"name": "provider-list", "description": "List provider connections"},
+            {"name": "key-list", "description": "List API keys"},
+            {"name": "pool-list", "description": "List proxy pools"},
+            {"name": "pool-status", "description": "Get pool status (args: [pool_name])"}
+        ]
     }))
     .into_response()
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Codex CLI Settings Endpoints
+// GET/POST/DELETE /api/cli-tools/codex-settings
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Codex CLI settings stored per user
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSettings {
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub subagent_model: Option<String>,
+}
+
+/// GET /api/cli-tools/codex-settings
+/// Get Codex CLI settings
+async fn get_codex_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let installed = check_codex_installed().await;
+    if !installed {
+        return Json(json!({
+            "installed": false,
+            "config": Value::Null,
+            "message": "Codex CLI is not installed",
+        }))
+        .into_response();
+    }
+
+    match read_codex_config().await {
+        Ok(config) => {
+            let has_openproxy = config.as_deref().is_some_and(has_openproxy_codex_config);
+            Json(json!({
+                "installed": true,
+                "config": config,
+                "hasOpenProxy": has_openproxy,
+                "configPath": codex_config_path().to_string_lossy().to_string(),
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to check codex settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/cli-tools/codex-settings
+/// Save Codex CLI settings
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSettingsRequest {
+    pub base_url: String,
+    pub api_key: String,
+    pub model: String,
+    pub subagent_model: Option<String>,
+}
+
+async fn save_codex_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<CodexSettingsRequest>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    match write_codex_settings(&CodexSettings {
+        base_url: Some(req.base_url),
+        api_key: Some(req.api_key),
+        model: Some(req.model),
+        subagent_model: req.subagent_model,
+    })
+    .await
+    {
+        Ok(config_path) => Json(json!({
+            "success": true,
+            "message": "Codex settings applied successfully!",
+            "configPath": config_path,
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to update codex settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /api/cli-tools/codex-settings
+/// Reset Codex CLI settings
+async fn delete_codex_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    match reset_codex_settings().await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to reset codex settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Copilot Settings Endpoints
@@ -727,6 +522,107 @@ async fn delete_copilot_settings(State(state): State<AppState>, headers: HeaderM
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Droid Settings Endpoints
+// GET/POST/DELETE /api/cli-tools/droid-settings
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DroidSettingsRequest {
+    pub base_url: String,
+    pub api_key: Option<String>,
+    pub model: Option<String>,
+    pub models: Option<Vec<String>>,
+    pub active_model: Option<String>,
+}
+
+async fn get_droid_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let installed = check_droid_installed().await;
+    if !installed {
+        return Json(json!({
+            "installed": false,
+            "settings": Value::Null,
+            "message": "Factory Droid CLI is not installed",
+        }))
+        .into_response();
+    }
+
+    match read_droid_settings().await {
+        Ok(settings) => {
+            let has_openproxy = settings.as_ref().is_some_and(has_openproxy_droid_settings);
+            Json(json!({
+                "installed": true,
+                "settings": settings,
+                "hasOpenProxy": has_openproxy,
+                "settingsPath": droid_settings_path().to_string_lossy().to_string(),
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to check droid settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn save_droid_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<DroidSettingsRequest>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let models = req.models.clone().unwrap_or_else(|| {
+        req.model
+            .clone()
+            .map(|model| vec![model])
+            .unwrap_or_default()
+    });
+    if req.base_url.trim().is_empty() || models.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "baseUrl and at least one model are required" })),
+        )
+            .into_response();
+    }
+
+    match write_droid_settings(&req, &models).await {
+        Ok(settings_path) => Json(json!({
+            "success": true,
+            "message": "Factory Droid settings applied successfully!",
+            "settingsPath": settings_path,
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to update droid settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_droid_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    match reset_droid_settings().await {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": format!("Failed to reset droid settings: {error}") })),
+        )
+            .into_response(),
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // OpenCode Settings Endpoints
@@ -1022,8 +918,248 @@ async fn delete_openclaw_settings(State(state): State<AppState>, headers: Header
     }
 }
 
+async fn check_codex_installed() -> bool {
+    command_exists("codex", true).await || fs::metadata(codex_config_path()).await.is_ok()
+}
+
+async fn read_codex_config() -> anyhow::Result<Option<String>> {
+    read_string_optional(&codex_config_path()).await
+}
+
+async fn write_codex_settings(settings: &CodexSettings) -> anyhow::Result<String> {
+    let config_path = codex_config_path();
+    let auth_path = codex_auth_path();
+    fs::create_dir_all(codex_dir()).await?;
+
+    let mut parsed = match fs::read_to_string(&config_path).await {
+        Ok(existing_config) => parse_toml_table(&existing_config).unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => TomlMap::new(),
+        Err(error) => return Err(error.into()),
+    };
+
+    let base_url = settings.base_url.clone().unwrap_or_default();
+    let api_key = settings.api_key.clone().unwrap_or_default();
+    let model = settings.model.clone().unwrap_or_default();
+    let subagent_model = settings
+        .subagent_model
+        .clone()
+        .unwrap_or_else(|| model.clone());
+
+    parsed.insert("model".to_string(), TomlValue::String(model));
+    parsed.insert(
+        "model_provider".to_string(),
+        TomlValue::String("openproxy".to_string()),
+    );
+    set_toml_section(
+        &mut parsed,
+        &["model_providers", "openproxy"],
+        TomlValue::Table(TomlMap::from_iter([
+            (
+                "name".to_string(),
+                TomlValue::String("OpenProxy".to_string()),
+            ),
+            (
+                "base_url".to_string(),
+                TomlValue::String(normalize_v1_base_url(&base_url)),
+            ),
+            (
+                "wire_api".to_string(),
+                TomlValue::String("responses".to_string()),
+            ),
+        ])),
+    );
+    set_toml_section(
+        &mut parsed,
+        &["agents", "subagent"],
+        TomlValue::Table(TomlMap::from_iter([(
+            "model".to_string(),
+            TomlValue::String(subagent_model),
+        )])),
+    );
+
+    let config_content = toml::to_string_pretty(&TomlValue::Table(parsed))?;
+    fs::write(&config_path, config_content).await?;
+
+    let mut auth_data = match fs::read_to_string(&auth_path).await {
+        Ok(existing_auth) => serde_json::from_str::<serde_json::Map<String, Value>>(&existing_auth)
+            .unwrap_or_default(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(error.into()),
+    };
+    auth_data.insert("OPENAI_API_KEY".to_string(), Value::String(api_key));
+    auth_data.insert("auth_mode".to_string(), Value::String("apikey".to_string()));
+    fs::write(
+        &auth_path,
+        serde_json::to_vec_pretty(&Value::Object(auth_data))?,
+    )
+    .await?;
+
+    Ok(config_path.to_string_lossy().to_string())
+}
+
+async fn reset_codex_settings() -> anyhow::Result<Value> {
+    let config_path = codex_config_path();
+    let existing_config = match fs::read_to_string(&config_path).await {
+        Ok(existing_config) => existing_config,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "success": true,
+                "message": "No config file to reset",
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let mut parsed = parse_toml_table(&existing_config)?;
+    if parsed.get("model_provider").and_then(TomlValue::as_str) == Some("openproxy") {
+        parsed.remove("model");
+        parsed.remove("model_provider");
+    }
+    delete_toml_section(&mut parsed, &["model_providers", "openproxy"]);
+    delete_toml_section(&mut parsed, &["agents", "subagent"]);
+
+    let config_content = toml::to_string_pretty(&TomlValue::Table(parsed))?;
+    fs::write(&config_path, config_content).await?;
+
+    let auth_path = codex_auth_path();
+    match fs::read_to_string(&auth_path).await {
+        Ok(existing_auth) => {
+            if let Ok(mut auth_data) =
+                serde_json::from_str::<serde_json::Map<String, Value>>(&existing_auth)
+            {
+                auth_data.remove("OPENAI_API_KEY");
+                auth_data.remove("auth_mode");
+                if auth_data.is_empty() {
+                    let _ = fs::remove_file(&auth_path).await;
+                } else {
+                    fs::write(
+                        &auth_path,
+                        serde_json::to_vec_pretty(&Value::Object(auth_data))?,
+                    )
+                    .await?;
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+
+    Ok(json!({
+        "success": true,
+        "message": "OpenProxy settings removed successfully",
+    }))
+}
+
+async fn read_string_optional(path: &FsPath) -> anyhow::Result<Option<String>> {
+    match fs::read_to_string(path).await {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn has_openproxy_codex_config(config: &str) -> bool {
+    config.contains("model_provider = \"openproxy\"")
+        || config.contains("[model_providers.openproxy]")
+}
+
+fn parse_toml_table(content: &str) -> anyhow::Result<TomlMap<String, TomlValue>> {
+    match toml::from_str::<TomlValue>(content)? {
+        TomlValue::Table(table) => Ok(table),
+        _ => Ok(TomlMap::new()),
+    }
+}
+
+fn set_toml_section(table: &mut TomlMap<String, TomlValue>, path: &[&str], value: TomlValue) {
+    if path.is_empty() {
+        return;
+    }
+    if path.len() == 1 {
+        table.insert(path[0].to_string(), value);
+        return;
+    }
+
+    let entry = table
+        .entry(path[0].to_string())
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    if !entry.is_table() {
+        *entry = TomlValue::Table(TomlMap::new());
+    }
+    if let TomlValue::Table(next) = entry {
+        set_toml_section(next, &path[1..], value);
+    }
+}
+
+fn delete_toml_section(table: &mut TomlMap<String, TomlValue>, path: &[&str]) {
+    if path.is_empty() {
+        return;
+    }
+    if path.len() == 1 {
+        table.remove(path[0]);
+        return;
+    }
+    if let Some(TomlValue::Table(next)) = table.get_mut(path[0]) {
+        delete_toml_section(next, &path[1..]);
+    }
+}
+
+fn normalize_v1_base_url(base_url: &str) -> String {
+    if base_url.ends_with("/v1") {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/v1")
+    }
+}
+
+async fn command_exists(program: &str, inject_windows_npm_path: bool) -> bool {
+    let finder = if cfg!(windows) { "where" } else { "which" };
+    let mut command = Command::new(finder);
+    command.arg(program);
+    if cfg!(windows) && inject_windows_npm_path {
+        if let Some(path) = windows_npm_augmented_path() {
+            command.env("PATH", path);
+        }
+    }
+    command
+        .status()
+        .await
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn windows_npm_augmented_path() -> Option<String> {
+    let appdata = env::var_os("APPDATA")?;
+    let current_path = env::var_os("PATH").unwrap_or_default();
+    let npm_dir = PathBuf::from(appdata).join("npm");
+    Some(format!(
+        "{};{}",
+        npm_dir.to_string_lossy(),
+        PathBuf::from(current_path).to_string_lossy()
+    ))
+}
+
+fn codex_dir() -> PathBuf {
+    home_dir().join(".codex")
+}
+
+fn codex_config_path() -> PathBuf {
+    codex_dir().join("config.toml")
+}
+
+fn codex_auth_path() -> PathBuf {
+    codex_dir().join("auth.json")
+}
+
 async fn read_copilot_config() -> anyhow::Result<Option<Value>> {
     read_json_optional(&copilot_config_path()).await
+}
+
+async fn check_droid_installed() -> bool {
+    command_exists("droid", true).await || fs::metadata(droid_settings_path()).await.is_ok()
+}
+
+async fn read_droid_settings() -> anyhow::Result<Option<Value>> {
+    read_json_optional(&droid_settings_path()).await
 }
 
 async fn check_opencode_installed() -> bool {
@@ -1124,6 +1260,136 @@ async fn reset_copilot_settings() -> anyhow::Result<Value> {
     Ok(json!({
         "success": true,
         "message": "OpenProxy removed from Copilot config",
+    }))
+}
+
+async fn write_droid_settings(
+    req: &DroidSettingsRequest,
+    models: &[String],
+) -> anyhow::Result<String> {
+    let settings_path = droid_settings_path();
+    if let Some(parent) = settings_path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+
+    let mut settings = match fs::read_to_string(&settings_path).await {
+        Ok(existing) => parse_json_object_or_default(&existing),
+        Err(_) => serde_json::Map::new(),
+    };
+
+    let custom_models_value = settings.remove("customModels");
+    let mut custom_models = match custom_models_value {
+        Some(Value::Array(entries)) => entries,
+        Some(Value::Null) | None => Vec::new(),
+        Some(_) => {
+            return Err(anyhow::anyhow!("customModels must be an array"));
+        }
+    };
+    custom_models.retain(|entry| {
+        !entry
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("custom:OpenProxy"))
+    });
+
+    let normalized_base_url = normalize_v1_base_url(&req.base_url);
+    let api_key = req
+        .api_key
+        .clone()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "your_api_key".to_string());
+
+    let default_index = match req.active_model.as_deref() {
+        Some("") => None,
+        Some(active_model) => Some(
+            models
+                .iter()
+                .position(|model| model == active_model)
+                .unwrap_or(0),
+        ),
+        None => Some(0),
+    };
+
+    for (index, model) in models.iter().enumerate() {
+        if model.is_empty() {
+            continue;
+        }
+        custom_models.push(json!({
+            "model": model,
+            "id": format!("custom:OpenProxy-{index}"),
+            "index": index,
+            "baseUrl": normalized_base_url,
+            "apiKey": api_key,
+            "displayName": model,
+            "maxOutputTokens": 131072,
+            "noImageSupport": false,
+            "provider": "openai",
+        }));
+    }
+
+    // Intentionally matches openproxy's whole-array reordering behavior, including
+    // pre-existing non-OpenProxy entries that may shift indexes.
+    if let Some(default_index) = default_index {
+        if default_index < custom_models.len() {
+            let default_entry = custom_models.remove(default_index);
+            custom_models.insert(0, default_entry);
+            for (index, entry) in custom_models.iter_mut().enumerate() {
+                if let Some(object) = entry.as_object_mut() {
+                    object.insert("index".to_string(), Value::from(index));
+                }
+            }
+        }
+    }
+
+    settings.insert("customModels".to_string(), Value::Array(custom_models));
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&Value::Object(settings))?,
+    )
+    .await?;
+    Ok(settings_path.to_string_lossy().to_string())
+}
+
+async fn reset_droid_settings() -> anyhow::Result<Value> {
+    let settings_path = droid_settings_path();
+    let mut settings = match fs::read_to_string(&settings_path).await {
+        Ok(existing) => parse_json_object_or_default(&existing),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(json!({
+                "success": true,
+                "message": "No settings file to reset",
+            }));
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    if let Some(custom_models_value) = settings.remove("customModels") {
+        let mut custom_models = match custom_models_value {
+            Value::Array(entries) => entries,
+            Value::Null => Vec::new(),
+            _ => {
+                return Err(anyhow::anyhow!("customModels must be an array"));
+            }
+        };
+        custom_models.retain(|entry| {
+            !entry
+                .get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id.starts_with("custom:OpenProxy"))
+        });
+        if !custom_models.is_empty() {
+            settings.insert("customModels".to_string(), Value::Array(custom_models));
+        }
+    }
+
+    fs::write(
+        &settings_path,
+        serde_json::to_vec_pretty(&Value::Object(settings))?,
+    )
+    .await?;
+    Ok(json!({
+        "success": true,
+        "message": "OpenProxy settings removed successfully",
     }))
 }
 
@@ -1720,6 +1986,20 @@ fn has_openproxy_copilot_config(config: &Value) -> bool {
     get_openproxy_copilot_entry(config).is_some()
 }
 
+fn has_openproxy_droid_settings(settings: &Value) -> bool {
+    settings
+        .get("customModels")
+        .and_then(Value::as_array)
+        .is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                entry
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("custom:OpenProxy"))
+            })
+        })
+}
+
 fn has_openproxy_openclaw_settings(settings: &Value) -> bool {
     settings
         .get("models")
@@ -1788,6 +2068,10 @@ fn copilot_config_path() -> PathBuf {
     }
 }
 
+fn droid_settings_path() -> PathBuf {
+    home_dir().join(".factory").join("settings.json")
+}
+
 fn opencode_config_path() -> PathBuf {
     home_dir()
         .join(".config")
@@ -1804,41 +2088,6 @@ fn home_dir() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from("/"))
-}
-
-fn normalize_v1_base_url(base_url: &str) -> String {
-    if base_url.ends_with("/v1") {
-        base_url.to_string()
-    } else {
-        format!("{base_url}/v1")
-    }
-}
-
-async fn command_exists(program: &str, inject_windows_npm_path: bool) -> bool {
-    let finder = if cfg!(windows) { "where" } else { "which" };
-    let mut command = tokio::process::Command::new(finder);
-    command.arg(program);
-    if cfg!(windows) && inject_windows_npm_path {
-        if let Some(path) = windows_npm_augmented_path() {
-            command.env("PATH", path);
-        }
-    }
-    command
-        .status()
-        .await
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-fn windows_npm_augmented_path() -> Option<String> {
-    let appdata = env::var_os("APPDATA")?;
-    let current_path = env::var_os("PATH").unwrap_or_default();
-    let npm_dir = PathBuf::from(appdata).join("npm");
-    Some(format!(
-        "{};{}",
-        npm_dir.to_string_lossy(),
-        PathBuf::from(current_path).to_string_lossy()
-    ))
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2173,16 +2422,21 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .merge(claude_settings::routes())
         .merge(cline_settings::routes())
+        .merge(continue_settings::routes())
         .merge(cowork_settings::routes())
-        .merge(cursor_settings::routes())
         .merge(hermes_settings::routes())
-        .merge(droid_settings::routes())
         .merge(kilo_settings::routes())
-        .merge(codex_settings::routes())
         .route("/api/cli-tools", get(list_tools))
         .route("/api/cli-tools/execute", post(execute_command))
         .route("/api/cli-tools/run/{tool_name}", post(run_tool))
         .route("/api/cli-tools/help", get(get_help))
+        // Codex settings
+        .route("/api/cli-tools/codex-settings", get(get_codex_settings))
+        .route("/api/cli-tools/codex-settings", post(save_codex_settings))
+        .route(
+            "/api/cli-tools/codex-settings",
+            delete(delete_codex_settings),
+        )
         .route("/api/cli-tools/copilot-settings", get(get_copilot_settings))
         .route(
             "/api/cli-tools/copilot-settings",
@@ -2198,6 +2452,12 @@ pub fn routes() -> Router<AppState> {
                 .post(save_opencode_settings)
                 .patch(patch_opencode_settings)
                 .delete(delete_opencode_settings),
+        )
+        .route(
+            "/api/cli-tools/droid-settings",
+            get(get_droid_settings)
+                .post(save_droid_settings)
+                .delete(delete_droid_settings),
         )
         .route(
             "/api/cli-tools/openclaw-settings",
@@ -2325,6 +2585,32 @@ async fn get_cowork_mcp_registry() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_codex_settings_default() {
+        let settings = CodexSettings::default();
+        assert_eq!(settings.base_url, None);
+        assert_eq!(settings.api_key, None);
+        assert_eq!(settings.model, None);
+        assert_eq!(settings.subagent_model, None);
+    }
+
+    #[test]
+    fn test_codex_settings_serialization() {
+        let settings = CodexSettings {
+            base_url: Some("http://localhost:4623/v1".to_string()),
+            api_key: Some("sk-test".to_string()),
+            model: Some("openai/gpt-4".to_string()),
+            subagent_model: Some("openai/gpt-4o".to_string()),
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        let deserialized: CodexSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.base_url, settings.base_url);
+        assert_eq!(deserialized.api_key, settings.api_key);
+        assert_eq!(deserialized.model, settings.model);
+        assert_eq!(deserialized.subagent_model, settings.subagent_model);
+    }
 
     #[test]
     fn test_antigravity_mitm_status_default() {
