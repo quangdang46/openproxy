@@ -212,7 +212,7 @@ mod gitlab_extended_tests {
     #[test]
     fn test_gitlab_provider_config() {
         let config = crate::oauth::providers::gitlab();
-        assert_eq!(config.auth_url, "https://gitlab.com/oauth/authorize");
+        assert_eq!(config.authorize_url, "https://gitlab.com/oauth/authorize");
         assert_eq!(config.token_url, "https://gitlab.com/oauth/token");
         assert!(config.uses_pkce);
     }
@@ -236,7 +236,7 @@ mod gitlab_extended_tests {
     fn test_gitlab_self_hosted_config() {
         let config = crate::oauth::providers::gitlab_with_baseurl("https://gitlab.example.com");
         assert_eq!(
-            config.auth_url,
+            config.authorize_url,
             "https://gitlab.example.com/oauth/authorize"
         );
         assert_eq!(config.token_url, "https://gitlab.example.com/oauth/token");
@@ -260,7 +260,7 @@ mod gitlab_extended_tests {
     fn test_gitlab_self_hosted_trailing_slash() {
         let config = crate::oauth::providers::gitlab_with_baseurl("https://gitlab.example.com/");
         assert_eq!(
-            config.auth_url,
+            config.authorize_url,
             "https://gitlab.example.com/oauth/authorize"
         );
     }
