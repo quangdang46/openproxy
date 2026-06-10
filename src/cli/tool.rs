@@ -226,7 +226,7 @@ async fn run_apply(
 
 /// Build the per-tool POST body. Each tool has a slightly different shape;
 /// we cover the agent-friendly common case (model + api_key + base_url).
-fn build_apply_body(
+pub(crate) fn build_apply_body(
     name: &str,
     model: &Option<String>,
     api_key: Option<&str>,

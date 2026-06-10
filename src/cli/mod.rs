@@ -52,6 +52,9 @@ pub(crate) mod test_lock {
     pub static ENV_LOCK: Mutex<()> = Mutex::new(());
 }
 
+#[cfg(test)]
+pub mod tests;
+
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "openproxy",
