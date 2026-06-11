@@ -22,10 +22,7 @@ use crate::types::ProviderConnection;
 const DEFAULT_BASE_URL: &str = "http://localhost:4623";
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route(
-        "/api/cli-tools/openclaw-config",
-        get(get_openclaw_config),
-    )
+    Router::new().route("/api/cli-tools/openclaw-config", get(get_openclaw_config))
 }
 
 fn require_management_access(
@@ -56,7 +53,11 @@ async fn get_openclaw_config(State(state): State<AppState>, headers: HeaderMap) 
     let base_url = if snapshot.settings.mitm_router_base_url.is_empty() {
         DEFAULT_BASE_URL.to_string()
     } else {
-        snapshot.settings.mitm_router_base_url.trim_end_matches('/').to_string()
+        snapshot
+            .settings
+            .mitm_router_base_url
+            .trim_end_matches('/')
+            .to_string()
     };
 
     // API key: first active key from the database.
@@ -123,7 +124,14 @@ fn redact_connection(conn: &ProviderConnection) -> Value {
         obj.remove("apiKey");
         if let Some(specific) = obj.get_mut("providerSpecificData") {
             if let Some(map) = specific.as_object_mut() {
-                for secret in ["accessToken", "refreshToken", "idToken", "apiKey", "cookie", "password"] {
+                for secret in [
+                    "accessToken",
+                    "refreshToken",
+                    "idToken",
+                    "apiKey",
+                    "cookie",
+                    "password",
+                ] {
                     map.remove(secret);
                 }
             }

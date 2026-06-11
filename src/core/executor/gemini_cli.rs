@@ -11,8 +11,8 @@ use crate::core::config::app_constants::{
 use crate::core::proxy::ProxyTarget;
 use crate::types::{ProviderConnection, ProviderNode};
 
-use super::{ClientPool, TransportKind, UpstreamResponse};
 use super::project_id_cache::lookup_project_id;
+use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const GEMINI_CLI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -155,10 +155,7 @@ impl GeminiCliExecutor {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth)?);
 
         let ua = gemini_cli_user_agent(model);
-        headers.insert(
-            reqwest::header::USER_AGENT,
-            HeaderValue::from_str(&ua)?,
-        );
+        headers.insert(reqwest::header::USER_AGENT, HeaderValue::from_str(&ua)?);
 
         headers.insert(
             "X-Goog-Api-Client",
@@ -273,11 +270,7 @@ impl GeminiCliExecutor {
 
         // Pick URL and headers according to auth mode.
         let (url, headers) = if is_oauth {
-            let access_token = request
-                .credentials
-                .access_token
-                .as_deref()
-                .unwrap_or("");
+            let access_token = request.credentials.access_token.as_deref().unwrap_or("");
             let hdrs =
                 Self::build_gemini_cli_headers(access_token, request.stream, &request.model)?;
             let url = self.build_url(&request.model, request.stream);

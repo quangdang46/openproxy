@@ -196,7 +196,9 @@ pub fn detect_source_format(body: &Value) -> Format {
     }
 
     // 3. CommandCode: has `threadId` and `params.messages` instead of top-level `messages`
-    if body.get("threadId").is_some() && body.get("params").and_then(|p| p.get("messages")).is_some() {
+    if body.get("threadId").is_some()
+        && body.get("params").and_then(|p| p.get("messages")).is_some()
+    {
         return Format::CommandCode;
     }
 

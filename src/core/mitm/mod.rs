@@ -281,8 +281,7 @@ mod tests {
 
     #[test]
     fn mitm_target_providers_exhaustive() {
-        let expected: std::collections::HashSet<&str> =
-            ["antigravity", "copilot", "kiro"].into();
+        let expected: std::collections::HashSet<&str> = ["antigravity", "copilot", "kiro"].into();
         let actual: std::collections::HashSet<&str> =
             MITM_TARGET_PROVIDERS.iter().copied().collect();
         assert_eq!(expected, actual);
@@ -330,7 +329,8 @@ mod tests {
             request_transform: false,
             response_transform: false,
         };
-        let url = MitmInterceptor::build_forward_url("antigravity", &config, "/streamGenerateContent");
+        let url =
+            MitmInterceptor::build_forward_url("antigravity", &config, "/streamGenerateContent");
         assert_eq!(
             url,
             "https://api.antigravity.ai/v1internal/streamGenerateContent"
@@ -346,10 +346,7 @@ mod tests {
             response_transform: false,
         };
         let url = MitmInterceptor::build_forward_url("copilot", &config, "/chat/completions");
-        assert_eq!(
-            url,
-            "https://api.githubcopilot.com/chat/completions"
-        );
+        assert_eq!(url, "https://api.githubcopilot.com/chat/completions");
     }
 
     #[test]
@@ -360,7 +357,8 @@ mod tests {
             request_transform: false,
             response_transform: false,
         };
-        let url = MitmInterceptor::build_forward_url("kiro", &config, "/q/generateAssistantResponse");
+        let url =
+            MitmInterceptor::build_forward_url("kiro", &config, "/q/generateAssistantResponse");
         assert_eq!(
             url,
             "https://q.us-east-1.amazonaws.com/q/generateAssistantResponse"
@@ -375,7 +373,8 @@ mod tests {
             request_transform: false,
             response_transform: false,
         };
-        let url = MitmInterceptor::build_forward_url("antigravity", &config, "/streamGenerateContent");
+        let url =
+            MitmInterceptor::build_forward_url("antigravity", &config, "/streamGenerateContent");
         // Both trailing slashes trimmed: base + prefix = one /
         assert_eq!(
             url,

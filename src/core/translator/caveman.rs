@@ -22,9 +22,7 @@ pub const CAVEMAN_LEVELS: [&str; 6] = [
 pub fn get_caveman_prompt(level: &str) -> &'static str {
     match level.trim().to_ascii_lowercase().as_str() {
         "lite" => "Respond tersely. Keep grammar and full sentences but drop filler.",
-        "full" => {
-            "Respond like terse caveman. All technical substance stay exact, only fluff die."
-        }
+        "full" => "Respond like terse caveman. All technical substance stay exact, only fluff die.",
         "ultra" => "Respond ultra-terse. Maximum compression. Telegraphic.",
         "wenyan-lite" => {
             "Respond semi-classical Chinese. Use concise wenyan phrasing where natural, \
@@ -39,9 +37,7 @@ pub fn get_caveman_prompt(level: &str) -> &'static str {
             "Respond in ultra-terse Classical Chinese (wenyan). Maximum compression. \
              Abbreviate. Use classical idioms. Technical terms stay exact."
         }
-        _ => {
-            "Respond like terse caveman. All technical substance stay exact, only fluff die."
-        }
+        _ => "Respond like terse caveman. All technical substance stay exact, only fluff die.",
     }
 }
 
@@ -92,10 +88,11 @@ fn inject_claude(body: &mut Value, prompt: &str) -> bool {
         }
         Value::Array(blocks) => {
             // Check idempotency: if any block already contains the prompt, skip.
-            if blocks
-                .iter()
-                .any(|b| b.get("text").and_then(Value::as_str).is_some_and(|t| t.contains(prompt)))
-            {
+            if blocks.iter().any(|b| {
+                b.get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| t.contains(prompt))
+            }) {
                 return false;
             }
 
@@ -206,13 +203,18 @@ fn inject_openai(body: &mut Value, prompt: &str) -> bool {
     };
 
     // Try to find existing system/developer message
-    let messages = fields.entry("messages").or_insert_with(|| Value::Array(vec![]));
+    let messages = fields
+        .entry("messages")
+        .or_insert_with(|| Value::Array(vec![]));
     let Some(arr) = messages.as_array_mut() else {
         return false;
     };
 
     if let Some(sys_msg) = arr.iter_mut().find(|m| {
-        matches!(m.get("role").and_then(Value::as_str), Some("system" | "developer"))
+        matches!(
+            m.get("role").and_then(Value::as_str),
+            Some("system" | "developer")
+        )
     }) {
         append_to_message(sys_msg, prompt)
     } else {
