@@ -87,9 +87,7 @@ pub use qwen::{QwenExecutionRequest, QwenExecutor, QwenExecutorError, QwenExecut
 pub use vertex::{
     VertexExecutionRequest, VertexExecutor, VertexExecutorError, VertexExecutorResponse,
 };
-pub use xai::{
-    XaiExecutionRequest, XaiExecutor, XaiExecutorError, XaiExecutorResponse,
-};
+pub use xai::{XaiExecutionRequest, XaiExecutor, XaiExecutorError, XaiExecutorResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutorKind {

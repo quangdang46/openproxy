@@ -22,66 +22,104 @@ fn expected_scopes(provider: &str) -> &'static [&'static str] {
         "codex" => &["openid", "profile", "email", "offline_access"],
         "gitlab" => &["api", "read_user"],
         "github" => &["read:user"],
-        "kiro" => &["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"],
+        "kiro" => &[
+            "codewhisperer:completions",
+            "codewhisperer:analysis",
+            "codewhisperer:conversations",
+        ],
         _ => &[],
     }
 }
 
 fn assert_scopes_match(cfg: &crate::oauth::OAuthProviderConfig, expected: &[&str]) {
-    assert_eq!(cfg.scopes, expected,
+    assert_eq!(
+        cfg.scopes, expected,
         "Unexpected scopes for provider `{}` — expected {expected:?} got {:?}",
-        cfg.id, cfg.scopes);
+        cfg.id, cfg.scopes
+    );
 }
 
 #[test]
 fn test_scopes_match_provider_data() {
     // Verify actual scope strings from providers.rs match expected
     let tests: &[(&str, &[&str])] = &[
-        ("claude", &["org:create_api_key", "user:profile", "user:inference"]),
+        (
+            "claude",
+            &["org:create_api_key", "user:profile", "user:inference"],
+        ),
         ("codex", &["openid", "profile", "email", "offline_access"]),
         ("gitlab", &["api", "read_user"]),
         ("github", &["read:user"]),
-        ("kiro", &["codewhisperer:completions", "codewhisperer:analysis", "codewhisperer:conversations"]),
+        (
+            "kiro",
+            &[
+                "codewhisperer:completions",
+                "codewhisperer:analysis",
+                "codewhisperer:conversations",
+            ],
+        ),
     ];
     for (id, scopes) in tests {
         let cfg = providers::get_config(id).unwrap();
-        assert_eq!(cfg.scopes, *scopes,
-            "Scopes mismatch for `{id}` — expected {scopes:?} got {:?}", cfg.scopes);
+        assert_eq!(
+            cfg.scopes, *scopes,
+            "Scopes mismatch for `{id}` — expected {scopes:?} got {:?}",
+            cfg.scopes
+        );
     }
 }
 
 fn assert_auth_url_shape(url: &str, expected_prefix: &str, expected_client_id: &str) {
-    assert!(url.starts_with(expected_prefix),
-        "URL should start with `{expected_prefix}`, got `{url}`");
+    assert!(
+        url.starts_with(expected_prefix),
+        "URL should start with `{expected_prefix}`, got `{url}`"
+    );
     assert!(url.contains("client_id="), "URL should contain client_id");
-    assert!(url.contains(expected_client_id),
-        "URL should contain client_id `{expected_client_id}`, got `{url}`");
-    assert!(url.contains("redirect_uri="), "URL should contain redirect_uri");
+    assert!(
+        url.contains(expected_client_id),
+        "URL should contain client_id `{expected_client_id}`, got `{url}`"
+    );
+    assert!(
+        url.contains("redirect_uri="),
+        "URL should contain redirect_uri"
+    );
     assert!(url.contains("state="), "URL should contain state for CSRF");
 }
 
 fn assert_scopes_in_url(url: &str, scopes: &[&str]) {
     // Scopes in URL are URL-encoded (%3A for colon, + for space)
-    let url_encoded = &url
-        .replace("%3A", ":")
-        .replace('+', " ");
+    let url_encoded = &url.replace("%3A", ":").replace('+', " ");
     for scope in scopes {
-        assert!(url_encoded.contains(scope),
-            "URL should contain scope `{scope}`, url=`{url}`");
+        assert!(
+            url_encoded.contains(scope),
+            "URL should contain scope `{scope}`, url=`{url}`"
+        );
     }
 }
 
 fn url_decoded_scope(url: &str) -> String {
-    url
-        .split("scope=").nth(1).unwrap_or("")
-        .split('&').next().unwrap_or("")
+    url.split("scope=")
+        .nth(1)
+        .unwrap_or("")
+        .split('&')
+        .next()
+        .unwrap_or("")
         .replace("%3A", ":")
         .replace('+', " ")
 }
 
 const ALL_PROVIDERS: &[&str] = &[
-    "claude", "codex", "gitlab", "github", "kiro",
-    "kimi-coding", "kilocode", "codebuddy", "qwen", "iflow", "cline",
+    "claude",
+    "codex",
+    "gitlab",
+    "github",
+    "kiro",
+    "kimi-coding",
+    "kilocode",
+    "codebuddy",
+    "qwen",
+    "iflow",
+    "cline",
 ];
 
 // ─── PKCE provider auth URL tests ──────────────────────────────────────────
@@ -91,10 +129,17 @@ fn test_claude_auth_url() {
     let cfg = providers::claude();
     assert_scopes_match(&cfg, expected_scopes("claude"));
     assert!(cfg.uses_pkce);
-    let url = cfg.build_auth_url("9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-        "http://localhost:4623/oauth/callback", "st", "ch");
-    assert_auth_url_shape(&url, expected_auth_url_prefix("claude"),
-        "9d1c250a-e61b-44d9-88ed-5944d1962f5e");
+    let url = cfg.build_auth_url(
+        "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+        "http://localhost:4623/oauth/callback",
+        "st",
+        "ch",
+    );
+    assert_auth_url_shape(
+        &url,
+        expected_auth_url_prefix("claude"),
+        "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+    );
     assert_scopes_in_url(&url, expected_scopes("claude"));
     assert!(url.contains("code_challenge=ch"));
     assert!(url.contains("code_challenge_method=S256"));
@@ -105,10 +150,17 @@ fn test_codex_auth_url() {
     let cfg = providers::codex();
     assert_scopes_match(&cfg, expected_scopes("codex"));
     assert!(cfg.uses_pkce);
-    let url = cfg.build_auth_url("app_EMoamEEZ73f0CkXaXp7hrann",
-        "http://localhost:4623/oauth/callback", "st", "ch");
-    assert_auth_url_shape(&url, expected_auth_url_prefix("codex"),
-        "app_EMoamEEZ73f0CkXaXp7hrann");
+    let url = cfg.build_auth_url(
+        "app_EMoamEEZ73f0CkXaXp7hrann",
+        "http://localhost:4623/oauth/callback",
+        "st",
+        "ch",
+    );
+    assert_auth_url_shape(
+        &url,
+        expected_auth_url_prefix("codex"),
+        "app_EMoamEEZ73f0CkXaXp7hrann",
+    );
     assert_scopes_in_url(&url, expected_scopes("codex"));
     assert!(url.contains("originator=codex_cli_rs"));
 }
@@ -118,8 +170,12 @@ fn test_gitlab_auth_url() {
     let cfg = providers::gitlab();
     assert_scopes_match(&cfg, expected_scopes("gitlab"));
     assert!(cfg.uses_pkce);
-    let url = cfg.build_auth_url("openproxy",
-        "http://localhost:4623/oauth/callback", "st", "ch");
+    let url = cfg.build_auth_url(
+        "openproxy",
+        "http://localhost:4623/oauth/callback",
+        "st",
+        "ch",
+    );
     assert_auth_url_shape(&url, expected_auth_url_prefix("gitlab"), "openproxy");
     assert_scopes_in_url(&url, expected_scopes("gitlab"));
     assert!(url.contains("code_challenge=ch"));
@@ -188,7 +244,11 @@ fn test_pkce_verifier_default_is_32_bytes() {
 fn test_pkce_verifier_xai_is_96_bytes() {
     let v = pkce::generate_code_verifier_with_len(96);
     // 96 random bytes -> 128 base64url chars (96*4/3 = 128)
-    assert_eq!(v.len(), 128, "96-byte verifier should be 128 base64url chars");
+    assert_eq!(
+        v.len(),
+        128,
+        "96-byte verifier should be 128 base64url chars"
+    );
 }
 
 #[test]
