@@ -1,10 +1,44 @@
-# v0.4.16 (2026-05-04)
+# v0.2.0 (2026-06-11)
 
-## Features
-- Skills system: manage and execute custom AI skills
+## Major: 9router parity — 24 features
 
-## Fixes
-- Fix input fields in tool cards
+### Auth per model
+- Rewrite OAuth provider constants — single source of truth in `src/oauth/providers.rs`
+  (claude, codex, github, kiro, qwen, iflow, kimi-coding, kilocode, cline, gitlab,
+  codebuddy, openai-native, gitlab-selfhost)
+- Add 5 missing OAuth services: xAI (Grok), Gemini CLI, Antigravity, OpenAI native, Qoder
+- Kiro 5-method auth: AWS Builder ID, IAM Identity Center, Google/GitHub social, import token
+- Token refresh dedup (anti-`refresh_token_reused`) with per-provider `REFRESH_LEAD_MS`
+- Cursor import service + jyh checksum algorithm
+
+### Upstream executors
+- Kiro executor -> AWS CodeWhisperer (was dead api.kiro.ai/v1)
+- Antigravity executor: Client-Metadata + projectId cache
+- Gemini CLI executor: Bearer auth + Client-Metadata
+- xAI executor: Bearer proxy via api.x.ai/v1
+
+### CLI tools setup
+- Codex settings endpoint
+- Cursor: guide-only steps with warnings (Pro + cloud required)
+- Continue: JSON merge into config.json
+- Roo, Droid, OpenClaw: VSCode globalState / one-click apply
+- Verify/fix 6 existing modules (claude, cline, kilo, hermes, cowork)
+
+### Translator
+- Caveman prompt injection: 6 levels, format-aware
+- Format::CommandCode added
+- MITM domains + 3 IDE model aliases verified
+
+### Quality
+- 807 tests passing, CI green on Linux + macOS
+- OAuth URLs match 9router byte-for-byte
+
+---
+
+# v0.1.0 (2026-06-07)
+
+Initial openproxy release. Single-binary AI router.<!-- keep existing content below -->
+
 
 # v0.4.14 (2026-05-03)
 
