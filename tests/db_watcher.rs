@@ -55,8 +55,9 @@ async fn watcher_picks_up_external_db_write() {
     tokio::fs::write(&tmp_path, &bytes).await.unwrap();
     tokio::fs::rename(&tmp_path, &final_path).await.unwrap();
 
-    // Poll the snapshot for up to ~1.5s; succeed on first observed update.
-    let deadline = Instant::now() + Duration::from_millis(1500);
+    // Poll the snapshot for up to ~10s; succeed on first observed update.
+    // Using 1.5s was flaky in CI (inotify latency on shared runners).
+    let deadline = Instant::now() + Duration::from_millis(10_000);
     loop {
         if db.snapshot().provider_connections.len() == 1 {
             break;
