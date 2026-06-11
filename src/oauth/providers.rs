@@ -295,6 +295,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "gitlab" => Some(gitlab()),
         "codebuddy" => Some(codebuddy()),
         "openai-native" => Some(openai_native()),
+        "xai" | "gemini-cli" | "antigravity" | "openai" => None,
         _ => None,
     }
 }
