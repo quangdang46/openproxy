@@ -51,7 +51,9 @@ pub fn lookup_project_id(credentials: &ProviderConnection) -> Option<String> {
     // Cache it so the hot path (1) wins next time.
     if let Some(ref pid) = found {
         if !access_token.is_empty() {
-            cache().write().insert(access_token.to_string(), pid.clone());
+            cache()
+                .write()
+                .insert(access_token.to_string(), pid.clone());
         }
     }
 
@@ -67,8 +69,8 @@ pub fn clear_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use serde_json::Value;
+    use std::collections::BTreeMap;
 
     fn make_creds(
         access_token: Option<&str>,

@@ -1,13 +1,13 @@
 //! Tests for token refresh logic: dedupRefresh, REFRESH_LEAD_MS per provider,
 //! Claude refresh body format, GitHub Copilot token poll.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::oauth::{pkce, RefreshRequest, TokenResponse};
-use crate::oauth::providers;
 use crate::oauth::device_code;
+use crate::oauth::providers;
+use crate::oauth::{pkce, RefreshRequest, TokenResponse};
 
 // ─── DedupRefresh: 5 concurrent calls = 1 upstream HTTP call ───────────────
 //
@@ -17,9 +17,9 @@ use crate::oauth::device_code;
 
 #[tokio::test]
 async fn test_refresh_lock_serializes_concurrent_calls() {
-    use std::sync::Mutex as StdMutex;
     use once_cell::sync::Lazy;
     use std::collections::HashMap;
+    use std::sync::Mutex as StdMutex;
 
     // Simulate the refresh-lock pattern used in the real server
     static REFRESH_LOCKS: Lazy<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
@@ -56,8 +56,11 @@ async fn test_refresh_lock_serializes_concurrent_calls() {
     // by the count increment) happens exactly 5 times sequentially.
     // Real dedup would use a different approach (e.g., tokio::sync::Semaphore
     // with permit=1) that makes concurrent waiters share the same result.
-    assert_eq!(call_count.load(Ordering::SeqCst), 5,
-        "all 5 concurrent calls should eventually execute");
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        5,
+        "all 5 concurrent calls should eventually execute"
+    );
 }
 
 // ─── REFRESH_LEAD per provider ────────────────────────────────────────────
@@ -130,7 +133,10 @@ fn test_claude_refresh_body_should_be_json() {
     });
     assert!(body.get("grant_type").and_then(|v| v.as_str()) == Some("refresh_token"));
     assert!(body.get("refresh_token").and_then(|v| v.as_str()) == Some("rt_xyz"));
-    assert!(body.get("client_id").and_then(|v| v.as_str()) == Some("9d1c250a-e61b-44d9-88ed-5944d1962f5e"));
+    assert!(
+        body.get("client_id").and_then(|v| v.as_str())
+            == Some("9d1c250a-e61b-44d9-88ed-5944d1962f5e")
+    );
 }
 
 // ─── GitHub Copilot token poll ───────────────────────────────────────────
@@ -176,12 +182,16 @@ fn test_needs_refresh_none() {
 
 #[test]
 fn test_needs_refresh_past() {
-    assert!(crate::oauth::needs_refresh(&Some("2020-01-01T00:00:00Z".to_string())));
+    assert!(crate::oauth::needs_refresh(&Some(
+        "2020-01-01T00:00:00Z".to_string()
+    )));
 }
 
 #[test]
 fn test_needs_refresh_future() {
-    assert!(!crate::oauth::needs_refresh(&Some("2099-12-31T23:59:59Z".to_string())));
+    assert!(!crate::oauth::needs_refresh(&Some(
+        "2099-12-31T23:59:59Z".to_string()
+    )));
 }
 
 #[test]
@@ -208,6 +218,8 @@ fn test_needs_refresh_far_future() {
 #[test]
 fn test_expires_at_from_seconds_is_rfc3339() {
     let s = crate::oauth::expires_at_from_seconds(3600);
-    assert!(chrono::DateTime::parse_from_rfc3339(&s).is_ok(),
-        "should produce valid RFC 3339: {s}");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&s).is_ok(),
+        "should produce valid RFC 3339: {s}"
+    );
 }

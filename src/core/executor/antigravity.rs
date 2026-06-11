@@ -27,8 +27,8 @@ use crate::core::config::app_constants::{
     ag_chat_user_agent, cloud_code_api, load_code_assist_metadata, AG_DEFAULT_TOOLS,
     INTERNAL_REQUEST_HEADER_NAME, INTERNAL_REQUEST_HEADER_VALUE,
 };
-use crate::core::utils::project_id_cache;
 use crate::core::proxy::ProxyTarget;
+use crate::core::utils::project_id_cache;
 use crate::core::utils::session_manager::derive_session_id;
 use crate::types::{ProviderConnection, ProviderNode};
 
@@ -203,10 +203,7 @@ impl AntigravityExecutor {
     ///    from the response, cache it, and return.
     /// 3. Returns an empty string if the lookup fails (caller should
     ///    proceed without a project id in that case).
-    pub async fn get_project_id(
-        connection_id: &str,
-        access_token: &str,
-    ) -> String {
+    pub async fn get_project_id(connection_id: &str, access_token: &str) -> String {
         // Check cache.
         if let Some(pid) = project_id_cache::get_cached_project_id(connection_id) {
             return pid;
@@ -686,7 +683,11 @@ impl AntigravityExecutor {
             .unwrap_or("");
         let project_id = Self::get_project_id(connection_id, &access_token).await;
         if !project_id.is_empty() {
-            if let Some(req) = request.body.get_mut("request").and_then(|v| v.as_object_mut()) {
+            if let Some(req) = request
+                .body
+                .get_mut("request")
+                .and_then(|v| v.as_object_mut())
+            {
                 req.insert("projectId".into(), Value::String(project_id.clone()));
             }
         }
@@ -958,7 +959,9 @@ mod tests {
             Some("google-api-nodejs-client/9.15.1")
         );
         assert_eq!(
-            headers.get("X-Goog-Api-Client").and_then(|v| v.to_str().ok()),
+            headers
+                .get("X-Goog-Api-Client")
+                .and_then(|v| v.to_str().ok()),
             Some("google-cloud-sdk vscode_cloudshelleditor/0.1")
         );
         // Client-Metadata should be valid JSON.

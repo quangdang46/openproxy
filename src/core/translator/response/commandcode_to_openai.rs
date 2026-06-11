@@ -4,8 +4,8 @@
 //! Matches the registry's ResponseTransformFn signature:
 //!   fn(chunk: &[u8], state: &mut ResponseTransformState) -> Vec<String>
 
+use crate::core::translator::registry::{CommandCodeResponseState, ResponseTransformState};
 use serde_json::Value;
-use crate::core::translator::registry::{ResponseTransformState, CommandCodeResponseState};
 
 fn map_finish_reason(reason: &str) -> &str {
     match reason {
@@ -22,7 +22,10 @@ fn ensure_state_initialized(state: &mut CommandCodeResponseState, model_hint: Op
     if state.response_id.is_some() {
         return;
     }
-    state.response_id = Some(format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis()));
+    state.response_id = Some(format!(
+        "chatcmpl-{}",
+        chrono::Utc::now().timestamp_millis()
+    ));
     state.created = Some(chrono::Utc::now().timestamp());
     state.model = Some(model_hint.unwrap_or("commandcode").to_string());
     state.chunk_index = 0;
@@ -54,9 +57,17 @@ fn make_chunk_line(
     // Attach usage on the final chunk if available
     if finish_reason.is_some() {
         if let Some(usage) = &state.usage {
-            let input_tokens = usage.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let output_tokens = usage.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let total = usage.get("totalTokens").and_then(|v| v.as_u64())
+            let input_tokens = usage
+                .get("inputTokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output_tokens = usage
+                .get("outputTokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total = usage
+                .get("totalTokens")
+                .and_then(|v| v.as_u64())
                 .unwrap_or(input_tokens + output_tokens);
             obj["usage"] = serde_json::json!({
                 "prompt_tokens": input_tokens,
@@ -70,10 +81,7 @@ fn make_chunk_line(
     format!("data: {}\n\n", json_str)
 }
 
-fn process_event(
-    event: &Value,
-    state: &mut CommandCodeResponseState,
-) -> Vec<String> {
+fn process_event(event: &Value, state: &mut CommandCodeResponseState) -> Vec<String> {
     let event_type = event.get("type").and_then(|v| v.as_str());
     if event_type.is_none() {
         return vec![];
@@ -132,10 +140,9 @@ fn process_event(
             let idx = if let Some(existing) = state.tool_index_by_id.get(id) {
                 existing.as_u64().unwrap_or(tool_index)
             } else {
-                state.tool_index_by_id.insert(
-                    id.to_string(),
-                    Value::Number(tool_index.into()),
-                );
+                state
+                    .tool_index_by_id
+                    .insert(id.to_string(), Value::Number(tool_index.into()));
                 let idx = tool_index;
                 state.tool_index += 1;
                 idx
@@ -200,10 +207,9 @@ fn process_event(
             if state.tool_index_by_id.get(id).is_some() {
                 return vec![];
             }
-            state.tool_index_by_id.insert(
-                id.to_string(),
-                Value::Number(tool_index.into()),
-            );
+            state
+                .tool_index_by_id
+                .insert(id.to_string(), Value::Number(tool_index.into()));
             state.tool_index += 1;
 
             let args_str = if let Some(s) = event.get("input").and_then(|v| v.as_str()) {
@@ -303,7 +309,8 @@ fn process_event(
                 .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "unknown".to_string()))
                 .unwrap_or_else(|| "unknown".to_string());
             // Text delta with error content
-            let delta = serde_json::json!({"content": format!("\n\n[CommandCode error: {}]", err_str)});
+            let delta =
+                serde_json::json!({"content": format!("\n\n[CommandCode error: {}]", err_str)});
             out.push(make_chunk_line(state, delta, None));
             // Final stop chunk
             out.push(make_chunk_line(state, serde_json::json!({}), Some("stop")));

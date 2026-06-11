@@ -564,9 +564,7 @@ pub async fn refresh_cline_token(refresh_token: &str) -> Result<RefreshResult, S
     let expires_in = data
         .get("expiresAt")
         .and_then(Value::as_str)
-        .and_then(|expires_at| {
-            chrono::DateTime::parse_from_rfc3339(expires_at).ok()
-        })
+        .and_then(|expires_at| chrono::DateTime::parse_from_rfc3339(expires_at).ok())
         .map(|expires_at| (expires_at.timestamp() - chrono::Utc::now().timestamp()).max(1));
 
     Ok(RefreshResult {
@@ -620,10 +618,7 @@ pub async fn refresh_qoder_token(_refresh_token: &str) -> Result<RefreshResult, 
 // ---------------------------------------------------------------------------
 
 /// Send a form-urlencoded POST and parse the JSON response into a RefreshResult.
-async fn refresh_form_token(
-    url: &str,
-    fields: Vec<(&str, &str)>,
-) -> Result<RefreshResult, String> {
+async fn refresh_form_token(url: &str, fields: Vec<(&str, &str)>) -> Result<RefreshResult, String> {
     let client = reqwest::Client::new();
     let resp = client
         .post(url)

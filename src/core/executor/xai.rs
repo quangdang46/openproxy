@@ -98,10 +98,7 @@ impl XaiExecutor {
     ) -> Result<HeaderMap, XaiExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static("grok-cli/9router"),
-        );
+        headers.insert(USER_AGENT, HeaderValue::from_static("grok-cli/9router"));
 
         // Auto-detect: prefer apiKey, fall back to accessToken
         let token = credentials

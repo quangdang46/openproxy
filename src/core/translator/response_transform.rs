@@ -578,7 +578,11 @@ fn map_cc_finish_reason(reason: &str) -> &str {
     }
 }
 
-fn make_cc_chunk_line(state: &CommandCodeStreamingState, delta: &serde_json::Value, finish_reason: Option<&str>) -> String {
+fn make_cc_chunk_line(
+    state: &CommandCodeStreamingState,
+    delta: &serde_json::Value,
+    finish_reason: Option<&str>,
+) -> String {
     let response_id = state.response_id.as_deref().unwrap_or("unknown");
     let created = state.created.unwrap_or(0);
     let model = state.model.as_deref().unwrap_or("commandcode");
@@ -597,9 +601,17 @@ fn make_cc_chunk_line(state: &CommandCodeStreamingState, delta: &serde_json::Val
 
     if finish_reason.is_some() {
         if let Some(usage) = &state.usage {
-            let input_tokens = usage.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let output_tokens = usage.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let total = usage.get("totalTokens").and_then(|v| v.as_u64())
+            let input_tokens = usage
+                .get("inputTokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let output_tokens = usage
+                .get("outputTokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total = usage
+                .get("totalTokens")
+                .and_then(|v| v.as_u64())
                 .unwrap_or(input_tokens + output_tokens);
             obj["usage"] = serde_json::json!({
                 "prompt_tokens": input_tokens,
@@ -650,9 +662,15 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
 
         // Init state
         if self.state.response_id.is_none() {
-            self.state.response_id = Some(format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis()));
+            self.state.response_id = Some(format!(
+                "chatcmpl-{}",
+                chrono::Utc::now().timestamp_millis()
+            ));
             self.state.created = Some(chrono::Utc::now().timestamp());
-            self.state.model = event.get("model").and_then(|v| v.as_str()).map(|s| s.to_string());
+            self.state.model = event
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             self.state.chunk_index = 0;
             self.state.tool_index = 0;
             self.state.tool_index_by_id = serde_json::Map::new();
@@ -670,7 +688,8 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
 
         match event_type {
             "text-delta" => {
-                let text = event.get("text")
+                let text = event
+                    .get("text")
                     .or_else(|| event.get("delta"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
@@ -699,17 +718,17 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
                 self.state.chunk_index += 1;
             }
             "tool-input-start" => {
-                let id = event.get("id")
+                let id = event
+                    .get("id")
                     .or_else(|| event.get("toolCallId"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let idx = if let Some(existing) = self.state.tool_index_by_id.get(id) {
                     existing.as_u64().unwrap_or(tool_index)
                 } else {
-                    self.state.tool_index_by_id.insert(
-                        id.to_string(),
-                        serde_json::Value::Number(tool_index.into()),
-                    );
+                    self.state
+                        .tool_index_by_id
+                        .insert(id.to_string(), serde_json::Value::Number(tool_index.into()));
                     let idx = tool_index;
                     self.state.tool_index += 1;
                     idx
@@ -744,7 +763,8 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
                 self.state.chunk_index += 1;
             }
             "tool-input-delta" => {
-                let id = event.get("id")
+                let id = event
+                    .get("id")
                     .or_else(|| event.get("toolCallId"))
                     .and_then(|v| v.as_str());
                 if id.is_none() {
@@ -773,17 +793,18 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
                 if self.state.tool_index_by_id.get(id).is_some() {
                     return vec![];
                 }
-                self.state.tool_index_by_id.insert(
-                    id.to_string(),
-                    serde_json::Value::Number(tool_index.into()),
-                );
+                self.state
+                    .tool_index_by_id
+                    .insert(id.to_string(), serde_json::Value::Number(tool_index.into()));
                 self.state.tool_index += 1;
 
                 let args_str = if let Some(s) = event.get("input").and_then(|v| v.as_str()) {
                     s.to_string()
                 } else {
                     serde_json::to_string(
-                        &event.get("input").cloned()
+                        &event
+                            .get("input")
+                            .cloned()
                             .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
                     )
                     .unwrap_or_else(|_| "{}".to_string())
@@ -840,9 +861,14 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
                 let err_str = err_val
                     .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "unknown".to_string()))
                     .unwrap_or_else(|| "unknown".to_string());
-                let delta = serde_json::json!({"content": format!("\n\n[CommandCode error: {}]", err_str)});
+                let delta =
+                    serde_json::json!({"content": format!("\n\n[CommandCode error: {}]", err_str)});
                 out.push(make_cc_chunk_line(&self.state, &delta, None));
-                out.push(make_cc_chunk_line(&self.state, &serde_json::json!({}), Some("stop")));
+                out.push(make_cc_chunk_line(
+                    &self.state,
+                    &serde_json::json!({}),
+                    Some("stop"),
+                ));
                 self.state.finish_reason = Some("stop".to_string());
             }
             _ => {}
@@ -857,7 +883,11 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
 
     fn matches_content_type(&self, content_type: Option<&str>) -> bool {
         content_type
-            .map(|ct| ct.contains("text/event-stream") || ct.contains("application/json") || ct.contains("application/x-ndjson"))
+            .map(|ct| {
+                ct.contains("text/event-stream")
+                    || ct.contains("application/json")
+                    || ct.contains("application/x-ndjson")
+            })
             .unwrap_or(false)
     }
 }

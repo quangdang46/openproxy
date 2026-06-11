@@ -18,17 +18,26 @@ use crate::types::Settings;
 
 #[test]
 fn test_compression_level_parse_lite() {
-    assert_eq!("lite".parse::<CompressionLevel>(), Ok(CompressionLevel::Lite));
+    assert_eq!(
+        "lite".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Lite)
+    );
 }
 
 #[test]
 fn test_compression_level_parse_full() {
-    assert_eq!("full".parse::<CompressionLevel>(), Ok(CompressionLevel::Full));
+    assert_eq!(
+        "full".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Full)
+    );
 }
 
 #[test]
 fn test_compression_level_parse_ultra() {
-    assert_eq!("ultra".parse::<CompressionLevel>(), Ok(CompressionLevel::Ultra));
+    assert_eq!(
+        "ultra".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Ultra)
+    );
 }
 
 #[test]
@@ -38,17 +47,38 @@ fn test_compression_level_parse_invalid() {
 
 #[test]
 fn test_compression_level_parse_case_insensitive() {
-    assert_eq!("LITE".parse::<CompressionLevel>(), Ok(CompressionLevel::Lite));
-    assert_eq!("FULL".parse::<CompressionLevel>(), Ok(CompressionLevel::Full));
-    assert_eq!("ULTRA".parse::<CompressionLevel>(), Ok(CompressionLevel::Ultra));
-    assert_eq!("LiTe".parse::<CompressionLevel>(), Ok(CompressionLevel::Lite));
+    assert_eq!(
+        "LITE".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Lite)
+    );
+    assert_eq!(
+        "FULL".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Full)
+    );
+    assert_eq!(
+        "ULTRA".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Ultra)
+    );
+    assert_eq!(
+        "LiTe".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Lite)
+    );
 }
 
 #[test]
 fn test_compression_level_parse_or_default() {
-    assert_eq!(CompressionLevel::parse_or_default("lite"), CompressionLevel::Lite);
-    assert_eq!(CompressionLevel::parse_or_default("invalid"), CompressionLevel::Full);
-    assert_eq!(CompressionLevel::parse_or_default("ultra"), CompressionLevel::Ultra);
+    assert_eq!(
+        CompressionLevel::parse_or_default("lite"),
+        CompressionLevel::Lite
+    );
+    assert_eq!(
+        CompressionLevel::parse_or_default("invalid"),
+        CompressionLevel::Full
+    );
+    assert_eq!(
+        CompressionLevel::parse_or_default("ultra"),
+        CompressionLevel::Ultra
+    );
 }
 
 #[test]
@@ -123,7 +153,10 @@ fn test_inject_caveman_openai_system_message() {
     let messages = body["messages"].as_array().unwrap();
     assert_eq!(messages[0]["role"], "system");
     assert!(messages[0]["content"].as_str().unwrap().contains("helpful"));
-    assert!(messages[0]["content"].as_str().unwrap().contains("Respond terse"));
+    assert!(messages[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Respond terse"));
 }
 
 #[test]
@@ -151,8 +184,14 @@ fn test_inject_caveman_openai_instructions() {
     let result = inject_caveman_prompt(&mut body, CompressionLevel::Ultra);
     assert!(result);
 
-    assert!(body["instructions"].as_str().unwrap().contains("Some existing"));
-    assert!(body["instructions"].as_str().unwrap().contains("Respond ultra-terse"));
+    assert!(body["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("Some existing"));
+    assert!(body["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("Respond ultra-terse"));
 }
 
 // =============================================================================
@@ -186,7 +225,10 @@ fn test_inject_caveman_claude_system_blocks() {
     let blocks = body["system"].as_array().unwrap();
     assert_eq!(blocks[0]["text"], "You are Claude.");
     // First block should be text, second block should have prompt
-    assert!(blocks[blocks.len() - 1]["text"].as_str().unwrap().contains("caveman"));
+    assert!(blocks[blocks.len() - 1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("caveman"));
 }
 
 // =============================================================================
@@ -205,9 +247,14 @@ fn test_inject_caveman_gemini_system_instruction_object() {
     let result = inject_caveman_prompt(&mut body, CompressionLevel::Lite);
     assert!(result);
 
-    let parts = body["request"]["systemInstruction"]["parts"].as_array().unwrap();
+    let parts = body["request"]["systemInstruction"]["parts"]
+        .as_array()
+        .unwrap();
     assert_eq!(parts[0]["text"], "You are Gemini.");
-    assert!(parts[parts.len() - 1]["text"].as_str().unwrap().contains("Respond terse"));
+    assert!(parts[parts.len() - 1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Respond terse"));
 }
 
 #[test]
@@ -222,9 +269,14 @@ fn test_inject_caveman_gemini_system_instruction_string() {
     let result = inject_caveman_prompt(&mut body, CompressionLevel::Full);
     assert!(result);
 
-    let parts = body["request"]["systemInstruction"]["parts"].as_array().unwrap();
+    let parts = body["request"]["systemInstruction"]["parts"]
+        .as_array()
+        .unwrap();
     assert_eq!(parts[0]["text"], "You are Gemini.");
-    assert!(parts[parts.len() - 1]["text"].as_str().unwrap().contains("caveman"));
+    assert!(parts[parts.len() - 1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("caveman"));
 }
 
 #[test]
@@ -257,7 +309,10 @@ fn test_inject_caveman_responses_api_input() {
     assert!(result);
 
     let input = body["input"].as_array().unwrap();
-    assert!(input[0]["content"][0]["text"].as_str().unwrap().contains("Hello"));
+    assert!(input[0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Hello"));
 }
 
 // =============================================================================
@@ -478,8 +533,14 @@ fn test_should_auto_apply_caveman_null_content() {
 
 #[test]
 fn test_compression_level_parse_with_whitespace() {
-    assert_eq!(" lite ".parse::<CompressionLevel>(), Ok(CompressionLevel::Lite));
-    assert_eq!("  full  ".parse::<CompressionLevel>(), Ok(CompressionLevel::Full));
+    assert_eq!(
+        " lite ".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Lite)
+    );
+    assert_eq!(
+        "  full  ".parse::<CompressionLevel>(),
+        Ok(CompressionLevel::Full)
+    );
 }
 
 // =============================================================================
@@ -500,43 +561,45 @@ fn test_context_window_inference_claude() {
                 { "role": "user", "content": "x".repeat(10000) }
             ]
         });
-        assert!(should_auto_apply_caveman(&body, model), "Failed for {}", model);
+        assert!(
+            should_auto_apply_caveman(&body, model),
+            "Failed for {}",
+            model
+        );
     }
 }
 
 #[test]
 fn test_context_window_inference_gemini_large() {
-    let models = vec![
-        "gemini-1.5-pro",
-        "gemini-2.0-flash",
-        "gemini-2.5-pro",
-    ];
+    let models = vec!["gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.5-pro"];
     for model in models {
         let body = json!({
             "messages": [
                 { "role": "user", "content": "x".repeat(10000) }
             ]
         });
-        assert!(should_auto_apply_caveman(&body, model), "Failed for {}", model);
+        assert!(
+            should_auto_apply_caveman(&body, model),
+            "Failed for {}",
+            model
+        );
     }
 }
 
 #[test]
 fn test_context_window_inference_openai() {
-    let models = vec![
-        "gpt-4o",
-        "gpt-4.1",
-        "o1-preview",
-        "o3",
-        "o4",
-    ];
+    let models = vec!["gpt-4o", "gpt-4.1", "o1-preview", "o3", "o4"];
     for model in models {
         let body = json!({
             "messages": [
                 { "role": "user", "content": "x".repeat(10000) }
             ]
         });
-        assert!(should_auto_apply_caveman(&body, model), "Failed for {}", model);
+        assert!(
+            should_auto_apply_caveman(&body, model),
+            "Failed for {}",
+            model
+        );
     }
 }
 

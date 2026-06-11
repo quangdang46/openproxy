@@ -64,7 +64,7 @@ impl RequestLogger {
     /// Generate aggregate statistics.
     pub fn get_stats(&self) -> ObservabilityStats {
         let logs = self.logs.lock().unwrap();
-        
+
         let total_requests = logs.len() as u64;
         let mut total_request_tokens = 0u64;
         let mut total_response_tokens = 0u64;

@@ -71,7 +71,8 @@ fn test_is_model_lock_active_no_lock() {
 fn test_is_model_lock_active_active_lock() {
     let mut conn = make_test_connection("acc1");
     let future_time = (now_plus_seconds(300)).to_rfc3339();
-    conn.extra.insert("modelLock_gpt-4".to_string(), Value::String(future_time));
+    conn.extra
+        .insert("modelLock_gpt-4".to_string(), Value::String(future_time));
 
     let now = Utc::now();
     assert!(is_model_lock_active(&conn, "gpt-4", now));
@@ -81,7 +82,8 @@ fn test_is_model_lock_active_active_lock() {
 fn test_is_model_lock_active_expired_lock() {
     let mut conn = make_test_connection("acc1");
     let past_time = (Utc::now() - Duration::hours(1)).to_rfc3339();
-    conn.extra.insert("modelLock_gpt-4".to_string(), Value::String(past_time));
+    conn.extra
+        .insert("modelLock_gpt-4".to_string(), Value::String(past_time));
 
     let now = Utc::now();
     assert!(!is_model_lock_active(&conn, "gpt-4", now));
@@ -91,7 +93,8 @@ fn test_is_model_lock_active_expired_lock() {
 fn test_is_model_lock_active_wrong_model() {
     let mut conn = make_test_connection("acc1");
     let future_time = (now_plus_seconds(300)).to_rfc3339();
-    conn.extra.insert("modelLock_gpt-4".to_string(), Value::String(future_time));
+    conn.extra
+        .insert("modelLock_gpt-4".to_string(), Value::String(future_time));
 
     let now = Utc::now();
     // Lock exists for gpt-4, but we check for gpt-3.5
@@ -102,7 +105,8 @@ fn test_is_model_lock_active_wrong_model() {
 fn test_is_model_lock_active_global_lock() {
     let mut conn = make_test_connection("acc1");
     let future_time = (now_plus_seconds(300)).to_rfc3339();
-    conn.extra.insert(MODEL_LOCK_ALL.to_string(), Value::String(future_time));
+    conn.extra
+        .insert(MODEL_LOCK_ALL.to_string(), Value::String(future_time));
 
     let now = Utc::now();
     // Empty model checks global lock
@@ -503,8 +507,8 @@ fn test_calculate_account_health_with_errors() {
 fn test_calculate_account_health_combined_penalty() {
     let mut conn = make_test_connection("acc1");
     conn.rate_limited_until = Some((now_plus_seconds(300)).to_rfc3339());
-    conn.consecutive_errors = Some(30);  // capped at 30
-    conn.backoff_level = Some(4);        // 4*5=20, capped at 20
+    conn.consecutive_errors = Some(30); // capped at 30
+    conn.backoff_level = Some(4); // 4*5=20, capped at 20
     let now = Utc::now();
     let health = calculate_account_health(&conn, now);
     // 100 - 50 (rate limit) - 30 (errors capped) - 20 (backoff capped) = 0

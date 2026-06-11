@@ -6,9 +6,9 @@
 //! Uses tempfile to simulate home directories so no real config files are
 //! touched.
 
+use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use serde_json::Value;
 
 // ─── claude_settings: writes ANTHROPIC_AUTH_TOKEN, not ANTHROPIC_API_KEY ──
 
@@ -56,12 +56,8 @@ fn test_claude_settings_contains_base_url() {
 
 #[test]
 fn test_claude_settings_contains_model() {
-    let body = crate::cli::tool::build_apply_body(
-        "claude",
-        &Some("sonnet-4".to_string()),
-        None,
-        None,
-    );
+    let body =
+        crate::cli::tool::build_apply_body("claude", &Some("sonnet-4".to_string()), None, None);
     let env = body.get("env").unwrap().as_object().unwrap();
     assert_eq!(
         env.get("ANTHROPIC_MODEL").and_then(Value::as_str),
@@ -88,14 +84,8 @@ fn test_codex_settings_uses_flat_shape() {
         body.get("baseUrl").and_then(Value::as_str),
         Some("http://localhost:4623")
     );
-    assert_eq!(
-        body.get("apiKey").and_then(Value::as_str),
-        Some("op_key")
-    );
-    assert_eq!(
-        body.get("model").and_then(Value::as_str),
-        Some("gpt-4o")
-    );
+    assert_eq!(body.get("apiKey").and_then(Value::as_str), Some("op_key"));
+    assert_eq!(body.get("model").and_then(Value::as_str), Some("gpt-4o"));
 }
 
 #[test]
@@ -114,12 +104,7 @@ fn test_codex_settings_defaults_base_url() {
 
 #[test]
 fn test_codex_settings_no_api_key() {
-    let body = crate::cli::tool::build_apply_body(
-        "codex",
-        &Some("gpt-4o".to_string()),
-        None,
-        None,
-    );
+    let body = crate::cli::tool::build_apply_body("codex", &Some("gpt-4o".to_string()), None, None);
     assert_eq!(body.get("apiKey").and_then(Value::as_str), Some(""));
 }
 
@@ -142,20 +127,47 @@ async fn test_cline_settings_writes_global_state_keys() {
 
     // Simulate what write_cline_settings does
     let mut global_state = serde_json::Map::new();
-    global_state.insert("actModeApiProvider".to_string(), Value::String("openai".to_string()));
-    global_state.insert("planModeApiProvider".to_string(), Value::String("openai".to_string()));
-    global_state.insert("openAiBaseUrl".to_string(), Value::String("http://localhost:4623".to_string()));
-    global_state.insert("openAiModelId".to_string(), Value::String("gpt-4o".to_string()));
-    global_state.insert("planModeOpenAiModelId".to_string(), Value::String("gpt-4o".to_string()));
+    global_state.insert(
+        "actModeApiProvider".to_string(),
+        Value::String("openai".to_string()),
+    );
+    global_state.insert(
+        "planModeApiProvider".to_string(),
+        Value::String("openai".to_string()),
+    );
+    global_state.insert(
+        "openAiBaseUrl".to_string(),
+        Value::String("http://localhost:4623".to_string()),
+    );
+    global_state.insert(
+        "openAiModelId".to_string(),
+        Value::String("gpt-4o".to_string()),
+    );
+    global_state.insert(
+        "planModeOpenAiModelId".to_string(),
+        Value::String("gpt-4o".to_string()),
+    );
 
     let mut secrets = serde_json::Map::new();
-    secrets.insert("openAiApiKey".to_string(), Value::String("op_key".to_string()));
+    secrets.insert(
+        "openAiApiKey".to_string(),
+        Value::String("op_key".to_string()),
+    );
 
-    std::fs::write(&global_state_path, serde_json::to_vec_pretty(&Value::Object(global_state.clone())).unwrap()).unwrap();
-    std::fs::write(&secrets_path, serde_json::to_vec_pretty(&Value::Object(secrets)).unwrap()).unwrap();
+    std::fs::write(
+        &global_state_path,
+        serde_json::to_vec_pretty(&Value::Object(global_state.clone())).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        &secrets_path,
+        serde_json::to_vec_pretty(&Value::Object(secrets)).unwrap(),
+    )
+    .unwrap();
 
     // Verify written keys
-    let written: Value = serde_json::from_reader(std::fs::File::open(&global_state_path).unwrap()).unwrap();
+    let written: Value =
+        serde_json::from_reader(std::fs::File::open(&global_state_path).unwrap()).unwrap();
     let obj = written.as_object().unwrap();
     assert_eq!(obj.len(), 5, "globalState should have 5 keys");
     assert_eq!(
@@ -217,11 +229,7 @@ async fn test_continue_settings_merges_models() {
 
     let mut config: Value =
         serde_json::from_reader(std::fs::File::open(&config_path).unwrap()).unwrap();
-    let models = config
-        .get_mut("models")
-        .unwrap()
-        .as_array_mut()
-        .unwrap();
+    let models = config.get_mut("models").unwrap().as_array_mut().unwrap();
     models.push(new_model);
 
     std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
@@ -232,9 +240,10 @@ async fn test_continue_settings_merges_models() {
     let result_models = result.get("models").unwrap().as_array().unwrap();
     assert_eq!(result_models.len(), 2, "should have 2 models after merge");
 
-    let op_model = result_models.iter().find(|m| {
-        m.get("title").and_then(Value::as_str) == Some("OpenProxy")
-    }).unwrap();
+    let op_model = result_models
+        .iter()
+        .find(|m| m.get("title").and_then(Value::as_str) == Some("OpenProxy"))
+        .unwrap();
     assert_eq!(
         op_model.get("baseUrl").and_then(Value::as_str),
         Some("http://localhost:4623")

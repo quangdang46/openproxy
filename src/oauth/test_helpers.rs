@@ -4,8 +4,15 @@ use crate::oauth::OAuthProviderConfig;
 
 /// The 9 providers known to `providers::get_config`: PKCE + device-code.
 pub const ALL_PROVIDERS: &[&str] = &[
-    "claude", "codex", "gitlab", "xai",
-    "github", "kiro", "kimi-coding", "kilocode", "codebuddy",
+    "claude",
+    "codex",
+    "gitlab",
+    "xai",
+    "github",
+    "kiro",
+    "kimi-coding",
+    "kilocode",
+    "codebuddy",
 ];
 
 /// Provider -> expected scopes (as sorted space-separated string).
@@ -46,11 +53,7 @@ pub fn assert_scopes_match(config: &OAuthProviderConfig, expected: &str) {
     got.sort();
     let mut want: Vec<&str> = expected.split_whitespace().collect();
     want.sort();
-    assert_eq!(
-        got.join(" "),
-        want.join(" "),
-        "scope mismatch"
-    );
+    assert_eq!(got.join(" "), want.join(" "), "scope mismatch");
 }
 
 /// Assert the auth URL starts with the expected prefix and contains client_id.
@@ -81,7 +84,8 @@ pub fn assert_scopes_in_url(url: &str, expected_scopes: &str) {
         .find(|p| p.starts_with("scope="))
         .expect("URL must contain a scope parameter");
     let scope_value = scope_param.strip_prefix("scope=").unwrap_or("");
-    let decoded = urlencoding::decode(scope_value).unwrap_or_else(|_| std::borrow::Cow::Borrowed(scope_value));
+    let decoded = urlencoding::decode(scope_value)
+        .unwrap_or_else(|_| std::borrow::Cow::Borrowed(scope_value));
 
     for scope in expected_scopes.split_whitespace() {
         assert!(
