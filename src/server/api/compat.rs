@@ -363,7 +363,19 @@ fn chat_completion_to_responses_json(source: &Value) -> Value {
     }
 
     if let Some(u) = source.get("usage") {
-        usage = Some(u.clone());
+        let mut mapped = json!({});
+        if let Some(m) = mapped.as_object_mut() {
+            if let Some(v) = u.get("prompt_tokens").and_then(Value::as_u64) {
+                m.insert("input_tokens".into(), json!(v));
+            }
+            if let Some(v) = u.get("completion_tokens").and_then(Value::as_u64) {
+                m.insert("output_tokens".into(), json!(v));
+            }
+            if let Some(v) = u.get("total_tokens").and_then(Value::as_u64) {
+                m.insert("total_tokens".into(), json!(v));
+            }
+        }
+        usage = Some(mapped);
     }
 
     let mut resp = json!({
@@ -827,12 +839,15 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
         let mut skeleton = response_skeleton(state);
         let obj = skeleton.as_object_mut().unwrap();
         obj.insert("status".to_string(), json!("completed"));
+        obj.insert("background".to_string(), json!(false));
+        obj.insert("error".into(), Value::Null);
         if !output.is_empty() {
             obj.insert("output".to_string(), json!(output));
         }
-        if let Some(usage) = usage_in_chunk {
-            obj.insert("usage".to_string(), usage.clone());
-        }
+        // NOTE: usage is intentionally NOT sent in response.completed,
+        // matching 9router's sendCompleted().
+        // Usage tokens come via the final non-streaming response body
+        // or a separate usage event in the Responses API spec.
 
         state.seq += 1;
         frames.push(format_sse_event(
