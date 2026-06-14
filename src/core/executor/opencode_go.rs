@@ -13,17 +13,15 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 const FORBIDDEN_FIELDS: &[&str] = &[
     "client_metadata",
     "client_meta_data",
-    "include",      // Responses API field
-    "reasoning",    // Responses API field
+    "include",   // Responses API field
+    "reasoning", // Responses API field
 ];
 
 // Tool types that Fireworks AI / OCg upstream accepts (only "function")
 const ALLOWED_TOOL_TYPES: &[&str] = &["function"];
 
 // Tool-level fields that Fireworks AI / OCg upstream rejects
-const TOOL_FORBIDDEN_FIELDS: &[&str] = &[
-    "strict",
-];
+const TOOL_FORBIDDEN_FIELDS: &[&str] = &["strict"];
 
 const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 const OPENCODE_GO_CLAUDE_PATH: &str = "/messages";
@@ -227,14 +225,20 @@ impl OpenCodeGoExecutor {
                     }
                     // Extract function name from either nested function:{} or top-level name
                     let fname = tool
-                        .get("function").and_then(|f| f.get("name").and_then(Value::as_str))
+                        .get("function")
+                        .and_then(|f| f.get("name").and_then(Value::as_str))
                         .or_else(|| tool.get("name").and_then(Value::as_str))
                         .unwrap_or("")
                         .to_string();
-                    if fname.is_empty() { continue; }
-                    cleaned.insert("function".into(), serde_json::json!({
-                        "name": fname
-                    }));
+                    if fname.is_empty() {
+                        continue;
+                    }
+                    cleaned.insert(
+                        "function".into(),
+                        serde_json::json!({
+                            "name": fname
+                        }),
+                    );
                     *tool = Value::Object(cleaned);
                 }
             }

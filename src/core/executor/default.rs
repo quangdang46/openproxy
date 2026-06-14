@@ -936,23 +936,41 @@ fn opencode_go_uses_claude_format(model: &str) -> bool {
 ///
 /// Also strips `tool_choice` from OpenAI format and converts it.
 fn convert_openai_tools_to_claude(body: &mut Value) {
-    let Some(obj) = body.as_object_mut() else { return };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
 
     // Convert tools[]
     if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
         let mut claude_tools = Vec::new();
         for tool in tools.drain(..) {
-            let Some(tool_obj) = tool.as_object() else { continue };
+            let Some(tool_obj) = tool.as_object() else {
+                continue;
+            };
             let type_ = tool_obj.get("type").and_then(Value::as_str).unwrap_or("");
             if type_ != "function" {
                 // Skip non-function tools
                 continue;
             }
-            let Some(func) = tool_obj.get("function") else { continue };
-            let name = func.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-            if name.is_empty() { continue; }
-            let description = func.get("description").and_then(Value::as_str).unwrap_or("").to_string();
-            let input_schema = func.get("parameters").cloned()
+            let Some(func) = tool_obj.get("function") else {
+                continue;
+            };
+            let name = func
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let description = func
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let input_schema = func
+                .get("parameters")
+                .cloned()
                 .or_else(|| func.get("input_schema").cloned())
                 .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
 
@@ -986,16 +1004,18 @@ fn convert_openai_tools_to_claude(body: &mut Value) {
     // OpenAI: "none" → Claude: {"type": "none"}
     if let Some(tc) = obj.get("tool_choice") {
         let new_tc = match tc {
-            Value::String(s) => {
-                match s.as_str() {
-                    "required" => Some(serde_json::json!({"type": "any"})),
-                    "none" => Some(serde_json::json!({"type": "none"})),
-                    "auto" => Some(serde_json::json!({"type": "auto"})),
-                    _ => Some(serde_json::json!({"type": "auto"})),
-                }
-            }
+            Value::String(s) => match s.as_str() {
+                "required" => Some(serde_json::json!({"type": "any"})),
+                "none" => Some(serde_json::json!({"type": "none"})),
+                "auto" => Some(serde_json::json!({"type": "auto"})),
+                _ => Some(serde_json::json!({"type": "auto"})),
+            },
             Value::Object(m) => {
-                if let Some(name) = m.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) {
+                if let Some(name) = m
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                {
                     Some(serde_json::json!({"type": "tool", "name": name}))
                 } else {
                     Some(serde_json::json!({"type": "auto"}))
@@ -1013,7 +1033,9 @@ fn convert_openai_tools_to_claude(body: &mut Value) {
 /// - Only keeps tools with type "function"
 /// - Strips "strict" field from function definitions
 fn strip_fireworks_unsupported_tools(body: &mut Value) {
-    let Some(obj) = body.as_object_mut() else { return };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
     if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
         tools.retain(|tool| {
             let t = tool.get("type").and_then(Value::as_str).unwrap_or("");

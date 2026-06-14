@@ -199,7 +199,10 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                                 index
                             ));
                             // Track thinking state for content_block_stop
-                            let block_type = content_block.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+                            let block_type = content_block
+                                .get("type")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("text");
                             if block_type == "thinking" {
                                 self.state.in_thinking = true;
                                 self.state.current_thinking_index = Some(index);
@@ -207,11 +210,9 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                                 self.state.in_thinking = false;
                             }
                         }
-                        AnthropicEvent::ContentBlockDelta {
-                            index,
-                            delta,
-                        } => {
-                            let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+                        AnthropicEvent::ContentBlockDelta { index, delta } => {
+                            let delta_type =
+                                delta.get("type").and_then(|t| t.as_str()).unwrap_or("text");
                             let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
                             match delta_type {
                                 "text_delta" if !text.is_empty() => {
@@ -233,7 +234,9 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                                 }
                                 "input_json_delta" => {
                                     // Tool call arguments — forward as text content
-                                    if let Some(json) = delta.get("partial_json").and_then(|t| t.as_str()) {
+                                    if let Some(json) =
+                                        delta.get("partial_json").and_then(|t| t.as_str())
+                                    {
                                         output_lines.push(format!(
                                             r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
                                             index,
@@ -315,9 +318,7 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
 #[serde(tag = "type")]
 pub enum AnthropicEvent {
     #[serde(rename = "message_start")]
-    MessageStart {
-        message: MessageData,
-    },
+    MessageStart { message: MessageData },
     #[serde(rename = "content_block_start")]
     ContentBlockStart {
         index: usize,
@@ -329,9 +330,7 @@ pub enum AnthropicEvent {
         delta: serde_json::Value,
     },
     #[serde(rename = "content_block_stop")]
-    ContentBlockStop {
-        index: usize,
-    },
+    ContentBlockStop { index: usize },
     #[serde(rename = "message_delta")]
     MessageDelta {
         delta: MessageDeltaData,
