@@ -1541,10 +1541,32 @@ fn normalize_tools(fields: &mut Map<String, Value>) {
     let converted: Vec<Value> = tools
         .into_iter()
         .map(|tool| {
-            let is_already_openai = tool.get("type").and_then(|v| v.as_str()) == Some("function")
-                || tool.get("function").is_some();
-            if is_already_openai {
+            let has_function_field = tool.get("function").is_some();
+            let is_function_type = tool.get("type").and_then(|v| v.as_str()) == Some("function");
+
+            // Already proper OpenAI format {type:"function", function:{name,...}}
+            if has_function_field {
                 return tool;
+            }
+
+            // type:"function" but missing function:{} (e.g. flat Claude-style)
+            // → convert to proper OpenAI format
+            if is_function_type {
+                let name = tool.get("name").cloned().unwrap_or(Value::Null);
+                let description = tool.get("description").cloned().unwrap_or_default();
+                let parameters = tool
+                    .get("parameters")
+                    .cloned()
+                    .or_else(|| tool.get("input_schema").cloned())
+                    .unwrap_or(json!({"type":"object","properties":{}}));
+                return json!({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": description,
+                        "parameters": parameters,
+                    }
+                });
             }
 
             let has_name = tool.get("name").and_then(|v| v.as_str()).is_some();

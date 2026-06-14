@@ -1038,9 +1038,13 @@ fn strip_fireworks_unsupported_tools(body: &mut Value) {
         return;
     };
     if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        // Keep only function-type tools that also have a `function` object
+        // (type "function" without function:{} breaks DeepSeek upstream)
         tools.retain(|tool| {
             let t = tool.get("type").and_then(Value::as_str).unwrap_or("");
-            t == "function" || t == "custom" || t.is_empty()
+            t == "function" && tool.get("function").and_then(Value::as_object).is_some()
+                || t == "custom"
+                || t.is_empty()
         });
         for tool in tools.iter_mut() {
             if let Some(tool_obj) = tool.as_object_mut() {
