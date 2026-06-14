@@ -4,6 +4,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYP
 use serde_json::Value;
 
 use crate::core::proxy::ProxyTarget;
+use crate::core::translator::helpers::openai_helper::normalize_developer_role;
 use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
@@ -113,8 +114,11 @@ impl OpenCodeExecutor {
 
     pub async fn execute_request(
         &self,
-        request: OpenCodeExecutionRequest,
+        mut request: OpenCodeExecutionRequest,
     ) -> Result<OpenCodeExecutorResponse, OpenCodeExecutorError> {
+        // Normalize developer→system role (many providers reject role:developer)
+        normalize_developer_role(&mut request.body);
+
         let url = self.build_url(&request.model);
         let headers = self.build_headers(&request.credentials, request.stream);
 
