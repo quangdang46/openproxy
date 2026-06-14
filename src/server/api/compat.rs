@@ -1893,15 +1893,24 @@ fn claude_body_to_chat_completion(body: &Value) -> Value {
         message["content"] = message.get("content").cloned().unwrap_or(json!(""));
     }
 
-    let stop_reason = body.get("stop_reason").and_then(Value::as_str).unwrap_or("stop");
+    let stop_reason = body
+        .get("stop_reason")
+        .and_then(Value::as_str)
+        .unwrap_or("stop");
     let finish_reason = match stop_reason {
         "end_turn" => "stop",
         "tool_use" => "tool_calls",
         other => other,
     };
 
-    let id = body.get("id").and_then(Value::as_str).unwrap_or("msg_unknown");
-    let model = body.get("model").and_then(Value::as_str).unwrap_or("unknown");
+    let id = body
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("msg_unknown");
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
     let created = chrono::Utc::now().timestamp();
 
     let mut result = json!({
@@ -1917,8 +1926,14 @@ fn claude_body_to_chat_completion(body: &Value) -> Value {
     });
 
     if let Some(usage) = body.get("usage") {
-        let input_tokens = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-        let output_tokens = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let input_tokens = usage
+            .get("input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let output_tokens = usage
+            .get("output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         result["usage"] = json!({
             "prompt_tokens": input_tokens,
             "completion_tokens": output_tokens,
