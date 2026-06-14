@@ -1540,6 +1540,11 @@ fn normalize_tools(fields: &mut Map<String, Value>) {
 
     let converted: Vec<Value> = tools
         .into_iter()
+        .filter(|tool| {
+            // Drop non-function tools (e.g. namespace) — DeepSeek rejects unknown types
+            let t = tool.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            t.is_empty() || t == "function"
+        })
         .map(|tool| {
             let has_function_field = tool.get("function").is_some();
             let is_function_type = tool.get("type").and_then(|v| v.as_str()) == Some("function");
