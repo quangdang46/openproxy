@@ -12,6 +12,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYP
 use serde_json::Value;
 
 use crate::core::proxy::ProxyTarget;
+use crate::core::translator::helpers::openai_helper::normalize_developer_role;
 use crate::types::{ProviderConnection, ProviderNode};
 
 use super::ClientPool;
@@ -746,11 +747,11 @@ impl DefaultExecutor {
     pub fn transform_request(&self, body: &Value) -> Value {
         let mut body = self.apply_json_schema_fallback(body);
 
+        // Normalize developer→system role (many providers reject role:developer)
+        normalize_developer_role(&mut body);
+
         // Convert OpenAI-format tools to Claude format when the provider
         // uses a Claude-compatible endpoint (minimax, glm, kimi, etc.)
-        //
-        // OpenAI format:  {"type":"function", "function": {"name":"...", "description":"...", "parameters":{...}}}
-        // Claude format:  {"name":"...", "description":"...", "input_schema": {...}}
         if matches!(
             self.provider.as_str(),
             "minimax" | "minimax-cn" | "glm" | "kimi" | "kimi-coding" | "agentrouter"

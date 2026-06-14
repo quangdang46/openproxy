@@ -206,8 +206,15 @@ impl OpenCodeGoExecutor {
 
             // Remove Responses API fields that aren't needed for chat
             obj.remove("tool_choice"); // OCg chat endpoint doesn't use Responses' tool_choice format
+        }
 
-            // --- Fix: strip unsupported tools for Fireworks AI ---
+        // Re-normalize developer→system after potential input→messages conversion
+        if needs_chat_format {
+            normalize_developer_role(&mut request.body);
+        }
+
+        // --- Fix: strip unsupported tools for Fireworks AI ---
+        if let Some(obj) = request.body.as_object_mut() {
             // Fireworks rejects: tools with type != "function", and any top-level
             // tool fields besides "type" and "function" (no name/description/parameters at tool level).
             // Codex may send tools in flat format (name/desc/params at tool level) or
