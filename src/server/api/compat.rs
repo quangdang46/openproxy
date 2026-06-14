@@ -13,6 +13,9 @@ use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Map, Value};
 
+use crate::core::translator::response_transform::{
+    AnthropicToOpenAiTransformer, StreamingTransformer,
+};
 use crate::server::state::AppState;
 
 use super::chat;
@@ -145,63 +148,116 @@ async fn convert_to_responses_api(response: Response) -> Response {
 
     if !is_sse {
         // Non-streaming — collect the whole body and convert the JSON.
-        // Read the body, then reconstruct the response if parsing fails.
+        // If the upstream returned a Claude-format body (type: message),
+        // convert it to OpenAI format first (matching 9router's translateNonStreamingResponse).
         let (parts, body) = response.into_parts();
         let body_bytes = match body.collect().await {
             Ok(col) => col.to_bytes(),
             Err(_) => return Response::from_parts(parts, Body::empty()),
         };
-        let Ok(chat_completion) = serde_json::from_slice::<Value>(&body_bytes) else {
-            return Response::from_parts(parts, Body::from(body_bytes));
-        };
-        let Ok(chat_completion) = serde_json::from_slice::<Value>(&body_bytes) else {
+        let Ok(body_value) = serde_json::from_slice::<Value>(&body_bytes) else {
             return (status, body_bytes).into_response();
         };
+
+        // Detect Claude-format body: {"type":"message","content":[...],"stop_reason":"end_turn"}
+        let chat_completion = if body_value.get("type").and_then(Value::as_str) == Some("message") {
+            claude_body_to_chat_completion(&body_value)
+        } else {
+            body_value
+        };
+
         let responses_json = chat_completion_to_responses_json(&chat_completion);
         return Json(responses_json).into_response();
     }
 
-    // Streaming — wrap the body through the SSE converter
+    // Streaming — wrap the body through the SSE converter.
+    // The upstream may return OpenAI SSE (chat.completion.chunk) or
+    // Anthropic SSE (message_start / content_block_* / message_delta).
+    // We detect Claude format by looking for "type":"message_start" in the data.
     let (parts, body) = response.into_parts();
-    let state = ResponsesSseState::new();
     let data_stream = body.into_data_stream();
     let converted = async_stream::stream! {
         // Token-buffer re-assembly: SSE frames can be split across TCP segments
         // or combined in a single chunk. We assemble whole `data: ...` frames
         // and pass complete JSON to the converter.
-        let buf = &mut String::new();
+        let mut raw_buf = String::new();
         let mut conv_state = ResponsesSseState::new();
+        // Claude SSE → OpenAI SSE transformer (lazy init on first Claude frame)
+        let mut claude_xform = AnthropicToOpenAiTransformer::new();
 
         #[allow(unused_mut)]
         let mut stream = data_stream;
+
         loop {
             let next = stream.next().await;
             match next {
                 Some(Ok(chunk)) => {
                     let chunk_str = String::from_utf8_lossy(&chunk);
-                    buf.push_str(&chunk_str);
+                    raw_buf.push_str(&chunk_str);
 
                     // Process complete SSE frames from the buffer.
-                    // Each frame is `data: {...}\n\n` or `data: [DONE]\n\n` or `: heartbeat\n\n`.
+                    // Each frame is `data: {...}\n\n` or `event: ...\ndata: {...}\n\n`.
                     loop {
-                        if let Some(frame_end) = buf.find("\n\n") {
-                            let frame = buf[..frame_end].to_string();
-                            buf.drain(..frame_end + 2);
+                        if let Some(frame_end) = raw_buf.find("\n\n") {
+                            let frame = raw_buf[..frame_end].to_string();
+                            raw_buf.drain(..frame_end + 2);
 
                             let frame = frame.trim();
                             if frame.is_empty() || frame.starts_with(':') {
                                 continue; // heartbeat or comment
                             }
 
-                            let json_str = frame.strip_prefix("data:").unwrap_or(&frame).trim();
+                            // Extract JSON from the data: line (may have event: prefix lines)
+                            let frame_lower = frame.to_lowercase();
+                            let json_str = if let Some(d) = frame.lines()
+                                .find(|l| l.trim().starts_with("data:"))
+                                .and_then(|l| l.splitn(2, ':').nth(1).map(|s| s.trim()))
+                            {
+                                d
+                            } else {
+                                continue;
+                            };
+
                             if json_str == "[DONE]" {
                                 break;
                             }
 
-                            if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
-                                let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
-                                for event_bytes in events {
-                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                            // Detect Claude format: has "type":"message_start" or other anthropic types
+                            let is_claude_event = json_str.contains("\"type\":\"")
+                                && (json_str.contains("\"message_start\"")
+                                    || json_str.contains("\"content_block_")
+                                    || json_str.contains("\"message_delta\"")
+                                    || json_str.contains("\"message_stop\"")
+                                    || json_str.contains("\"ping\""));
+
+                            if is_claude_event {
+                                // Filter out ping events (no OpenAI equivalent)
+                                if json_str.contains("\"ping\"") {
+                                    continue;
+                                }
+                                // Convert Claude SSE → OpenAI SSE lines via transformer
+                                let claude_bytes = Bytes::from(format!("data: {json_str}\n\n"));
+                                let openai_lines = claude_xform.transform_chunk(&claude_bytes);
+                                for line in openai_lines {
+                                    if let Some(data) = line.strip_prefix("data: ") {
+                                        if data == "[DONE]" {
+                                            break;
+                                        }
+                                        if let Ok(chunk_value) = serde_json::from_str::<Value>(data) {
+                                            let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
+                                            for event_bytes in events {
+                                                yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Already OpenAI format — pass through directly
+                                if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
+                                    let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
+                                    for event_bytes in events {
+                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                                    }
                                 }
                             }
                         } else {
@@ -1780,6 +1836,97 @@ fn cors_preflight_response(methods: &str) -> Response {
         HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("POST, OPTIONS")),
     );
     response
+}
+
+/// Convert a Claude-format non-streaming response body to OpenAI chat.completion format.
+/// Port of 9router's translateNonStreamingResponse Claude branch.
+fn claude_body_to_chat_completion(body: &Value) -> Value {
+    // body: { "type":"message", "content":[{"type":"text","text":"..."}],
+    //         "stop_reason":"end_turn", "usage":{...}, "id":"msg_...", "model":"..." }
+    let mut text_content = String::new();
+    let mut thinking_content = String::new();
+    let mut tool_calls = Vec::new();
+
+    if let Some(content) = body.get("content").and_then(Value::as_array) {
+        for block in content {
+            let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+            match block_type {
+                "text" => {
+                    if let Some(text) = block.get("text").and_then(Value::as_str) {
+                        text_content.push_str(text);
+                    }
+                }
+                "thinking" => {
+                    if let Some(t) = block.get("thinking").and_then(Value::as_str) {
+                        thinking_content.push_str(t);
+                    }
+                }
+                "tool_use" => {
+                    let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("");
+                    let args = block.get("input").cloned().unwrap_or(json!({}));
+                    tool_calls.push(json!({
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string())
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut message = json!({"role": "assistant"});
+    if !text_content.is_empty() {
+        message["content"] = json!(text_content);
+    }
+    if !thinking_content.is_empty() {
+        message["reasoning_content"] = json!(thinking_content);
+    }
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = json!(tool_calls);
+    }
+    if !text_content.is_empty() || tool_calls.is_empty() {
+        message["content"] = message.get("content").cloned().unwrap_or(json!(""));
+    }
+
+    let stop_reason = body.get("stop_reason").and_then(Value::as_str).unwrap_or("stop");
+    let finish_reason = match stop_reason {
+        "end_turn" => "stop",
+        "tool_use" => "tool_calls",
+        other => other,
+    };
+
+    let id = body.get("id").and_then(Value::as_str).unwrap_or("msg_unknown");
+    let model = body.get("model").and_then(Value::as_str).unwrap_or("unknown");
+    let created = chrono::Utc::now().timestamp();
+
+    let mut result = json!({
+        "id": format!("chatcmpl-{}", id),
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason
+        }]
+    });
+
+    if let Some(usage) = body.get("usage") {
+        let input_tokens = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let output_tokens = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+        result["usage"] = json!({
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens
+        });
+    }
+
+    result
 }
 
 #[cfg(test)]

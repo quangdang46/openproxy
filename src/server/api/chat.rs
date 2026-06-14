@@ -1384,7 +1384,7 @@ async fn proxy_response_with_usage_tracking(
     let headers = response.headers().clone();
     let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
 
-    if body_complete {
+    let final_body = if body_complete {
         let token_usage = extract_token_usage_from_bytes(&body_bytes);
         state
             .usage_tracker()
@@ -1398,14 +1398,13 @@ async fn proxy_response_with_usage_tracking(
             )
             .await;
         state.usage_live.notify_update();
-    }
 
-    state
-        .usage_live
-        .finish_request(model, provider, connection_id, false)
-        .await;
+        Body::from(body_bytes.clone())
+    } else {
+        Body::from(body_bytes)
+    };
 
-    build_proxied_response(status, &headers, Body::from(body_bytes))
+    build_proxied_response(status, &headers, final_body)
 }
 
 async fn proxy_response_with_pending_tracking(
