@@ -744,7 +744,26 @@ impl DefaultExecutor {
     }
 
     pub fn transform_request(&self, body: &Value) -> Value {
-        self.apply_json_schema_fallback(body)
+        let mut body = self.apply_json_schema_fallback(body);
+
+        // Convert OpenAI-format tools to Claude format when the provider
+        // uses a Claude-compatible endpoint (minimax, glm, kimi, etc.)
+        //
+        // OpenAI format:  {"type":"function", "function": {"name":"...", "description":"...", "parameters":{...}}}
+        // Claude format:  {"name":"...", "description":"...", "input_schema": {...}}
+        if matches!(
+            self.provider.as_str(),
+            "minimax" | "minimax-cn" | "glm" | "kimi" | "kimi-coding" | "agentrouter"
+        ) {
+            convert_openai_tools_to_claude(&mut body);
+        }
+
+        // Strip unsupported tool types for Fireworks/OCg upstream
+        if self.provider == "opencode-go" {
+            strip_fireworks_unsupported_tools(&mut body);
+        }
+
+        body
     }
 
     /// Fallback json_schema -> json_object for openai-compatible providers
@@ -908,4 +927,102 @@ fn non_empty_option(value: Option<&str>) -> Option<&str> {
 
 fn opencode_go_uses_claude_format(model: &str) -> bool {
     matches!(model, "minimax-m2.5" | "minimax-m2.7")
+}
+
+/// Convert OpenAI-format tools to Claude format.
+///
+/// OpenAI: `{"type":"function", "function": {"name":"x", "description":"d", "parameters":{...}}}`
+/// Claude: `{"name":"x", "description":"d", "input_schema": {...}}`
+///
+/// Also strips `tool_choice` from OpenAI format and converts it.
+fn convert_openai_tools_to_claude(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else { return };
+
+    // Convert tools[]
+    if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        let mut claude_tools = Vec::new();
+        for tool in tools.drain(..) {
+            let Some(tool_obj) = tool.as_object() else { continue };
+            let type_ = tool_obj.get("type").and_then(Value::as_str).unwrap_or("");
+            if type_ != "function" {
+                // Skip non-function tools
+                continue;
+            }
+            let Some(func) = tool_obj.get("function") else { continue };
+            let name = func.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            if name.is_empty() { continue; }
+            let description = func.get("description").and_then(Value::as_str).unwrap_or("").to_string();
+            let input_schema = func.get("parameters").cloned()
+                .or_else(|| func.get("input_schema").cloned())
+                .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
+
+            claude_tools.push(serde_json::json!({
+                "name": name,
+                "description": description,
+                "input_schema": input_schema,
+            }));
+        }
+        if !claude_tools.is_empty() {
+            // Add cache_control to last tool
+            if let Some(last) = claude_tools.last_mut() {
+                if let Some(last_obj) = last.as_object_mut() {
+                    last_obj.insert(
+                        "cache_control".to_string(),
+                        serde_json::json!({"type": "ephemeral"}),
+                    );
+                }
+            }
+            tools.clear();
+            tools.extend(claude_tools);
+        } else {
+            obj.remove("tools");
+        }
+    }
+
+    // Convert tool_choice
+    // OpenAI: {"type": "function", "function": {"name": "..."}} → Claude: {"type": "tool", "name": "..."}
+    // OpenAI: "auto" → Claude: {"type": "auto"}
+    // OpenAI: "required" → Claude: {"type": "any"}
+    // OpenAI: "none" → Claude: {"type": "none"}
+    if let Some(tc) = obj.get("tool_choice") {
+        let new_tc = match tc {
+            Value::String(s) => {
+                match s.as_str() {
+                    "required" => Some(serde_json::json!({"type": "any"})),
+                    "none" => Some(serde_json::json!({"type": "none"})),
+                    "auto" => Some(serde_json::json!({"type": "auto"})),
+                    _ => Some(serde_json::json!({"type": "auto"})),
+                }
+            }
+            Value::Object(m) => {
+                if let Some(name) = m.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) {
+                    Some(serde_json::json!({"type": "tool", "name": name}))
+                } else {
+                    Some(serde_json::json!({"type": "auto"}))
+                }
+            }
+            _ => None,
+        };
+        if let Some(new_tc) = new_tc {
+            obj.insert("tool_choice".to_string(), new_tc);
+        }
+    }
+}
+
+/// Strip tools that Fireworks AI / OCg upstream doesn't support.
+/// - Only keeps tools with type "function"
+/// - Strips "strict" field from function definitions
+fn strip_fireworks_unsupported_tools(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else { return };
+    if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        tools.retain(|tool| {
+            let t = tool.get("type").and_then(Value::as_str).unwrap_or("");
+            t == "function" || t == "custom" || t.is_empty()
+        });
+        for tool in tools.iter_mut() {
+            if let Some(tool_obj) = tool.as_object_mut() {
+                tool_obj.remove("strict");
+            }
+        }
+    }
 }

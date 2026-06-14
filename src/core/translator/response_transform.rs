@@ -32,6 +32,10 @@ pub struct AnthropicStreamingState {
     pub current_block: Option<String>,
     /// Cache control metadata
     pub cache_lookaheads: Vec<String>,
+    /// Whether we're currently inside a thinking block
+    pub in_thinking: bool,
+    /// Index of the current thinking block
+    pub current_thinking_index: Option<usize>,
 }
 
 /// Gemini streaming state
@@ -175,93 +179,111 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                     continue;
                 }
 
-                // Parse event
-                if let Ok(event) = serde_json::from_str::<AnthropicSSEEvent>(data) {
-                    // Convert message_start
-                    if let Some(msg_start) = event.message_start {
-                        let id = msg_start.id.as_deref().unwrap_or("anonymous");
-                        let model = msg_start.model.as_deref().unwrap_or("");
-                        output_lines.push(format!(
-                            r#"{{"id":"{id}","object":"chat.completion.chunk","created":{},"model":"{model}","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":null}}]}}"#,
-                            msg_start.created_at.unwrap_or(0)
-                        ));
-                    }
-
-                    // Convert content_block_start
-                    if let Some(block_start) = event.content_block_start {
-                        let _block_type = block_start
-                            .content_block
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("text");
-                        let block_index = block_start.index;
-                        output_lines.push(format!(
-                            r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"role":"assistant","content":null}},"logprobs":null,"finish_reason":null}}]}}"#,
-                            block_index
-                        ));
-                    }
-
-                    // Convert content_block_delta
-                    if let Some(delta) = event.content_block_delta {
-                        let delta_type = delta
-                            .delta
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("text");
-                        let text = delta
-                            .delta
-                            .get("text")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or("");
-                        let index = delta.index;
-
-                        match delta_type {
-                            "text_delta" if !text.is_empty() => {
-                                output_lines.push(format!(
-                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
-                                    index,
-                                    escape_json_string(text)
-                                ));
+                // Parse event using type-tagged enum
+                if let Ok(event) = serde_json::from_str::<AnthropicEvent>(data) {
+                    match event {
+                        AnthropicEvent::MessageStart { message } => {
+                            let id = message.id.as_deref().unwrap_or("anonymous");
+                            let model = message.model.as_deref().unwrap_or("");
+                            let created = message.created_at.unwrap_or(0);
+                            output_lines.push(format!(
+                                r#"{{"id":"{id}","object":"chat.completion.chunk","created":{created},"model":"{model}","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":null}}]}}"#,
+                            ));
+                        }
+                        AnthropicEvent::ContentBlockStart {
+                            index,
+                            content_block,
+                        } => {
+                            output_lines.push(format!(
+                                r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"role":"assistant","content":null}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                index
+                            ));
+                            // Track thinking state for content_block_stop
+                            let block_type = content_block.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+                            if block_type == "thinking" {
+                                self.state.in_thinking = true;
+                                self.state.current_thinking_index = Some(index);
+                            } else if block_type == "text" || block_type == "tool_use" {
+                                self.state.in_thinking = false;
                             }
-                            "thinking_delta" if !text.is_empty() => {
-                                output_lines.push(format!(
-                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"[thinking] {} [/thinking]"}},"logprobs":null,"finish_reason":null}}]}}"#,
-                                    index,
-                                    escape_json_string(text)
-                                ));
-                            }
-                            "cache_control_delta" => {
-                                // Emit cache_lookahead metadata
-                                if let Some(param) =
-                                    delta.delta.get("cache_control").and_then(|c| c.get("type"))
-                                {
-                                    if param == "cache_control_lookahead" {
+                        }
+                        AnthropicEvent::ContentBlockDelta {
+                            index,
+                            delta,
+                        } => {
+                            let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+                            let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                            match delta_type {
+                                "text_delta" if !text.is_empty() => {
+                                    self.state.in_thinking = false;
+                                    output_lines.push(format!(
+                                        r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                        index,
+                                        escape_json_string(text)
+                                    ));
+                                }
+                                "thinking_delta" if !text.is_empty() => {
+                                    self.state.in_thinking = true;
+                                    self.state.current_thinking_index = Some(index);
+                                    output_lines.push(format!(
+                                        r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"[thinking] {} [/thinking]"}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                        index,
+                                        escape_json_string(text)
+                                    ));
+                                }
+                                "input_json_delta" => {
+                                    // Tool call arguments — forward as text content
+                                    if let Some(json) = delta.get("partial_json").and_then(|t| t.as_str()) {
                                         output_lines.push(format!(
-                                            r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"cache_lookahead":true}},"logprobs":null,"finish_reason":null}}]}}"#,
-                                            index
+                                            r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                            index,
+                                            escape_json_string(json)
                                         ));
                                     }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
-                    }
-
-                    // Convert message_delta
-                    if let Some(msg_delta) = event.message_delta {
-                        if let Some(stop_reason) = msg_delta.stop_reason {
-                            output_lines.push(format!(
-                                r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"{}"}}]}}"#,
-                                stop_reason
-                            ));
+                        AnthropicEvent::ContentBlockStop { index } => {
+                            // If we were in a thinking block, emit a small transition marker
+                            if self.state.in_thinking {
+                                self.state.in_thinking = false;
+                                // Close thinking bracket
+                                output_lines.push(format!(
+                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":""}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                    index
+                                ));
+                            } else {
+                                output_lines.push(format!(
+                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":""}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                    index
+                                ));
+                            }
                         }
-                        if let Some(usage) = msg_delta.usage {
-                            let prompt_tokens = usage.input_tokens.unwrap_or(0);
-                            let completion_tokens = usage.output_tokens.unwrap_or(0);
-                            output_lines.push(format!(
-                                r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
-                                prompt_tokens, completion_tokens, prompt_tokens + completion_tokens
-                            ));
+                        AnthropicEvent::MessageDelta {
+                            delta: delta_data,
+                            usage,
+                        } => {
+                            if let Some(stop_reason) = delta_data.stop_reason {
+                                output_lines.push(format!(
+                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"{}"}}]}}"#,
+                                    stop_reason
+                                ));
+                            }
+                            if let Some(usage) = usage {
+                                let prompt_tokens = usage.input_tokens.unwrap_or(0);
+                                let completion_tokens = usage.output_tokens.unwrap_or(0);
+                                output_lines.push(format!(
+                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
+                                    prompt_tokens, completion_tokens, prompt_tokens + completion_tokens
+                                ));
+                            }
+                        }
+                        AnthropicEvent::MessageStop => {
+                            output_lines.push("data: [DONE]".to_string());
+                        }
+                        AnthropicEvent::Unknown => {
+                            // ping, heartbeat — silently ignore
                         }
                     }
                 }
@@ -282,51 +304,65 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
     }
 }
 
-/// Anthropic SSE event structure
+/// Anthropic SSE event — type-tagged enum matching the actual wire format:
+///   data: {"type":"message_start","message":{"id":"...","model":"...","content":[],...}}
+///   data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+///   data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"..."}}
+///   data: {"type":"content_block_stop","index":0}
+///   data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{...}}
+///   data: {"type":"message_stop"}
 #[derive(Debug, Deserialize)]
-pub struct AnthropicSSEEvent {
-    #[serde(rename = "type")]
-    #[serde(default)]
-    pub event_type: Option<String>,
-    #[serde(default)]
-    pub message_start: Option<MessageStart>,
-    #[serde(default)]
-    pub content_block_start: Option<ContentBlockStart>,
-    #[serde(default)]
-    pub content_block_delta: Option<ContentBlockDelta>,
-    #[serde(default)]
-    pub message_delta: Option<MessageDelta>,
+#[serde(tag = "type")]
+pub enum AnthropicEvent {
+    #[serde(rename = "message_start")]
+    MessageStart {
+        message: MessageData,
+    },
+    #[serde(rename = "content_block_start")]
+    ContentBlockStart {
+        index: usize,
+        content_block: serde_json::Value,
+    },
+    #[serde(rename = "content_block_delta")]
+    ContentBlockDelta {
+        index: usize,
+        delta: serde_json::Value,
+    },
+    #[serde(rename = "content_block_stop")]
+    ContentBlockStop {
+        index: usize,
+    },
+    #[serde(rename = "message_delta")]
+    MessageDelta {
+        delta: MessageDeltaData,
+        usage: Option<MessageUsage>,
+    },
+    #[serde(rename = "message_stop")]
+    MessageStop,
+    /// Catch-all for ping, heartbeat, or unknown events (silently ignored)
+    #[serde(other)]
+    Unknown,
 }
 
+/// Data nested inside `{"type":"message_start","message":{...}}`
 #[derive(Debug, Deserialize)]
-pub struct MessageStart {
+pub struct MessageData {
     pub id: Option<String>,
-    #[serde(rename = "type")]
-    pub msg_type: Option<String>,
     pub model: Option<String>,
     #[serde(rename = "created_at")]
     pub created_at: Option<u64>,
 }
 
+/// Data nested inside `{"type":"message_delta","delta":{"stop_reason":"..."}}`
 #[derive(Debug, Deserialize)]
-pub struct ContentBlockStart {
-    pub index: usize,
-    pub content_block: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ContentBlockDelta {
-    pub index: usize,
-    pub delta: serde_json::Value,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct MessageDelta {
+pub struct MessageDeltaData {
     #[serde(default)]
     pub stop_reason: Option<String>,
-    pub usage: Option<MessageUsage>,
+    #[serde(default)]
+    pub stop_sequence: Option<String>,
 }
 
+/// Data nested inside `{"type":"message_delta","usage":{...}}`
 #[derive(Debug, Deserialize)]
 pub struct MessageUsage {
     #[serde(rename = "input_tokens")]

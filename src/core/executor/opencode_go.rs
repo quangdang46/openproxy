@@ -1,13 +1,29 @@
 use std::sync::Arc;
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::translator::helpers::openai_helper::normalize_developer_role;
 use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
+
+// Fields that Fireworks AI / OCg upstream reject as "Extra inputs not permitted"
+const FORBIDDEN_FIELDS: &[&str] = &[
+    "client_metadata",
+    "client_meta_data",
+    "include",      // Responses API field
+    "reasoning",    // Responses API field
+];
+
+// Tool types that Fireworks AI / OCg upstream accepts (only "function")
+const ALLOWED_TOOL_TYPES: &[&str] = &["function"];
+
+// Tool-level fields that Fireworks AI / OCg upstream rejects
+const TOOL_FORBIDDEN_FIELDS: &[&str] = &[
+    "strict",
+];
 
 const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 const OPENCODE_GO_CLAUDE_PATH: &str = "/messages";
@@ -150,6 +166,85 @@ impl OpenCodeGoExecutor {
         // Normalize developer→system role for providers that reject role:developer (DeepSeek, etc.)
         normalize_developer_role(&mut request.body);
 
+        // Strip forbidden fields that Cloudflare Workers AI / Fireworks reject
+        let mut needs_chat_format = false;
+        if let Some(obj) = request.body.as_object_mut() {
+            for field in FORBIDDEN_FIELDS {
+                obj.remove(*field);
+            }
+            // Also strip from nested assistant tool_calls and messages
+            if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+                for msg in messages.iter_mut() {
+                    if let Some(msg_obj) = msg.as_object_mut() {
+                        for field in FORBIDDEN_FIELDS {
+                            msg_obj.remove(*field);
+                        }
+                    }
+                }
+            }
+
+            // Convert Responses API format (input) to chat format (messages)
+            // Codex CLI sends { model, input, client_metadata, ... }
+            // OpenCode Go /zen/go/v1/chat/completions expects { model, messages, ... }
+            if obj.contains_key("input") && !obj.contains_key("messages") {
+                needs_chat_format = true;
+                if let Some(input) = obj.remove("input") {
+                    let messages = responses_input_to_messages(input);
+                    obj.insert("messages".to_string(), messages);
+                }
+                // Responses API uses `previous_response_id` for multi-turn
+                obj.remove("previous_response_id");
+                // Responses API uses `instructions` — map to system message if present
+                if let Some(instructions) = obj.remove("instructions") {
+                    if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+                        let sys_msg = serde_json::json!({
+                            "role": "system",
+                            "content": instructions
+                        });
+                        messages.insert(0, sys_msg);
+                    }
+                }
+            }
+
+            // Remove Responses API fields that aren't needed for chat
+            obj.remove("tool_choice"); // OCg chat endpoint doesn't use Responses' tool_choice format
+
+            // --- Fix: strip unsupported tools for Fireworks AI ---
+            // Fireworks rejects: tools with type != "function", and any top-level
+            // tool fields besides "type" and "function" (no name/description/parameters at tool level).
+            // Codex may send tools in flat format (name/desc/params at tool level) or
+            // nested format (inside function:{}). Both need to be normalized.
+            if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+                tools.retain(|tool| {
+                    let t = tool.get("type").and_then(Value::as_str).unwrap_or("");
+                    ALLOWED_TOOL_TYPES.contains(&t)
+                });
+                for tool in tools.iter_mut() {
+                    let mut cleaned = serde_json::Map::new();
+                    // Keep type
+                    if let Some(t) = tool.get("type").and_then(Value::as_str) {
+                        cleaned.insert("type".into(), Value::String(t.into()));
+                    }
+                    // Extract function name from either nested function:{} or top-level name
+                    let fname = tool
+                        .get("function").and_then(|f| f.get("name").and_then(Value::as_str))
+                        .or_else(|| tool.get("name").and_then(Value::as_str))
+                        .unwrap_or("")
+                        .to_string();
+                    if fname.is_empty() { continue; }
+                    cleaned.insert("function".into(), serde_json::json!({
+                        "name": fname
+                    }));
+                    *tool = Value::Object(cleaned);
+                }
+            }
+        }
+
+        // Log if we had to convert format, so debugging is easier
+        if needs_chat_format {
+            tracing::debug!("Converted Responses API format to chat format for opencode-go");
+        }
+
         let client = self.pool.get("opencode-go", request.proxy.as_ref())?;
         let response = client
             .post(&url)
@@ -165,5 +260,46 @@ impl OpenCodeGoExecutor {
             transformed_body: request.body,
             transport: TransportKind::Reqwest,
         })
+    }
+}
+
+/// Convert Responses API `input` (array or string) to chat `messages` array.
+///
+/// OpenAI Responses API format:
+/// ```json
+/// {"input": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
+/// ```
+/// or a plain string `"input": "hello"`.
+///
+/// Chat format expects:
+/// ```json
+/// {"messages": [{"role": "user", "content": "..."}]}
+/// ```
+fn responses_input_to_messages(input: Value) -> Value {
+    match input {
+        Value::Array(items) => {
+            let messages: Vec<Value> = items
+                .into_iter()
+                .filter_map(|item| {
+                    let item_obj = match item {
+                        Value::Object(m) => m,
+                        _ => return None,
+                    };
+                    // Only keep items that have a "role" field
+                    if item_obj.contains_key("role") {
+                        Some(Value::Object(item_obj))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            Value::Array(messages)
+        }
+        Value::String(text) => {
+            json!([{"role": "user", "content": text}])
+        }
+        _ => {
+            json!([{"role": "user", "content": input.to_string()}])
+        }
     }
 }
