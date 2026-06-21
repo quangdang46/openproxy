@@ -345,6 +345,10 @@ async fn get_usage_daily(State(state): State<AppState>, headers: HeaderMap) -> R
             prompt_tokens: summary.prompt_tokens,
             completion_tokens: summary.completion_tokens,
             cost: summary.cost,
+            cache_read_input_tokens: summary.cache_read_input_tokens,
+            cache_creation_input_tokens: summary.cache_creation_input_tokens,
+            cached_tokens: summary.cached_tokens,
+            reasoning_tokens: summary.reasoning_tokens,
             by_provider: summary
                 .by_provider
                 .iter()
@@ -354,6 +358,10 @@ async fn get_usage_daily(State(state): State<AppState>, headers: HeaderMap) -> R
                     prompt_tokens: counter.prompt_tokens,
                     completion_tokens: counter.completion_tokens,
                     cost: counter.cost,
+                    cache_read_input_tokens: counter.cache_read_input_tokens,
+                    cache_creation_input_tokens: counter.cache_creation_input_tokens,
+                    cached_tokens: counter.cached_tokens,
+                    reasoning_tokens: counter.reasoning_tokens,
                 })
                 .collect(),
         })
@@ -967,6 +975,10 @@ fn usage_tokens(entry: &UsageEntry) -> TokenUsage {
         completion_tokens: None,
         output_tokens: None,
         total_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        cached_tokens: None,
+        reasoning_tokens: None,
         extra: BTreeMap::new(),
     })
 }
@@ -1074,6 +1086,10 @@ mod tests {
                 completion_tokens: Some(50),
                 output_tokens: None,
                 total_tokens: Some(150),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                cached_tokens: None,
+                reasoning_tokens: None,
                 extra: BTreeMap::new(),
             },
             request: Some(serde_json::json!({ "input": "hello" })),
