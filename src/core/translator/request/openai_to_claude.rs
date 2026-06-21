@@ -437,7 +437,11 @@ pub fn openai_to_claude_request(
 
     if let Some(messages) = body_obj.get("messages").and_then(|v| v.as_array()) {
         for msg in messages {
-            if msg.get("role").and_then(|v| v.as_str()) == Some("system") {
+            // 9router CRITICAL bug fix: developer role messages were silently dropped
+            // because only "system" role was checked. Map "developer" -> "system" (Anthropic
+            // treats system and developer identically in the system prompt).
+            let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
+            if role == "system" || role == "developer" {
                 let content = msg.get("content");
                 let text = match content {
                     Some(Value::String(s)) => s.clone(),
