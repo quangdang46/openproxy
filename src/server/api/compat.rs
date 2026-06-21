@@ -2134,9 +2134,11 @@ mod tests {
             sse.contains("event: response.completed\n"),
             "should emit completed"
         );
+        // Usage was intentionally removed from response.completed per 9router parity.
+        // Tokens come via the final non-streaming response body or a separate usage event.
         assert!(
-            sse.contains("\"total_tokens\":12"),
-            "usage should be included"
+            !sse.contains("\"total_tokens\""),
+            "usage should NOT be in response.completed"
         );
     }
 
