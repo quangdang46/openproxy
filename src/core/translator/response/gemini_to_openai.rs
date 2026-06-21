@@ -58,16 +58,16 @@ pub fn gemini_to_openai_response(chunk: &Value, state: &mut HashMap<String, Valu
     if let Some(content) = candidate.get("content") {
         if let Some(parts) = content.get("parts").and_then(|v| v.as_array()) {
             for part in parts {
-                let has_thought_sig = part
-                    .get("thoughtSignature")
-                    .or_else(|| part.get("thought_signature"))
-                    .is_some();
                 let is_thought = part
                     .get("thought")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                let has_thought_sig = part
+                    .get("thoughtSignature")
+                    .or_else(|| part.get("thought_signature"))
+                    .is_some();
 
-                if has_thought_sig {
+                if is_thought || has_thought_sig {
                     if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
                         if !text.is_empty() {
                             let delta_key = if is_thought {
