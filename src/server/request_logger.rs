@@ -1,8 +1,84 @@
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Instant;
 
 use chrono::Local;
+use serde_json::json;
 
 use crate::server::console_logs::shared_console_log_buffer;
+
+/// Whether ENABLE_REQUEST_LOGS=true was set at process start.
+static REQUEST_LOG_FILE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+/// Returns the directory path for request log files, defaulting to `logs/`.
+fn log_dir() -> PathBuf {
+    std::env::var("REQUEST_LOG_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("logs"))
+}
+
+/// Append a single JSON line to the daily-rotated request log file.
+///
+/// The file is named `request-YYYY-MM-DD.log` inside `log_dir()` and is
+/// created atomically on first write.  Every call opens, writes, and
+/// flushes — no open file handle is retained between calls so the file
+/// can be safely rotated (renamed/deleted) by an external process.
+pub fn append_request_log(
+    method: &str,
+    path: &str,
+    status: u16,
+    duration_ms: u64,
+    model: Option<&str>,
+) {
+    if !enabled() {
+        return;
+    }
+
+    let dir = log_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("[request_logger] failed to create log dir {:?}: {}", dir, e);
+        return;
+    }
+
+    let date = Local::now().format("%Y-%m-%d");
+    let filename = dir.join(format!("request-{}.log", date));
+
+    let entry = json!({
+        "timestamp": Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z").to_string(),
+        "method": method,
+        "path": path,
+        "status": status,
+        "duration_ms": duration_ms,
+        "model": model,
+    });
+
+    // Open in append/create mode and write one JSON line.
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&filename)
+    {
+        Ok(mut file) => {
+            let line = serde_json::to_string(&entry).unwrap_or_default();
+            let _ = writeln!(file, "{}", line);
+            let _ = file.flush();
+        }
+        Err(e) => {
+            eprintln!(
+                "[request_logger] failed to open log file {:?}: {}",
+                filename, e
+            );
+        }
+    }
+}
+
+fn enabled() -> bool {
+    *REQUEST_LOG_FILE_ENABLED
+        .get_or_init(|| std::env::var("ENABLE_REQUEST_LOGS").ok().as_deref() == Some("true"))
+}
 
 /// Structured request/response logging matching 9router's logger.js.
 ///
@@ -41,6 +117,7 @@ fn log_both(terminal_line: &str) {
 pub struct RequestLog {
     method: &'static str,
     path: String,
+    model: Option<String>,
     start: Instant,
 }
 
@@ -57,6 +134,7 @@ impl RequestLog {
         Self {
             method,
             path: path.to_owned(),
+            model: model.map(str::to_string),
             start: Instant::now(),
         }
     }
@@ -69,6 +147,7 @@ impl RequestLog {
             "[{}] {} {} ({}ms) {} {}",
             time, icon, status, elapsed, self.method, self.path
         ));
+        append_request_log(self.method, &self.path, status, elapsed, self.model.as_deref());
     }
 }
 

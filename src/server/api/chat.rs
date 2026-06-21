@@ -1016,6 +1016,13 @@ async fn forward_with_provider_fallback(
                     )
                     .await;
                     excluded.insert(connection.id.clone());
+                    // On 429 (too many requests / rate limit), sleep for the cooldown
+                    // duration before trying the next account/model. This prevents
+                    // repeatedly hammering the same rate-limited provider during
+                    // the per-account fallback loop.
+                    if status.as_u16() == 429 {
+                        tokio::time::sleep(cooldown).await;
+                    }
                     continue;
                 }
 

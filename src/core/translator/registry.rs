@@ -127,6 +127,14 @@ pub struct AnthropicResponseState {
 pub struct GeminiResponseState {
     pub line_buffer: String,
     pub current_part_index: usize,
+    /// Accumulated tool call data: tool-call-index -> {id, name, arguments_buf}
+    pub tool_calls_accum: serde_json::Map<String, Value>,
+    /// Response ID extracted from the first OpenAI SSE chunk
+    pub response_id: String,
+    /// Model name extracted from the first OpenAI SSE chunk
+    pub model: String,
+    /// Whether we have already emitted a finish chunk (guard against duplicates)
+    pub finish_emitted: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -207,21 +215,7 @@ pub fn detect_source_format(body: &Value) -> Format {
         return Format::Gemini;
     }
 
-    // 5. OpenAI-specific indicators (fields that never appear in Claude format)
-    if body.get("stream_options").is_some()
-        || body.get("response_format").is_some()
-        || body.get("logprobs").is_some()
-        || body.get("top_logprobs").is_some()
-        || body.get("n").is_some()
-        || body.get("presence_penalty").is_some()
-        || body.get("frequency_penalty").is_some()
-        || body.get("logit_bias").is_some()
-        || body.get("user").is_some()
-    {
-        return Format::OpenAi;
-    }
-
-    // 6. Claude-specific indicators
+    // 5. Claude-specific indicators
     // Check first message for Claude-style content types
     if let Some(messages) = body.get("messages").and_then(Value::as_array) {
         if let Some(first) = messages.first() {
@@ -245,6 +239,20 @@ pub fn detect_source_format(body: &Value) -> Format {
                 }
             }
         }
+    }
+
+    // 6. OpenAI-specific indicators (fields that never appear in Claude format)
+    if body.get("stream_options").is_some()
+        || body.get("response_format").is_some()
+        || body.get("logprobs").is_some()
+        || body.get("top_logprobs").is_some()
+        || body.get("n").is_some()
+        || body.get("presence_penalty").is_some()
+        || body.get("frequency_penalty").is_some()
+        || body.get("logit_bias").is_some()
+        || body.get("user").is_some()
+    {
+        return Format::OpenAi;
     }
 
     // 7. Default to OpenAI
@@ -390,8 +398,9 @@ impl TranslationRegistry {
         if target != Format::OpenAi {
             let key = (Format::OpenAi, target);
             if let Some(transform) = self.response_transforms.get(&key) {
-                let mut intermediate_state = ResponseTransformState::default();
-                let converted = transform(chunk, &mut intermediate_state);
+                // Use the same persistent state so the transform can accumulate
+                // tool calls and other per-stream data across chunks.
+                let converted = transform(chunk, state);
                 if !converted.is_empty() {
                     return converted;
                 }
@@ -477,6 +486,7 @@ pub fn global_registry() -> &'static TranslationRegistry {
     use crate::core::translator::request::openai_to_ollama::openai_to_ollama_request;
     use crate::core::translator::request::openai_to_vertex::openai_to_vertex_request;
     use crate::core::translator::response::commandcode_to_openai::commandcode_to_openai_response;
+    use crate::core::translator::response::openai_to_gemini::openai_to_gemini_response;
 
     REGISTRY.get_or_init(|| {
         let mut reg = TranslationRegistry::new();
@@ -566,6 +576,11 @@ pub fn global_registry() -> &'static TranslationRegistry {
             Format::CommandCode,
             Format::OpenAi,
             commandcode_to_openai_response as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::OpenAi,
+            Format::Gemini,
+            openai_to_gemini_response as ResponseTransformFn,
         );
 
         reg

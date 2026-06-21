@@ -37,6 +37,10 @@ pub struct AnthropicStreamingState {
     pub in_thinking: bool,
     /// Index of the current thinking block
     pub current_thinking_index: Option<usize>,
+    /// Accumulated tool call arguments per content block index (maps index -> accumulated JSON string).
+    /// Without this buffer, partial_json from input_json_delta events is forwarded as bare text
+    /// content and tool call arguments vanish during streaming.
+    pub tool_arg_buffers: std::collections::HashMap<usize, String>,
 }
 
 /// Gemini streaming state
@@ -222,8 +226,28 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                             if block_type == "thinking" {
                                 self.state.in_thinking = true;
                                 self.state.current_thinking_index = Some(index);
-                            } else if block_type == "text" || block_type == "tool_use" {
+                            } else if block_type == "text" {
                                 self.state.in_thinking = false;
+                            } else if block_type == "tool_use" {
+                                self.state.in_thinking = false;
+                                // Emit tool call start chunk with id and name
+                                let tool_id = content_block
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let tool_name = content_block
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                // Initialize the argument accumulator buffer for this tool call index
+                                self.state.tool_arg_buffers.insert(index, String::new());
+                                output_lines.push(format!(
+                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"tool_calls":[{{"index":{},"id":"{}","type":"function","function":{{"name":"{}","arguments":""}}}}]}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                    index,
+                                    index,
+                                    escape_json_string(tool_id),
+                                    escape_json_string(tool_name)
+                                ));
                             }
                         }
                         AnthropicEvent::ContentBlockDelta { index, delta } => {
@@ -249,12 +273,15 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                                     ));
                                 }
                                 "input_json_delta" => {
-                                    // Tool call arguments — forward as text content
+                                    // Tool call arguments — accumulate into buffer and emit
+                                    // proper OpenAI tool_calls arguments delta
                                     if let Some(json) =
                                         delta.get("partial_json").and_then(|t| t.as_str())
                                     {
+                                        self.state.tool_arg_buffers.insert(index, json.to_string());
                                         output_lines.push(format!(
-                                            r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                            r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"tool_calls":[{{"index":{},"function":{{"arguments":"{}"}}}}]}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                            index,
                                             index,
                                             escape_json_string(json)
                                         ));
@@ -273,6 +300,9 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                             }
                         }
                         AnthropicEvent::ContentBlockStop { index } => {
+                            // If this was a tool_use block, clean up the argument buffer
+                            self.state.tool_arg_buffers.remove(&index);
+
                             // If we were in a thinking block, emit a small transition marker
                             if self.state.in_thinking {
                                 self.state.in_thinking = false;

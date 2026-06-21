@@ -7,12 +7,83 @@ use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
+use serde_json::{json, Value};
+use tokio::sync::mpsc;
+
 use crate::core::account_fallback::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, MAX_BACKOFF_LEVEL};
 use crate::types::Combo;
 
 const LONG_COOLDOWN: Duration = Duration::from_secs(120);
 const SHORT_COOLDOWN: Duration = Duration::from_secs(5);
 const TRANSIENT_COOLDOWN: Duration = Duration::from_secs(30);
+
+// Fusion tuning defaults — equivalent to FUSION_DEFAULTS in 9router.
+const FUSION_DEFAULT_MIN_PANEL: usize = 2;
+const FUSION_DEFAULT_STRAGGLER_GRACE_MS: u64 = 8000;
+const FUSION_DEFAULT_PANEL_HARD_TIMEOUT_MS: u64 = 90000;
+
+/// Tunable knobs for fusion strategy, parsed from `combo.extra.fusionConfig`
+/// or the per-combo strategy overrides in settings.
+#[derive(Debug, Clone)]
+pub struct FusionConfig {
+    /// Minimum successful panel answers before we start the straggler grace timer.
+    /// Clamped to `[2, panel.len()]`.
+    pub min_panel: usize,
+    /// Milliseconds to wait for laggard panel models once quorum is reached.
+    pub straggler_grace_ms: u64,
+    /// Absolute per-panel-call timeout (one hung model cannot stall the whole fusion).
+    pub panel_hard_timeout_ms: u64,
+    /// Optional judge model string; falls back to the first panel model.
+    pub judge_model: Option<String>,
+}
+
+impl Default for FusionConfig {
+    fn default() -> Self {
+        Self {
+            min_panel: FUSION_DEFAULT_MIN_PANEL,
+            straggler_grace_ms: FUSION_DEFAULT_STRAGGLER_GRACE_MS,
+            panel_hard_timeout_ms: FUSION_DEFAULT_PANEL_HARD_TIMEOUT_MS,
+            judge_model: None,
+        }
+    }
+}
+
+impl FusionConfig {
+    /// Parse a `FusionConfig` from the `extra.fusionConfig` map (serde_json::Value).
+    /// Missing fields get the defaults; `min_panel` is clamped to `[2, panel_len]`.
+    pub fn from_extra(extra: &serde_json::Map<String, Value>, panel_len: usize) -> Self {
+        let cfg = extra.get("fusionConfig").and_then(|v| v.as_object());
+        let mut s = Self::default();
+        if let Some(cfg) = cfg {
+            if let Some(v) = cfg.get("minPanel").and_then(Value::as_u64) {
+                s.min_panel = (v as usize).max(2).min(panel_len);
+            }
+            if let Some(v) = cfg.get("stragglerGraceMs").and_then(Value::as_u64) {
+                s.straggler_grace_ms = v;
+            }
+            if let Some(v) = cfg.get("panelHardTimeoutMs").and_then(Value::as_u64) {
+                s.panel_hard_timeout_ms = v;
+            }
+            if let Some(v) = cfg.get("judgeModel").and_then(Value::as_str) {
+                let v = v.trim();
+                if !v.is_empty() {
+                    s.judge_model = Some(v.to_string());
+                }
+            }
+        }
+        s.min_panel = s.min_panel.max(2).min(panel_len);
+        s
+    }
+}
+
+/// Result from one panel model in a fusion execution.
+#[derive(Debug, Clone)]
+pub struct FusionPanelResult {
+    /// The model name that produced this answer.
+    pub model: String,
+    /// Extracted text content from the panel response.
+    pub text: String,
+}
 
 static COMBO_ROTATION_STATE: Lazy<Mutex<HashMap<String, usize>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
@@ -36,6 +107,7 @@ pub enum ComboStrategy {
     #[default]
     Fallback,
     RoundRobin,
+    Fusion,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
