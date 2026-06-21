@@ -1,11 +1,23 @@
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use sha2::Sha256;
+use std::sync::OnceLock;
 
-pub const API_KEY_SECRET: &str = "endpoint-proxy-api-key-secret";
 pub const CLI_TOKEN_HEADER: &str = "x-9r-cli-token";
 
 type HmacSha256 = Hmac<Sha256>;
+
+const DEFAULT_API_KEY_SECRET: &str = "endpoint-proxy-api-key-secret";
+
+/// Returns the HMAC secret used for API key CRC generation, resolving from
+/// the `API_KEY_SECRET` environment variable at first call with lazy caching.
+/// Falls back to the static default when the env var is not set.
+pub fn api_key_secret() -> &'static str {
+    static SECRET: OnceLock<String> = OnceLock::new();
+    SECRET.get_or_init(|| {
+        std::env::var("API_KEY_SECRET").unwrap_or_else(|_| DEFAULT_API_KEY_SECRET.to_string())
+    })
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuthContext {
@@ -20,6 +32,22 @@ pub struct ParsedApiKey {
     pub is_new_format: bool,
 }
 
+/// Compares two strings in constant time (no early-exit on mismatch).
+/// Both strings must be the same length; if lengths differ, returns false
+/// without leaking which byte differed.
+fn timing_safe_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let mut diff: u8 = 0;
+    for i in 0..a.len() {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
 pub fn parse_api_key(api_key: &str) -> Option<ParsedApiKey> {
     if !api_key.starts_with("sk-") {
         return None;
@@ -31,7 +59,7 @@ pub fn parse_api_key(api_key: &str) -> Option<ParsedApiKey> {
         let key_id = parts[2];
         let crc = parts[3];
         let expected_crc = generate_crc(machine_id, key_id);
-        if crc != expected_crc {
+        if !timing_safe_eq(crc, &expected_crc) {
             return None;
         }
 
@@ -69,7 +97,8 @@ pub fn generate_api_key_with_machine(machine_id: &str) -> String {
 }
 
 fn generate_crc(machine_id: &str, key_id: &str) -> String {
-    let mut mac = HmacSha256::new_from_slice(API_KEY_SECRET.as_bytes()).expect("static HMAC key");
+    let key = api_key_secret();
+    let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC key");
     mac.update(machine_id.as_bytes());
     mac.update(key_id.as_bytes());
     hex::encode(mac.finalize().into_bytes())[..8].to_string()
