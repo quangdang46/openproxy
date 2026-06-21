@@ -450,18 +450,37 @@ pub fn get_model_lock_key(model: &str) -> String {
 
 /// Check if a model lock on a connection is still active.
 /// Reads flat field `modelLock_${model}` (or `modelLock___all` when model="").
+/// Also checks the global `MODEL_LOCK_ALL` key so an account-level lock blocks
+/// every model, not just the specific one.
 pub fn is_model_lock_active(
     connection: &ProviderConnection,
     model: &str,
     now: DateTime<Utc>,
 ) -> bool {
-    let key = get_model_lock_key(model);
-    connection
+    // Check model-specific lock
+    let specific_key = get_model_lock_key(model);
+    let specific_locked = connection
         .extra
-        .get(&key)
+        .get(&specific_key)
         .and_then(|v| v.as_str())
         .and_then(parse_timestamp)
-        .is_some_and(|until| until > now)
+        .is_some_and(|until| until > now);
+
+    if specific_locked {
+        return true;
+    }
+
+    // Also check the global account-level lock (MODEL_LOCK_ALL)
+    if !model.is_empty() {
+        connection
+            .extra
+            .get(MODEL_LOCK_ALL)
+            .and_then(|v| v.as_str())
+            .and_then(parse_timestamp)
+            .is_some_and(|until| until > now)
+    } else {
+        false
+    }
 }
 
 /// Check if account is currently unavailable (cooldown not expired).

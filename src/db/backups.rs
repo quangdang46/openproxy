@@ -260,6 +260,9 @@ impl BackupManager {
     /// Restore a specific backup. Takes a pre-restore safety snapshot first,
     /// validates the backup is valid JSON, then atomically replaces
     /// `db.json`. The caller is responsible for reloading the in-memory DB.
+    ///
+    /// Handles backward compatibility: if the backup was written without
+    /// encryption metadata, it is parsed as-is.
     pub async fn read_backup(&self, backup_id: &str) -> anyhow::Result<AppDb> {
         validate_backup_id(backup_id)?;
         let backup_path = self.backup_dir.join(backup_id);
@@ -269,6 +272,13 @@ impl BackupManager {
         }
 
         let bytes = fs::read(&backup_path).await?;
+
+        // Try the full decryption+checksum path first.
+        if let Ok(db) = crate::db::crypto::open_db(&bytes, crate::db::crypto::encryption_key().as_deref()) {
+            return Ok(db);
+        }
+
+        // Fallback for pre-encryption backups.
         let parsed: Value = serde_json::from_slice(&bytes)
             .map_err(|e| anyhow::anyhow!("Backup file is not valid JSON: {e}"))?;
         if !parsed.is_object() {

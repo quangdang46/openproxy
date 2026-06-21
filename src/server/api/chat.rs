@@ -13,6 +13,9 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
+use crate::core::account_fallback::{
+    build_model_lock_update, filter_available_accounts,
+};
 use crate::core::chat::RequestPlan;
 use crate::core::combo::{
     check_fallback_error, execute_combo_strategy_with_capacity, get_combo_models_from_data,
@@ -1141,17 +1144,27 @@ fn select_connection(
     excluded: &HashSet<String>,
 ) -> Option<ProviderConnection> {
     let now = Utc::now();
-    let mut candidates: Vec<_> = snapshot
-        .provider_connections
-        .iter()
+
+    // First: use filter_available_accounts to get accounts not in cooldown / not locked.
+    let available = filter_available_accounts(
+        &snapshot.provider_connections,
+        provider,
+        model,
+        None,
+        now,
+    );
+
+    // Then: apply remaining filters that filter_available_accounts does not cover:
+    //   - credentials presence
+    //   - model support
+    //   - excluded set (the call above passes None for exclude_id since we need
+    //     to apply it separately alongside the other per-request filters)
+    let mut candidates: Vec<_> = available
+        .into_iter()
         .filter(|connection| {
-            connection.provider == provider
-                && connection.is_active()
-                && connection_has_credentials(connection)
+            connection_has_credentials(connection)
                 && !excluded.contains(&connection.id)
                 && connection_supports_model(connection, model)
-                && !is_connection_rate_limited(connection, now)
-                && !is_model_locked(connection, model, now)
         })
         .cloned()
         .collect();
@@ -1318,12 +1331,8 @@ async fn mark_connection_unavailable(
     cooldown: std::time::Duration,
     backoff_level: u32,
 ) {
-    let until = ChronoDuration::from_std(cooldown)
-        .map(|duration| Utc::now() + duration)
-        .unwrap_or_else(|_| Utc::now());
-
     let connection_id = connection_id.to_string();
-    let model_lock_key = format!("modelLock_{model}");
+    let (model_lock_key, until_str) = build_model_lock_update(model, cooldown.as_secs() as i64);
     let message = message.to_string();
     let _ = state
         .db
@@ -1335,7 +1344,7 @@ async fn mark_connection_unavailable(
             {
                 connection
                     .extra
-                    .insert(model_lock_key.clone(), Value::String(until.to_rfc3339()));
+                    .insert(model_lock_key, Value::String(until_str));
                 connection.last_error = Some(message.clone());
                 connection.last_error_at = Some(Utc::now().to_rfc3339());
                 connection.error_code = Some(status.to_string());

@@ -1,6 +1,10 @@
 use axum::http::HeaderMap;
+use dashmap::DashSet;
 use jsonwebtoken::{decode, DecodingKey, Validation};
+use once_cell::sync::Lazy;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::core::auth::{parse_api_key, CLI_TOKEN_HEADER};
 use crate::db::Db;
@@ -12,6 +16,71 @@ pub mod oidc;
 pub const API_KEY_HEADER: &str = "x-api-key";
 pub const AUTHORIZATION_HEADER: &str = "authorization";
 pub const AUTH_COOKIE_NAME: &str = "auth_token";
+
+/// Resolves the JWT signing secret at runtime:
+/// 1. `JWT_SECRET` env var if set and non-empty.
+/// 2. Otherwise a cryptographically-random 256-bit hex string generated
+///    exactly once per process lifetime. This means the secret changes
+///    on every server restart, invalidating all existing sessions.
+static JWT_SECRET: Lazy<String> = Lazy::new(|| {
+    std::env::var("JWT_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let mut buf = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut buf);
+            hex::encode(buf)
+        })
+});
+
+/// Revoked JWT `jti` (JWT ID) values. Populated on logout; checked during
+/// every `require_dashboard_session` call. Entries are never evicted — the
+/// session TTL caps at 7d and the in-memory cost is negligible.
+static REVOKED_JTIS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+
+/// Monotonically-increasing epoch used for bulk token invalidation. Each time
+/// we need to revoke *all* outstanding tokens (e.g. on password change) the
+/// epoch is incremented. Tokens signed with an older epoch are rejected by
+/// [`require_dashboard_session`].
+///
+/// The epoch is embedded in `DashboardClaims.jti` as a prefix
+/// (`"<epoch>:<uuid>"`). This avoids an extra claim field and keeps the
+/// blocklist size small — only the per-token jtis need DashSet entries, while
+/// epoch-wide revocations are handled by a simple integer compare.
+static TOKEN_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// Expose the resolved JWT secret (env var or random fallback) for use by
+/// downstream modules that need to sign tokens.
+pub fn jwt_secret() -> &'static str {
+    &JWT_SECRET
+}
+
+/// Generate a `jti` value that embeds the current token epoch.
+/// The format is `<epoch>:<uuid>`.
+pub fn generate_jti() -> String {
+    let epoch = TOKEN_EPOCH.load(Ordering::Relaxed);
+    let id = uuid::Uuid::new_v4();
+    format!("{epoch}:{id}")
+}
+
+/// Parse a `jti` and check whether its epoch matches the current token epoch.
+/// Returns `true` if the token was issued under the current (valid) epoch.
+pub fn is_jti_valid(jti: &str) -> bool {
+    let Some(epoch_str) = jti.split(':').next() else {
+        return false;
+    };
+    let Ok(epoch) = epoch_str.parse::<u64>() else {
+        return false;
+    };
+    epoch == TOKEN_EPOCH.load(Ordering::Relaxed)
+}
+
+/// Increment the global token epoch, effectively invalidating all tokens ever
+/// issued before this call — including those not in the per-jti blocklist.
+/// Use this for sensitive operations such as password changes.
+pub fn increment_token_epoch() {
+    TOKEN_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PresentedKeySource {
@@ -52,6 +121,10 @@ impl DashboardAuthError {
 pub struct DashboardClaims {
     pub authenticated: bool,
     pub exp: usize,
+    /// JWT ID — a unique per-token identifier. Used for revocation via
+    /// [`REVOKED_JTIS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
 }
 
 impl AuthError {
@@ -91,23 +164,39 @@ pub fn require_dashboard_session(
         return Ok(DashboardClaims {
             authenticated: true,
             exp: usize::MAX,
+            jti: None,
         });
     }
 
     let token = extract_auth_token(headers).ok_or(DashboardAuthError::Missing)?;
-    let secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "openproxy-default-secret-change-me".to_string());
     let validation = Validation::default();
     let decoded = decode::<DashboardClaims>(
         &token,
-        &DecodingKey::from_secret(secret.as_bytes()),
+        &DecodingKey::from_secret(JWT_SECRET.as_bytes()),
         &validation,
     )
     .map_err(|_| DashboardAuthError::Invalid)?;
     if !decoded.claims.authenticated {
         return Err(DashboardAuthError::Invalid);
     }
+    // Reject tokens from a previous epoch (password change, bulk revoke).
+    if let Some(ref jti) = decoded.claims.jti {
+        if !is_jti_valid(jti) {
+            return Err(DashboardAuthError::Invalid);
+        }
+        // Reject individually-revoked tokens (per-session logout).
+        if REVOKED_JTIS.contains(jti) {
+            return Err(DashboardAuthError::Invalid);
+        }
+    }
     Ok(decoded.claims)
+}
+
+/// Revoke a dashboard session by its `jti` (JWT ID). The revoked token will
+/// be rejected by [`require_dashboard_session`] on subsequent requests.
+/// Idempotent: calling this multiple times with the same `jti` is a no-op.
+pub fn revoke_jti(jti: &str) {
+    REVOKED_JTIS.insert(jti.to_string());
 }
 
 fn extract_presented_key(headers: &HeaderMap) -> Option<PresentedKey> {

@@ -39,10 +39,21 @@ impl UsageTracker {
         let completion_tokens = tokens
             .and_then(|t| t.completion_tokens.or(t.output_tokens))
             .unwrap_or(0);
+        let cache_creation_tokens = tokens
+            .and_then(|t| t.cache_creation_input_tokens)
+            .unwrap_or(0);
+        let cache_read_tokens = tokens
+            .and_then(|t| t.cache_read_input_tokens)
+            .unwrap_or(0);
 
-        let cost = self
-            .pricing
-            .calculate_cost(provider, model, prompt_tokens, completion_tokens);
+        let cost = self.pricing.calculate_cost(
+            provider,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            cache_creation_tokens,
+            cache_read_tokens,
+        );
 
         let entry = UsageEntry {
             timestamp: Some(Utc::now().to_rfc3339()),
