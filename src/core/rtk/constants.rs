@@ -80,7 +80,6 @@ pub const READ_NUMBERED_MIN_HIT_RATIO: f64 = 0.7;
 /// Filter name identifiers (Rust parity + JS extras)
 pub const FILTER_GIT_DIFF: &str = "git-diff";
 pub const FILTER_GIT_STATUS: &str = "git-status";
-pub const FILTER_GIT_LOG: &str = "git-log";
 pub const FILTER_GREP: &str = "grep";
 pub const FILTER_FIND: &str = "find";
 pub const FILTER_LS: &str = "ls";

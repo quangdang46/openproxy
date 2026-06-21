@@ -178,7 +178,13 @@ pub fn gemini_to_openai_response(chunk: &Value, state: &mut HashMap<String, Valu
 
     state.insert("functionIndex".to_string(), Value::Number(func_idx.into()));
 
+    if state.get("emitted_done").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return results;
+    }
+
     if let Some(finish_reason) = candidate.get("finishReason").and_then(|v| v.as_str()) {
+        state.insert("emitted_done".to_string(), Value::Bool(true));
+
         let mut fr = finish_reason.to_lowercase();
         if fr == "stop" && func_idx > 0 {
             fr = "tool_calls".to_string();

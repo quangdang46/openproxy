@@ -108,6 +108,10 @@ async fn handle_web_fetch(
             if url::Url::parse(s).is_err() {
                 return fetch_error(StatusCode::BAD_REQUEST, "Invalid URL format");
             }
+            // Reject URLs that resolve to private/internal IPs (SSRF protection)
+            if let Err(msg) = check_private_ip(s.trim()).await {
+                return fetch_error(StatusCode::BAD_REQUEST, &msg);
+            }
             s.trim().to_string()
         }
         _ => return fetch_error(StatusCode::BAD_REQUEST, "Missing required field: url"),
@@ -504,6 +508,72 @@ fn urlencoding(input: &str) -> String {
         }
     }
     out
+}
+
+/// Check whether an `IpAddr` is in a private-use or loopback range.
+///
+/// Covers: 127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+/// ::1, fe80::/10 (link-local), and fc00::/7 (unique-local).
+/// `IpAddr::is_private()` is not available on this Rust version so we
+/// delegate to the concrete-variant helpers.
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_multicast()
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // Unique-local (fc00::/7)
+                || (v6.octets()[0] & 0xfe) == 0xfc
+        }
+    }
+}
+
+/// Resolve a URL's host to IP addresses and reject private/internal ranges.
+///
+/// This is an SSRF guard: it blocks requests to 127.0.0.1, 10.x.x.x,
+/// 172.16-31.x.x, 192.168.x.x, ::1, and other loopback/private/unique-local
+/// addresses as defined by IANA special-purpose registries.
+async fn check_private_ip(url_str: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(url_str).map_err(|_| "Invalid URL".to_string())?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "URL has no host".to_string())?;
+
+    // Fast-path: if it's already a literal IP, check it directly.
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if is_private_ip(ip) {
+            return Err(format!(
+                "URL resolves to a private/internal IP address: {}",
+                ip
+            ));
+        }
+        return Ok(());
+    }
+
+    // Otherwise it's a hostname — resolve to IPs.
+    let addr_str = format!("{}:0", host);
+    let addrs = tokio::net::lookup_host(&addr_str)
+        .await
+        .map_err(|e| format!("DNS resolution failed: {}", e))?;
+
+    for addr in addrs {
+        let ip = addr.ip();
+        if is_private_ip(ip) {
+            return Err(format!(
+                "URL resolves to a private/internal IP address: {}",
+                ip
+            ));
+        }
+    }
+
+    Ok(())
 }
 
 fn normalize_fetch_response(

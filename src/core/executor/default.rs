@@ -189,7 +189,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "vertex-partner",
-            ProviderConfig::openai("https://{project}.{location}.掉ax.com/v1/chat/completions"),
+            ProviderConfig::openai("https://{project}.{location}.someax.com/v1/chat/completions"),
         ),
         (
             "ollama-local",

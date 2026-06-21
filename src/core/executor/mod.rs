@@ -31,8 +31,9 @@ pub use api_key::{
 };
 pub use azure::{AzureExecutionRequest, AzureExecutor, AzureExecutorError, AzureExecutorResponse};
 pub use client_pool::{
-    ClientPool, DirectHyperClient, CLIENT_POOL_IDLE_TIMEOUT, CLIENT_POOL_MAX_IDLE_PER_HOST,
-    CLIENT_POOL_TCP_KEEPALIVE,
+    ClientPool, ClientTimeout, DirectHyperClient, CLIENT_POOL_IDLE_TIMEOUT,
+    CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE, DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_STREAM_TIMEOUT,
 };
 pub use codex::{
     convert_openai_sse_to_standard, CodexExecutionRequest, CodexExecutor, CodexExecutorError,

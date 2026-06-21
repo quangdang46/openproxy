@@ -232,7 +232,7 @@ impl CodexExecutor {
             let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
 
             // Skip system messages as they're handled differently in Responses API
-            if role == "system" {
+            if role == "system" || role == "developer" {
                 continue;
             }
 

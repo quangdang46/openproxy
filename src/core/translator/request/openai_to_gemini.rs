@@ -229,7 +229,7 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, _signature: &s
             let content = msg.get("content").cloned().unwrap_or(Value::Null);
 
             // System message
-            if role == "system" && messages.len() > 1 {
+            if (role == "system" || role == "developer") && messages.len() > 1 {
                 let system_text = extract_text_content(&content);
                 if !system_text.is_empty() {
                     result["systemInstruction"] = serde_json::json!({
@@ -240,8 +240,8 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, _signature: &s
                 continue;
             }
 
-            // User message (or system-only)
-            if role == "user" || (role == "system" && messages.len() == 1) {
+            // User message (or system-only/developer-only)
+            if role == "user" || ((role == "system" || role == "developer") && messages.len() == 1) {
                 let parts = convert_openai_content_to_parts(&content);
                 if !parts.is_empty() {
                     result["contents"]

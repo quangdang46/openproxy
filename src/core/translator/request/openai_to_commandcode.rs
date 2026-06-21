@@ -69,7 +69,7 @@ fn convert_messages(messages: &[Value]) -> (Vec<Value>, String) {
         }
         let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
-        if role == "system" {
+        if role == "system" || role == "developer" {
             let t = flatten_text(m.get("content").unwrap_or(&Value::Null));
             if !t.is_empty() {
                 system_texts.push(t);

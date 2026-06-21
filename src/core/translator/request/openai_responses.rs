@@ -223,7 +223,7 @@ pub fn chat_to_openai_responses_request(
     for msg in &messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
-        if role == "system" {
+        if role == "system" || role == "developer" {
             if !has_system {
                 result["instructions"] = msg
                     .get("content")
@@ -343,6 +343,9 @@ pub fn chat_to_openai_responses_request(
     }
     if let Some(m) = body.get("max_tokens") {
         result["max_tokens"] = m.clone();
+    }
+    if let Some(m) = body.get("max_completion_tokens") {
+        result["max_completion_tokens"] = m.clone();
     }
     if let Some(t) = body.get("top_p") {
         result["top_p"] = t.clone();

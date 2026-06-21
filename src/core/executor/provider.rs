@@ -696,7 +696,7 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             (
                 "vertex-partner",
                 ProviderExecutorConfig::openai(
-                    "https://{project}.{location}.掉ax.com/v1/chat/completions",
+                    "https://{project}.{location}.someax.com/v1/chat/completions",
                 ),
             ),
             (
