@@ -338,10 +338,7 @@ pub fn is_private_ip(addr: &str) -> bool {
     if let Ok(n) = addr.parse::<u32>() {
         let octets = n.to_be_bytes();
         return is_private_ip_addr(IpAddr::V4(Ipv4Addr::new(
-            octets[0],
-            octets[1],
-            octets[2],
-            octets[3],
+            octets[0], octets[1], octets[2], octets[3],
         )));
     }
 

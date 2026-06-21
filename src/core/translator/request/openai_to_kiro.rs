@@ -525,7 +525,8 @@ pub fn openai_to_kiro_request(
 
     // Preserve client's max_tokens; fall back to 32000 default (9router bug fixed:
     // previously always hardcoded 32000 as a u64 literal, ignoring the client value)
-    let client_max_tokens: u64 = body.get("max_tokens")
+    let client_max_tokens: u64 = body
+        .get("max_tokens")
         .or_else(|| body.get("max_completion_tokens"))
         .and_then(|v| v.as_u64())
         .filter(|&t| t > 0)

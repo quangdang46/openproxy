@@ -274,7 +274,9 @@ impl BackupManager {
         let bytes = fs::read(&backup_path).await?;
 
         // Try the full decryption+checksum path first.
-        if let Ok(db) = crate::db::crypto::open_db(&bytes, crate::db::crypto::encryption_key().as_deref()) {
+        if let Ok(db) =
+            crate::db::crypto::open_db(&bytes, crate::db::crypto::encryption_key().as_deref())
+        {
             return Ok(db);
         }
 

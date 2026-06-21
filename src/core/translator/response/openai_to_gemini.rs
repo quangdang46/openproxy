@@ -10,10 +10,7 @@
 use crate::core::translator::registry::ResponseTransformState;
 use serde_json::Value;
 
-pub fn openai_to_gemini_response(
-    chunk: &[u8],
-    state: &mut ResponseTransformState,
-) -> Vec<String> {
+pub fn openai_to_gemini_response(chunk: &[u8], state: &mut ResponseTransformState) -> Vec<String> {
     let text = String::from_utf8_lossy(chunk);
     let line = text.trim();
 
@@ -49,10 +46,7 @@ pub fn openai_to_gemini_response(
 
     let Some(choice) = choice else {
         // Usage-only chunk (no choice)
-        if chunk_val.get("usage").is_some()
-            && !gs.finish_emitted
-            && gs.current_part_index > 0
-        {
+        if chunk_val.get("usage").is_some() && !gs.finish_emitted && gs.current_part_index > 0 {
             gs.finish_emitted = true;
             return emit_finish(chunk_val, gs, "STOP", false);
         }
@@ -154,9 +148,12 @@ pub fn openai_to_gemini_response(
             for idx in gs.tool_calls_accum.keys() {
                 if let Some(accum) = gs.tool_calls_accum.get(idx) {
                     let name = accum.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                    let args_str = accum.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
-                    let args: Value =
-                        serde_json::from_str(args_str).unwrap_or(Value::Object(serde_json::Map::new()));
+                    let args_str = accum
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+                    let args: Value = serde_json::from_str(args_str)
+                        .unwrap_or(Value::Object(serde_json::Map::new()));
 
                     finish_parts.push(serde_json::json!({
                         "functionCall": {

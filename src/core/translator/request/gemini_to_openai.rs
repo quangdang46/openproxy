@@ -24,8 +24,14 @@ fn convert_gemini_content(content: &Value) -> Option<Value> {
     for part in parts {
         if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
             if !text.is_empty() {
-                if part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) {
-                    reasoning_text.get_or_insert_with(String::new).push_str(text);
+                if part
+                    .get("thought")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    reasoning_text
+                        .get_or_insert_with(String::new)
+                        .push_str(text);
                 } else {
                     text_parts.push(serde_json::json!({
                         "type": "text",

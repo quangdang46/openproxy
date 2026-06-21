@@ -147,7 +147,13 @@ impl RequestLog {
             "[{}] {} {} ({}ms) {} {}",
             time, icon, status, elapsed, self.method, self.path
         ));
-        append_request_log(self.method, &self.path, status, elapsed, self.model.as_deref());
+        append_request_log(
+            self.method,
+            &self.path,
+            status,
+            elapsed,
+            self.model.as_deref(),
+        );
     }
 }
 

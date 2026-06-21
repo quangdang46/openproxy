@@ -163,10 +163,7 @@ impl LoginLimiter {
 
         let root = PathBuf::new();
         let dir = self.path.parent().unwrap_or(&root);
-        let tmp = dir.join(format!(
-            ".attempts.{}.tmp",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp = dir.join(format!(".attempts.{}.tmp", uuid::Uuid::new_v4()));
 
         if let Err(e) = fs::write(&tmp, &bytes).await {
             tracing::warn!(?e, "LoginLimiter: failed to write attempts file");
