@@ -1154,9 +1154,8 @@ mod tests {
     #[test]
     fn test_anthropic_message_delta_stop_reason() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
-        let chunk = Bytes::from(
-            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
-        );
+        let chunk =
+            Bytes::from(r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#);
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
         let output = &lines[0];
@@ -1580,9 +1579,8 @@ mod tests {
     #[test]
     fn test_anthropic_partial_chunk_processing() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
-        let chunk = Bytes::from(
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"partial\"}}\n",
-        );
+        let chunk =
+            Bytes::from("data: {\"type\":\"message_start\",\"message\":{\"id\":\"partial\"}}\n");
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
     }
