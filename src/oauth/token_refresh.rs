@@ -177,14 +177,19 @@ impl RefreshDedup {
             .await
             .clone();
 
-        // --- cache warming ---
-        {
-            let mut cache = self.cache.lock();
-            if let Some(entry) = cache.get_mut(&key) {
-                entry.cached_result = Some(result.clone());
-                entry.expires_at = Instant::now() + Duration::from_millis(REFRESH_RESULT_TTL_MS);
+            // 9router bug fix: only cache SUCCESS results, not errors/null.
+            // The original JS dedup cached null results for 10 seconds,
+            // defeating the caller's refreshWithRetry(3) which then only made
+            // one real attempt. We cache the in-flight OnceCell (so concurrent
+            // callers share one attempt) but only warm the result cache on
+            // success, allowing retries to actually retry.
+            if result.is_ok() {
+                let mut cache = self.cache.lock();
+                if let Some(entry) = cache.get_mut(&key) {
+                    entry.cached_result = Some(result.clone());
+                    entry.expires_at = Instant::now() + Duration::from_millis(REFRESH_RESULT_TTL_MS);
+                }
             }
-        }
 
         result
     }

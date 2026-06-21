@@ -844,10 +844,12 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
         if !output.is_empty() {
             obj.insert("output".to_string(), json!(output));
         }
-        // NOTE: usage is intentionally NOT sent in response.completed,
-        // matching 9router's sendCompleted().
-        // Usage tokens come via the final non-streaming response body
-        // or a separate usage event in the Responses API spec.
+        // Include usage from the last chunk (fix: 9router omit bug — sendCompleted()
+        // in the JS version omits usage, breaking downstream consumers).
+        // Responses API spec requires usage in response.completed.
+        if let Some(usage) = chunk.get("usage").filter(|v| !v.is_null()) {
+            obj.insert("usage".to_string(), usage.clone());
+        }
 
         state.seq += 1;
         frames.push(format_sse_event(
