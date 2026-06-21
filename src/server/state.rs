@@ -91,7 +91,7 @@ impl AppState {
             usage_live: Arc::new(UsageLiveState::new()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             codex_proxy: Arc::new(CodexProxyState::new()),
-            login_limiter: Arc::new(LoginLimiter::new()),
+            login_limiter: Arc::new(LoginLimiter::new(&db.data_dir)),
             oidc_client: None,
             dashboard_sidecar_url: None,
             dashboard_client: None,

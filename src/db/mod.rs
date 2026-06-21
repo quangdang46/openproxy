@@ -2,7 +2,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use serde::Serialize;
 use serde_json::Value;
 use tokio::fs;
 use tokio::sync::RwLock;
@@ -11,6 +10,7 @@ use uuid::Uuid;
 use crate::types::{AppDb, Combo, ModelAliasTarget, ProviderConnection, ProviderNode, UsageDb};
 
 pub mod backups;
+pub mod crypto;
 pub mod watcher;
 
 #[derive(Debug, Clone, Default)]
@@ -137,7 +137,8 @@ impl Db {
         let mut next = (*self.snapshot()).clone();
         updater(&mut next);
         next.normalize();
-        write_json_atomic(&self.db_path, &next).await?;
+        let key = crate::db::crypto::encryption_key().unwrap_or_default();
+        write_app_db_atomic(&mut next, &self.db_path, &key).await?;
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
         Ok(next)
@@ -151,7 +152,7 @@ impl Db {
         let mut next = (*self.usage_snapshot()).clone();
         updater(&mut next);
         next.normalize();
-        write_json_atomic(&self.usage_path, &next).await?;
+        write_usage_db_atomic(&mut next, &self.usage_path).await?;
         let next = Arc::new(next);
         self.usage_snapshot.store(next.clone());
         Ok(next)
@@ -167,9 +168,65 @@ impl Db {
         let _guard = self.write_lock.write().await;
         let mut next = make_next();
         next.normalize();
-        write_json_atomic(&self.db_path, &next).await?;
+        let key = crate::db::crypto::encryption_key().unwrap_or_default();
+        write_app_db_atomic(&mut next, &self.db_path, &key).await?;
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
+        Ok(next)
+    }
+
+    // ------------------------------------------------------------------
+    // Centralized export / import
+    // ------------------------------------------------------------------
+
+    /// Serialize the current `AppDb` snapshot to pretty-printed JSON bytes.
+    /// Returns a useful filename hint as well.
+    pub fn export_db(&self) -> anyhow::Result<(Vec<u8>, String)> {
+        let snapshot = self.snapshot.load_full();
+        let json = serde_json::to_vec_pretty(snapshot.as_ref())?;
+        let filename = format!(
+            "openproxy-db-{}.json",
+            chrono_like_stamp()
+        );
+        Ok((json, filename))
+    }
+
+    /// Deserialize JSON bytes into `AppDb` and atomically replace the
+    /// in-memory snapshot + on-disk file in one write-locked operation.
+    pub async fn import_db(&self, json_bytes: &[u8]) -> anyhow::Result<Arc<AppDb>> {
+        let parsed: Value = serde_json::from_slice(json_bytes)?;
+        if !parsed.is_object() {
+            anyhow::bail!("import payload must be a JSON object");
+        }
+        let next = AppDb::from_json_value(parsed);
+        self.replace_app_db(move || next).await
+    }
+
+    /// Serialize the current `UsageDb` snapshot to pretty-printed JSON bytes.
+    pub fn export_usage_db(&self) -> anyhow::Result<(Vec<u8>, String)> {
+        let snapshot = self.usage_snapshot.load_full();
+        let json = serde_json::to_vec_pretty(snapshot.as_ref())?;
+        let filename = format!(
+            "openproxy-usage-{}.json",
+            chrono_like_stamp()
+        );
+        Ok((json, filename))
+    }
+
+    /// Deserialize JSON bytes into `UsageDb` and atomically replace the
+    /// in-memory usage snapshot + on-disk file in one write-locked operation.
+    /// Returns the new snapshot.
+    pub async fn import_usage_db(&self, json_bytes: &[u8]) -> anyhow::Result<Arc<UsageDb>> {
+        let _guard = self.write_lock.write().await;
+        let parsed: Value = serde_json::from_slice(json_bytes)?;
+        if !parsed.is_object() {
+            anyhow::bail!("import payload must be a JSON object");
+        }
+        let mut next = UsageDb::from_json_value(parsed);
+        next.normalize();
+        write_usage_db_atomic(&mut next, &self.usage_path).await?;
+        let next = Arc::new(next);
+        self.usage_snapshot.store(next.clone());
         Ok(next)
     }
 }
@@ -198,59 +255,88 @@ fn is_permission_denied(err: &anyhow::Error) -> bool {
 
 async fn load_or_init_app_db(path: &Path) -> anyhow::Result<AppDb> {
     if !fs::try_exists(path).await? {
-        let value = AppDb::default();
-        write_json_atomic(path, &value).await?;
+        let mut value = AppDb::default();
+        let key = crate::db::crypto::encryption_key().unwrap_or_default();
+        write_app_db_atomic(&mut value, path, &key).await?;
         return Ok(value);
     }
 
     let bytes = fs::read(path).await?;
-    let parsed = match serde_json::from_slice::<Value>(&bytes) {
-        Ok(value) => value,
-        Err(_) => {
-            let value = AppDb::default();
-            write_json_atomic(path, &value).await?;
-            return Ok(value);
+
+    // Try reading with checksum verification and decryption.
+    let maybe_value = read_app_db(&bytes).await;
+
+    let (mut value, created_new) = match maybe_value {
+        Ok(v) => (v, false),
+        Err(e) => {
+            tracing::warn!(
+                target: "openproxy::db",
+                "failed to read db.json with crypto ({e}); falling back to plain parse"
+            );
+            // Fallback: parse the file as a plain (unchecksummed, unencrypted)
+            // JSON object.
+            let parsed: Value = match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(_) => {
+                    let mut v = AppDb::default();
+                    let key = crate::db::crypto::encryption_key().unwrap_or_default();
+                    write_app_db_atomic(&mut v, path, &key).await?;
+                    return Ok(v);
+                }
+            };
+            (AppDb::from_json_value(parsed), false)
         }
     };
 
-    let value = AppDb::from_json_value(parsed.clone());
-
     // Migration v0.1.3: default require_login to false for better local UX.
     let mut mutated = false;
-    let mut value = value;
     if value.settings.require_login {
         value.settings.require_login = false;
         mutated = true;
     }
 
-    if mutated || serde_json::to_value(&value)? != parsed {
-        write_json_atomic(path, &value).await?;
+    // Schema version check: if the loaded value has a lower version, migrate.
+    if value.schema_version < crate::db::crypto::SCHEMA_VERSION {
+        value.schema_version = crate::db::crypto::SCHEMA_VERSION;
+        mutated = true;
+    }
+
+    if mutated || created_new {
+        let key = crate::db::crypto::encryption_key().unwrap_or_default();
+        write_app_db_atomic(&mut value, path, &key).await?;
     }
     Ok(value)
 }
 
 async fn load_or_init_usage_db(path: &Path) -> anyhow::Result<UsageDb> {
     if !fs::try_exists(path).await? {
-        let value = UsageDb::default();
-        write_json_atomic(path, &value).await?;
+        let mut value = UsageDb::default();
+        write_usage_db_atomic(&mut value, path).await?;
         return Ok(value);
     }
 
     let bytes = fs::read(path).await?;
-    let parsed = match serde_json::from_slice::<Value>(&bytes) {
-        Ok(value) => value,
-        Err(_) => {
-            let value = UsageDb::default();
-            write_json_atomic(path, &value).await?;
-            return Ok(value);
-        }
-    };
 
-    let value = UsageDb::from_json_value(parsed.clone());
-    if serde_json::to_value(&value)? != parsed {
-        write_json_atomic(path, &value).await?;
+    // Try checksum-verified read; fall back to plain parse for legacy files.
+    match read_usage_db(&bytes).await {
+        Ok(db) => Ok(db),
+        Err(e) => {
+            tracing::warn!(
+                target: "openproxy::db",
+                "failed to read usage.json with checksum ({e}); falling back to plain parse"
+            );
+            let parsed: Value = match serde_json::from_slice(&bytes) {
+                Ok(v) => v,
+                Err(_) => {
+                    let mut v = UsageDb::default();
+                    write_usage_db_atomic(&mut v, path).await?;
+                    return Ok(v);
+                }
+            };
+            let value = UsageDb::from_json_value(parsed);
+            Ok(value)
+        }
     }
-    Ok(value)
 }
 
 /// Re-read `db.json` from disk without writing anything back. Used by the
@@ -264,8 +350,19 @@ pub async fn reload_app_db(path: &Path) -> anyhow::Result<AppDb> {
             fs::read(path).await?
         }
     };
-    let parsed: Value = serde_json::from_slice(&bytes)?;
-    Ok(AppDb::from_json_value(parsed))
+
+    // Try checksum-verified + decrypted read first; fall back to plain parse.
+    match read_app_db(&bytes).await {
+        Ok(db) => Ok(db),
+        Err(e) => {
+            tracing::warn!(
+                target: "openproxy::db",
+                "reload_app_db: crypto read failed ({e}), using plain parse"
+            );
+            let parsed: Value = serde_json::from_slice(&bytes)?;
+            Ok(AppDb::from_json_value(parsed))
+        }
+    }
 }
 
 /// Re-read `usage.json` from disk without writing anything back.
@@ -277,11 +374,55 @@ pub async fn reload_usage_db(path: &Path) -> anyhow::Result<UsageDb> {
             fs::read(path).await?
         }
     };
-    let parsed: Value = serde_json::from_slice(&bytes)?;
-    Ok(UsageDb::from_json_value(parsed))
+
+    // Try checksum-verified read; fall back to plain parse.
+    match read_usage_db(&bytes).await {
+        Ok(db) => Ok(db),
+        Err(e) => {
+            tracing::warn!(
+                target: "openproxy::db",
+                "reload_usage_db: checksum read failed ({e}), using plain parse"
+            );
+            let parsed: Value = serde_json::from_slice(&bytes)?;
+            Ok(UsageDb::from_json_value(parsed))
+        }
+    }
 }
 
-async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> anyhow::Result<()> {
+/// Compact UTC timestamp safe for use in filenames (no colons).
+fn chrono_like_stamp() -> String {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // Split into date and time parts, replacing ':' with '-'.
+    let secs_of_day = n % 86_400;
+    let h = secs_of_day / 3600;
+    let m = (secs_of_day % 3600) / 60;
+    let s = secs_of_day % 60;
+
+    let z = n / 86_400;
+    let z_i64 = z as i64 + 719_468;
+    let era = if z_i64 >= 0 {
+        z_i64 / 146_097
+    } else {
+        (z_i64 - 146_096) / 146_097
+    };
+    let doe = (z_i64 - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m_civ = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = (if m_civ <= 2 { y + 1 } else { y }) as i32;
+
+    format!("{:04}-{:02}-{:02}T{:02}-{:02}-{:02}Z", y, m_civ, d, h, m, s)
+}
+
+/// Atomic write: serialize `value` to pretty JSON at `path` via temp + rename,
+/// embedding a `_checksum` SHA-256 field for integrity verification.
+async fn write_value_with_checksum(value: &serde_json::Value, path: &Path) -> anyhow::Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).await?;
 
@@ -293,8 +434,93 @@ async fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> anyhow::Resu
         Uuid::new_v4()
     ));
 
-    let bytes = serde_json::to_vec_pretty(value)?;
+    let body = serde_json::to_vec_pretty(value)?;
+    let checksum = crate::db::crypto::sha256_checksum(&body);
+    let mut with_checksum = value.clone();
+    with_checksum
+        .as_object_mut()
+        .expect("top-level Value must be an object")
+        .insert("_checksum".into(), serde_json::Value::String(checksum));
+
+    let bytes = serde_json::to_vec_pretty(&with_checksum)?;
     fs::write(&temp_path, bytes).await?;
     fs::rename(&temp_path, path).await?;
     Ok(())
+}
+
+/// Read a `serde_json::Value`, verify `_checksum` if present, return the
+/// clean Value (with `_checksum` stripped).
+fn read_verified_value(bytes: &[u8]) -> anyhow::Result<serde_json::Value> {
+    let mut root: serde_json::Value = serde_json::from_slice(bytes)?;
+    let Value::Object(ref mut map) = root else {
+        return Ok(root);
+    };
+
+    let stored_checksum = map
+        .remove("_checksum")
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
+    if let Some(ref expected) = stored_checksum {
+        if let Ok(body) = serde_json::to_vec_pretty(&root) {
+            let actual = crate::db::crypto::sha256_checksum(&body);
+            if *expected != actual {
+                tracing::warn!(
+                    target: "openproxy::db",
+                    "SHA-256 checksum mismatch (expected={expected}, actual={actual}); continuing"
+                );
+            }
+        }
+    }
+
+    Ok(root)
+}
+
+/// Write an `AppDb` to disk: encrypt sensitive connection fields, embed
+/// `schema_version`, serialize with a SHA-256 checksum, then restore
+/// plaintext on `value` so the in-memory copy remains usable.
+async fn write_app_db_atomic(value: &mut AppDb, path: &Path, key: &str) -> anyhow::Result<()> {
+    for conn in &mut value.provider_connections {
+        crate::db::crypto::encrypt_connection(conn, key);
+    }
+    value.schema_version = crate::db::crypto::SCHEMA_VERSION;
+    value.checksum.clear();
+
+    let json_val =
+        serde_json::to_value(&*value).expect("AppDb is always serializable");
+    write_value_with_checksum(&json_val, path).await?;
+
+    // Restore plaintext in-memory.
+    for conn in &mut value.provider_connections {
+        crate::db::crypto::decrypt_connection(conn, key);
+    }
+    Ok(())
+}
+
+/// Read an `AppDb` from disk, verify the SHA-256 checksum, and decrypt
+/// sensitive connection fields.
+async fn read_app_db(bytes: &[u8]) -> anyhow::Result<AppDb> {
+    let parsed = read_verified_value(bytes)?;
+    let mut app_db = AppDb::from_json_value(parsed);
+
+    if let Some(ref key) = crate::db::crypto::encryption_key() {
+        for conn in &mut app_db.provider_connections {
+            crate::db::crypto::decrypt_connection(conn, key);
+        }
+    }
+
+    Ok(app_db)
+}
+
+/// Write a `UsageDb` to disk with a SHA-256 checksum. Usage records are not
+/// encrypted (they contain no secrets), but they get the same integrity check.
+async fn write_usage_db_atomic(value: &mut UsageDb, path: &Path) -> anyhow::Result<()> {
+    let json_val =
+        serde_json::to_value(&*value).expect("UsageDb is always serializable");
+    write_value_with_checksum(&json_val, path).await?;
+    Ok(())
+}
+
+/// Read a `UsageDb` from disk, verifying the SHA-256 checksum if present.
+async fn read_usage_db(bytes: &[u8]) -> anyhow::Result<UsageDb> {
+    let parsed = read_verified_value(bytes)?;
+    Ok(UsageDb::from_json_value(parsed))
 }

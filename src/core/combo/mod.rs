@@ -1,19 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 
+use crate::core::account_fallback::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, MAX_BACKOFF_LEVEL};
 use crate::types::Combo;
 
 const LONG_COOLDOWN: Duration = Duration::from_secs(120);
 const SHORT_COOLDOWN: Duration = Duration::from_secs(5);
 const TRANSIENT_COOLDOWN: Duration = Duration::from_secs(30);
-const MAX_BACKOFF_LEVEL: u32 = 15;
-const BACKOFF_BASE_MS: u64 = 2_000;
-const BACKOFF_MAX_MS: u64 = 5 * 60 * 1_000;
 
 static COMBO_ROTATION_STATE: Lazy<Mutex<HashMap<String, usize>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));

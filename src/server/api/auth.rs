@@ -7,17 +7,18 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
-use bcrypt::verify;
+use bcrypt::{hash, verify, DEFAULT_COST};
 use chrono::{Duration as ChronoDuration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::server::auth::login_limiter::LockoutError;
 use crate::server::auth::oidc::{
     code_challenge_from_verifier, generate_code_verifier, generate_state_token,
 };
-use crate::server::auth::require_api_key;
+use crate::server::auth::{increment_token_epoch, jwt_secret, require_api_key, revoke_jti};
 use crate::server::state::AppState;
 use crate::types::Settings;
 
@@ -30,6 +31,9 @@ pub struct PasswordLoginRequest {
 struct AuthTokenClaims {
     authenticated: bool,
     exp: usize,
+    /// JWT ID — unique per-token identifier for revocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    jti: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,7 +80,7 @@ pub async fn login(
     // cannot bypass the limit by timing requests around bcrypt. A successful
     // password check immediately resets the counter via the second call below.
     if let Err(LockoutError::Locked { retry_after_secs }) =
-        state.login_limiter.check_and_record(client_ip, false)
+        state.login_limiter.check_and_record(client_ip, false).await
     {
         return lockout_response(retry_after_secs);
     }
@@ -93,7 +97,7 @@ pub async fn login(
 
     if !valid {
         if let Err(LockoutError::Locked { retry_after_secs }) =
-            state.login_limiter.check_and_record(client_ip, false)
+            state.login_limiter.check_and_record(client_ip, false).await
         {
             return lockout_response(retry_after_secs);
         }
@@ -104,18 +108,18 @@ pub async fn login(
             .into_response();
     }
 
-    let _ = state.login_limiter.check_and_record(client_ip, true);
+    let _ = state.login_limiter.check_and_record(client_ip, true).await;
 
     let expires_at = now_secs() + 86400;
-    let secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "openproxy-default-secret-change-me".to_string());
+    let jti = crate::server::auth::generate_jti();
     let token = match encode(
         &JwtHeader::default(),
         &AuthTokenClaims {
             authenticated: true,
             exp: expires_at as usize,
+            jti: Some(jti),
         },
-        &EncodingKey::from_secret(secret.as_bytes()),
+        &EncodingKey::from_secret(jwt_secret().as_bytes()),
     ) {
         Ok(token) => token,
         Err(error) => {
@@ -153,7 +157,7 @@ pub async fn oidc_login(headers: HeaderMap, State(state): State<AppState>) -> Re
     // Apply login rate limiter to prevent DoS against the IdP redirect.
     let client_ip = client_ip_from_headers(&headers);
     if let Err(LockoutError::Locked { retry_after_secs }) =
-        state.login_limiter.check_and_record(client_ip, false)
+        state.login_limiter.check_and_record(client_ip, false).await
     {
         return lockout_response(retry_after_secs);
     }
@@ -266,7 +270,7 @@ pub async fn oidc_callback(
 
     let client_ip = client_ip_from_headers(&headers);
     if let Err(LockoutError::Locked { retry_after_secs }) =
-        state.login_limiter.check_and_record(client_ip, false)
+        state.login_limiter.check_and_record(client_ip, false).await
     {
         return lockout_response(retry_after_secs);
     }
@@ -275,7 +279,7 @@ pub async fn oidc_callback(
         Ok(r) => r,
         Err(error) => {
             tracing::warn!(?error, "OIDC token exchange failed");
-            let _ = state.login_limiter.check_and_record(client_ip, false);
+            let _ = state.login_limiter.check_and_record(client_ip, false).await;
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "error": "Token exchange failed" })),
@@ -287,7 +291,7 @@ pub async fn oidc_callback(
     let id_token = match token_resp.get("id_token").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
         None => {
-            let _ = state.login_limiter.check_and_record(client_ip, false);
+            let _ = state.login_limiter.check_and_record(client_ip, false).await;
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "No id_token in token response" })),
@@ -300,7 +304,7 @@ pub async fn oidc_callback(
         Ok(j) => j,
         Err(error) => {
             tracing::warn!(?error, "OIDC JWKS fetch failed");
-            let _ = state.login_limiter.check_and_record(client_ip, false);
+            let _ = state.login_limiter.check_and_record(client_ip, false).await;
             return (
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "error": "Failed to fetch JWKS" })),
@@ -313,7 +317,7 @@ pub async fn oidc_callback(
         Ok(c) => c,
         Err(error) => {
             tracing::warn!(?error, "OIDC id_token verification failed");
-            let _ = state.login_limiter.check_and_record(client_ip, false);
+            let _ = state.login_limiter.check_and_record(client_ip, false).await;
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({ "error": "ID token verification failed" })),
@@ -324,7 +328,7 @@ pub async fn oidc_callback(
 
     // Authenticated. Mark the limiter as a success so a single bad
     // pre-auth probe doesn't pollute the failure budget.
-    let _ = state.login_limiter.check_and_record(client_ip, true);
+    let _ = state.login_limiter.check_and_record(client_ip, true).await;
 
     let email = claims
         .get("email")
@@ -339,6 +343,7 @@ pub async fn oidc_callback(
 
     let now = Utc::now().timestamp();
     let exp = (Utc::now() + ChronoDuration::days(7)).timestamp();
+    let jti = crate::server::auth::generate_jti();
     let token_claims = json!({
         "sub": email,
         "email": email,
@@ -346,13 +351,12 @@ pub async fn oidc_callback(
         "authenticated": true,
         "iat": now,
         "exp": exp,
+        "jti": jti,
     });
-    let secret = std::env::var("JWT_SECRET")
-        .unwrap_or_else(|_| "openproxy-default-secret-change-me".to_string());
     let token = match encode(
         &JwtHeader::default(),
         &token_claims,
-        &EncodingKey::from_secret(secret.as_bytes()),
+        &EncodingKey::from_secret(jwt_secret().as_bytes()),
     ) {
         Ok(t) => t,
         Err(error) => {
@@ -398,7 +402,18 @@ pub async fn logout(
     headers: HeaderMap,
     Json(req): Json<LogoutRequest>,
 ) -> Response {
-    if crate::server::auth::extract_auth_token(&headers).is_some() {
+    if let Some(token) = crate::server::auth::extract_auth_token(&headers) {
+        // Revoke by jti if we can decode it.
+        if let Ok(decoded) = jsonwebtoken::decode::<AuthTokenClaims>(
+            &token,
+            &jsonwebtoken::DecodingKey::from_secret(jwt_secret().as_bytes()),
+            &jsonwebtoken::Validation::default(),
+        ) {
+            if let Some(ref jti) = decoded.claims.jti {
+                revoke_jti(jti);
+            }
+        }
+
         let mut response = Json(json!({
             "success": true,
             "message": "Logged out"
@@ -583,10 +598,120 @@ pub async fn get_user(State(state): State<AppState>, headers: HeaderMap) -> Resp
     .into_response()
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PasswordChangeRequest {
+    /// The existing dashboard password (plaintext). Required when a password
+    /// hash is already stored in settings.
+    current_password: Option<String>,
+    /// The new dashboard password (plaintext). Will be bcrypt-hashed before
+    /// storage. Must be at least 8 characters.
+    new_password: String,
+}
+
+/// POST /api/auth/password
+///
+/// Change the dashboard password. The caller must present a valid dashboard
+/// session (JWT cookie) or management API key.
+///
+/// - Verifies `current_password` against the stored bcrypt hash (if any).
+/// - Bcrypt-hashes `new_password` and persists it in `settings.password`.
+/// - Revokes all existing JWT sessions so the user must log in again.
+pub async fn change_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PasswordChangeRequest>,
+) -> Response {
+    // Require either a dashboard session or management API key.
+    if let Err(response) =
+        crate::server::api::require_dashboard_or_management_api_key(&headers, &state)
+    {
+        return response;
+    }
+
+    let new_password = req.new_password.trim();
+    if new_password.len() < 8 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "New password must be at least 8 characters long" })),
+        )
+            .into_response();
+    }
+
+    let snapshot = state.db.snapshot();
+    let current_hash = settings_password_hash(&snapshot.settings);
+
+    // If a password hash already exists, require the current password for
+    // verification.
+    if let Some(hash) = current_hash {
+        match req.current_password {
+            Some(ref current) if !current.is_empty() => {
+                if !verify(current, hash).unwrap_or(false) {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": "Current password is incorrect" })),
+                    )
+                        .into_response();
+                }
+            }
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "Current password is required to set a new password" })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Bcrypt-hash the new password.
+    let hashed = match hash(new_password, DEFAULT_COST) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to bcrypt-hash new password");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "Failed to hash password" })),
+            )
+                .into_response();
+        }
+    };
+
+    // Persist the new password hash in settings.
+    if let Err(e) = state
+        .db
+        .update(|db| {
+            db.settings.password = Some(hashed);
+            // Also clear the legacy `extra["password"]` field if present.
+            db.settings.extra.remove("password");
+        })
+        .await
+    {
+        tracing::error!(error = %e, "failed to persist new password");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": "Failed to save password" })),
+        )
+            .into_response();
+    }
+
+    // Bump the token epoch to invalidate all outstanding sessions. Future
+    // `generate_jti()` calls will produce tokens with the new epoch, and
+    // `require_dashboard_session` will reject any token with an older one.
+    crate::server::auth::increment_token_epoch();
+
+    Json(json!({
+        "success": true,
+        "message": "Password changed. All sessions have been invalidated. Please log in again."
+    }))
+    .into_response()
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
+        .route("/api/auth/password", post(change_password))
         .route("/api/auth/sessions", get(list_sessions))
         .route("/api/auth/sessions", delete(delete_all_sessions))
         .route("/api/auth/session/{session_id}", get(get_session))

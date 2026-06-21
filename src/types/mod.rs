@@ -10,6 +10,14 @@ pub const DEFAULT_MITM_ROUTER_BASE: &str = "http://localhost:4623";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AppDb {
+    /// Schema version for forward-compatibility checks.
+    /// 0 = pre-encryption (legacy), 1 = AES-256-CBC on connection secrets.
+    #[serde(default)]
+    pub schema_version: u32,
+    /// Hex-encoded SHA-256 checksum of the canonical JSON body (computed
+    /// after serialisation but before writing; verified after reading).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub checksum: String,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub provider_connections: Vec<ProviderConnection>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
@@ -51,6 +59,8 @@ impl AppDb {
         };
 
         let mut db = Self {
+            schema_version: extract_named_field(&mut fields, "schemaVersion"),
+            checksum: extract_named_field(&mut fields, "checksum"),
             provider_connections: extract_named_field(&mut fields, "providerConnections"),
             provider_nodes: extract_named_field(&mut fields, "providerNodes"),
             proxy_pools: extract_named_field(&mut fields, "proxyPools"),

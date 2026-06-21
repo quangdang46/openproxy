@@ -8,13 +8,11 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use chrono::{SecondsFormat, Utc};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::json;
 
 use crate::db::backups::{BackupManager, BackupReason};
 use crate::server::state::AppState;
-use crate::types::AppDb;
 
 use super::require_dashboard_or_management_api_key;
 
@@ -179,16 +177,10 @@ async fn export_handler(State(state): State<AppState>, headers: HeaderMap) -> Re
         return response;
     }
 
-    let snapshot = state.db.snapshot();
-    let bytes = match serde_json::to_vec_pretty(snapshot.as_ref()) {
-        Ok(b) => b,
-        Err(err) => return internal_error(anyhow::anyhow!(err)),
+    let (bytes, filename) = match state.db.export_db() {
+        Ok(m) => m,
+        Err(err) => return internal_error(err),
     };
-
-    let timestamp = Utc::now()
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
-        .replace([':', '.'], "-");
-    let filename = format!("openproxy-backup-{}.json", timestamp);
 
     Response::builder()
         .status(StatusCode::OK)
@@ -232,26 +224,9 @@ async fn import_handler(
             .into_response();
     }
 
-    let parsed: Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": format!("Invalid JSON: {err}") })),
-            )
-                .into_response();
-        }
-    };
-
-    if !parsed.is_object() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Import payload must be a JSON object" })),
-        )
-            .into_response();
-    }
-
-    // Pre-import safety snapshot.
+    // Pre-import safety snapshot — take it before we attempt to parse,
+    // because a corrupt upload shouldn't leave us with no backup at all
+    // (the backup is of the current, good db).
     if let Err(err) = manager(&state).create(BackupReason::PreImport).await {
         tracing::warn!(
             target: "openproxy::db::backups",
@@ -261,17 +236,23 @@ async fn import_handler(
         return internal_error(err);
     }
 
-    let next = AppDb::from_json_value(parsed);
-    match state.db.replace_app_db(move || next).await {
-        Ok(snapshot) => Json(json!({
-            "imported": true,
-            "providerCount": snapshot.provider_connections.len(),
-            "comboCount": snapshot.combos.len(),
-            "apiKeyCount": snapshot.api_keys.len(),
-        }))
-        .into_response(),
-        Err(err) => internal_error(err),
-    }
+    let next = match state.db.import_db(&bytes).await {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    Json(json!({
+        "imported": true,
+        "providerCount": next.provider_connections.len(),
+        "comboCount": next.combos.len(),
+        "apiKeyCount": next.api_keys.len(),
+    }))
+    .into_response()
 }
 
 enum ImportError {

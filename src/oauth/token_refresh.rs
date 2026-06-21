@@ -20,12 +20,102 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 use tokio::sync::OnceCell;
 
 use super::TOKEN_EXPIRY_BUFFER_MS;
+
+// ---------------------------------------------------------------------------
+// Retry with jittered backoff
+// ---------------------------------------------------------------------------
+
+/// Constants for the retry loop.
+const MAX_RETRIES: u32 = 3;
+const BASE_DELAY_MS: u64 = 500;
+const MAX_DELAY_MS: u64 = 5_000;
+
+/// Retry `refresh_fn` up to `MAX_RETRIES` times with jittered exponential
+/// backoff.  Only retries transient-looking errors (network / 5xx); permanent
+/// errors (4xx) are returned immediately.
+pub async fn refresh_with_retry<F, Fut>(refresh_fn: F) -> Result<RefreshResult, String>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<RefreshResult, String>>,
+{
+    let mut last_err = String::new();
+
+    for attempt in 0..MAX_RETRIES {
+        if attempt > 0 {
+            let delay = jittered_delay(attempt);
+            tokio::time::sleep(delay).await;
+        }
+
+        match refresh_fn().await {
+            Ok(result) => return Ok(result),
+            Err(err) => {
+                let is_transient = !err.contains("40") // heuristic: 4xx usually permanent
+                    || err.contains("429")
+                    || err.contains("502")
+                    || err.contains("503")
+                    || err.contains("504");
+                if !is_transient {
+                    return Err(err);
+                }
+                last_err = err;
+            }
+        }
+    }
+
+    Err(format!(
+        "token refresh failed after {MAX_RETRIES} attempts: {last_err}"
+    ))
+}
+
+/// Jittered exponential backoff: `BASE * 2^(attempt-1) + random(0, BASE/2)`.
+fn jittered_delay(attempt: u32) -> Duration {
+    let base = BASE_DELAY_MS * (1u64 << (attempt.saturating_sub(1)));
+    let capped = base.min(MAX_DELAY_MS);
+    let jitter = rand::random::<u64>() % (BASE_DELAY_MS / 2);
+    Duration::from_millis(capped + jitter)
+}
+
+// ---------------------------------------------------------------------------
+// Global refresh dedup singleton
+// ---------------------------------------------------------------------------
+
+/// Global singleton that all callers can share.
+pub(crate) static GLOBAL_REFRESH_DEDUP: Lazy<RefreshDedup> = Lazy::new(RefreshDedup::new);
+
+/// Convenience: dedup then retry a refresh.
+///
+/// Combines `RefreshDedup::dedup` (one in-flight per provider+token pair) with
+/// `refresh_with_retry` (jittered exponential backoff on transient failures).
+///
+/// `http_fn` must be `Fn` (not `FnOnce`) so the retry loop can call it
+/// multiple times.
+pub async fn dedup_refresh<F, Fut>(
+    provider: &str,
+    old_token: &str,
+    http_fn: F,
+) -> Result<RefreshResult, String>
+where
+    F: Fn() -> Fut + 'static,
+    Fut: Future<Output = Result<RefreshResult, String>>,
+{
+    let provider = provider.to_owned();
+    let old_token = old_token.to_owned();
+
+    GLOBAL_REFRESH_DEDUP
+        .dedup(&provider, &old_token, move || {
+            // The dedup layer calls this FnOnce closure exactly once.
+            // Inside, refresh_with_retry calls http_fn (Fn) up to MAX_RETRIES times.
+            refresh_with_retry(http_fn)
+        })
+        .await
+}
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -218,6 +308,24 @@ pub fn needs_refresh(expires_at: &Option<String>) -> bool {
             let now = chrono::Utc::now();
             let buffer = chrono::Duration::milliseconds(TOKEN_EXPIRY_BUFFER_MS as i64);
             expires_at - buffer < now
+        }
+        Err(_) => true,
+    }
+}
+
+/// Check whether an access token needs refreshing with a provider-specific
+/// lead time.  Used by openai.rs, xai.rs, gemini_cli.rs, and antigravity.rs.
+pub fn needs_refresh_with_lead(expires_at: &Option<String>, lead_ms: u64) -> bool {
+    let Some(expires_at) = expires_at else {
+        return true;
+    };
+
+    match chrono::DateTime::parse_from_rfc3339(expires_at) {
+        Ok(expires_at) => {
+            let expires_at = expires_at.with_timezone(&chrono::Utc);
+            let now = chrono::Utc::now();
+            let lead = chrono::Duration::milliseconds(lead_ms as i64);
+            expires_at - lead < now
         }
         Err(_) => true,
     }
