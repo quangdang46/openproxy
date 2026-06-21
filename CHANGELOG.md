@@ -16,7 +16,7 @@
 ## CI/CD
 - All 1008 tests pass across all platforms (CI ✅)
 - v0.3.2 release published with cross-compiled binaries (Release ✅)
-- Docker multi-arch image build in progress
+- Docker multi-arch image published to GHCR (Docker ✅)
 
 # v0.3.0 (2026-06-21)
 
