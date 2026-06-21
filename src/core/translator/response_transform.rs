@@ -244,6 +244,20 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                                         ));
                                     }
                                 }
+                                "cache_control_delta" => {
+                                    // Emit cache_lookahead metadata
+                                    let is_lookahead = delta
+                                        .get("cache_control")
+                                        .and_then(|c| c.get("type"))
+                                        .and_then(|t| t.as_str())
+                                        == Some("cache_control_lookahead");
+                                    if is_lookahead {
+                                        output_lines.push(format!(
+                                            r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"cache_lookahead":true}},"logprobs":null,"finish_reason":null}}]}}"#,
+                                            index
+                                        ));
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -1019,9 +1033,9 @@ mod tests {
     #[test]
     fn test_anthropic_to_openai_transformer() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
-        // Simulate Anthropic SSE - format: data: {"type":"message_start","message_start":{...}}
+        // Simulate Anthropic SSE - format: data: {"type":"message_start","message":{...}}
         let chunk = Bytes::from(
-            r#"data: {"type":"message_start","message_start":{"id":"test","model":"claude-3","type":"message_start","created_at":1234567890}}"#,
+            r#"data: {"type":"message_start","message":{"id":"test","model":"claude-3","created_at":1234567890}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(
@@ -1077,7 +1091,7 @@ mod tests {
     fn test_anthropic_message_start_conversion() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            r#"data: {"type":"message_start","message_start":{"id":"msg-123","model":"claude-3-opus-20250219","type":"message","created_at":1234567890}}"#,
+            r#"data: {"type":"message_start","message":{"id":"msg-123","model":"claude-3-opus-20250219","created_at":1234567890}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1090,7 +1104,7 @@ mod tests {
     fn test_anthropic_content_block_start_conversion() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            r#"data: {"type":"content_block_start","content_block_start":{"index":0,"content_block":{"type":"text"}}}"#,
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1102,7 +1116,7 @@ mod tests {
     fn test_anthropic_text_delta_conversion() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            r#"data: {"type":"content_block_delta","content_block_delta":{"index":0,"delta":{"type":"text_delta","text":"Hello"}}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1115,7 +1129,7 @@ mod tests {
     fn test_anthropic_thinking_delta_conversion() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            r#"data: {"type":"content_block_delta","content_block_delta":{"index":0,"delta":{"type":"thinking_delta","text":"reasoning here"}}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","text":"reasoning here"}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1129,7 +1143,7 @@ mod tests {
     fn test_anthropic_cache_control_delta_conversion() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            r#"data: {"type":"content_block_delta","content_block_delta":{"index":0,"delta":{"type":"cache_control_delta","cache_control":{"type":"cache_control_lookahead"}}}}"#,
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"cache_control_delta","cache_control":{"type":"cache_control_lookahead"}}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1141,7 +1155,7 @@ mod tests {
     fn test_anthropic_message_delta_stop_reason() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            r#"data: {"type":"message_delta","message_delta":{"stop_reason":"end_turn"}}"#,
+            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1153,7 +1167,7 @@ mod tests {
     fn test_anthropic_message_delta_usage() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            r#"data: {"type":"message_delta","message_delta":{"usage":{"output_tokens":150,"input_tokens":50}}}"#,
+            r#"data: {"type":"message_delta","delta":{},"usage":{"output_tokens":150,"input_tokens":50}}"#,
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1167,10 +1181,10 @@ mod tests {
     fn test_anthropic_multiple_events_in_chunk() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            "data: {\"type\":\"message_start\",\"message_start\":{\"id\":\"msg-1\",\"model\":\"claude-3\",\"created_at\":1234567890}}\n\
-             data: {\"type\":\"content_block_start\",\"content_block_start\":{\"index\":0,\"content_block\":{\"type\":\"text\"}}}\n\
-             data: {\"type\":\"content_block_delta\",\"content_block_delta\":{\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}}\n\
-             data: {\"type\":\"message_delta\",\"message_delta\":{\"stop_reason\":\"end_turn\",\"usage\":{\"output_tokens\":10,\"input_tokens\":5}}}}",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"model\":\"claude-3\",\"created_at\":1234567890}}\n\
+             data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n\
+             data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\
+             data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":10,\"input_tokens\":5}}",
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1433,9 +1447,9 @@ mod tests {
     #[test]
     fn test_chunk_by_chunk_accumulation_anthropic() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
-        let chunk1 = Bytes::from("data: {\"type\":\"message_start\",\"message_start\":{\"id\":\"msg-1\",\"model\":\"claude-3\",\"created_at\":1234567890}}\n");
-        let chunk2 = Bytes::from("data: {\"type\":\"content_block_start\",\"content_block_start\":{\"index\":0,\"content_block\":{\"type\":\"text\"}}}\n");
-        let chunk3 = Bytes::from("data: {\"type\":\"content_block_delta\",\"content_block_delta\":{\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}}\n");
+        let chunk1 = Bytes::from("data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"model\":\"claude-3\",\"created_at\":1234567890}}\n");
+        let chunk2 = Bytes::from("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}\n");
+        let chunk3 = Bytes::from("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n");
         let lines1 = transformer.transform_chunk(&chunk1);
         let lines2 = transformer.transform_chunk(&chunk2);
         let lines3 = transformer.transform_chunk(&chunk3);
@@ -1448,7 +1462,7 @@ mod tests {
     fn test_anthropic_thinking_block_format() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            "data: {\"type\":\"content_block_delta\",\"content_block_delta\":{\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"text\":\"Let me think about this step by step...\"}}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"text\":\"Let me think about this step by step...\"}}\n",
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1480,7 +1494,7 @@ mod tests {
     fn test_anthropic_cache_control_lookahead_emitted() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            "data: {\"type\":\"content_block_delta\",\"content_block_delta\":{\"index\":0,\"delta\":{\"type\":\"cache_control_delta\",\"cache_control\":{\"type\":\"cache_control_lookahead\",\"amount\":1024}}}}\n",
+            "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"cache_control_delta\",\"cache_control\":{\"type\":\"cache_control_lookahead\",\"amount\":1024}}}\n",
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1555,7 +1569,7 @@ mod tests {
     fn test_anthropic_message_delta_without_usage() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            "data: {\"type\":\"message_delta\",\"message_delta\":{\"stop_reason\":\"end_turn\"}}\n",
+            "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n",
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
@@ -1567,7 +1581,7 @@ mod tests {
     fn test_anthropic_partial_chunk_processing() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
         let chunk = Bytes::from(
-            "data: {\"type\":\"message_start\",\"message_start\":{\"id\":\"partial\"}}\n",
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"partial\"}}\n",
         );
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
