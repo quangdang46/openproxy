@@ -139,7 +139,7 @@ pub fn openai_to_kiro_request(
             .unwrap_or("")
             .to_string();
 
-        if role == "system" || role == "tool" {
+        if role == "system" || role == "developer" || role == "tool" {
             role = "user".to_string();
         }
 

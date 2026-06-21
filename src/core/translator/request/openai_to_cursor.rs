@@ -112,7 +112,7 @@ pub fn openai_to_cursor_request(
     for msg in &messages {
         let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
-        if role == "system" {
+        if role == "system" || role == "developer" {
             result_messages.push(serde_json::json!({
                 "role": "user",
                 "content": format!("[System Instructions]\n{}", extract_content(msg.get("content").unwrap_or(&Value::Null)))

@@ -558,7 +558,7 @@ impl QoderExecutor {
             let text = Self::extract_text(msg.get("content").unwrap_or(&Value::Null));
             let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
-            if role == "system" {
+            if role == "system" || role == "developer" {
                 if !text.is_empty() {
                     system_parts.push(text);
                 }

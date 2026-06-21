@@ -485,7 +485,7 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
         return Some(compress_kiro_format(body));
     }
 
-    let items = {
+    let mut items = {
         let fields = body.as_object()?;
         let arr = fields.get("messages").and_then(Value::as_array);
         let input = fields.get("input").and_then(Value::as_array);
@@ -498,67 +498,116 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
         hits: Vec::new(),
     };
 
-    for msg in items.iter() {
-        let msg_fields = msg.as_object()?;
+    for msg in items.iter_mut() {
+        let msg_fields = msg.as_object_mut()?;
         let role = msg_fields.get("role").and_then(Value::as_str);
 
         if role == Some("tool") {
-            if let Some(content) = msg_fields.get("content").and_then(Value::as_str) {
-                compress_tool_text(content, &mut stats, "openai-tool", |text| {
-                    auto_detect_filter(text).map(|f| f.filter_fn)
-                });
-            } else if let Some(parts) = msg_fields.get("content").and_then(Value::as_array) {
-                for part in parts.iter() {
-                    if let Some(text) = part.get("text").and_then(Value::as_str) {
-                        compress_tool_text(text, &mut stats, "openai-tool-array", |text| {
-                            auto_detect_filter(text).map(|f| f.filter_fn)
-                        });
+            if let Some(content) = msg_fields.get_mut("content") {
+                match content {
+                    Value::String(text) => {
+                        let compressed =
+                            compress_tool_text_owned(text.as_str(), &mut stats, "openai-tool");
+                        if compressed.len() < text.len() {
+                            *text = compressed;
+                        }
                     }
+                    Value::Array(parts) => {
+                        for part in parts.iter_mut() {
+                            if let Some(Value::String(text)) = part.get_mut("text") {
+                                let compressed = compress_tool_text_owned(
+                                    text.as_str(),
+                                    &mut stats,
+                                    "openai-tool-array",
+                                );
+                                if compressed.len() < text.len() {
+                                    *text = compressed;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         } else if msg_fields.get("type").and_then(Value::as_str) == Some("function_call_output") {
-            if let Some(output) = msg_fields.get("output") {
-                if let Some(text) = output.as_str() {
-                    compress_tool_text(text, &mut stats, "openai-responses-string", |text| {
-                        auto_detect_filter(text).map(|f| f.filter_fn)
-                    });
-                } else if let Some(arr) = output.as_array() {
-                    for part in arr.iter() {
-                        if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            compress_tool_text(
-                                text,
-                                &mut stats,
-                                "openai-responses-array",
-                                |text| auto_detect_filter(text).map(|f| f.filter_fn),
-                            );
+            if let Some(output) = msg_fields.get_mut("output") {
+                match output {
+                    Value::String(text) => {
+                        let compressed = compress_tool_text_owned(
+                            text.as_str(),
+                            &mut stats,
+                            "openai-responses-string",
+                        );
+                        if compressed.len() < text.len() {
+                            *text = compressed;
                         }
                     }
+                    Value::Array(parts) => {
+                        for part in parts.iter_mut() {
+                            if let Some(Value::String(text)) = part.get_mut("text") {
+                                let compressed = compress_tool_text_owned(
+                                    text.as_str(),
+                                    &mut stats,
+                                    "openai-responses-array",
+                                );
+                                if compressed.len() < text.len() {
+                                    *text = compressed;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
-        } else if let Some(content) = msg_fields.get("content").and_then(Value::as_array) {
-            for block in content.iter() {
-                if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+        } else if let Some(content) = msg_fields.get_mut("content").and_then(Value::as_array_mut) {
+            for block in content.iter_mut() {
+                let block_fields = block.as_object_mut()?;
+                if block_fields.get("type").and_then(Value::as_str) != Some("tool_result") {
                     continue;
                 }
-                if block.get("is_error").and_then(Value::as_bool) == Some(true) {
+                if block_fields.get("is_error").and_then(Value::as_bool) == Some(true) {
                     continue;
                 }
-                if let Some(text) = block.get("content").and_then(Value::as_str) {
-                    compress_tool_text(text, &mut stats, "claude-string", |text| {
-                        auto_detect_filter(text).map(|f| f.filter_fn)
-                    });
-                } else if let Some(parts) = block.get("content").and_then(Value::as_array) {
-                    for part in parts.iter() {
-                        if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            compress_tool_text(text, &mut stats, "claude-array", |text| {
-                                auto_detect_filter(text).map(|f| f.filter_fn)
-                            });
+                if let Some(cv) = block_fields.get_mut("content") {
+                    match cv {
+                        Value::String(text) => {
+                            let compressed = compress_tool_text_owned(
+                                text.as_str(),
+                                &mut stats,
+                                "claude-string",
+                            );
+                            if compressed.len() < text.len() {
+                                *text = compressed;
+                            }
                         }
+                        Value::Array(parts) => {
+                            for part in parts.iter_mut() {
+                                if let Some(Value::String(text)) = part.get_mut("text") {
+                                    let compressed = compress_tool_text_owned(
+                                        text.as_str(),
+                                        &mut stats,
+                                        "claude-array",
+                                    );
+                                    if compressed.len() < text.len() {
+                                        *text = compressed;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
         }
     }
+
+    // Write the modified items back into the request body.
+    let key = if body.as_object().is_some_and(|f| f.contains_key("messages")) {
+        "messages"
+    } else {
+        "input"
+    };
+    body[key] = Value::Array(items);
 
     Some(stats)
 }
@@ -634,10 +683,9 @@ fn compress_kiro_tool_results(msg: &mut Value, stats: &mut RtkStats) {
     }
 }
 
-/// Variant of `compress_tool_text` that returns the (possibly-compressed)
-/// output instead of discarding it. Used by the Kiro path which has to write
-/// the result back into the request body so the upstream actually sees a
-/// smaller payload.
+/// Compress a single text payload and return the (possibly-compressed) output.
+/// Used when the caller needs to write the result back into the request body
+/// so the upstream sees a smaller payload.
 fn compress_tool_text_owned(text: &str, stats: &mut RtkStats, shape: &str) -> String {
     let bytes_in = text.len();
     stats.bytes_before += bytes_in;
@@ -666,47 +714,6 @@ fn compress_tool_text_owned(text: &str, stats: &mut RtkStats, shape: &str) -> St
         saved: bytes_in - out.len(),
     });
     out
-}
-
-fn compress_tool_text<F>(text: &str, stats: &mut RtkStats, shape: &str, detect_fn: F)
-where
-    F: Fn(&str) -> Option<FilterFn>,
-{
-    let bytes_in = text.len();
-    stats.bytes_before += bytes_in;
-
-    if !(MIN_COMPRESS_SIZE..=RAW_CAP).contains(&bytes_in) {
-        stats.bytes_after += bytes_in;
-        return;
-    }
-
-    let filter_fn = match detect_fn(text) {
-        Some(f) => f,
-        None => {
-            stats.bytes_after += bytes_in;
-            return;
-        }
-    };
-
-    let filter_name = auto_detect_filter(text)
-        .map(|f| f.filter_name)
-        .unwrap_or("unknown");
-
-    let out = safe_apply(filter_fn, text, filter_name);
-
-    if out.is_empty() || out.len() >= bytes_in {
-        stats.bytes_after += bytes_in;
-        return;
-    }
-
-    stats.bytes_after += out.len();
-    stats.hits.push(RtkHit {
-        shape: shape.to_string(),
-        filter: filter_name.to_string(),
-        saved: bytes_in - out.len(),
-    });
-
-    let _ = out;
 }
 
 #[cfg(test)]
