@@ -74,8 +74,10 @@ pub enum ModelCapacity {
 }
 
 pub fn get_quota_cooldown(backoff_level: u32) -> Duration {
-    let level = backoff_level.saturating_sub(1);
-    let cooldown_ms = BACKOFF_BASE_MS.saturating_mul(2u64.saturating_pow(level));
+    // 9router bug fixed: was `saturating_sub(1)` which made levels 0 and 1
+    // both produce BASE*2^0 = same delay. Correct formula: BASE * 2^level
+    // so level 0 = BASE (2s), level 1 = 2*BASE (4s), level 2 = 4*BASE (8s), etc.
+    let cooldown_ms = BACKOFF_BASE_MS.saturating_mul(2u64.saturating_pow(backoff_level));
     Duration::from_millis(cooldown_ms.min(BACKOFF_MAX_MS))
 }
 
@@ -111,7 +113,15 @@ pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -
     }
 
     match status {
-        401..=404 => FallbackDecision {
+        // 9router bug fixed: 4xx client errors should NOT trigger fallback.
+        // The original code returned should_fallback: true for all of 401-404,
+        // causing account rotation on bad requests that will fail on any account.
+        400 | 404 => FallbackDecision {
+            should_fallback: false,
+            cooldown: Duration::ZERO,
+            new_backoff_level: None,
+        },
+        401 | 403 => FallbackDecision {
             should_fallback: true,
             cooldown: LONG_COOLDOWN,
             new_backoff_level: None,
