@@ -298,9 +298,7 @@ fn parse_model_pricing(provider: &str, model: &str, value: &Value) -> ModelPrici
         // Try per-field per-million names
         let field_input = obj.get("inputPricePerMillion").and_then(Value::as_f64);
         let field_output = obj.get("outputPricePerMillion").and_then(Value::as_f64);
-        let field_cache_read = obj
-            .get("cacheReadPricePerMillion")
-            .and_then(Value::as_f64);
+        let field_cache_read = obj.get("cacheReadPricePerMillion").and_then(Value::as_f64);
         let field_cache_creation = obj
             .get("cacheCreationPricePerMillion")
             .and_then(Value::as_f64);

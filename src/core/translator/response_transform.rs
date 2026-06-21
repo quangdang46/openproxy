@@ -201,159 +201,159 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                         continue;
                     }
                 };
-                    match event {
-                        AnthropicEvent::MessageStart { message } => {
-                            let id = message.id.as_deref().unwrap_or("anonymous");
-                            let model = message.model.as_deref().unwrap_or("");
-                            let created = message.created_at.unwrap_or(0);
-                            output_lines.push(format!(
+                match event {
+                    AnthropicEvent::MessageStart { message } => {
+                        let id = message.id.as_deref().unwrap_or("anonymous");
+                        let model = message.model.as_deref().unwrap_or("");
+                        let created = message.created_at.unwrap_or(0);
+                        output_lines.push(format!(
                                 r#"{{"id":"{id}","object":"chat.completion.chunk","created":{created},"model":"{model}","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":null}}]}}"#,
                             ));
-                        }
-                        AnthropicEvent::ContentBlockStart {
-                            index,
-                            content_block,
-                        } => {
-                            output_lines.push(format!(
+                    }
+                    AnthropicEvent::ContentBlockStart {
+                        index,
+                        content_block,
+                    } => {
+                        output_lines.push(format!(
                                 r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"role":"assistant","content":null}},"logprobs":null,"finish_reason":null}}]}}"#,
                                 index
                             ));
-                            // Track thinking state for content_block_stop
-                            let block_type = content_block
-                                .get("type")
-                                .and_then(|t| t.as_str())
-                                .unwrap_or("text");
-                            if block_type == "thinking" {
-                                self.state.in_thinking = true;
-                                self.state.current_thinking_index = Some(index);
-                            } else if block_type == "text" {
-                                self.state.in_thinking = false;
-                            } else if block_type == "tool_use" {
-                                self.state.in_thinking = false;
-                                // Emit tool call start chunk with id and name
-                                let tool_id = content_block
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let tool_name = content_block
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                // Initialize the argument accumulator buffer for this tool call index
-                                self.state.tool_arg_buffers.insert(index, String::new());
-                                output_lines.push(format!(
+                        // Track thinking state for content_block_stop
+                        let block_type = content_block
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("text");
+                        if block_type == "thinking" {
+                            self.state.in_thinking = true;
+                            self.state.current_thinking_index = Some(index);
+                        } else if block_type == "text" {
+                            self.state.in_thinking = false;
+                        } else if block_type == "tool_use" {
+                            self.state.in_thinking = false;
+                            // Emit tool call start chunk with id and name
+                            let tool_id = content_block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            let tool_name = content_block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            // Initialize the argument accumulator buffer for this tool call index
+                            self.state.tool_arg_buffers.insert(index, String::new());
+                            output_lines.push(format!(
                                     r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"tool_calls":[{{"index":{},"id":"{}","type":"function","function":{{"name":"{}","arguments":""}}}}]}},"logprobs":null,"finish_reason":null}}]}}"#,
                                     index,
                                     index,
                                     escape_json_string(tool_id),
                                     escape_json_string(tool_name)
                                 ));
-                            }
                         }
-                        AnthropicEvent::ContentBlockDelta { index, delta } => {
-                            let delta_type =
-                                delta.get("type").and_then(|t| t.as_str()).unwrap_or("text");
-                            let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
-                            match delta_type {
-                                "text_delta" if !text.is_empty() => {
-                                    self.state.in_thinking = false;
-                                    output_lines.push(format!(
+                    }
+                    AnthropicEvent::ContentBlockDelta { index, delta } => {
+                        let delta_type =
+                            delta.get("type").and_then(|t| t.as_str()).unwrap_or("text");
+                        let text = delta.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                        match delta_type {
+                            "text_delta" if !text.is_empty() => {
+                                self.state.in_thinking = false;
+                                output_lines.push(format!(
                                         r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
                                         index,
                                         escape_json_string(text)
                                     ));
-                                }
-                                "thinking_delta" if !text.is_empty() => {
-                                    self.state.in_thinking = true;
-                                    self.state.current_thinking_index = Some(index);
-                                    output_lines.push(format!(
+                            }
+                            "thinking_delta" if !text.is_empty() => {
+                                self.state.in_thinking = true;
+                                self.state.current_thinking_index = Some(index);
+                                output_lines.push(format!(
                                         r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":"[thinking] {} [/thinking]"}},"logprobs":null,"finish_reason":null}}]}}"#,
                                         index,
                                         escape_json_string(text)
                                     ));
-                                }
-                                "input_json_delta" => {
-                                    // Tool call arguments — accumulate into buffer and emit
-                                    // proper OpenAI tool_calls arguments delta
-                                    if let Some(json) =
-                                        delta.get("partial_json").and_then(|t| t.as_str())
-                                    {
-                                        self.state.tool_arg_buffers.insert(index, json.to_string());
-                                        output_lines.push(format!(
+                            }
+                            "input_json_delta" => {
+                                // Tool call arguments — accumulate into buffer and emit
+                                // proper OpenAI tool_calls arguments delta
+                                if let Some(json) =
+                                    delta.get("partial_json").and_then(|t| t.as_str())
+                                {
+                                    self.state.tool_arg_buffers.insert(index, json.to_string());
+                                    output_lines.push(format!(
                                             r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"tool_calls":[{{"index":{},"function":{{"arguments":"{}"}}}}]}},"logprobs":null,"finish_reason":null}}]}}"#,
                                             index,
                                             index,
                                             escape_json_string(json)
                                         ));
-                                    }
                                 }
-                                "cache_control_delta" => {
-                                    // Cache control hints — emit a marker chunk
-                                    if let Some(cc) = delta.get("cache_control") {
-                                        output_lines.push(format!(
+                            }
+                            "cache_control_delta" => {
+                                // Cache control hints — emit a marker chunk
+                                if let Some(cc) = delta.get("cache_control") {
+                                    output_lines.push(format!(
                                             r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":""}},"logprobs":null,"finish_reason":null}}],"cache_lookahead":true}}"#,
                                             index
                                         ));
-                                    }
                                 }
-                                _ => {}
                             }
+                            _ => {}
                         }
-                        AnthropicEvent::ContentBlockStop { index } => {
-                            // If this was a tool_use block, clean up the argument buffer
-                            self.state.tool_arg_buffers.remove(&index);
+                    }
+                    AnthropicEvent::ContentBlockStop { index } => {
+                        // If this was a tool_use block, clean up the argument buffer
+                        self.state.tool_arg_buffers.remove(&index);
 
-                            // If we were in a thinking block, emit a small transition marker
-                            if self.state.in_thinking {
-                                self.state.in_thinking = false;
-                                // Close thinking bracket
-                                output_lines.push(format!(
+                        // If we were in a thinking block, emit a small transition marker
+                        if self.state.in_thinking {
+                            self.state.in_thinking = false;
+                            // Close thinking bracket
+                            output_lines.push(format!(
                                     r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":""}},"logprobs":null,"finish_reason":null}}]}}"#,
                                     index
                                 ));
-                            } else {
-                                output_lines.push(format!(
+                        } else {
+                            output_lines.push(format!(
                                     r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":{},"delta":{{"content":""}},"logprobs":null,"finish_reason":null}}]}}"#,
                                     index
                                 ));
-                            }
                         }
-                        AnthropicEvent::MessageDelta {
-                            delta: delta_data,
-                            usage,
-                        } => {
-                            let finish_reason = delta_data
-                                .stop_reason
-                                .map(|r| match r.as_str() {
-                                    "end_turn" | "stop" => "stop".to_string(),
-                                    "max_tokens" => "length".to_string(),
-                                    other => other.to_string(),
-                                })
-                                .unwrap_or_else(|| "stop".to_string());
-                            if let Some(usage) = usage {
-                                let input_tokens = usage.input_tokens.unwrap_or(0);
-                                let output_tokens = usage.output_tokens.unwrap_or(0);
-                                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
-                                let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
-                                let prompt_tokens = input_tokens + cache_read + cache_creation;
-                                output_lines.push(format!(
+                    }
+                    AnthropicEvent::MessageDelta {
+                        delta: delta_data,
+                        usage,
+                    } => {
+                        let finish_reason = delta_data
+                            .stop_reason
+                            .map(|r| match r.as_str() {
+                                "end_turn" | "stop" => "stop".to_string(),
+                                "max_tokens" => "length".to_string(),
+                                other => other.to_string(),
+                            })
+                            .unwrap_or_else(|| "stop".to_string());
+                        if let Some(usage) = usage {
+                            let input_tokens = usage.input_tokens.unwrap_or(0);
+                            let output_tokens = usage.output_tokens.unwrap_or(0);
+                            let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+                            let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+                            let prompt_tokens = input_tokens + cache_read + cache_creation;
+                            output_lines.push(format!(
                                     r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"{}"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
                                     finish_reason, prompt_tokens, output_tokens, prompt_tokens + output_tokens
                                 ));
-                            } else {
-                                output_lines.push(format!(
+                        } else {
+                            output_lines.push(format!(
                                     r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"{}"}}]}}"#,
                                     finish_reason
                                 ));
-                            }
-                        }
-                        AnthropicEvent::MessageStop => {
-                            output_lines.push("data: [DONE]".to_string());
-                        }
-                        AnthropicEvent::Unknown => {
-                            // ping, heartbeat — silently ignore
                         }
                     }
+                    AnthropicEvent::MessageStop => {
+                        output_lines.push("data: [DONE]".to_string());
+                    }
+                    AnthropicEvent::Unknown => {
+                        // ping, heartbeat — silently ignore
+                    }
+                }
             }
         }
 
@@ -483,46 +483,46 @@ impl StreamingTransformer for GeminiToOpenAiTransformer {
                         continue;
                     }
                 };
-                    if let Some(candidate) = event.candidates {
-                        for candidate_data in candidate {
-                            if let Some(content) = candidate_data.content {
-                                for part in content.parts.unwrap_or_default() {
-                                    if let Some(text) = part.text {
-                                        if !text.is_empty() {
-                                            output_lines.push(format!(
+                if let Some(candidate) = event.candidates {
+                    for candidate_data in candidate {
+                        if let Some(content) = candidate_data.content {
+                            for part in content.parts.unwrap_or_default() {
+                                if let Some(text) = part.text {
+                                    if !text.is_empty() {
+                                        output_lines.push(format!(
                                                 r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"gemini","choices":[{{"index":{},"delta":{{"content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
                                                 self.state.current_part_index,
                                                 escape_json_string(&text)
                                             ));
-                                        }
                                     }
-                                    if let Some(function_call) = part.function_call {
-                                        let name = function_call.name.unwrap_or_default();
-                                        let args = function_call.args.unwrap_or_default();
-                                        if let Ok(args_str) = serde_json::to_string(&args) {
-                                            output_lines.push(format!(
+                                }
+                                if let Some(function_call) = part.function_call {
+                                    let name = function_call.name.unwrap_or_default();
+                                    let args = function_call.args.unwrap_or_default();
+                                    if let Ok(args_str) = serde_json::to_string(&args) {
+                                        output_lines.push(format!(
                                                 r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"gemini","choices":[{{"index":{},"delta":{{"function_call":{{"name":"{}","arguments":"{}"}}}},"logprobs":null,"finish_reason":null}}]}}"#,
                                                 self.state.current_part_index,
                                                 escape_json_string(&name),
                                                 escape_json_string(&args_str)
                                             ));
-                                        }
                                     }
                                 }
-                                self.state.current_part_index += 1;
                             }
+                            self.state.current_part_index += 1;
                         }
                     }
+                }
 
-                    // Handle usage metadata
-                    if let Some(usage) = event.usage_metadata {
-                        let prompt_tokens = usage.prompt_token_count.unwrap_or(0);
-                        let completion_tokens = usage.candidates_token_count.unwrap_or(0);
-                        output_lines.push(format!(
+                // Handle usage metadata
+                if let Some(usage) = event.usage_metadata {
+                    let prompt_tokens = usage.prompt_token_count.unwrap_or(0);
+                    let completion_tokens = usage.candidates_token_count.unwrap_or(0);
+                    output_lines.push(format!(
                             r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"gemini","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
                             prompt_tokens, completion_tokens, prompt_tokens + completion_tokens
                         ));
-                    }
+                }
             }
         }
 
@@ -632,12 +632,12 @@ impl StreamingTransformer for OllamaToOpenAiTransformer {
                         continue;
                     }
                 };
-                    if let Some(message) = event.message {
-                        let role = message.role.unwrap_or_else(|| "assistant".to_string());
-                        let content = message.content.unwrap_or_default();
+                if let Some(message) = event.message {
+                    let role = message.role.unwrap_or_else(|| "assistant".to_string());
+                    let content = message.content.unwrap_or_default();
 
-                        if !content.is_empty() {
-                            output_lines.push(format!(
+                    if !content.is_empty() {
+                        output_lines.push(format!(
                                 r#"{{"id":"chatcmpl-{}","object":"chat.completion.chunk","created":{},"model":"ollama","choices":[{{"index":{},"delta":{{"role":"{}","content":"{}"}},"logprobs":null,"finish_reason":null}}]}}"#,
                                 self.state.message_idx,
                                 event.created_at.unwrap_or(0),
@@ -645,15 +645,15 @@ impl StreamingTransformer for OllamaToOpenAiTransformer {
                                 role,
                                 escape_json_string(&content)
                             ));
-                        }
+                    }
 
-                        // Handle tool calls
-                        if let Some(tool_calls) = message.tool_calls {
-                            for (i, tool_call) in tool_calls.into_iter().enumerate() {
-                                let name = tool_call.function.name.unwrap_or_default();
-                                let args = tool_call.function.arguments.unwrap_or_default();
-                                if let Ok(args_str) = serde_json::to_string(&args) {
-                                    output_lines.push(format!(
+                    // Handle tool calls
+                    if let Some(tool_calls) = message.tool_calls {
+                        for (i, tool_call) in tool_calls.into_iter().enumerate() {
+                            let name = tool_call.function.name.unwrap_or_default();
+                            let args = tool_call.function.arguments.unwrap_or_default();
+                            if let Ok(args_str) = serde_json::to_string(&args) {
+                                output_lines.push(format!(
                                         r#"{{"id":"chatcmpl-{}","object":"chat.completion.chunk","created":{},"model":"ollama","choices":[{{"index":{},"delta":{{"tool_calls":[{{"index":{},"id":"tool_{}","type":"function","function":{{"name":"{}","arguments":"{}"}}}}]}},"logprobs":null,"finish_reason":null}}]}}"#,
                                         self.state.message_idx,
                                         event.created_at.unwrap_or(0),
@@ -663,19 +663,19 @@ impl StreamingTransformer for OllamaToOpenAiTransformer {
                                         escape_json_string(&name),
                                         escape_json_string(&args_str)
                                     ));
-                                }
                             }
                         }
                     }
+                }
 
-                    // Handle done signal
-                    if event.done.unwrap_or(false) {
-                        if !emitted_done {
-                            output_lines.push("data: [DONE]".to_string());
-                            emitted_done = true;
-                        }
-                        self.state.message_idx += 1;
+                // Handle done signal
+                if event.done.unwrap_or(false) {
+                    if !emitted_done {
+                        output_lines.push("data: [DONE]".to_string());
+                        emitted_done = true;
                     }
+                    self.state.message_idx += 1;
+                }
             }
         }
 
@@ -1251,9 +1251,8 @@ mod tests {
     #[test]
     fn test_anthropic_message_delta_stop_reason() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
-        let chunk = Bytes::from(
-            r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
-        );
+        let chunk =
+            Bytes::from(r#"data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#);
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
         let output = &lines[0];
@@ -1677,9 +1676,8 @@ mod tests {
     #[test]
     fn test_anthropic_partial_chunk_processing() {
         let mut transformer = AnthropicToOpenAiTransformer::new();
-        let chunk = Bytes::from(
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"partial\"}}\n",
-        );
+        let chunk =
+            Bytes::from("data: {\"type\":\"message_start\",\"message\":{\"id\":\"partial\"}}\n");
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
     }

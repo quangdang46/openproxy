@@ -241,7 +241,8 @@ fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, _signature: &s
             }
 
             // User message (or system-only/developer-only)
-            if role == "user" || ((role == "system" || role == "developer") && messages.len() == 1) {
+            if role == "user" || ((role == "system" || role == "developer") && messages.len() == 1)
+            {
                 let parts = convert_openai_content_to_parts(&content);
                 if !parts.is_empty() {
                     result["contents"]

@@ -178,7 +178,11 @@ pub fn gemini_to_openai_response(chunk: &Value, state: &mut HashMap<String, Valu
 
     state.insert("functionIndex".to_string(), Value::Number(func_idx.into()));
 
-    if state.get("emitted_done").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if state
+        .get("emitted_done")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return results;
     }
 

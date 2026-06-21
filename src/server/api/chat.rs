@@ -13,9 +13,7 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
-use crate::core::account_fallback::{
-    build_model_lock_update, filter_available_accounts,
-};
+use crate::core::account_fallback::{build_model_lock_update, filter_available_accounts};
 use crate::core::chat::RequestPlan;
 use crate::core::combo::{
     check_fallback_error, execute_combo_strategy_with_capacity, get_combo_models_from_data,
@@ -1153,13 +1151,8 @@ fn select_connection(
     let now = Utc::now();
 
     // First: use filter_available_accounts to get accounts not in cooldown / not locked.
-    let available = filter_available_accounts(
-        &snapshot.provider_connections,
-        provider,
-        model,
-        None,
-        now,
-    );
+    let available =
+        filter_available_accounts(&snapshot.provider_connections, provider, model, None, now);
 
     // Then: apply remaining filters that filter_available_accounts does not cover:
     //   - credentials presence
@@ -1825,7 +1818,9 @@ fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
         reasoning_tokens: usage.get("reasoning_tokens").and_then(Value::as_u64),
         cached_tokens: usage.get("cached_tokens").and_then(Value::as_u64),
         cache_read_input_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
-        cache_creation_input_tokens: usage.get("cache_creation_input_tokens").and_then(Value::as_u64),
+        cache_creation_input_tokens: usage
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64),
         extra: usage
             .iter()
             .filter(|(key, _)| !known_fields.contains(&key.as_str()))

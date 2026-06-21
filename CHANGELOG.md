@@ -1,3 +1,36 @@
+# v0.3.0 (2026-06-21)
+
+## Bug fixes and quality improvements
+
+### API/Protocol fixes
+- Fix response completion DONE chunk handling — double DONE guard implemented
+- Preserve thinking blocks across SSE response transformation
+- Tool call handling on done chunks fixed
+
+### Request/response translation
+- Detect format correctly in edge cases (detectFormat fix)
+- Fusion types support completed
+- Tool argument buffers handled correctly for multi-turn
+- Response transformation chain cleaned up (response_transform.rs)
+
+### Security and auth
+- API key HMAC uses env var secret + timing-safe CRC comparison
+- SSRF protection gaps closed
+- Token refresh dedup and unrecoverable error handling improved
+
+### Database and persistence
+- DB encryption module refactored for correctness
+- Persistent rate limiter with login throttling
+- Usage tracking and pricing fixed (cache cost, shouldFallback, backoff)
+
+### Executor fixes
+- Tool normalization: `type:function` tools missing `function:{}` field handled
+- Developer→system role mapping for OpenCodeExecutor and DefaultExecutor
+- Fixed 20+ 9router bug patterns ported to Rust: usage tracking, backoff, shouldFallback always true
+- Provider-specific logic for OCg and Minimax
+
+---
+
 # v0.2.0 (2026-06-11)
 
 ## Major: 9router parity — 24 features

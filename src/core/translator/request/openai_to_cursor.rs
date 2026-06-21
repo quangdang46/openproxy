@@ -255,7 +255,8 @@ pub fn openai_to_cursor_request(
     rest["messages"] = Value::Array(result_messages);
     // Preserve client's max_tokens; fall back to 32000 default (9router bug fixed:
     // previously always hardcoded 32000, ignoring the client's requested value)
-    let client_max_tokens = body.get("max_tokens")
+    let client_max_tokens = body
+        .get("max_tokens")
         .or_else(|| body.get("max_completion_tokens"))
         .and_then(|v| v.as_u64());
     rest["max_tokens"] = match client_max_tokens {

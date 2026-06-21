@@ -184,10 +184,7 @@ impl Db {
     pub fn export_db(&self) -> anyhow::Result<(Vec<u8>, String)> {
         let snapshot = self.snapshot.load_full();
         let json = serde_json::to_vec_pretty(snapshot.as_ref())?;
-        let filename = format!(
-            "openproxy-db-{}.json",
-            chrono_like_stamp()
-        );
+        let filename = format!("openproxy-db-{}.json", chrono_like_stamp());
         Ok((json, filename))
     }
 
@@ -206,10 +203,7 @@ impl Db {
     pub fn export_usage_db(&self) -> anyhow::Result<(Vec<u8>, String)> {
         let snapshot = self.usage_snapshot.load_full();
         let json = serde_json::to_vec_pretty(snapshot.as_ref())?;
-        let filename = format!(
-            "openproxy-usage-{}.json",
-            chrono_like_stamp()
-        );
+        let filename = format!("openproxy-usage-{}.json", chrono_like_stamp());
         Ok((json, filename))
     }
 
@@ -484,8 +478,7 @@ async fn write_app_db_atomic(value: &mut AppDb, path: &Path, key: &str) -> anyho
     value.schema_version = crate::db::crypto::SCHEMA_VERSION;
     value.checksum.clear();
 
-    let json_val =
-        serde_json::to_value(&*value).expect("AppDb is always serializable");
+    let json_val = serde_json::to_value(&*value).expect("AppDb is always serializable");
     write_value_with_checksum(&json_val, path).await?;
 
     // Restore plaintext in-memory.
@@ -513,8 +506,7 @@ async fn read_app_db(bytes: &[u8]) -> anyhow::Result<AppDb> {
 /// Write a `UsageDb` to disk with a SHA-256 checksum. Usage records are not
 /// encrypted (they contain no secrets), but they get the same integrity check.
 async fn write_usage_db_atomic(value: &mut UsageDb, path: &Path) -> anyhow::Result<()> {
-    let json_val =
-        serde_json::to_value(&*value).expect("UsageDb is always serializable");
+    let json_val = serde_json::to_value(&*value).expect("UsageDb is always serializable");
     write_value_with_checksum(&json_val, path).await?;
     Ok(())
 }

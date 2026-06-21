@@ -42,9 +42,7 @@ impl UsageTracker {
         let cache_creation_tokens = tokens
             .and_then(|t| t.cache_creation_input_tokens)
             .unwrap_or(0);
-        let cache_read_tokens = tokens
-            .and_then(|t| t.cache_read_input_tokens)
-            .unwrap_or(0);
+        let cache_read_tokens = tokens.and_then(|t| t.cache_read_input_tokens).unwrap_or(0);
 
         let cost = self.pricing.calculate_cost(
             provider,

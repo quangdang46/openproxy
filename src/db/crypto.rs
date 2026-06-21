@@ -2,9 +2,7 @@
 //! plus SHA-256 checksum and schema version management.
 
 use aes::cipher::{
-    block_padding::Pkcs7,
-    generic_array::GenericArray,
-    BlockDecryptMut, BlockEncryptMut, KeyIvInit,
+    block_padding::Pkcs7, generic_array::GenericArray, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
 };
 use anyhow::Context;
 use base64::Engine;
@@ -205,12 +203,10 @@ pub fn open_db(bytes: &[u8], key: Option<&str>) -> anyhow::Result<AppDb> {
         return Ok(serde_json::from_slice(bytes)?);
     };
 
-    let checksum_str = map
-        .remove("_checksum")
-        .and_then(|v| match v {
-            Value::String(s) => Some(s),
-            _ => None,
-        });
+    let checksum_str = map.remove("_checksum").and_then(|v| match v {
+        Value::String(s) => Some(s),
+        _ => None,
+    });
     map.remove("_schemaVersion");
 
     // Checksum verification (best-effort — warn only).
@@ -229,8 +225,8 @@ pub fn open_db(bytes: &[u8], key: Option<&str>) -> anyhow::Result<AppDb> {
     }
 
     // Deserialize into AppDb.
-    let mut db: AppDb = serde_json::from_value(root)
-        .map_err(|e| anyhow::anyhow!("failed to parse AppDb: {e}"))?;
+    let mut db: AppDb =
+        serde_json::from_value(root).map_err(|e| anyhow::anyhow!("failed to parse AppDb: {e}"))?;
 
     // Decrypt connection fields.
     if let Some(k) = key {
@@ -268,12 +264,10 @@ pub fn open_json(bytes: &[u8]) -> anyhow::Result<Value> {
         return Ok(root);
     };
 
-    let checksum_str = map
-        .remove("_checksum")
-        .and_then(|v| match v {
-            Value::String(s) => Some(s),
-            _ => None,
-        });
+    let checksum_str = map.remove("_checksum").and_then(|v| match v {
+        Value::String(s) => Some(s),
+        _ => None,
+    });
     map.remove("_schemaVersion");
 
     if let Some(ref expected) = checksum_str {
@@ -323,17 +317,15 @@ mod tests {
     fn finalize_open_round_trip() {
         let key = Some("test-key");
         let mut db = AppDb::default();
-        db.provider_connections = vec![
-            ProviderConnection {
-                id: "c1".into(),
-                provider: "openai".into(),
-                api_key: Some("sk-abc".into()),
-                access_token: Some("tok-xyz".into()),
-                refresh_token: Some("rt-secret".into()),
-                name: Some("test".into()),
-                ..Default::default()
-            },
-        ];
+        db.provider_connections = vec![ProviderConnection {
+            id: "c1".into(),
+            provider: "openai".into(),
+            api_key: Some("sk-abc".into()),
+            access_token: Some("tok-xyz".into()),
+            refresh_token: Some("rt-secret".into()),
+            name: Some("test".into()),
+            ..Default::default()
+        }];
 
         let bytes = finalize_db(&db, key).unwrap();
 
@@ -362,44 +354,52 @@ mod tests {
     fn backwards_compat_no_metadata() {
         let key = Some("test-key");
         let mut db = AppDb::default();
-        db.provider_connections = vec![
-            ProviderConnection {
-                id: "c1".into(),
-                provider: "openai".into(),
-                api_key: Some("sk-plain".into()),
-                access_token: Some("tok-plain".into()),
-                ..Default::default()
-            },
-        ];
+        db.provider_connections = vec![ProviderConnection {
+            id: "c1".into(),
+            provider: "openai".into(),
+            api_key: Some("sk-plain".into()),
+            access_token: Some("tok-plain".into()),
+            ..Default::default()
+        }];
         // Write without any metadata — simulating an old file.
         let bytes = serde_json::to_vec_pretty(&db).unwrap();
         let restored = open_db(&bytes, key).unwrap();
-        assert_eq!(restored.provider_connections[0].api_key.as_deref(), Some("sk-plain"));
-        assert_eq!(restored.provider_connections[0].access_token.as_deref(), Some("tok-plain"));
+        assert_eq!(
+            restored.provider_connections[0].api_key.as_deref(),
+            Some("sk-plain")
+        );
+        assert_eq!(
+            restored.provider_connections[0].access_token.as_deref(),
+            Some("tok-plain")
+        );
     }
 
     #[test]
     fn no_key_no_encrypt() {
         // No key => no encryption, but metadata is still present.
         let mut db = AppDb::default();
-        db.provider_connections = vec![
-            ProviderConnection {
-                id: "c1".into(),
-                provider: "openai".into(),
-                api_key: Some("sk-plain".into()),
-                ..Default::default()
-            },
-        ];
+        db.provider_connections = vec![ProviderConnection {
+            id: "c1".into(),
+            provider: "openai".into(),
+            api_key: Some("sk-plain".into()),
+            ..Default::default()
+        }];
 
         let bytes = finalize_db(&db, None).unwrap();
 
         let raw: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(raw.get("_schemaVersion").and_then(Value::as_u64), Some(1));
         // Field NOT encrypted when no key.
-        assert_eq!(raw["providerConnections"][0]["apiKey"].as_str(), Some("sk-plain"));
+        assert_eq!(
+            raw["providerConnections"][0]["apiKey"].as_str(),
+            Some("sk-plain")
+        );
 
         let restored = open_db(&bytes, None).unwrap();
-        assert_eq!(restored.provider_connections[0].api_key.as_deref(), Some("sk-plain"));
+        assert_eq!(
+            restored.provider_connections[0].api_key.as_deref(),
+            Some("sk-plain")
+        );
     }
 
     #[test]
@@ -410,14 +410,17 @@ mod tests {
         // Corrupt the checksum value in the JSON (not content).
         // Replace `_checksum` value with a different string.
         let mut raw: Value = serde_json::from_slice(&bytes_orig).unwrap();
-        raw.as_object_mut().unwrap().insert(
-            "_checksum".into(),
-            Value::String("deadbeef".into()),
-        );
+        raw.as_object_mut()
+            .unwrap()
+            .insert("_checksum".into(), Value::String("deadbeef".into()));
         let bytes = serde_json::to_vec_pretty(&raw).unwrap();
         // JSON is valid, checksum is wrong.
         let result = open_db(&bytes, key);
-        assert!(result.is_ok(), "corrupted checksum should still parse: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "corrupted checksum should still parse: {:?}",
+            result.err()
+        );
     }
 
     #[test]
