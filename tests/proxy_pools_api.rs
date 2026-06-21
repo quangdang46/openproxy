@@ -8,6 +8,7 @@ use axum::http::{Request, StatusCode};
 use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
 use once_cell::sync::Lazy;
 use openproxy::db::Db;
+use openproxy::server::auth::jwt_secret;
 use openproxy::server::state::AppState;
 use openproxy::types::{ApiKey, ProviderConnection, ProxyPool};
 use serde::Serialize;
@@ -175,7 +176,7 @@ fn dashboard_cookie() -> String {
             authenticated: true,
             exp: now + 3600,
         },
-        &EncodingKey::from_secret(b"openproxy-default-secret-change-me"),
+        &EncodingKey::from_secret(jwt_secret().as_bytes()),
     )
     .expect("dashboard token");
     format!("auth_token={token}")

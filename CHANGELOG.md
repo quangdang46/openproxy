@@ -1,3 +1,10 @@
+# v0.3.2 (2026-06-21)
+
+## Bug fixes
+
+- Fix `proxy_pools_api` dashboard cookie auth tests — sign JWT with `jwt_secret()`
+  instead of hardcoded `openproxy-default-secret-change-me`
+
 # v0.3.1 (2026-06-21)
 
 ## Bug fixes
