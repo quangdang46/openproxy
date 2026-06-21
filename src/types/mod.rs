@@ -516,6 +516,14 @@ pub struct TokenUsage {
     pub output_tokens: Option<u64>,
     #[serde(default)]
     pub total_tokens: Option<u64>,
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -529,6 +537,14 @@ pub struct DailySummary {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
     #[serde(default)]
     pub cost: f64,
     #[serde(default)]
@@ -554,6 +570,14 @@ pub struct SummaryCounter {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    #[serde(default)]
+    pub reasoning_tokens: u64,
+    #[serde(default)]
+    pub cached_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
     #[serde(default)]
     pub cost: f64,
     #[serde(default)]
@@ -672,6 +696,10 @@ fn aggregate_usage_entry(daily_summary: &mut BTreeMap<String, DailySummary>, ent
             requests: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
+            cached_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             cost: 0.0,
             by_provider: BTreeMap::new(),
             by_model: BTreeMap::new(),
@@ -691,11 +719,35 @@ fn aggregate_usage_entry(daily_summary: &mut BTreeMap<String, DailySummary>, ent
         .as_ref()
         .and_then(|tokens| tokens.completion_tokens.or(tokens.output_tokens))
         .unwrap_or(0);
+    let reasoning_tokens = entry
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.reasoning_tokens)
+        .unwrap_or(0);
+    let cached_tokens = entry
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.cached_tokens)
+        .unwrap_or(0);
+    let cache_read_input_tokens = entry
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.cache_read_input_tokens)
+        .unwrap_or(0);
+    let cache_creation_input_tokens = entry
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.cache_creation_input_tokens)
+        .unwrap_or(0);
     let cost = entry.cost.unwrap_or(0.0);
 
     summary.requests += 1;
     summary.prompt_tokens += prompt_tokens;
     summary.completion_tokens += completion_tokens;
+    summary.reasoning_tokens += reasoning_tokens;
+    summary.cached_tokens += cached_tokens;
+    summary.cache_read_input_tokens += cache_read_input_tokens;
+    summary.cache_creation_input_tokens += cache_creation_input_tokens;
     summary.cost += cost;
 
     if let Some(provider) = entry.provider.as_deref() {
@@ -704,6 +756,10 @@ fn aggregate_usage_entry(daily_summary: &mut BTreeMap<String, DailySummary>, ent
             provider,
             prompt_tokens,
             completion_tokens,
+            reasoning_tokens,
+            cached_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
             cost,
             None,
         );
@@ -718,6 +774,10 @@ fn aggregate_usage_entry(daily_summary: &mut BTreeMap<String, DailySummary>, ent
         &model_key,
         prompt_tokens,
         completion_tokens,
+        reasoning_tokens,
+        cached_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
         cost,
         Some((
             Some(entry.model.clone()),
@@ -733,6 +793,10 @@ fn aggregate_usage_entry(daily_summary: &mut BTreeMap<String, DailySummary>, ent
             connection_id,
             prompt_tokens,
             completion_tokens,
+            reasoning_tokens,
+            cached_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
             cost,
             Some((
                 Some(entry.model.clone()),
@@ -758,6 +822,10 @@ fn aggregate_usage_entry(daily_summary: &mut BTreeMap<String, DailySummary>, ent
         &api_key_key,
         prompt_tokens,
         completion_tokens,
+        reasoning_tokens,
+        cached_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
         cost,
         Some((
             Some(entry.model.clone()),
@@ -779,6 +847,10 @@ fn aggregate_usage_entry(daily_summary: &mut BTreeMap<String, DailySummary>, ent
         &endpoint_key,
         prompt_tokens,
         completion_tokens,
+        reasoning_tokens,
+        cached_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
         cost,
         Some((
             Some(entry.model.clone()),
@@ -801,6 +873,10 @@ fn add_to_counter(
     key: &str,
     prompt_tokens: u64,
     completion_tokens: u64,
+    reasoning_tokens: u64,
+    cached_tokens: u64,
+    cache_read_input_tokens: u64,
+    cache_creation_input_tokens: u64,
     cost: f64,
     metadata: Option<SummaryMetadata>,
 ) {
@@ -810,6 +886,10 @@ fn add_to_counter(
             requests: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            reasoning_tokens: 0,
+            cached_tokens: 0,
+            cache_read_input_tokens: 0,
+            cache_creation_input_tokens: 0,
             cost: 0.0,
             raw_model: None,
             provider: None,
@@ -821,6 +901,10 @@ fn add_to_counter(
     counter.requests += 1;
     counter.prompt_tokens += prompt_tokens;
     counter.completion_tokens += completion_tokens;
+    counter.reasoning_tokens += reasoning_tokens;
+    counter.cached_tokens += cached_tokens;
+    counter.cache_read_input_tokens += cache_read_input_tokens;
+    counter.cache_creation_input_tokens += cache_creation_input_tokens;
     counter.cost += cost;
 
     if let Some((raw_model, provider, api_key, endpoint)) = metadata {

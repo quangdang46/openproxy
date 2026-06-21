@@ -82,6 +82,10 @@ pub struct UsageSummary {
     pub total_requests: u64,
     pub total_prompt_tokens: u64,
     pub total_completion_tokens: u64,
+    pub total_reasoning_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_cache_read_input_tokens: u64,
+    pub total_cache_creation_input_tokens: u64,
     pub total_cost: f64,
     pub days: Vec<DailyUsageSummary>,
 }
@@ -92,6 +96,10 @@ pub struct DailyUsageSummary {
     pub requests: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub cost: f64,
     pub by_provider: Vec<ProviderUsage>,
 }
@@ -102,6 +110,10 @@ pub struct ProviderUsage {
     pub requests: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub cost: f64,
 }
 
@@ -110,6 +122,10 @@ impl UsageTracker {
         let usage_db = self.db.usage_snapshot();
         let mut total_prompt = 0u64;
         let mut total_completion = 0u64;
+        let mut total_reasoning = 0u64;
+        let mut total_cached = 0u64;
+        let mut total_cache_read = 0u64;
+        let mut total_cache_creation = 0u64;
         let mut total_cost = 0.0;
 
         for entry in &usage_db.history {
@@ -119,6 +135,10 @@ impl UsageTracker {
                     .completion_tokens
                     .or(tokens.output_tokens)
                     .unwrap_or(0);
+                total_reasoning += tokens.reasoning_tokens.unwrap_or(0);
+                total_cached += tokens.cached_tokens.unwrap_or(0);
+                total_cache_read += tokens.cache_read_input_tokens.unwrap_or(0);
+                total_cache_creation += tokens.cache_creation_input_tokens.unwrap_or(0);
             }
             total_cost += entry.cost.unwrap_or(0.0);
         }
@@ -131,6 +151,10 @@ impl UsageTracker {
                 requests: summary.requests,
                 prompt_tokens: summary.prompt_tokens,
                 completion_tokens: summary.completion_tokens,
+                reasoning_tokens: summary.reasoning_tokens,
+                cached_tokens: summary.cached_tokens,
+                cache_read_input_tokens: summary.cache_read_input_tokens,
+                cache_creation_input_tokens: summary.cache_creation_input_tokens,
                 cost: summary.cost,
                 by_provider: summary
                     .by_provider
@@ -140,6 +164,10 @@ impl UsageTracker {
                         requests: counter.requests,
                         prompt_tokens: counter.prompt_tokens,
                         completion_tokens: counter.completion_tokens,
+                        reasoning_tokens: counter.reasoning_tokens,
+                        cached_tokens: counter.cached_tokens,
+                        cache_read_input_tokens: counter.cache_read_input_tokens,
+                        cache_creation_input_tokens: counter.cache_creation_input_tokens,
                         cost: counter.cost,
                     })
                     .collect(),
@@ -150,6 +178,10 @@ impl UsageTracker {
             total_requests: usage_db.total_requests_lifetime,
             total_prompt_tokens: total_prompt,
             total_completion_tokens: total_completion,
+            total_reasoning_tokens: total_reasoning,
+            total_cached_tokens: total_cached,
+            total_cache_read_input_tokens: total_cache_read,
+            total_cache_creation_input_tokens: total_cache_creation,
             total_cost,
             days,
         }
