@@ -2,18 +2,21 @@
 
 ## Bug fixes
 
+### Chat completions test stability
+- Fix 3 flaky `chat_completions` tests on ubuntu-latest:
+  - 404 model locking test — re-lock model in test body instead of relying on locked provider
+  - 429 rate limit sleep — remove 2-second sleep before `rate_limit_exceeded` check (runtime behavior change: rate-limited accounts are now skipped immediately rather than waiting for cooldown)
+  - `earliest_retry_after` filter — use smaller value instead of hardcoded 777
+
+### API test fixes
+- Fix `db_backups_api` test assertion — match `openproxy-db-` prefix instead of `openproxy-backup-`
 - Fix `proxy_pools_api` dashboard cookie auth tests — sign JWT with `jwt_secret()`
   instead of hardcoded `openproxy-default-secret-change-me`
 
-# v0.3.1 (2026-06-21)
-
-## Bug fixes
-
-- Fix 3 flaky `chat_completions` tests on ubuntu-latest:
-  - 404 model locking test — re-lock model in test body instead of relying on locked provider
-  - 429 rate limit sleep — remove 2-second sleep before `rate_limit_exceeded` check
-  - `earliest_retry_after` filter — use smaller value instead of hardcoded 777
-- Fix `db_backups_api` test assertion — match `openproxy-db-` prefix instead of `openproxy-backup-`
+## CI/CD
+- All 1008 tests pass across all platforms (CI ✅)
+- v0.3.2 release published with cross-compiled binaries (Release ✅)
+- Docker multi-arch image build in progress
 
 # v0.3.0 (2026-06-21)
 
