@@ -1707,7 +1707,16 @@ fn flush_dashboard_sse_chunk(
     if line.ends_with('\r') {
         line.pop();
     }
-    transform_sse_stream(&Bytes::from(line), transformer)
+    let pending_len = line.len();
+    let output = transform_sse_stream(&Bytes::from(line), transformer);
+    if output.is_empty() {
+        tracing::trace!(
+            target: "openproxy::chat::stream",
+            "flush_dashboard_sse_chunk: {} bytes of partial/invalid buffer content yielded no output lines",
+            pending_len,
+        );
+    }
+    output
 }
 
 fn build_proxied_response(
@@ -1785,6 +1794,10 @@ fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
         "completion_tokens",
         "output_tokens",
         "total_tokens",
+        "reasoning_tokens",
+        "cached_tokens",
+        "cache_read_input_tokens",
+        "cache_creation_input_tokens",
     ];
 
     Some(TokenUsage {
@@ -1793,6 +1806,10 @@ fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
         completion_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
         output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
         total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+        reasoning_tokens: usage.get("reasoning_tokens").and_then(Value::as_u64),
+        cached_tokens: usage.get("cached_tokens").and_then(Value::as_u64),
+        cache_read_input_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
+        cache_creation_input_tokens: usage.get("cache_creation_input_tokens").and_then(Value::as_u64),
         extra: usage
             .iter()
             .filter(|(key, _)| !known_fields.contains(&key.as_str()))

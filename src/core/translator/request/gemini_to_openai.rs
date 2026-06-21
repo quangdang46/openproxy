@@ -19,14 +19,19 @@ fn convert_gemini_content(content: &Value) -> Option<Value> {
 
     let mut text_parts: Vec<Value> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
+    let mut reasoning_text: Option<String> = None;
 
     for part in parts {
         if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
             if !text.is_empty() {
-                text_parts.push(serde_json::json!({
-                    "type": "text",
-                    "text": text
-                }));
+                if part.get("thought").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    reasoning_text.get_or_insert_with(String::new).push_str(text);
+                } else {
+                    text_parts.push(serde_json::json!({
+                        "type": "text",
+                        "text": text
+                    }));
+                }
             }
         }
 
@@ -88,21 +93,40 @@ fn convert_gemini_content(content: &Value) -> Option<Value> {
         } else if !text_parts.is_empty() {
             result["content"] = Value::Array(text_parts);
         }
+        if let Some(reasoning) = &reasoning_text {
+            result["reasoning_content"] = Value::String(reasoning.clone());
+        }
         result["tool_calls"] = Value::Array(tool_calls);
         return Some(result);
     }
 
     if text_parts.len() == 1 {
         if let Some(text) = text_parts[0].get("text").and_then(|v| v.as_str()) {
-            return Some(serde_json::json!({
+            let mut msg = serde_json::json!({
                 "role": openai_role,
                 "content": text
-            }));
+            });
+            if let Some(reasoning) = &reasoning_text {
+                msg["reasoning_content"] = Value::String(reasoning.clone());
+            }
+            return Some(msg);
         }
     } else if !text_parts.is_empty() {
-        return Some(serde_json::json!({
+        let mut msg = serde_json::json!({
             "role": openai_role,
             "content": text_parts
+        });
+        if let Some(reasoning) = &reasoning_text {
+            msg["reasoning_content"] = Value::String(reasoning.clone());
+        }
+        return Some(msg);
+    }
+
+    // Only reasoning content present, no regular text parts or tool calls
+    if let Some(reasoning) = reasoning_text {
+        return Some(serde_json::json!({
+            "role": openai_role,
+            "reasoning_content": reasoning
         }));
     }
 
@@ -117,6 +141,7 @@ fn extract_gemini_text(content: &Value) -> String {
     if let Some(parts) = content.get("parts").and_then(|v| v.as_array()) {
         return parts
             .iter()
+            .filter(|p| !p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false))
             .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
             .collect::<Vec<_>>()
             .join("");

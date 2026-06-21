@@ -50,6 +50,38 @@ pub fn ollama_to_openai_response(
             finish_reason = "tool_calls";
         }
 
+        // Extract tool_calls from the final chunk's message, if present.
+        // Ollama may emit tool_calls only in the done=true chunk.
+        let mut delta = serde_json::Map::new();
+        if let Some(message) = chunk.get("message") {
+            if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+                if !tool_calls.is_empty() {
+                    state.insert("hadToolCalls".to_string(), Value::Bool(true));
+                    let converted: Vec<Value> = tool_calls.iter().enumerate().map(|(i, tc)| {
+                        let args = tc.get("function").and_then(|f| f.get("arguments"))
+                            .map(|a| {
+                                if a.is_string() {
+                                    a.as_str().unwrap_or("{}").to_string()
+                                } else {
+                                    serde_json::to_string(a).unwrap_or_else(|_| "{}".to_string())
+                                }
+                            })
+                            .unwrap_or_else(|| "{}".to_string());
+                        serde_json::json!({
+                            "index": tc.get("function").and_then(|f| f.get("index")).and_then(|v| v.as_u64()).unwrap_or(i as u64),
+                            "id": tc.get("id").and_then(|v| v.as_str()).unwrap_or(&format!("call_{}_{}", i, chrono::Utc::now().timestamp_millis())),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).unwrap_or(""),
+                                "arguments": args
+                            }
+                        })
+                    }).collect();
+                    delta.insert("tool_calls".to_string(), Value::Array(converted));
+                }
+            }
+        }
+
         return Some(serde_json::json!({
             "id": id,
             "object": "chat.completion.chunk",
@@ -57,7 +89,7 @@ pub fn ollama_to_openai_response(
             "model": model,
             "choices": [{
                 "index": 0,
-                "delta": {},
+                "delta": delta,
                 "finish_reason": finish_reason
             }],
             "usage": usage

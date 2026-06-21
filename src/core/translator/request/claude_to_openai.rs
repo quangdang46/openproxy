@@ -226,6 +226,30 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
                         "content": result_content
                     }));
                 }
+                "thinking" => {
+                    if let Some(thinking) = block.get("thinking").and_then(|v| v.as_str()) {
+                        parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": thinking
+                        }));
+                    }
+                }
+                "signature" => {
+                    if let Some(sig) = block.get("signature").and_then(|v| v.as_str()) {
+                        parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": sig
+                        }));
+                    }
+                }
+                "redacted_thinking" => {
+                    if let Some(data) = block.get("data").and_then(|v| v.as_str()) {
+                        parts.push(serde_json::json!({
+                            "type": "text",
+                            "text": data
+                        }));
+                    }
+                }
                 _ => {}
             }
         }
@@ -429,6 +453,11 @@ pub fn claude_to_openai_request(
     // Tool choice
     if let Some(tool_choice) = body_obj.get("tool_choice") {
         result["tool_choice"] = convert_tool_choice(tool_choice);
+    }
+
+    // Thinking budget configuration (e.g. {"type": "enabled", "budget_tokens": 10000})
+    if let Some(thinking) = body_obj.get("thinking") {
+        result["thinking"] = thinking.clone();
     }
 
     *body = result;

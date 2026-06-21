@@ -303,7 +303,8 @@ export function calculateCostFromTokens(tokens: TokenUsage, pricing: PricingEntr
 
   const inputTokens = tokens.prompt_tokens || tokens.input_tokens || 0;
   const cachedTokens = tokens.cached_tokens || tokens.cache_read_input_tokens || 0;
-  const nonCachedInput = Math.max(0, inputTokens - cachedTokens);
+  const cacheCreationTokens = tokens.cache_creation_input_tokens || 0;
+  const nonCachedInput = Math.max(0, inputTokens - cachedTokens - cacheCreationTokens);
 
   cost += nonCachedInput * (pricing.input / 1000000);
 
@@ -319,7 +320,6 @@ export function calculateCostFromTokens(tokens: TokenUsage, pricing: PricingEntr
     cost += reasoningTokens * ((pricing.reasoning || pricing.output) / 1000000);
   }
 
-  const cacheCreationTokens = tokens.cache_creation_input_tokens || 0;
   if (cacheCreationTokens > 0) {
     cost += cacheCreationTokens * ((pricing.cache_creation || pricing.input) / 1000000);
   }

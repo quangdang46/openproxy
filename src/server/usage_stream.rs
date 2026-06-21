@@ -13,6 +13,10 @@ pub struct UsageStatsPayload {
     pub total_requests: u64,
     pub total_prompt_tokens: u64,
     pub total_completion_tokens: u64,
+    pub total_reasoning_tokens: u64,
+    pub total_cached_tokens: u64,
+    pub total_cache_read_input_tokens: u64,
+    pub total_cache_creation_input_tokens: u64,
     pub total_cost: f64,
     pub by_provider: BTreeMap<String, AggregateStats>,
     pub by_model: BTreeMap<String, ModelStats>,
@@ -41,6 +45,10 @@ pub struct AggregateStats {
     pub requests: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub cost: f64,
 }
 
@@ -50,6 +58,10 @@ pub struct ModelStats {
     pub requests: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub cost: f64,
     pub raw_model: String,
     pub provider: String,
@@ -62,6 +74,10 @@ pub struct AccountStats {
     pub requests: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub cost: f64,
     pub raw_model: String,
     pub provider: String,
@@ -76,6 +92,10 @@ pub struct ApiKeyStats {
     pub requests: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub cost: f64,
     pub raw_model: String,
     pub provider: String,
@@ -91,6 +111,10 @@ pub struct EndpointStats {
     pub requests: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub cost: f64,
     pub endpoint: String,
     pub raw_model: String,
@@ -104,6 +128,10 @@ pub struct LastTenMinutesBucket {
     pub requests: u64,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub cost: f64,
 }
 
@@ -115,6 +143,10 @@ pub struct RecentRequest {
     pub provider: String,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cache_creation_input_tokens: u64,
     pub status: String,
 }
 
@@ -162,6 +194,10 @@ pub fn build_recent_requests(history: &[UsageEntry]) -> Vec<RecentRequest> {
                 provider: entry.provider.clone().unwrap_or_default(),
                 prompt_tokens,
                 completion_tokens,
+                reasoning_tokens: tokens.reasoning_tokens.unwrap_or(0),
+                cached_tokens: tokens.cached_tokens.unwrap_or(0),
+                cache_read_input_tokens: tokens.cache_read_input_tokens.unwrap_or(0),
+                cache_creation_input_tokens: tokens.cache_creation_input_tokens.unwrap_or(0),
                 status: entry.status.clone().unwrap_or_else(|| "ok".to_string()),
             })
         })
@@ -201,6 +237,10 @@ pub fn build_usage_stats(
         total_requests: usage_db.total_requests_lifetime,
         total_prompt_tokens: 0,
         total_completion_tokens: 0,
+        total_reasoning_tokens: 0,
+        total_cached_tokens: 0,
+        total_cache_read_input_tokens: 0,
+        total_cache_creation_input_tokens: 0,
         total_cost: 0.0,
         by_provider: BTreeMap::new(),
         by_model: BTreeMap::new(),
@@ -280,6 +320,10 @@ pub fn build_usage_stats(
 
                 stats.total_prompt_tokens += day.prompt_tokens;
                 stats.total_completion_tokens += day.completion_tokens;
+                stats.total_reasoning_tokens += day.reasoning_tokens;
+                stats.total_cached_tokens += day.cached_tokens;
+                stats.total_cache_read_input_tokens += day.cache_read_input_tokens;
+                stats.total_cache_creation_input_tokens += day.cache_creation_input_tokens;
                 stats.total_cost += day.cost;
 
                 merge_by_provider(&mut stats.by_provider, &day.by_provider);
@@ -363,6 +407,26 @@ fn aggregate_live_entry(
         .as_ref()
         .and_then(|tokens| tokens.completion_tokens.or(tokens.output_tokens))
         .unwrap_or(0);
+    let reasoning_tokens = entry
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.reasoning_tokens)
+        .unwrap_or(0);
+    let cached_tokens = entry
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.cached_tokens)
+        .unwrap_or(0);
+    let cache_read_input_tokens = entry
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.cache_read_input_tokens)
+        .unwrap_or(0);
+    let cache_creation_input_tokens = entry
+        .tokens
+        .as_ref()
+        .and_then(|tokens| tokens.cache_creation_input_tokens)
+        .unwrap_or(0);
     let cost = entry.cost.unwrap_or(0.0);
     let provider = entry.provider.clone().unwrap_or_default();
     let provider_display = provider_names
@@ -373,12 +437,20 @@ fn aggregate_live_entry(
 
     stats.total_prompt_tokens += prompt_tokens;
     stats.total_completion_tokens += completion_tokens;
+    stats.total_reasoning_tokens += reasoning_tokens;
+    stats.total_cached_tokens += cached_tokens;
+    stats.total_cache_read_input_tokens += cache_read_input_tokens;
+    stats.total_cache_creation_input_tokens += cache_creation_input_tokens;
     stats.total_cost += cost;
 
     let provider_bucket = stats.by_provider.entry(provider.clone()).or_default();
     provider_bucket.requests += 1;
     provider_bucket.prompt_tokens += prompt_tokens;
     provider_bucket.completion_tokens += completion_tokens;
+    provider_bucket.reasoning_tokens += reasoning_tokens;
+    provider_bucket.cached_tokens += cached_tokens;
+    provider_bucket.cache_read_input_tokens += cache_read_input_tokens;
+    provider_bucket.cache_creation_input_tokens += cache_creation_input_tokens;
     provider_bucket.cost += cost;
 
     let model_key = if provider.is_empty() {
@@ -390,6 +462,10 @@ fn aggregate_live_entry(
     model_bucket.requests += 1;
     model_bucket.prompt_tokens += prompt_tokens;
     model_bucket.completion_tokens += completion_tokens;
+    model_bucket.reasoning_tokens += reasoning_tokens;
+    model_bucket.cached_tokens += cached_tokens;
+    model_bucket.cache_read_input_tokens += cache_read_input_tokens;
+    model_bucket.cache_creation_input_tokens += cache_creation_input_tokens;
     model_bucket.cost += cost;
     model_bucket.raw_model = entry.model.clone();
     model_bucket.provider = provider_display.clone();
@@ -410,6 +486,10 @@ fn aggregate_live_entry(
         account_bucket.requests += 1;
         account_bucket.prompt_tokens += prompt_tokens;
         account_bucket.completion_tokens += completion_tokens;
+        account_bucket.reasoning_tokens += reasoning_tokens;
+        account_bucket.cached_tokens += cached_tokens;
+        account_bucket.cache_read_input_tokens += cache_read_input_tokens;
+        account_bucket.cache_creation_input_tokens += cache_creation_input_tokens;
         account_bucket.cost += cost;
         account_bucket.raw_model = entry.model.clone();
         account_bucket.provider = provider_display.clone();
@@ -437,6 +517,10 @@ fn aggregate_live_entry(
     api_key_bucket.requests += 1;
     api_key_bucket.prompt_tokens += prompt_tokens;
     api_key_bucket.completion_tokens += completion_tokens;
+    api_key_bucket.reasoning_tokens += reasoning_tokens;
+    api_key_bucket.cached_tokens += cached_tokens;
+    api_key_bucket.cache_read_input_tokens += cache_read_input_tokens;
+    api_key_bucket.cache_creation_input_tokens += cache_creation_input_tokens;
     api_key_bucket.cost += cost;
     api_key_bucket.raw_model = entry.model.clone();
     api_key_bucket.provider = provider_display.clone();
@@ -471,6 +555,10 @@ fn aggregate_live_entry(
     endpoint_bucket.requests += 1;
     endpoint_bucket.prompt_tokens += prompt_tokens;
     endpoint_bucket.completion_tokens += completion_tokens;
+    endpoint_bucket.reasoning_tokens += reasoning_tokens;
+    endpoint_bucket.cached_tokens += cached_tokens;
+    endpoint_bucket.cache_read_input_tokens += cache_read_input_tokens;
+    endpoint_bucket.cache_creation_input_tokens += cache_creation_input_tokens;
     endpoint_bucket.cost += cost;
     endpoint_bucket.endpoint = endpoint;
     endpoint_bucket.raw_model = entry.model.clone();
@@ -487,6 +575,10 @@ fn merge_by_provider(
         bucket.requests += counter.requests;
         bucket.prompt_tokens += counter.prompt_tokens;
         bucket.completion_tokens += counter.completion_tokens;
+        bucket.reasoning_tokens += counter.reasoning_tokens;
+        bucket.cached_tokens += counter.cached_tokens;
+        bucket.cache_read_input_tokens += counter.cache_read_input_tokens;
+        bucket.cache_creation_input_tokens += counter.cache_creation_input_tokens;
         bucket.cost += counter.cost;
     }
 }
@@ -519,6 +611,10 @@ fn merge_by_model(
         bucket.requests += counter.requests;
         bucket.prompt_tokens += counter.prompt_tokens;
         bucket.completion_tokens += counter.completion_tokens;
+        bucket.reasoning_tokens += counter.reasoning_tokens;
+        bucket.cached_tokens += counter.cached_tokens;
+        bucket.cache_read_input_tokens += counter.cache_read_input_tokens;
+        bucket.cache_creation_input_tokens += counter.cache_creation_input_tokens;
         bucket.cost += counter.cost;
         bucket.raw_model = raw_model;
         bucket.provider = provider_display;
@@ -554,6 +650,10 @@ fn merge_by_account(
         bucket.requests += counter.requests;
         bucket.prompt_tokens += counter.prompt_tokens;
         bucket.completion_tokens += counter.completion_tokens;
+        bucket.reasoning_tokens += counter.reasoning_tokens;
+        bucket.cached_tokens += counter.cached_tokens;
+        bucket.cache_read_input_tokens += counter.cache_read_input_tokens;
+        bucket.cache_creation_input_tokens += counter.cache_creation_input_tokens;
         bucket.cost += counter.cost;
         bucket.raw_model = raw_model;
         bucket.provider = provider_display;
@@ -591,6 +691,10 @@ fn merge_by_api_key(
         bucket.requests += counter.requests;
         bucket.prompt_tokens += counter.prompt_tokens;
         bucket.completion_tokens += counter.completion_tokens;
+        bucket.reasoning_tokens += counter.reasoning_tokens;
+        bucket.cached_tokens += counter.cached_tokens;
+        bucket.cache_read_input_tokens += counter.cache_read_input_tokens;
+        bucket.cache_creation_input_tokens += counter.cache_creation_input_tokens;
         bucket.cost += counter.cost;
         bucket.raw_model = raw_model;
         bucket.provider = provider_display;
@@ -742,9 +846,33 @@ fn build_last_ten_minutes(history: &[UsageEntry]) -> Vec<LastTenMinutesBucket> {
             .as_ref()
             .and_then(|tokens| tokens.completion_tokens.or(tokens.output_tokens))
             .unwrap_or(0);
+        let reasoning_tokens = entry
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.reasoning_tokens)
+            .unwrap_or(0);
+        let cached_tokens = entry
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.cached_tokens)
+            .unwrap_or(0);
+        let cache_read_input_tokens = entry
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.cache_read_input_tokens)
+            .unwrap_or(0);
+        let cache_creation_input_tokens = entry
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.cache_creation_input_tokens)
+            .unwrap_or(0);
         bucket.requests += 1;
         bucket.prompt_tokens += prompt_tokens;
         bucket.completion_tokens += completion_tokens;
+        bucket.reasoning_tokens += reasoning_tokens;
+        bucket.cached_tokens += cached_tokens;
+        bucket.cache_read_input_tokens += cache_read_input_tokens;
+        bucket.cache_creation_input_tokens += cache_creation_input_tokens;
         bucket.cost += entry.cost.unwrap_or(0.0);
     }
 

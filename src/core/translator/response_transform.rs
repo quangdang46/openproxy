@@ -6,6 +6,7 @@
 
 use bytes::Bytes;
 use serde::Deserialize;
+use tracing;
 
 /// Base streaming state shared across all transformations
 #[derive(Debug, Clone, Default)]
@@ -167,6 +168,7 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
     fn transform_chunk(&mut self, chunk: &Bytes) -> Vec<String> {
         let text = String::from_utf8_lossy(chunk);
         let mut output_lines = Vec::new();
+        let mut emitted_done = false;
 
         for line in text.lines() {
             let line = line.trim();
@@ -175,12 +177,26 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                 let data = data.trim();
 
                 if data == "[DONE]" {
-                    output_lines.push("data: [DONE]".to_string());
+                    if !emitted_done {
+                        output_lines.push("data: [DONE]".to_string());
+                        emitted_done = true;
+                    }
                     continue;
                 }
 
                 // Parse event using type-tagged enum
-                if let Ok(event) = serde_json::from_str::<AnthropicEvent>(data) {
+                let event = match serde_json::from_str::<AnthropicEvent>(data) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::trace!(
+                            target: "openproxy::transform",
+                            "Anthropic parse error ({} bytes): {}",
+                            data.len(),
+                            e
+                        );
+                        continue;
+                    }
+                };
                     match event {
                         AnthropicEvent::MessageStart { message } => {
                             let id = message.id.as_deref().unwrap_or("anonymous");
@@ -276,18 +292,28 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                             delta: delta_data,
                             usage,
                         } => {
-                            if let Some(stop_reason) = delta_data.stop_reason {
+                            let finish_reason = delta_data
+                                .stop_reason
+                                .map(|r| match r.as_str() {
+                                    "end_turn" | "stop" => "stop".to_string(),
+                                    "max_tokens" => "length".to_string(),
+                                    other => other.to_string(),
+                                })
+                                .unwrap_or_else(|| "stop".to_string());
+                            if let Some(usage) = usage {
+                                let input_tokens = usage.input_tokens.unwrap_or(0);
+                                let output_tokens = usage.output_tokens.unwrap_or(0);
+                                let cache_read = usage.cache_read_input_tokens.unwrap_or(0);
+                                let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+                                let prompt_tokens = input_tokens + cache_read + cache_creation;
+                                output_lines.push(format!(
+                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"{}"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
+                                    finish_reason, prompt_tokens, output_tokens, prompt_tokens + output_tokens
+                                ));
+                            } else {
                                 output_lines.push(format!(
                                     r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"{}"}}]}}"#,
-                                    stop_reason
-                                ));
-                            }
-                            if let Some(usage) = usage {
-                                let prompt_tokens = usage.input_tokens.unwrap_or(0);
-                                let completion_tokens = usage.output_tokens.unwrap_or(0);
-                                output_lines.push(format!(
-                                    r#"{{"id":"assistant","object":"chat.completion.chunk","created":0,"model":"","choices":[{{"index":0,"delta":{{}},"logprobs":null,"finish_reason":"stop"}}],"usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}}}}"#,
-                                    prompt_tokens, completion_tokens, prompt_tokens + completion_tokens
+                                    finish_reason
                                 ));
                             }
                         }
@@ -298,7 +324,6 @@ impl StreamingTransformer for AnthropicToOpenAiTransformer {
                             // ping, heartbeat — silently ignore
                         }
                     }
-                }
             }
         }
 
@@ -379,6 +404,12 @@ pub struct MessageUsage {
     #[serde(rename = "output_tokens")]
     #[serde(default)]
     pub output_tokens: Option<usize>,
+    #[serde(rename = "cache_read_input_tokens")]
+    #[serde(default)]
+    pub cache_read_input_tokens: Option<usize>,
+    #[serde(rename = "cache_creation_input_tokens")]
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<usize>,
 }
 
 /// Gemini to OpenAI SSE transformer
@@ -410,7 +441,18 @@ impl StreamingTransformer for GeminiToOpenAiTransformer {
                 }
 
                 // Parse Gemini SSE
-                if let Ok(event) = serde_json::from_str::<GeminiSSEEvent>(data) {
+                let event = match serde_json::from_str::<GeminiSSEEvent>(data) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::trace!(
+                            target: "openproxy::transform",
+                            "Gemini parse error ({} bytes): {}",
+                            data.len(),
+                            e
+                        );
+                        continue;
+                    }
+                };
                     if let Some(candidate) = event.candidates {
                         for candidate_data in candidate {
                             if let Some(content) = candidate_data.content {
@@ -451,7 +493,6 @@ impl StreamingTransformer for GeminiToOpenAiTransformer {
                             prompt_tokens, completion_tokens, prompt_tokens + completion_tokens
                         ));
                     }
-                }
             }
         }
 
@@ -532,6 +573,7 @@ impl StreamingTransformer for OllamaToOpenAiTransformer {
     fn transform_chunk(&mut self, chunk: &Bytes) -> Vec<String> {
         let text = String::from_utf8_lossy(chunk);
         let mut output_lines = Vec::new();
+        let mut emitted_done = false;
 
         for line in text.lines() {
             let line = line.trim();
@@ -540,12 +582,26 @@ impl StreamingTransformer for OllamaToOpenAiTransformer {
                 let data = data.trim();
 
                 if data == "[DONE]" {
-                    output_lines.push("data: [DONE]".to_string());
+                    if !emitted_done {
+                        output_lines.push("data: [DONE]".to_string());
+                        emitted_done = true;
+                    }
                     continue;
                 }
 
                 // Parse Ollama streaming response
-                if let Ok(event) = serde_json::from_str::<OllamaStreamResponse>(data) {
+                let event = match serde_json::from_str::<OllamaStreamResponse>(data) {
+                    Ok(event) => event,
+                    Err(e) => {
+                        tracing::trace!(
+                            target: "openproxy::transform",
+                            "Ollama parse error ({} bytes): {}",
+                            data.len(),
+                            e
+                        );
+                        continue;
+                    }
+                };
                     if let Some(message) = event.message {
                         let role = message.role.unwrap_or_else(|| "assistant".to_string());
                         let content = message.content.unwrap_or_default();
@@ -584,10 +640,12 @@ impl StreamingTransformer for OllamaToOpenAiTransformer {
 
                     // Handle done signal
                     if event.done.unwrap_or(false) {
-                        output_lines.push("data: [DONE]".to_string());
+                        if !emitted_done {
+                            output_lines.push("data: [DONE]".to_string());
+                            emitted_done = true;
+                        }
                         self.state.message_idx += 1;
                     }
-                }
             }
         }
 
@@ -691,11 +749,25 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
             if v.get("object").and_then(|o| o.as_str()) == Some("chat.completion.chunk") {
                 return vec![format!("data: {}\n\n", line)];
             }
+        } else {
+            tracing::trace!(
+                target: "openproxy::transform",
+                "CommandCode: initial JSON parse failed ({} bytes)",
+                line.len()
+            );
         }
 
         let event: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
-            Err(_) => return vec![],
+            Err(e) => {
+                tracing::trace!(
+                    target: "openproxy::transform",
+                    "CommandCode parse error ({} bytes): {}",
+                    line.len(),
+                    e
+                );
+                return vec![];
+            }
         };
 
         let event_type = event.get("type").and_then(|v| v.as_str());
@@ -1155,7 +1227,7 @@ mod tests {
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
         let output = &lines[0];
-        assert!(output.contains("\"finish_reason\":\"end_turn\""));
+        assert!(output.contains("\"finish_reason\":\"stop\""));
     }
 
     #[test]
@@ -1569,7 +1641,7 @@ mod tests {
         let lines = transformer.transform_chunk(&chunk);
         assert!(!lines.is_empty());
         let output = &lines[0];
-        assert!(output.contains("\"finish_reason\":\"end_turn\""));
+        assert!(output.contains("\"finish_reason\":\"stop\""));
     }
 
     #[test]

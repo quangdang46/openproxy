@@ -202,6 +202,7 @@ fn extract_gemini_text(value: &Value) -> String {
             .unwrap_or_default(),
         Value::Array(parts) => parts
             .iter()
+            .filter(|p| !p.get("thought").and_then(|t| t.as_bool()).unwrap_or(false))
             .filter_map(|part| part.get("text").and_then(Value::as_str))
             .collect::<Vec<_>>()
             .join("\n"),
