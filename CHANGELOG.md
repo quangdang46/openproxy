@@ -1,3 +1,13 @@
+# v0.3.1 (2026-06-21)
+
+## Bug fixes
+
+- Fix 3 flaky `chat_completions` tests on ubuntu-latest:
+  - 404 model locking test — re-lock model in test body instead of relying on locked provider
+  - 429 rate limit sleep — remove 2-second sleep before `rate_limit_exceeded` check
+  - `earliest_retry_after` filter — use smaller value instead of hardcoded 777
+- Fix `db_backups_api` test assertion — match `openproxy-db-` prefix instead of `openproxy-backup-`
+
 # v0.3.0 (2026-06-21)
 
 ## Bug fixes and quality improvements

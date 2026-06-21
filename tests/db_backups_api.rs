@@ -241,7 +241,7 @@ async fn export_returns_attachment() {
         .to_str()
         .unwrap()
         .to_string();
-    assert!(disposition.contains("openproxy-backup-"));
+    assert!(disposition.contains("openproxy-db-"));
     assert!(disposition.contains(".json"));
     let body = drain_body(res.into_body()).await;
     assert_eq!(body["apiKeys"].as_array().unwrap().len(), 1);

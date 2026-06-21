@@ -1002,6 +1002,23 @@ async fn forward_with_provider_fallback(
                     retry_after,
                 });
 
+                // 404 (model not found) should set a model-specific lock without
+                // excluding the connection — other models on the same connection
+                // should still be routable.
+                if status.as_u16() == 404 {
+                    let model_cooldown = std::time::Duration::from_secs(300);
+                    mark_connection_unavailable(
+                        state,
+                        &connection.id,
+                        model,
+                        status.as_u16(),
+                        &message,
+                        model_cooldown,
+                        current_backoff,
+                    )
+                    .await;
+                }
+
                 if decision.should_fallback {
                     mark_connection_unavailable(
                         state,
@@ -1014,13 +1031,6 @@ async fn forward_with_provider_fallback(
                     )
                     .await;
                     excluded.insert(connection.id.clone());
-                    // On 429 (too many requests / rate limit), sleep for the cooldown
-                    // duration before trying the next account/model. This prevents
-                    // repeatedly hammering the same rate-limited provider during
-                    // the per-account fallback loop.
-                    if status.as_u16() == 429 {
-                        tokio::time::sleep(cooldown).await;
-                    }
                     continue;
                 }
 
@@ -1274,6 +1284,7 @@ fn earliest_retry_after(
     model: &str,
     _excluded: &HashSet<String>,
 ) -> Option<DateTime<Utc>> {
+    let now = Utc::now();
     snapshot
         .provider_connections
         .iter()
@@ -1304,6 +1315,7 @@ fn earliest_retry_after(
             }
             retry_after
         })
+        .filter(|until| *until > now)
         .min()
 }
 
