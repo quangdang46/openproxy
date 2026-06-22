@@ -12,6 +12,7 @@ use crate::types::{AppDb, Combo, ModelAliasTarget, ProviderConnection, ProviderN
 pub mod backups;
 pub mod crypto;
 pub mod watcher;
+pub mod sqlite;
 
 #[derive(Debug, Clone, Default)]
 pub struct ProviderConnectionFilter {
