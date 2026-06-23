@@ -28,7 +28,6 @@ static UPSTREAM_CONNECTION_RE: Lazy<Regex> =
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route("/v1", get(list_default_models).options(cors_options))
         .route("/v1/models", get(list_default_models).options(cors_options))
         .route(
             "/v1/models/{kind}",

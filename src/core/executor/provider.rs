@@ -768,7 +768,7 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             ),
             (
                 "opencode-go",
-                ProviderExecutorConfig::openai("https://opencode.ai/zen/go/v1"),
+                ProviderExecutorConfig::openai("https://opencode.ai/zen/v1"),
             ),
             (
                 "glm-cn",

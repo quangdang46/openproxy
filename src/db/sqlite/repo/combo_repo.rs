@@ -63,6 +63,7 @@ fn row_to_combo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Combo> {
         models,
         created_at: Some(created_at),
         updated_at: Some(updated_at),
+        ..Default::default()
     })
 }
 

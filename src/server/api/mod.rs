@@ -58,6 +58,7 @@ pub fn routes() -> Router<AppState> {
         .route("/health", get(health))
         .route("/api/health", get(api_health))
         .route("/api/catalog", get(api_catalog))
+        .route("/v1", get(v1_root))
         .route("/v1/health", get(health))
         .route("/v1/v1/health", get(health))
         .merge(v1_api_chat::routes())
@@ -234,6 +235,28 @@ pub fn routes() -> Router<AppState> {
         .merge(cli_tools::routes())
         .merge(settings_payload_rules::routes())
         .merge(db_backups::routes())
+}
+
+
+async fn v1_root() -> Response {
+    Json(json!({
+        "version": "v1",
+        "endpoints": [
+            "/v1/chat/completions",
+            "/v1/messages",
+            "/v1/messages/count_tokens",
+            "/v1/responses",
+            "/v1/responses/compact",
+            "/v1/embeddings",
+            "/v1/images/generations",
+            "/v1/audio/speech",
+            "/v1/audio/transcriptions",
+            "/v1/search",
+            "/v1/web/fetch",
+            "/v1/models",
+            "/v1/usage",
+        ]
+    })).into_response()
 }
 
 async fn health() -> Json<HealthResponse> {

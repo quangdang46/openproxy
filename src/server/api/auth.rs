@@ -153,6 +153,23 @@ pub async fn login(
 /// HttpOnly cookies; and 302-redirects to the IdP's `authorization_endpoint`.
 ///
 /// Returns 400 when OIDC is not configured (no `OIDC_*` env vars at boot).
+
+/// GET /api/auth/status - Check if user is authenticated.
+/// Returns the current login status.
+pub async fn auth_status(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Response {
+    let logged_in = match crate::server::auth::require_dashboard_session(&headers, &state.db) {
+        Ok(_) => true,
+        Err(_) => false,
+    };
+    Json(json!({
+        "authenticated": logged_in,
+        "requireLogin": state.db.snapshot().settings.require_login,
+    })).into_response()
+}
+
 pub async fn oidc_login(headers: HeaderMap, State(state): State<AppState>) -> Response {
     // Apply login rate limiter to prevent DoS against the IdP redirect.
     let client_ip = client_ip_from_headers(&headers);
@@ -715,6 +732,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/sessions", get(list_sessions))
         .route("/api/auth/sessions", delete(delete_all_sessions))
         .route("/api/auth/session/{session_id}", get(get_session))
+        .route("/api/auth/status", get(auth_status))
         .route("/api/auth/oidc/login", get(oidc_login))
         .route("/api/auth/oidc/callback", get(oidc_callback))
         .route("/api/user", get(get_user))

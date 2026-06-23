@@ -468,8 +468,8 @@ async fn forward_with_provider_fallback(
             VertexExecutor,
         };
 
-        let is_codex_model = model.starts_with("codex/");
-        let is_cursor_model = model.starts_with("cursor/");
+        let is_codex_model = model.starts_with("codex/") || provider == "codex";
+        let is_cursor_model = model.starts_with("cursor/") || provider == "cu" || provider == "cursor";
         let executor_result: Result<KiroExecutorResponse, ComboAttemptError> =
             if provider == "kiro" {
                 let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)

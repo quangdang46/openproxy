@@ -4,6 +4,8 @@
 //! via [`crate::db::crypto`] before insertion and decrypted after read.
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde_json::json;
+
 use serde_json::Value;
 
 use crate::types::ProviderConnection;
@@ -46,8 +48,8 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConnec
     };
     if let Ok(v) = row.get::<_, Option<String>>(3) { c.name = v; }
     if let Ok(v) = row.get::<_, Option<String>>(4) { c.email = v; }
-    if let Ok(v) = row.get::<_, Option<i64>>(5) { c.priority = Some(v as u32); }
-    if let Ok(v) = row.get::<_, Option<bool>>(6) { c.is_active = Some(v); }
+    if let Ok(v) = row.get::<_, Option<i64>>(5) { c.priority = v.map(|x| x as u32); }
+    if let Ok(v) = row.get::<_, Option<bool>>(6) { c.is_active = v; }
     c.created_at = Some(row.get(7)?);
     c.updated_at = Some(row.get(8)?);
 

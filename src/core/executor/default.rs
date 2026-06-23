@@ -133,7 +133,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "opencode-go",
-            ProviderConfig::openai("https://opencode.ai/zen/go/v1"),
+            ProviderConfig::openai("https://opencode.ai/zen/v1"),
         ),
         (
             "glm-cn",
@@ -372,6 +372,26 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         (
             "glhf",
             ProviderConfig::openai("https://glhf.chat/api/openai/v1/chat/completions"),
+        ),
+        (
+            "cursor",
+            ProviderConfig::openai("https://api.cursor.sh/v1/chat/completions"),
+        ),
+        (
+            "cu",
+            ProviderConfig::openai("https://api.cursor.sh/v1/chat/completions"),
+        ),
+        (
+            "codebuddy-cn",
+            ProviderConfig::openai("https://api.codebuddy.cn/v1/chat/completions"),
+        ),
+        (
+            "mimo-free",
+            ProviderConfig::openai("https://mimo.kiro.dev/v1/chat/completions"),
+        ),
+        (
+            "xiaomi-tokenplan",
+            ProviderConfig::openai("https://tokenplan.xiaomi.com/v1/chat/completions"),
         ),
     ])
 });

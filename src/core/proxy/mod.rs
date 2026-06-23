@@ -442,9 +442,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_proxy_url_normalizes_http() {
-        // Test that normalize is called, but actual connectivity will fail
-        // so we just check the function runs
-        let result = test_proxy_url("localhost:8080").await;
+        // Test that normalize is called — use a high port that no service
+        // will be listening on, so the connection always fails.
+        let result = test_proxy_url("127.0.0.1:65501").await;
         // Will fail with connection error, but not "Empty"
         assert!(result.is_err());
         let err = result.unwrap_err();
