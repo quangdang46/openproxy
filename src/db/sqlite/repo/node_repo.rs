@@ -54,7 +54,7 @@ pub fn delete(conn: &Connection, id: &str) -> rusqlite::Result<()> {
 fn row_to_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderNode> {
     let id: String = row.get(0)?;
     let node_type: Option<String> = row.get(1)?;
-    let name: Option<String> = row.get(2)?;
+    let name: String = row.get::<_, Option<String>>(2)?.unwrap_or_default();
     let data_str: String = row.get(3)?;
     let created_at: String = row.get(4)?;
     let updated_at: String = row.get(5)?;
@@ -101,13 +101,14 @@ mod tests {
         let node = ProviderNode {
             id: "n1".into(),
             r#type: "openai-compatible".into(),
-            name: Some("test-node".into()),
+            name: "test-node".into(),
             created_at: Some("2026-01-01".into()),
             updated_at: Some("2026-01-01".into()),
+            ..Default::default()
         };
         db.with_transaction(|tx| create(tx, &node)).unwrap();
         let read = db.with_conn(|c| get_by_id(c, "n1")).unwrap().unwrap();
-        assert_eq!(read.name.as_deref(), Some("test-node"));
+        assert_eq!(read.name, "test-node");
         let all = db.with_conn(|c| get_by_type(c, Some("openai-compatible"))).unwrap();
         assert_eq!(all.len(), 1);
     }

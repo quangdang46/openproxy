@@ -60,10 +60,11 @@ fn row_to_api_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiKey> {
     Ok(ApiKey {
         id,
         key,
-        name,
+        name: name.unwrap_or_default(),
         machine_id,
         is_active: is_active.map(|v| v != 0),
         created_at: Some(created_at),
+        ..Default::default()
     })
 }
 
@@ -78,10 +79,11 @@ mod tests {
         let key = ApiKey {
             id: "k1".into(),
             key: "sk-test-machineid-12345678".into(),
-            name: Some("test".into()),
+            name: "test".into(),
             machine_id: Some("machine123".into()),
             is_active: Some(true),
             created_at: Some("2026-01-01".into()),
+            ..Default::default()
         };
         db.with_transaction(|tx| create(tx, &key)).unwrap();
         let read = db.with_conn(|c| get_by_id(c, "k1")).unwrap().unwrap();

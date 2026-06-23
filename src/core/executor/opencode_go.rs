@@ -23,7 +23,7 @@ const ALLOWED_TOOL_TYPES: &[&str] = &["function"];
 // Tool-level fields that Fireworks AI / OCg upstream rejects
 const TOOL_FORBIDDEN_FIELDS: &[&str] = &["strict"];
 
-const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
+const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/v1";
 const OPENCODE_GO_CLAUDE_PATH: &str = "/messages";
 const OPENCODE_GO_DEFAULT_PATH: &str = "/chat/completions";
 const CLAUDE_FORMAT_MODELS: [&str; 2] = ["minimax-m2.5", "minimax-m2.7"];
