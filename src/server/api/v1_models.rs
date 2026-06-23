@@ -322,6 +322,30 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
         }
     }
 
+    // Also include custom models whose provider_alias doesn't match any connection
+    // (e.g., custom models registered on provider nodes rather than connections)
+    if kind_filter.contains(&LLM_KIND) {
+        for custom_model in &snapshot.custom_models {
+            if !custom_model.r#type.is_empty() && custom_model.r#type != LLM_KIND {
+                continue;
+            }
+            let model_id = custom_model.id.trim();
+            if model_id.is_empty() {
+                continue;
+            }
+            let provider_alias = custom_model.provider_alias.trim();
+            if provider_alias.is_empty() {
+                continue;
+            }
+            models.push(model_card(
+                format!("{provider_alias}/{model_id}"),
+                provider_alias.to_string(),
+                created,
+                None,
+            ));
+        }
+    }
+
     let mut deduped_models = Vec::new();
     let mut seen_ids = HashSet::new();
     for model in models {
@@ -591,4 +615,128 @@ pub async fn models_info(
         "routeKind": format!("{:?}", resolved.route_kind),
     });
     Json(json!({ "object": "model.info", "data": info })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{CustomModel, ProviderConnection};
+    use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn custom_models_appear_without_connections() {
+        // Issue #156 regression: custom models must appear in /v1/models
+        // even when there are no provider connections.
+        let snapshot = AppDb {
+            custom_models: vec![
+                CustomModel {
+                    provider_alias: "tr".into(),
+                    id: "MiniMax-M3".into(),
+                    r#type: String::new(),
+                    name: None,
+                    extra: BTreeMap::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&snapshot, &[LLM_KIND]).await;
+        assert!(models.iter().any(|m| m.id == "tr/MiniMax-M3"),
+            "custom model with provider_alias 'tr' should appear in /v1/models even without connections");
+    }
+
+    #[tokio::test]
+    async fn custom_models_appear_with_unrelated_connections() {
+        // Issue #156 regression: custom models with a provider_alias that
+        // doesn't match any connection should still appear in /v1/models.
+        let snapshot = AppDb {
+            provider_connections: vec![ProviderConnection {
+                id: "conn-opencode".into(),
+                provider: "opencode-go".into(),
+                auth_type: "apikey".into(),
+                provider_specific_data: BTreeMap::from([
+                    ("prefix".into(), json!("oc")),
+                    ("enabledModels".into(), json!(["gpt-4o", "claude-3"])),
+                ]),
+                ..Default::default()
+            }],
+            custom_models: vec![
+                CustomModel {
+                    provider_alias: "tr".into(),
+                    id: "MiniMax-M3".into(),
+                    r#type: String::new(),
+                    name: None,
+                    extra: BTreeMap::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&snapshot, &[LLM_KIND]).await;
+        assert!(models.iter().any(|m| m.id == "tr/MiniMax-M3"),
+            "custom model 'tr/MiniMax-M3' should appear even when it doesn't match any connection's prefix");
+    }
+
+    #[tokio::test]
+    async fn no_duplicate_custom_models() {
+        // When a custom model's provider_alias matches a connection's output_alias,
+        // it should only appear once (deduped).
+        let snapshot = AppDb {
+            provider_connections: vec![ProviderConnection {
+                id: "conn-opencode".into(),
+                provider: "opencode-go".into(),
+                auth_type: "apikey".into(),
+                provider_specific_data: BTreeMap::from([
+                    ("prefix".into(), json!("ocg")),
+                    ("enabledModels".into(), json!(["gpt-4o"])),
+                ]),
+                ..Default::default()
+            }],
+            custom_models: vec![
+                CustomModel {
+                    provider_alias: "ocg".into(),
+                    id: "gpt-4o".into(),
+                    r#type: String::new(),
+                    name: None,
+                    extra: BTreeMap::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&snapshot, &[LLM_KIND]).await;
+        let count = models.iter().filter(|m| m.id == "ocg/gpt-4o").count();
+        assert_eq!(count, 1,
+            "custom model 'ocg/gpt-4o' should appear exactly once even if matched by connection AND fallback");
+    }
+
+    #[tokio::test]
+    async fn custom_models_without_llm_kind_filtered() {
+        // Custom models with type "image" should not appear in LLM kind filter.
+        let snapshot = AppDb {
+            custom_models: vec![
+                CustomModel {
+                    provider_alias: "tr".into(),
+                    id: "MiniMax-M3".into(),
+                    r#type: "llm".into(),
+                    name: None,
+                    extra: BTreeMap::new(),
+                },
+                CustomModel {
+                    provider_alias: "tr".into(),
+                    id: "flux-pro".into(),
+                    r#type: "image".into(),
+                    name: None,
+                    extra: BTreeMap::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&snapshot, &[LLM_KIND]).await;
+        assert!(models.iter().any(|m| m.id == "tr/MiniMax-M3"),
+            "llm-type custom model should appear in LLM list");
+        assert!(!models.iter().any(|m| m.id == "tr/flux-pro"),
+            "image-type custom model should NOT appear in LLM list");
+    }
 }

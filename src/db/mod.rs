@@ -138,8 +138,8 @@ impl Db {
         let mut next = (*self.snapshot()).clone();
         updater(&mut next);
         next.normalize();
-        let key = crate::db::crypto::encryption_key().unwrap_or_default();
-        write_app_db_atomic(&mut next, &self.db_path, &key).await?;
+        let key = crate::db::crypto::encryption_key();
+        write_app_db_atomic(&mut next, &self.db_path, key.as_deref()).await?;
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
         Ok(next)
@@ -169,8 +169,8 @@ impl Db {
         let _guard = self.write_lock.write().await;
         let mut next = make_next();
         next.normalize();
-        let key = crate::db::crypto::encryption_key().unwrap_or_default();
-        write_app_db_atomic(&mut next, &self.db_path, &key).await?;
+        let key = crate::db::crypto::encryption_key();
+        write_app_db_atomic(&mut next, &self.db_path, key.as_deref()).await?;
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
         Ok(next)
@@ -251,8 +251,8 @@ fn is_permission_denied(err: &anyhow::Error) -> bool {
 async fn load_or_init_app_db(path: &Path) -> anyhow::Result<AppDb> {
     if !fs::try_exists(path).await? {
         let mut value = AppDb::default();
-        let key = crate::db::crypto::encryption_key().unwrap_or_default();
-        write_app_db_atomic(&mut value, path, &key).await?;
+        let key = crate::db::crypto::encryption_key();
+        write_app_db_atomic(&mut value, path, key.as_deref()).await?;
         return Ok(value);
     }
 
@@ -274,8 +274,8 @@ async fn load_or_init_app_db(path: &Path) -> anyhow::Result<AppDb> {
                 Ok(v) => v,
                 Err(_) => {
                     let mut v = AppDb::default();
-                    let key = crate::db::crypto::encryption_key().unwrap_or_default();
-                    write_app_db_atomic(&mut v, path, &key).await?;
+                    let key = crate::db::crypto::encryption_key();
+                    write_app_db_atomic(&mut v, path, key.as_deref()).await?;
                     return Ok(v);
                 }
             };
@@ -297,8 +297,8 @@ async fn load_or_init_app_db(path: &Path) -> anyhow::Result<AppDb> {
     }
 
     if mutated || created_new {
-        let key = crate::db::crypto::encryption_key().unwrap_or_default();
-        write_app_db_atomic(&mut value, path, &key).await?;
+        let key = crate::db::crypto::encryption_key();
+        write_app_db_atomic(&mut value, path, key.as_deref()).await?;
     }
     Ok(value)
 }
@@ -472,9 +472,11 @@ fn read_verified_value(bytes: &[u8]) -> anyhow::Result<serde_json::Value> {
 /// Write an `AppDb` to disk: encrypt sensitive connection fields, embed
 /// `schema_version`, serialize with a SHA-256 checksum, then restore
 /// plaintext on `value` so the in-memory copy remains usable.
-async fn write_app_db_atomic(value: &mut AppDb, path: &Path, key: &str) -> anyhow::Result<()> {
-    for conn in &mut value.provider_connections {
-        crate::db::crypto::encrypt_connection(conn, key);
+async fn write_app_db_atomic(value: &mut AppDb, path: &Path, key: Option<&str>) -> anyhow::Result<()> {
+    if let Some(k) = key {
+        for conn in &mut value.provider_connections {
+            crate::db::crypto::encrypt_connection(conn, k);
+        }
     }
     value.schema_version = crate::db::crypto::SCHEMA_VERSION;
     value.checksum.clear();
@@ -483,8 +485,10 @@ async fn write_app_db_atomic(value: &mut AppDb, path: &Path, key: &str) -> anyho
     write_value_with_checksum(&json_val, path).await?;
 
     // Restore plaintext in-memory.
-    for conn in &mut value.provider_connections {
-        crate::db::crypto::decrypt_connection(conn, key);
+    if let Some(k) = key {
+        for conn in &mut value.provider_connections {
+            crate::db::crypto::decrypt_connection(conn, k);
+        }
     }
     Ok(())
 }
@@ -516,4 +520,80 @@ async fn write_usage_db_atomic(value: &mut UsageDb, path: &Path) -> anyhow::Resu
 async fn read_usage_db(bytes: &[u8]) -> anyhow::Result<UsageDb> {
     let parsed = read_verified_value(bytes)?;
     Ok(UsageDb::from_json_value(parsed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{AppDb, ProviderConnection};
+    use serde_json::Value;
+
+    /// Issue #155 regression: when OPENPROXY_ENCRYPTION_KEY is unset, the
+    /// write path must NOT encrypt secrets. Otherwise the read path (which
+    /// skips decryption when no key is set) would return ciphertext as if
+    /// it were a plaintext API key.
+    #[tokio::test]
+    async fn write_app_db_no_key_does_not_encrypt() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db.json");
+
+        let mut db = AppDb::default();
+        db.provider_connections = vec![ProviderConnection {
+            id: "c1".into(),
+            provider: "openai".into(),
+            api_key: Some("sk-plaintext-12345".into()),
+            access_token: Some("tok-plaintext".into()),
+            refresh_token: None,
+            id_token: None,
+            ..Default::default()
+        }];
+
+        // No key => write_app_db_atomic must skip encryption.
+        write_app_db_atomic(&mut db, &path, None).await.unwrap();
+
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let conn = &raw["providerConnections"][0];
+        assert_eq!(
+            conn["apiKey"].as_str(),
+            Some("sk-plaintext-12345"),
+            "with no key, apiKey must be stored as plaintext (not encrypted)"
+        );
+        assert_eq!(
+            conn["accessToken"].as_str(),
+            Some("tok-plaintext"),
+            "with no key, accessToken must be stored as plaintext (not encrypted)"
+        );
+
+        // (no need to read back — write_app_db_atomic with None skips encryption)
+    }
+
+    /// Issue #155 regression: with a key, secrets are encrypted on disk.
+    #[tokio::test]
+    async fn write_app_db_with_key_encrypts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("db.json");
+
+        let mut db = AppDb::default();
+        db.provider_connections = vec![ProviderConnection {
+            id: "c1".into(),
+            provider: "openai".into(),
+            api_key: Some("sk-secret-key".into()),
+            access_token: None,
+            refresh_token: None,
+            id_token: None,
+            ..Default::default()
+        }];
+
+        write_app_db_atomic(&mut db, &path, Some("test-key")).await.unwrap();
+
+        let bytes = tokio::fs::read(&path).await.unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let conn = &raw["providerConnections"][0];
+        assert_ne!(
+            conn["apiKey"].as_str(),
+            Some("sk-secret-key"),
+            "with a key, apiKey must be encrypted on disk"
+        );
+    }
 }
