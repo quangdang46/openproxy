@@ -373,6 +373,27 @@ pub struct Settings {
     )]
     pub caveman_level: String,
     #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub ponytail_enabled: bool,
+    #[serde(
+        default = "default_ponytail_level",
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub ponytail_level: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub headroom_enabled: bool,
+    #[serde(
+        default = "default_headroom_url",
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub headroom_url: String,
+    #[serde(
+        default = "default_headroom_timeout_ms",
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub headroom_timeout_ms: u64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub headroom_compress_user_messages: bool,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
     pub payload_rules: PayloadRulesConfig,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub system_prompt: SystemPromptConfig,
@@ -410,6 +431,12 @@ impl Default for Settings {
             rtk_enabled: true,
             caveman_enabled: false,
             caveman_level: default_caveman_level(),
+            ponytail_enabled: false,
+            ponytail_level: default_ponytail_level(),
+            headroom_enabled: false,
+            headroom_url: default_headroom_url(),
+            headroom_timeout_ms: default_headroom_timeout_ms(),
+            headroom_compress_user_messages: false,
             payload_rules: PayloadRulesConfig::default(),
             system_prompt: SystemPromptConfig::default(),
             password: None,
@@ -425,6 +452,7 @@ impl Settings {
         }
 
         self.caveman_level = normalize_caveman_level_value(&self.caveman_level);
+        self.ponytail_level = normalize_ponytail_level_value(&self.ponytail_level);
         self.payload_rules.normalize();
         self.system_prompt.normalize();
     }
@@ -672,6 +700,27 @@ fn normalize_caveman_level_value(value: &str) -> String {
         "ultra" => "ultra".into(),
         _ => default_caveman_level(),
     }
+}
+
+fn default_ponytail_level() -> String {
+    "full".into()
+}
+
+fn normalize_ponytail_level_value(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "lite" => "lite".into(),
+        "full" => "full".into(),
+        "ultra" => "ultra".into(),
+        _ => default_ponytail_level(),
+    }
+}
+
+fn default_headroom_url() -> String {
+    "http://localhost:8787".into()
+}
+
+fn default_headroom_timeout_ms() -> u64 {
+    3000
 }
 
 fn default_true() -> bool {

@@ -165,7 +165,7 @@ fn schema_for(resource: &str) -> Option<Value> {
             "properties": {
                 "id": {"type": "string"},
                 "name": {"type": "string"},
-                "strategy": {"type": "string", "enum": ["fallback", "round-robin", "sticky-round-robin"], "default": "fallback"},
+                "strategy": {"type": "string", "enum": ["fallback", "round-robin", "sticky-round-robin", "fusion"], "default": "fallback"},
                 "models": {"type": "array", "items": {"type": "string"}},
                 "isActive": {"type": "boolean", "default": true}
             }

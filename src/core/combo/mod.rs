@@ -13,6 +13,8 @@ use tokio::sync::mpsc;
 use crate::core::account_fallback::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, MAX_BACKOFF_LEVEL};
 use crate::types::Combo;
 
+pub mod fusion;
+
 const LONG_COOLDOWN: Duration = Duration::from_secs(120);
 const SHORT_COOLDOWN: Duration = Duration::from_secs(5);
 const TRANSIENT_COOLDOWN: Duration = Duration::from_secs(30);
@@ -165,23 +167,79 @@ const HARD_CAPS: &[&str] = &["vision", "pdf"];
 /// Detect required capabilities from the request body by scanning the last
 /// user turn for multimodal blocks (9router detectRequiredCapabilities parity).
 pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
-    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+    // Try messages, input (Responses API), contents (Gemini), request.contents (Gemini-passthrough).
+    let messages = body
+        .get("messages")
+        .or_else(|| body.get("input"))
+        .or_else(|| body.get("contents"))
+        .or_else(|| {
+            body.get("request")
+                .and_then(|r| r.get("contents"))
+        })
+        .and_then(Value::as_array);
+
+    let Some(messages) = messages else {
         return HashSet::new();
     };
 
-    // Only scan the last user turn (matching 9router's approach).
-    let Some(last_user) = messages.iter().rev().find(|msg| {
-        msg.get("role").and_then(Value::as_str) == Some("user")
-    }) else {
-        return HashSet::new();
-    };
+    // Search capability detection runs independently of message array presence.
+    let mut required = HashSet::new();
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        if tools.iter().any(|t| t.get("type").and_then(Value::as_str) == Some("search")) {
+            required.insert("search".to_string());
+        }
+    }
 
-    let Some(content) = last_user.get("content") else {
+    // Scan trailing user messages (9router's trailingUserItems pattern):
+    // find all messages after the last assistant/model turn.
+    let trailing_users: Vec<&Value> = messages
+        .iter()
+        .rev()
+        .take_while(|msg| {
+            let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+            role == "user" || !["assistant", "model"].contains(&role)
+        })
+        .filter(|msg| msg.get("role").and_then(Value::as_str) == Some("user"))
+        .collect();
+
+    if trailing_users.is_empty() {
         return HashSet::new();
-    };
+    }
 
     let mut required = HashSet::new();
 
+    for last_user in &trailing_users {
+        // Scan OpenAI-style content (messages/input arrays).
+        if let Some(content) = last_user.get("content") {
+            scan_content_for_capabilities(content, &mut required);
+        }
+        // For Gemini-style parts (contents array), scan each part for
+        // inlineData/fileData MIME types.
+        if let Some(parts) = last_user.get("parts").and_then(Value::as_array) {
+            for part in parts {
+                if part.get("text").and_then(Value::as_str).is_some() {
+                    continue;
+                }
+                let mime = part
+                    .get("inlineData")
+                    .and_then(|d| d.get("mimeType"))
+                    .or_else(|| part.get("fileData").and_then(|d| d.get("mimeType")))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if mime.starts_with("image/") {
+                    required.insert("vision".to_string());
+                } else if mime == "application/pdf" {
+                    required.insert("pdf".to_string());
+                }
+            }
+        }
+    }
+
+    required
+}
+
+/// Scan a single content value (string or array) for vision/pdf capability signals.
+fn scan_content_for_capabilities(content: &Value, required: &mut HashSet<String>) {
     match content {
         Value::Array(arr) => {
             for item in arr {
@@ -191,6 +249,25 @@ pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
                     }
                     Some("input_file" | "document") => {
                         required.insert("pdf".to_string());
+                    }
+                    Some("inlineData" | "fileData") => {
+                        let mime = item
+                            .get("mimeType")
+                            .or_else(|| {
+                                item.get("inlineData")
+                                    .and_then(|d| d.get("mimeType"))
+                            })
+                            .or_else(|| {
+                                item.get("fileData")
+                                    .and_then(|d| d.get("mimeType"))
+                            })
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if mime.starts_with("image/") {
+                            required.insert("vision".to_string());
+                        } else if mime == "application/pdf" {
+                            required.insert("pdf".to_string());
+                        }
                     }
                     _ => {}
                 }
@@ -209,8 +286,6 @@ pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
         }
         _ => {}
     }
-
-    required
 }
 
 /// Heuristic check: does the combo model entry (e.g. "openai/gpt-4o") support
