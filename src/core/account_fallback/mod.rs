@@ -28,6 +28,9 @@ pub struct ComboRotationState {
     pub last_rotation: i64,
     /// Total requests through this combo.
     pub total_requests: u64,
+    /// Per-account timestamps of last use (indexed by account position).
+    /// Used for LRU-based round-robin selection (9router parity).
+    pub last_used_at: Vec<i64>,
 }
 
 /// Model lock state for sticky routing.
@@ -196,7 +199,22 @@ impl AccountRegistry {
                 let combo_id = combo_id?;
                 let mut rotation = self.combo_rotation.write();
                 let state = rotation.entry(combo_id.to_string()).or_default();
-                let idx = state.last_index;
+
+                // Initialize last_used_at vector if available accounts changed
+                if state.last_used_at.len() != available.len() {
+                    state.last_used_at = vec![0i64; available.len()];
+                }
+
+                // LRU-based selection (9router parity): pick the least recently used account
+                let idx = state
+                    .last_used_at
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, &ts)| ts)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+
+                state.last_used_at[idx] = Utc::now().timestamp();
                 state.last_index = (idx + 1) % available.len();
                 state.total_requests += 1;
                 state.last_rotation = Utc::now().timestamp();

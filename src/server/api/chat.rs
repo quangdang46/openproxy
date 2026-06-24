@@ -16,14 +16,21 @@ use serde_json::{json, Value};
 use crate::core::account_fallback::{build_model_lock_update, filter_available_accounts};
 use crate::core::chat::RequestPlan;
 use crate::core::combo::{
-    check_fallback_error, execute_combo_strategy_with_capacity, get_combo_models_from_data,
-    get_disabled_members_for_combo, mark_combo_member_quarantined, ComboAttemptError,
-    ComboExecutionError, ComboStrategy, ModelCapacity,
+    check_fallback_error, detect_required_capabilities, execute_combo_strategy_with_capacity,
+    get_combo_models_from_data, get_disabled_members_for_combo, mark_combo_member_quarantined,
+    reorder_by_capabilities, ComboAttemptError, ComboExecutionError, ComboStrategy, ModelCapacity,
 };
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
 use crate::core::rtk::apply_request_preprocessing;
+use crate::core::translator::helpers::image_helper::fetch_image_as_base64;
+use crate::core::translator::helpers::modality_helper::{
+    capabilities_for_format, strip_unsupported_modalities, ModalityCapabilities,
+};
+use crate::core::utils::bypass_handler::{detect_bypass, BypassDecision, DEFAULT_BYPASS_TEXT};
+use crate::core::utils::client_detector::{detect_client_tool, is_native_passthrough, ClientTool};
+use crate::core::utils::tool_deduper::dedupe_tools;
 use crate::core::translator::registry::{self, Format};
 use crate::core::translator::response_transform::{transform_sse_stream, transformer_for_provider};
 use crate::payload_rules::{apply_request_rules, apply_system_prompt};
@@ -219,12 +226,112 @@ async fn chat_completions_impl(
     apply_system_prompt(&mut body, &snapshot.settings.system_prompt);
     apply_request_rules(&mut body, model_str, None, &snapshot.settings.payload_rules);
 
+    // Convert headers once for client-tool detection shared by both
+    // Direct and Combo dispatch paths.
+    let headers_map: std::collections::HashMap<String, String> = headers
+        .iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().to_lowercase(),
+                v.to_str().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    let client_tool = detect_client_tool(&headers_map, &body);
+
+    // 9router parity: Accept-header streaming preference (chatCore.js:87-94).
+    // When client explicitly prefers application/json over text/event-stream,
+    // force non-streaming so AI SDK / curl-style callers get a synchronous response.
+    if let Some(accept_val) = headers.get("accept") {
+        if let Ok(accept_str) = accept_val.to_str() {
+            let a = accept_str.to_lowercase();
+            let wants_json = a.contains("application/json");
+            let wants_sse = a.contains("text/event-stream");
+            if wants_json && !wants_sse && a != "*/*" {
+                body.as_object_mut()
+                    .and_then(|obj| obj.insert("stream".to_string(), Value::Bool(false)));
+            }
+        }
+    }
+
+    let user_agent = headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    match detect_bypass(&body, &user_agent, false) {
+        BypassDecision::Bypass => {
+            return json_success_response(
+                StatusCode::OK,
+                json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis()),
+                    "object": "chat.completion",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model_str,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": DEFAULT_BYPASS_TEXT
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2
+                    }
+                }),
+            );
+        }
+        BypassDecision::Naming { title } => {
+            let naming_text = serde_json::to_string(&json!({
+                "isNewTopic": true,
+                "title": title,
+            }));
+            return json_success_response(
+                StatusCode::OK,
+                json!({
+                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis()),
+                    "object": "chat.completion",
+                    "created": chrono::Utc::now().timestamp(),
+                    "model": model_str,
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": naming_text.unwrap_or_default()
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2
+                    }
+                }),
+            );
+        }
+        BypassDecision::Pass => {}
+    }
+
     match resolved.route_kind {
         ModelRouteKind::Combo => {
             let combo_name = resolved.model;
             let Some(combo_models) = get_combo_models_from_data(&combo_name, &snapshot.combos)
             else {
                 return json_error_response(StatusCode::BAD_REQUEST, "Unknown combo model");
+            };
+
+            // 9router parity: capability auto-switch — reorder models so that
+            // vision/pdf-capable providers are tried first when the request
+            // contains multimodal blocks. Models without required hard caps
+            // remain as last-resort fallback rather than being excluded.
+            let required_caps = detect_required_capabilities(&body);
+            let combo_models = if !required_caps.is_empty() {
+                reorder_by_capabilities(&combo_models, &required_caps)
+            } else {
+                combo_models
             };
 
             let disabled_members = get_disabled_members_for_combo(&combo_name, &snapshot.combos);
@@ -246,6 +353,7 @@ async fn chat_completions_impl(
             let attempted_members: std::sync::Arc<parking_lot::Mutex<Vec<String>>> =
                 std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
             let combo_name_for_quarantine = combo_name.clone();
+            let client_tool_for_combo = client_tool;
             let result = {
                 let attempted_members = attempted_members.clone();
                 execute_combo_strategy_with_capacity(
@@ -271,8 +379,10 @@ async fn chat_completions_impl(
                             .unwrap_or("unknown")
                             .to_string();
                         let resolved_model = combo_resolved.model.clone();
-                        let combo_plan =
+                        let mut combo_plan =
                             RequestPlan::new(endpoint, &body, &combo_provider_str, &resolved_model);
+                        combo_plan.passthrough =
+                            is_native_passthrough(client_tool_for_combo, &combo_provider_str);
                         let plan_for_combo = combo_plan.clone();
                         async move {
                             execute_single_model(
@@ -282,6 +392,7 @@ async fn chat_completions_impl(
                                 api_key.as_deref(),
                                 endpoint,
                                 &plan_for_combo,
+                                client_tool_for_combo,
                             )
                             .await
                         }
@@ -314,12 +425,13 @@ async fn chat_completions_impl(
             }
         }
         ModelRouteKind::Direct => {
-            let plan = RequestPlan::new(
+            let mut plan = RequestPlan::new(
                 endpoint,
                 &body,
                 resolved.provider.as_deref().unwrap_or(model_str),
                 &resolved.model,
             );
+            plan.passthrough = is_native_passthrough(client_tool, &plan.provider);
             match execute_single_model(
                 &state,
                 &body,
@@ -327,6 +439,7 @@ async fn chat_completions_impl(
                 presented_api_key.as_deref(),
                 endpoint,
                 &plan,
+                client_tool,
             )
             .await
             {
@@ -344,6 +457,7 @@ async fn execute_single_model(
     api_key: Option<&str>,
     endpoint: Option<&'static str>,
     plan: &RequestPlan,
+    client_tool: Option<ClientTool>,
 ) -> Result<Response, ComboAttemptError> {
     let snapshot = state.db.snapshot();
 
@@ -359,6 +473,86 @@ async fn execute_single_model(
     }
 
     let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
+
+    let caps = capabilities_for_format(plan.source_format);
+    strip_unsupported_modalities(&mut body, plan.source_format, &caps);
+
+    // Prefetch remote images for providers that need inline base64
+    // (9router prefetchRemoteImages parity: gate on target format).
+    if plan.target_format.needs_image_prefetch() {
+        if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            let client = reqwest::Client::new();
+            for msg in messages.iter_mut() {
+                let content_array = match msg.get_mut("content") {
+                    Some(Value::Array(arr)) => arr,
+                    _ => continue,
+                };
+                for part in content_array.iter_mut() {
+                    // OpenAI format: image_url.url
+                    if let Some(url) = part
+                        .get("image_url")
+                        .and_then(|iu| iu.get("url"))
+                        .and_then(|u| u.as_str())
+                    {
+                        if url.starts_with("http://") || url.starts_with("https://") {
+                            if let Some(fetched) =
+                                fetch_image_as_base64(&client, url).await
+                            {
+                                if let Some(img) =
+                                    part.get_mut("image_url").and_then(|iu| iu.as_object_mut())
+                                {
+                                    img.insert(
+                                        "url".into(),
+                                        Value::String(fetched.data_url),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // Claude format: image.source.url
+                    if let Some(source) = part.get("image").and_then(|im| im.get("source")) {
+                        if source.get("type").and_then(|t| t.as_str()) == Some("url") {
+                            if let Some(url) = source.get("url").and_then(|u| u.as_str()) {
+                                if url.starts_with("http://") || url.starts_with("https://") {
+                                    if let Some(fetched) =
+                                        fetch_image_as_base64(&client, url).await
+                                    {
+                                        if let Some(src) = part
+                                            .get_mut("image")
+                                            .and_then(|im| im.get_mut("source"))
+                                            .and_then(|s| s.as_object_mut())
+                                        {
+                                            src.insert(
+                                                "data".into(),
+                                                Value::String(fetched.data_url),
+                                            );
+                                            src.insert(
+                                                "type".into(),
+                                                Value::String("base64".into()),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Deduplicate tool definitions when MCP equivalents are present
+    // (9router parity: only strips for Claude client).
+    if client_tool == Some(ClientTool::Claude) {
+        if let Some(tools_val) = body.get("tools").and_then(|t| t.as_array()) {
+            let result = dedupe_tools(tools_val);
+            if !result.stripped.is_empty() {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("tools".into(), Value::Array(result.tools));
+                }
+            }
+        }
+    }
 
     tracing::debug!(
         "PLAN provider={} model={} source={:?} target={:?} stream={} translate={}",
@@ -378,6 +572,7 @@ async fn execute_single_model(
         api_key,
         endpoint,
         plan,
+        client_tool,
     )
     .await
 }
@@ -390,6 +585,7 @@ async fn forward_with_provider_fallback(
     api_key: Option<&str>,
     endpoint: Option<&'static str>,
     plan: &RequestPlan,
+    client_tool: Option<ClientTool>,
 ) -> Result<Response, ComboAttemptError> {
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
@@ -448,7 +644,15 @@ async fn forward_with_provider_fallback(
         let stream = request_body
             .get("stream")
             .and_then(Value::as_bool)
-            .unwrap_or(false);
+            .unwrap_or(true);
+
+        // DeepSeek TUI non-interactive (-p) mode can't parse SSE
+        // (9router chatCore.js:81-86 parity).
+        let stream = if client_tool == Some(ClientTool::DeepseekTui) {
+            false
+        } else {
+            stream
+        };
 
         state
             .usage_live
@@ -1019,6 +1223,52 @@ async fn forward_with_provider_fallback(
                     .await;
                 }
 
+                // Token refresh: on 401/403, try to refresh the access token
+                // before giving up on this connection (9router parity).
+                // On success, update the DB and continue the loop so the
+                // fresh snapshot picks up the renewed token.
+                if (status.as_u16() == 401 || status.as_u16() == 403)
+                    && connection.refresh_token.is_some()
+                {
+                    if let Some(ref rt) = connection.refresh_token.clone() {
+                        let refresh_provider = plan.provider.as_str();
+                        match crate::oauth::token_refresh::dispatch_oauth_refresh(
+                            refresh_provider,
+                            &rt,
+                            &connection.provider_specific_data,
+                        )
+                        .await
+                        {
+                            Ok(result) => {
+                                let conn_id = connection.id.clone();
+                                let new_access = result.access_token.clone();
+                                let new_refresh = result.refresh_token.clone();
+                                let _ = state
+                                    .db
+                                    .update(move |db| {
+                                        if let Some(conn) = db
+                                            .provider_connections
+                                            .iter_mut()
+                                            .find(|c| c.id == conn_id)
+                                        {
+                                            conn.access_token = Some(new_access);
+                                            if let Some(rt) = new_refresh {
+                                                conn.refresh_token = Some(rt);
+                                            }
+                                            conn.last_error = None;
+                                            conn.last_error_at = None;
+                                            conn.error_code = None;
+                                            conn.backoff_level = Some(0);
+                                        }
+                                    })
+                                    .await;
+                                continue;
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+
                 if decision.should_fallback {
                     mark_connection_unavailable(
                         state,
@@ -1571,7 +1821,22 @@ async fn proxy_response_with_pending_tracking(
         }
     };
 
-    build_proxied_response(status, &headers, body)
+    let mut response = build_proxied_response(status, &headers, body);
+    // SSE-specific headers (9router parity): prevent nginx/proxy buffering
+    // and keep the SSE connection alive through intermediary proxies.
+    response
+        .headers_mut()
+        .insert("Connection", "keep-alive".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("X-Accel-Buffering", "no".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("Cache-Control", "no-cache".parse().unwrap());
+    response
+        .headers_mut()
+        .insert("Content-Type", "text/event-stream".parse().unwrap());
+    response
 }
 
 fn sse_frame_for_dashboard(line: &str) -> Option<Bytes> {
@@ -1974,6 +2239,12 @@ fn json_error_response(status: StatusCode, message: &str) -> Response {
             })),
         )
             .into_response(),
+    )
+}
+
+fn json_success_response(status: StatusCode, data: Value) -> Response {
+    with_cors_response(
+        (status, Json(data)).into_response(),
     )
 }
 

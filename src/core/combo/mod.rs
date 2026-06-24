@@ -88,6 +88,11 @@ pub struct FusionPanelResult {
 static COMBO_ROTATION_STATE: Lazy<Mutex<HashMap<String, usize>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+/// Sticky counter for round-robin: maps combo_name -> consecutive uses on
+/// the current model. Reset when sticky_limit is reached (9router parity).
+static COMBO_ROTATION_STICKY_COUNT: Lazy<Mutex<HashMap<String, u32>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
 /// In-memory quarantine map keyed by `(combo_name, model)`. Members get
 /// added when [`mark_combo_member_quarantined`] is called and removed
 /// either when the TTL expires or via [`clear_combo_member_quarantine`] /
@@ -145,11 +150,151 @@ pub enum ModelCapacity {
 }
 
 pub fn get_quota_cooldown(backoff_level: u32) -> Duration {
-    // 9router bug fixed: was `saturating_sub(1)` which made levels 0 and 1
-    // both produce BASE*2^0 = same delay. Correct formula: BASE * 2^level
-    // so level 0 = BASE (2s), level 1 = 2*BASE (4s), level 2 = 4*BASE (8s), etc.
-    let cooldown_ms = BACKOFF_BASE_MS.saturating_mul(2u64.saturating_pow(backoff_level));
+    // Aligned to 9router formula: BASE * 2^max(0, level-1).
+    // This means level 0 and level 1 both produce BASE (2s) delay.
+    // 9router used `Math.pow(2, Math.max(0, backoffLevel - 1))`.
+    let level = backoff_level.saturating_sub(1);
+    let cooldown_ms = BACKOFF_BASE_MS.saturating_mul(2u64.saturating_pow(level));
     Duration::from_millis(cooldown_ms.min(BACKOFF_MAX_MS))
+}
+
+/// Hard capabilities that models must support to handle the request — a model
+/// missing any of these gets tier-2 (last-resort) placement.
+const HARD_CAPS: &[&str] = &["vision", "pdf"];
+
+/// Detect required capabilities from the request body by scanning the last
+/// user turn for multimodal blocks (9router detectRequiredCapabilities parity).
+pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return HashSet::new();
+    };
+
+    // Only scan the last user turn (matching 9router's approach).
+    let Some(last_user) = messages.iter().rev().find(|msg| {
+        msg.get("role").and_then(Value::as_str) == Some("user")
+    }) else {
+        return HashSet::new();
+    };
+
+    let Some(content) = last_user.get("content") else {
+        return HashSet::new();
+    };
+
+    let mut required = HashSet::new();
+
+    match content {
+        Value::Array(arr) => {
+            for item in arr {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("image_url" | "image") => {
+                        required.insert("vision".to_string());
+                    }
+                    Some("input_file" | "document") => {
+                        required.insert("pdf".to_string());
+                    }
+                    _ => {}
+                }
+                // Also check Claude content blocks with source
+                if let Some(source) = item.get("source") {
+                    if source.get("type").and_then(Value::as_str) == Some("url") {
+                        required.insert("vision".to_string());
+                    }
+                }
+            }
+        }
+        Value::String(text) => {
+            if text.contains("media://") {
+                required.insert("vision".to_string());
+            }
+        }
+        _ => {}
+    }
+
+    required
+}
+
+/// Heuristic check: does the combo model entry (e.g. "openai/gpt-4o") support
+/// a given capability? Uses provider-prefix and model-name patterns rather
+/// than an explicit capability database (9router reads PROVIDERS[].capabilities).
+fn model_has_capability(entry: &str, capability: &str) -> bool {
+    let entry_lower = entry.to_lowercase();
+
+    match capability {
+        "vision" => {
+            // Provider-level vision signals
+            if entry_lower.starts_with("openai/gpt-4")
+                || entry_lower.starts_with("openai/o1")
+                || entry_lower.starts_with("openai/o3")
+                || entry_lower.starts_with("anthropic/claude")
+                || entry_lower.starts_with("google/gemini")
+                || entry_lower.starts_with("vertex/claude")
+                || entry_lower.starts_with("vertex/gemini")
+                || entry_lower.starts_with("aws/claude")
+                || entry_lower.starts_with("gcp/gemini")
+                || entry_lower.starts_with("custom/node-openai")
+            {
+                return true;
+            }
+            // Model-name patterns
+            if entry_lower.contains("vision") || entry_lower.contains("-4o") || entry_lower.contains("gemini") {
+                return true;
+            }
+            false
+        }
+        "pdf" => {
+            // PDF support is primarily Claude + Gemini
+            if entry_lower.starts_with("anthropic/claude")
+                || entry_lower.starts_with("vertex/claude")
+                || entry_lower.starts_with("aws/claude")
+                || entry_lower.starts_with("google/gemini")
+                || entry_lower.starts_with("vertex/gemini")
+                || entry_lower.starts_with("gcp/gemini")
+            {
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Reorder combo models so that capability-matching models are tried first
+/// (9router reorderByCapabilities parity).
+///
+/// Tier 0 — All required caps present (preferred first).
+/// Tier 1 — No missing hard caps (missing a soft cap only, still fine).
+/// Tier 2 — Missing one or more hard caps (last resort).
+///
+/// When no capabilities are required, the input order is preserved unchanged.
+pub fn reorder_by_capabilities(models: &[String], required: &HashSet<String>) -> Vec<String> {
+    if required.is_empty() {
+        return models.to_vec();
+    }
+
+    let mut tier0: Vec<String> = Vec::new();
+    let mut tier1: Vec<String> = Vec::new();
+    let mut tier2: Vec<String> = Vec::new();
+
+    for model in models {
+        let has_all_required = required.iter().all(|cap| model_has_capability(model, cap));
+        let missing_hard = HARD_CAPS
+            .iter()
+            .any(|cap| required.contains(*cap) && !model_has_capability(model, cap));
+
+        if has_all_required {
+            tier0.push(model.clone());
+        } else if !missing_hard {
+            tier1.push(model.clone());
+        } else {
+            tier2.push(model.clone());
+        }
+    }
+
+    let mut result = Vec::with_capacity(models.len());
+    result.extend(tier0);
+    result.extend(tier1);
+    result.extend(tier2);
+    result
 }
 
 pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -> FallbackDecision {
@@ -184,15 +329,9 @@ pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -
     }
 
     match status {
-        // 9router bug fixed: 4xx client errors should NOT trigger fallback.
-        // The original code returned should_fallback: true for all of 401-404,
-        // causing account rotation on bad requests that will fail on any account.
-        400 | 404 => FallbackDecision {
-            should_fallback: false,
-            cooldown: Duration::ZERO,
-            new_backoff_level: None,
-        },
-        401 | 403 => FallbackDecision {
+        // 9router ERROR_RULES: 401/402/403/404 all allow fallback with LONG_COOLDOWN
+        // 400 is NOT in ERROR_RULES — falls through to default TRANSIENT_COOLDOWN (9router parity)
+        401 | 402 | 403 | 404 => FallbackDecision {
             should_fallback: true,
             cooldown: LONG_COOLDOWN,
             new_backoff_level: None,
@@ -217,6 +356,7 @@ pub fn get_rotated_models(
     models: &[String],
     combo_name: Option<&str>,
     strategy: ComboStrategy,
+    sticky_limit: u32,
 ) -> Vec<String> {
     if models.len() <= 1 || strategy != ComboStrategy::RoundRobin {
         return models.to_vec();
@@ -237,16 +377,30 @@ pub fn get_rotated_models(
         }
     }
 
-    state.insert(combo_name.to_string(), (current_index + 1) % models.len());
+    if sticky_limit > 1 {
+        let mut sticky_counts = COMBO_ROTATION_STICKY_COUNT.lock();
+        let count = sticky_counts.entry(combo_name.to_string()).or_insert(0);
+        *count += 1;
+        if *count >= sticky_limit {
+            *count = 0;
+            state.insert(combo_name.to_string(), (current_index + 1) % models.len());
+        }
+    } else {
+        state.insert(combo_name.to_string(), (current_index + 1) % models.len());
+    }
+
     rotated
 }
 
 pub fn reset_combo_rotation(combo_name: Option<&str>) {
     let mut state = COMBO_ROTATION_STATE.lock();
+    let mut sticky = COMBO_ROTATION_STICKY_COUNT.lock();
     if let Some(combo_name) = combo_name {
         state.remove(combo_name);
+        sticky.remove(combo_name);
     } else {
         state.clear();
+        sticky.clear();
     }
 }
 
@@ -435,7 +589,7 @@ where
         });
     }
 
-    let rotated = get_rotated_models(&active, combo_name, strategy);
+    let rotated = get_rotated_models(&active, combo_name, strategy, 1);
 
     if strategy == ComboStrategy::RoundRobin && rotated.len() > 1 {
         let available: Vec<String> = rotated
@@ -487,6 +641,17 @@ where
                         message: error.message,
                         earliest_retry_after,
                     });
+                }
+
+                // 9router transient wait: on 502/503/504, wait cooldown before
+                // falling through to the next combo member so the upstream
+                // gets a brief recovery window instead of an immediate retry.
+                // 9router caps transient wait at 5000ms to avoid 30s+ delays in the iterator
+                if matches!(error.status, 502 | 503 | 504)
+                    && !decision.cooldown.is_zero()
+                    && decision.cooldown.as_millis() <= 5000
+                {
+                    tokio::time::sleep(decision.cooldown).await;
                 }
 
                 last_error = Some(error);
