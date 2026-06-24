@@ -91,3 +91,6 @@ HANDOFF.md
 
 # Rust compiler ICE logs
 rustc-ice-*.txt
+
+# omo (session/loop artifacts)
+.omo/

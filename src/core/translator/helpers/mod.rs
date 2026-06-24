@@ -6,5 +6,6 @@
 
 pub mod image_helper;
 pub mod max_tokens_helper;
+pub mod modality_helper;
 pub mod openai_helper;
 pub mod tool_call_helper;

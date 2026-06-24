@@ -726,6 +726,138 @@ pub async fn refresh_qoder_token(_refresh_token: &str) -> Result<RefreshResult, 
     Err("Qoder does not support token refresh".to_string())
 }
 
+/// Dispatch to the correct per-provider token refresh function.
+///
+/// Matches on `provider` name and calls the appropriate `dedup_refresh` wrapper.
+/// Used by the inline token-refresh logic in chat.rs (9router parity: on 401/403,
+/// refresh the token before falling through to the next account).
+pub async fn dispatch_oauth_refresh(
+    provider: &str,
+    refresh_token: &str,
+    provider_specific_data: &std::collections::BTreeMap<String, Value>,
+) -> Result<RefreshResult, String> {
+    match provider {
+        "claude" | "anthropic" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_claude_oauth_token(&rt).await }
+            })
+            .await
+        }
+        "codex" | "opencode" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_codex_token(&rt).await }
+            })
+            .await
+        }
+        "gemini-cli" => {
+            let rt = refresh_token.to_string();
+            let cid = GEMINI_CLIENT_ID.to_string();
+            let csec = GEMINI_CLIENT_SECRET.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let (rt, cid, csec) = (rt.clone(), cid.clone(), csec.clone());
+                async move { refresh_google_token(&rt, &cid, &csec).await }
+            })
+            .await
+        }
+        "antigravity" => {
+            let rt = refresh_token.to_string();
+            let cid = ANTIGRAVITY_CLIENT_ID.to_string();
+            let csec = ANTIGRAVITY_CLIENT_SECRET.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let (rt, cid, csec) = (rt.clone(), cid.clone(), csec.clone());
+                async move { refresh_google_token(&rt, &cid, &csec).await }
+            })
+            .await
+        }
+        "qwen" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_qwen_token(&rt).await }
+            })
+            .await
+        }
+        "xai" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_xai_token(&rt).await }
+            })
+            .await
+        }
+        "kimi-coding" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_kimi_coding_token(&rt).await }
+            })
+            .await
+        }
+        "kilocode" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_kilocode_token(&rt).await }
+            })
+            .await
+        }
+        "cline" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_cline_token(&rt).await }
+            })
+            .await
+        }
+        "gitlab" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_gitlab_token(&rt).await }
+            })
+            .await
+        }
+        "codebuddy" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_codebuddy_token(&rt).await }
+            })
+            .await
+        }
+        "openai" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_openai_token(&rt).await }
+            })
+            .await
+        }
+        "iflow" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_iflow_token(&rt).await }
+            })
+            .await
+        }
+        "kiro" => {
+            let rt = refresh_token.to_string();
+            let pdata = provider_specific_data.clone();
+            dedup_refresh(provider, refresh_token, move || {
+                let (rt, pdata) = (rt.clone(), pdata.clone());
+                async move { refresh_kiro_token(&rt, &pdata).await }
+            })
+            .await
+        }
+        _ => Err(format!("No refresh handler for provider: {}", provider)),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------

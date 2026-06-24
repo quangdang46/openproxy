@@ -50,7 +50,7 @@ impl RequestPlan {
 
         let target_format = registry::get_target_format_for_provider(provider);
 
-        let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+        let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(true);
 
         Self {
             provider: provider.to_string(),

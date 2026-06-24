@@ -67,11 +67,26 @@ impl Format {
         }
     }
 
-    /// Returns true if this format uses OpenAI's native structure.
+    /// Returns true if this format supports remote image URLs natively.
     pub fn is_openai(&self) -> bool {
         matches!(
             self,
             Self::OpenAi | Self::OpenAiResponses | Self::OpenAiResponse
+        )
+    }
+
+    /// Returns true if this format needs images as inline base64
+    /// rather than supporting remote HTTP URLs (9router TARGETS_NEED_BASE64 parity).
+    pub fn needs_image_prefetch(&self) -> bool {
+        matches!(
+            self,
+            Self::Gemini
+            | Self::GeminiCli
+            | Self::Vertex
+            | Self::Ollama
+            | Self::CommandCode
+            | Self::Antigravity
+            | Self::Kiro
         )
     }
 }
