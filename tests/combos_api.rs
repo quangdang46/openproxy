@@ -153,7 +153,7 @@ async fn update_combo_resets_rotation_state() {
         "openai/gpt-4o-mini".to_string(),
         "claude/sonnet".to_string(),
     ];
-    let _ = get_rotated_models(&models, Some(original_name), ComboStrategy::RoundRobin);
+    let _ = get_rotated_models(&models, Some(original_name), ComboStrategy::RoundRobin, 0);
     assert_eq!(rotation_index(original_name), Some(1));
 
     let app = openproxy::build_app(app_state(vec![combo("combo-1", original_name)]).await);
@@ -189,7 +189,7 @@ async fn delete_combo_resets_rotation_state() {
         "openai/gpt-4o-mini".to_string(),
         "claude/sonnet".to_string(),
     ];
-    let _ = get_rotated_models(&models, Some(combo_name), ComboStrategy::RoundRobin);
+    let _ = get_rotated_models(&models, Some(combo_name), ComboStrategy::RoundRobin, 0);
     assert_eq!(rotation_index(combo_name), Some(1));
 
     let app = openproxy::build_app(app_state(vec![combo("combo-1", combo_name)]).await);

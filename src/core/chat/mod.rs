@@ -16,6 +16,7 @@
 use serde_json::Value;
 
 use crate::core::translator::caveman::inject_caveman;
+use crate::core::translator::ponytail::{inject_ponytail_prompt, PonytailLevel};
 use crate::core::translator::registry::{self, Format};
 use crate::types::Settings;
 
@@ -97,13 +98,18 @@ pub fn apply_preprocessing(
     source_format: &Format,
     plan: &RequestPlan,
 ) -> bool {
+    let mut modified = false;
     if settings.caveman_enabled {
-        let injected = inject_caveman(body, source_format, &settings.caveman_level);
-        if injected {
-            return true;
-        }
+        modified |= inject_caveman(body, source_format, &settings.caveman_level);
     }
-    false
+    if settings.ponytail_enabled {
+        // Ponytail always applies if enabled (no context-pressure gate).
+        modified |= inject_ponytail_prompt(
+            body,
+            PonytailLevel::parse_or_default(&settings.ponytail_level),
+        );
+    }
+    modified
 }
 
 #[cfg(test)]

@@ -209,6 +209,8 @@ fn combo_strategy_for(snapshot: &crate::types::AppDb, combo_name: &str) -> Combo
 
     if value.eq_ignore_ascii_case("round-robin") {
         ComboStrategy::RoundRobin
+    } else if value.eq_ignore_ascii_case("fusion") {
+        ComboStrategy::Fusion
     } else {
         ComboStrategy::Fallback
     }

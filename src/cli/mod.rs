@@ -11,7 +11,8 @@ use crate::core::combo::{get_combo_models_from_data, ComboStrategy};
 use crate::core::executor::{ClientPool, DefaultExecutor, ExecutionRequest};
 use crate::core::model::get_model_info;
 use crate::core::proxy::resolve_proxy_target;
-use crate::core::rtk::apply_request_preprocessing;
+use crate::core::rtk::headroom::{compress_with_headroom, HeadroomConfig};
+use crate::core::rtk::{apply_request_preprocessing, compress_messages};
 use crate::db::Db;
 use crate::types::{ApiKey, AppDb, ProviderConnection, ProxyPool};
 
@@ -1608,6 +1609,21 @@ async fn run_direct_route(
         "stream": stream,
     });
 
+    compress_messages(&mut request_body, snapshot.settings.rtk_enabled);
+    {
+        let hc = HeadroomConfig {
+            enabled: snapshot.settings.headroom_enabled,
+            url: snapshot.settings.headroom_url.clone(),
+            timeout_ms: snapshot.settings.headroom_timeout_ms,
+            compress_user_messages: snapshot.settings.headroom_compress_user_messages,
+        };
+        let handle = tokio::runtime::Handle::current();
+        if let Some(stats) = handle.block_on(
+            compress_with_headroom(&mut request_body, &hc, &resolved.model, "openai"),
+        ) {
+            eprintln!("{}", stats.format_headroom_log().unwrap_or_default());
+        }
+    }
     let _ = apply_request_preprocessing(&mut request_body, &snapshot.settings, &resolved.model);
 
     let mut excluded = HashSet::new();
@@ -1750,6 +1766,21 @@ async fn run_combo_route(
         "stream": stream,
     });
 
+    compress_messages(&mut request_body, snapshot.settings.rtk_enabled);
+    {
+        let hc = HeadroomConfig {
+            enabled: snapshot.settings.headroom_enabled,
+            url: snapshot.settings.headroom_url.clone(),
+            timeout_ms: snapshot.settings.headroom_timeout_ms,
+            compress_user_messages: snapshot.settings.headroom_compress_user_messages,
+        };
+        let handle = tokio::runtime::Handle::current();
+        if let Some(stats) = handle.block_on(
+            compress_with_headroom(&mut request_body, &hc, &resolved.model, "openai"),
+        ) {
+            eprintln!("{}", stats.format_headroom_log().unwrap_or_default());
+        }
+    }
     let _ = apply_request_preprocessing(&mut request_body, &snapshot.settings, &resolved.model);
 
     let mut excluded = HashSet::new();

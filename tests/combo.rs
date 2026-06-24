@@ -43,19 +43,19 @@ fn round_robin_rotation_advances_state() {
     let models = vec!["a".to_string(), "b".to_string(), "c".to_string()];
 
     assert_eq!(
-        get_rotated_models(&models, Some(combo_name), ComboStrategy::RoundRobin),
+        get_rotated_models(&models, Some(combo_name), ComboStrategy::RoundRobin, 0),
         vec!["a", "b", "c"]
     );
     assert_eq!(rotation_index(combo_name), Some(1));
 
     assert_eq!(
-        get_rotated_models(&models, Some(combo_name), ComboStrategy::RoundRobin),
+        get_rotated_models(&models, Some(combo_name), ComboStrategy::RoundRobin, 0),
         vec!["b", "c", "a"]
     );
     assert_eq!(rotation_index(combo_name), Some(2));
 
     assert_eq!(
-        get_rotated_models(&models, Some(combo_name), ComboStrategy::Fallback),
+        get_rotated_models(&models, Some(combo_name), ComboStrategy::Fallback, 0),
         vec!["a", "b", "c"]
     );
 }

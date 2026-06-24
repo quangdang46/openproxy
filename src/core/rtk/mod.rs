@@ -2,12 +2,14 @@ use std::str::FromStr;
 
 use serde_json::{json, Map, Value};
 
+use crate::core::translator::ponytail::{inject_ponytail_prompt, PonytailLevel};
 use crate::types::Settings;
 
 pub mod apply_filter;
 pub mod autodetect;
 pub mod constants;
 pub mod filters;
+pub mod headroom;
 
 use apply_filter::{safe_apply, RtkHit, RtkStats};
 use autodetect::{auto_detect_filter, FilterFn};
@@ -96,18 +98,23 @@ pub fn apply_request_preprocessing(body: &mut Value, settings: &Settings, model:
     // JS keeps RTK compression and Caveman prompting as separate toggles.
     // The RTK body-compression pass is tracked independently; this hook only
     // owns context-pressure-triggered Caveman injection.
-    if !settings.caveman_enabled {
-        return false;
+    let mut modified = false;
+    if settings.caveman_enabled {
+        if should_auto_apply_caveman(body, model) {
+            modified |= inject_caveman_prompt(
+                body,
+                CompressionLevel::parse_or_default(&settings.caveman_level),
+            );
+        }
     }
-
-    if !should_auto_apply_caveman(body, model) {
-        return false;
+    if settings.ponytail_enabled {
+        // Ponytail has NO context-pressure auto-trigger — always applies if enabled.
+        modified |= inject_ponytail_prompt(
+            body,
+            crate::core::translator::ponytail::PonytailLevel::parse_or_default(&settings.ponytail_level),
+        );
     }
-
-    inject_caveman_prompt(
-        body,
-        CompressionLevel::parse_or_default(&settings.caveman_level),
-    )
+    modified
 }
 
 pub fn should_auto_apply_caveman(body: &Value, model: &str) -> bool {

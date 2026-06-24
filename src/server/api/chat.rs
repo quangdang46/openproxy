@@ -15,15 +15,18 @@ use serde_json::{json, Value};
 
 use crate::core::account_fallback::{build_model_lock_update, filter_available_accounts};
 use crate::core::chat::RequestPlan;
+use crate::core::combo::fusion::handle_fusion_chat;
 use crate::core::combo::{
     check_fallback_error, detect_required_capabilities, execute_combo_strategy_with_capacity,
     get_combo_models_from_data, get_disabled_members_for_combo, mark_combo_member_quarantined,
-    reorder_by_capabilities, ComboAttemptError, ComboExecutionError, ComboStrategy, ModelCapacity,
+    reorder_by_capabilities, ComboAttemptError, ComboExecutionError, ComboStrategy, FusionConfig,
+    ModelCapacity,
 };
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
-use crate::core::rtk::apply_request_preprocessing;
+use crate::core::rtk::headroom::{compress_with_headroom, HeadroomConfig};
+use crate::core::rtk::{apply_request_preprocessing, compress_messages};
 use crate::core::translator::helpers::image_helper::fetch_image_as_base64;
 use crate::core::translator::helpers::modality_helper::{
     capabilities_for_format, strip_unsupported_modalities, ModalityCapabilities,
@@ -354,7 +357,71 @@ async fn chat_completions_impl(
                 std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
             let combo_name_for_quarantine = combo_name.clone();
             let client_tool_for_combo = client_tool;
-            let result = {
+            let result = if strategy == ComboStrategy::Fusion {
+                let combo_data: serde_json::Map<String, serde_json::Value> = snapshot
+                    .combos
+                    .iter()
+                    .find(|c| c.name == combo_name)
+                    .map(|c| c.extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .unwrap_or_default();
+
+                let f_state = state.clone();
+                let f_body = body.clone();
+                let f_api_key = presented_api_key.clone();
+                let f_client_tool = client_tool;
+
+                let panel_count = combo_models.len();
+                let fusion_result = handle_fusion_chat(
+                    &mut body.clone(),
+                    &combo_models,
+                    &FusionConfig::from_extra(&combo_data, panel_count),
+                    None,
+                    move |model: String, panel_body: Value| {
+                        let state = f_state.clone();
+                        let body = f_body.clone();
+                        let api_key = f_api_key.clone();
+                        let client_tool = f_client_tool;
+                        async move {
+                            let snapshot = state.db.snapshot();
+                            let resolved = get_model_info(&model, &snapshot);
+                            let provider = resolved.provider.as_deref().unwrap_or("unknown").to_string();
+                            let resolved_model = resolved.model.clone();
+                            let mut plan = RequestPlan::new(endpoint, &body, &provider, &resolved_model);
+                            plan.passthrough = is_native_passthrough(client_tool, &provider);
+                            plan.stream = false;
+                            let response = execute_single_model(
+                                &state,
+                                &panel_body,
+                                &resolved_model,
+                                api_key.as_deref(),
+                                endpoint,
+                                &plan,
+                                client_tool,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Fusion panel failed: {}", e.message))?;
+                            let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("Failed to read panel body: {}", e))?;
+                            serde_json::from_slice(&body_bytes)
+                                .map_err(|e| anyhow::anyhow!("Failed to parse panel body: {}", e))
+                        }
+                    },
+                )
+                .await;
+
+                match fusion_result {
+                    Ok(value) => {
+                        let json_str = serde_json::to_string(&value).unwrap_or_default();
+                        Ok(axum::response::Response::new(axum::body::Body::from(json_str)))
+                    }
+                    Err(e) => Err(ComboExecutionError {
+                        status: e.status,
+                        message: e.message,
+                        earliest_retry_after: None,
+                    }),
+                }
+            } else {
                 let attempted_members = attempted_members.clone();
                 execute_combo_strategy_with_capacity(
                     &combo_models,
@@ -472,6 +539,35 @@ async fn execute_single_model(
         });
     }
 
+    // 1. RTK tool-result compression (gated by rtk_enabled)
+    compress_messages(&mut body, snapshot.settings.rtk_enabled);
+
+    // 2. Headroom external token compression (gated by headroom_enabled)
+    {
+        let headroom_cfg = HeadroomConfig {
+            enabled: snapshot.settings.headroom_enabled,
+            url: snapshot.settings.headroom_url.clone(),
+            timeout_ms: snapshot.settings.headroom_timeout_ms,
+            compress_user_messages: snapshot.settings.headroom_compress_user_messages,
+        };
+        let headroom_format = if plan.source_format == crate::core::translator::registry::Format::Claude {
+            "claude"
+        } else {
+            "openai"
+        };
+        if let Some(stats) = compress_with_headroom(
+            &mut body,
+            &headroom_cfg,
+            &plan.model,
+            headroom_format,
+        )
+        .await
+        {
+            tracing::debug!("{}", stats.format_headroom_log().unwrap_or_default());
+        }
+    }
+
+    // 3. Caveman + Ponytail prompt injection
     let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
 
     let caps = capabilities_for_format(plan.source_format);
@@ -563,6 +659,19 @@ async fn execute_single_model(
         plan.stream,
         plan.needs_translation(),
     );
+
+    // Translate request body from source format to target format
+    // before dispatching to the provider executor.
+    if plan.needs_translation() {
+        registry::global_registry().translate_request(
+            plan.source_format,
+            plan.target_format,
+            &plan.model,
+            &mut body,
+            plan.stream,
+            None,
+        );
+    }
 
     forward_with_provider_fallback(
         state,
@@ -1579,6 +1688,8 @@ fn combo_strategy_for(snapshot: &AppDb, combo_name: &str) -> ComboStrategy {
 
     if value.eq_ignore_ascii_case("round-robin") {
         ComboStrategy::RoundRobin
+    } else if value.eq_ignore_ascii_case("fusion") {
+        ComboStrategy::Fusion
     } else {
         ComboStrategy::Fallback
     }
