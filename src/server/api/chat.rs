@@ -32,6 +32,7 @@ use crate::core::translator::helpers::modality_helper::{
     capabilities_for_format, strip_unsupported_modalities, ModalityCapabilities,
 };
 use crate::core::utils::bypass_handler::{detect_bypass, BypassDecision, DEFAULT_BYPASS_TEXT};
+use crate::core::utils::claude_cloaking::{CloakedRequest, cloak_claude_tools};
 use crate::core::utils::client_detector::{detect_client_tool, is_native_passthrough, ClientTool};
 use crate::core::utils::tool_deduper::dedupe_tools;
 use crate::core::translator::registry::{self, Format};
@@ -240,6 +241,11 @@ async fn chat_completions_impl(
             )
         })
         .collect();
+
+    // 9router parity: cache Claude-specific headers from incoming request
+    // for replay on subsequent requests (claudeHeaderCache).
+    crate::core::utils::claude_header_cache::cache_claude_headers(&headers_map);
+
     let client_tool = detect_client_tool(&headers_map, &body);
 
     // 9router parity: Accept-header streaming preference (chatCore.js:87-94).
@@ -262,62 +268,38 @@ async fn chat_completions_impl(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_lowercase();
-    match detect_bypass(&body, &user_agent, false) {
+    // 9router parity: ccFilterNaming setting — used by bypass handler to
+    // intercept Claude Code's isNewTopic / topic-extraction requests before
+    // they reach a provider (matches handleChat in 9router).
+    let cc_filter_naming = snapshot
+        .settings
+        .extra
+        .get("ccFilterNaming")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    match detect_bypass(&body, &user_agent, cc_filter_naming) {
         BypassDecision::Bypass => {
-            return json_success_response(
-                StatusCode::OK,
-                json!({
-                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis()),
-                    "object": "chat.completion",
-                    "created": chrono::Utc::now().timestamp(),
-                    "model": model_str,
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": DEFAULT_BYPASS_TEXT
-                        },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 1,
-                        "completion_tokens": 1,
-                        "total_tokens": 2
-                    }
-                }),
-            );
+            let stream = body
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            return bypass_response(model_str, DEFAULT_BYPASS_TEXT, stream);
         }
         BypassDecision::Naming { title } => {
             let naming_text = serde_json::to_string(&json!({
                 "isNewTopic": true,
                 "title": title,
-            }));
-            return json_success_response(
-                StatusCode::OK,
-                json!({
-                    "id": format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis()),
-                    "object": "chat.completion",
-                    "created": chrono::Utc::now().timestamp(),
-                    "model": model_str,
-                    "choices": [{
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": naming_text.unwrap_or_default()
-                        },
-                        "finish_reason": "stop"
-                    }],
-                    "usage": {
-                        "prompt_tokens": 1,
-                        "completion_tokens": 1,
-                        "total_tokens": 2
-                    }
-                }),
-            );
+            }))
+            .unwrap_or_else(|_| String::new());
+            let stream = body
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            return bypass_response(model_str, &naming_text, stream);
         }
         BypassDecision::Pass => {}
     }
-
     match resolved.route_kind {
         ModelRouteKind::Combo => {
             let combo_name = resolved.model;
@@ -567,6 +549,44 @@ async fn execute_single_model(
         }
     }
 
+    // 9router parity: provider-level thinking config override (chatCore.js:44-57).
+    if let Some(provider_thinking) = snapshot
+        .settings
+        .extra
+        .get("providerThinking")
+        .and_then(|v| v.as_object())
+    {
+        if let Some(mode_val) = provider_thinking.get(plan.provider.as_str()) {
+            let mode = mode_val.as_str().unwrap_or("auto");
+            if mode != "auto" {
+                if mode == "on" && !body.get("thinking").and_then(|v| v.as_object()).is_some() {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert(
+                            "thinking".to_string(),
+                            json!({"type": "enabled", "budget_tokens": 10000}),
+                        );
+                    }
+                } else if mode == "off" && !body.get("thinking").and_then(|v| v.as_object()).is_some() {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert(
+                            "thinking".to_string(),
+                            json!({"type": "disabled"}),
+                        );
+                    }
+                } else if mode != "on" && mode != "off" {
+                    if !body.get("reasoning_effort").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+                        if let Some(obj) = body.as_object_mut() {
+                            obj.insert(
+                                "reasoning_effort".to_string(),
+                                Value::String(mode.to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // 3. Caveman + Ponytail prompt injection
     let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
 
@@ -699,6 +719,14 @@ async fn forward_with_provider_fallback(
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
     let registry = &state.account_registry;
+
+    // Extract tool name map from body (set by Claude cloaking).
+    // Remove from body before dispatch to avoid serializing it upstream.
+    let tool_name_map: Option<std::collections::BTreeMap<String, String>> = request_body
+        .as_object_mut()
+        .and_then(|obj| obj.remove("_toolNameMap"))
+        .and_then(|v| serde_json::from_value(v).ok());
+
 
     loop {
         let snapshot = state.db.snapshot();
@@ -1282,6 +1310,8 @@ async fn forward_with_provider_fallback(
                             Some(connection.id.as_str()),
                             api_key,
                             endpoint,
+                            plan,
+                            tool_name_map.as_ref(),
                         )
                         .await);
                     }
@@ -1294,6 +1324,7 @@ async fn forward_with_provider_fallback(
                         model.to_string(),
                         Some(connection.id.clone()),
                         normalize_for_dashboard,
+                        plan,
                     )
                     .await);
                 }
@@ -1556,7 +1587,16 @@ fn select_connection(
 fn is_no_auth_provider(provider: &str) -> bool {
     matches!(
         provider,
-        "opencode" | "edge-tts" | "google-tts" | "local-device"
+        "opencode"
+            | "opencode-go"
+            | "edge-tts"
+            | "google-tts"
+            | "local-device"
+            | "ollama-local"
+            | "sdwebui"
+            | "comfyui"
+            | "grok-web"
+            | "perplexity-web"
     )
 }
 
@@ -1761,10 +1801,24 @@ async fn proxy_response_with_usage_tracking(
     connection_id: Option<&str>,
     api_key: Option<&str>,
     endpoint: Option<&str>,
+    plan: &RequestPlan,
+    tool_name_map: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
     let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
+
+    // 9router parity: decloak tool names when Claude cloaking was applied.
+    let decloaked_body = if let Some(map) = tool_name_map {
+        if !map.is_empty() {
+            let body_val: serde_json::Value =
+                serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+            if !body_val.is_null() {
+                let decloaked = crate::core::utils::claude_cloaking::decloak_tool_names(&body_val, map);
+                serde_json::to_vec(&decloaked).map(Bytes::from).unwrap_or(body_bytes.clone())
+            } else { body_bytes.clone() }
+        } else { body_bytes.clone() }
+    } else { body_bytes.clone() };
 
     let final_body = if body_complete {
         let token_usage = extract_token_usage_from_bytes(&body_bytes);
@@ -1781,9 +1835,28 @@ async fn proxy_response_with_usage_tracking(
             .await;
         state.usage_live.notify_update();
 
-        Body::from(body_bytes.clone())
+        // 9router parity: translate non-streaming response body when source
+        // and target formats differ (handleNonStreamingResponse).
+        let translated_body = if plan.needs_translation() {
+            let mut state = crate::core::translator::registry::ResponseTransformState::default();
+            let chunks = registry::global_registry()
+                .translate_response(plan.target_format, plan.source_format, decloaked_body.as_ref(), &mut state);
+            if !chunks.is_empty() {
+                let mut result = String::new();
+                for chunk in &chunks {
+                    if let Some(data) = chunk.strip_prefix("data: ") {
+                        result = data.to_string();
+                        if result == "[DONE]" { continue; }
+                    }
+                }
+                if result.is_empty() { decloaked_body.clone() }
+                else { Bytes::from(result) }
+            } else { decloaked_body.clone() }
+        } else { decloaked_body.clone() };
+
+        Body::from(translated_body)
     } else {
-        Body::from(body_bytes)
+        Body::from(decloaked_body)
     };
 
     build_proxied_response(status, &headers, final_body)
@@ -1796,7 +1869,12 @@ async fn proxy_response_with_pending_tracking(
     model: String,
     connection_id: Option<String>,
     normalize_for_dashboard: bool,
+    plan: &RequestPlan,
 ) -> Response {
+    // Extract formats before stream closure to avoid lifetime issues
+    let needs_stream_translation = plan.needs_translation();
+    let stream_source_format = plan.source_format;
+    let stream_target_format = plan.target_format;
     let status = response.status();
     let headers = response.headers().clone();
     let transformer = normalize_for_dashboard
@@ -1898,6 +1976,23 @@ async fn proxy_response_with_pending_tracking(
                             if let Ok(data) = frame.into_data() {
                                 if let Some(transformer) = transformer.as_mut() {
                                     for line in transform_dashboard_sse_chunk(&data, transformer.as_mut(), &mut pending_text) {
+                                        if let Some(frame) = sse_frame_for_dashboard(&line) {
+                                            yield Ok::<Bytes, std::io::Error>(frame);
+                                        }
+                                    }
+                                } else if needs_stream_translation {
+                                    // 9router parity: translate SSE response chunks
+                                    // from provider format back to source format
+                                    // during streaming (translateResponse pipeline).
+                                    let mut t_state = crate::core::translator::registry::ResponseTransformState::default();
+                                    let chunks = registry::global_registry()
+                                        .translate_response(
+                                            stream_target_format,
+                                            stream_source_format,
+                                            &data,
+                                            &mut t_state,
+                                        );
+                                    for line in chunks {
                                         if let Some(frame) = sse_frame_for_dashboard(&line) {
                                             yield Ok::<Bytes, std::io::Error>(frame);
                                         }
@@ -2319,11 +2414,18 @@ fn combo_error_response(error: ComboExecutionError) -> Response {
 
 fn attempt_error_response(error: ComboAttemptError) -> Response {
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
+    let (e_type, e_code) = match crate::core::config::error_config::error_type_for(status.as_u16()) {
+        Some(info) => (info.r#type, info.code),
+        None if status.as_u16() >= 500 => ("server_error", "internal_server_error"),
+        None => ("invalid_request_error", ""),
+    };
     let mut response = (
         status,
         Json(json!({
             "error": {
-                "message": error.message
+                "message": error.message,
+                "type": e_type,
+                "code": e_code
             }
         })),
     )
@@ -2340,12 +2442,20 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
+    let (e_type, e_code) = match crate::core::config::error_config::error_type_for(status.as_u16()) {
+        Some(info) => (info.r#type, info.code),
+        None if status.as_u16() >= 500 => ("server_error", "internal_server_error"),
+        None => ("invalid_request_error", ""),
+    };
+    let msg = message;
     with_cors_response(
         (
             status,
             Json(json!({
                 "error": {
-                    "message": message
+                    "message": msg,
+                    "type": e_type,
+                    "code": e_code
                 }
             })),
         )
@@ -2391,6 +2501,100 @@ fn cors_preflight_response(methods: &str) -> Response {
     );
     response
 }
+
+
+
+/// Build a bypass response — either streaming SSE (when `stream` is true) or
+/// non-streaming JSON. 9router parity: the streaming path emits proper OpenAI
+/// SSE chunks so client-side SSE parsers (Claude Code, Gemini CLI, etc.)
+/// receive a valid event stream instead of unexpected JSON.
+fn bypass_response(model: &str, text: &str, stream: bool) -> Response {
+    let id = format!("chatcmpl-{}", chrono::Utc::now().timestamp_millis());
+    let created = chrono::Utc::now().timestamp();
+
+    if stream {
+        let content_frame = json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "content": text
+                },
+                "finish_reason": null
+            }]
+        });
+        let finish_frame = json!({
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2
+            }
+        });
+
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            serde_json::to_string(&content_frame).unwrap_or_default(),
+            serde_json::to_string(&finish_frame).unwrap_or_default(),
+        );
+
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = StatusCode::OK;
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        );
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        );
+        response.headers_mut().insert(
+            header::CONNECTION,
+            HeaderValue::from_static("keep-alive"),
+        );
+        response.headers_mut().insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        response
+    } else {
+        json_success_response(
+            StatusCode::OK,
+            json!({
+                "id": id,
+                "object": "chat.completion",
+                "created": created,
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": text
+                    },
+                    "finish_reason": "stop"
+                }],
+                "usage": {
+                    "prompt_tokens": 1,
+                    "completion_tokens": 1,
+                    "total_tokens": 2
+                }
+            }),
+        )
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
