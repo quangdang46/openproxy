@@ -2051,7 +2051,19 @@ fn sse_frame_for_dashboard(line: &str) -> Option<Bytes> {
         return None;
     }
 
-    let framed = if trimmed.starts_with(':') || trimmed.starts_with("data:") {
+    // 9router parity: preserve all standard SSE line types without wrapping.
+    // - data: {...}          → data frame
+    // - event: name          → event type header
+    // - id: ...              → event id
+    // - retry: ...           → retry interval
+    // - : comment            → comment (keep-alive)
+    // Everything else gets data: prefix added.
+    let framed = if trimmed.starts_with("data:")
+        || trimmed.starts_with("event:")
+        || trimmed.starts_with("id:")
+        || trimmed.starts_with("retry:")
+        || trimmed.starts_with(':')
+    {
         format!("{trimmed}\n\n")
     } else {
         format!("data: {trimmed}\n\n")
