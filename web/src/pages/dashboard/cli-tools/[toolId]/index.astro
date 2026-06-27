@@ -1,0 +1,17 @@
+---
+import Layout from '@/layouts/Layout.astro';
+import ToolDetailClient from '@/components/cli-tools/ToolDetailClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+import { CLI_TOOLS, MITM_TOOLS } from '@/shared/constants/cliTools';
+
+export async function getStaticPaths() {
+  const cliTools = Object.keys(CLI_TOOLS).map((id) => ({ params: { toolId: id } }));
+  const mitmTools = Object.keys(MITM_TOOLS).map((id) => ({ params: { toolId: id } }));
+  return [...cliTools, ...mitmTools];
+}
+---
+<Layout>
+  <DashboardLayout client:only="react">
+    <ToolDetailClient client:only="react" />
+  </DashboardLayout>
+</Layout>

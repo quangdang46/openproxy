@@ -1,0 +1,6 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "@qdang46/opencode-dcp-plugin"
+  ]
+}

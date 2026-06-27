@@ -16,6 +16,7 @@ import ConnectionRow from "./ConnectionRow";
 import AddApiKeyModal from "./AddApiKeyModal";
 import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
+import BulkImportCodexModal from "./BulkImportCodexModal";
 
 export default function ProviderDetailPageClient() {
   // useParams/useRouter shims for Astro (no Next.js runtime)
@@ -50,6 +51,7 @@ export default function ProviderDetailPageClient() {
   const [modelsTestError, setModelsTestError] = useState("");
   const [testingModelIds, setTestingModelIds] = useState(new Set<string>());
   const [showAddCustomModel, setShowAddCustomModel] = useState(false);
+  const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
   const [selectedConnectionIds, setSelectedConnectionIds] = useState([]);
   const [bulkProxyPoolId, setBulkProxyPoolId] = useState("__none__");
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
@@ -1089,6 +1091,11 @@ export default function ProviderDetailPageClient() {
                     Cookie
                   </Button>
                 )}
+                {!isCompatible && providerId === "codex" && (
+                  <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportCodex(true)}>
+                    Bulk Add
+                  </Button>
+                )}
                 <Button
                   size="sm"
                   icon="add"
@@ -1120,6 +1127,18 @@ export default function ProviderDetailPageClient() {
                       className="w-full sm:w-auto"
                     >
                       Cookie
+                    </Button>
+                  )}
+                  {providerId === "codex" && (
+                    <Button
+                      size="sm"
+                      icon="playlist_add"
+                      variant="secondary"
+                      onClick={() => setShowBulkImportCodex(true)}
+                      title="Bulk import codex accounts from JSON"
+                      className="w-full sm:w-auto"
+                    >
+                      Bulk Add
                     </Button>
                   )}
                   <Button
@@ -1270,6 +1289,18 @@ export default function ProviderDetailPageClient() {
           onClose={() => setShowAddCustomModel(false)}
         />
       )}
+
+      {providerId === "codex" && (
+        <BulkImportCodexModal
+          isOpen={showBulkImportCodex}
+          onClose={() => setShowBulkImportCodex(false)}
+          onSuccess={async () => {
+            setShowBulkImportCodex(false);
+            await fetchConnections();
+          }}
+        />
+      )}
+
       <ConfirmModal
         isOpen={!!deleteConnTarget}
         onClose={() => setDeleteConnTarget(null)}

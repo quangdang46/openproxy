@@ -1,72 +1,216 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Card, Button, Badge } from "@/shared/components";
+import { useEffect, useState } from "react";
+import { Card, Badge, Button } from "@/shared/components";
+import ProviderIcon from "@/shared/components/ProviderIcon";
+import { AI_PROVIDERS, getProvidersByKind } from "@/shared/constants/providers";
+import React from "react";
 
-interface Provider {
-  id: string;
-  name: string;
-  type: string;
-  active: boolean;
+function getEffectiveStatus(conn: any) {
+  const isCooldown = Object.entries(conn).some(
+    ([k, v]) => k.startsWith("modelLock_") && v && new Date(v as string).getTime() > Date.now()
+  );
+  return conn.testStatus === "unavailable" && !isCooldown ? "active" : conn.testStatus;
 }
 
-export default function MediaProvidersWebPageClient() {
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-
-  useEffect(() => {
-    fetchProviders();
-  }, []);
-
-  const fetchProviders = async () => {
-    try {
-      const res = await fetch("/api/media-providers/web");
-      if (res.ok) {
-        const data = await res.json();
-        setProviders(data.providers || []);
-      }
-    } catch (error) {
-      console.error("Failed to fetch web providers:", error);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="text-center py-12">Loading...</div>;
-  }
+function ProviderCard({ provider, kind, connections }: { provider: any; kind: string; connections: any[] }) {
+  const providerInfo = AI_PROVIDERS[provider.id];
+  const isNoAuth = !!providerInfo?.noAuth;
+  const providerConns = connections.filter((c: any) => c.provider === provider.id);
+  const connected = providerConns.filter((c: any) => { const s = getEffectiveStatus(c); return s === "active" || s === "success"; }).length;
+  const error = providerConns.filter((c: any) => { const s = getEffectiveStatus(c); return s === "error" || s === "expired" || s === "unavailable"; }).length;
+  const total = providerConns.length;
+  const allDisabled = total > 0 && providerConns.every((c: any) => c.isActive === false);
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">Web Search & Fetch</h1>
-        <Button>Add Provider</Button>
+    <a href={`/dashboard/media-providers/${kind}/${provider.id}`} className="group">
+      <Card padding="xs" className={`h-full hover:bg-black/[0.01] dark:hover:bg-white/[0.01] transition-colors cursor-pointer ${allDisabled ? "opacity-50" : ""}`}>
+        <div className="flex min-w-0 items-center gap-3">
+          <div
+            className="size-8 rounded-mini-lg flex items-center justify-center shrink-0"
+            style={{ backgroundColor: `${(provider.color?.length > 7 ? provider.color : (provider.color ?? "#888"))}15` }}
+          >
+            <ProviderIcon
+              src={`/providers/${provider.id}.png`}
+              alt={provider.name}
+              size={30}
+              className="object-contain rounded-mini-lg max-w-[30px] max-h-[30px]"
+              fallbackText={provider.textIcon || provider.id.slice(0, 2).toUpperCase()}
+              fallbackColor={provider.color}
+            />
+          </div>
+          <div>
+            <h3 className="font-semibold text-sm">{provider.name}</h3>
+            <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+              {(() => {
+                if (isNoAuth) return <Badge variant="success" size="sm">Ready</Badge>;
+                if (allDisabled) return <Badge variant="default" size="sm">Disabled</Badge>;
+                if (total === 0) return <span className="text-xs text-text-muted">No connections</span>;
+                return (
+                  <>
+                    {connected > 0 && <Badge variant="success" size="sm" dot>{connected} Connected</Badge>}
+                    {error > 0 && <Badge variant="error" size="sm" dot>{error} Error</Badge>}
+                    {connected === 0 && error === 0 && <Badge variant="default" size="sm">{total} Added</Badge>}
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+        </div>
+      </Card>
+    </a>
+  );
+}
+
+function ComboList({ combos }: { combos: any[] }) {
+  if (combos.length === 0) {
+    return <p className="text-xs text-text-muted italic">No combos yet.</p>;
+  }
+  return (
+    <div className="flex flex-col gap-2">
+      {combos.map((combo: any) => (
+        <a key={combo.id} href={`/dashboard/media-providers/combo/${combo.id}`}>
+          <Card padding="xs" className="hover:bg-black/[0.02] dark:hover:bg-white/[0.02] transition-colors cursor-pointer">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="material-symbols-outlined text-brand-coral text-[18px]">layers</span>
+              <code className="text-sm font-mono font-medium flex-1 truncate">{combo.name}</code>
+              <div className="flex flex-wrap items-center gap-1 sm:shrink-0">
+                {(combo.models || []).slice(0, 6).map((entry: any, i: number) => {
+                  const pid = typeof entry === "string" ? entry.split("/")[0] : "";
+                  const p = AI_PROVIDERS[pid];
+                  return (
+                    <div key={`${entry}-${i}`} title={p?.name || entry} className="size-5 rounded flex items-center justify-center" style={{ backgroundColor: `${(p?.color ?? "#888")}15` }}>
+                      <ProviderIcon
+                        src={`/providers/${pid}.png`}
+                        alt={p?.name || pid}
+                        size={18}
+                        className="object-contain rounded max-w-[18px] max-h-[18px]"
+                        fallbackText={p?.textIcon || pid.slice(0, 2).toUpperCase()}
+                        fallbackColor={p?.color}
+                      />
+                    </div>
+                  );
+                })}
+                {(combo.models || []).length > 6 && (
+                  <span className="text-[10px] text-text-muted ml-1">+{(combo.models || []).length - 6}</span>
+                )}
+              </div>
+              <span className="text-[11px] text-text-muted shrink-0">{(combo.models || []).length}</span>
+              <span className="material-symbols-outlined text-text-muted text-[16px]">chevron_right</span>
+            </div>
+          </Card>
+        </a>
+      ))}
+    </div>
+  );
+}
+
+function Section({
+  title,
+  icon,
+  kind,
+  providers,
+  connections,
+  combos,
+  onCreateCombo,
+}: {
+  title: string;
+  icon: string;
+  kind: string;
+  providers: any[];
+  connections: any[];
+  combos: any[];
+  onCreateCombo: () => void;
+}) {
+  return (
+    <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="material-symbols-outlined text-brand-coral">{icon}</span>
+          <h2 className="text-base font-semibold">{title}</h2>
+          <span className="text-xs text-text-muted">({providers.length} providers &middot; {combos.length} combos)</span>
+        </div>
+        <Button size="sm" icon="add" onClick={onCreateCombo}>Create Combo</Button>
       </div>
 
+      {combos.length > 0 && (
+        <div className="mb-4">
+          <ComboList combos={combos} />
+        </div>
+      )}
+
       {providers.length === 0 ? (
-        <Card padding="lg">
-          <div className="text-center py-12">
-            <p className="text-text-muted">No web providers configured</p>
-            <p className="text-sm text-text-muted mt-2">Add a web search or fetch provider</p>
-          </div>
-        </Card>
+        <div className="text-center py-8 border border-dashed border-hairline rounded-mini-xl text-text-muted text-sm">
+          No providers.
+        </div>
       ) : (
-        <div className="grid gap-4">
-          {providers.map((provider) => (
-            <Card key={provider.id} padding="lg">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h3 className="font-semibold">{provider.name}</h3>
-                  <p className="text-sm text-text-muted">{provider.type}</p>
-                </div>
-                <Badge variant={provider.active ? "success" : "neutral"}>
-                  {provider.active ? "Active" : "Inactive"}
-                </Badge>
-              </div>
-            </Card>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+          {providers.map((p: any) => (
+            <ProviderCard key={p.id} provider={p} kind={kind} connections={connections} />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+export default function MediaProvidersWebPageClient() {
+  const [connections, setConnections] = useState<any[]>([]);
+  const [combos, setCombos] = useState<any[]>([]);
+
+  const fetchAll = async () => {
+    try {
+      const [connsRes, combosRes] = await Promise.all([
+        fetch("/api/providers", { cache: "no-store" }),
+        fetch("/api/combos", { cache: "no-store" }),
+      ]);
+      if (connsRes.ok) setConnections((await connsRes.json()).connections || []);
+      if (combosRes.ok) setCombos((await combosRes.json()).combos || []);
+    } catch { /* noop */ }
+  };
+
+  useEffect(() => { fetchAll(); }, []);
+
+  const searchProviders = getProvidersByKind("webSearch" as any);
+  const fetchProviders = getProvidersByKind("webFetch" as any);
+  const searchCombos = combos.filter((c: any) => c.kind === "webSearch");
+  const fetchCombos = combos.filter((c: any) => c.kind === "webFetch");
+
+  const handleCreateCombo = async (kind: string) => {
+    const base = kind === "webSearch" ? "search-combo" : "fetch-combo";
+    let name = base;
+    let i = 1;
+    const existing = new Set(combos.map((c: any) => c.name));
+    while (existing.has(name)) { name = `${base}-${i++}`; }
+    const res = await fetch("/api/combos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name, models: [], kind }),
+    });
+    if (res.ok) {
+      const created = await res.json();
+      window.location.href = `/dashboard/media-providers/combo/${created.id}`;
+    } else {
+      const err = await res.json();
+      alert(err.error || "Failed to create combo");
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-8">
+      <Section
+        title="Web Search" icon="search" kind="webSearch"
+        providers={searchProviders} connections={connections} combos={searchCombos}
+        onCreateCombo={() => handleCreateCombo("webSearch")}
+      />
+
+      <div className="border-t border-hairline" />
+
+      <Section
+        title="Web Fetch" icon="travel_explore" kind="webFetch"
+        providers={fetchProviders} connections={connections} combos={fetchCombos}
+        onCreateCombo={() => handleCreateCombo("webFetch")}
+      />
     </div>
   );
 }
