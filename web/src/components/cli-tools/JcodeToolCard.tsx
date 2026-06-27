@@ -3,7 +3,6 @@
 import { useState, useEffect, useRef } from "react";
 import type { ChangeEvent } from "react";
 import { Card, Button, ModelSelectModal, ManualConfigModal } from "@/shared/components";
-// import Image from "next/image";
 import EndpointPresetControl from "./EndpointPresetControl";
 import BaseUrlSelect from "./BaseUrlSelect";
 import ApiKeySelect from "./ApiKeySelect";
@@ -12,6 +11,7 @@ import { matchKnownEndpoint } from "./cliEndpointMatch";
 interface Tool {
   name: string;
   description: string;
+  notes?: Array<{ type: string; text: string }>;
 }
 
 interface ApiKey {
@@ -19,35 +19,14 @@ interface ApiKey {
   key: string;
 }
 
-interface Agent {
-  id: string;
-  name?: string;
-  agentDir?: string;
-  currentModel?: string;
-}
-
-interface OpenclawStatus {
+interface JcodeStatus {
   installed: boolean;
   error?: string;
   hasOpenProxy?: boolean;
-  settings?: {
-    models?: {
-      providers?: {
-        "openproxy"?: {
-          baseUrl?: string;
-          apiKey?: string;
-        };
-      };
-    };
-    agents?: {
-      defaults?: {
-        model?: {
-          primary?: string;
-        };
-      };
-    };
+  config?: {
+    providers?: Record<string, { base_url?: string; default_model?: string }>;
   };
-  agents?: Agent[];
+  envApiKey?: string;
 }
 
 interface Message {
@@ -55,7 +34,7 @@ interface Message {
   text: string;
 }
 
-interface OpenClawToolCardProps {
+interface JcodeToolCardProps {
   tool: Tool;
   isExpanded: boolean;
   onToggle: () => void;
@@ -69,10 +48,10 @@ interface OpenClawToolCardProps {
   tailscaleEnabled?: boolean;
   tailscaleUrl?: string;
   cloudUrl?: string;
-  initialStatus?: OpenclawStatus | null;
+  initialStatus?: JcodeStatus | null;
 }
 
-export default function OpenClawToolCard({
+export default function JcodeToolCard({
   tool,
   isExpanded,
   onToggle,
@@ -87,16 +66,14 @@ export default function OpenClawToolCard({
   tailscaleUrl = "",
   cloudUrl = "",
   initialStatus,
-}: OpenClawToolCardProps): React.ReactNode {
-  const [openclawStatus, setOpenclawStatus] = useState<OpenclawStatus | null>(initialStatus || null);
-  const [checkingOpenclaw, setCheckingOpenclaw] = useState<boolean>(false);
+}: JcodeToolCardProps): React.ReactNode {
+  const [jcodeStatus, setJcodeStatus] = useState<JcodeStatus | null>(initialStatus || null);
+  const [checkingJcode, setCheckingJcode] = useState<boolean>(false);
   const [applying, setApplying] = useState<boolean>(false);
   const [restoring, setRestoring] = useState<boolean>(false);
   const [message, setMessage] = useState<Message | null>(null);
   const [selectedApiKey, setSelectedApiKey] = useState<string>("");
   const [selectedModel, setSelectedModel] = useState<string>("");
-  const [agentModels, setAgentModels] = useState<Record<string, string>>({}); // { [agentId]: modelId }
-  const [agentModalFor, setAgentModalFor] = useState<string | null>(null); // agentId opening modal
   const [modalOpen, setModalOpen] = useState<boolean>(false);
   const [modelAliases, setModelAliases] = useState<Record<string, string>>({});
   const [showManualConfigModal, setShowManualConfigModal] = useState<boolean>(false);
@@ -104,10 +81,11 @@ export default function OpenClawToolCard({
   const hasInitializedModel = useRef<boolean>(false);
 
   const getConfigStatus = (): "configured" | "not_configured" | "other" | null => {
-    if (!openclawStatus?.installed) return null;
-    const currentProvider = openclawStatus.settings?.models?.providers?.["openproxy"];
+    if (!jcodeStatus?.installed) return null;
+    if (!jcodeStatus?.hasOpenProxy) return "not_configured";
+    const currentProvider = jcodeStatus.config?.providers?.["openproxy"];
     if (!currentProvider) return "not_configured";
-    const matched = matchKnownEndpoint(currentProvider.baseUrl, {
+    const matched = matchKnownEndpoint(currentProvider.base_url, {
       tunnelPublicUrl,
       tailscaleUrl,
       cloudUrl,
@@ -124,12 +102,12 @@ export default function OpenClawToolCard({
   }, [apiKeys, selectedApiKey]);
 
   useEffect(() => {
-    if (initialStatus) setOpenclawStatus(initialStatus);
+    if (initialStatus) setJcodeStatus(initialStatus);
   }, [initialStatus]);
 
   useEffect(() => {
-    if (isExpanded && !openclawStatus) {
-      checkOpenclawStatus();
+    if (isExpanded && !jcodeStatus) {
+      checkJcodeStatus();
       fetchModelAliases();
     }
     if (isExpanded) fetchModelAliases();
@@ -146,36 +124,32 @@ export default function OpenClawToolCard({
   };
 
   useEffect(() => {
-    if (openclawStatus?.installed && !hasInitializedModel.current) {
+    if (jcodeStatus?.installed && !hasInitializedModel.current) {
       hasInitializedModel.current = true;
-      const provider = openclawStatus.settings?.models?.providers?.["openproxy"];
+      const provider = jcodeStatus.config?.providers?.["openproxy"];
       if (provider) {
-        const primaryModel = openclawStatus.settings?.agents?.defaults?.model?.primary;
-        if (primaryModel) setSelectedModel(primaryModel.replace("openproxy/", ""));
-        if (provider.apiKey && apiKeys?.some(k => k.key === provider.apiKey)) {
-          setSelectedApiKey(provider.apiKey);
+        if (provider.default_model) {
+          setSelectedModel(provider.default_model);
+        }
+        // Try to match API key from env file
+        const envApiKey = jcodeStatus.envApiKey;
+        if (envApiKey && apiKeys?.some(k => k.key === envApiKey)) {
+          setSelectedApiKey(envApiKey);
         }
       }
-      // Init per-agent models from enriched agents list
-      const agentList = openclawStatus.agents || [];
-      const initAgentModels: Record<string, string> = {};
-      agentList.forEach((agent) => {
-        if (agent.currentModel) initAgentModels[agent.id] = agent.currentModel;
-      });
-      setAgentModels(initAgentModels);
     }
-  }, [openclawStatus, apiKeys]);
+  }, [jcodeStatus, apiKeys]);
 
-  const checkOpenclawStatus = async (): Promise<void> => {
-    setCheckingOpenclaw(true);
+  const checkJcodeStatus = async (): Promise<void> => {
+    setCheckingJcode(true);
     try {
-      const res = await fetch("/api/cli-tools/openclaw-settings");
+      const res = await fetch("/api/cli-tools/jcode-settings");
       const data = await res.json();
-      setOpenclawStatus(data);
+      setJcodeStatus(data);
     } catch (error) {
-      setOpenclawStatus({ installed: false, error: (error as Error).message });
+      setJcodeStatus({ installed: false, error: (error as Error).message });
     } finally {
-      setCheckingOpenclaw(false);
+      setCheckingJcode(false);
     }
   };
 
@@ -200,20 +174,19 @@ export default function OpenClawToolCard({
         || (apiKeys?.length > 0 ? apiKeys[0].key : null)
         || (!cloudEnabled ? "sk_openproxy" : null);
 
-      const res = await fetch("/api/cli-tools/openclaw-settings", {
+      const res = await fetch("/api/cli-tools/jcode-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           baseUrl: getEffectiveBaseUrl(),
           apiKey: keyToUse,
-          model: selectedModel,
-          agentModels,
+          models: selectedModel ? [selectedModel] : [],
         }),
       });
       const data = await res.json();
       if (res.ok) {
         setMessage({ type: "success", text: "Settings applied successfully!" });
-        checkOpenclawStatus();
+        checkJcodeStatus();
       } else {
         setMessage({ type: "error", text: data.error || "Failed to apply settings" });
       }
@@ -228,13 +201,13 @@ export default function OpenClawToolCard({
     setRestoring(true);
     setMessage(null);
     try {
-      const res = await fetch("/api/cli-tools/openclaw-settings", { method: "DELETE" });
+      const res = await fetch("/api/cli-tools/jcode-settings", { method: "DELETE" });
       const data = await res.json();
       if (res.ok) {
         setMessage({ type: "success", text: "Settings reset successfully!" });
         setSelectedModel("");
         setSelectedApiKey("");
-        checkOpenclawStatus();
+        checkJcodeStatus();
       } else {
         setMessage({ type: "error", text: data.error || "Failed to reset settings" });
       }
@@ -246,12 +219,7 @@ export default function OpenClawToolCard({
   };
 
   const handleModelSelect = (model: { value: string }): void => {
-    if (agentModalFor) {
-      setAgentModels(prev => ({ ...prev, [agentModalFor]: model.value }));
-      setAgentModalFor(null);
-    } else {
-      setSelectedModel(model.value);
-    }
+    setSelectedModel(model.value);
     setModalOpen(false);
   };
 
@@ -260,35 +228,28 @@ export default function OpenClawToolCard({
       ? selectedApiKey
       : (!cloudEnabled ? "sk_openproxy" : "<API_KEY_FROM_DASHBOARD>");
 
-    const settingsContent = {
-      agents: {
-        defaults: {
-          model: {
-            primary: `openproxy/${selectedModel || "provider/model-id"}`,
-          },
-        },
-      },
-      models: {
-        providers: {
-          "openproxy": {
-            baseUrl: getEffectiveBaseUrl(),
-            apiKey: keyToUse,
-            api: "openai-completions",
-            models: [
-              {
-                id: selectedModel || "provider/model-id",
-                name: (selectedModel || "provider/model-id").split("/").pop(),
-              },
-            ],
-          },
-        },
-      },
-    };
+    const configToml = `[providers.openproxy]
+	type = "openai-compatible"
+	base_url = "${getEffectiveBaseUrl()}"
+	auth = "bearer"
+	api_key_env = "JCODE_OPENPROXY_API_KEY"
+	env_file = "provider-openproxy.env"
+	default_model = "${selectedModel || "provider/model-id"}"
+	requires_api_key = true
+
+	[[providers.openproxy.models]]
+	id = "${selectedModel || "provider/model-id"}"`;
+
+    const envContent = `JCODE_OPENPROXY_API_KEY="${keyToUse}"`;
 
     return [
       {
-        filename: "~/.openclaw/openclaw.json",
-        content: JSON.stringify(settingsContent, null, 2),
+        filename: "~/.jcode/config.toml",
+        content: configToml,
+      },
+      {
+        filename: "~/.config/jcode/provider-openproxy.env",
+        content: envContent,
       },
     ];
   };
@@ -298,7 +259,7 @@ export default function OpenClawToolCard({
       <div className="flex items-start justify-between gap-3 hover:cursor-pointer sm:items-center" onClick={onToggle}>
         <div className="flex min-w-0 items-center gap-3">
           <div className="size-8 flex items-center justify-center shrink-0">
-            <img src="/providers/openclaw.png" alt={tool.name} width={32} height={32} className="size-8 object-contain rounded-lg" sizes="32px" onError={(e: React.SyntheticEvent<HTMLImageElement>) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+            <img src="/providers/jcode.png" alt={tool.name} width={32} height={32} className="size-8 object-contain rounded-lg" sizes="32px" onError={(e: React.SyntheticEvent<HTMLImageElement>) => { (e.target as HTMLImageElement).style.display = "none"; }} />
           </div>
           <div className="min-w-0">
             <div className="flex min-w-0 flex-wrap items-center gap-2">
@@ -315,21 +276,25 @@ export default function OpenClawToolCard({
 
       {isExpanded && (
         <div className="mt-4 pt-4 border-t border-border flex flex-col gap-4">
-          {checkingOpenclaw && (
+          {checkingJcode && (
             <div className="flex items-center gap-2 text-text-muted">
               <span className="material-symbols-outlined animate-spin">progress_activity</span>
-              <span>Checking Open Claw CLI...</span>
+              <span>Checking jcode CLI...</span>
             </div>
           )}
 
-          {!checkingOpenclaw && openclawStatus && !openclawStatus.installed && (
+          {!checkingJcode && jcodeStatus && !jcodeStatus.installed && (
             <div className="flex flex-col gap-4">
               <div className="flex flex-col gap-3 p-4 bg-yellow-500/10 border border-yellow-500/30 rounded-lg">
                 <div className="flex items-start gap-3">
                   <span className="material-symbols-outlined text-yellow-500">warning</span>
                   <div className="flex-1">
-                    <p className="font-medium text-yellow-600 dark:text-yellow-400">Open Claw CLI not detected locally</p>
-                    <p className="text-sm text-text-muted">Manual configuration is still available if openproxy is deployed on a remote server.</p>
+                    <p className="font-medium text-yellow-600 dark:text-yellow-400">jcode CLI not detected locally</p>
+                    <p className="text-sm text-text-muted mt-1">Install jcode to enable automatic configuration:</p>
+                    <code className="block mt-2 p-2 bg-black/20 rounded text-xs font-mono">
+                      curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash
+                    </code>
+                    <p className="text-sm text-text-muted mt-2">Manual configuration is still available if openproxy is deployed on a remote server.</p>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 pl-9">
@@ -342,16 +307,34 @@ export default function OpenClawToolCard({
             </div>
           )}
 
-          {!checkingOpenclaw && openclawStatus?.installed && (
+          {!checkingJcode && jcodeStatus?.installed && (
             <>
               <div className="flex flex-col gap-2">
-                {/* Current Base URL */}
-                {openclawStatus?.settings?.models?.providers?.["openproxy"]?.baseUrl && (
+                {/* Info notes */}
+                {tool.notes && tool.notes.length > 0 && (
+                  <div className="flex flex-col gap-2 mb-2">
+                    {tool.notes.map((note, idx) => (
+                      <div key={idx} className={`flex items-start gap-2 p-2 rounded text-xs ${
+                        note.type === "info" ? "bg-blue-500/10 text-blue-600 dark:text-blue-400" :
+                        note.type === "warning" ? "bg-yellow-500/10 text-yellow-600 dark:text-yellow-400" :
+                        "bg-gray-500/10 text-text-muted"
+                      }`}>
+                        <span className="material-symbols-outlined text-[14px] mt-0.5">
+                          {note.type === "info" ? "info" : note.type === "warning" ? "warning" : "help"}
+                        </span>
+                        <span>{note.text}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Current base URL */}
+                {jcodeStatus?.config?.providers?.["openproxy"]?.base_url && (
                   <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">
                     <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Current</span>
                     <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
                     <span className="min-w-0 truncate rounded bg-surface/40 px-2 py-2 text-xs text-text-muted sm:py-1.5">
-                      {openclawStatus.settings.models.providers["openproxy"]!.baseUrl}
+                      {jcodeStatus.config.providers["openproxy"].base_url}
                     </span>
                   </div>
                 )}
@@ -394,33 +377,21 @@ export default function OpenClawToolCard({
 
                 {/* Default Model */}
                 <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">
-                  <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Default Model</span>
+                  <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Model</span>
                   <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
                   <div className="relative w-full min-w-0">
                     <input type="text" value={selectedModel} onChange={(e: ChangeEvent<HTMLInputElement>) => setSelectedModel(e.target.value)} placeholder="provider/model-id" className="w-full min-w-0 pl-2 pr-7 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5" />
                     {selectedModel && <button onClick={() => setSelectedModel("")} className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-text-muted hover:text-red-500 rounded transition-colors" title="Clear"><span className="material-symbols-outlined text-[14px]">close</span></button>}
                   </div>
-                  <button onClick={() => { setAgentModalFor(null); setModalOpen(true); }} disabled={!hasActiveProviders} className={`w-full sm:w-auto rounded border px-2 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap sm:shrink-0 ${hasActiveProviders ? "bg-surface border-border text-text-main hover:border-primary cursor-pointer" : "opacity-50 cursor-not-allowed border-border"}`}>Select</button>
+                  <button onClick={() => setModalOpen(true)} disabled={!hasActiveProviders} className={`w-full sm:w-auto rounded border px-2 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap sm:shrink-0 ${hasActiveProviders ? "bg-surface border-border text-text-main hover:border-primary cursor-pointer" : "opacity-50 cursor-not-allowed border-border"}`}>Select</button>
                 </div>
 
-                {/* Per-agent model overrides */}
-                {(openclawStatus.agents || []).filter(a => a.agentDir).map((agent) => (
-                  <div key={agent.id} className="flex items-center gap-2 pl-4">
-                    <span className="w-32 shrink-0 text-xs text-primary text-right truncate" title={agent.name || agent.id}>Agent {agent.name || agent.id}</span>
-                    <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
-                    <div className="relative w-full min-w-0">
-                      <input
-                        type="text"
-                        value={agentModels[agent.id] || ""}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setAgentModels(prev => ({ ...prev, [agent.id]: e.target.value }))}
-                        placeholder={`default (${selectedModel || "provider/model-id"})`}
-                        className="w-full min-w-0 pl-2 pr-7 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
-                      />
-                      {agentModels[agent.id] && <button onClick={() => setAgentModels(prev => ({ ...prev, [agent.id]: "" }))} className="absolute right-1 top-1/2 -translate-y-1/2 p-0.5 text-text-muted hover:text-red-500 rounded transition-colors" title="Clear"><span className="material-symbols-outlined text-[14px]">close</span></button>}
-                    </div>
-                    <button onClick={() => { setAgentModalFor(agent.id); setModalOpen(true); }} disabled={!hasActiveProviders} className={`w-full sm:w-auto rounded border px-2 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap sm:shrink-0 ${hasActiveProviders ? "bg-surface border-border text-text-main hover:border-primary cursor-pointer" : "opacity-50 cursor-not-allowed border-border"}`}>Select</button>
-                  </div>
-                ))}
+                {/* Usage hint */}
+                <div className="flex flex-col gap-1 p-3 bg-blue-500/5 border border-blue-500/20 rounded-lg">
+                  <p className="text-xs font-medium text-blue-600 dark:text-blue-400">Usage:</p>
+                  <code className="text-xs font-mono text-text-muted">jcode --provider-profile openproxy</code>
+                  <code className="text-xs font-mono text-text-muted">jcode --provider-profile openproxy --model {selectedModel || "provider/model-id"}</code>
+                </div>
               </div>
 
               {message && (
@@ -431,10 +402,10 @@ export default function OpenClawToolCard({
               )}
 
               <div className="grid grid-cols-1 gap-2 sm:flex sm:items-center">
-                <Button variant="primary" size="sm" onClick={handleApplySettings} disabled={!selectedModel} loading={applying}>
+                <Button variant="primary" size="sm" onClick={() => void handleApplySettings()} disabled={!selectedModel} loading={applying}>
                   <span className="material-symbols-outlined text-[14px] mr-1">save</span>Apply
                 </Button>
-                <Button variant="outline" size="sm" onClick={handleResetSettings} disabled={!openclawStatus?.hasOpenProxy} loading={restoring}>
+                <Button variant="outline" size="sm" onClick={() => void handleResetSettings()} disabled={!jcodeStatus?.hasOpenProxy} loading={restoring}>
                   <span className="material-symbols-outlined text-[14px] mr-1">restore</span>Reset
                 </Button>
                 <Button variant="ghost" size="sm" onClick={() => setShowManualConfigModal(true)}>
@@ -453,13 +424,13 @@ export default function OpenClawToolCard({
         selectedModel={selectedModel}
         activeProviders={activeProviders}
         modelAliases={modelAliases}
-        title="Select Model for Open Claw"
+        title="Select Model for jcode"
       />
 
       <ManualConfigModal
         isOpen={showManualConfigModal}
         onClose={() => setShowManualConfigModal(false)}
-        title="Open Claw - Manual Configuration"
+        title="jcode - Manual Configuration"
         configs={getManualConfigs()}
       />
     </Card>

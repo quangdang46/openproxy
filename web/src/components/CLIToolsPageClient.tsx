@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, CardSkeleton } from "@/shared/components";
 import { CLI_TOOLS } from "@/shared/constants/cliTools";
 import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS, useEnsureCatalog } from "@/shared/constants/models";
-import { ClaudeToolCard, ClineToolCard, KiloToolCard, CodexToolCard, DroidToolCard, OpenClawToolCard, HermesToolCard, DefaultToolCard, OpenCodeToolCard, CoworkToolCard, MitmLinkCard } from "./cli-tools";
+import { ClaudeToolCard, ClineToolCard, KiloToolCard, CodexToolCard, DroidToolCard, OpenClawToolCard, HermesToolCard, DefaultToolCard, OpenCodeToolCard, CoworkToolCard, DeepSeekTuiToolCard, JcodeToolCard, MitmLinkCard } from "./cli-tools";
 import { MITM_TOOLS } from "@/shared/constants/cliTools";
 
 const CLOUD_URL: string | undefined = (import.meta.env as Record<string, string | undefined>)?.PUBLIC_CLOUD_URL;
@@ -20,6 +20,8 @@ const STATUS_ENDPOINTS: Record<string, string> = {
   openclaw: "/api/cli-tools/openclaw-settings",
   hermes: "/api/cli-tools/hermes-settings",
   cowork: "/api/cli-tools/cowork-settings",
+  "deepseek-tui": "/api/cli-tools/deepseek-tui-settings",
+  jcode: "/api/cli-tools/jcode-settings",
 };
 
 interface CLIToolsPageClientProps {
@@ -211,9 +213,13 @@ export default function CLIToolsPageClient({ machineId }: CLIToolsPageClientProp
       case "droid":
         return <DroidToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} initialStatus={toolStatuses.droid} />;
       case "openclaw":
-        return <OpenClawToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} initialStatus={toolStatuses.openclaw} />;
+        return <OpenClawToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} cloudUrl={CLOUD_URL} tunnelEnabled={tunnelEnabled} tunnelPublicUrl={tunnelPublicUrl} tailscaleEnabled={tailscaleEnabled} tailscaleUrl={tailscaleUrl} initialStatus={toolStatuses.openclaw} />;
       case "hermes":
         return <HermesToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} initialStatus={toolStatuses.hermes} />;
+      case "deepseek-tui":
+        return <DeepSeekTuiToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} initialStatus={toolStatuses["deepseek-tui"]} />;
+      case "jcode":
+        return <JcodeToolCard key={toolId} {...commonProps} activeProviders={getActiveProviders()} hasActiveProviders={hasActiveProviders} cloudEnabled={cloudEnabled} cloudUrl={CLOUD_URL} tunnelEnabled={tunnelEnabled} tunnelPublicUrl={tunnelPublicUrl} tailscaleEnabled={tailscaleEnabled} tailscaleUrl={tailscaleUrl} initialStatus={toolStatuses.jcode} />;
       default:
         return <DefaultToolCard key={toolId} toolId={toolId} {...commonProps} activeProviders={getActiveProviders()} cloudEnabled={cloudEnabled} tunnelEnabled={tunnelEnabled} />;
     }

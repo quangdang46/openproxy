@@ -9,7 +9,7 @@ interface DefaultModel {
 }
 
 interface Note {
-  type: "warning" | "cloudCheck";
+  type: "info" | "warning" | "cloudCheck";
   text: string;
 }
 
@@ -271,6 +271,31 @@ export const CLI_TOOLS: Record<string, CLITool> = {
   "apiKey": "{{apiKey}}"
 }`,
     },
+  },
+  "deepseek-tui": {
+    id: "deepseek-tui",
+    name: "DeepSeek TUI",
+    image: "/providers/deepseek-tui.png",
+    color: "#4D6BFE",
+    description: "DeepSeek Terminal Coding Agent (Rust TUI)",
+    configType: "custom",
+    notes: [
+      { type: "info" as const, text: "DeepSeek TUI uses ~/.deepseek/config.toml for configuration. OpenProxy will update the provider to 'openai' mode with your base_url, api_key, and model." },
+      { type: "warning" as const, text: "Config path: Linux/macOS ~/.deepseek/config.toml - Windows %USERPROFILE%\\.deepseek\\config.toml" },
+    ],
+  },
+  jcode: {
+    id: "jcode",
+    name: "jcode",
+    image: "/providers/jcode.png",
+    color: "#FF6B35",
+    description: "High-performance Rust-based coding agent harness",
+    configType: "custom",
+    notes: [
+      { type: "info" as const, text: "jcode is a Rust-based coding agent with semantic memory, multi-agent swarms, and extreme performance (27.8 MB RAM, 14ms boot)." },
+      { type: "info" as const, text: "Configure openproxy as an OpenAI-compatible provider to route all jcode requests through the optimization layer." },
+      { type: "warning" as const, text: "Requires jcode installed. Install via: curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash" },
+    ],
   },
   hermes: {
     id: "hermes",

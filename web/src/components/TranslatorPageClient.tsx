@@ -1,117 +1,402 @@
 "use client";
 
-import { useState } from "react";
+import { useState, lazy, Suspense } from "react";
 import { Card, Button } from "@/shared/components";
+import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
-const DEFAULT_REQUEST = JSON.stringify(
-  {
-    model: "claude-sonnet-4",
-    messages: [{ role: "user", content: "Hello" }],
-    stream: false,
-  },
-  null,
-  2
-);
+const Editor = lazy(() => import("@monaco-editor/react"));
+
+const STEPS = [
+  { id: 1, label: "Client Request",         file: "1_req_client.json",  lang: "json", desc: "Raw request from client" },
+  { id: 2, label: "Source Body",            file: "2_req_source.json",  lang: "json", desc: "After initial conversion" },
+  { id: 3, label: "OpenAI Intermediate",    file: "3_req_openai.json",  lang: "json", desc: "source → openai" },
+  { id: 4, label: "Target Request",         file: "4_req_target.json",  lang: "json", desc: "openai → target + URL + headers" },
+  { id: 5, label: "Provider Response",      file: "5_res_provider.txt", lang: "text", desc: "Raw SSE from provider" },
+  { id: 6, label: "OpenAI Response",        file: "6_res_openai.txt",   lang: "text", desc: "target → openai (response)" },
+  { id: 7, label: "Client Response",        file: "7_res_client.txt",   lang: "text", desc: "Final response to client" },
+];
+
+const EDITOR_OPTIONS = {
+  minimap: { enabled: false },
+  fontSize: 12,
+  lineNumbers: "on" as const,
+  scrollBeyondLastLine: false,
+  wordWrap: "on" as const,
+  automaticLayout: true,
+};
+
+interface MetaData {
+  provider: string;
+  model: string;
+  sourceFormat: string;
+  targetFormat: string;
+}
 
 export default function TranslatorPageClient() {
-  const [sourceText, setSourceText] = useState<string>(DEFAULT_REQUEST);
-  const [translatedText, setTranslatedText] = useState<string>("");
-  const [error, setError] = useState<string>("");
-  const [loading, setLoading] = useState<boolean>(false);
+  const [contents, setContents] = useState<Record<number, string>>({});
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({ 1: true });
+  const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [meta, setMeta] = useState<MetaData | null>(null);
 
-  const handleTranslate = async () => {
-    if (!sourceText.trim()) return;
+  const setLoad = (key: string, val: boolean) =>
+    setLoading((prev) => ({ ...prev, [key]: val }));
+  const toggle = (id: number) =>
+    setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
 
-    setLoading(true);
-    setError("");
-    setTranslatedText("");
+  const setContent = (id: number, val: string) =>
+    setContents((prev) => ({ ...prev, [id]: val }));
 
-    let parsedBody: unknown;
+  const openNext = (nextId: number) =>
+    setExpanded((prev) => {
+      const next: Record<number, boolean> = {};
+      STEPS.forEach((s) => { next[s.id] = false; });
+      next[nextId] = true;
+      return next;
+    });
+
+  // Load file from logs/translator/
+  const handleLoad = async (stepId: number) => {
+    const step = STEPS.find((s) => s.id === stepId);
+    if (!step) return;
+    setLoad(`load-${stepId}`, true);
     try {
-      parsedBody = JSON.parse(sourceText);
-    } catch {
-      setError("Source must be valid JSON (a request body with a 'model' field).");
-      setLoading(false);
-      return;
+      const res = await fetch(`/api/translator/load?file=${step.file}`);
+      const data = await res.json();
+      if (data.success) {
+        setContent(stepId, data.content);
+        if (stepId === 1) await detectMeta(data.content);
+      } else {
+        alert(data.error || "File not found");
+      }
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : String(e));
     }
+    setLoad(`load-${stepId}`, false);
+  };
 
+  // Step 1: detect provider/format from model field
+  const detectMeta = async (rawContent: string) => {
     try {
-      // Step 1: detect provider/source/target formats from the request body.
-      const detectRes = await fetch("/api/translator/translate", {
+      const body = typeof rawContent === "string" ? JSON.parse(rawContent) : rawContent;
+      const res = await fetch("/api/translator/translate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ step: 1, body: parsedBody }),
+        body: JSON.stringify({ step: 1, body }),
       });
-      const detectJson = await detectRes.json();
-      if (!detectRes.ok || detectJson?.success === false) {
-        setError(detectJson?.error || `Detect failed (HTTP ${detectRes.status})`);
-        return;
-      }
-
-      // Step 2: translate the source body into the OpenAI intermediate format.
-      const toOpenAiRes = await fetch("/api/translator/translate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ step: 2, body: parsedBody }),
-      });
-      const toOpenAiJson = await toOpenAiRes.json();
-      if (!toOpenAiRes.ok || toOpenAiJson?.success === false) {
-        setError(toOpenAiJson?.error || `Translate failed (HTTP ${toOpenAiRes.status})`);
-        return;
-      }
-
-      setTranslatedText(
-        JSON.stringify(
-          {
-            detected: detectJson.result,
-            openaiBody: toOpenAiJson.result?.body,
-          },
-          null,
-          2
-        )
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
+      const data = await res.json();
+      if (data.success) setMeta(data.result);
+    } catch {
+      /* ignore parse or network errors */
     }
   };
 
+  const save = (file: string, content: string) => {
+    fetch("/api/translator/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file, content }),
+    }).catch(() => {});
+  };
+
+  // Step 1 → Step 3: source → OpenAI intermediate
+  const handleToOpenAI = async () => {
+    setLoad("toOpenAI", true);
+    try {
+      const raw = contents[1];
+      if (!raw) return;
+      const body = JSON.parse(raw);
+      // Save input: 1_req_client.json + 2_req_source.json (body only)
+      save("1_req_client.json", raw);
+      save(
+        "2_req_source.json",
+        JSON.stringify(
+          { timestamp: new Date().toISOString(), headers: {}, body: body.body || body },
+          null,
+          2,
+        ),
+      );
+
+      const res = await fetch("/api/translator/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ step: 2, body }),
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.error); return; }
+      const str = JSON.stringify(data.result.body, null, 2);
+      setContent(3, str);
+      openNext(3);
+    } catch (e: unknown) { alert(e instanceof Error ? e.message : String(e)); }
+    setLoad("toOpenAI", false);
+  };
+
+  // Step 3 → Step 4: OpenAI → target + build URL/headers
+  const handleToTarget = async () => {
+    setLoad("toTarget", true);
+    try {
+      const raw = contents[3];
+      if (!raw) return;
+      const openaiBody = JSON.parse(raw);
+      // Save input: 3_req_openai.json
+      save("3_req_openai.json", raw);
+
+      const res = await fetch("/api/translator/translate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          step: 3,
+          body: { ...openaiBody, provider: meta?.provider, model: meta?.model },
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) { alert(data.error); return; }
+      // Embed provider + model so Send works even without meta
+      const step4Content = {
+        ...data.result,
+        provider: meta?.provider,
+        model: meta?.model,
+      };
+      setContent(4, JSON.stringify(step4Content, null, 2));
+      openNext(4);
+    } catch (e: unknown) { alert(e instanceof Error ? e.message : String(e)); }
+    setLoad("toTarget", false);
+  };
+
+  // Step 4 → Step 5: send to provider via executor
+  const handleSend = async () => {
+    setLoad("send", true);
+    try {
+      const raw = contents[4];
+      if (!raw) return;
+      const step4 = JSON.parse(raw);
+      // Save input: 4_req_target.json
+      save("4_req_target.json", raw);
+
+      // Read provider/model from step4 content (embedded during build), fallback to meta
+      const provider = step4.provider || meta?.provider;
+      const model = step4.model || meta?.model;
+
+      if (!provider || !model) {
+        alert("Missing provider or model. Please run step 1 first to detect them.");
+        return;
+      }
+
+      const res = await fetch("/api/translator/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, model, body: step4.body || step4 }),
+      });
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: res.statusText }));
+        alert(err.error || "Send failed");
+        return;
+      }
+
+      // Accumulate streaming response
+      const reader = res.body!.getReader();
+      const decoder = new TextDecoder();
+      let full = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        full += decoder.decode(value, { stream: true });
+      }
+
+      setContent(5, full);
+      openNext(5);
+
+      // Save to logs/translator/5_res_provider.txt
+      await fetch("/api/translator/save", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: "5_res_provider.txt", content: full }),
+      });
+    } catch (e: unknown) {
+      alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoad("send", false);
+    }
+  };
+
+  const { copy } = useCopyToClipboard();
+
+  const handleCopy = (id: number) => {
+    const text = contents[id];
+    if (!text) return;
+    copy(text, `translator-step-${id}`);
+  };
+
+  const handleFormat = (id: number) => {
+    try {
+      const obj = JSON.parse(contents[id]);
+      setContent(id, JSON.stringify(obj, null, 2));
+    } catch {
+      /* not JSON, skip */
+    }
+  };
+
+  // Render action button per step
+  const getAction = (stepId: number) => {
+    if (stepId === 1)
+      return (
+        <Button size="sm" icon="arrow_forward" loading={loading["toOpenAI"]} onClick={handleToOpenAI}>
+          OpenAI
+        </Button>
+      );
+    if (stepId === 3)
+      return (
+        <Button size="sm" icon="arrow_forward" loading={loading["toTarget"]} onClick={handleToTarget}>
+          Target
+        </Button>
+      );
+    if (stepId === 4)
+      return (
+        <Button size="sm" icon="send" loading={loading["send"]} onClick={handleSend}>
+          Send
+        </Button>
+      );
+    return null;
+  };
+
   return (
-    <div className="flex flex-col gap-6">
-      <h1 className="text-2xl font-bold">Translator</h1>
-      <p className="text-sm text-text-muted">
-        Translate a provider-specific request body (Anthropic, Gemini, Cohere, …) into the OpenAI intermediate format used by OpenProxy.
-      </p>
-
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Card padding="lg">
-          <div className="flex flex-col gap-4">
-            <label className="text-sm font-medium text-text-muted">Source Request (JSON)</label>
-            <textarea
-              value={sourceText}
-              onChange={(e) => setSourceText(e.target.value)}
-              placeholder="Paste a request body to translate..."
-              className="w-full h-48 p-3 border border-border rounded-lg bg-bg-subtle resize-none focus:outline-none focus:ring-2 focus:ring-primary/50 font-mono text-sm"
-            />
-            <Button onClick={handleTranslate} disabled={loading || !sourceText.trim()}>
-              {loading ? "Translating..." : "Translate"}
-            </Button>
-            {error && <p className="text-sm text-red-500">{error}</p>}
+    <div className="p-8 space-y-3">
+      {/* Header */}
+      <div className="flex items-center justify-between mb-2">
+        <div>
+          <h1 className="text-2xl font-bold text-ink">Translator Debug</h1>
+          <p className="text-sm text-body mt-1">Replay request flow — matches log files</p>
+        </div>
+        {meta && (
+          <div className="flex items-center gap-2 flex-wrap justify-end">
+            <MetaBadge label="src" value={meta.sourceFormat} color="blue" />
+            <span className="material-symbols-outlined text-body text-[14px]">arrow_forward</span>
+            <MetaBadge label="dst" value={meta.targetFormat} color="orange" />
+            <MetaBadge label="provider" value={meta.provider} color="green" />
+            <MetaBadge label="model" value={meta.model} color="purple" />
           </div>
-        </Card>
-
-        <Card padding="lg">
-          <div className="flex flex-col gap-4">
-            <label className="text-sm font-medium text-text-muted">Translation</label>
-            <pre className="w-full h-48 p-3 border border-border rounded-lg bg-bg-subtle overflow-auto font-mono text-sm">
-              {translatedText || (
-                <span className="text-text-muted">Translation will appear here</span>
-              )}
-            </pre>
-          </div>
-        </Card>
+        )}
       </div>
+
+      {STEPS.map((step) => {
+        const action = getAction(step.id);
+        const isExpanded = !!expanded[step.id];
+        const content = contents[step.id] || "";
+
+        return (
+          <Card key={step.id} padding="none">
+            <div className="p-4 space-y-3">
+              {/* Step header */}
+              <div className="flex items-center justify-between">
+                <button
+                  onClick={() => toggle(step.id)}
+                  className="flex items-center gap-2 flex-1 text-left group"
+                >
+                  <span className="material-symbols-outlined text-[20px] text-body group-hover:text-ink transition-colors">
+                    {isExpanded ? "expand_more" : "chevron_right"}
+                  </span>
+                  <span className="text-xs font-mono text-body/60 w-4">{step.id}</span>
+                  <h3 className="text-sm font-semibold text-ink">{step.label}</h3>
+                  <span className="text-xs text-body/60 font-mono">{step.file}</span>
+                  {content && (
+                    <span className="text-xs text-green-500">
+                      ({content.length} chars)
+                    </span>
+                  )}
+                </button>
+                {!isExpanded && (
+                  <div className="flex gap-1 shrink-0">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon="folder_open"
+                      loading={loading[`load-${step.id}`]}
+                      onClick={() => handleLoad(step.id)}
+                    />
+                    {action}
+                  </div>
+                )}
+              </div>
+
+              {/* Expanded content */}
+              {isExpanded && (
+                <>
+                  <div className="border border-hairline rounded-mini-lg overflow-hidden">
+                    <Suspense
+                      fallback={
+                        <div className="h-[400px] bg-surface-soft animate-pulse" />
+                      }
+                    >
+                      <Editor
+                        height="400px"
+                        defaultLanguage={step.lang === "text" ? "plaintext" : "json"}
+                        value={content}
+                        onChange={(v: string | undefined) => {
+                          setContent(step.id, v || "");
+                          if (step.id === 1) detectMeta(v || "");
+                        }}
+                        theme="vs-dark"
+                        options={EDITOR_OPTIONS}
+                      />
+                    </Suspense>
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      icon="folder_open"
+                      loading={loading[`load-${step.id}`]}
+                      onClick={() => handleLoad(step.id)}
+                    >
+                      Load
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      icon="data_object"
+                      onClick={() => handleFormat(step.id)}
+                    >
+                      Format
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      icon="content_copy"
+                      onClick={() => handleCopy(step.id)}
+                    >
+                      Copy
+                    </Button>
+                    {action}
+                  </div>
+                </>
+              )}
+            </div>
+          </Card>
+        );
+      })}
     </div>
+  );
+}
+
+interface MetaBadgeProps {
+  label: string;
+  value: string;
+  color: "blue" | "orange" | "green" | "purple";
+}
+
+function MetaBadge({ label, value, color }: MetaBadgeProps) {
+  const colors: Record<string, string> = {
+    blue: "bg-blue-500/10 text-blue-500",
+    orange: "bg-orange-500/10 text-orange-500",
+    green: "bg-green-500/10 text-green-500",
+    purple: "bg-purple-500/10 text-purple-500",
+  };
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-mono ${colors[color]}`}
+    >
+      <span className="text-body/70 font-sans text-[10px]">{label}:</span>
+      {value}
+    </span>
   );
 }

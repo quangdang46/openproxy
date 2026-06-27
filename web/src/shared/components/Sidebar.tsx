@@ -9,6 +9,7 @@ import Button from "./Button";
 import AnthropicSpike from "./AnthropicSpike";
 import { ConfirmModal } from "./Modal";
 import { useNotificationStore } from "@/store/notificationStore";
+import NineRemotePromoModal from "./NineRemotePromoModal";
 import React from "react";
 
 /**
@@ -57,6 +58,11 @@ const debugItems: NavItem[] = [
 
 const systemItems: NavItem[] = [
   { href: "/dashboard/proxy-pools", label: "Proxy Pools", icon: "lan" },
+  { href: "/dashboard/skills", label: "Skills", icon: "extension" },
+];
+
+const footerItems: NavItem[] = [
+  { href: "/dashboard/profile", label: "Settings", icon: "settings" },
 ];
 
 interface SidebarProps {
@@ -91,6 +97,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
   }, []);
 
   const [mediaOpen, setMediaOpen] = useState(false);
+  const [showRemoteModal, setShowRemoteModal] = useState(false);
   const [showShutdownModal, setShowShutdownModal] = useState(false);
   const [isShuttingDown, setIsShuttingDown] = useState(false);
   const [isDisconnected, setIsDisconnected] = useState(false);
@@ -329,7 +336,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
               </a>
             ))}
 
-            {/* Debug items (inside System section, before Settings) */}
+            {/* Debug items (inside System section, before Profile) */}
             {debugItems.map((item) => {
               const show = item.href !== "/dashboard/translator" || enableTranslator;
               return show ? (
@@ -354,11 +361,66 @@ export default function Sidebar({ onClose }: SidebarProps) {
                 </a>
               ) : null;
             })}
+
+            {/* Profile */}
+            <a
+              href="/dashboard/profile"
+              onClick={onClose}
+              className={cn(
+                NAV_ITEM_BASE,
+                isActive("/dashboard/profile") ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
+              )}
+            >
+              <span
+                className={cn(
+                  "material-symbols-outlined text-[18px]",
+                  isActive("/dashboard/profile") ? "fill-1" : ""
+                )}
+              >
+                account_circle
+              </span>
+              <span className="text-[13px]">Profile</span>
+            </a>
           </div>
         </nav>
 
         {/* Footer section */}
-        <div className="p-3 border-t border-hairline-soft">
+        <div className="p-3 border-t border-hairline-soft space-y-1">
+          {footerItems.map((item) => (
+            <a
+              key={item.href}
+              href={item.href}
+              onClick={onClose}
+              className={cn(
+                NAV_ITEM_BASE,
+                isActive(item.href) ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
+              )}
+            >
+              <span
+                className={cn(
+                  "material-symbols-outlined text-[18px]",
+                  isActive(item.href) ? "fill-1" : ""
+                )}
+              >
+                {item.icon}
+              </span>
+              <span className="text-[13px]">{item.label}</span>
+            </a>
+          ))}
+          {/* Remote */}
+          <button
+            onClick={() => setShowRemoteModal(true)}
+            className={cn(
+              NAV_ITEM_BASE,
+              "w-full text-left",
+              NAV_ITEM_INACTIVE,
+            )}
+          >
+            <span className="material-symbols-outlined text-[18px] group-hover:text-primary transition-colors">
+              computer
+            </span>
+            <span className="text-[13px]">Remote</span>
+          </button>
           {/* Shutdown button */}
           <Button
             variant="secondary"
@@ -371,6 +433,9 @@ export default function Sidebar({ onClose }: SidebarProps) {
           </Button>
         </div>
       </aside>
+
+      {/* Remote Promo Modal */}
+      <NineRemotePromoModal isOpen={showRemoteModal} onClose={() => setShowRemoteModal(false)} />
 
       {/* Shutdown Confirmation Modal */}
       <ConfirmModal

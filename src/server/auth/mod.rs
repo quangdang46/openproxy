@@ -200,6 +200,11 @@ pub fn revoke_jti(jti: &str) {
 }
 
 fn extract_presented_key(headers: &HeaderMap) -> Option<PresentedKey> {
+    // Debug: log all header names
+    let header_names: Vec<String> = headers.keys().map(|k| k.to_string()).collect();
+    tracing::debug!("extract_presented_key: headers={:?}, has_authorization={}", 
+        header_names, headers.get(AUTHORIZATION_HEADER).is_some());
+    
     if let Some(value) = headers
         .get(AUTHORIZATION_HEADER)
         .and_then(|value| value.to_str().ok())
