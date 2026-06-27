@@ -1,3 +1,38 @@
+# v0.4.0 (2026-06-27)
+
+## 9router parity — 18 gaps closed
+
+### Core pipeline fixes
+- Bypass handler now supports SSE streaming + JSON (warmup/naming requests)
+- ccFilterNaming setting wired from `settings.extra["ccFilterNaming"]`
+- Provider-level thinking config injection (`settings.extra["providerThinking"]`)
+- Free/noAuth provider virtual connections expanded (4→10 providers)
+- Claude tool cloaking for `sk-ant-oat` API keys (tool suffix, billing header, fake user-id)
+- Tool name map extracted from body before upstream dispatch
+- Non-streaming response translation via `translate_response()` 
+- Response tool name decloaking via `decloak_tool_names()`
+- Streaming SSE format translation via `translate_response()` in stream
+- Normalize Claude passthrough (adaptive thinking, system hoisting)
+- OpenAI-compatible error format (`type` + `code` fields)
+
+### SSE and streaming
+- SSE frame formatting handles `event:`/`id:`/`retry:` line types
+- SSE stall timeout with proper cleanup
+
+### Rate limiting and auth
+- Google-specific rate limit headers (`x-ratelimit-reset-after`, `x-ratelimit-reset`)
+- Proactive token expiry check before dispatch
+- Token refresh on 401/403 with `dispatch_oauth_refresh()`
+
+### Executor fixes
+- Codex executor: `session_id`, `originator: codex_cli_rs` headers
+- Codex executor: connection ID extracted from credentials
+- `tool_name_map` passed to streaming response handler
+
+### Tests
+- 924/924 lib tests passing (all platforms)
+- Zero regressions across all 18 gap fixes
+
 # v0.3.2 (2026-06-21)
 
 ## Bug fixes
