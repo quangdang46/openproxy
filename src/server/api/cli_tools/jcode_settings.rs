@@ -48,7 +48,9 @@ async fn get_jcode_settings(State(state): State<AppState>, headers: HeaderMap) -
         .into_response();
     }
 
-    let config = read_config().await.unwrap_or_else(|_| Value::Object(Default::default()));
+    let config = read_config()
+        .await
+        .unwrap_or_else(|_| Value::Object(Default::default()));
     let has_openproxy = has_openproxy_config(&config);
     let env_api_key = read_provider_env()
         .await
@@ -296,12 +298,27 @@ async fn write_jcode_config(body: &SaveJcodeSettingsRequest) -> AnyhowResult<()>
 
     // Build the provider entry
     let provider_entry = TomlValue::Table(TomlMap::from_iter([
-        ("type".to_string(), TomlValue::String("openai-compatible".to_string())),
-        ("base_url".to_string(), TomlValue::String(normalized_base_url)),
+        (
+            "type".to_string(),
+            TomlValue::String("openai-compatible".to_string()),
+        ),
+        (
+            "base_url".to_string(),
+            TomlValue::String(normalized_base_url),
+        ),
         ("auth".to_string(), TomlValue::String("bearer".to_string())),
-        ("api_key_env".to_string(), TomlValue::String("JCODE_OPENPROXY_API_KEY".to_string())),
-        ("env_file".to_string(), TomlValue::String("provider-openproxy.env".to_string())),
-        ("default_model".to_string(), TomlValue::String(default_model)),
+        (
+            "api_key_env".to_string(),
+            TomlValue::String("JCODE_OPENPROXY_API_KEY".to_string()),
+        ),
+        (
+            "env_file".to_string(),
+            TomlValue::String("provider-openproxy.env".to_string()),
+        ),
+        (
+            "default_model".to_string(),
+            TomlValue::String(default_model),
+        ),
         ("requires_api_key".to_string(), TomlValue::Boolean(true)),
     ]));
 

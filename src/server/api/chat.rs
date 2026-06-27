@@ -31,12 +31,12 @@ use crate::core::translator::helpers::image_helper::fetch_image_as_base64;
 use crate::core::translator::helpers::modality_helper::{
     capabilities_for_format, strip_unsupported_modalities, ModalityCapabilities,
 };
-use crate::core::utils::bypass_handler::{detect_bypass, BypassDecision, DEFAULT_BYPASS_TEXT};
-use crate::core::utils::claude_cloaking::{CloakedRequest, cloak_claude_tools};
-use crate::core::utils::client_detector::{detect_client_tool, is_native_passthrough, ClientTool};
-use crate::core::utils::tool_deduper::dedupe_tools;
 use crate::core::translator::registry::{self, Format};
 use crate::core::translator::response_transform::{transform_sse_stream, transformer_for_provider};
+use crate::core::utils::bypass_handler::{detect_bypass, BypassDecision, DEFAULT_BYPASS_TEXT};
+use crate::core::utils::claude_cloaking::{cloak_claude_tools, CloakedRequest};
+use crate::core::utils::client_detector::{detect_client_tool, is_native_passthrough, ClientTool};
+use crate::core::utils::tool_deduper::dedupe_tools;
 use crate::payload_rules::{apply_request_rules, apply_system_prompt};
 use crate::server::auth::{extract_api_key, require_api_key};
 use crate::server::state::AppState;
@@ -280,10 +280,7 @@ async fn chat_completions_impl(
 
     match detect_bypass(&body, &user_agent, cc_filter_naming) {
         BypassDecision::Bypass => {
-            let stream = body
-                .get("stream")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(true);
             return bypass_response(model_str, DEFAULT_BYPASS_TEXT, stream);
         }
         BypassDecision::Naming { title } => {
@@ -292,10 +289,7 @@ async fn chat_completions_impl(
                 "title": title,
             }))
             .unwrap_or_else(|_| String::new());
-            let stream = body
-                .get("stream")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
+            let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(true);
             return bypass_response(model_str, &naming_text, stream);
         }
         BypassDecision::Pass => {}
@@ -344,7 +338,12 @@ async fn chat_completions_impl(
                     .combos
                     .iter()
                     .find(|c| c.name == combo_name)
-                    .map(|c| c.extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+                    .map(|c| {
+                        c.extra
+                            .iter()
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect()
+                    })
                     .unwrap_or_default();
 
                 let f_state = state.clone();
@@ -366,9 +365,14 @@ async fn chat_completions_impl(
                         async move {
                             let snapshot = state.db.snapshot();
                             let resolved = get_model_info(&model, &snapshot);
-                            let provider = resolved.provider.as_deref().unwrap_or("unknown").to_string();
+                            let provider = resolved
+                                .provider
+                                .as_deref()
+                                .unwrap_or("unknown")
+                                .to_string();
                             let resolved_model = resolved.model.clone();
-                            let mut plan = RequestPlan::new(endpoint, &body, &provider, &resolved_model);
+                            let mut plan =
+                                RequestPlan::new(endpoint, &body, &provider, &resolved_model);
                             plan.passthrough = is_native_passthrough(client_tool, &provider);
                             plan.stream = false;
                             let response = execute_single_model(
@@ -382,9 +386,12 @@ async fn chat_completions_impl(
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("Fusion panel failed: {}", e.message))?;
-                            let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
-                                .await
-                                .map_err(|e| anyhow::anyhow!("Failed to read panel body: {}", e))?;
+                            let body_bytes =
+                                axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+                                    .await
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("Failed to read panel body: {}", e)
+                                    })?;
                             serde_json::from_slice(&body_bytes)
                                 .map_err(|e| anyhow::anyhow!("Failed to parse panel body: {}", e))
                         }
@@ -395,7 +402,9 @@ async fn chat_completions_impl(
                 match fusion_result {
                     Ok(value) => {
                         let json_str = serde_json::to_string(&value).unwrap_or_default();
-                        Ok(axum::response::Response::new(axum::body::Body::from(json_str)))
+                        Ok(axum::response::Response::new(axum::body::Body::from(
+                            json_str,
+                        )))
                     }
                     Err(e) => Err(ComboExecutionError {
                         status: e.status,
@@ -532,18 +541,14 @@ async fn execute_single_model(
             timeout_ms: snapshot.settings.headroom_timeout_ms,
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
         };
-        let headroom_format = if plan.source_format == crate::core::translator::registry::Format::Claude {
-            "claude"
-        } else {
-            "openai"
-        };
-        if let Some(stats) = compress_with_headroom(
-            &mut body,
-            &headroom_cfg,
-            &plan.model,
-            headroom_format,
-        )
-        .await
+        let headroom_format =
+            if plan.source_format == crate::core::translator::registry::Format::Claude {
+                "claude"
+            } else {
+                "openai"
+            };
+        if let Some(stats) =
+            compress_with_headroom(&mut body, &headroom_cfg, &plan.model, headroom_format).await
         {
             tracing::debug!("{}", stats.format_headroom_log().unwrap_or_default());
         }
@@ -566,15 +571,19 @@ async fn execute_single_model(
                             json!({"type": "enabled", "budget_tokens": 10000}),
                         );
                     }
-                } else if mode == "off" && !body.get("thinking").and_then(|v| v.as_object()).is_some() {
+                } else if mode == "off"
+                    && !body.get("thinking").and_then(|v| v.as_object()).is_some()
+                {
                     if let Some(obj) = body.as_object_mut() {
-                        obj.insert(
-                            "thinking".to_string(),
-                            json!({"type": "disabled"}),
-                        );
+                        obj.insert("thinking".to_string(), json!({"type": "disabled"}));
                     }
                 } else if mode != "on" && mode != "off" {
-                    if !body.get("reasoning_effort").and_then(|v| v.as_str()).map(|s| !s.is_empty()).unwrap_or(false) {
+                    if !body
+                        .get("reasoning_effort")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                    {
                         if let Some(obj) = body.as_object_mut() {
                             obj.insert(
                                 "reasoning_effort".to_string(),
@@ -611,16 +620,11 @@ async fn execute_single_model(
                         .and_then(|u| u.as_str())
                     {
                         if url.starts_with("http://") || url.starts_with("https://") {
-                            if let Some(fetched) =
-                                fetch_image_as_base64(&client, url).await
-                            {
+                            if let Some(fetched) = fetch_image_as_base64(&client, url).await {
                                 if let Some(img) =
                                     part.get_mut("image_url").and_then(|iu| iu.as_object_mut())
                                 {
-                                    img.insert(
-                                        "url".into(),
-                                        Value::String(fetched.data_url),
-                                    );
+                                    img.insert("url".into(), Value::String(fetched.data_url));
                                 }
                             }
                         }
@@ -630,8 +634,7 @@ async fn execute_single_model(
                         if source.get("type").and_then(|t| t.as_str()) == Some("url") {
                             if let Some(url) = source.get("url").and_then(|u| u.as_str()) {
                                 if url.starts_with("http://") || url.starts_with("https://") {
-                                    if let Some(fetched) =
-                                        fetch_image_as_base64(&client, url).await
+                                    if let Some(fetched) = fetch_image_as_base64(&client, url).await
                                     {
                                         if let Some(src) = part
                                             .get_mut("image")
@@ -727,7 +730,6 @@ async fn forward_with_provider_fallback(
         .and_then(|obj| obj.remove("_toolNameMap"))
         .and_then(|v| serde_json::from_value(v).ok());
 
-
     loop {
         let snapshot = state.db.snapshot();
         let Some(connection) = select_connection(&snapshot, provider, model, &excluded) else {
@@ -810,7 +812,8 @@ async fn forward_with_provider_fallback(
         };
 
         let is_codex_model = model.starts_with("codex/") || provider == "codex";
-        let is_cursor_model = model.starts_with("cursor/") || provider == "cu" || provider == "cursor";
+        let is_cursor_model =
+            model.starts_with("cursor/") || provider == "cu" || provider == "cursor";
         let executor_result: Result<KiroExecutorResponse, ComboAttemptError> =
             if provider == "kiro" {
                 let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
@@ -1815,11 +1818,20 @@ async fn proxy_response_with_usage_tracking(
             let body_val: serde_json::Value =
                 serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
             if !body_val.is_null() {
-                let decloaked = crate::core::utils::claude_cloaking::decloak_tool_names(&body_val, map);
-                serde_json::to_vec(&decloaked).map(Bytes::from).unwrap_or(body_bytes.clone())
-            } else { body_bytes.clone() }
-        } else { body_bytes.clone() }
-    } else { body_bytes.clone() };
+                let decloaked =
+                    crate::core::utils::claude_cloaking::decloak_tool_names(&body_val, map);
+                serde_json::to_vec(&decloaked)
+                    .map(Bytes::from)
+                    .unwrap_or(body_bytes.clone())
+            } else {
+                body_bytes.clone()
+            }
+        } else {
+            body_bytes.clone()
+        }
+    } else {
+        body_bytes.clone()
+    };
 
     let final_body = if body_complete {
         let token_usage = extract_token_usage_from_bytes(&body_bytes);
@@ -1840,20 +1852,33 @@ async fn proxy_response_with_usage_tracking(
         // and target formats differ (handleNonStreamingResponse).
         let translated_body = if plan.needs_translation() {
             let mut state = crate::core::translator::registry::ResponseTransformState::default();
-            let chunks = registry::global_registry()
-                .translate_response(plan.target_format, plan.source_format, decloaked_body.as_ref(), &mut state);
+            let chunks = registry::global_registry().translate_response(
+                plan.target_format,
+                plan.source_format,
+                decloaked_body.as_ref(),
+                &mut state,
+            );
             if !chunks.is_empty() {
                 let mut result = String::new();
                 for chunk in &chunks {
                     if let Some(data) = chunk.strip_prefix("data: ") {
                         result = data.to_string();
-                        if result == "[DONE]" { continue; }
+                        if result == "[DONE]" {
+                            continue;
+                        }
                     }
                 }
-                if result.is_empty() { decloaked_body.clone() }
-                else { Bytes::from(result) }
-            } else { decloaked_body.clone() }
-        } else { decloaked_body.clone() };
+                if result.is_empty() {
+                    decloaked_body.clone()
+                } else {
+                    Bytes::from(result)
+                }
+            } else {
+                decloaked_body.clone()
+            }
+        } else {
+            decloaked_body.clone()
+        };
 
         Body::from(translated_body)
     } else {
@@ -2384,7 +2409,10 @@ fn retry_after_from_headers(headers: &HeaderMap) -> Option<DateTime<Utc>> {
 
     // Google-specific rate limit headers (used by Antigravity / Cloud Code)
     // x-ratelimit-reset-after: seconds until rate limit resets (relative)
-    if let Some(value) = headers.get("x-ratelimit-reset-after").and_then(|v| v.to_str().ok()) {
+    if let Some(value) = headers
+        .get("x-ratelimit-reset-after")
+        .and_then(|v| v.to_str().ok())
+    {
         if let Ok(seconds) = value.trim().parse::<i64>() {
             if seconds > 0 {
                 return Some(Utc::now() + ChronoDuration::seconds(seconds));
@@ -2393,7 +2421,10 @@ fn retry_after_from_headers(headers: &HeaderMap) -> Option<DateTime<Utc>> {
     }
 
     // x-ratelimit-reset: unix timestamp (seconds) when rate limit resets (absolute)
-    if let Some(value) = headers.get("x-ratelimit-reset").and_then(|v| v.to_str().ok()) {
+    if let Some(value) = headers
+        .get("x-ratelimit-reset")
+        .and_then(|v| v.to_str().ok())
+    {
         if let Ok(ts) = value.trim().parse::<i64>() {
             let now = Utc::now().timestamp();
             if ts > now {
@@ -2448,7 +2479,8 @@ fn combo_error_response(error: ComboExecutionError) -> Response {
 
 fn attempt_error_response(error: ComboAttemptError) -> Response {
     let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
-    let (e_type, e_code) = match crate::core::config::error_config::error_type_for(status.as_u16()) {
+    let (e_type, e_code) = match crate::core::config::error_config::error_type_for(status.as_u16())
+    {
         Some(info) => (info.r#type, info.code),
         None if status.as_u16() >= 500 => ("server_error", "internal_server_error"),
         None => ("invalid_request_error", ""),
@@ -2476,7 +2508,8 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
-    let (e_type, e_code) = match crate::core::config::error_config::error_type_for(status.as_u16()) {
+    let (e_type, e_code) = match crate::core::config::error_config::error_type_for(status.as_u16())
+    {
         Some(info) => (info.r#type, info.code),
         None if status.as_u16() >= 500 => ("server_error", "internal_server_error"),
         None => ("invalid_request_error", ""),
@@ -2498,9 +2531,7 @@ fn json_error_response(status: StatusCode, message: &str) -> Response {
 }
 
 fn json_success_response(status: StatusCode, data: Value) -> Response {
-    with_cors_response(
-        (status, Json(data)).into_response(),
-    )
+    with_cors_response((status, Json(data)).into_response())
 }
 
 fn with_cors_response(mut response: Response) -> Response {
@@ -2535,8 +2566,6 @@ fn cors_preflight_response(methods: &str) -> Response {
     );
     response
 }
-
-
 
 /// Build a bypass response — either streaming SSE (when `stream` is true) or
 /// non-streaming JSON. 9router parity: the streaming path emits proper OpenAI
@@ -2590,14 +2619,12 @@ fn bypass_response(model: &str, text: &str, stream: bool) -> Response {
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/event-stream; charset=utf-8"),
         );
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-cache"),
-        );
-        response.headers_mut().insert(
-            header::CONNECTION,
-            HeaderValue::from_static("keep-alive"),
-        );
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
         response.headers_mut().insert(
             header::ACCESS_CONTROL_ALLOW_ORIGIN,
             HeaderValue::from_static("*"),
@@ -2628,7 +2655,6 @@ fn bypass_response(model: &str, text: &str, stream: bool) -> Response {
         )
     }
 }
-
 
 #[cfg(test)]
 mod tests {

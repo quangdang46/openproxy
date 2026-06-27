@@ -14,7 +14,7 @@ pub fn get_active(conn: &Connection) -> rusqlite::Result<Vec<ProxyPool>> {
 
 pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ProxyPool>> {
     let mut stmt = conn.prepare(
-        "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools WHERE id = ?1"
+        "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_pool)?;
     Ok(rows.next().transpose()?)
@@ -31,7 +31,13 @@ pub fn create(conn: &Connection, p: &ProxyPool) -> rusqlite::Result<()> {
 pub fn update(conn: &Connection, p: &ProxyPool) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE proxyPools SET isActive=?2, testStatus=?3, data=?4, updatedAt=?5 WHERE id=?1",
-        params![p.id, p.is_active.map(|v| v as i32), p.test_status, pool_to_data(p), p.updated_at.as_deref().unwrap_or("")],
+        params![
+            p.id,
+            p.is_active.map(|v| v as i32),
+            p.test_status,
+            pool_to_data(p),
+            p.updated_at.as_deref().unwrap_or("")
+        ],
     )?;
     Ok(())
 }
@@ -70,7 +76,8 @@ fn pool_to_data(p: &ProxyPool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json; use crate::db::sqlite::SqliteDb;
+    use crate::db::sqlite::SqliteDb;
+    use serde_json::json;
 
     #[test]
     fn roundtrip() {

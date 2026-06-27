@@ -143,7 +143,12 @@ impl CodexExecutor {
     }
 
     /// Build request headers for OpenAI Responses API.
-    fn build_headers(&self, api_key: &str, stream: bool, connection_id: Option<&str>) -> Result<HeaderMap, CodexExecutorError> {
+    fn build_headers(
+        &self,
+        api_key: &str,
+        stream: bool,
+        connection_id: Option<&str>,
+    ) -> Result<HeaderMap, CodexExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
@@ -154,19 +159,16 @@ impl CodexExecutor {
 
         // 9router parity: session_id header for request session continuity.
         // Derives from connection_id or falls back to "default".
-        let session_id = connection_id.and_then(|cid| {
-            if cid.is_empty() { None } else { Some(cid) }
-        }).unwrap_or("default");
+        let session_id = connection_id
+            .and_then(|cid| if cid.is_empty() { None } else { Some(cid) })
+            .unwrap_or("default");
         headers.insert(
             "session_id",
             HeaderValue::from_str(session_id).map_err(CodexExecutorError::InvalidHeader)?,
         );
 
         // 9router parity: identify client type to Codex backend.
-        headers.insert(
-            "originator",
-            HeaderValue::from_static("codex_cli_rs"),
-        );
+        headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
 
         if stream {
             headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
@@ -284,7 +286,10 @@ impl CodexExecutor {
                 CodexExecutorError::MissingCredentials("API key required".to_string())
             })?;
 
-        let connection_id = request.credentials.email.as_deref()
+        let connection_id = request
+            .credentials
+            .email
+            .as_deref()
             .or(request.credentials.id.as_str().into())
             .or(request.credentials.display_name.as_deref());
         let headers = self.build_headers(api_key, request.stream, connection_id)?;

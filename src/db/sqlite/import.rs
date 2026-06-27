@@ -14,24 +14,30 @@ use super::SqliteDb;
 /// Wipes existing data and reinserts in an atomic transaction.
 /// Returns the number of provider connections imported.
 pub fn import_db(db: &SqliteDb, payload: &Value) -> anyhow::Result<usize> {
-    db.with_transaction(|conn| -> rusqlite::Result<usize> {
-        import_all(conn, payload)
-    }).map_err(|e| anyhow::anyhow!("SQLite import: {e}"))
+    db.with_transaction(|conn| -> rusqlite::Result<usize> { import_all(conn, payload) })
+        .map_err(|e| anyhow::anyhow!("SQLite import: {e}"))
 }
 
 /// Import usage JSON payload.
 pub fn import_usage(db: &SqliteDb, payload: &Value) -> anyhow::Result<usize> {
-    db.with_transaction(|conn| -> rusqlite::Result<usize> {
-        import_usage_impl(conn, payload)
-    }).map_err(|e| anyhow::anyhow!("SQLite usage import: {e}"))
+    db.with_transaction(|conn| -> rusqlite::Result<usize> { import_usage_impl(conn, payload) })
+        .map_err(|e| anyhow::anyhow!("SQLite usage import: {e}"))
 }
 
 fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
     // Wipe all data (keep _meta)
     let tables = [
-        "settings", "providerConnections", "providerNodes", "proxyPools",
-        "apiKeys", "combos", "kv", "disabledModels", "usageHistory",
-        "usageDaily", "requestDetails",
+        "settings",
+        "providerConnections",
+        "providerNodes",
+        "proxyPools",
+        "apiKeys",
+        "combos",
+        "kv",
+        "disabledModels",
+        "usageHistory",
+        "usageDaily",
+        "requestDetails",
     ];
     for table in &tables {
         conn.execute(&format!("DELETE FROM {table}"), [])?;
@@ -130,7 +136,8 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
     // Combos
     if let Some(arr) = payload.get("combos").and_then(Value::as_array) {
         for item in arr {
-            let models_vec = Value::Array(vec![]); let models_val = item.get("models").unwrap_or(&models_vec);
+            let models_vec = Value::Array(vec![]);
+            let models_val = item.get("models").unwrap_or(&models_vec);
             let models_str = serde_json::to_string(models_val).unwrap_or_else(|_| "[]".into());
             conn.execute(
                 "INSERT INTO combos(id, name, kind, models, data, createdAt, updatedAt) VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -151,7 +158,11 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
     import_kv_scope(conn, "modelAliases", payload.get("modelAliases"))?;
     if let Some(arr) = payload.get("customModels").and_then(Value::as_array) {
         for (idx, item) in arr.iter().enumerate() {
-            let fallback_key = format!("idx{idx}"); let key = item.get("id").and_then(Value::as_str).unwrap_or(&fallback_key);
+            let fallback_key = format!("idx{idx}");
+            let key = item
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(&fallback_key);
             let val_str = serde_json::to_string(item).unwrap_or_else(|_| "null".into());
             conn.execute(
                 "INSERT INTO kv(scope, key, value) VALUES('customModels', ?1, ?2)",
@@ -177,9 +188,11 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
         }
     }
 
-    let count = conn.query_row(
-        "SELECT COUNT(*) FROM providerConnections", [], |row| row.get(0),
-    ).unwrap_or(0);
+    let count = conn
+        .query_row("SELECT COUNT(*) FROM providerConnections", [], |row| {
+            row.get(0)
+        })
+        .unwrap_or(0);
 
     Ok(count)
 }
@@ -190,7 +203,8 @@ fn import_usage_impl(conn: &Connection, payload: &Value) -> rusqlite::Result<usi
 
     if let Some(arr) = payload.get("history").and_then(Value::as_array) {
         for item in arr {
-            let tokens_str = item.get("tokens")
+            let tokens_str = item
+                .get("tokens")
                 .map(|t| serde_json::to_string(t).unwrap_or_default());
             conn.execute(
                 "INSERT INTO usageHistory(timestamp, provider, model, cost, status, tokens)
@@ -207,11 +221,18 @@ fn import_usage_impl(conn: &Connection, payload: &Value) -> rusqlite::Result<usi
         }
     }
 
-    let count = payload.get("history").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0); Ok(count)
+    let count = payload
+        .get("history")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
+    Ok(count)
 }
 
 fn import_kv_scope(conn: &Connection, scope: &str, val: Option<&Value>) -> rusqlite::Result<()> {
-    let Some(Value::Object(obj)) = val else { return Ok(()) };
+    let Some(Value::Object(obj)) = val else {
+        return Ok(());
+    };
     for (key, value) in obj {
         let val_str = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
         conn.execute(
@@ -226,7 +247,6 @@ fn import_kv_scope(conn: &Connection, scope: &str, val: Option<&Value>) -> rusql
 mod tests {
     use super::*;
     use serde_json::json;
-    
 
     #[test]
     fn roundtrip_export_import() {
@@ -251,9 +271,13 @@ mod tests {
         assert_eq!(count, 1);
 
         // Verify data persisted
-        let verified: i64 = db2.with_conn(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM providerConnections", [], |row| row.get::<_, i64>(0))
-        }).unwrap();
+        let verified: i64 = db2
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM providerConnections", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+            })
+            .unwrap();
         assert_eq!(verified, 1);
     }
 

@@ -1618,9 +1618,12 @@ async fn run_direct_route(
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
         };
         let handle = tokio::runtime::Handle::current();
-        if let Some(stats) = handle.block_on(
-            compress_with_headroom(&mut request_body, &hc, &resolved.model, "openai"),
-        ) {
+        if let Some(stats) = handle.block_on(compress_with_headroom(
+            &mut request_body,
+            &hc,
+            &resolved.model,
+            "openai",
+        )) {
             eprintln!("{}", stats.format_headroom_log().unwrap_or_default());
         }
     }
@@ -1775,9 +1778,12 @@ async fn run_combo_route(
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
         };
         let handle = tokio::runtime::Handle::current();
-        if let Some(stats) = handle.block_on(
-            compress_with_headroom(&mut request_body, &hc, &resolved.model, "openai"),
-        ) {
+        if let Some(stats) = handle.block_on(compress_with_headroom(
+            &mut request_body,
+            &hc,
+            &resolved.model,
+            "openai",
+        )) {
             eprintln!("{}", stats.format_headroom_log().unwrap_or_default());
         }
     }

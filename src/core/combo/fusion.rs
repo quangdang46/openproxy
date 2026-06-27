@@ -66,10 +66,7 @@ pub struct FusionPanelResult {
 
 /// Wraps `future` with a [`tokio::time::timeout`] of `timeout_ms`
 /// milliseconds. Returns `Some(T)` on success, `None` on expiry.
-pub async fn with_timeout<T>(
-    future: impl Future<Output = T>,
-    timeout_ms: u64,
-) -> Option<T> {
+pub async fn with_timeout<T>(future: impl Future<Output = T>, timeout_ms: u64) -> Option<T> {
     match tokio::time::timeout(Duration::from_millis(timeout_ms), future).await {
         Ok(val) => Some(val),
         Err(_) => None,
@@ -135,9 +132,10 @@ pub fn flatten_tool_history(body: &Value) -> Value {
                                 arr.iter()
                                     .filter_map(|v| match v {
                                         Value::String(s) => Some(s.clone()),
-                                        Value::Object(obj) => {
-                                            obj.get("text").and_then(Value::as_str).map(String::from)
-                                        }
+                                        Value::Object(obj) => obj
+                                            .get("text")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
                                         _ => None,
                                     })
                                     .collect::<Vec<_>>()
@@ -184,10 +182,7 @@ pub fn flatten_tool_history(body: &Value) -> Value {
                                 .and_then(Value::as_str)
                                 .unwrap_or("")
                                 .to_string();
-                            let inline = format!(
-                                "[Called tools: {}]",
-                                tool_names.join(", ")
-                            );
+                            let inline = format!("[Called tools: {}]", tool_names.join(", "));
                             let new_content = if existing.is_empty() {
                                 inline
                             } else {
@@ -200,24 +195,32 @@ pub fn flatten_tool_history(body: &Value) -> Value {
                         obj.remove("function_call");
 
                         // Handle content arrays with tool blocks (Anthropic format).
-                        if let Some(content_arr) = obj.get_mut("content").and_then(Value::as_array_mut) {
+                        if let Some(content_arr) =
+                            obj.get_mut("content").and_then(Value::as_array_mut)
+                        {
                             let mut text_parts: Vec<String> = Vec::new();
                             let mut tool_names_inline: Vec<String> = Vec::new();
                             for part in content_arr.iter() {
                                 if let Some(text) = part.get("text").and_then(Value::as_str) {
                                     text_parts.push(text.to_string());
-                                } else if part.get("type").and_then(Value::as_str) == Some("tool_use") {
+                                } else if part.get("type").and_then(Value::as_str)
+                                    == Some("tool_use")
+                                {
                                     if let Some(name) = part.get("name").and_then(Value::as_str) {
                                         tool_names_inline.push(name.to_string());
                                     }
-                                } else if part.get("type").and_then(Value::as_str) == Some("tool_result") {
+                                } else if part.get("type").and_then(Value::as_str)
+                                    == Some("tool_result")
+                                {
                                     let result_text = part
                                         .get("content")
                                         .and_then(|c| match c {
                                             Value::String(s) => Some(s.clone()),
                                             Value::Array(arr) => Some(
                                                 arr.iter()
-                                                    .filter_map(|v| v.get("text").and_then(Value::as_str))
+                                                    .filter_map(|v| {
+                                                        v.get("text").and_then(Value::as_str)
+                                                    })
                                                     .collect::<Vec<_>>()
                                                     .join("\n"),
                                             ),
@@ -231,7 +234,8 @@ pub fn flatten_tool_history(body: &Value) -> Value {
                             }
                             let mut combined = text_parts.join("\n");
                             if !tool_names_inline.is_empty() {
-                                let tool_str = format!("[Called tools: {}]", tool_names_inline.join(", "));
+                                let tool_str =
+                                    format!("[Called tools: {}]", tool_names_inline.join(", "));
                                 if combined.is_empty() {
                                     combined = tool_str;
                                 } else {
@@ -319,7 +323,11 @@ pub fn extract_panel_text(panel_response: &Value) -> (String, String) {
             return (text.to_string(), "openai".to_string());
         }
         // Also check choices[*].text (used by some providers)
-        if let Some(text) = choices.first().and_then(|c| c.get("text")).and_then(Value::as_str) {
+        if let Some(text) = choices
+            .first()
+            .and_then(|c| c.get("text"))
+            .and_then(Value::as_str)
+        {
             return (text.to_string(), "openai".to_string());
         }
     }
@@ -517,19 +525,17 @@ where
             let model = model.clone();
             let panel_fn = handle_single_model.clone();
             panel_futs.push(Box::pin(async move {
-                let result =
-                    tokio::time::timeout(
-                        Duration::from_millis(timeout_ms),
-                        panel_fn(model.clone(), panel_body),
-                    )
-                    .await;
+                let result = tokio::time::timeout(
+                    Duration::from_millis(timeout_ms),
+                    panel_fn(model.clone(), panel_body),
+                )
+                .await;
                 (idx, model, result)
             }));
         }
 
         // Collect results until we have enough or everything resolves.
-        let mut hard_deadline = tokio::time::Instant::now()
-            + Duration::from_millis(timeout_ms);
+        let mut hard_deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         let mut grace_started = false;
 
         while let Some((idx, model, result)) = panel_futs.next().await {
@@ -558,8 +564,7 @@ where
             // Quorum-grace: once we have min_panel answers, tighten deadline.
             if ok_count >= min_panel && !grace_started {
                 grace_started = true;
-                let grace_deadline = tokio::time::Instant::now()
-                    + Duration::from_millis(grace_ms);
+                let grace_deadline = tokio::time::Instant::now() + Duration::from_millis(grace_ms);
                 if grace_deadline < hard_deadline {
                     hard_deadline = grace_deadline;
                 }
@@ -567,9 +572,7 @@ where
 
             // After processing each result, check if the deadline has expired.
             // If so, drop the remaining in-flight futures.
-            if !panel_futs.is_empty()
-                && tokio::time::Instant::now() >= hard_deadline
-            {
+            if !panel_futs.is_empty() && tokio::time::Instant::now() >= hard_deadline {
                 break;
             }
         }
@@ -637,12 +640,10 @@ where
             // Detect which format the body uses and push judge message
             // with the correct shape.  Gemini uses {role, parts:[{text}]}
             // while OpenAI/Claude use {role, content}.
-            let is_gemini =
-                obj.contains_key("contents") || obj.contains_key("systemInstruction")
+            let is_gemini = obj.contains_key("contents")
+                || obj.contains_key("systemInstruction")
                 || obj.contains_key("system_instruction")
-                || obj.get("request")
-                    .and_then(|r| r.get("contents"))
-                    .is_some();
+                || obj.get("request").and_then(|r| r.get("contents")).is_some();
 
             let judge_entry = if is_gemini {
                 json!({"role": "user", "parts": [{"text": judge_message.get("content").and_then(Value::as_str).unwrap_or("")}]})
@@ -666,12 +667,8 @@ where
                     }
                 }
                 None => {
-                    if let Some(request) =
-                        obj.get_mut("request").and_then(Value::as_object_mut)
-                    {
-                        if let Some(arr) = request
-                            .get_mut("contents")
-                            .and_then(Value::as_array_mut)
+                    if let Some(request) = obj.get_mut("request").and_then(Value::as_object_mut) {
+                        if let Some(arr) = request.get_mut("contents").and_then(Value::as_array_mut)
                         {
                             arr.push(judge_entry);
                             true
