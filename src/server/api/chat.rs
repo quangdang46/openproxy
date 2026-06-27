@@ -1325,6 +1325,7 @@ async fn forward_with_provider_fallback(
                         Some(connection.id.clone()),
                         normalize_for_dashboard,
                         plan,
+                        tool_name_map.as_ref(),
                     )
                     .await);
                 }
@@ -1870,6 +1871,7 @@ async fn proxy_response_with_pending_tracking(
     connection_id: Option<String>,
     normalize_for_dashboard: bool,
     plan: &RequestPlan,
+    tool_name_map: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Response {
     // Extract formats before stream closure to avoid lifetime issues
     let needs_stream_translation = plan.needs_translation();
