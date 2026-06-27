@@ -11,20 +11,34 @@ use serde_json::Value;
 use crate::types::ProviderConnection;
 
 /// Column list (excluding the dynamic `data` payload) used for all SELECTs.
-const COLUMNS: &str = "id, provider, authType, name, email, priority, isActive, createdAt, updatedAt";
+const COLUMNS: &str =
+    "id, provider, authType, name, email, priority, isActive, createdAt, updatedAt";
 
 fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConnection> {
     let data_str: String = row.get(8)?;
-    let mut data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Object(Default::default()));
+    let mut data: Value =
+        serde_json::from_str(&data_str).unwrap_or(Value::Object(Default::default()));
 
     if let Some(obj) = data.as_object_mut() {
         obj.insert("id".into(), Value::String(row.get(0)?));
         obj.insert("provider".into(), Value::String(row.get(1)?));
         obj.insert("authType".into(), Value::String(row.get(2)?));
-        if let Ok(v) = row.get::<_, Option<String>>(3) { if let Some(v) = v { obj.insert("name".into(), Value::String(v)); } }
-        if let Ok(v) = row.get::<_, Option<String>>(4) { if let Some(v) = v { obj.insert("email".into(), Value::String(v)); } }
-        if let Ok(v) = row.get::<_, Option<i64>>(5) { obj.insert("priority".into(), json!(v)); }
-        if let Ok(v) = row.get::<_, Option<bool>>(6) { obj.insert("isActive".into(), json!(v)); }
+        if let Ok(v) = row.get::<_, Option<String>>(3) {
+            if let Some(v) = v {
+                obj.insert("name".into(), Value::String(v));
+            }
+        }
+        if let Ok(v) = row.get::<_, Option<String>>(4) {
+            if let Some(v) = v {
+                obj.insert("email".into(), Value::String(v));
+            }
+        }
+        if let Ok(v) = row.get::<_, Option<i64>>(5) {
+            obj.insert("priority".into(), json!(v));
+        }
+        if let Ok(v) = row.get::<_, Option<bool>>(6) {
+            obj.insert("isActive".into(), json!(v));
+        }
         obj.insert("createdAt".into(), Value::String(row.get(7)?));
         obj.insert("updatedAt".into(), Value::String(row.get(8)?));
     }
@@ -46,17 +60,28 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConnec
         auth_type: row.get(2)?,
         ..Default::default()
     };
-    if let Ok(v) = row.get::<_, Option<String>>(3) { c.name = v; }
-    if let Ok(v) = row.get::<_, Option<String>>(4) { c.email = v; }
-    if let Ok(v) = row.get::<_, Option<i64>>(5) { c.priority = v.map(|x| x as u32); }
-    if let Ok(v) = row.get::<_, Option<bool>>(6) { c.is_active = v; }
+    if let Ok(v) = row.get::<_, Option<String>>(3) {
+        c.name = v;
+    }
+    if let Ok(v) = row.get::<_, Option<String>>(4) {
+        c.email = v;
+    }
+    if let Ok(v) = row.get::<_, Option<i64>>(5) {
+        c.priority = v.map(|x| x as u32);
+    }
+    if let Ok(v) = row.get::<_, Option<bool>>(6) {
+        c.is_active = v;
+    }
     c.created_at = Some(row.get(7)?);
     c.updated_at = Some(row.get(8)?);
 
     // Merge data blob
     if let Some(obj) = data.as_object() {
         let data_str = serde_json::to_string(obj).unwrap_or_default();
-        if let Ok(mut parsed) = serde_json::from_str::<crate::types::AppDb>(&format!(r#"{{"providerConnections":[{}]}}"#, data_str)) {
+        if let Ok(mut parsed) = serde_json::from_str::<crate::types::AppDb>(&format!(
+            r#"{{"providerConnections":[{}]}}"#,
+            data_str
+        )) {
             if let Some(pc) = parsed.provider_connections.pop() {
                 c.access_token = pc.access_token;
                 c.refresh_token = pc.refresh_token;
@@ -197,7 +222,8 @@ mod tests {
         db.with_transaction(|tx| {
             create(tx, &c1)?;
             create(tx, &c2)
-        }).unwrap();
+        })
+        .unwrap();
 
         let openai = db.with_conn(|c| get_active(c, "openai")).unwrap();
         assert_eq!(openai.len(), 1);

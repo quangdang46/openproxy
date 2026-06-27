@@ -5,18 +5,25 @@ use serde_json::Value;
 
 use crate::types::{DailySummary, UsageEntry};
 
-pub fn get_history(conn: &Connection, limit: i64, offset: i64) -> rusqlite::Result<Vec<UsageEntry>> {
+pub fn get_history(
+    conn: &Connection,
+    limit: i64,
+    offset: i64,
+) -> rusqlite::Result<Vec<UsageEntry>> {
     let mut stmt = conn.prepare(
         "SELECT timestamp, provider, model, connectionId, apiKey, endpoint,
                 promptTokens, completionTokens, cost, status, tokens, meta
-         FROM usageHistory ORDER BY timestamp DESC LIMIT ?1 OFFSET ?2"
+         FROM usageHistory ORDER BY timestamp DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(params![limit, offset], row_to_usage)?;
     rows.collect()
 }
 
 pub fn insert(conn: &Connection, entry: &UsageEntry) -> rusqlite::Result<()> {
-    let tokens_json = entry.tokens.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default());
+    let tokens_json = entry
+        .tokens
+        .as_ref()
+        .map(|t| serde_json::to_string(t).unwrap_or_default());
     conn.execute(
         "INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint,
                 promptTokens, completionTokens, cost, status, tokens, meta)
@@ -28,8 +35,16 @@ pub fn insert(conn: &Connection, entry: &UsageEntry) -> rusqlite::Result<()> {
             entry.connection_id.as_deref(),
             entry.api_key.as_deref(),
             entry.endpoint.as_deref(),
-            entry.tokens.as_ref().and_then(|t| t.prompt_tokens.or(t.input_tokens)).unwrap_or(0) as i64,
-            entry.tokens.as_ref().and_then(|t| t.completion_tokens.or(t.output_tokens)).unwrap_or(0) as i64,
+            entry
+                .tokens
+                .as_ref()
+                .and_then(|t| t.prompt_tokens.or(t.input_tokens))
+                .unwrap_or(0) as i64,
+            entry
+                .tokens
+                .as_ref()
+                .and_then(|t| t.completion_tokens.or(t.output_tokens))
+                .unwrap_or(0) as i64,
             entry.cost,
             entry.status.as_deref(),
             tokens_json,
@@ -48,7 +63,11 @@ pub fn get_daily(conn: &Connection, date_key: &str) -> rusqlite::Result<Option<D
     Ok(rows.next().transpose()?)
 }
 
-pub fn upsert_daily(conn: &Connection, date_key: &str, summary: &DailySummary) -> rusqlite::Result<()> {
+pub fn upsert_daily(
+    conn: &Connection,
+    date_key: &str,
+    summary: &DailySummary,
+) -> rusqlite::Result<()> {
     let json_str = serde_json::to_string(summary).unwrap_or_else(|_| "{}".into());
     conn.execute(
         "INSERT INTO usageDaily(dateKey, data) VALUES(?1,?2) ON CONFLICT(dateKey) DO UPDATE SET data = excluded.data",
@@ -86,7 +105,8 @@ fn row_to_usage(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json; use crate::db::sqlite::SqliteDb;
+    use crate::db::sqlite::SqliteDb;
+    use serde_json::json;
 
     #[test]
     fn roundtrip() {

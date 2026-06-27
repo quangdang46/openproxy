@@ -111,7 +111,9 @@ pub fn apply_request_preprocessing(body: &mut Value, settings: &Settings, model:
         // Ponytail has NO context-pressure auto-trigger — always applies if enabled.
         modified |= inject_ponytail_prompt(
             body,
-            crate::core::translator::ponytail::PonytailLevel::parse_or_default(&settings.ponytail_level),
+            crate::core::translator::ponytail::PonytailLevel::parse_or_default(
+                &settings.ponytail_level,
+            ),
         );
     }
     modified

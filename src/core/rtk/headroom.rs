@@ -116,15 +116,8 @@ pub async fn compress_with_headroom(
 /// JSON response on success. Returns `None` on any failure.
 ///
 /// Ports `callCompress()` from upstream 9router.
-async fn call_compress(
-    config: &HeadroomConfig,
-    messages: &[Value],
-    model: &str,
-) -> Option<Value> {
-    let endpoint = format!(
-        "{}/v1/compress",
-        config.url.trim_end_matches('/')
-    );
+async fn call_compress(config: &HeadroomConfig, messages: &[Value], model: &str) -> Option<Value> {
+    let endpoint = format!("{}/v1/compress", config.url.trim_end_matches('/'));
 
     let mut payload = build_openai_body(messages, model);
     if config.compress_user_messages {
@@ -133,10 +126,7 @@ async fn call_compress(
 
     let timeout = Duration::from_millis(config.timeout_ms);
 
-    let client = match reqwest::Client::builder()
-        .timeout(timeout)
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(timeout).build() {
         Ok(c) => c,
         Err(_) => return None,
     };
@@ -396,9 +386,11 @@ mod tests {
             "messages": [{ "role": "user", "content": "hi" }]
         });
         let config = HeadroomConfig::default();
-        assert!(compress_with_headroom(&mut body, &config, "gpt-4o", "openai")
-            .await
-            .is_none());
+        assert!(
+            compress_with_headroom(&mut body, &config, "gpt-4o", "openai")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -411,9 +403,11 @@ mod tests {
             url: String::new(),
             ..HeadroomConfig::default()
         };
-        assert!(compress_with_headroom(&mut body, &config, "gpt-4o", "openai")
-            .await
-            .is_none());
+        assert!(
+            compress_with_headroom(&mut body, &config, "gpt-4o", "openai")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -424,9 +418,11 @@ mod tests {
             url: "http://localhost:9999".into(),
             ..HeadroomConfig::default()
         };
-        assert!(compress_with_headroom(&mut body, &config, "gpt-4o", "openai")
-            .await
-            .is_none());
+        assert!(
+            compress_with_headroom(&mut body, &config, "gpt-4o", "openai")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -441,9 +437,11 @@ mod tests {
             timeout_ms: 100,
             ..HeadroomConfig::default()
         };
-        assert!(compress_with_headroom(&mut body, &config, "gpt-4o", "openai")
-            .await
-            .is_none());
+        assert!(
+            compress_with_headroom(&mut body, &config, "gpt-4o", "openai")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -458,8 +456,10 @@ mod tests {
             timeout_ms: 100,
             ..HeadroomConfig::default()
         };
-        assert!(compress_with_headroom(&mut body, &config, "claude-sonnet-4-20250514", "claude")
-            .await
-            .is_none());
+        assert!(
+            compress_with_headroom(&mut body, &config, "claude-sonnet-4-20250514", "claude")
+                .await
+                .is_none()
+        );
     }
 }

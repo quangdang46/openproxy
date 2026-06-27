@@ -25,7 +25,8 @@ const SHARED_OUTPUT: &str = "Code first. Then at most three short lines: what wa
 
 const SHARED_NOT_LAZY: &str = "Never simplify away: input validation at trust boundaries, error handling that prevents data loss, security, accessibility, anything explicitly requested. Non-trivial logic leaves ONE runnable check behind (an assert-based self-check or one small test file; no frameworks). Trivial one-liners need no test.";
 
-const SHARED_PERSISTENCE: &str = "ACTIVE EVERY RESPONSE. No drift back to over-building. Still active if unsure.";
+const SHARED_PERSISTENCE: &str =
+    "ACTIVE EVERY RESPONSE. No drift back to over-building. Still active if unsure.";
 
 // ---------------------------------------------------------------------------
 // PonytailLevel
@@ -392,7 +393,10 @@ mod tests {
     fn ponytail_level_parse_or_default() {
         assert_eq!(PonytailLevel::parse_or_default("lite"), PonytailLevel::Lite);
         assert_eq!(PonytailLevel::parse_or_default("FULL"), PonytailLevel::Full);
-        assert_eq!(PonytailLevel::parse_or_default(" Ultra "), PonytailLevel::Ultra);
+        assert_eq!(
+            PonytailLevel::parse_or_default(" Ultra "),
+            PonytailLevel::Ultra
+        );
         assert_eq!(
             PonytailLevel::parse_or_default("unknown"),
             PonytailLevel::Full
@@ -401,7 +405,11 @@ mod tests {
 
     #[test]
     fn ponytail_prompts_contain_shared_fragments() {
-        for level in [PonytailLevel::Lite, PonytailLevel::Full, PonytailLevel::Ultra] {
+        for level in [
+            PonytailLevel::Lite,
+            PonytailLevel::Full,
+            PonytailLevel::Ultra,
+        ] {
             let prompt = level.prompt();
             assert!(
                 prompt.contains("lazy senior developer"),
@@ -438,9 +446,15 @@ mod tests {
 
     #[test]
     fn ponytail_prompts_contain_level_specific_tagline() {
-        assert!(PonytailLevel::Lite.prompt().contains("Lite: build what's asked"));
-        assert!(PonytailLevel::Full.prompt().contains("Full: the ladder enforced"));
-        assert!(PonytailLevel::Ultra.prompt().contains("Ultra: YAGNI extremist"));
+        assert!(PonytailLevel::Lite
+            .prompt()
+            .contains("Lite: build what's asked"));
+        assert!(PonytailLevel::Full
+            .prompt()
+            .contains("Full: the ladder enforced"));
+        assert!(PonytailLevel::Ultra
+            .prompt()
+            .contains("Ultra: YAGNI extremist"));
     }
 
     // -----------------------------------------------------------------------
@@ -474,10 +488,7 @@ mod tests {
 
         assert!(inject_ponytail_prompt(&mut body, PonytailLevel::Lite));
         assert_eq!(body["messages"][0]["role"], "system");
-        assert_eq!(
-            body["messages"][0]["content"],
-            PonytailLevel::Lite.prompt()
-        );
+        assert_eq!(body["messages"][0]["content"], PonytailLevel::Lite.prompt());
     }
 
     #[test]
@@ -487,9 +498,7 @@ mod tests {
         });
 
         assert!(inject_ponytail_prompt(&mut body, PonytailLevel::Ultra));
-        let instr = body["instructions"]
-            .as_str()
-            .expect("instructions string");
+        let instr = body["instructions"].as_str().expect("instructions string");
         assert!(instr.starts_with("Be accurate"));
         assert!(instr.contains(PonytailLevel::Ultra.prompt()));
     }
@@ -686,10 +695,7 @@ mod tests {
         let parts = body["systemInstruction"]["parts"]
             .as_array()
             .expect("gemini parts");
-        assert_eq!(
-            parts[0],
-            json!({ "text": PonytailLevel::Lite.prompt() })
-        );
+        assert_eq!(parts[0], json!({ "text": PonytailLevel::Lite.prompt() }));
     }
 
     #[test]

@@ -14,7 +14,9 @@ use super::SqliteDb;
 /// Export ALL scopes to the canonical JSON format. Returns pretty-printed
 /// bytes plus a filename hint.
 pub fn export_db(db: &SqliteDb) -> (Vec<u8>, String) {
-    let json_val = db.with_conn(|conn| -> rusqlite::Result<Value> { export_all(conn) }).unwrap_or(Value::Null);
+    let json_val = db
+        .with_conn(|conn| -> rusqlite::Result<Value> { export_all(conn) })
+        .unwrap_or(Value::Null);
     let bytes = serde_json::to_vec_pretty(&json_val).unwrap_or_default();
     let stamp = chrono_like_stamp();
     (bytes, format!("openproxy-db-{stamp}.json"))
@@ -22,7 +24,9 @@ pub fn export_db(db: &SqliteDb) -> (Vec<u8>, String) {
 
 /// Export usage history to canonical format.
 pub fn export_usage(db: &SqliteDb) -> (Vec<u8>, String) {
-    let json_val = db.with_conn(|conn| -> rusqlite::Result<Value> { export_usage_impl(conn) }).unwrap_or(Value::Null);
+    let json_val = db
+        .with_conn(|conn| -> rusqlite::Result<Value> { export_usage_impl(conn) })
+        .unwrap_or(Value::Null);
     let bytes = serde_json::to_vec_pretty(&json_val).unwrap_or_default();
     let stamp = chrono_like_stamp();
     (bytes, format!("openproxy-usage-{stamp}.json"))
@@ -44,15 +48,28 @@ fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
         )?;
         let rows = stmt.query_map([], |row| -> rusqlite::Result<Value> {
             let data_str: String = row.get(7)?;
-            let mut data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Object(Default::default()));
+            let mut data: Value =
+                serde_json::from_str(&data_str).unwrap_or(Value::Object(Default::default()));
             if let Some(obj) = data.as_object_mut() {
                 obj.insert("id".into(), json!(row.get::<_, String>(0)?));
                 obj.insert("provider".into(), json!(row.get::<_, String>(1)?));
                 obj.insert("authType".into(), json!(row.get::<_, String>(2)?));
-                if let Ok(v) = row.get::<_, Option<String>>(3) { if let Some(v) = v { obj.insert("name".into(), json!(v)); } }
-                if let Ok(v) = row.get::<_, Option<String>>(4) { if let Some(v) = v { obj.insert("email".into(), json!(v)); } }
-                if let Ok(v) = row.get::<_, Option<i64>>(5) { obj.insert("priority".into(), json!(v)); }
-                if let Ok(v) = row.get::<_, Option<bool>>(6) { obj.insert("isActive".into(), json!(v)); }
+                if let Ok(v) = row.get::<_, Option<String>>(3) {
+                    if let Some(v) = v {
+                        obj.insert("name".into(), json!(v));
+                    }
+                }
+                if let Ok(v) = row.get::<_, Option<String>>(4) {
+                    if let Some(v) = v {
+                        obj.insert("email".into(), json!(v));
+                    }
+                }
+                if let Ok(v) = row.get::<_, Option<i64>>(5) {
+                    obj.insert("priority".into(), json!(v));
+                }
+                if let Ok(v) = row.get::<_, Option<bool>>(6) {
+                    obj.insert("isActive".into(), json!(v));
+                }
                 obj.insert("createdAt".into(), json!(row.get::<_, String>(8)?));
                 obj.insert("updatedAt".into(), json!(row.get::<_, String>(9)?));
             }
@@ -63,9 +80,8 @@ fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
 
     // Nodes
     let provider_nodes: Vec<Value> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes"
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let node_type: Option<String> = row.get(1)?;
@@ -73,7 +89,8 @@ fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
             let data_str: String = row.get(3)?;
             let created_at: String = row.get(4)?;
             let updated_at: String = row.get(5)?;
-            let data: Value = serde_json::from_str(&data_str).unwrap_or(Value::Object(Default::default()));
+            let data: Value =
+                serde_json::from_str(&data_str).unwrap_or(Value::Object(Default::default()));
             Ok(json!({
                 "id": id, "type": node_type, "name": name,
                 "createdAt": created_at, "updatedAt": updated_at,
@@ -86,11 +103,14 @@ fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
     // Proxy pools
     let proxy_pools: Vec<Value> = {
         let mut stmt = conn.prepare(
-            "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools"
+            "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools",
         )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
-            let is_active: Option<bool> = row.get::<_, Option<i32>>(1).map(|v| v.map(|x| x != 0)).unwrap_or(None);
+            let is_active: Option<bool> = row
+                .get::<_, Option<i32>>(1)
+                .map(|v| v.map(|x| x != 0))
+                .unwrap_or(None);
             let test_status: Option<String> = row.get(2)?;
             let created_at: String = row.get(4)?;
             let updated_at: String = row.get(5)?;
@@ -104,15 +124,17 @@ fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
 
     // API keys
     let api_keys: Vec<Value> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys"
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let key: String = row.get(1)?;
             let name: Option<String> = row.get(2)?;
             let machine_id: Option<String> = row.get(3)?;
-            let is_active: Option<bool> = row.get::<_, Option<i32>>(4).map(|v| v.map(|x| x != 0)).unwrap_or(None);
+            let is_active: Option<bool> = row
+                .get::<_, Option<i32>>(4)
+                .map(|v| v.map(|x| x != 0))
+                .unwrap_or(None);
             let created_at: String = row.get(5)?;
             Ok(json!({
                 "id": id, "key": key, "name": name, "machineId": machine_id,
@@ -124,9 +146,8 @@ fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
 
     // Combos
     let combos: Vec<Value> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, name, kind, models, data, createdAt, updatedAt FROM combos"
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, name, kind, models, data, createdAt, updatedAt FROM combos")?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let name: String = row.get(1)?;
@@ -179,7 +200,7 @@ fn export_usage_impl(conn: &Connection) -> rusqlite::Result<Value> {
         let mut stmt = conn.prepare(
             "SELECT timestamp, provider, model, connectionId, apiKey, endpoint,
                     promptTokens, completionTokens, cost, status, tokens, meta
-             FROM usageHistory ORDER BY timestamp DESC LIMIT 10000"
+             FROM usageHistory ORDER BY timestamp DESC LIMIT 10000",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(json!({
@@ -201,9 +222,13 @@ fn export_usage_impl(conn: &Connection) -> rusqlite::Result<Value> {
 }
 
 fn kv_scope_to_map(conn: &Connection, scope: &str) -> Value {
-    let mut stmt = conn.prepare("SELECT key, value FROM kv WHERE scope = ?1").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT key, value FROM kv WHERE scope = ?1")
+        .unwrap();
     let rows: Vec<(String, String)> = stmt
-        .query_map(rusqlite::params![scope], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map(rusqlite::params![scope], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
@@ -215,7 +240,9 @@ fn kv_scope_to_map(conn: &Connection, scope: &str) -> Value {
 }
 
 fn kv_scope_to_array(conn: &Connection, scope: &str) -> Vec<Value> {
-    let mut stmt = conn.prepare("SELECT value FROM kv WHERE scope = ?1").unwrap();
+    let mut stmt = conn
+        .prepare("SELECT value FROM kv WHERE scope = ?1")
+        .unwrap();
     stmt.query_map(rusqlite::params![scope], |row| {
         let s: String = row.get(0)?;
         Ok(serde_json::from_str(&s).unwrap_or(Value::Null))
@@ -240,17 +267,26 @@ fn chrono_like_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
 
     #[test]
     fn export_returns_json_with_all_keys() {
         let db = SqliteDb::open_in_memory().unwrap();
         let (bytes, _) = export_db(&db);
         let val: Value = serde_json::from_slice(&bytes).unwrap();
-        for key in &["schemaVersion", "settings", "providerConnections",
-                     "providerNodes", "proxyPools", "apiKeys", "combos",
-                     "modelAliases", "customModels", "mitmAlias", "pricing",
-                     "disabledModels"] {
+        for key in &[
+            "schemaVersion",
+            "settings",
+            "providerConnections",
+            "providerNodes",
+            "proxyPools",
+            "apiKeys",
+            "combos",
+            "modelAliases",
+            "customModels",
+            "mitmAlias",
+            "pricing",
+            "disabledModels",
+        ] {
             assert!(val.get(*key).is_some(), "missing key {key}");
         }
     }

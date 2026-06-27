@@ -6,7 +6,7 @@ use crate::types::ApiKey;
 
 pub fn get_active(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
     let mut stmt = conn.prepare(
-        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE isActive = 1"
+        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE isActive = 1",
     )?;
     let rows = stmt.query_map([], row_to_api_key)?;
     rows.collect()
@@ -14,7 +14,7 @@ pub fn get_active(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
 
 pub fn get_all(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
     let mut stmt = conn.prepare(
-        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys ORDER BY createdAt DESC"
+        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys ORDER BY createdAt DESC",
     )?;
     let rows = stmt.query_map([], row_to_api_key)?;
     rows.collect()
@@ -22,7 +22,7 @@ pub fn get_all(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
 
 pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiKey>> {
     let mut stmt = conn.prepare(
-        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE id = ?1"
+        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_api_key)?;
     Ok(rows.next().transpose()?)
@@ -39,7 +39,13 @@ pub fn create(conn: &Connection, k: &ApiKey) -> rusqlite::Result<()> {
 pub fn update(conn: &Connection, k: &ApiKey) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE apiKeys SET key=?2, name=?3, machineId=?4, isActive=?5 WHERE id=?1",
-        params![k.id, k.key, k.name, k.machine_id, k.is_active.map(|v| v as i32)],
+        params![
+            k.id,
+            k.key,
+            k.name,
+            k.machine_id,
+            k.is_active.map(|v| v as i32)
+        ],
     )?;
     Ok(())
 }
@@ -71,7 +77,8 @@ fn row_to_api_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json; use crate::db::sqlite::SqliteDb;
+    use crate::db::sqlite::SqliteDb;
+    use serde_json::json;
 
     #[test]
     fn roundtrip() {

@@ -22,14 +22,15 @@ async fn e2e_write_then_reload() {
     assert!(db.sqlite_enabled(), "SQLite should be active");
 
     db.update(|app| {
-        app.provider_connections.push(openproxy::types::ProviderConnection {
-            id: "e2e-1".into(),
-            provider: "openai".into(),
-            auth_type: "apikey".into(),
-            api_key: Some("sk-test".into()),
-            is_active: Some(true),
-            ..Default::default()
-        });
+        app.provider_connections
+            .push(openproxy::types::ProviderConnection {
+                id: "e2e-1".into(),
+                provider: "openai".into(),
+                auth_type: "apikey".into(),
+                api_key: Some("sk-test".into()),
+                is_active: Some(true),
+                ..Default::default()
+            });
     })
     .await
     .unwrap();
@@ -37,10 +38,7 @@ async fn e2e_write_then_reload() {
     // Second load: reload from disk, verify SQLite has the data
     let db2 = openproxy::db::Db::load().await.unwrap();
     let snap = db2.snapshot();
-    let found = snap
-        .provider_connections
-        .iter()
-        .find(|c| c.id == "e2e-1");
+    let found = snap.provider_connections.iter().find(|c| c.id == "e2e-1");
     assert!(found.is_some(), "connection must persist across reload");
 
     // Verify SQLite row count
@@ -86,9 +84,12 @@ async fn e2e_auto_import_legacy_json() {
         "pricing": {},
     });
     let legacy_path = tmp.path().join("db.json");
-    tokio::fs::write(&legacy_path, serde_json::to_vec_pretty(&legacy_json).unwrap())
-        .await
-        .unwrap();
+    tokio::fs::write(
+        &legacy_path,
+        serde_json::to_vec_pretty(&legacy_json).unwrap(),
+    )
+    .await
+    .unwrap();
 
     // Load → should auto-import
     let db = openproxy::db::Db::load().await.unwrap();
@@ -110,7 +111,10 @@ async fn e2e_auto_import_legacy_json() {
             )
         })
         .unwrap();
-    assert_eq!(count, 1, "legacy connection must be auto-imported into SQLite");
+    assert_eq!(
+        count, 1,
+        "legacy connection must be auto-imported into SQLite"
+    );
 }
 
 /// Integrity check runs on startup and returns "ok" on a fresh DB.
@@ -138,16 +142,15 @@ async fn e2e_concurrent_writes() {
             for j in 0..10 {
                 let id = format!("c-{i}-{j}");
                 db.update(move |app| {
-                    app.provider_connections.push(
-                        openproxy::types::ProviderConnection {
+                    app.provider_connections
+                        .push(openproxy::types::ProviderConnection {
                             id: id.clone(),
                             provider: "openai".into(),
                             auth_type: "apikey".into(),
                             api_key: Some(format!("sk-{i}-{j}")),
                             is_active: Some(true),
                             ..Default::default()
-                        },
-                    );
+                        });
                 })
                 .await
                 .unwrap();
@@ -183,16 +186,15 @@ async fn e2e_export_import_roundtrip() {
 
     let db = openproxy::db::Db::load().await.unwrap();
     db.update(|app| {
-        app.provider_connections.push(
-            openproxy::types::ProviderConnection {
+        app.provider_connections
+            .push(openproxy::types::ProviderConnection {
                 id: "rt-1".into(),
                 provider: "openai".into(),
                 auth_type: "apikey".into(),
                 api_key: Some("sk-roundtrip".into()),
                 is_active: Some(true),
                 ..Default::default()
-            },
-        );
+            });
         app.api_keys.push(openproxy::types::ApiKey {
             id: "k1".into(),
             key: "sk-machineid-12345678".into(),
@@ -224,7 +226,9 @@ async fn e2e_export_import_roundtrip() {
         "mitmAlias": {},
         "pricing": {},
     });
-    db.import_db(&serde_json::to_vec(&empty).unwrap()).await.unwrap();
+    db.import_db(&serde_json::to_vec(&empty).unwrap())
+        .await
+        .unwrap();
 
     // Verify gone
     let snap = db.snapshot();
@@ -289,14 +293,13 @@ async fn e2e_high_concurrency_stress() {
                 let id = format!("stress-{i}-{j}");
                 let _ = db
                     .update(move |app| {
-                        app.provider_connections.push(
-                            openproxy::types::ProviderConnection {
+                        app.provider_connections
+                            .push(openproxy::types::ProviderConnection {
                                 id: id.clone(),
                                 provider: "openai".into(),
                                 auth_type: "apikey".into(),
                                 ..Default::default()
-                            },
-                        );
+                            });
                     })
                     .await;
             }
@@ -321,5 +324,8 @@ async fn e2e_high_concurrency_stress() {
 
     let sq = db2.sqlite_handle().unwrap();
     let integrity = sq.integrity_check().unwrap();
-    assert_eq!(integrity, "ok", "SQLite must remain consistent after stress");
+    assert_eq!(
+        integrity, "ok",
+        "SQLite must remain consistent after stress"
+    );
 }

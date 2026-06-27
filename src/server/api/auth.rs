@@ -156,10 +156,7 @@ pub async fn login(
 
 /// GET /api/auth/status - Check if user is authenticated.
 /// Returns the current login status.
-pub async fn auth_status(
-    headers: HeaderMap,
-    State(state): State<AppState>,
-) -> Response {
+pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> Response {
     let logged_in = match crate::server::auth::require_dashboard_session(&headers, &state.db) {
         Ok(_) => true,
         Err(_) => false,
@@ -167,7 +164,8 @@ pub async fn auth_status(
     Json(json!({
         "authenticated": logged_in,
         "requireLogin": state.db.snapshot().settings.require_login,
-    })).into_response()
+    }))
+    .into_response()
 }
 
 pub async fn oidc_login(headers: HeaderMap, State(state): State<AppState>) -> Response {

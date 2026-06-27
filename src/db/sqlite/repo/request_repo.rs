@@ -3,9 +3,16 @@
 use rusqlite::{params, Connection};
 use serde_json::Value;
 
-pub fn save(conn: &Connection, id: &str, timestamp: &str, provider: Option<&str>,
-            model: Option<&str>, connection_id: Option<&str>, status: Option<&str>,
-            data: &Value) -> rusqlite::Result<()> {
+pub fn save(
+    conn: &Connection,
+    id: &str,
+    timestamp: &str,
+    provider: Option<&str>,
+    model: Option<&str>,
+    connection_id: Option<&str>,
+    status: Option<&str>,
+    data: &Value,
+) -> rusqlite::Result<()> {
     let data_str = serde_json::to_string(data).unwrap_or_else(|_| "{}".into());
     conn.execute(
         "INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, data) VALUES(?1,?2,?3,?4,?5,?6,?7)",
@@ -14,7 +21,20 @@ pub fn save(conn: &Connection, id: &str, timestamp: &str, provider: Option<&str>
     Ok(())
 }
 
-pub fn get_recent(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<(String, String, Option<String>, Option<String>, Option<String>, Option<String>, Value)>> {
+pub fn get_recent(
+    conn: &Connection,
+    limit: i64,
+) -> rusqlite::Result<
+    Vec<(
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Value,
+    )>,
+> {
     let mut stmt = conn.prepare(
         "SELECT id, timestamp, provider, model, connectionId, status, data FROM requestDetails ORDER BY timestamp DESC LIMIT ?1"
     )?;
@@ -35,14 +55,25 @@ pub fn get_recent(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<(String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json; use crate::db::sqlite::SqliteDb;
+    use crate::db::sqlite::SqliteDb;
+    use serde_json::json;
 
     #[test]
     fn roundtrip() {
         let db = SqliteDb::open_in_memory().unwrap();
         db.with_transaction(|tx| {
-            save(tx, "r1", "2026-01-01T00:00:00Z", Some("openai"), Some("gpt-4o"), Some("c1"), Some("success"), &serde_json::json!({"prompt": "hello"}))
-        }).unwrap();
+            save(
+                tx,
+                "r1",
+                "2026-01-01T00:00:00Z",
+                Some("openai"),
+                Some("gpt-4o"),
+                Some("c1"),
+                Some("success"),
+                &serde_json::json!({"prompt": "hello"}),
+            )
+        })
+        .unwrap();
         let recent = db.with_conn(|c| get_recent(c, 10)).unwrap();
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].0, "r1");

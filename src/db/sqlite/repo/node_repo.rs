@@ -5,7 +5,10 @@ use serde_json::Value;
 
 use crate::types::ProviderNode;
 
-pub fn get_by_type(conn: &Connection, node_type: Option<&str>) -> rusqlite::Result<Vec<ProviderNode>> {
+pub fn get_by_type(
+    conn: &Connection,
+    node_type: Option<&str>,
+) -> rusqlite::Result<Vec<ProviderNode>> {
     let rows = if let Some(t) = node_type {
         let mut stmt = conn.prepare(
             "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes WHERE type = ?1 ORDER BY name"
@@ -14,7 +17,7 @@ pub fn get_by_type(conn: &Connection, node_type: Option<&str>) -> rusqlite::Resu
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         let mut stmt = conn.prepare(
-            "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes ORDER BY name"
+            "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes ORDER BY name",
         )?;
         let rows = stmt.query_map([], row_to_node)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
@@ -24,7 +27,7 @@ pub fn get_by_type(conn: &Connection, node_type: Option<&str>) -> rusqlite::Resu
 
 pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ProviderNode>> {
     let mut stmt = conn.prepare(
-        "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes WHERE id = ?1"
+        "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_node)?;
     Ok(rows.next().transpose()?)
@@ -41,7 +44,13 @@ pub fn create(conn: &Connection, n: &ProviderNode) -> rusqlite::Result<()> {
 pub fn update(conn: &Connection, n: &ProviderNode) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE providerNodes SET type=?2, name=?3, data=?4, updatedAt=?5 WHERE id=?1",
-        params![n.id, n.r#type, n.name, node_to_data(n), n.updated_at.as_deref().unwrap_or("")],
+        params![
+            n.id,
+            n.r#type,
+            n.name,
+            node_to_data(n),
+            n.updated_at.as_deref().unwrap_or("")
+        ],
     )?;
     Ok(())
 }
@@ -93,7 +102,8 @@ fn node_to_data(n: &ProviderNode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json; use crate::db::sqlite::SqliteDb;
+    use crate::db::sqlite::SqliteDb;
+    use serde_json::json;
 
     #[test]
     fn roundtrip() {
@@ -109,7 +119,9 @@ mod tests {
         db.with_transaction(|tx| create(tx, &node)).unwrap();
         let read = db.with_conn(|c| get_by_id(c, "n1")).unwrap().unwrap();
         assert_eq!(read.name, "test-node");
-        let all = db.with_conn(|c| get_by_type(c, Some("openai-compatible"))).unwrap();
+        let all = db
+            .with_conn(|c| get_by_type(c, Some("openai-compatible")))
+            .unwrap();
         assert_eq!(all.len(), 1);
     }
 }

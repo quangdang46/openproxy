@@ -172,10 +172,7 @@ pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
         .get("messages")
         .or_else(|| body.get("input"))
         .or_else(|| body.get("contents"))
-        .or_else(|| {
-            body.get("request")
-                .and_then(|r| r.get("contents"))
-        })
+        .or_else(|| body.get("request").and_then(|r| r.get("contents")))
         .and_then(Value::as_array);
 
     let Some(messages) = messages else {
@@ -185,7 +182,10 @@ pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
     // Search capability detection runs independently of message array presence.
     let mut required = HashSet::new();
     if let Some(tools) = body.get("tools").and_then(Value::as_array) {
-        if tools.iter().any(|t| t.get("type").and_then(Value::as_str) == Some("search")) {
+        if tools
+            .iter()
+            .any(|t| t.get("type").and_then(Value::as_str) == Some("search"))
+        {
             required.insert("search".to_string());
         }
     }
@@ -253,14 +253,8 @@ fn scan_content_for_capabilities(content: &Value, required: &mut HashSet<String>
                     Some("inlineData" | "fileData") => {
                         let mime = item
                             .get("mimeType")
-                            .or_else(|| {
-                                item.get("inlineData")
-                                    .and_then(|d| d.get("mimeType"))
-                            })
-                            .or_else(|| {
-                                item.get("fileData")
-                                    .and_then(|d| d.get("mimeType"))
-                            })
+                            .or_else(|| item.get("inlineData").and_then(|d| d.get("mimeType")))
+                            .or_else(|| item.get("fileData").and_then(|d| d.get("mimeType")))
                             .and_then(Value::as_str)
                             .unwrap_or("");
                         if mime.starts_with("image/") {
@@ -311,7 +305,10 @@ fn model_has_capability(entry: &str, capability: &str) -> bool {
                 return true;
             }
             // Model-name patterns
-            if entry_lower.contains("vision") || entry_lower.contains("-4o") || entry_lower.contains("gemini") {
+            if entry_lower.contains("vision")
+                || entry_lower.contains("-4o")
+                || entry_lower.contains("gemini")
+            {
                 return true;
             }
             false

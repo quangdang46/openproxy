@@ -81,12 +81,12 @@ impl Format {
         matches!(
             self,
             Self::Gemini
-            | Self::GeminiCli
-            | Self::Vertex
-            | Self::Ollama
-            | Self::CommandCode
-            | Self::Antigravity
-            | Self::Kiro
+                | Self::GeminiCli
+                | Self::Vertex
+                | Self::Ollama
+                | Self::CommandCode
+                | Self::Antigravity
+                | Self::Kiro
         )
     }
 }

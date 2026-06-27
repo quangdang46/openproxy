@@ -628,15 +628,13 @@ mod tests {
         // Issue #156 regression: custom models must appear in /v1/models
         // even when there are no provider connections.
         let snapshot = AppDb {
-            custom_models: vec![
-                CustomModel {
-                    provider_alias: "tr".into(),
-                    id: "MiniMax-M3".into(),
-                    r#type: String::new(),
-                    name: None,
-                    extra: BTreeMap::new(),
-                },
-            ],
+            custom_models: vec![CustomModel {
+                provider_alias: "tr".into(),
+                id: "MiniMax-M3".into(),
+                r#type: String::new(),
+                name: None,
+                extra: BTreeMap::new(),
+            }],
             ..Default::default()
         };
 
@@ -660,15 +658,13 @@ mod tests {
                 ]),
                 ..Default::default()
             }],
-            custom_models: vec![
-                CustomModel {
-                    provider_alias: "tr".into(),
-                    id: "MiniMax-M3".into(),
-                    r#type: String::new(),
-                    name: None,
-                    extra: BTreeMap::new(),
-                },
-            ],
+            custom_models: vec![CustomModel {
+                provider_alias: "tr".into(),
+                id: "MiniMax-M3".into(),
+                r#type: String::new(),
+                name: None,
+                extra: BTreeMap::new(),
+            }],
             ..Default::default()
         };
 
@@ -692,15 +688,13 @@ mod tests {
                 ]),
                 ..Default::default()
             }],
-            custom_models: vec![
-                CustomModel {
-                    provider_alias: "ocg".into(),
-                    id: "gpt-4o".into(),
-                    r#type: String::new(),
-                    name: None,
-                    extra: BTreeMap::new(),
-                },
-            ],
+            custom_models: vec![CustomModel {
+                provider_alias: "ocg".into(),
+                id: "gpt-4o".into(),
+                r#type: String::new(),
+                name: None,
+                extra: BTreeMap::new(),
+            }],
             ..Default::default()
         };
 
@@ -734,9 +728,13 @@ mod tests {
         };
 
         let models = build_models_list(&snapshot, &[LLM_KIND]).await;
-        assert!(models.iter().any(|m| m.id == "tr/MiniMax-M3"),
-            "llm-type custom model should appear in LLM list");
-        assert!(!models.iter().any(|m| m.id == "tr/flux-pro"),
-            "image-type custom model should NOT appear in LLM list");
+        assert!(
+            models.iter().any(|m| m.id == "tr/MiniMax-M3"),
+            "llm-type custom model should appear in LLM list"
+        );
+        assert!(
+            !models.iter().any(|m| m.id == "tr/flux-pro"),
+            "image-type custom model should NOT appear in LLM list"
+        );
     }
 }

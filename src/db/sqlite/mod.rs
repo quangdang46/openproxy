@@ -41,7 +41,9 @@ struct SqliteInner {
 
 impl std::fmt::Debug for SqliteDb {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SqliteDb").field("path", &self.inner.path).finish()
+        f.debug_struct("SqliteDb")
+            .field("path", &self.inner.path)
+            .finish()
     }
 }
 
@@ -58,7 +60,9 @@ impl SqliteDb {
             conn: Mutex::new(conn),
             path,
         };
-        let db = SqliteDb { inner: Arc::new(inner) };
+        let db = SqliteDb {
+            inner: Arc::new(inner),
+        };
         db.init()?;
         Ok(db)
     }
@@ -70,7 +74,9 @@ impl SqliteDb {
             conn: Mutex::new(conn),
             path: PathBuf::from(":memory:"),
         };
-        let db = SqliteDb { inner: Arc::new(inner) };
+        let db = SqliteDb {
+            inner: Arc::new(inner),
+        };
         db.init()?;
         Ok(db)
     }
@@ -153,9 +159,8 @@ mod tests {
         let db = SqliteDb::open_in_memory().unwrap();
         let names: Vec<String> = db
             .with_conn(|c| {
-                let mut stmt = c.prepare(
-                    "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name",
-                )?;
+                let mut stmt =
+                    c.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?;
                 let rows = stmt.query_map([], |row| row.get(0))?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
             })
@@ -265,9 +270,7 @@ mod tests {
         assert!(result.is_err());
         // The first insert must have rolled back.
         let count: i64 = db
-            .with_conn(|c| {
-                Ok(c.query_row("SELECT COUNT(*) FROM apiKeys", [], |row| row.get(0))?)
-            })
+            .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM apiKeys", [], |row| row.get(0))?))
             .unwrap();
         assert_eq!(count, 0);
     }

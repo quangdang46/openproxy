@@ -237,7 +237,6 @@ pub fn routes() -> Router<AppState> {
         .merge(db_backups::routes())
 }
 
-
 async fn v1_root() -> Response {
     Json(json!({
         "version": "v1",
@@ -256,7 +255,8 @@ async fn v1_root() -> Response {
             "/v1/models",
             "/v1/usage",
         ]
-    })).into_response()
+    }))
+    .into_response()
 }
 
 async fn health() -> Json<HealthResponse> {

@@ -92,22 +92,26 @@ fn filter_blocks(
     is_last: bool,
 ) {
     let mut removed = Vec::new();
-    blocks.retain(|block| {
-        match cap_of(block) {
-            Some("vision") if !caps.vision => {
-                if !removed.contains(&"vision") { removed.push("vision"); }
-                false
+    blocks.retain(|block| match cap_of(block) {
+        Some("vision") if !caps.vision => {
+            if !removed.contains(&"vision") {
+                removed.push("vision");
             }
-            Some("audioInput") if !caps.audio_input => {
-                if !removed.contains(&"audioInput") { removed.push("audioInput"); }
-                false
-            }
-            Some("pdf") if !caps.pdf => {
-                if !removed.contains(&"pdf") { removed.push("pdf"); }
-                false
-            }
-            _ => true,
+            false
         }
+        Some("audioInput") if !caps.audio_input => {
+            if !removed.contains(&"audioInput") {
+                removed.push("audioInput");
+            }
+            false
+        }
+        Some("pdf") if !caps.pdf => {
+            if !removed.contains(&"pdf") {
+                removed.push("pdf");
+            }
+            false
+        }
+        _ => true,
     });
     for cap in &removed {
         blocks.push(json!({"type": "text", "text": placeholder(cap, is_last)}));
@@ -164,11 +168,15 @@ fn strip_responses(body: &mut Value, caps: &ModalityCapabilities) {
         content.retain(|block| {
             let t = block.get("type").and_then(|t| t.as_str());
             if t == Some("input_image") && !caps.vision {
-                if !removed.contains(&"vision") { removed.push("vision"); }
+                if !removed.contains(&"vision") {
+                    removed.push("vision");
+                }
                 return false;
             }
             if t == Some("input_file") && !caps.pdf {
-                if !removed.contains(&"pdf") { removed.push("pdf"); }
+                if !removed.contains(&"pdf") {
+                    removed.push("pdf");
+                }
                 return false;
             }
             true
@@ -204,15 +212,21 @@ fn strip_gemini(body: &mut Value, caps: &ModalityCapabilities) {
                 });
             match mime.and_then(cap_for_mime) {
                 Some("vision") if !caps.vision => {
-                    if !removed.contains(&"vision") { removed.push("vision"); }
+                    if !removed.contains(&"vision") {
+                        removed.push("vision");
+                    }
                     false
                 }
                 Some("audioInput") if !caps.audio_input => {
-                    if !removed.contains(&"audioInput") { removed.push("audioInput"); }
+                    if !removed.contains(&"audioInput") {
+                        removed.push("audioInput");
+                    }
                     false
                 }
                 Some("pdf") if !caps.pdf => {
-                    if !removed.contains(&"pdf") { removed.push("pdf"); }
+                    if !removed.contains(&"pdf") {
+                        removed.push("pdf");
+                    }
                     false
                 }
                 _ => true,
@@ -241,11 +255,7 @@ pub fn strip_unsupported_modalities(
     }
 
     match source_format {
-        Format::OpenAi
-        | Format::Ollama
-        | Format::Kiro
-        | Format::Cursor
-        | Format::CommandCode => {
+        Format::OpenAi | Format::Ollama | Format::Kiro | Format::Cursor | Format::CommandCode => {
             strip_openai(body, caps);
         }
         Format::Claude => {
@@ -281,15 +291,21 @@ pub fn strip_unsupported_modalities(
                                     });
                                 match mime.and_then(cap_for_mime) {
                                     Some("vision") if !caps.vision => {
-                                        if !removed.contains(&"vision") { removed.push("vision"); }
+                                        if !removed.contains(&"vision") {
+                                            removed.push("vision");
+                                        }
                                         false
                                     }
                                     Some("audioInput") if !caps.audio_input => {
-                                        if !removed.contains(&"audioInput") { removed.push("audioInput"); }
+                                        if !removed.contains(&"audioInput") {
+                                            removed.push("audioInput");
+                                        }
                                         false
                                     }
                                     Some("pdf") if !caps.pdf => {
-                                        if !removed.contains(&"pdf") { removed.push("pdf"); }
+                                        if !removed.contains(&"pdf") {
+                                            removed.push("pdf");
+                                        }
                                         false
                                     }
                                     _ => true,
@@ -348,22 +364,38 @@ mod tests {
     use serde_json::json;
 
     fn caps_all_true() -> ModalityCapabilities {
-        ModalityCapabilities { vision: true, audio_input: true, pdf: true }
+        ModalityCapabilities {
+            vision: true,
+            audio_input: true,
+            pdf: true,
+        }
     }
 
     fn caps_no_vision() -> ModalityCapabilities {
-        ModalityCapabilities { vision: false, audio_input: true, pdf: true }
+        ModalityCapabilities {
+            vision: false,
+            audio_input: true,
+            pdf: true,
+        }
     }
 
     fn caps_text_only() -> ModalityCapabilities {
-        ModalityCapabilities { vision: false, audio_input: false, pdf: false }
+        ModalityCapabilities {
+            vision: false,
+            audio_input: false,
+            pdf: false,
+        }
     }
 
     #[test]
     fn test_fast_exit_when_all_caps_supported() {
         let mut body = json!({"messages":[{"role":"user","content":[{"type":"image_url","image_url":{"url":"http://example.com/img.png"}}]}]});
         // Fast exit: all caps true → no stripping, returns false
-        assert!(!strip_unsupported_modalities(&mut body, Format::OpenAi, &caps_all_true()));
+        assert!(!strip_unsupported_modalities(
+            &mut body,
+            Format::OpenAi,
+            &caps_all_true()
+        ));
         // Body unchanged
         assert!(body["messages"][0]["content"][0].get("image_url").is_some());
     }
@@ -374,13 +406,20 @@ mod tests {
             {"type":"text","text":"hello"},
             {"type":"image_url","image_url":{"url":"http://example.com/img.png"}}
         ]}]});
-        assert!(strip_unsupported_modalities(&mut body, Format::OpenAi, &caps_no_vision()));
+        assert!(strip_unsupported_modalities(
+            &mut body,
+            Format::OpenAi,
+            &caps_no_vision()
+        ));
         // Image block replaced with placeholder
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[1]["type"], "text");
-        assert!(content[1]["text"].as_str().unwrap().contains("image omitted"));
+        assert!(content[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("image omitted"));
     }
 
     #[test]
@@ -389,11 +428,18 @@ mod tests {
             {"type":"text","text":"hello"},
             {"type":"image","source":{"type":"url","url":"http://example.com/img.png"}}
         ]}]});
-        assert!(strip_unsupported_modalities(&mut body, Format::Claude, &caps_no_vision()));
+        assert!(strip_unsupported_modalities(
+            &mut body,
+            Format::Claude,
+            &caps_no_vision()
+        ));
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[1]["type"], "text");
-        assert!(content[1]["text"].as_str().unwrap().contains("image omitted"));
+        assert!(content[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("image omitted"));
     }
 
     #[test]
@@ -402,7 +448,11 @@ mod tests {
             {"text":"hello"},
             {"inlineData":{"mimeType":"image/png","data":"abc123"}}
         ]}]});
-        assert!(strip_unsupported_modalities(&mut body, Format::Gemini, &caps_no_vision()));
+        assert!(strip_unsupported_modalities(
+            &mut body,
+            Format::Gemini,
+            &caps_no_vision()
+        ));
         let parts = body["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert!(parts[1]["text"].as_str().unwrap().contains("image omitted"));
@@ -414,10 +464,17 @@ mod tests {
             {"type":"input_text","text":"hello"},
             {"type":"input_image","image_url":"http://example.com/img.png"}
         ]}]});
-        assert!(strip_unsupported_modalities(&mut body, Format::OpenAiResponses, &caps_no_vision()));
+        assert!(strip_unsupported_modalities(
+            &mut body,
+            Format::OpenAiResponses,
+            &caps_no_vision()
+        ));
         let content = body["input"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
-        assert!(content[1]["text"].as_str().unwrap().contains("image omitted"));
+        assert!(content[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("image omitted"));
     }
 
     #[test]
@@ -426,10 +483,17 @@ mod tests {
             {"role":"user","content":[{"type":"image_url","image_url":{"url":"http://img.png"}}]},
             {"role":"user","content":[{"type":"image_url","image_url":{"url":"http://img2.png"}}]},
         ]});
-        assert!(strip_unsupported_modalities(&mut body, Format::OpenAi, &caps_no_vision()));
+        assert!(strip_unsupported_modalities(
+            &mut body,
+            Format::OpenAi,
+            &caps_no_vision()
+        ));
         let c0 = &body["messages"][0]["content"].as_array().unwrap()[0];
         let c1 = &body["messages"][1]["content"].as_array().unwrap()[0];
-        assert!(c0["text"].as_str().unwrap().contains("Previous image omitted"));
+        assert!(c0["text"]
+            .as_str()
+            .unwrap()
+            .contains("Previous image omitted"));
         assert!(c1["text"].as_str().unwrap().contains("image omitted"));
     }
 
@@ -437,7 +501,11 @@ mod tests {
     fn test_no_op_when_no_multimodal_blocks() {
         let mut body = json!({"messages":[{"role":"user","content":"plain text"}]});
         // text-only messages are not content arrays, so nested loops skip
-        assert!(strip_unsupported_modalities(&mut body, Format::OpenAi, &caps_no_vision()));
+        assert!(strip_unsupported_modalities(
+            &mut body,
+            Format::OpenAi,
+            &caps_no_vision()
+        ));
         assert_eq!(body["messages"][0]["content"], "plain text");
     }
 
@@ -448,7 +516,11 @@ mod tests {
             {"type":"input_audio","input_audio":{"data":"..."}},
             {"type":"file","file":{"filename":"doc.pdf"}},
         ]}]});
-        assert!(strip_unsupported_modalities(&mut body, Format::OpenAi, &caps_text_only()));
+        assert!(strip_unsupported_modalities(
+            &mut body,
+            Format::OpenAi,
+            &caps_text_only()
+        ));
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 3);
         for part in content {

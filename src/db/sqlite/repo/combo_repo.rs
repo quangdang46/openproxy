@@ -6,7 +6,7 @@ use crate::types::Combo;
 
 pub fn get_all(conn: &Connection) -> rusqlite::Result<Vec<Combo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, kind, models, data, createdAt, updatedAt FROM combos ORDER BY name"
+        "SELECT id, name, kind, models, data, createdAt, updatedAt FROM combos ORDER BY name",
     )?;
     let rows = stmt.query_map([], row_to_combo)?;
     rows.collect()
@@ -14,7 +14,7 @@ pub fn get_all(conn: &Connection) -> rusqlite::Result<Vec<Combo>> {
 
 pub fn get_by_name(conn: &Connection, name: &str) -> rusqlite::Result<Option<Combo>> {
     let mut stmt = conn.prepare(
-        "SELECT id, name, kind, models, data, createdAt, updatedAt FROM combos WHERE name = ?1"
+        "SELECT id, name, kind, models, data, createdAt, updatedAt FROM combos WHERE name = ?1",
     )?;
     let mut rows = stmt.query_map(params![name], row_to_combo)?;
     Ok(rows.next().transpose()?)
@@ -35,7 +35,13 @@ pub fn update(conn: &Connection, c: &Combo) -> rusqlite::Result<()> {
     let data_json = serde_json::to_string(&c.extra).unwrap_or_else(|_| "{}".into());
     conn.execute(
         "UPDATE combos SET kind=?2, models=?3, data=?4, updatedAt=?5 WHERE id=?1",
-        params![c.id, c.kind, models_json, data_json, c.updated_at.as_deref().unwrap_or("")],
+        params![
+            c.id,
+            c.kind,
+            models_json,
+            data_json,
+            c.updated_at.as_deref().unwrap_or("")
+        ],
     )?;
     Ok(())
 }
@@ -70,7 +76,8 @@ fn row_to_combo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Combo> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json; use crate::db::sqlite::SqliteDb;
+    use crate::db::sqlite::SqliteDb;
+    use serde_json::json;
 
     #[test]
     fn roundtrip() {
@@ -85,7 +92,10 @@ mod tests {
             ..Default::default()
         };
         db.with_transaction(|tx| create(tx, &combo)).unwrap();
-        let read = db.with_conn(|c| get_by_name(c, "mycombo")).unwrap().unwrap();
+        let read = db
+            .with_conn(|c| get_by_name(c, "mycombo"))
+            .unwrap()
+            .unwrap();
         assert_eq!(read.models.len(), 2);
     }
 

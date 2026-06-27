@@ -11,8 +11,8 @@ use crate::types::{AppDb, Combo, ModelAliasTarget, ProviderConnection, ProviderN
 
 pub mod backups;
 pub mod crypto;
-pub mod watcher;
 pub mod sqlite;
+pub mod watcher;
 
 #[derive(Debug, Clone, Default)]
 pub struct ProviderConnectionFilter {
@@ -472,7 +472,11 @@ fn read_verified_value(bytes: &[u8]) -> anyhow::Result<serde_json::Value> {
 /// Write an `AppDb` to disk: encrypt sensitive connection fields, embed
 /// `schema_version`, serialize with a SHA-256 checksum, then restore
 /// plaintext on `value` so the in-memory copy remains usable.
-async fn write_app_db_atomic(value: &mut AppDb, path: &Path, key: Option<&str>) -> anyhow::Result<()> {
+async fn write_app_db_atomic(
+    value: &mut AppDb,
+    path: &Path,
+    key: Option<&str>,
+) -> anyhow::Result<()> {
     if let Some(k) = key {
         for conn in &mut value.provider_connections {
             crate::db::crypto::encrypt_connection(conn, k);
@@ -585,7 +589,9 @@ mod tests {
             ..Default::default()
         }];
 
-        write_app_db_atomic(&mut db, &path, Some("test-key")).await.unwrap();
+        write_app_db_atomic(&mut db, &path, Some("test-key"))
+            .await
+            .unwrap();
 
         let bytes = tokio::fs::read(&path).await.unwrap();
         let raw: Value = serde_json::from_slice(&bytes).unwrap();
