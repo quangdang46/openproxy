@@ -143,13 +143,29 @@ impl CodexExecutor {
     }
 
     /// Build request headers for OpenAI Responses API.
-    fn build_headers(&self, api_key: &str, stream: bool) -> Result<HeaderMap, CodexExecutorError> {
+    fn build_headers(&self, api_key: &str, stream: bool, connection_id: Option<&str>) -> Result<HeaderMap, CodexExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {}", api_key))
                 .map_err(CodexExecutorError::InvalidHeader)?,
+        );
+
+        // 9router parity: session_id header for request session continuity.
+        // Derives from connection_id or falls back to "default".
+        let session_id = connection_id.and_then(|cid| {
+            if cid.is_empty() { None } else { Some(cid) }
+        }).unwrap_or("default");
+        headers.insert(
+            "session_id",
+            HeaderValue::from_str(session_id).map_err(CodexExecutorError::InvalidHeader)?,
+        );
+
+        // 9router parity: identify client type to Codex backend.
+        headers.insert(
+            "originator",
+            HeaderValue::from_static("codex_cli_rs"),
         );
 
         if stream {
@@ -268,7 +284,10 @@ impl CodexExecutor {
                 CodexExecutorError::MissingCredentials("API key required".to_string())
             })?;
 
-        let headers = self.build_headers(api_key, request.stream)?;
+        let connection_id = request.credentials.email.as_deref()
+            .or(request.credentials.id.as_str().into())
+            .or(request.credentials.display_name.as_deref());
+        let headers = self.build_headers(api_key, request.stream, connection_id)?;
         let transformed_body = self.transform_request_body(&request.body, &actual_model)?;
 
         let client = self.pool.get("openai", request.proxy.as_ref())?;
