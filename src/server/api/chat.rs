@@ -2369,18 +2369,38 @@ async fn extract_error_message(response: UpstreamResponse) -> String {
 }
 
 fn retry_after_from_headers(headers: &HeaderMap) -> Option<DateTime<Utc>> {
-    let value = headers.get("retry-after")?.to_str().ok()?.trim();
-    if value.is_empty() {
-        return None;
+    // Standard retry-after header (HTTP/1.1)
+    if let Some(value) = headers.get("retry-after").and_then(|v| v.to_str().ok()) {
+        let trimmed = value.trim();
+        if let Ok(seconds) = trimmed.parse::<i64>() {
+            return Some(Utc::now() + ChronoDuration::seconds(seconds.max(0)));
+        }
+        if let Ok(timestamp) = DateTime::parse_from_rfc2822(trimmed) {
+            return Some(timestamp.with_timezone(&Utc));
+        }
     }
 
-    if let Ok(seconds) = value.parse::<i64>() {
-        return Some(Utc::now() + ChronoDuration::seconds(seconds.max(0)));
+    // Google-specific rate limit headers (used by Antigravity / Cloud Code)
+    // x-ratelimit-reset-after: seconds until rate limit resets (relative)
+    if let Some(value) = headers.get("x-ratelimit-reset-after").and_then(|v| v.to_str().ok()) {
+        if let Ok(seconds) = value.trim().parse::<i64>() {
+            if seconds > 0 {
+                return Some(Utc::now() + ChronoDuration::seconds(seconds));
+            }
+        }
     }
 
-    DateTime::parse_from_rfc2822(value)
-        .map(|timestamp| timestamp.with_timezone(&Utc))
-        .ok()
+    // x-ratelimit-reset: unix timestamp (seconds) when rate limit resets (absolute)
+    if let Some(value) = headers.get("x-ratelimit-reset").and_then(|v| v.to_str().ok()) {
+        if let Ok(ts) = value.trim().parse::<i64>() {
+            let now = Utc::now().timestamp();
+            if ts > now {
+                return Some(Utc::now() + ChronoDuration::seconds(ts - now));
+            }
+        }
+    }
+
+    None
 }
 
 fn is_hop_by_hop_header(name: &str) -> bool {
