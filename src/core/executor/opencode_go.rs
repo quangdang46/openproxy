@@ -23,10 +23,19 @@ const ALLOWED_TOOL_TYPES: &[&str] = &["function"];
 // Tool-level fields that Fireworks AI / OCg upstream rejects
 const TOOL_FORBIDDEN_FIELDS: &[&str] = &["strict"];
 
-const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/v1";
+const OPENCODE_GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 const OPENCODE_GO_CLAUDE_PATH: &str = "/messages";
 const OPENCODE_GO_DEFAULT_PATH: &str = "/chat/completions";
-const CLAUDE_FORMAT_MODELS: [&str; 2] = ["minimax-m2.5", "minimax-m2.7"];
+// Models that use /zen/go/v1/messages (Anthropic/Claude format + x-api-key auth)
+// Matches 9router open-sse/executors/opencode-go.js
+const CLAUDE_FORMAT_MODELS: [&str; 6] = [
+    "minimax-m3",
+    "minimax-m2.7",
+    "minimax-m2.5",
+    "qwen3.7-max",
+    "qwen3.7-plus",
+    "qwen3.6-plus",
+];
 
 #[derive(Clone)]
 pub struct OpenCodeGoExecutor {
