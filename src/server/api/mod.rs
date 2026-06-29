@@ -42,7 +42,8 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{
-    routing::{get, post},
+    extract::Path,
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -202,18 +203,24 @@ pub fn routes() -> Router<AppState> {
         // Dashboard API endpoints
         .route("/api/providers", get(list_providers_api))
         .route("/api/providers", post(create_provider_api))
+        // Provider CRUD is handled by providers::routes()
         .route("/api/nodes", get(list_nodes_api))
         .route("/api/nodes", post(create_node_api))
         .route("/api/combos", get(list_combos_api))
         .route("/api/combos", post(create_combo_api))
+        // Combo CRUD is handled by admin_items::routes() at /api/combos/{id}
         .route(
             "/api/combos/test-model",
             post(provider_model_tests::test_combo_model),
         )
         .route("/api/keys", get(list_keys_api))
         .route("/api/keys", post(create_key_api))
+        .route("/api/keys/{id}", delete(delete_key_api))
+        .route("/api/keys/{id}", put(update_key_api))
         .route("/api/proxy-pools", get(list_pools_api))
         .route("/api/proxy-pools", post(create_pool_api))
+        .route("/api/proxy-pools/{id}", put(update_pool_api))
+        .route("/api/proxy-pools/{id}", delete(delete_pool_api))
         .route(
             "/api/settings",
             get(get_settings_api)
@@ -658,6 +665,94 @@ async fn create_provider_api(
     }
 }
 
+// Provider CRUD - GET, PUT, DELETE by id
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateProviderRequest {
+    name: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    is_active: Option<bool>,
+}
+
+// Branch 1: create_provider_api ... (definition continues above at line 536)
+async fn get_provider_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+    let snapshot = state.db.snapshot();
+    let connections = snapshot.provider_connections.clone();
+    let found = connections
+        .iter()
+        .find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false))
+        .cloned();
+    match found {
+        Some(conn) => Json(json!({ "provider": conn })).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "Provider not found" }))).into_response(),
+    }
+}
+
+async fn update_provider_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateProviderRequest>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+    let snapshot = state.db.snapshot();
+    let exists = snapshot.provider_connections.iter().any(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+    if !exists {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "Provider not found" }))).into_response();
+    }
+    let result = state.db.update(|db| {
+        if let Some(conn) = db.provider_connections.iter_mut().find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false)) {
+            if let Some(name) = req.name { conn.name = Some(name); }
+            if let Some(api_key) = req.api_key { conn.api_key = Some(api_key); }
+            if let Some(base_url) = req.base_url { conn.provider_specific_data.insert("baseUrl".to_string(), Value::String(base_url)); }
+            if let Some(is_active) = req.is_active { conn.is_active = Some(is_active); }
+            conn.updated_at = Some(chrono::Utc::now().to_rfc3339());
+        }
+    }).await;
+    match result {
+        Ok(_) => {
+            let snapshot = state.db.snapshot();
+            match snapshot.provider_connections.iter().find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false)) {
+                Some(conn) => Json(json!({ "provider": conn })).into_response(),
+                None => (StatusCode::NOT_FOUND, Json(json!({ "error": "Provider not found after update" }))).into_response(),
+            }
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
+async fn delete_provider_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+    let snapshot = state.db.snapshot();
+    let exists = snapshot.provider_connections.iter().any(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+    if !exists {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": "Provider not found" }))).into_response();
+    }
+    let result = state.db.update(|db| {
+        db.provider_connections.retain(|c| c.id != id && !c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+    }).await;
+    match result {
+        Ok(_) => Json(json!({ "success": true, "message": "Provider deleted" })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+    }
+}
+
 // Node CRUD API
 async fn list_nodes_api(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
@@ -822,6 +917,112 @@ async fn create_combo_api(
     }
 }
 
+// PUT /api/combos/{name} - Update combo
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateComboRequest {
+    #[serde(default)]
+    models: Option<Vec<String>>,
+    kind: Option<String>,
+}
+
+async fn update_combo_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+    Json(req): Json<UpdateComboRequest>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    // First check if combo exists
+    let snapshot = state.db.snapshot();
+    let combo_exists = snapshot.combos.iter().any(|c| c.name == name);
+
+    if !combo_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Combo not found" })),
+        )
+            .into_response();
+    }
+
+    let result = state
+        .db
+        .update(|db| {
+            if let Some(combo) = db.combos.iter_mut().find(|c| c.name == name) {
+                if let Some(models) = req.models {
+                    combo.models = models;
+                }
+                if let Some(kind) = req.kind {
+                    combo.kind = Some(kind);
+                }
+                combo.updated_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        })
+        .await;
+
+    match result {
+        Ok(_) => {
+            // Fetch updated combo
+            let snapshot = state.db.snapshot();
+            match snapshot.combos.iter().find(|c| c.name == name) {
+                Some(combo) => (StatusCode::OK, Json(combo.clone())).into_response(),
+                None => (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "Combo not found after update" })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// DELETE /api/combos/{name} - Delete combo
+async fn delete_combo_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    // First check if combo exists
+    let snapshot = state.db.snapshot();
+    let combo_exists = snapshot.combos.iter().any(|c| c.name == name);
+
+    if !combo_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Combo not found" })),
+        )
+            .into_response();
+    }
+
+    let result = state
+        .db
+        .update(|db| {
+            db.combos.retain(|c| c.name != name);
+        })
+        .await;
+
+    match result {
+        Ok(_) => Json(json!({ "success": true, "message": "Combo deleted" })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 // API Key CRUD API
 async fn list_keys_api(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
@@ -902,6 +1103,112 @@ async fn create_key_api(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// API Key CRUD - PUT + DELETE
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateKeyRequest {
+    name: Option<String>,
+    is_active: Option<bool>,
+}
+
+async fn update_key_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateKeyRequest>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    // Check exists
+    let snapshot = state.db.snapshot();
+    let exists = snapshot.api_keys.iter().any(|k| k.id == id);
+
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "API key not found" })),
+        )
+            .into_response();
+    }
+
+    let result = state
+        .db
+        .update(|db| {
+            if let Some(key) = db.api_keys.iter_mut().find(|k| k.id == id) {
+                if let Some(name) = req.name {
+                    key.name = name;
+                }
+                if let Some(is_active) = req.is_active {
+                    key.is_active = Some(is_active);
+                }
+            }
+        })
+        .await;
+
+    match result {
+        Ok(_) => {
+            let snapshot = state.db.snapshot();
+            match snapshot.api_keys.iter().find(|k| k.id == id) {
+                Some(key) => {
+                    // Redact key value in response
+                    let mut response_key = key.clone();
+                    response_key.key = "***".to_string();
+                    Json(json!({ "key": response_key })).into_response()
+                }
+                None => (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "Key not found after update" })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_key_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let exists = snapshot.api_keys.iter().any(|k| k.id == id);
+
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "API key not found" })),
+        )
+            .into_response();
+    }
+
+    let result = state
+        .db
+        .update(|db| {
+            db.api_keys.retain(|k| k.id != id);
+        })
+        .await;
+
+    match result {
+        Ok(_) => Json(json!({ "success": true, "message": "API key deleted" })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
     }
@@ -1085,6 +1392,123 @@ async fn create_pool_api(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+// Proxy Pool CRUD - PUT + DELETE
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdatePoolRequest {
+    name: Option<String>,
+    proxy_url: Option<String>,
+    no_proxy: Option<String>,
+    is_active: Option<bool>,
+    strict_proxy: Option<bool>,
+    r#type: Option<String>,
+}
+
+async fn update_pool_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdatePoolRequest>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let exists = snapshot.proxy_pools.iter().any(|p| p.id == id);
+
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Proxy pool not found" })),
+        )
+            .into_response();
+    }
+
+    let result = state
+        .db
+        .update(|db| {
+            if let Some(pool) = db.proxy_pools.iter_mut().find(|p| p.id == id) {
+                if let Some(name) = req.name {
+                    pool.name = name;
+                }
+                if let Some(proxy_url) = req.proxy_url {
+                    pool.proxy_url = proxy_url;
+                }
+                if let Some(no_proxy) = req.no_proxy {
+                    pool.no_proxy = no_proxy;
+                }
+                if let Some(is_active) = req.is_active {
+                    pool.is_active = Some(is_active);
+                }
+                if let Some(strict_proxy) = req.strict_proxy {
+                    pool.strict_proxy = Some(strict_proxy);
+                }
+                if let Some(r#type) = req.r#type {
+                    pool.r#type = r#type;
+                }
+                pool.updated_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        })
+        .await;
+
+    match result {
+        Ok(_) => {
+            let snapshot = state.db.snapshot();
+            match snapshot.proxy_pools.iter().find(|p| p.id == id) {
+                Some(pool) => Json(json!({ "proxyPool": pool })).into_response(),
+                None => (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "Pool not found after update" })),
+                )
+                    .into_response(),
+            }
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn delete_pool_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let exists = snapshot.proxy_pools.iter().any(|p| p.id == id);
+
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Proxy pool not found" })),
+        )
+            .into_response();
+    }
+
+    let result = state
+        .db
+        .update(|db| {
+            db.proxy_pools.retain(|p| p.id != id);
+        })
+        .await;
+
+    match result {
+        Ok(_) => Json(json!({ "success": true, "message": "Proxy pool deleted" })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
         )
             .into_response(),
     }
