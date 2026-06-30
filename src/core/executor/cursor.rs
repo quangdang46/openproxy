@@ -1,9 +1,14 @@
+use std::io::Read;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use hyper::http;
 use hyper::http::uri::InvalidUri;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::utils::cursor_checksum;
@@ -13,6 +18,17 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const CURSOR_API_ENDPOINT: &str =
     "https://agentn.api5.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools";
+
+// ==================== COMPRESSION FLAGS ====================
+
+const COMPRESS_FLAG_NONE: u8 = 0x00;
+const COMPRESS_FLAG_GZIP: u8 = 0x01;
+const COMPRESS_FLAG_TRAILER: u8 = 0x02;
+const COMPRESS_FLAG_GZIP_TRAILER: u8 = 0x03;
+
+// ==================== SSE CONSTANTS ====================
+
+const SSE_DONE: &str = "data: [DONE]\n\n";
 
 // ==================== TYPES ====================
 
@@ -1488,29 +1504,72 @@ impl CursorExecutor {
         let body_bytes = self.transform_request_body(&request.body, &actual_model)?;
 
         let client = self.pool.get("cursor", request.proxy.as_ref())?;
-        let response = client
+        let raw_response = client
             .post(CURSOR_API_ENDPOINT)
             .headers(headers.clone())
             .body(body_bytes)
             .send()
             .await?;
 
-        Ok(CursorExecutorResponse {
-            response: UpstreamResponse::Reqwest(response),
-            url: CURSOR_API_ENDPOINT.to_string(),
-            headers,
-            transformed_body: request.body,
-            transport: TransportKind::Reqwest,
-        })
+        let status = raw_response.status();
+        let is_stream = request.stream;
+
+        if status == 200 {
+            let raw_body = raw_response.bytes().await.map_err(CursorExecutorError::Request)?;
+            let body_value = request.body.clone();
+            let cursor_model = request.model.clone();
+
+            let (body_string, content_type) = if is_stream {
+                let sse = transform_protobuf_to_sse(&raw_body, &cursor_model, &body_value)?;
+                (sse, "text/event-stream")
+            } else {
+                let json = transform_protobuf_to_json(&raw_body, &cursor_model, &body_value)?;
+                (json, "application/json")
+            };
+
+            let http_response = http::Response::builder()
+                .status(200)
+                .header("content-type", content_type)
+                .header("cache-control", "no-cache")
+                .body(reqwest::Body::from(body_string))
+                .map_err(|e| CursorExecutorError::InvalidRequest(e))?;
+            let fake_response: reqwest::Response = http_response.into();
+
+            Ok(CursorExecutorResponse {
+                response: UpstreamResponse::Reqwest(fake_response),
+                url: CURSOR_API_ENDPOINT.to_string(),
+                headers,
+                transformed_body: request.body,
+                transport: TransportKind::Reqwest,
+            })
+        } else {
+            Ok(CursorExecutorResponse {
+                response: UpstreamResponse::Reqwest(raw_response),
+                url: CURSOR_API_ENDPOINT.to_string(),
+                headers,
+                transformed_body: request.body,
+                transport: TransportKind::Reqwest,
+            })
+        }
     }
 }
 
 // ==================== DECODING HELPERS ====================
 
-/// Extract text and tool call from a response payload
+/// Response extracted from a single protobuf frame.
+/// Each frame can contain EITHER a text/thinking update OR a tool-call chunk.
+pub struct DecodedFrame {
+    pub text: Option<String>,
+    pub thinking: Option<String>,
+    pub tool_call: Option<Value>,
+    pub error: Option<String>,
+}
+
+/// Extract text, thinking and tool call from a response payload.
+/// Returns (text, thinking, tool_call) — at most one of these is Some per frame.
 fn extract_from_response(
     payload: &[u8],
-) -> Result<Option<(String, Option<Value>)>, CursorExecutorError> {
+) -> Result<Option<DecodedFrame>, CursorExecutorError> {
     let fields = decode_message(payload)?;
 
     // Field 1: ClientSideToolV2Call (tool call)
@@ -1550,6 +1609,16 @@ fn extract_from_response(
                 if let Some(flag_data) = flags.first() {
                     let is_last = flag_data.first().copied().unwrap_or(0) != 0;
                     tool_call_json.insert("is_last".to_string(), serde_json::Value::Bool(is_last));
+                }
+            }
+
+            // Also check alternate is_last field (FLD_TOOL_IS_LAST_ALT = 15)
+            if !tool_call_json.contains_key("is_last") {
+                if let Some(flags) = tool_call_fields.get(&proto_fields::FLD_TOOL_IS_LAST_ALT) {
+                    if let Some(flag_data) = flags.first() {
+                        let is_last = flag_data.first().copied().unwrap_or(0) != 0;
+                        tool_call_json.insert("is_last".to_string(), serde_json::Value::Bool(is_last));
+                    }
                 }
             }
 
@@ -1619,23 +1688,55 @@ fn extract_from_response(
                     "type": "function",
                     "function": function,
                 });
-                return Ok(Some((String::new(), Some(tool_call))));
+                return Ok(Some(DecodedFrame {
+                    text: None,
+                    thinking: None,
+                    tool_call: Some(tool_call),
+                    error: None,
+                }));
             }
         }
     }
 
-    // Field 2: StreamUnifiedChatResponse (text)
+    // Field 2: StreamUnifiedChatResponse (text + thinking)
     if let Some(values) = fields.get(&proto_fields::FLD_RESPONSE) {
         if let Some(data) = values.first() {
             let response_fields = decode_message(data)?;
 
-            // Extract text
+            let mut text: Option<String> = None;
+            let mut thinking: Option<String> = None;
+
+            // Extract text (field 1)
             if let Some(text_values) = response_fields.get(&proto_fields::FLD_RESPONSE_TEXT) {
                 if let Some(text_data) = text_values.first() {
                     if let Ok(text_str) = std::str::from_utf8(text_data) {
-                        return Ok(Some((text_str.to_string(), None)));
+                        text = Some(text_str.to_string());
                     }
                 }
+            }
+
+            // Extract thinking (field 25) — 9router parity
+            if let Some(thinking_values) = response_fields.get(&proto_fields::FLD_THINKING) {
+                if let Some(thinking_data) = thinking_values.first() {
+                    if let Ok(thinking_fields) = decode_message(thinking_data) {
+                        if let Some(thinking_text_values) = thinking_fields.get(&proto_fields::FLD_THINKING_TEXT) {
+                            if let Some(thinking_text_data) = thinking_text_values.first() {
+                                if let Ok(thinking_str) = std::str::from_utf8(thinking_text_data) {
+                                    thinking = Some(thinking_str.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if text.is_some() || thinking.is_some() {
+                return Ok(Some(DecodedFrame {
+                    text,
+                    thinking,
+                    tool_call: None,
+                    error: None,
+                }));
             }
         }
     }
@@ -1643,7 +1744,577 @@ fn extract_from_response(
     Ok(None)
 }
 
-/// Parse SSE events from Cursor streaming response
+// ==================== DECOMPRESSION ====================
+
+/// Decompress payload based on Connect-RPC flags.
+/// Mirrors cursor.js decompressPayload() lines 59-101.
+fn decompress_payload(payload: &[u8], flags: u8) -> Vec<u8> {
+    // Check for JSON error response (starts with `{"error`)
+    if payload.len() > 10 && payload[0] == 0x7b && payload[1] == 0x22 {
+        if let Ok(text) = std::str::from_utf8(payload) {
+            if text.starts_with("{\"error") {
+                return payload.to_vec();
+            }
+        }
+    }
+
+    match flags {
+        COMPRESS_FLAG_GZIP | COMPRESS_FLAG_TRAILER | COMPRESS_FLAG_GZIP_TRAILER => {
+            // Try gzip first
+            let r = std::io::Cursor::new(payload);
+            let mut decoder = GzDecoder::new(r);
+            let mut out = Vec::new();
+            if decoder.read_to_end(&mut out).is_ok() && !out.is_empty() {
+                return out;
+            }
+
+            // Try zlib deflate (RFC 1950)
+            let r = std::io::Cursor::new(payload);
+            let mut decoder = ZlibDecoder::new(r);
+            let mut out = Vec::new();
+            if decoder.read_to_end(&mut out).is_ok() && !out.is_empty() {
+                return out;
+            }
+
+            // Try raw deflate (RFC 1951)
+            let r = std::io::Cursor::new(payload);
+            let mut decoder = DeflateDecoder::new(r);
+            let mut out = Vec::new();
+            if decoder.read_to_end(&mut out).is_ok() && !out.is_empty() {
+                return out;
+            }
+
+            payload.to_vec()
+        }
+        COMPRESS_FLAG_NONE => payload.to_vec(),
+        _ => payload.to_vec(),
+    }
+}
+
+/// Read a Connect-RPC frame with decompression.
+/// Returns Ok(None) when no more frames (done),
+/// Ok(Some(Vec::new())) for skip,
+/// Ok(Some(data)) for a valid payload.
+fn read_cursor_frame(buffer: &[u8], offset: &mut usize) -> Result<Option<Vec<u8>>, CursorExecutorError> {
+    if *offset + 5 > buffer.len() {
+        return Ok(None);
+    }
+
+    let flags = buffer[*offset];
+    let length = u32::from_be_bytes([
+        buffer[*offset + 1],
+        buffer[*offset + 2],
+        buffer[*offset + 3],
+        buffer[*offset + 4],
+    ]) as usize;
+
+    if *offset + 5 + length > buffer.len() {
+        return Ok(None);
+    }
+
+    let raw_payload = &buffer[*offset + 5..*offset + 5 + length];
+    *offset += 5 + length;
+
+    let decompressed = decompress_payload(raw_payload, flags);
+    if decompressed.is_empty() {
+        return Ok(Some(Vec::new())); // skip
+    }
+
+    Ok(Some(decompressed))
+}
+
+// ==================== RESPONSE TRANSFORM HELPERS ====================
+
+/// Check if model is a composer model (9router parity)
+fn is_composer_model(model: &str) -> bool {
+    model.to_lowercase().contains("composer")
+}
+
+/// Extract visible content from thinking for composer models.
+/// Looks for `  `` tag and returns everything after it.
+fn visible_composer_content_from_thinking(thinking: &str) -> Option<String> {
+    let start_tag = "</thinking>";
+    let end_idx = thinking.find(start_tag)?;
+    let after = &thinking[end_idx + start_tag.len()..];
+    let trimmed = after.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+/// Format a chat.completion.chunk SSE data line.
+/// Mirrors chatChunkSse from open-sse/utils/sse.js
+fn format_chat_chunk_sse(
+    id: &str,
+    created: u64,
+    model: &str,
+    delta: Value,
+    finish_reason: Option<&str>,
+) -> String {
+    let choices = serde_json::json!([{
+        "index": 0,
+        "delta": delta,
+        "finish_reason": finish_reason,
+    }]);
+    let data = serde_json::json!({
+        "id": id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": choices,
+    });
+    format!("data: {}\n\n", serde_json::to_string(&data).unwrap_or_default())
+}
+
+/// Build an OpenAI chat completion response.
+/// Mirrors cursorChatResponse from cursor.js lines 318-368.
+fn build_chat_completion_response(
+    id: &str,
+    created: u64,
+    model: &str,
+    text: Option<&str>,
+    thinking: Option<&str>,
+    tool_calls: Vec<Value>,
+) -> Value {
+    let content = match (text, thinking) {
+        (Some(t), Some(th)) => Some(format!("{}\n\n{}", th, t)),
+        (Some(t), None) => Some(t.to_string()),
+        (None, Some(th)) => Some(th.to_string()),
+        (None, None) => None,
+    };
+
+    let mut message = serde_json::json!({
+        "role": "assistant",
+        "content": content,
+    });
+
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = serde_json::Value::Array(tool_calls.clone());
+    }
+
+    let finish_reason = if !tool_calls.is_empty() {
+        "tool_calls"
+    } else {
+        "stop"
+    };
+
+    let usage = serde_json::json!({
+        "prompt_tokens": 0,
+        "completion_tokens": content.as_ref().map(|c| c.len() / 4).unwrap_or(0) as u64,
+        "total_tokens": content.as_ref().map(|c| c.len() / 4).unwrap_or(0) as u64,
+    });
+
+    serde_json::json!({
+        "id": id,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+        "usage": usage,
+    })
+}
+
+// ==================== TRANSFORM PROTOS TO SSE ====================
+
+/// Transform Cursor protobuf response into OpenAI SSE chunks.
+/// Mirrors transformProtobufToSSE from cursor.js lines 302-516.
+pub fn transform_protobuf_to_sse(
+    buffer: &[u8],
+    model: &str,
+    _body: &Value,
+) -> Result<String, CursorExecutorError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let response_id = format!("chatcmpl-cursor-{}", now.as_millis());
+    let created = now.as_secs();
+
+    let mut offset = 0;
+    let mut chunks: Vec<String> = Vec::new();
+    let mut first_chunk = true;
+    let mut total_content = String::new();
+    let mut total_thinking = String::new();
+    let mut tool_call_map: HashMap<String, Value> = HashMap::new();
+    let mut has_content = false;
+
+    while offset < buffer.len() {
+        let frame = read_cursor_frame(buffer, &mut offset)?;
+        let payload = match frame {
+            None => break,    // done
+            Some(p) if p.is_empty() => continue, // skip
+            Some(p) => p,
+        };
+
+        // Check for JSON error response
+        if payload.len() > 10 && payload[0] == 0x7b && payload[1] == 0x22 {
+            if let Ok(text) = std::str::from_utf8(&payload) {
+                if text.contains("\"error\"") {
+                    if has_content {
+                        break;
+                    }
+                    // Return error as SSE
+                    let error_chunk = format!("data: {}\n\n", text);
+                    chunks.push(error_chunk);
+                    chunks.push(SSE_DONE.to_string());
+                    return Ok(chunks.concat());
+                }
+            }
+        }
+
+        let result = extract_from_response(&payload)?;
+        let frame = match result {
+            None => continue,
+            Some(f) => f,
+        };
+
+        // Handle error in frame
+        if let Some(err) = frame.error {
+            let error_sse = format!("data: {}\n\n", err);
+            chunks.push(error_sse);
+            chunks.push(SSE_DONE.to_string());
+            return Ok(chunks.concat());
+        }
+
+        // Handle tool call
+        if let Some(tc) = frame.tool_call {
+            let tc_id = tc["id"].as_str().unwrap_or("").to_string();
+            let tc_args = tc["function"]["arguments"].as_str().unwrap_or("{}").to_string();
+            let _tc_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
+
+            // Check is_last in our accumulated map or from the frame
+            let is_last_value = tc.get("is_last").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            if let Some(existing) = tool_call_map.get_mut(&tc_id) {
+                // Accumulate arguments
+                let existing_args = existing["function"]["arguments"].as_str().unwrap_or("").to_string();
+                existing["function"]["arguments"] = json!(existing_args + &tc_args);
+                if is_last_value {
+                    existing["is_last"] = json!(true);
+
+                    // Emit tool call chunk
+                    let delta = json!({
+                        "role": "assistant",
+                        "content": null,
+                    });
+                    let sse = format_chat_chunk_sse(&response_id, created, model, delta, None);
+                    chunks.push(sse);
+
+                    // Emit tool call delta
+                    let tool_delta = json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": existing["id"],
+                            "type": "function",
+                            "function": {
+                                "name": existing["function"]["name"],
+                                "arguments": existing["function"]["arguments"],
+                            }
+                        }]
+                    });
+                    let tool_sse = format_chat_chunk_sse(&response_id, created, model, tool_delta, None);
+                    chunks.push(tool_sse);
+                }
+            } else {
+                let mut new_tc = tc.clone();
+                if is_last_value {
+                    new_tc["is_last"] = json!(true);
+                }
+                tool_call_map.insert(tc_id, new_tc);
+
+                if is_last_value {
+                    // Emit tool call chunk immediately
+                    let delta = json!({
+                        "role": "assistant",
+                        "content": null,
+                    });
+                    let sse = format_chat_chunk_sse(&response_id, created, model, delta, None);
+                    chunks.push(sse);
+
+                    let tool_delta = json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": tc.get("id"),
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("function").and_then(|f| f.get("name")),
+                                "arguments": tc.get("function").and_then(|f| f.get("arguments")),
+                            }
+                        }]
+                    });
+                    let tool_sse = format_chat_chunk_sse(&response_id, created, model, tool_delta, None);
+                    chunks.push(tool_sse);
+                }
+            }
+
+            has_content = true;
+        }
+
+        // Handle text
+        if let Some(text) = frame.text {
+            if !text.is_empty() {
+                total_content.push_str(&text);
+                has_content = true;
+
+                let delta = if first_chunk {
+                    first_chunk = false;
+                    json!({"role": "assistant", "content": text})
+                } else {
+                    json!({"content": text})
+                };
+                let sse = format_chat_chunk_sse(&response_id, created, model, delta, None);
+                chunks.push(sse);
+            }
+        }
+
+        // Handle thinking
+        if let Some(thinking) = frame.thinking {
+            if !thinking.is_empty() {
+                total_thinking.push_str(&thinking);
+
+                // For composer models, extract visible content from thinking
+                if is_composer_model(model) {
+                    if let Some(visible) = visible_composer_content_from_thinking(&thinking) {
+                        if !visible.is_empty() {
+                            total_content.push_str(&visible);
+                            has_content = true;
+                            let delta = if first_chunk {
+                                first_chunk = false;
+                                json!({"role": "assistant", "content": visible})
+                            } else {
+                                json!({"content": visible})
+                            };
+                            let sse = format_chat_chunk_sse(&response_id, created, model, delta, None);
+                            chunks.push(sse);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Finalize remaining tool calls (those without isLast)
+    let mut tool_calls: Vec<Value> = Vec::new();
+    for (_id, tc) in tool_call_map.iter() {
+        let finalized_tc = serde_json::json!({
+            "id": tc.get("id"),
+            "type": "function",
+            "function": {
+                "name": tc.get("function").and_then(|f| f.get("name")),
+                "arguments": tc.get("function").and_then(|f| f.get("arguments")),
+            }
+        });
+        tool_calls.push(finalized_tc);
+    }
+
+    // If we only got tool calls, emit them
+    if !tool_calls.is_empty() && !has_content {
+        let delta = json!({"role": "assistant", "content": null});
+        let sse = format_chat_chunk_sse(&response_id, created, model, delta, None);
+        chunks.push(sse);
+
+        for tc in &tool_calls {
+            let tool_delta = json!({
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [tc]
+            });
+            let tool_sse = format_chat_chunk_sse(&response_id, created, model, tool_delta, None);
+            chunks.push(tool_sse);
+        }
+    }
+
+    // Final chunk with finish_reason and usage estimation
+    let finish_reason = if !tool_calls.is_empty() {
+        "tool_calls"
+    } else {
+        "stop"
+    };
+
+    let usage = serde_json::json!({
+        "prompt_tokens": 0,
+        "completion_tokens": total_content.len() / 4,
+        "total_tokens": total_content.len() / 4,
+    });
+
+    let final_delta = json!({});
+    let final_sse = serde_json::json!({
+        "id": response_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "delta": final_delta,
+            "finish_reason": finish_reason,
+        }],
+        "usage": usage,
+    });
+    chunks.push(format!("data: {}\n\n", serde_json::to_string(&final_sse).unwrap_or_default()));
+    chunks.push(SSE_DONE.to_string());
+
+    Ok(chunks.concat())
+}
+
+// ==================== TRANSFORM PROTOS TO JSON ====================
+
+/// Transform Cursor protobuf response into OpenAI chat completion JSON.
+/// Mirrors transformProtobufToJSON from cursor.js lines 518-681.
+pub fn transform_protobuf_to_json(
+    buffer: &[u8],
+    model: &str,
+    _body: &Value,
+) -> Result<String, CursorExecutorError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let response_id = format!("chatcmpl-cursor-{}", now.as_millis());
+    let created = now.as_secs();
+
+    let mut offset = 0;
+    let mut total_content = String::new();
+    let mut total_thinking = String::new();
+    let mut tool_call_map: HashMap<String, Value> = HashMap::new();
+    let mut finalized_ids: HashSet<String> = HashSet::new();
+    let mut has_content = false;
+
+    while offset < buffer.len() {
+        let frame = read_cursor_frame(buffer, &mut offset)?;
+        let payload = match frame {
+            None => break,    // done
+            Some(p) if p.is_empty() => continue, // skip
+            Some(p) => p,
+        };
+
+        // Check for JSON error response
+        if payload.len() > 10 && payload[0] == 0x7b && payload[1] == 0x22 {
+            if let Ok(text) = std::str::from_utf8(&payload) {
+                if text.contains("\"error\"") {
+                    if has_content {
+                        break;
+                    }
+                    // Return error JSON as-is
+                    return Ok(text.to_string());
+                }
+            }
+        }
+
+        let result = extract_from_response(&payload)?;
+        let frame = match result {
+            None => continue,
+            Some(f) => f,
+        };
+
+        // Handle error
+        if let Some(err) = frame.error {
+            return Ok(err);
+        }
+
+        // Handle tool call
+        if let Some(tc) = frame.tool_call {
+            let tc_id = tc["id"].as_str().unwrap_or("").to_string();
+            let tc_args = tc["function"]["arguments"].as_str().unwrap_or("{}").to_string();
+            let is_last = tc.get("is_last").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            if let Some(existing) = tool_call_map.get_mut(&tc_id) {
+                // Accumulate arguments
+                let existing_args = existing["function"]["arguments"].as_str().unwrap_or("").to_string();
+                existing["function"]["arguments"] = json!(existing_args + &tc_args);
+                if is_last {
+                    finalized_ids.insert(tc_id);
+                }
+            } else {
+                let mut new_tc = tc.clone();
+                if is_last {
+                    finalized_ids.insert(tc_id.clone());
+                }
+                tool_call_map.insert(tc_id, new_tc);
+            }
+
+            has_content = true;
+        }
+
+        // Handle text
+        if let Some(text) = frame.text {
+            if !text.is_empty() {
+                total_content.push_str(&text);
+                has_content = true;
+            }
+        }
+
+        // Handle thinking
+        if let Some(thinking) = frame.thinking {
+            if !thinking.is_empty() {
+                total_thinking.push_str(&thinking);
+
+                // For composer models, extract visible content from thinking
+                if is_composer_model(model) {
+                    if let Some(visible) = visible_composer_content_from_thinking(&thinking) {
+                        if !visible.is_empty() {
+                            total_content.push_str(&visible);
+                            has_content = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Build tool_calls array
+    let mut tool_calls: Vec<Value> = Vec::new();
+    for (_id, tc) in tool_call_map.iter() {
+        let finalized_tc = serde_json::json!({
+            "id": tc.get("id"),
+            "type": "function",
+            "function": {
+                "name": tc.get("function").and_then(|f| f.get("name")),
+                "arguments": tc.get("function").and_then(|f| f.get("arguments")),
+            }
+        });
+        tool_calls.push(finalized_tc);
+    }
+
+    // Build the response
+    let text_opt = if total_content.is_empty() {
+        if total_thinking.is_empty() && tool_calls.is_empty() {
+            None
+        } else {
+            None
+        }
+    } else {
+        Some(total_content.as_str())
+    };
+
+    let thinking_opt = if total_thinking.is_empty() {
+        None
+    } else {
+        Some(total_thinking.as_str())
+    };
+
+    if text_opt.is_none() && thinking_opt.is_none() && tool_calls.is_empty() {
+        return Ok(String::new());
+    }
+
+    let response = build_chat_completion_response(
+        &response_id,
+        created,
+        model,
+        text_opt,
+        thinking_opt,
+        tool_calls,
+    );
+
+    Ok(serde_json::to_string(&response).unwrap_or_default())
+}
 pub fn parse_cursor_sse_events(data: &[u8]) -> Result<Vec<SseEvent>, CursorExecutorError> {
     if data.is_empty() {
         return Ok(Vec::new());
@@ -1652,27 +2323,46 @@ pub fn parse_cursor_sse_events(data: &[u8]) -> Result<Vec<SseEvent>, CursorExecu
     let mut events = Vec::new();
     let mut offset = 0;
 
+    let mut tool_call_accumulators: HashMap<String, Value> = HashMap::new();
+    let mut finalized_ids: HashSet<String> = HashSet::new();
+
     while offset < data.len() {
         // Try to parse a Connect-RPC frame
         match parse_connect_rpc_frame(&data[offset..])? {
-            Some((_flags, payload)) => {
-                if let Ok(Some((text, tool_call))) = extract_from_response(&payload) {
-                    if !text.is_empty() {
-                        events.push(SseEvent::Text(text));
-                    }
-                    if let Some(tc) = tool_call {
-                        events.push(SseEvent::ToolCall(tc));
-                    }
-                }
-                offset += 5 + u32::from_be_bytes([
+            Some((flags, payload)) => {
+                let raw_length = u32::from_be_bytes([
                     data[offset + 1],
                     data[offset + 2],
                     data[offset + 3],
                     data[offset + 4],
                 ]) as usize;
+                offset += 5 + raw_length;
+
+                // Decompress if needed
+                let decompressed_payload = decompress_payload(&payload, flags);
+
+                if decompressed_payload.is_empty() {
+                    continue; // skip
+                }
+
+                if let Ok(Some(frame)) = extract_from_response(&decompressed_payload) {
+                    if let Some(text) = frame.text {
+                        if !text.is_empty() {
+                            events.push(SseEvent::Text(text));
+                        }
+                    }
+                    if let Some(thinking) = frame.thinking {
+                        if !thinking.is_empty() {
+                            events.push(SseEvent::Thinking(thinking));
+                        }
+                    }
+                    if let Some(tc) = frame.tool_call {
+                        events.push(SseEvent::ToolCall(tc));
+                    }
+                }
             }
             None => {
-                // Try regular SSE parsing
+                // Try regular SSE parsing as fallback
                 if let Ok(text) = std::str::from_utf8(&data[offset..]) {
                     for line in text.lines() {
                         if line.starts_with("data: ") {
@@ -1694,6 +2384,7 @@ pub fn parse_cursor_sse_events(data: &[u8]) -> Result<Vec<SseEvent>, CursorExecu
 #[derive(Debug, Clone)]
 pub enum SseEvent {
     Text(String),
+    Thinking(String),
     ToolCall(Value),
     Raw(String),
 }

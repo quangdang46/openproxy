@@ -26,6 +26,7 @@ pub struct Db {
     pub usage_path: PathBuf,
     pub snapshot: ArcSwap<AppDb>,
     pub usage_snapshot: ArcSwap<UsageDb>,
+    pub sqlite: Option<sqlite::SqliteDb>,
     write_lock: RwLock<()>,
 }
 
@@ -62,12 +63,29 @@ impl Db {
         let app_db = load_or_init_app_db(&db_path).await?;
         let usage_db = load_or_init_usage_db(&usage_path).await?;
 
+        // Initialize SQLite backend alongside the JSON files. The SQLite DB
+        // file lives at <data_dir>/openproxy.sqlite.
+        let sqlite_path = data_dir.join("openproxy.sqlite");
+        let sqlite = match sqlite::SqliteDb::open(&sqlite_path) {
+            Ok(db) => Some(db),
+            Err(e) => {
+                tracing::warn!(
+                    target: "openproxy::db",
+                    path = %sqlite_path.display(),
+                    error = %e,
+                    "SQLite backend failed to open; falling back to JSON-only mode"
+                );
+                None
+            }
+        };
+
         Ok(Self {
             data_dir,
             db_path,
             usage_path,
             snapshot: ArcSwap::from_pointee(app_db),
             usage_snapshot: ArcSwap::from_pointee(usage_db),
+            sqlite,
             write_lock: RwLock::new(()),
         })
     }
@@ -78,6 +96,16 @@ impl Db {
 
     pub fn usage_snapshot(&self) -> Arc<UsageDb> {
         self.usage_snapshot.load_full()
+    }
+
+    /// Returns `true` if the SQLite backend is available and active.
+    pub fn sqlite_enabled(&self) -> bool {
+        self.sqlite.is_some()
+    }
+
+    /// Returns a reference to the SQLite handle, if active.
+    pub fn sqlite_handle(&self) -> Option<&sqlite::SqliteDb> {
+        self.sqlite.as_ref()
     }
 
     pub fn provider_connections(

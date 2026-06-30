@@ -83,6 +83,9 @@ anyhow = "1"
 aws-credential-types = "1"
 aws-sigv4 = "1.4"
 
+# Compression
+flate2 = "1"
+
 # Random
 rand = "0.8"
 
