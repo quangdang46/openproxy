@@ -1,5 +1,5 @@
-use std::io::Read;
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1151,12 +1151,14 @@ fn build_chat_request_wrapper(
     reasoning_effort: Option<&str>,
     force_agent_mode: bool,
 ) -> Vec<u8> {
-    let inner = build_chat_request(messages, model_name, tools, reasoning_effort, force_agent_mode);
-    encode_field_len(
-        proto_fields::FLD_REQUEST,
-        proto_fields::WIRE_LEN,
-        &inner,
-    )
+    let inner = build_chat_request(
+        messages,
+        model_name,
+        tools,
+        reasoning_effort,
+        force_agent_mode,
+    );
+    encode_field_len(proto_fields::FLD_REQUEST, proto_fields::WIRE_LEN, &inner)
 }
 
 /// Wrap payload in Connect-RPC frame: [1 byte flags][4 bytes length BE][payload]
@@ -1231,18 +1233,13 @@ fn build_cursor_headers(
     );
     header_map.insert(
         "x-client-key",
-        HeaderValue::from_str(&headers.client_key)
-            .map_err(CursorExecutorError::InvalidHeader)?,
+        HeaderValue::from_str(&headers.client_key).map_err(CursorExecutorError::InvalidHeader)?,
     );
     header_map.insert(
         "x-cursor-checksum",
-        HeaderValue::from_str(&headers.checksum)
-            .map_err(CursorExecutorError::InvalidHeader)?,
+        HeaderValue::from_str(&headers.checksum).map_err(CursorExecutorError::InvalidHeader)?,
     );
-    header_map.insert(
-        "x-cursor-client-version",
-        HeaderValue::from_static("3.1.0"),
-    );
+    header_map.insert("x-cursor-client-version", HeaderValue::from_static("3.1.0"));
     header_map.insert("x-cursor-client-type", HeaderValue::from_static("ide"));
     header_map.insert("x-cursor-client-os", HeaderValue::from_static(headers.os));
     header_map.insert(
@@ -1271,8 +1268,7 @@ fn build_cursor_headers(
     );
     header_map.insert(
         "x-session-id",
-        HeaderValue::from_str(&headers.session_id)
-            .map_err(CursorExecutorError::InvalidHeader)?,
+        HeaderValue::from_str(&headers.session_id).map_err(CursorExecutorError::InvalidHeader)?,
     );
 
     Ok(header_map)
@@ -1488,7 +1484,8 @@ impl CursorExecutor {
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
                 CursorExecutorError::MissingCredentials(
-                    "Machine ID is required for Cursor API. Re-import your Cursor account.".to_string(),
+                    "Machine ID is required for Cursor API. Re-import your Cursor account."
+                        .to_string(),
                 )
             })?;
 
@@ -1515,7 +1512,10 @@ impl CursorExecutor {
         let is_stream = request.stream;
 
         if status == 200 {
-            let raw_body = raw_response.bytes().await.map_err(CursorExecutorError::Request)?;
+            let raw_body = raw_response
+                .bytes()
+                .await
+                .map_err(CursorExecutorError::Request)?;
             let body_value = request.body.clone();
             let cursor_model = request.model.clone();
 
@@ -1567,9 +1567,7 @@ pub struct DecodedFrame {
 
 /// Extract text, thinking and tool call from a response payload.
 /// Returns (text, thinking, tool_call) — at most one of these is Some per frame.
-fn extract_from_response(
-    payload: &[u8],
-) -> Result<Option<DecodedFrame>, CursorExecutorError> {
+fn extract_from_response(payload: &[u8]) -> Result<Option<DecodedFrame>, CursorExecutorError> {
     let fields = decode_message(payload)?;
 
     // Field 1: ClientSideToolV2Call (tool call)
@@ -1617,7 +1615,8 @@ fn extract_from_response(
                 if let Some(flags) = tool_call_fields.get(&proto_fields::FLD_TOOL_IS_LAST_ALT) {
                     if let Some(flag_data) = flags.first() {
                         let is_last = flag_data.first().copied().unwrap_or(0) != 0;
-                        tool_call_json.insert("is_last".to_string(), serde_json::Value::Bool(is_last));
+                        tool_call_json
+                            .insert("is_last".to_string(), serde_json::Value::Bool(is_last));
                     }
                 }
             }
@@ -1719,7 +1718,9 @@ fn extract_from_response(
             if let Some(thinking_values) = response_fields.get(&proto_fields::FLD_THINKING) {
                 if let Some(thinking_data) = thinking_values.first() {
                     if let Ok(thinking_fields) = decode_message(thinking_data) {
-                        if let Some(thinking_text_values) = thinking_fields.get(&proto_fields::FLD_THINKING_TEXT) {
+                        if let Some(thinking_text_values) =
+                            thinking_fields.get(&proto_fields::FLD_THINKING_TEXT)
+                        {
                             if let Some(thinking_text_data) = thinking_text_values.first() {
                                 if let Ok(thinking_str) = std::str::from_utf8(thinking_text_data) {
                                     thinking = Some(thinking_str.to_string());
@@ -1795,7 +1796,10 @@ fn decompress_payload(payload: &[u8], flags: u8) -> Vec<u8> {
 /// Returns Ok(None) when no more frames (done),
 /// Ok(Some(Vec::new())) for skip,
 /// Ok(Some(data)) for a valid payload.
-fn read_cursor_frame(buffer: &[u8], offset: &mut usize) -> Result<Option<Vec<u8>>, CursorExecutorError> {
+fn read_cursor_frame(
+    buffer: &[u8],
+    offset: &mut usize,
+) -> Result<Option<Vec<u8>>, CursorExecutorError> {
     if *offset + 5 > buffer.len() {
         return Ok(None);
     }
@@ -1865,7 +1869,10 @@ fn format_chat_chunk_sse(
         "model": model,
         "choices": choices,
     });
-    format!("data: {}\n\n", serde_json::to_string(&data).unwrap_or_default())
+    format!(
+        "data: {}\n\n",
+        serde_json::to_string(&data).unwrap_or_default()
+    )
 }
 
 /// Build an OpenAI chat completion response.
@@ -1946,7 +1953,7 @@ pub fn transform_protobuf_to_sse(
     while offset < buffer.len() {
         let frame = read_cursor_frame(buffer, &mut offset)?;
         let payload = match frame {
-            None => break,    // done
+            None => break,                       // done
             Some(p) if p.is_empty() => continue, // skip
             Some(p) => p,
         };
@@ -1984,7 +1991,10 @@ pub fn transform_protobuf_to_sse(
         // Handle tool call
         if let Some(tc) = frame.tool_call {
             let tc_id = tc["id"].as_str().unwrap_or("").to_string();
-            let tc_args = tc["function"]["arguments"].as_str().unwrap_or("{}").to_string();
+            let tc_args = tc["function"]["arguments"]
+                .as_str()
+                .unwrap_or("{}")
+                .to_string();
             let _tc_name = tc["function"]["name"].as_str().unwrap_or("").to_string();
 
             // Check is_last in our accumulated map or from the frame
@@ -1992,7 +2002,10 @@ pub fn transform_protobuf_to_sse(
 
             if let Some(existing) = tool_call_map.get_mut(&tc_id) {
                 // Accumulate arguments
-                let existing_args = existing["function"]["arguments"].as_str().unwrap_or("").to_string();
+                let existing_args = existing["function"]["arguments"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
                 existing["function"]["arguments"] = json!(existing_args + &tc_args);
                 if is_last_value {
                     existing["is_last"] = json!(true);
@@ -2019,7 +2032,8 @@ pub fn transform_protobuf_to_sse(
                             }
                         }]
                     });
-                    let tool_sse = format_chat_chunk_sse(&response_id, created, model, tool_delta, None);
+                    let tool_sse =
+                        format_chat_chunk_sse(&response_id, created, model, tool_delta, None);
                     chunks.push(tool_sse);
                 }
             } else {
@@ -2051,7 +2065,8 @@ pub fn transform_protobuf_to_sse(
                             }
                         }]
                     });
-                    let tool_sse = format_chat_chunk_sse(&response_id, created, model, tool_delta, None);
+                    let tool_sse =
+                        format_chat_chunk_sse(&response_id, created, model, tool_delta, None);
                     chunks.push(tool_sse);
                 }
             }
@@ -2093,7 +2108,8 @@ pub fn transform_protobuf_to_sse(
                             } else {
                                 json!({"content": visible})
                             };
-                            let sse = format_chat_chunk_sse(&response_id, created, model, delta, None);
+                            let sse =
+                                format_chat_chunk_sse(&response_id, created, model, delta, None);
                             chunks.push(sse);
                         }
                     }
@@ -2159,7 +2175,10 @@ pub fn transform_protobuf_to_sse(
         }],
         "usage": usage,
     });
-    chunks.push(format!("data: {}\n\n", serde_json::to_string(&final_sse).unwrap_or_default()));
+    chunks.push(format!(
+        "data: {}\n\n",
+        serde_json::to_string(&final_sse).unwrap_or_default()
+    ));
     chunks.push(SSE_DONE.to_string());
 
     Ok(chunks.concat())
@@ -2190,7 +2209,7 @@ pub fn transform_protobuf_to_json(
     while offset < buffer.len() {
         let frame = read_cursor_frame(buffer, &mut offset)?;
         let payload = match frame {
-            None => break,    // done
+            None => break,                       // done
             Some(p) if p.is_empty() => continue, // skip
             Some(p) => p,
         };
@@ -2222,12 +2241,18 @@ pub fn transform_protobuf_to_json(
         // Handle tool call
         if let Some(tc) = frame.tool_call {
             let tc_id = tc["id"].as_str().unwrap_or("").to_string();
-            let tc_args = tc["function"]["arguments"].as_str().unwrap_or("{}").to_string();
+            let tc_args = tc["function"]["arguments"]
+                .as_str()
+                .unwrap_or("{}")
+                .to_string();
             let is_last = tc.get("is_last").and_then(|v| v.as_bool()).unwrap_or(false);
 
             if let Some(existing) = tool_call_map.get_mut(&tc_id) {
                 // Accumulate arguments
-                let existing_args = existing["function"]["arguments"].as_str().unwrap_or("").to_string();
+                let existing_args = existing["function"]["arguments"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
                 existing["function"]["arguments"] = json!(existing_args + &tc_args);
                 if is_last {
                     finalized_ids.insert(tc_id);
@@ -2514,7 +2539,8 @@ mod tests {
 
     #[test]
     fn test_build_cursor_headers() {
-        let headers = build_cursor_headers("Bearer test-token", Some("test-machine-id"), true).unwrap();
+        let headers =
+            build_cursor_headers("Bearer test-token", Some("test-machine-id"), true).unwrap();
         assert!(headers.contains_key("authorization"));
         assert!(headers.contains_key("content-type"));
         assert!(headers.contains_key("x-cursor-checksum"));
@@ -2524,7 +2550,8 @@ mod tests {
     #[test]
     fn test_build_cursor_headers_with_prefixed_token() {
         // Token with prefix like "cursor::abc123"
-        let headers = build_cursor_headers("cursor::abc123", Some("test-machine-id"), true).unwrap();
+        let headers =
+            build_cursor_headers("cursor::abc123", Some("test-machine-id"), true).unwrap();
         let auth = headers.get("authorization").unwrap();
         // Should use the part after "::"
         assert_eq!(auth.to_str().unwrap(), "Bearer abc123");

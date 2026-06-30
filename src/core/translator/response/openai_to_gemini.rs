@@ -7,8 +7,10 @@
 //! Matches the registry's `ResponseTransformFn` signature:
 //!   fn(chunk: &[u8], state: &mut ResponseTransformState) -> Vec<String>
 
-use crate::core::translator::registry::ResponseTransformState;
 use serde_json::Value;
+
+use crate::core::translator::registry::ResponseTransformState;
+use crate::core::translator::request::openai_to_gemini::DEFAULT_THINKING_AG_SIGNATURE;
 
 pub fn openai_to_gemini_response(chunk: &[u8], state: &mut ResponseTransformState) -> Vec<String> {
     let text = String::from_utf8_lossy(chunk);
@@ -156,6 +158,7 @@ pub fn openai_to_gemini_response(chunk: &[u8], state: &mut ResponseTransformStat
                         .unwrap_or(Value::Object(serde_json::Map::new()));
 
                     finish_parts.push(serde_json::json!({
+                        "thoughtSignature": DEFAULT_THINKING_AG_SIGNATURE,
                         "functionCall": {
                             "name": name,
                             "args": args

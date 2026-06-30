@@ -101,7 +101,6 @@ pub struct RestoreResult {
 
 pub struct BackupManager {
     backup_dir: PathBuf,
-    db_path: PathBuf,
     last_backup_ms: AtomicU64,
 }
 
@@ -109,7 +108,6 @@ impl BackupManager {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             backup_dir: data_dir.join("db_backups"),
-            db_path: data_dir.join("db.json"),
             last_backup_ms: AtomicU64::new(0),
         }
     }
@@ -145,24 +143,23 @@ impl BackupManager {
             .unwrap_or(false)
     }
 
-    /// Create a snapshot of `db.json` under `db_backups/`. Returns `None`
-    /// if the backup was throttled or skipped (e.g. db.json is missing or
-    /// suspiciously small).
-    pub async fn create(&self, reason: BackupReason) -> anyhow::Result<Option<BackupInfo>> {
+    /// Create a snapshot from in-memory JSON bytes (SQLite runtime store path).
+    /// Accepts pre-serialized JSON bytes of the entire AppDb snapshot and writes
+    /// them to the backup directory with the same naming/throttle/cleanup rules.
+    pub async fn create_from_json(
+        &self,
+        reason: BackupReason,
+        json_bytes: &[u8],
+    ) -> anyhow::Result<Option<BackupInfo>> {
         if reason == BackupReason::Auto && Self::is_auto_disabled() {
             return Ok(None);
         }
 
-        if !fs::try_exists(&self.db_path).await? {
-            return Ok(None);
-        }
-
-        let stat = fs::metadata(&self.db_path).await?;
-        if stat.len() < MIN_BACKUP_BYTES {
+        if json_bytes.len() < MIN_BACKUP_BYTES as usize {
             tracing::warn!(
                 target: "openproxy::db::backups",
-                size = stat.len(),
-                "skipping backup — db.json too small to be valid"
+                size = json_bytes.len(),
+                "skipping backup — snapshot JSON too small to be valid"
             );
             return Ok(None);
         }
@@ -175,23 +172,20 @@ impl BackupManager {
             }
             self.last_backup_ms.store(now_ms, Ordering::Relaxed);
         } else {
-            // Manual/pre-* still updates the timestamp so the next auto
-            // throttle window starts now.
             self.last_backup_ms.store(now_millis(), Ordering::Relaxed);
         }
 
         fs::create_dir_all(&self.backup_dir).await?;
 
-        // Shrink-detection guard for auto backups only — never block a manual
-        // or pre-* operator action.
+        // Shrink-detection guard for auto backups only.
         if reason == BackupReason::Auto {
             if let Some(latest) = self.latest_backup_size().await? {
-                if latest > MIN_BACKUP_BYTES && stat.len() < latest / 2 {
+                if latest > MIN_BACKUP_BYTES && (json_bytes.len() as u64) < latest / 2 {
                     tracing::warn!(
                         target: "openproxy::db::backups",
                         previous = latest,
-                        current = stat.len(),
-                        "skipping backup — db.json shrank by >50% since last snapshot"
+                        current = json_bytes.len(),
+                        "skipping backup — snapshot shrank by >50% since last backup"
                     );
                     return Ok(None);
                 }
@@ -203,7 +197,7 @@ impl BackupManager {
         let filename = format!("db_{}_{}.json", safe_timestamp, reason.as_str());
         let dest = self.backup_dir.join(&filename);
 
-        fs::copy(&self.db_path, &dest).await?;
+        fs::write(&dest, json_bytes).await?;
 
         let info = describe_backup(&self.backup_dir, &filename).await?;
         tracing::info!(
@@ -211,7 +205,7 @@ impl BackupManager {
             id = %info.id,
             size = info.size,
             reason = %info.reason,
-            "created db backup"
+            "created db backup from snapshot"
         );
 
         // Best-effort retention pass after each new snapshot.
@@ -500,20 +494,17 @@ mod tests {
         db
     }
 
-    async fn write_db(path: &Path, db: &AppDb) {
-        let bytes = serde_json::to_vec_pretty(db).unwrap();
-        fs::write(path, bytes).await.unwrap();
+    fn seed_app_db_bytes() -> Vec<u8> {
+        serde_json::to_vec_pretty(&seed_app_db()).unwrap()
     }
 
     #[tokio::test]
     async fn create_then_list_then_restore_round_trip() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("db.json");
-        write_db(&db_path, &seed_app_db()).await;
-
         let mgr = BackupManager::new(dir.path());
+        let json = seed_app_db_bytes();
         let info = mgr
-            .create(BackupReason::Manual)
+            .create_from_json(BackupReason::Manual, &json)
             .await
             .unwrap()
             .expect("backup created");
@@ -532,27 +523,33 @@ mod tests {
     #[tokio::test]
     async fn auto_backup_is_throttled() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("db.json");
-        write_db(&db_path, &seed_app_db()).await;
-
         let mgr = BackupManager::new(dir.path());
-        let first = mgr.create(BackupReason::Auto).await.unwrap();
+        let json = seed_app_db_bytes();
+        let first = mgr
+            .create_from_json(BackupReason::Auto, &json)
+            .await
+            .unwrap();
         assert!(first.is_some());
-        let second = mgr.create(BackupReason::Auto).await.unwrap();
+        let second = mgr
+            .create_from_json(BackupReason::Auto, &json)
+            .await
+            .unwrap();
         assert!(second.is_none(), "auto backup should be throttled");
     }
 
     #[tokio::test]
     async fn manual_backup_skips_throttle() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("db.json");
-        write_db(&db_path, &seed_app_db()).await;
-
         let mgr = BackupManager::new(dir.path());
-        let first = mgr.create(BackupReason::Auto).await.unwrap().unwrap();
+        let json = seed_app_db_bytes();
+        let first = mgr
+            .create_from_json(BackupReason::Auto, &json)
+            .await
+            .unwrap()
+            .unwrap();
         // Manual immediately after auto must still succeed.
         let second = mgr
-            .create(BackupReason::Manual)
+            .create_from_json(BackupReason::Manual, &json)
             .await
             .unwrap()
             .expect("manual backup");
@@ -562,13 +559,13 @@ mod tests {
     #[tokio::test]
     async fn cleanup_respects_max_files() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("db.json");
-        write_db(&db_path, &seed_app_db()).await;
         let mgr = BackupManager::new(dir.path());
 
         // Manual backups don't share the auto throttle; create 5 of them.
         for _ in 0..5 {
-            mgr.create(BackupReason::Manual).await.unwrap();
+            mgr.create_from_json(BackupReason::Manual, &seed_app_db_bytes())
+                .await
+                .unwrap();
             // Tiny sleep so each timestamp differs.
             tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         }
@@ -590,12 +587,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skips_when_db_too_small() {
+    async fn skips_when_snapshot_too_small() {
         let dir = tempdir().unwrap();
-        let db_path = dir.path().join("db.json");
-        fs::write(&db_path, b"{").await.unwrap();
         let mgr = BackupManager::new(dir.path());
-        let result = mgr.create(BackupReason::Manual).await.unwrap();
-        assert!(result.is_none(), "tiny db.json must not be backed up");
+        let result = mgr
+            .create_from_json(BackupReason::Manual, b"{}")
+            .await
+            .unwrap();
+        assert!(result.is_none(), "tiny snapshot must not be backed up");
     }
 }

@@ -5,6 +5,8 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::core::translator::request::openai_to_gemini::DEFAULT_THINKING_AG_SIGNATURE;
+
 pub fn openai_to_antigravity_response(
     chunk: &Value,
     state: &mut serde_json::Map<String, Value>,
@@ -116,6 +118,7 @@ pub fn openai_to_antigravity_response(
                 };
 
                 parts.push(serde_json::json!({
+                    "thoughtSignature": DEFAULT_THINKING_AG_SIGNATURE,
                     "functionCall": {
                         "name": original_name,
                         "args": args

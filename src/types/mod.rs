@@ -399,6 +399,12 @@ pub struct Settings {
     pub system_prompt: SystemPromptConfig,
     #[serde(default, skip_serializing)]
     pub password: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub oidc_enabled: bool,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub client_ping_url: String,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub client_ping_any: bool,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -440,6 +446,9 @@ impl Default for Settings {
             payload_rules: PayloadRulesConfig::default(),
             system_prompt: SystemPromptConfig::default(),
             password: None,
+            oidc_enabled: false,
+            client_ping_url: String::new(),
+            client_ping_any: false,
             extra: BTreeMap::new(),
         }
     }

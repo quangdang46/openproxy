@@ -43,6 +43,7 @@ const navItems: NavItem[] = [
   { href: "/dashboard/endpoint", label: "Endpoint", icon: "api" },
   { href: "/dashboard/providers", label: "Providers", icon: "dns" },
   { href: "/dashboard/combos", label: "Combos", icon: "layers" },
+  { href: "/dashboard/token-saver", label: "Token Saver", icon: "token" },
   { href: "/dashboard/payload-rules", label: "Payload Rules", icon: "tune" },
   { href: "/dashboard/db-backups", label: "DB Backups", icon: "backup" },
   { href: "/dashboard/usage", label: "Usage", icon: "bar_chart" },

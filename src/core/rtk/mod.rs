@@ -100,12 +100,11 @@ pub fn apply_request_preprocessing(body: &mut Value, settings: &Settings, model:
     // owns context-pressure-triggered Caveman injection.
     let mut modified = false;
     if settings.caveman_enabled {
-        if should_auto_apply_caveman(body, model) {
-            modified |= inject_caveman_prompt(
-                body,
-                CompressionLevel::parse_or_default(&settings.caveman_level),
-            );
-        }
+        // 9router parity: always inject when enabled (no context-pressure guard).
+        modified |= inject_caveman_prompt(
+            body,
+            CompressionLevel::parse_or_default(&settings.caveman_level),
+        );
     }
     if settings.ponytail_enabled {
         // Ponytail has NO context-pressure auto-trigger — always applies if enabled.
@@ -919,13 +918,13 @@ mod tests {
             ]
         });
 
-        assert!(!should_auto_apply_caveman(&body, "gpt-4o-mini"));
-        assert!(!apply_request_preprocessing(
+        // 9router parity: Caveman always injects when enabled, regardless of length.
+        assert!(apply_request_preprocessing(
             &mut body,
             &settings,
             "gpt-4o-mini"
         ));
-        assert_eq!(body["messages"].as_array().expect("messages").len(), 1);
+        assert_eq!(body["messages"].as_array().expect("messages").len(), 2);
     }
 
     #[test]

@@ -450,9 +450,9 @@ fn is_stdout_tty() -> bool {
     true
 }
 
-/// Background task that snapshots `db.json` once per hour. The throttle and
-/// retention are enforced inside `BackupManager::create` / `cleanup`, so the
-/// loop just nudges the manager on a fixed interval. Honors
+/// Background task that snapshots db state once per hour. The throttle and
+/// retention are enforced inside `BackupManager::create_from_json` / `cleanup`,
+/// so the loop just nudges the manager on a fixed interval. Honors
 /// `DISABLE_AUTO_BACKUP=1`.
 fn spawn_auto_backup(db: Arc<Db>) {
     use openproxy::db::backups::{BackupManager, BackupReason};
@@ -468,7 +468,20 @@ fn spawn_auto_backup(db: Arc<Db>) {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         let mgr = BackupManager::new(&db.data_dir);
         loop {
-            match mgr.create(BackupReason::Auto).await {
+            // Export the in-memory snapshot as JSON bytes for the backup.
+            let (json_bytes, _filename) = match db.export_db() {
+                Ok(m) => m,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "openproxy::db::backups",
+                        error = %err,
+                        "auto backup: export failed"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+                    continue;
+                }
+            };
+            match mgr.create_from_json(BackupReason::Auto, &json_bytes).await {
                 Ok(Some(info)) => tracing::debug!(
                     target: "openproxy::db::backups",
                     id = %info.id,
@@ -509,7 +522,7 @@ async fn seed_default_api_key_if_missing(db: &Db) -> anyhow::Result<()> {
 
     db.update(|d| d.api_keys.push(api_key.clone())).await?;
     tracing::info!(target: "openproxy", "seeded default API key (apiKeys was empty)");
-    eprintln!("  Default API key (saved to db.json):");
+    eprintln!("  Default API key (saved):");
     eprintln!("    {key}");
     eprintln!();
     Ok(())

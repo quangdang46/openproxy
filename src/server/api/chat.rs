@@ -527,6 +527,7 @@ async fn execute_single_model(
             status: 400,
             message: "Request body must be a JSON object".into(),
             retry_after: None,
+            upstream_body: None,
         });
     }
 
@@ -596,11 +597,25 @@ async fn execute_single_model(
         }
     }
 
-    // 3. Caveman + Ponytail prompt injection
-    let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
-
+    // 3. Strip unsupported modalities in source format before translation
     let caps = capabilities_for_format(plan.source_format);
     strip_unsupported_modalities(&mut body, plan.source_format, &caps);
+
+    // 4. Translate request body from source format to target format
+    //     before applying token savers (9router order: translate first, then preprocess).
+    if plan.needs_translation() {
+        registry::global_registry().translate_request(
+            plan.source_format,
+            plan.target_format,
+            &plan.model,
+            &mut body,
+            plan.stream,
+            None,
+        );
+    }
+
+    // 5. Caveman + Ponytail prompt injection (after translate — 9router parity)
+    let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
 
     // Prefetch remote images for providers that need inline base64
     // (9router prefetchRemoteImages parity: gate on target format).
@@ -683,19 +698,6 @@ async fn execute_single_model(
         plan.needs_translation(),
     );
 
-    // Translate request body from source format to target format
-    // before dispatching to the provider executor.
-    if plan.needs_translation() {
-        registry::global_registry().translate_request(
-            plan.source_format,
-            plan.target_format,
-            &plan.model,
-            &mut body,
-            plan.stream,
-            None,
-        );
-    }
-
     forward_with_provider_fallback(
         state,
         &plan.provider,
@@ -749,6 +751,7 @@ async fn forward_with_provider_fallback(
                     format!("No credentials for provider: {provider}")
                 },
                 retry_after,
+                upstream_body: None,
             });
         };
 
@@ -821,6 +824,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Kiro executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 executor
                     .execute_request(KiroExecutionRequest {
@@ -835,6 +839,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Kiro execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })
             } else if provider == "vertex" {
                 let executor = VertexExecutor::new(state.client_pool.clone(), provider_node)
@@ -842,6 +847,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Vertex executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(VertexExecutionRequest {
@@ -856,6 +862,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Vertex execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -870,6 +877,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Codex executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute(CodexExecutionRequest {
@@ -884,6 +892,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Codex execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -898,6 +907,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Cursor executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute(CursorExecutionRequest {
@@ -912,6 +922,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Cursor execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -926,6 +937,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Github executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(GithubExecutionRequest {
@@ -940,6 +952,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Github execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -954,6 +967,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Azure executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(AzureExecutionRequest {
@@ -968,6 +982,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Azure execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -982,6 +997,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Qwen executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(QwenExecutionRequest {
@@ -996,6 +1012,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Qwen execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1010,6 +1027,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("IFlow executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(IFlowExecutionRequest {
@@ -1024,6 +1042,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("IFlow execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1038,6 +1057,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("GeminiCli executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(GeminiCliExecutionRequest {
@@ -1052,6 +1072,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("GeminiCli execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1066,6 +1087,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("OpenCode executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(OpenCodeExecutionRequest {
@@ -1080,6 +1102,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("OpenCode execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1094,6 +1117,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("OpenCodeGo executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(OpenCodeGoExecutionRequest {
@@ -1108,6 +1132,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("OpenCodeGo execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1122,6 +1147,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Qoder executor creation failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 let result = executor
                     .execute_request(QoderExecutionRequest {
@@ -1136,6 +1162,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Qoder execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1150,6 +1177,7 @@ async fn forward_with_provider_fallback(
                     status: 500,
                     message: format!("CommandCode executor creation failed: {:?}", e),
                     retry_after: None,
+                    upstream_body: None,
                 })?;
                 let result = executor
                     .execute_request(CommandCodeExecutionRequest {
@@ -1164,6 +1192,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("CommandCode execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1178,6 +1207,7 @@ async fn forward_with_provider_fallback(
                     status: 500,
                     message: format!("Antigravity executor creation failed: {:?}", e),
                     retry_after: None,
+                    upstream_body: None,
                 })?;
                 let result = executor
                     .execute_request(AntigravityExecutionRequest {
@@ -1192,6 +1222,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Antigravity execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1215,6 +1246,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("GrokWeb execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1238,6 +1270,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("PerplexityWeb execution failed: {:?}", e),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1256,6 +1289,7 @@ async fn forward_with_provider_fallback(
                     status: 500,
                     message: format!("Default executor creation failed: {:?}", e),
                     retry_after: None,
+                    upstream_body: None,
                 })?;
                 let result = executor
                     .execute(ExecutionRequest {
@@ -1270,6 +1304,7 @@ async fn forward_with_provider_fallback(
                         status: 500,
                         message: format!("Execution failed: {:?}", err),
                         retry_after: None,
+                        upstream_body: None,
                     })?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
@@ -1348,6 +1383,7 @@ async fn forward_with_provider_fallback(
                     status: status.as_u16(),
                     message: message.clone(),
                     retry_after,
+                    upstream_body: None,
                 });
 
                 // 404 (model not found) should set a model-specific lock without
@@ -2474,6 +2510,7 @@ fn combo_error_response(error: ComboExecutionError) -> Response {
         status: error.status,
         message: error.message,
         retry_after: error.earliest_retry_after,
+        upstream_body: None,
     }))
 }
 

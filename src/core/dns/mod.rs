@@ -45,6 +45,7 @@ pub const MITM_BYPASS_HOSTS: &[&str] = &[
     // Kiro / AWS CodeWhisperer
     "q.us-east-1.amazonaws.com",
     "codewhisperer.us-east-1.amazonaws.com",
+    "runtime.us-east-1.kiro.dev",
     // Cursor
     "api2.cursor.sh",
 ];

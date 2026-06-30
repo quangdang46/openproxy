@@ -32,7 +32,7 @@ pub fn export_usage(db: &SqliteDb) -> (Vec<u8>, String) {
     (bytes, format!("openproxy-usage-{stamp}.json"))
 }
 
-fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
+pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
     // Settings (single row)
     let settings: Value = conn
         .query_row("SELECT data FROM settings WHERE id = 1", [], |row| {
@@ -195,7 +195,7 @@ fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
     }))
 }
 
-fn export_usage_impl(conn: &Connection) -> rusqlite::Result<Value> {
+pub(crate) fn export_usage_impl(conn: &Connection) -> rusqlite::Result<Value> {
     let history: Vec<Value> = {
         let mut stmt = conn.prepare(
             "SELECT timestamp, provider, model, connectionId, apiKey, endpoint,

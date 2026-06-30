@@ -10,6 +10,19 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+/// Valid OpenAI content block types (mirrors VALID_OPENAI_CONTENT_TYPES in schema/blocks.js).
+const VALID_OPENAI_CONTENT_TYPES: &[&str] = &[
+    "text",
+    "image_url",
+    "image",
+    "input_audio",
+    "audio_url",
+    "refusal",
+];
+
+/// Valid OpenAI message-level roles (mirrors VALID_OPENAI_MESSAGE_TYPES).
+const VALID_OPENAI_MESSAGE_TYPES: &[&str] = &["system", "user", "assistant", "tool"];
+
 /// All supported translation formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
@@ -434,49 +447,252 @@ fn apply_normalization_hooks(body: &mut Value) -> bool {
     // OAI-compat providers (DeepSeek, Groq, Ollama, …) that pre-date the
     // Codex CLI role split don't 400 on the request.
     crate::core::translator::helpers::openai_helper::normalize_developer_role(body);
-    // ensureToolCallIds: ensure tool_calls have ids
-    ensure_tool_call_ids(body);
-    // fixMissingToolResponses: insert empty tool_result if needed
-    fix_missing_tool_responses(body);
+    // ensureToolCallIds: ensure tool_calls have ids (full impl from tool_call_helper)
+    crate::core::translator::helpers::tool_call_helper::ensure_tool_call_ids(body);
+    // fixMissingToolResponses: insert empty tool_result if needed (full impl from tool_call_helper)
+    crate::core::translator::helpers::tool_call_helper::fix_missing_tool_responses(body);
     true
 }
 
-/// Ensure every tool_call has an id field.
-/// If id is missing, generate one.
-pub fn ensure_tool_call_ids(body: &mut Value) {
+/// Strip specific content types from messages (opt-in via stripList).
+/// Mirrors stripContentTypes in open-sse/translator/index.js.
+pub fn strip_content_types(body: &mut Value, strip_list: &[&str]) {
+    if strip_list.is_empty() {
+        return;
+    }
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
 
-    let mut call_counter: usize = 0;
+    let image_types: std::collections::HashSet<&str> = ["image_url", "image"].into_iter().collect();
+    let audio_types: std::collections::HashSet<&str> =
+        ["audio_url", "input_audio"].into_iter().collect();
+
+    let strip_image = strip_list.contains(&"image");
+    let strip_audio = strip_list.contains(&"audio");
+
     for msg in messages.iter_mut() {
-        let Some(tool_calls) = msg.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+        let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) else {
             continue;
         };
-
-        for tc in tool_calls.iter_mut() {
-            let func_name = {
-                let func = tc.get("function");
-                let name = func.and_then(|f| f.get("name"));
-                name.and_then(|n| n.as_str()).unwrap_or("tool").to_string()
+        content.retain(|part| {
+            let t = match part.get("type").and_then(Value::as_str) {
+                Some(t) => t,
+                None => return true,
             };
-            if tc.get("id").is_none() {
-                let id = format!("call_{func_name}_{call_counter}");
-                if let Some(tc_obj) = tc.as_object_mut() {
-                    tc_obj.insert("id".into(), Value::String(id));
-                }
-                call_counter += 1;
+            if image_types.contains(t) && strip_image {
+                return false;
+            }
+            if audio_types.contains(t) && strip_audio {
+                return false;
+            }
+            true
+        });
+        if content.is_empty() {
+            if let Some(obj) = msg.as_object_mut() {
+                obj.insert("content".to_string(), Value::String(String::new()));
             }
         }
     }
 }
 
-/// Insert empty tool_result content blocks after tool_call messages
-/// if the next assistant message is missing them.
-fn fix_missing_tool_responses(_body: &mut Value) {
-    // This is a simplified version. The full implementation in JS
-    // also handles multi-turn conversations and checks the role sequence.
-    // Will be expanded in the translator bead (br-3fu).
+/// Filter messages to OpenAI standard format.
+/// Mirrors filterToOpenAIFormat in open-sse/translator/formats/openai.js.
+pub fn filter_to_openai_format(body: &mut Value, preserve_cache_control: bool) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    // Process each message
+    for msg in messages.iter_mut() {
+        // Normalize developer role to system (many providers don't support developer)
+        if let Some(obj) = msg.as_object_mut() {
+            if obj.get("role").and_then(Value::as_str) == Some("developer") {
+                obj.insert("role".to_string(), Value::String("system".to_string()));
+            }
+        }
+
+        // Keep tool messages as-is
+        if msg.get("role").and_then(Value::as_str) == Some("tool") {
+            continue;
+        }
+
+        // Keep assistant messages with tool_calls as-is
+        if msg.get("role").and_then(Value::as_str) == Some("assistant")
+            && msg.get("tool_calls").is_some()
+        {
+            continue;
+        }
+
+        // Handle string content — keep as-is
+        if msg.get("content").and_then(Value::as_str).is_some() {
+            continue;
+        }
+
+        // Handle array content — strip Claude-specific blocks
+        if let Some(arr) = msg.get_mut("content").and_then(Value::as_array_mut) {
+            let mut filtered: Vec<Value> = Vec::new();
+            for block in arr.drain(..) {
+                let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+                // Skip thinking blocks
+                if block_type == "thinking"
+                    || block_type == "redacted_thinking"
+                    || block_type == "signature"
+                {
+                    continue;
+                }
+                // Only keep valid OpenAI content types
+                if VALID_OPENAI_CONTENT_TYPES.contains(&block_type) {
+                    let mut cleaned = block;
+                    if let Some(obj) = cleaned.as_object_mut() {
+                        obj.remove("signature");
+                        if !preserve_cache_control {
+                            obj.remove("cache_control");
+                        }
+                    }
+                    filtered.push(cleaned);
+                } else if block_type == "tool_use" || block_type == "tool_result" {
+                    // Keep tool blocks as-is (they'll be handled separately)
+                    filtered.push(block);
+                }
+            }
+
+            // If all content was filtered, add empty text
+            if filtered.is_empty() {
+                filtered.push(serde_json::json!({"type": "text", "text": ""}));
+            }
+
+            if let Some(obj) = msg.as_object_mut() {
+                obj.insert("content".to_string(), Value::Array(filtered));
+            }
+        }
+    }
+
+    // Filter out messages with only empty text (but NEVER filter tool messages)
+    messages.retain(|msg| {
+        let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+        // Always keep tool messages
+        if role == "tool" {
+            return true;
+        }
+        // Always keep assistant messages with tool_calls
+        if role == "assistant" && msg.get("tool_calls").is_some() {
+            return true;
+        }
+        // Check content
+        match msg.get("content") {
+            Some(Value::String(s)) => !s.trim().is_empty(),
+            Some(Value::Array(arr)) => arr.iter().any(|b| {
+                let t = b.get("type").and_then(Value::as_str).unwrap_or("");
+                if t == "text" {
+                    b.get("text")
+                        .and_then(Value::as_str)
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            }),
+            _ => true,
+        }
+    });
+
+    // Remove empty tools array
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        if tools.is_empty() {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("tools");
+            }
+        }
+    }
+
+    // Normalize tools to OpenAI format (from Claude, Gemini, etc.)
+    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        let mut normalized: Vec<Value> = Vec::new();
+        for tool in tools.drain(..) {
+            // Already OpenAI format
+            if tool.get("type").and_then(Value::as_str) == Some("function")
+                && tool.get("function").is_some()
+            {
+                normalized.push(tool);
+                continue;
+            }
+            // Claude format: {name, description, input_schema}
+            if tool.get("name").is_some()
+                && (tool.get("input_schema").is_some() || tool.get("description").is_some())
+            {
+                normalized.push(serde_json::json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.get("name").and_then(Value::as_str).unwrap_or(""),
+                        "description": tool.get("description").and_then(Value::as_str).unwrap_or("").to_string(),
+                        "parameters": tool.get("input_schema").cloned().unwrap_or(serde_json::json!({"type": "object", "properties": {}}))
+                    }
+                }));
+                continue;
+            }
+            // Gemini format: {functionDeclarations: [{name, description, parameters}]}
+            if let Some(decls) = tool.get("functionDeclarations").and_then(Value::as_array) {
+                for fn_decl in decls {
+                    normalized.push(serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": fn_decl.get("name").and_then(Value::as_str).unwrap_or(""),
+                            "description": fn_decl.get("description").and_then(Value::as_str).unwrap_or("").to_string(),
+                            "parameters": fn_decl.get("parameters").cloned().unwrap_or(serde_json::json!({"type": "object", "properties": {}}))
+                        }
+                    }));
+                }
+                continue;
+            }
+            normalized.push(tool);
+        }
+        *tools = normalized;
+    }
+
+    // Normalize tool_choice to OpenAI format
+    if let Some(choice) = body.get("tool_choice").cloned() {
+        if let Some(choice_obj) = choice.as_object() {
+            let choice_type = choice_obj.get("type").and_then(Value::as_str).unwrap_or("");
+            match choice_type {
+                "auto" => {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert("tool_choice".to_string(), Value::String("auto".to_string()));
+                    }
+                }
+                "any" => {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert(
+                            "tool_choice".to_string(),
+                            Value::String("required".to_string()),
+                        );
+                    }
+                }
+                "tool" => {
+                    if let Some(name) = choice_obj.get("name").and_then(Value::as_str) {
+                        if let Some(obj) = body.as_object_mut() {
+                            obj.insert(
+                                "tool_choice".to_string(),
+                                serde_json::json!({
+                                    "type": "function",
+                                    "function": {"name": name}
+                                }),
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Normalize thinking config: remove if last message is not user.
+/// Stub — mirrors normalizeThinkingConfig in 9router.
+pub fn normalize_thinking_config(_body: &mut Value) {
+    // Full implementation would check if last message is user
+    // and remove/reduce thinking budget accordingly.
+    // For now, this is a no-op.
 }
 
 /// Global registry instance — lazily initialized.

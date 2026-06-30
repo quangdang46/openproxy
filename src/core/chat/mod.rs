@@ -243,10 +243,10 @@ mod tests {
                 }]
             }]
         });
-        registry::ensure_tool_call_ids(&mut body);
+        crate::core::translator::helpers::tool_call_helper::ensure_tool_call_ids(&mut body);
         // Should have added an id
         let tc = &body["messages"][0]["tool_calls"][0];
         assert!(tc.get("id").is_some());
-        assert!(tc["id"].as_str().unwrap().starts_with("call_read_file_"));
+        assert!(tc["id"].as_str().unwrap().contains("read_file"));
     }
 }

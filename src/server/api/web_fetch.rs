@@ -188,6 +188,7 @@ async fn execute_combo_fetch(
                     status: e.status,
                     message: e.message,
                     retry_after: None,
+                    upstream_body: None,
                 })
         }
     })
