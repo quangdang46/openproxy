@@ -114,12 +114,14 @@ async fn combo_strategy_stops_after_first_success() {
                         status: 503,
                         message: "temporary failure".into(),
                         retry_after: None,
+                        upstream_body: None,
                     }),
                     "b" => Ok("ok"),
                     _ => Err(ComboAttemptError {
                         status: 500,
                         message: "should not reach".into(),
                         retry_after: None,
+                        upstream_body: None,
                     }),
                 }
             }
@@ -184,6 +186,7 @@ async fn combo_strategy_returns_earliest_retry_after_on_exhaustion() {
                     status: 401,
                     message: "no credentials".into(),
                     retry_after: Some(retry_after),
+                    upstream_body: None,
                 })
             }
         },

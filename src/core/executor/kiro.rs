@@ -340,6 +340,30 @@ fn generate_nonce() -> String {
     hex::encode(bytes)
 }
 
+/// Strip <thinking>...</thinking> blocks from Kiro streamed SSE content.
+/// 9router open-sse/executors/kiro.js:~L165-180 parity.
+fn strip_thinking_tags(data: &str) -> String {
+    // Fast path: no thinking tags
+    if !data.contains("<thinking") {
+        return data.to_string();
+    }
+    let mut result = String::with_capacity(data.len());
+    let mut remaining = data;
+    while let Some(start) = remaining.find("<thinking") {
+        // Append everything before <thinking
+        result.push_str(&remaining[..start]);
+        // Find the closing tag
+        if let Some(end) = remaining[start..].find("</thinking>") {
+            let close = start + end + "</thinking>".len();
+            remaining = &remaining[close..];
+        } else {
+            // Unclosed tag — remove from <thinking to end
+            break;
+        }
+    }
+    result
+}
+
 pub struct EventStreamDecoder;
 
 impl EventStreamDecoder {
@@ -375,9 +399,10 @@ impl EventStreamDecoder {
                         if line.starts_with("data: ") {
                             let data_content = line.trim_start_matches("data: ");
                             if !data_content.is_empty() && data_content != "[DONE]" {
-                                events.push(SseEvent {
-                                    data: data_content.to_string(),
-                                });
+                                // Strip <thinking>...</thinking> blocks from Kiro streamed content
+                                // 9router open-sse/executors/kiro.js:~L165-180 parity
+                                let cleaned = strip_thinking_tags(data_content);
+                                events.push(SseEvent { data: cleaned });
                             }
                         }
                     }

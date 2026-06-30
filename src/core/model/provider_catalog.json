@@ -50,6 +50,8 @@
     "vertex-partner": "vertex-partner",
     "gitlab": "gitlab",
     "codebuddy": "codebuddy",
+    "codebuddy-cn": "codebuddy-cn",
+    "mimo-free": "mimo-free",
     "opencode-go": "opencode-go",
     "grok-web": "grok-web",
     "perplexity-web": "perplexity-web",
@@ -4570,6 +4572,28 @@
     {
       "id": "hackclub",
       "alias": "hc",
+      "serviceKinds": [
+        "llm"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "codebuddy-cn",
+      "alias": "codebuddy-cn",
+      "serviceKinds": [
+        "llm"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "mimo-free",
+      "alias": "mimo-free",
       "serviceKinds": [
         "llm"
       ],

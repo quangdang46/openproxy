@@ -481,7 +481,46 @@ impl AntigravityExecutor {
                         })
                         .cloned()
                         .collect();
-                    co.insert("parts".into(), Value::Array(cleaned_parts));
+                    // Ported from 9router's antigravity.js transformRequest:
+                    // Gemini 3+ rejects functionCall parts without thoughtSignature.
+                    // Clients (Claude Code, IDE) don't persist thoughtSignature in
+                    // their history, so backfill the default signature on any
+                    // functionCall part that arrives without one.
+                    let needs_backfill = cleaned_parts.iter().any(|p| {
+                        p.as_object()
+                            .map(|o| {
+                                o.contains_key("functionCall")
+                                    && !o.contains_key("thoughtSignature")
+                            })
+                            .unwrap_or(false)
+                    });
+                    let final_parts: Vec<Value> = if needs_backfill {
+                        cleaned_parts
+                            .into_iter()
+                            .map(|p| {
+                                let Some(o) = p.as_object() else {
+                                    return p;
+                                };
+                                if o.contains_key("functionCall") && !o.contains_key("thoughtSignature") {
+                                    let mut backfilled = p.clone();
+                                    if let Some(obj) = backfilled.as_object_mut() {
+                                        obj.insert(
+                                            "thoughtSignature".into(),
+                                            Value::String(
+                                                crate::core::translator::request::openai_to_gemini::DEFAULT_THINKING_AG_SIGNATURE.to_string(),
+                                            ),
+                                        );
+                                    }
+                                    backfilled
+                                } else {
+                                    p
+                                }
+                            })
+                            .collect()
+                    } else {
+                        cleaned_parts
+                    };
+                    co.insert("parts".into(), Value::Array(final_parts));
                 }
             }
 
@@ -571,8 +610,14 @@ impl AntigravityExecutor {
                                 "name".into(),
                                 Value::String(Self::sanitize_function_name(raw_name)),
                             );
-                            // Provide an empty-but-valid schema if missing.
-                            if !obj.contains_key("parameters") {
+                            // Clean JSON schema for Antigravity API compatibility.
+                            // Ported from 9router's antigravity.js transformRequest:
+                            // `fn.parameters ? cleanJSONSchemaForAntigravity(structuredClone(fn.parameters)) : ...`
+                            if let Some(params) = obj.get_mut("parameters") {
+                                let cleaned = crate::core::translator::request::openai_to_gemini::clean_json_schema(params);
+                                obj.insert("parameters".into(), cleaned);
+                            } else {
+                                // Provide an empty-but-valid schema if missing.
                                 obj.insert(
                                     "parameters".into(),
                                     json!({

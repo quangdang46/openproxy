@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use anyhow::Context;
 use arc_swap::ArcSwap;
 use serde_json::Value;
 use tokio::fs;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 use crate::types::{AppDb, Combo, ModelAliasTarget, ProviderConnection, ProviderNode, UsageDb};
 
@@ -22,11 +22,9 @@ pub struct ProviderConnectionFilter {
 
 pub struct Db {
     pub data_dir: PathBuf,
-    pub db_path: PathBuf,
-    pub usage_path: PathBuf,
+    pub sqlite: sqlite::SqliteDb,
     pub snapshot: ArcSwap<AppDb>,
     pub usage_snapshot: ArcSwap<UsageDb>,
-    pub sqlite: Option<sqlite::SqliteDb>,
     write_lock: RwLock<()>,
 }
 
@@ -57,35 +55,101 @@ impl Db {
         let data_dir = data_dir.as_ref().to_path_buf();
         fs::create_dir_all(&data_dir).await?;
 
-        let db_path = data_dir.join("db.json");
-        let usage_path = data_dir.join("usage.json");
-
-        let app_db = load_or_init_app_db(&db_path).await?;
-        let usage_db = load_or_init_usage_db(&usage_path).await?;
-
-        // Initialize SQLite backend alongside the JSON files. The SQLite DB
-        // file lives at <data_dir>/openproxy.sqlite.
+        // SQLite is the sole runtime store — mandatory, no fallback.
         let sqlite_path = data_dir.join("openproxy.sqlite");
-        let sqlite = match sqlite::SqliteDb::open(&sqlite_path) {
-            Ok(db) => Some(db),
-            Err(e) => {
-                tracing::warn!(
-                    target: "openproxy::db",
-                    path = %sqlite_path.display(),
-                    error = %e,
-                    "SQLite backend failed to open; falling back to JSON-only mode"
-                );
-                None
+        let sqlite = sqlite::SqliteDb::open(&sqlite_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to open SQLite DB at {}: {}",
+                sqlite_path.display(),
+                e
+            )
+        })?;
+
+        // ---- One-time migration from legacy db.json / usage.json ----
+        let migrated_marker = data_dir.join(".migrated-from-json");
+        let db_json_path = data_dir.join("db.json");
+        let usage_json_path = data_dir.join("usage.json");
+
+        if !migrated_marker.exists() && (db_json_path.exists() || usage_json_path.exists()) {
+            tracing::info!(
+                target: "openproxy::db",
+                "Legacy JSON files detected — importing into SQLite once"
+            );
+
+            if db_json_path.exists() {
+                let bytes = fs::read(&db_json_path)
+                    .await
+                    .with_context(|| format!("read legacy {}", db_json_path.display()))?;
+                // Try decrypted+checksum read first, fall back to plain JSON.
+                let app_db_value = match crate::db::crypto::open_db(
+                    &bytes,
+                    crate::db::crypto::encryption_key().as_deref(),
+                ) {
+                    Ok(db) => serde_json::to_value(db)?,
+                    Err(_) => {
+                        let parsed: Value = serde_json::from_slice(&bytes)
+                            .with_context(|| format!("parse legacy {}", db_json_path.display()))?;
+                        parsed
+                    }
+                };
+                let sq = sqlite.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::db::sqlite::import::import_db(&sq, &app_db_value)
+                })
+                .await
+                .context("spawn_blocking for db.json import")??;
+                tracing::info!(target: "openproxy::db", "db.json imported into SQLite");
             }
-        };
+
+            if usage_json_path.exists() {
+                let bytes = fs::read(&usage_json_path)
+                    .await
+                    .with_context(|| format!("read legacy {}", usage_json_path.display()))?;
+                let usage_value: Value = serde_json::from_slice(&bytes)
+                    .with_context(|| format!("parse legacy {}", usage_json_path.display()))?;
+                let sq = sqlite.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::db::sqlite::import::import_usage(&sq, &usage_value)
+                })
+                .await
+                .context("spawn_blocking for usage.json import")??;
+                tracing::info!(target: "openproxy::db", "usage.json imported into SQLite");
+            }
+
+            fs::write(&migrated_marker, b"1").await.with_context(|| {
+                format!("write migrated marker at {}", migrated_marker.display())
+            })?;
+            tracing::info!(
+                target: "openproxy::db",
+                "Legacy JSON import complete — wrote {}",
+                migrated_marker.display()
+            );
+        }
+
+        // ---- Read snapshot from SQLite ----
+        let sq = sqlite.clone();
+        let (app_db, usage_db) =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<(AppDb, UsageDb)> {
+                let app_db = sq.with_conn(|conn| -> rusqlite::Result<AppDb> {
+                    let json_val = crate::db::sqlite::export::export_all(conn)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    Ok(AppDb::from_json_value(json_val))
+                })?;
+                let usage_db = sq.with_conn(|conn| -> rusqlite::Result<UsageDb> {
+                    let json_val = crate::db::sqlite::export::export_usage_impl(conn)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    Ok(UsageDb::from_json_value(json_val))
+                })?;
+                Ok((app_db, usage_db))
+            })
+            .await
+            .context("spawn_blocking for initial SQLite snapshot")??;
 
         Ok(Self {
             data_dir,
-            db_path,
-            usage_path,
+            sqlite,
             snapshot: ArcSwap::from_pointee(app_db),
             usage_snapshot: ArcSwap::from_pointee(usage_db),
-            sqlite,
             write_lock: RwLock::new(()),
         })
     }
@@ -98,14 +162,9 @@ impl Db {
         self.usage_snapshot.load_full()
     }
 
-    /// Returns `true` if the SQLite backend is available and active.
-    pub fn sqlite_enabled(&self) -> bool {
-        self.sqlite.is_some()
-    }
-
-    /// Returns a reference to the SQLite handle, if active.
-    pub fn sqlite_handle(&self) -> Option<&sqlite::SqliteDb> {
-        self.sqlite.as_ref()
+    /// Returns a reference to the SQLite handle.
+    pub fn sqlite_handle(&self) -> &sqlite::SqliteDb {
+        &self.sqlite
     }
 
     pub fn provider_connections(
@@ -166,8 +225,13 @@ impl Db {
         let mut next = (*self.snapshot()).clone();
         updater(&mut next);
         next.normalize();
-        let key = crate::db::crypto::encryption_key();
-        write_app_db_atomic(&mut next, &self.db_path, key.as_deref()).await?;
+        // Persist to SQLite — the sole runtime store.
+        let json_val = serde_json::to_value(&next)?;
+        let sq = self.sqlite.clone();
+        tokio::task::spawn_blocking(move || crate::db::sqlite::import::import_db(&sq, &json_val))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking for update: {e}"))?
+            .map_err(|e| anyhow::anyhow!("SQLite write failed: {e}"))?;
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
         Ok(next)
@@ -181,7 +245,15 @@ impl Db {
         let mut next = (*self.usage_snapshot()).clone();
         updater(&mut next);
         next.normalize();
-        write_usage_db_atomic(&mut next, &self.usage_path).await?;
+        // Persist to SQLite — the sole runtime store.
+        let json_val = serde_json::to_value(&next)?;
+        let sq = self.sqlite.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::db::sqlite::import::import_usage(&sq, &json_val)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking for update_usage: {e}"))?
+        .map_err(|e| anyhow::anyhow!("SQLite usage write failed: {e}"))?;
         let next = Arc::new(next);
         self.usage_snapshot.store(next.clone());
         Ok(next)
@@ -197,8 +269,13 @@ impl Db {
         let _guard = self.write_lock.write().await;
         let mut next = make_next();
         next.normalize();
-        let key = crate::db::crypto::encryption_key();
-        write_app_db_atomic(&mut next, &self.db_path, key.as_deref()).await?;
+        // Write to SQLite — the sole runtime store.
+        let json_val = serde_json::to_value(&next)?;
+        let sq = self.sqlite.clone();
+        tokio::task::spawn_blocking(move || crate::db::sqlite::import::import_db(&sq, &json_val))
+            .await
+            .map_err(|e| anyhow::anyhow!("spawn_blocking for replace_app_db: {e}"))?
+            .map_err(|e| anyhow::anyhow!("SQLite replace failed: {e}"))?;
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
         Ok(next)
@@ -218,7 +295,7 @@ impl Db {
     }
 
     /// Deserialize JSON bytes into `AppDb` and atomically replace the
-    /// in-memory snapshot + on-disk file in one write-locked operation.
+    /// in-memory snapshot + SQLite in one write-locked operation.
     pub async fn import_db(&self, json_bytes: &[u8]) -> anyhow::Result<Arc<AppDb>> {
         let parsed: Value = serde_json::from_slice(json_bytes)?;
         if !parsed.is_object() {
@@ -237,7 +314,7 @@ impl Db {
     }
 
     /// Deserialize JSON bytes into `UsageDb` and atomically replace the
-    /// in-memory usage snapshot + on-disk file in one write-locked operation.
+    /// in-memory usage snapshot + SQLite in one write-locked operation.
     /// Returns the new snapshot.
     pub async fn import_usage_db(&self, json_bytes: &[u8]) -> anyhow::Result<Arc<UsageDb>> {
         let _guard = self.write_lock.write().await;
@@ -247,7 +324,14 @@ impl Db {
         }
         let mut next = UsageDb::from_json_value(parsed);
         next.normalize();
-        write_usage_db_atomic(&mut next, &self.usage_path).await?;
+        let json_val = serde_json::to_value(&next)?;
+        let sq = self.sqlite.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::db::sqlite::import::import_usage(&sq, &json_val)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking for import_usage_db: {e}"))?
+        .map_err(|e| anyhow::anyhow!("SQLite usage import failed: {e}"))?;
         let next = Arc::new(next);
         self.usage_snapshot.store(next.clone());
         Ok(next)
@@ -274,142 +358,6 @@ fn is_permission_denied(err: &anyhow::Error) -> bool {
             .downcast_ref::<std::io::Error>()
             .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
     })
-}
-
-async fn load_or_init_app_db(path: &Path) -> anyhow::Result<AppDb> {
-    if !fs::try_exists(path).await? {
-        let mut value = AppDb::default();
-        let key = crate::db::crypto::encryption_key();
-        write_app_db_atomic(&mut value, path, key.as_deref()).await?;
-        return Ok(value);
-    }
-
-    let bytes = fs::read(path).await?;
-
-    // Try reading with checksum verification and decryption.
-    let maybe_value = read_app_db(&bytes).await;
-
-    let (mut value, created_new) = match maybe_value {
-        Ok(v) => (v, false),
-        Err(e) => {
-            tracing::warn!(
-                target: "openproxy::db",
-                "failed to read db.json with crypto ({e}); falling back to plain parse"
-            );
-            // Fallback: parse the file as a plain (unchecksummed, unencrypted)
-            // JSON object.
-            let parsed: Value = match serde_json::from_slice(&bytes) {
-                Ok(v) => v,
-                Err(_) => {
-                    let mut v = AppDb::default();
-                    let key = crate::db::crypto::encryption_key();
-                    write_app_db_atomic(&mut v, path, key.as_deref()).await?;
-                    return Ok(v);
-                }
-            };
-            (AppDb::from_json_value(parsed), false)
-        }
-    };
-
-    // Migration v0.1.3: default require_login to false for better local UX.
-    let mut mutated = false;
-    if value.settings.require_login {
-        value.settings.require_login = false;
-        mutated = true;
-    }
-
-    // Schema version check: if the loaded value has a lower version, migrate.
-    if value.schema_version < crate::db::crypto::SCHEMA_VERSION {
-        value.schema_version = crate::db::crypto::SCHEMA_VERSION;
-        mutated = true;
-    }
-
-    if mutated || created_new {
-        let key = crate::db::crypto::encryption_key();
-        write_app_db_atomic(&mut value, path, key.as_deref()).await?;
-    }
-    Ok(value)
-}
-
-async fn load_or_init_usage_db(path: &Path) -> anyhow::Result<UsageDb> {
-    if !fs::try_exists(path).await? {
-        let mut value = UsageDb::default();
-        write_usage_db_atomic(&mut value, path).await?;
-        return Ok(value);
-    }
-
-    let bytes = fs::read(path).await?;
-
-    // Try checksum-verified read; fall back to plain parse for legacy files.
-    match read_usage_db(&bytes).await {
-        Ok(db) => Ok(db),
-        Err(e) => {
-            tracing::warn!(
-                target: "openproxy::db",
-                "failed to read usage.json with checksum ({e}); falling back to plain parse"
-            );
-            let parsed: Value = match serde_json::from_slice(&bytes) {
-                Ok(v) => v,
-                Err(_) => {
-                    let mut v = UsageDb::default();
-                    write_usage_db_atomic(&mut v, path).await?;
-                    return Ok(v);
-                }
-            };
-            let value = UsageDb::from_json_value(parsed);
-            Ok(value)
-        }
-    }
-}
-
-/// Re-read `db.json` from disk without writing anything back. Used by the
-/// file watcher to pick up CLI mutations made by another process. Tolerates
-/// a brief read race during atomic-rename writes by retrying once.
-pub async fn reload_app_db(path: &Path) -> anyhow::Result<AppDb> {
-    let bytes = match fs::read(path).await {
-        Ok(b) => b,
-        Err(_) => {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            fs::read(path).await?
-        }
-    };
-
-    // Try checksum-verified + decrypted read first; fall back to plain parse.
-    match read_app_db(&bytes).await {
-        Ok(db) => Ok(db),
-        Err(e) => {
-            tracing::warn!(
-                target: "openproxy::db",
-                "reload_app_db: crypto read failed ({e}), using plain parse"
-            );
-            let parsed: Value = serde_json::from_slice(&bytes)?;
-            Ok(AppDb::from_json_value(parsed))
-        }
-    }
-}
-
-/// Re-read `usage.json` from disk without writing anything back.
-pub async fn reload_usage_db(path: &Path) -> anyhow::Result<UsageDb> {
-    let bytes = match fs::read(path).await {
-        Ok(b) => b,
-        Err(_) => {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            fs::read(path).await?
-        }
-    };
-
-    // Try checksum-verified read; fall back to plain parse.
-    match read_usage_db(&bytes).await {
-        Ok(db) => Ok(db),
-        Err(e) => {
-            tracing::warn!(
-                target: "openproxy::db",
-                "reload_usage_db: checksum read failed ({e}), using plain parse"
-            );
-            let parsed: Value = serde_json::from_slice(&bytes)?;
-            Ok(UsageDb::from_json_value(parsed))
-        }
-    }
 }
 
 /// Compact UTC timestamp safe for use in filenames (no colons).
@@ -443,191 +391,44 @@ fn chrono_like_stamp() -> String {
     format!("{:04}-{:02}-{:02}T{:02}-{:02}-{:02}Z", y, m_civ, d, h, m, s)
 }
 
-/// Atomic write: serialize `value` to pretty JSON at `path` via temp + rename,
-/// embedding a `_checksum` SHA-256 field for integrity verification.
-async fn write_value_with_checksum(value: &serde_json::Value, path: &Path) -> anyhow::Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).await?;
-
-    let temp_path = parent.join(format!(
-        ".{}.{}.tmp",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("db"),
-        Uuid::new_v4()
-    ));
-
-    let body = serde_json::to_vec_pretty(value)?;
-    let checksum = crate::db::crypto::sha256_checksum(&body);
-    let mut with_checksum = value.clone();
-    with_checksum
-        .as_object_mut()
-        .expect("top-level Value must be an object")
-        .insert("_checksum".into(), serde_json::Value::String(checksum));
-
-    let bytes = serde_json::to_vec_pretty(&with_checksum)?;
-    fs::write(&temp_path, bytes).await?;
-    fs::rename(&temp_path, path).await?;
-    Ok(())
-}
-
-/// Read a `serde_json::Value`, verify `_checksum` if present, return the
-/// clean Value (with `_checksum` stripped).
-fn read_verified_value(bytes: &[u8]) -> anyhow::Result<serde_json::Value> {
-    let mut root: serde_json::Value = serde_json::from_slice(bytes)?;
-    let Value::Object(ref mut map) = root else {
-        return Ok(root);
-    };
-
-    let stored_checksum = map
-        .remove("_checksum")
-        .and_then(|v| v.as_str().map(|s| s.to_string()));
-    if let Some(ref expected) = stored_checksum {
-        if let Ok(body) = serde_json::to_vec_pretty(&root) {
-            let actual = crate::db::crypto::sha256_checksum(&body);
-            if *expected != actual {
-                tracing::warn!(
-                    target: "openproxy::db",
-                    "SHA-256 checksum mismatch (expected={expected}, actual={actual}); continuing"
-                );
-            }
-        }
-    }
-
-    Ok(root)
-}
-
-/// Write an `AppDb` to disk: encrypt sensitive connection fields, embed
-/// `schema_version`, serialize with a SHA-256 checksum, then restore
-/// plaintext on `value` so the in-memory copy remains usable.
-async fn write_app_db_atomic(
-    value: &mut AppDb,
-    path: &Path,
-    key: Option<&str>,
-) -> anyhow::Result<()> {
-    if let Some(k) = key {
-        for conn in &mut value.provider_connections {
-            crate::db::crypto::encrypt_connection(conn, k);
-        }
-    }
-    value.schema_version = crate::db::crypto::SCHEMA_VERSION;
-    value.checksum.clear();
-
-    let json_val = serde_json::to_value(&*value).expect("AppDb is always serializable");
-    write_value_with_checksum(&json_val, path).await?;
-
-    // Restore plaintext in-memory.
-    if let Some(k) = key {
-        for conn in &mut value.provider_connections {
-            crate::db::crypto::decrypt_connection(conn, k);
-        }
-    }
-    Ok(())
-}
-
-/// Read an `AppDb` from disk, verify the SHA-256 checksum, and decrypt
-/// sensitive connection fields.
-async fn read_app_db(bytes: &[u8]) -> anyhow::Result<AppDb> {
-    let parsed = read_verified_value(bytes)?;
-    let mut app_db = AppDb::from_json_value(parsed);
-
-    if let Some(ref key) = crate::db::crypto::encryption_key() {
-        for conn in &mut app_db.provider_connections {
-            crate::db::crypto::decrypt_connection(conn, key);
-        }
-    }
-
-    Ok(app_db)
-}
-
-/// Write a `UsageDb` to disk with a SHA-256 checksum. Usage records are not
-/// encrypted (they contain no secrets), but they get the same integrity check.
-async fn write_usage_db_atomic(value: &mut UsageDb, path: &Path) -> anyhow::Result<()> {
-    let json_val = serde_json::to_value(&*value).expect("UsageDb is always serializable");
-    write_value_with_checksum(&json_val, path).await?;
-    Ok(())
-}
-
-/// Read a `UsageDb` from disk, verifying the SHA-256 checksum if present.
-async fn read_usage_db(bytes: &[u8]) -> anyhow::Result<UsageDb> {
-    let parsed = read_verified_value(bytes)?;
-    Ok(UsageDb::from_json_value(parsed))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{AppDb, ProviderConnection};
-    use serde_json::Value;
+    use crate::db::sqlite::SqliteDb;
+    use crate::types::AppDb;
 
-    /// Issue #155 regression: when OPENPROXY_ENCRYPTION_KEY is unset, the
-    /// write path must NOT encrypt secrets. Otherwise the read path (which
-    /// skips decryption when no key is set) would return ciphertext as if
-    /// it were a plaintext API key.
     #[tokio::test]
-    async fn write_app_db_no_key_does_not_encrypt() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("db.json");
+    async fn db_init_creates_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite_path = dir.path().join("openproxy.sqlite");
 
-        let mut db = AppDb::default();
-        db.provider_connections = vec![ProviderConnection {
-            id: "c1".into(),
-            provider: "openai".into(),
-            api_key: Some("sk-plaintext-12345".into()),
-            access_token: Some("tok-plaintext".into()),
-            refresh_token: None,
-            id_token: None,
-            ..Default::default()
-        }];
+        // SQLite must be created and readable.
+        let sqlite = SqliteDb::open(&sqlite_path).unwrap();
+        assert!(sqlite_path.exists(), "SQLite file must exist");
 
-        // No key => write_app_db_atomic must skip encryption.
-        write_app_db_atomic(&mut db, &path, None).await.unwrap();
-
-        let bytes = tokio::fs::read(&path).await.unwrap();
-        let raw: Value = serde_json::from_slice(&bytes).unwrap();
-        let conn = &raw["providerConnections"][0];
-        assert_eq!(
-            conn["apiKey"].as_str(),
-            Some("sk-plaintext-12345"),
-            "with no key, apiKey must be stored as plaintext (not encrypted)"
-        );
-        assert_eq!(
-            conn["accessToken"].as_str(),
-            Some("tok-plaintext"),
-            "with no key, accessToken must be stored as plaintext (not encrypted)"
-        );
-
-        // (no need to read back — write_app_db_atomic with None skips encryption)
+        // An empty SQLite should export a default snapshot.
+        let app_db = sqlite
+            .with_conn(|conn| {
+                let val = crate::db::sqlite::export::export_all(conn)?;
+                Ok(AppDb::from_json_value(val))
+            })
+            .unwrap();
+        assert_eq!(app_db.settings, Default::default());
+        drop(sqlite);
     }
 
-    /// Issue #155 regression: with a key, secrets are encrypted on disk.
     #[tokio::test]
-    async fn write_app_db_with_key_encrypts() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("db.json");
+    async fn db_init_creates_usage_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        let sqlite_path = dir.path().join("openproxy-usage.sqlite");
 
-        let mut db = AppDb::default();
-        db.provider_connections = vec![ProviderConnection {
-            id: "c1".into(),
-            provider: "openai".into(),
-            api_key: Some("sk-secret-key".into()),
-            access_token: None,
-            refresh_token: None,
-            id_token: None,
-            ..Default::default()
-        }];
-
-        write_app_db_atomic(&mut db, &path, Some("test-key"))
-            .await
+        let sqlite = SqliteDb::open(&sqlite_path).unwrap();
+        let usage_db = sqlite
+            .with_conn(|conn| {
+                let val = crate::db::sqlite::export::export_usage_impl(conn)?;
+                Ok(UsageDb::from_json_value(val))
+            })
             .unwrap();
-
-        let bytes = tokio::fs::read(&path).await.unwrap();
-        let raw: Value = serde_json::from_slice(&bytes).unwrap();
-        let conn = &raw["providerConnections"][0];
-        assert_ne!(
-            conn["apiKey"].as_str(),
-            Some("sk-secret-key"),
-            "with a key, apiKey must be encrypted on disk"
-        );
+        assert!(usage_db.history.is_empty());
     }
 }

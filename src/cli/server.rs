@@ -375,23 +375,23 @@ pub async fn run_status(ctx: OutputCtx, cfg: &ResolvedConfig) -> anyhow::Result<
     Ok(if alive || reachable { 0 } else { 1 })
 }
 
-/// `openproxy server init`. Initializes an empty `db.json` and prints one
-/// fresh admin API key. If a `db.json` already exists, behaviour depends on
-/// what's inside it:
+/// `openproxy server init`. Initializes an empty runtime store and prints one
+/// fresh admin API key. If an `openproxy.sqlite` already exists, behaviour
+/// depends on what's inside it:
 ///
 /// - apiKeys empty *and* providerConnections empty *and* combos empty: we
 ///   treat the data dir as effectively unprovisioned and append a fresh
 ///   admin key idempotently. This avoids the deadlock described in bug #4
 ///   where `openproxy doctor` (or just running the server once) creates an
-///   empty `db.json`, after which `server init` refused to mint a key
+///   empty store, after which `server init` refused to mint a key
 ///   without `--force` (which would also wipe future state).
 /// - any of those is non-empty: we refuse to overwrite without `--force`.
 pub async fn run_init(ctx: OutputCtx, cfg: &ResolvedConfig, force: bool) -> anyhow::Result<i32> {
     std::fs::create_dir_all(&cfg.data_dir)
         .with_context(|| format!("create data dir {}", cfg.data_dir.display()))?;
 
-    let db_path = cfg.data_dir.join("db.json");
-    let db_existed = db_path.exists();
+    let sqlite_path = cfg.data_dir.join("openproxy.sqlite");
+    let db_existed = sqlite_path.exists();
 
     if db_existed && !force {
         // Inspect the existing DB. If it's an "empty shell" (no keys, no
@@ -406,51 +406,23 @@ pub async fn run_init(ctx: OutputCtx, cfg: &ResolvedConfig, force: bool) -> anyh
                     && snap.proxy_pools.is_empty();
                 if !truly_empty {
                     let msg = format!(
-                        "db.json already exists at {} (use --force to overwrite)",
-                        db_path.display()
+                        "openproxy.sqlite already exists at {} (use --force to overwrite)",
+                        sqlite_path.display()
                     );
                     return Ok(emit_error(ctx, "conflict", &msg)?);
                 }
             }
             Err(_) => {
-                // db.json present but unparseable — refuse to clobber.
                 let msg = format!(
-                    "db.json at {} is unreadable (use --force to overwrite)",
-                    db_path.display()
+                    "openproxy.sqlite at {} is unreadable (use --force to overwrite)",
+                    sqlite_path.display()
                 );
                 return Ok(emit_error(ctx, "conflict", &msg)?);
             }
         }
     }
 
-    // Only touch a fresh empty document when we have no existing db (or
-    // the user passed --force). For the "empty shell" idempotent path we
-    // keep whatever serialized shape is already on disk and just append
-    // the admin key via the normal `update` path.
-    if !db_existed || force {
-        let empty = serde_json::json!({
-            "providerConnections": [],
-            "providerNodes": [],
-            "apiKeys": [],
-            "proxyPools": [],
-            "combos": [],
-            "modelAliases": {},
-            "modelAvailability": {},
-            "settings": {}
-        });
-        let tmp = cfg.data_dir.join(".db.json.init");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(&empty)?)
-            .with_context(|| format!("write {}", tmp.display()))?;
-        // Lock down permissions so the DB isn't world-readable on shared boxes.
-        #[cfg(unix)]
-        {
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-        }
-        std::fs::rename(&tmp, &db_path)
-            .with_context(|| format!("install {}", db_path.display()))?;
-    }
-
-    // Now load the db and append a fresh admin key.
+    // Load the db (creates SQLite if it doesn't exist) and append a fresh admin key.
     let key_secret = generate_api_key();
     let key = ApiKey {
         id: uuid::Uuid::new_v4().to_string(),
@@ -470,7 +442,7 @@ pub async fn run_init(ctx: OutputCtx, cfg: &ResolvedConfig, force: bool) -> anyh
             "openproxy.v1.server.init",
             json!({
                 "data_dir": cfg.data_dir.display().to_string(),
-                "db_path": db_path.display().to_string(),
+                "sqlite_path": sqlite_path.display().to_string(),
                 "admin_key": {
                     "id": key.id,
                     "name": key.name,
@@ -484,6 +456,7 @@ pub async fn run_init(ctx: OutputCtx, cfg: &ResolvedConfig, force: bool) -> anyh
             ctx,
             format!("Initialized openproxy at {}", cfg.data_dir.display()),
         );
+        humanln(ctx, "  Runtime store: SQLite (openproxy.sqlite)");
         humanln(ctx, "");
         humanln(ctx, "Admin API key (save it now — shown only once):");
         humanln(ctx, format!("  {key_secret}"));

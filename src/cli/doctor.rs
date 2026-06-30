@@ -94,7 +94,8 @@ fn check_data_dir(dir: &Path) -> Check {
 }
 
 fn check_db_file(dir: &Path) -> Check {
-    let db = dir.join("db.json");
+    // SQLite is now the sole runtime store.
+    let db = dir.join("openproxy.sqlite");
     if db.exists() {
         Check::ok("db_file", format!("{} present", db.display()))
     } else {
@@ -109,8 +110,8 @@ fn check_db_file(dir: &Path) -> Check {
 }
 
 async fn check_db_loadable() -> Check {
-    // Use a non-side-effecting probe: read `db.json` directly and try to
-    // parse it, instead of `Db::load()` which would *create* the file
+    // Use a non-side-effecting probe: open SQLite read-only and export
+    // the snapshot, instead of `Db::load()` which would *create* the file
     // (causing a misleading FAIL/ok flip on the very first run — bug #5).
     let dir = std::env::var_os("DATA_DIR")
         .map(std::path::PathBuf::from)
@@ -120,7 +121,7 @@ async fn check_db_loadable() -> Check {
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
             home.join(".openproxy")
         });
-    let db_path = dir.join("db.json");
+    let db_path = dir.join("openproxy.sqlite");
     if !db_path.exists() {
         return Check::fail(
             "db_loadable",
@@ -130,32 +131,27 @@ async fn check_db_loadable() -> Check {
             ),
         );
     }
-    let bytes = match std::fs::read(&db_path) {
-        Ok(b) => b,
-        Err(e) => return Check::fail("db_loadable", format!("read {}: {e}", db_path.display())),
+    let sqlite = match crate::db::sqlite::SqliteDb::open(&db_path) {
+        Ok(db) => db,
+        Err(e) => return Check::fail("db_loadable", format!("open {}: {e}", db_path.display())),
     };
-    let parsed: Result<Value, _> = serde_json::from_slice(&bytes);
-    match parsed {
-        Ok(value) => {
-            let count = |key: &str| {
-                value
-                    .get(key)
-                    .and_then(Value::as_array)
-                    .map(|a| a.len())
-                    .unwrap_or(0)
-            };
-            Check::ok(
-                "db_loadable",
-                format!(
-                    "{} providers, {} keys, {} pools, {} combos",
-                    count("providerConnections"),
-                    count("apiKeys"),
-                    count("proxyPools"),
-                    count("combos"),
-                ),
-            )
-        }
-        Err(e) => Check::fail("db_loadable", format!("parse error: {e}")),
+    let app_db = sqlite.with_conn(|conn| {
+        let val = crate::db::sqlite::export::export_all(conn)?;
+        Ok(crate::types::AppDb::from_json_value(val))
+    });
+    match app_db {
+        Ok(value) => Check::ok(
+            "db_loadable",
+            format!(
+                "{} providers, {} keys, {} pools, {} combos, {} nodes",
+                value.provider_connections.len(),
+                value.api_keys.len(),
+                value.proxy_pools.len(),
+                value.combos.len(),
+                value.provider_nodes.len(),
+            ),
+        ),
+        Err(e) => Check::fail("db_loadable", format!("SQLite export error: {e}")),
     }
 }
 

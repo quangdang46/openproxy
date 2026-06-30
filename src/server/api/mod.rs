@@ -6,6 +6,7 @@ pub mod cloud_credentials;
 pub mod cloud_sync;
 pub mod compat;
 pub mod db_backups;
+pub mod headroom;
 pub mod locale;
 pub mod mcp;
 pub mod media;
@@ -242,6 +243,10 @@ pub fn routes() -> Router<AppState> {
         .merge(cli_tools::routes())
         .merge(settings_payload_rules::routes())
         .merge(db_backups::routes())
+        // Headroom API routes
+        .route("/api/headroom/status", get(headroom::status))
+        .route("/api/headroom/start", post(headroom::start))
+        .route("/api/headroom/stop", post(headroom::stop))
 }
 
 async fn v1_root() -> Response {
@@ -477,6 +482,11 @@ fn safe_settings_payload(settings: &crate::types::Settings) -> Value {
                 .and_then(|value| value.as_str())
                 .is_some_and(|value| !value.is_empty());
         fields.insert("hasPassword".to_string(), Value::Bool(has_password));
+
+        // Stamp OIDC configured status (determined at boot, not a setting toggle)
+        let oidc_configured = std::env::var("OIDC_ISSUER").ok().is_some()
+            && std::env::var("OIDC_CLIENT_ID").ok().is_some();
+        fields.insert("oidcConfigured".to_string(), Value::Bool(oidc_configured));
     }
 
     value
@@ -692,7 +702,11 @@ async fn get_provider_api(
         .cloned();
     match found {
         Some(conn) => Json(json!({ "provider": conn })).into_response(),
-        None => (StatusCode::NOT_FOUND, Json(json!({ "error": "Provider not found" }))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Provider not found" })),
+        )
+            .into_response(),
     }
 }
 
@@ -706,28 +720,63 @@ async fn update_provider_api(
         return response;
     }
     let snapshot = state.db.snapshot();
-    let exists = snapshot.provider_connections.iter().any(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+    let exists = snapshot
+        .provider_connections
+        .iter()
+        .any(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false));
     if !exists {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "Provider not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Provider not found" })),
+        )
+            .into_response();
     }
-    let result = state.db.update(|db| {
-        if let Some(conn) = db.provider_connections.iter_mut().find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false)) {
-            if let Some(name) = req.name { conn.name = Some(name); }
-            if let Some(api_key) = req.api_key { conn.api_key = Some(api_key); }
-            if let Some(base_url) = req.base_url { conn.provider_specific_data.insert("baseUrl".to_string(), Value::String(base_url)); }
-            if let Some(is_active) = req.is_active { conn.is_active = Some(is_active); }
-            conn.updated_at = Some(chrono::Utc::now().to_rfc3339());
-        }
-    }).await;
+    let result = state
+        .db
+        .update(|db| {
+            if let Some(conn) = db
+                .provider_connections
+                .iter_mut()
+                .find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false))
+            {
+                if let Some(name) = req.name {
+                    conn.name = Some(name);
+                }
+                if let Some(api_key) = req.api_key {
+                    conn.api_key = Some(api_key);
+                }
+                if let Some(base_url) = req.base_url {
+                    conn.provider_specific_data
+                        .insert("baseUrl".to_string(), Value::String(base_url));
+                }
+                if let Some(is_active) = req.is_active {
+                    conn.is_active = Some(is_active);
+                }
+                conn.updated_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        })
+        .await;
     match result {
         Ok(_) => {
             let snapshot = state.db.snapshot();
-            match snapshot.provider_connections.iter().find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false)) {
+            match snapshot
+                .provider_connections
+                .iter()
+                .find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false))
+            {
                 Some(conn) => Json(json!({ "provider": conn })).into_response(),
-                None => (StatusCode::NOT_FOUND, Json(json!({ "error": "Provider not found after update" }))).into_response(),
+                None => (
+                    StatusCode::NOT_FOUND,
+                    Json(json!({ "error": "Provider not found after update" })),
+                )
+                    .into_response(),
             }
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -740,16 +789,31 @@ async fn delete_provider_api(
         return response;
     }
     let snapshot = state.db.snapshot();
-    let exists = snapshot.provider_connections.iter().any(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+    let exists = snapshot
+        .provider_connections
+        .iter()
+        .any(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false));
     if !exists {
-        return (StatusCode::NOT_FOUND, Json(json!({ "error": "Provider not found" }))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Provider not found" })),
+        )
+            .into_response();
     }
-    let result = state.db.update(|db| {
-        db.provider_connections.retain(|c| c.id != id && !c.name.as_deref().map(|n| n == &id).unwrap_or(false));
-    }).await;
+    let result = state
+        .db
+        .update(|db| {
+            db.provider_connections
+                .retain(|c| c.id != id && !c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+        })
+        .await;
     match result {
         Ok(_) => Json(json!({ "success": true, "message": "Provider deleted" })).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({ "error": e.to_string() }))).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -1497,6 +1561,30 @@ async fn delete_pool_api(
             .into_response();
     }
 
+    // Check for bound connections before allowing deletion (9router parity)
+    let bound_connection_count = snapshot
+        .provider_connections
+        .iter()
+        .filter(|connection| {
+            connection
+                .provider_specific_data
+                .get("proxyPoolId")
+                .and_then(Value::as_str)
+                .is_some_and(|proxy_pool_id| proxy_pool_id == id)
+        })
+        .count();
+
+    if bound_connection_count > 0 {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "Proxy pool is currently in use",
+                "boundConnectionCount": bound_connection_count
+            })),
+        )
+            .into_response();
+    }
+
     let result = state
         .db
         .update(|db| {
@@ -1550,6 +1638,9 @@ struct UpdateSettingsRequest {
     outbound_no_proxy: Option<String>,
     new_password: Option<String>,
     current_password: Option<String>,
+    oidc_enabled: Option<bool>,
+    client_ping_url: Option<String>,
+    client_ping_any: Option<bool>,
 }
 
 async fn update_settings_api(
@@ -1636,6 +1727,15 @@ async fn update_settings_api(
             }
             if let Some(v) = req.outbound_no_proxy {
                 db.settings.outbound_no_proxy = v;
+            }
+            if let Some(v) = req.oidc_enabled {
+                db.settings.oidc_enabled = v;
+            }
+            if let Some(v) = req.client_ping_url {
+                db.settings.client_ping_url = v;
+            }
+            if let Some(v) = req.client_ping_any {
+                db.settings.client_ping_any = v;
             }
             db.settings.normalize();
         })

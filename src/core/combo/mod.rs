@@ -122,6 +122,21 @@ pub struct ComboAttemptError {
     pub status: u16,
     pub message: String,
     pub retry_after: Option<DateTime<Utc>>,
+    /// Preserved upstream error body (JSON bytes). When set, the error response
+    /// should return this body verbatim instead of constructing a new one from
+    /// `message`. 9router parity: preserve upstream response on error.
+    pub upstream_body: Option<Vec<u8>>,
+}
+
+impl ComboAttemptError {
+    pub fn new(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            retry_after: None,
+            upstream_body: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -735,6 +750,7 @@ where
         status: 503,
         message: "All combo models unavailable".into(),
         retry_after: earliest_retry_after,
+        upstream_body: None,
     });
 
     let status = if fallback_error

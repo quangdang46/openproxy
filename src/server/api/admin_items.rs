@@ -40,16 +40,8 @@ pub fn routes() -> Router<AppState> {
             "/api/combos/{id}/health",
             get(get_combo_health).delete(clear_combo_health),
         )
-        .route(
-            "/api/keys/{id}",
-            get(get_key).put(update_key).delete(delete_key),
-        )
-        .route(
-            "/api/proxy-pools/{id}",
-            get(get_proxy_pool)
-                .put(update_proxy_pool)
-                .delete(delete_proxy_pool),
-        )
+        .route("/api/keys/{id}", get(get_key))
+        .route("/api/proxy-pools/{id}", get(get_proxy_pool))
 }
 
 async fn get_provider(

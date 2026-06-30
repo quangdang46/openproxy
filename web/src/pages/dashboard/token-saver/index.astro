@@ -1,0 +1,10 @@
+---
+import Layout from '@/layouts/Layout.astro';
+import TokenSaverPageClient from '@/components/TokenSaverPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+---
+<Layout>
+  <DashboardLayout client:only="react">
+    <TokenSaverPageClient client:only="react" />
+  </DashboardLayout>
+</Layout>

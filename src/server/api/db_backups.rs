@@ -53,7 +53,16 @@ async fn create_handler(State(state): State<AppState>, headers: HeaderMap) -> Re
         return response;
     }
 
-    match manager(&state).create(BackupReason::Manual).await {
+    // Export the in-memory snapshot as JSON bytes for the backup.
+    let (json_bytes, _filename) = match state.db.export_db() {
+        Ok(m) => m,
+        Err(err) => return internal_error(err),
+    };
+
+    match manager(&state)
+        .create_from_json(BackupReason::Manual, &json_bytes)
+        .await
+    {
         Ok(Some(info)) => Json(json!({ "created": true, "backup": info })).into_response(),
         Ok(None) => {
             Json(json!({ "created": false, "message": "Backup skipped (db missing or invalid)" }))
@@ -103,7 +112,21 @@ async fn restore_handler(
     };
 
     // Safety snapshot of the current db before we swap.
-    if let Err(err) = mgr.create(BackupReason::PreRestore).await {
+    let (pre_json, _filename) = match state.db.export_db() {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                target: "openproxy::db::backups",
+                error = %err,
+                "pre-restore backup: export failed; aborting restore"
+            );
+            return internal_error(err);
+        }
+    };
+    if let Err(err) = mgr
+        .create_from_json(BackupReason::PreRestore, &pre_json)
+        .await
+    {
         tracing::warn!(
             target: "openproxy::db::backups",
             error = %err,
@@ -227,7 +250,21 @@ async fn import_handler(
     // Pre-import safety snapshot — take it before we attempt to parse,
     // because a corrupt upload shouldn't leave us with no backup at all
     // (the backup is of the current, good db).
-    if let Err(err) = manager(&state).create(BackupReason::PreImport).await {
+    let (pre_json, _filename) = match state.db.export_db() {
+        Ok(m) => m,
+        Err(err) => {
+            tracing::warn!(
+                target: "openproxy::db::backups",
+                error = %err,
+                "pre-import backup: export failed; aborting import"
+            );
+            return internal_error(err);
+        }
+    };
+    if let Err(err) = manager(&state)
+        .create_from_json(BackupReason::PreImport, &pre_json)
+        .await
+    {
         tracing::warn!(
             target: "openproxy::db::backups",
             error = %err,
