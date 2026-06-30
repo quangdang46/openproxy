@@ -169,11 +169,10 @@ async fn db_loader_creates_initial_files() {
     let db = Db::load_from(temp.path()).await.expect("db loads");
     let snapshot = db.snapshot();
 
-    assert!(db.db_path.exists());
-    assert!(db.usage_path.exists());
+    assert!(db.data_dir.join("openproxy.sqlite").exists());
     assert!(snapshot.provider_connections.is_empty());
     assert!(snapshot.settings.rtk_enabled);
 
     let state = AppState::new(Arc::new(db));
-    assert!(state.db.db_path.starts_with(temp.path()));
+    assert!(state.db.data_dir.starts_with(temp.path()));
 }
