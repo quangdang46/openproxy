@@ -6,6 +6,7 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
 use crate::core::proxy::ProxyTarget;
+use crate::core::utils::cursor_checksum;
 use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
@@ -315,7 +316,7 @@ fn format_tool_name(name: &str) -> String {
         return "mcp_custom_tool".to_string();
     }
     if name.starts_with("mcp__") {
-        let rest = &name[4..];
+        let rest = &name[5..];
         if let Some(idx) = rest.find("__") {
             let server = &rest[..idx];
             let tool_name = &rest[idx + 2..];
@@ -327,6 +328,19 @@ fn format_tool_name(name: &str) -> String {
         return name.to_string();
     }
     format!("mcp_custom_{}", name)
+}
+
+/// Parse formatted tool name: "mcp_server_tool" -> (server_name, selected_tool)
+fn parse_tool_name(formatted_name: &str) -> (String, String) {
+    if let Some(tail) = formatted_name.strip_prefix("mcp_") {
+        if let Some(idx) = tail.find('_') {
+            (tail[..idx].to_string(), tail[idx + 1..].to_string())
+        } else {
+            ("custom".to_string(), tail.to_string())
+        }
+    } else {
+        ("custom".to_string(), formatted_name.to_string())
+    }
 }
 
 /// Parse tool_call_id into { tool_call_id, model_call_id }
@@ -438,53 +452,80 @@ fn encode_tool_result(tool_result: &Value) -> Vec<u8> {
 
     let (tc_id, mc_id) = parse_tool_id(tool_call_id);
 
-    // Parse tool name to get selected tool (for MCP result)
+    // Parse tool name
     let formatted_name = format_tool_name(tool_name);
-    let selected_tool = if let Some(tail) = formatted_name.strip_prefix("mcp_") {
-        if let Some(idx) = tail.find('_') {
-            tail[idx + 1..].to_string()
-        } else {
-            tail.to_string()
-        }
-    } else {
-        formatted_name.clone()
-    };
+    let (server_name, selected_tool) = parse_tool_name(&formatted_name);
 
     let name_bytes = formatted_name.as_bytes();
 
-    concat_arrays(&[
-        &encode_field_len(
-            proto_fields::FLD_TOOL_RESULT_CALL_ID,
+    let mut result = Vec::new();
+
+    // Field 1: tool_call_id
+    result.extend_from_slice(&encode_field_len(
+        proto_fields::FLD_TOOL_RESULT_CALL_ID,
+        proto_fields::WIRE_LEN,
+        tc_id.as_bytes(),
+    ));
+
+    // Field 2: name
+    result.extend_from_slice(&encode_field_len(
+        proto_fields::FLD_TOOL_RESULT_NAME,
+        proto_fields::WIRE_LEN,
+        name_bytes,
+    ));
+
+    // Field 3: index
+    result.extend_from_slice(&encode_field_varint(
+        proto_fields::FLD_TOOL_RESULT_INDEX,
+        proto_fields::WIRE_VARINT,
+        tool_index,
+    ));
+
+    // Field 12: model_call_id (only when \nmc_ present)
+    if let Some(ref mcid) = mc_id {
+        result.extend_from_slice(&encode_field_len(
+            proto_fields::FLD_TOOL_RESULT_MODEL_CALL_ID,
             proto_fields::WIRE_LEN,
-            tc_id.as_bytes(),
-        ),
-        &encode_field_len(
-            proto_fields::FLD_TOOL_RESULT_NAME,
-            proto_fields::WIRE_LEN,
-            name_bytes,
-        ),
-        &encode_field_varint(
-            proto_fields::FLD_TOOL_RESULT_INDEX,
-            proto_fields::WIRE_VARINT,
+            mcid.as_bytes(),
+        ));
+    }
+
+    // Field 5: raw_args
+    result.extend_from_slice(&encode_field_len(
+        proto_fields::FLD_TOOL_RESULT_RAW_ARGS,
+        proto_fields::WIRE_LEN,
+        raw_args.as_bytes(),
+    ));
+
+    // Field 8: result (ClientSideToolV2Result)
+    result.extend_from_slice(&encode_field_len(
+        proto_fields::FLD_TOOL_RESULT_RESULT,
+        proto_fields::WIRE_LEN,
+        &encode_client_side_tool_v2_result(
+            &tc_id,
+            mc_id.as_deref(),
+            &selected_tool,
+            result_content,
             tool_index,
         ),
-        &encode_field_len(
-            proto_fields::FLD_TOOL_RESULT_RAW_ARGS,
-            proto_fields::WIRE_LEN,
-            raw_args.as_bytes(),
+    ));
+
+    // Field 11: tool_call (ClientSideToolV2Call) — 9router parity
+    result.extend_from_slice(&encode_field_len(
+        proto_fields::FLD_TOOL_RESULT_TOOL_CALL,
+        proto_fields::WIRE_LEN,
+        &encode_client_side_tool_v2_call(
+            &tc_id,
+            &formatted_name,
+            &selected_tool,
+            &server_name,
+            raw_args,
+            mc_id.as_deref(),
+            tool_index,
         ),
-        &encode_field_len(
-            proto_fields::FLD_TOOL_RESULT_RESULT,
-            proto_fields::WIRE_LEN,
-            &encode_client_side_tool_v2_result(
-                &tc_id,
-                mc_id.as_deref(),
-                &selected_tool,
-                result_content,
-                tool_index,
-            ),
-        ),
-    ])
+    ));
+
+    result
 }
 
 /// Encode MCP params for tool call
@@ -846,18 +887,52 @@ fn build_chat_request(
             normalized["tool_results"] = json!([]);
             normalized_messages.push(normalized);
 
-            // Avoid inserting duplicate if next message already has same results
-            if let Some(next) = messages.get(i + 1) {
-                let next_tr = next.get("tool_results").and_then(|v| v.as_array());
-                let next_has_tr = next_tr.map(|a| !a.is_empty()).unwrap_or(false);
-                if !next_has_tr {
-                    let result_msg = serde_json::json!({
-                        "role": "assistant",
-                        "content": "",
-                        "tool_results": tool_results
-                    });
-                    normalized_messages.push(result_msg);
-                }
+            // Always insert tool-result assistant message unless duplicate detected
+            // Check if next message has the same tool_call_ids
+            let next = messages.get(i + 1);
+            let next_has_tr = next
+                .and_then(|n| n.get("tool_results"))
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+
+            let current_ids: std::collections::BTreeSet<String> = tool_results
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|tr| {
+                            tr.get("tool_call_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let next_ids: std::collections::BTreeSet<String> = next
+                .and_then(|n| n.get("tool_results"))
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|tr| {
+                            tr.get("tool_call_id")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let same_ids = !current_ids.is_empty()
+                && current_ids.len() == next_ids.len()
+                && current_ids == next_ids;
+
+            if !(next_has_tr && same_ids) {
+                let result_msg = serde_json::json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_results": tool_results
+                });
+                normalized_messages.push(result_msg);
             }
         } else {
             normalized_messages.push(msg.clone());
@@ -1051,6 +1126,23 @@ fn build_chat_request(
     result
 }
 
+/// Build the full request payload (wrapped in field 1 REQUEST)
+/// Corresponds to 9router buildChatRequest() → encodeField(FLD_REQUEST, WIRE_TYPE.LEN, encodeRequest(...))
+fn build_chat_request_wrapper(
+    messages: &[Value],
+    model_name: &str,
+    tools: &[Value],
+    reasoning_effort: Option<&str>,
+    force_agent_mode: bool,
+) -> Vec<u8> {
+    let inner = build_chat_request(messages, model_name, tools, reasoning_effort, force_agent_mode);
+    encode_field_len(
+        proto_fields::FLD_REQUEST,
+        proto_fields::WIRE_LEN,
+        &inner,
+    )
+}
+
 /// Wrap payload in Connect-RPC frame: [1 byte flags][4 bytes length BE][payload]
 fn wrap_connect_rpc_frame(payload: &[u8], compress: bool) -> Vec<u8> {
     let flags = if compress { 0x01u8 } else { 0x00u8 };
@@ -1063,166 +1155,111 @@ fn wrap_connect_rpc_frame(payload: &[u8], compress: bool) -> Vec<u8> {
     frame
 }
 
-/// Generate cursor checksum (JYH cipher)
+/// Use cursor_checksum::generate_cursor_checksum instead (in cursor_checksum.rs).
+/// This function is kept as a compatibility shim.
 fn generate_cursor_checksum(machine_id: &str) -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    // Get Unix timestamp in microseconds
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_micros() as u64;
-
-    // Create byte array from timestamp (6 bytes, big-endian)
-    let mut byte_array = [
-        ((timestamp >> 40) & 0xFF) as u8,
-        ((timestamp >> 32) & 0xFF) as u8,
-        ((timestamp >> 24) & 0xFF) as u8,
-        ((timestamp >> 16) & 0xFF) as u8,
-        ((timestamp >> 8) & 0xFF) as u8,
-        (timestamp & 0xFF) as u8,
-    ];
-
-    // Jyh cipher obfuscation
-    let mut t: u8 = 165;
-    for (i, byte) in byte_array.iter_mut().enumerate() {
-        *byte = (*byte ^ t).wrapping_add(i as u8);
-        t = *byte;
-    }
-
-    // URL-safe base64 encode (without padding)
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut encoded = String::new();
-
-    for chunk in byte_array.chunks(3) {
-        let a = chunk[0];
-        let b = chunk.get(1).copied().unwrap_or(0);
-        let c = chunk.get(2).copied().unwrap_or(0);
-
-        encoded.push(ALPHABET[(a >> 2) as usize] as char);
-        encoded.push(ALPHABET[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-
-        if chunk.len() > 1 {
-            encoded.push(ALPHABET[(((b & 15) << 2) | (c >> 6)) as usize] as char);
-        }
-        if chunk.len() > 2 {
-            encoded.push(ALPHABET[(c & 63) as usize] as char);
-        }
-    }
-
-    format!("{}{}", encoded, machine_id)
+    cursor_checksum::generate_cursor_checksum(machine_id)
 }
 
-/// Generate machine ID from token using SHA-256
+/// See cursor_checksum::generate_hashed64_hex instead.
+#[allow(dead_code)]
 fn generate_machine_id(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    hasher.update(b"machineId");
-    hex::encode(hasher.finalize())
+    cursor_checksum::generate_hashed64_hex(token, "machineId")
 }
 
-/// Generate session ID using UUID v5
+/// See cursor_checksum::generate_session_id instead.
+#[allow(dead_code)]
 fn generate_session_id(token: &str) -> String {
-    // Use simple deterministic ID based on token hash
-    use sha1::{Digest, Sha1};
-    let mut hasher = Sha1::new();
-    hasher.update(token.as_bytes());
-    let result = hasher.finalize();
-    format!("{:x}", result)
+    cursor_checksum::generate_session_id(token)
 }
 
-/// Generate client key using SHA-256
+/// See cursor_checksum::generate_hashed64_hex instead.
+#[allow(dead_code)]
 fn generate_client_key(token: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    hex::encode(hasher.finalize())
+    cursor_checksum::generate_hashed64_hex(token, "")
 }
 
-/// Build Cursor API headers
-fn build_cursor_headers(access_token: &str) -> Result<HeaderMap, CursorExecutorError> {
-    use sha2::Digest;
+/// Build Cursor API headers using cursor_checksum::build_cursor_headers.
+/// Extracts machineId and ghostMode from credentials.provider_specific_data.
+/// Returns an error if machineId is missing (matching 9router behavior).
+fn build_cursor_headers(
+    access_token: &str,
+    machine_id: Option<&str>,
+    ghost_mode: bool,
+) -> Result<HeaderMap, CursorExecutorError> {
+    let headers = cursor_checksum::build_cursor_headers(access_token, machine_id, ghost_mode);
 
-    // Clean token if it has prefix
-    let clean_token = if access_token.contains("::") {
-        access_token.split("::").nth(1).unwrap_or(access_token)
-    } else {
-        access_token
-    };
+    let mut header_map = HeaderMap::new();
 
-    // Generate derived values
-    let machine_id = generate_machine_id(clean_token);
-    let session_id = generate_session_id(clean_token);
-    let client_key = generate_client_key(clean_token);
-    let checksum = generate_cursor_checksum(&machine_id);
-
-    // Detect OS
-    let os = match std::env::consts::OS {
-        "windows" => "windows",
-        "macos" => "macos",
-        _ => "linux",
-    };
-
-    // Detect architecture
-    let arch = match std::env::consts::ARCH {
-        "aarch64" => "aarch64",
-        _ => "x64",
-    };
-
-    let mut headers = HeaderMap::new();
-
-    headers.insert(
+    // Authorization
+    header_map.insert(
         AUTHORIZATION,
-        HeaderValue::from_str(&format!("Bearer {}", clean_token))
+        HeaderValue::from_str(&headers.authorization)
             .map_err(CursorExecutorError::InvalidHeader)?,
     );
-    headers.insert("connect-accept-encoding", HeaderValue::from_static("gzip"));
-    headers.insert("connect-protocol-version", HeaderValue::from_static("1"));
-    headers.insert(
+
+    // Static headers
+    header_map.insert("connect-accept-encoding", HeaderValue::from_static("gzip"));
+    header_map.insert("connect-protocol-version", HeaderValue::from_static("1"));
+    header_map.insert(
         CONTENT_TYPE,
         HeaderValue::from_static("application/connect+proto"),
     );
-    headers.insert("user-agent", HeaderValue::from_static("connect-es/1.6.1"));
-    headers.insert(
+    header_map.insert("user-agent", HeaderValue::from_static("connect-es/1.6.1"));
+
+    // Dynamic headers
+    header_map.insert(
         "x-amzn-trace-id",
         HeaderValue::from_str(&format!("Root={}", uuid::Uuid::new_v4()))
             .map_err(CursorExecutorError::InvalidHeader)?,
     );
-    headers.insert(
+    header_map.insert(
         "x-client-key",
-        HeaderValue::from_str(&client_key).map_err(CursorExecutorError::InvalidHeader)?,
+        HeaderValue::from_str(&headers.client_key)
+            .map_err(CursorExecutorError::InvalidHeader)?,
     );
-    headers.insert(
+    header_map.insert(
         "x-cursor-checksum",
-        HeaderValue::from_str(&checksum).map_err(CursorExecutorError::InvalidHeader)?,
+        HeaderValue::from_str(&headers.checksum)
+            .map_err(CursorExecutorError::InvalidHeader)?,
     );
-    headers.insert("x-cursor-client-version", HeaderValue::from_static("3.1.0"));
-    headers.insert("x-cursor-client-type", HeaderValue::from_static("ide"));
-    headers.insert("x-cursor-client-os", HeaderValue::from_static(os));
-    headers.insert("x-cursor-client-arch", HeaderValue::from_static(arch));
-    headers.insert(
+    header_map.insert(
+        "x-cursor-client-version",
+        HeaderValue::from_static("3.1.0"),
+    );
+    header_map.insert("x-cursor-client-type", HeaderValue::from_static("ide"));
+    header_map.insert("x-cursor-client-os", HeaderValue::from_static(headers.os));
+    header_map.insert(
+        "x-cursor-client-arch",
+        HeaderValue::from_static(headers.arch),
+    );
+    header_map.insert(
         "x-cursor-client-device-type",
         HeaderValue::from_static("desktop"),
     );
-    headers.insert(
+    header_map.insert(
         "x-cursor-config-version",
         HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
             .map_err(CursorExecutorError::InvalidHeader)?,
     );
-    headers.insert("x-cursor-timezone", HeaderValue::from_static("UTC"));
-    headers.insert("x-ghost-mode", HeaderValue::from_static("true"));
-    headers.insert(
+    header_map.insert("x-cursor-timezone", HeaderValue::from_static("UTC"));
+    header_map.insert(
+        "x-ghost-mode",
+        HeaderValue::from_str(if ghost_mode { "true" } else { "false" })
+            .map_err(CursorExecutorError::InvalidHeader)?,
+    );
+    header_map.insert(
         "x-request-id",
         HeaderValue::from_str(&uuid::Uuid::new_v4().to_string())
             .map_err(CursorExecutorError::InvalidHeader)?,
     );
-    headers.insert(
+    header_map.insert(
         "x-session-id",
-        HeaderValue::from_str(&session_id).map_err(CursorExecutorError::InvalidHeader)?,
+        HeaderValue::from_str(&headers.session_id)
+            .map_err(CursorExecutorError::InvalidHeader)?,
     );
 
-    Ok(headers)
+    Ok(header_map)
 }
 
 // ==================== PROTOBUF DECODING ====================
@@ -1404,7 +1441,7 @@ impl CursorExecutor {
         let tools = Self::extract_tools(body);
         let reasoning_effort = Self::extract_reasoning_effort(body);
 
-        let protobuf = build_chat_request(
+        let protobuf = build_chat_request_wrapper(
             &messages,
             actual_model,
             &tools,
@@ -1427,7 +1464,27 @@ impl CursorExecutor {
             CursorExecutorError::MissingCredentials("Cursor access token required".to_string())
         })?;
 
-        let headers = build_cursor_headers(access_token)?;
+        // Extract machineId from provider_specific_data (must exist after OAuth import)
+        let machine_id = request
+            .credentials
+            .provider_specific_data
+            .get("machineId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CursorExecutorError::MissingCredentials(
+                    "Machine ID is required for Cursor API. Re-import your Cursor account.".to_string(),
+                )
+            })?;
+
+        // Extract ghostMode from provider_specific_data (defaults to true)
+        let ghost_mode = request
+            .credentials
+            .provider_specific_data
+            .get("ghostMode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let headers = build_cursor_headers(access_token, Some(machine_id), ghost_mode)?;
         let body_bytes = self.transform_request_body(&request.body, &actual_model)?;
 
         let client = self.pool.get("cursor", request.proxy.as_ref())?;
@@ -1707,9 +1764,8 @@ mod tests {
     #[test]
     fn test_generate_session_id() {
         let session_id = generate_session_id("test-token");
-        // Should be a non-empty hex string
-        assert!(!session_id.is_empty());
-        assert!(session_id.chars().all(|c| c.is_ascii_hexdigit()));
+        // Now UUIDv5 (hyphenated), which is 36 chars like "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        assert_eq!(session_id.len(), 36);
     }
 
     #[test]
@@ -1750,7 +1806,7 @@ mod tests {
     #[test]
     fn test_format_tool_name() {
         assert_eq!(format_tool_name("Read"), "mcp_custom_Read");
-        assert_eq!(format_tool_name("mcp__server__Write"), "mcp__server_Write");
+        assert_eq!(format_tool_name("mcp__server__Write"), "mcp_server_Write");
         assert_eq!(format_tool_name("mcp_custom_Tool"), "mcp_custom_Tool");
     }
 
@@ -1767,7 +1823,7 @@ mod tests {
 
     #[test]
     fn test_build_cursor_headers() {
-        let headers = build_cursor_headers("Bearer test-token").unwrap();
+        let headers = build_cursor_headers("Bearer test-token", Some("test-machine-id"), true).unwrap();
         assert!(headers.contains_key("authorization"));
         assert!(headers.contains_key("content-type"));
         assert!(headers.contains_key("x-cursor-checksum"));
@@ -1777,10 +1833,24 @@ mod tests {
     #[test]
     fn test_build_cursor_headers_with_prefixed_token() {
         // Token with prefix like "cursor::abc123"
-        let headers = build_cursor_headers("cursor::abc123").unwrap();
+        let headers = build_cursor_headers("cursor::abc123", Some("test-machine-id"), true).unwrap();
         let auth = headers.get("authorization").unwrap();
         // Should use the part after "::"
         assert_eq!(auth.to_str().unwrap(), "Bearer abc123");
+    }
+
+    #[test]
+    fn test_build_cursor_headers_ghost_mode_false() {
+        let headers = build_cursor_headers("test-token", Some("test-machine-id"), false).unwrap();
+        let ghost = headers.get("x-ghost-mode").unwrap();
+        assert_eq!(ghost.to_str().unwrap(), "false");
+    }
+
+    #[test]
+    fn test_build_cursor_headers_without_machine_id_falls_back() {
+        // When machine_id is None, it falls back to token-derived hash
+        let headers = build_cursor_headers("test-token", None, true).unwrap();
+        assert!(headers.contains_key("x-cursor-checksum"));
     }
 
     #[test]
