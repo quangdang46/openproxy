@@ -242,8 +242,7 @@ async fn db_loads_normalizes_and_persists_json_files() {
     assert!(snapshot.api_keys[0].is_active());
     assert!(snapshot.settings.outbound_proxy_enabled);
     assert_eq!(usage.total_requests_lifetime, 1);
-    assert!(db.db_path.exists());
-    assert!(db.usage_path.exists());
+    assert!(db.data_dir.join("openproxy.sqlite").exists());
 
     db.update(|state| {
         state.model_aliases.insert(

@@ -19,7 +19,6 @@ async fn e2e_write_then_reload() {
 
     // First load: write some data
     let db = openproxy::db::Db::load().await.unwrap();
-    assert!(db.sqlite_enabled(), "SQLite should be active");
 
     db.update(|app| {
         app.provider_connections
@@ -42,7 +41,7 @@ async fn e2e_write_then_reload() {
     assert!(found.is_some(), "connection must persist across reload");
 
     // Verify SQLite row count
-    let sq = db2.sqlite_handle().unwrap();
+    let sq = db2.sqlite_handle();
     let count: i64 = sq
         .with_conn(|c| {
             c.query_row(
@@ -101,7 +100,7 @@ async fn e2e_auto_import_legacy_json() {
     assert!(found.is_some(), "legacy connection must be loaded");
 
     // SQLite should have it too
-    let sq = db.sqlite_handle().unwrap();
+    let sq = db.sqlite_handle();
     let count: i64 = sq
         .with_conn(|c| {
             c.query_row(
@@ -124,7 +123,7 @@ async fn e2e_integrity_check_on_startup() {
     std::env::set_var("DATA_DIR", tmp.path());
 
     let db = openproxy::db::Db::load().await.unwrap();
-    let sq = db.sqlite_handle().unwrap();
+    let sq = db.sqlite_handle();
     assert_eq!(sq.integrity_check().unwrap(), "ok");
 }
 
@@ -171,7 +170,7 @@ async fn e2e_concurrent_writes() {
         .count();
     assert_eq!(count, 100, "all 100 concurrent writes must persist");
 
-    let sq = db2.sqlite_handle().unwrap();
+    let sq = db2.sqlite_handle();
     let sqlite_count: i64 = sq
         .with_conn(|c| c.query_row("SELECT COUNT(*) FROM providerConnections", [], |r| r.get(0)))
         .unwrap();
@@ -271,7 +270,7 @@ async fn e2e_usage_persists_to_sqlite() {
     assert_eq!(usage.history[0].model, "gpt-4o");
 
     // SQLite has it too
-    let sq = db2.sqlite_handle().unwrap();
+    let sq = db2.sqlite_handle();
     let count: i64 = sq
         .with_conn(|c| c.query_row("SELECT COUNT(*) FROM usageHistory", [], |r| r.get(0)))
         .unwrap();
@@ -322,7 +321,7 @@ async fn e2e_high_concurrency_stress() {
         "at least 900/1000 concurrent writes must persist, got {count}"
     );
 
-    let sq = db2.sqlite_handle().unwrap();
+    let sq = db2.sqlite_handle();
     let integrity = sq.integrity_check().unwrap();
     assert_eq!(
         integrity, "ok",
