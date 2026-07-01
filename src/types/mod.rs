@@ -707,6 +707,9 @@ fn normalize_caveman_level_value(value: &str) -> String {
         "lite" => "lite".into(),
         "full" => "full".into(),
         "ultra" => "ultra".into(),
+        "wenyan-lite" => "wenyan-lite".into(),
+        "wenyan" => "wenyan".into(),
+        "wenyan-ultra" => "wenyan-ultra".into(),
         _ => default_caveman_level(),
     }
 }

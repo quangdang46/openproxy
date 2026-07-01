@@ -13,7 +13,7 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
-use crate::core::account_fallback::{build_model_lock_update, filter_available_accounts};
+use crate::core::account_fallback::{build_model_lock_update, filter_available_accounts, StrategyType};
 use crate::core::chat::RequestPlan;
 use crate::core::combo::fusion::handle_fusion_chat;
 use crate::core::combo::{
@@ -735,7 +735,7 @@ async fn forward_with_provider_fallback(
 
     loop {
         let snapshot = state.db.snapshot();
-        let Some(connection) = select_connection(&snapshot, provider, model, &excluded) else {
+        let Some(connection) = select_connection(&snapshot, provider, model, &excluded, Some(registry)) else {
             let retry_after = earliest_retry_after(&snapshot, provider, model, &excluded);
             if let Some(mut error) = last_error {
                 if retry_after.is_some() {
@@ -1588,6 +1588,7 @@ fn select_connection(
     provider: &str,
     model: &str,
     excluded: &HashSet<String>,
+    registry: Option<&crate::core::account_fallback::AccountRegistry>,
 ) -> Option<ProviderConnection> {
     let now = Utc::now();
 
@@ -1610,19 +1611,70 @@ fn select_connection(
         .cloned()
         .collect();
 
-    candidates.sort_by_key(|connection| connection.priority.unwrap_or(999));
-    if let Some(connection) = candidates.into_iter().next() {
-        return Some(connection);
+    if candidates.is_empty() {
+        // No stored connection. Inject a virtual one for noAuth free providers
+        // (matches 9router's getProviderCredentials behavior). Lets OpenCode Free,
+        // edge-tts, google-tts, etc. route requests without manual setup.
+        if is_no_auth_provider(provider) && !excluded.contains("noauth") {
+            return Some(virtual_no_auth_connection(provider));
+        }
+        return None;
     }
 
-    // No stored connection. Inject a virtual one for noAuth free providers
-    // (matches 9router's getProviderCredentials behavior). Lets OpenCode Free,
-    // edge-tts, google-tts, etc. route requests without manual setup.
-    if is_no_auth_provider(provider) && !excluded.contains("noauth") {
-        return Some(virtual_no_auth_connection(provider));
-    }
+    // Determine strategy for this provider.
+    // Uses provider_strategies map, falling back to FillFirst.
+    let strategy = snapshot
+        .settings
+        .provider_strategies
+        .get(provider)
+        .and_then(|s| s.parse::<StrategyType>().ok())
+        .unwrap_or(StrategyType::FillFirst);
 
-    None
+    match strategy {
+        StrategyType::FillFirst | StrategyType::LeastLoaded => {
+            if let Some(reg) = registry {
+                let refs: Vec<&ProviderConnection> = candidates.iter().collect();
+                if let Some(idx) = reg.select_account_by_strategy(&refs, strategy, None, 300) {
+                    return Some(candidates.into_iter().nth(idx).unwrap());
+                }
+            }
+            // Fallback: sort by priority
+            candidates.sort_by_key(|connection| connection.priority.unwrap_or(999));
+            candidates.into_iter().next()
+        }
+        StrategyType::RoundRobin => {
+            if let Some(reg) = registry {
+                let refs: Vec<&ProviderConnection> = candidates.iter().collect();
+                let combo_id = format!("provider_{}", provider);
+                if let Some(idx) = reg.select_account_by_strategy(
+                    &refs,
+                    StrategyType::RoundRobin,
+                    Some(&combo_id),
+                    300,
+                ) {
+                    return Some(candidates.into_iter().nth(idx).unwrap());
+                }
+            }
+            candidates.sort_by_key(|connection| connection.priority.unwrap_or(999));
+            candidates.into_iter().next()
+        }
+        StrategyType::Sticky => {
+            if let Some(reg) = registry {
+                let refs: Vec<&ProviderConnection> = candidates.iter().collect();
+                let combo_id = format!("provider_{}", provider);
+                if let Some(idx) = reg.select_account_by_strategy(
+                    &refs,
+                    StrategyType::Sticky,
+                    Some(&combo_id),
+                    300,
+                ) {
+                    return Some(candidates.into_iter().nth(idx).unwrap());
+                }
+            }
+            candidates.sort_by_key(|connection| connection.priority.unwrap_or(999));
+            candidates.into_iter().next()
+        }
+    }
 }
 
 fn is_no_auth_provider(provider: &str) -> bool {
@@ -2773,7 +2825,7 @@ mod tests {
         };
 
         let excluded = HashSet::from([excluded_connection.id]);
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &excluded)
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &excluded, None)
             .expect("third account should remain selectable");
 
         assert_eq!(selected.id, chosen_connection.id);
@@ -2816,8 +2868,8 @@ mod tests {
             ..AppDb::default()
         };
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
-            .expect("should find available connection");
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new(), None)
+            .expect("should select an account");
 
         assert_eq!(selected.id, "available");
     }
@@ -2837,8 +2889,8 @@ mod tests {
             ..AppDb::default()
         };
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
-            .expect("should skip locked model and find available");
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new(), None)
+            .expect("should select an account");
 
         assert_eq!(selected.id, "available");
     }
@@ -2858,8 +2910,8 @@ mod tests {
             ..AppDb::default()
         };
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
-            .expect("should skip account-level lock and find available");
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new(), None)
+            .expect("should select an account");
 
         assert_eq!(selected.id, "available");
     }
@@ -2876,8 +2928,8 @@ mod tests {
             ..AppDb::default()
         };
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
-            .expect("should find active connection");
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new(), None)
+            .expect("should select an account");
 
         assert_eq!(selected.id, "active");
     }
@@ -2895,8 +2947,8 @@ mod tests {
             ..AppDb::default()
         };
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
-            .expect("should find connection with credentials");
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new(), None)
+            .expect("should select an account");
 
         assert_eq!(selected.id, "with-creds");
     }
@@ -2911,8 +2963,8 @@ mod tests {
             ..AppDb::default()
         };
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
-            .expect("should select highest priority connection");
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new(), None)
+            .expect("should select an account");
 
         assert_eq!(selected.id, "high-priority");
     }
@@ -2936,8 +2988,8 @@ mod tests {
             ..AppDb::default()
         };
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new())
-            .expect("should select connection supporting gpt-4.1");
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new(), None)
+            .expect("should select an account");
 
         assert_eq!(selected.id, "conn-b");
     }
@@ -2956,8 +3008,7 @@ mod tests {
             .into_iter()
             .collect();
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &excluded);
-
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &excluded, None);
         assert!(
             selected.is_none(),
             "should return None when all accounts excluded"
@@ -2968,8 +3019,7 @@ mod tests {
     fn select_connection_returns_none_when_no_connections_match() {
         let snapshot = AppDb::default();
 
-        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new());
-
+        let selected = select_connection(&snapshot, "openai", "gpt-4.1", &HashSet::new(), None);
         assert!(
             selected.is_none(),
             "should return None when no connections exist"

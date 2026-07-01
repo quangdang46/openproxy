@@ -456,6 +456,9 @@ pub enum ProviderCmd {
         from_file: String,
         #[arg(long)]
         prune: bool,
+        /// Preview changes without modifying the database.
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -1156,9 +1159,17 @@ pub async fn run_provider(cmd: ProviderCmd, db: &Db, ctx: output::OutputCtx) -> 
                  not run_provider"
             );
         }
-        ProviderCmd::Apply { from_file, prune } => {
+        ProviderCmd::Apply {
+            from_file,
+            prune,
+            dry_run,
+        } => {
             provider_ext::run(
-                provider_ext::ProviderExtCmd::Apply { from_file, prune },
+                provider_ext::ProviderExtCmd::Apply {
+                    from_file,
+                    prune,
+                    dry_run,
+                },
                 db,
                 ctx,
             )

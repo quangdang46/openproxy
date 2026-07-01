@@ -198,7 +198,64 @@ pub fn kilocode() -> OAuthProviderConfig {
     }
 }
 
-/// Cline — PKCE auth-code flow with a dedicated refresh endpoint.
+/// Kimchi — browser_token OAuth flow.
+pub fn kimchi() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "kimchi",
+        client_id: "openproxy",
+        authorize_url: "",
+        token_url: "",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[],
+        refresh_lead_ms: 0,
+    }
+}
+
+/// xAI — PKCE auth-code flow with 96-byte verifier.
+pub fn xai() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "xai",
+        client_id: "b1a00492-073a-073a-47ea-816f-4c329264a828",
+        authorize_url: "https://auth.x.ai/oauth2/authorize",
+        token_url: "https://auth.x.ai/oauth2/token",
+        scopes: &["openid", "profile", "email", "offline_access", "grok-cli:access", "api:access"],
+        uses_pkce: true,
+        extra_params: &[
+            ("plan", "generic"),
+            ("referrer", "cli-proxy-api"),
+        ],
+        refresh_lead_ms: 5 * 60 * 1000,
+    }
+}
+
+/// Gemini CLI — PKCE auth-code flow (Google OAuth).
+pub fn gemini_cli() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "gemini-cli",
+        client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
+        authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+        token_url: "https://oauth2.googleapis.com/token",
+        scopes: &["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
+        uses_pkce: true,
+        extra_params: &[],
+        refresh_lead_ms: 4 * 60 * 60 * 1000,
+    }
+}
+
+/// Qoder — device-code flow.
+pub fn qoder() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "qoder",
+        client_id: "openproxy",
+        authorize_url: "https://api.qoder.ai/oauth/device/code",
+        token_url: "https://api.qoder.ai/oauth/token",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[],
+        refresh_lead_ms: 0,
+    }
+}
 pub fn cline() -> OAuthProviderConfig {
     OAuthProviderConfig {
         id: "cline",
@@ -295,7 +352,11 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "gitlab" => Some(gitlab()),
         "codebuddy" => Some(codebuddy()),
         "openai-native" => Some(openai_native()),
-        "xai" | "gemini-cli" | "antigravity" | "openai" => None,
+        "xai" => Some(xai()),
+        "gemini-cli" => Some(gemini_cli()),
+        "qoder" => Some(qoder()),
+        "kimchi" => Some(kimchi()),
+        "antigravity" | "openai" => None,
         _ => None,
     }
 }

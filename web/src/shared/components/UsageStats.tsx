@@ -207,8 +207,8 @@ const PERIODS = [
 ];
 
 export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false }: UsageStatsProps = {}) {
-  const sortBy = "rawModel";
-  const sortOrder = "asc";
+  const [sortBy, setSortBy] = useState("rawModel");
+  const [sortOrder, setSortOrder] = useState("asc");
 
   const [stats, setStats] = useState<StatsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -285,7 +285,16 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   }, []);
 
   const toggleSort = useCallback((tableType: string, field: string) => {
-    console.log("toggleSort called with", tableType, field);
+    setSortBy((prev) => {
+      if (prev === field) {
+        // Toggle order when clicking the same field
+        setSortOrder((o) => (o === "asc" ? "desc" : "asc"));
+        return prev;
+      }
+      // New field: default to ascending
+      setSortOrder("asc");
+      return field;
+    });
   }, []);
 
   // Compute active table data
