@@ -447,11 +447,12 @@ async fn models_endpoint_falls_back_to_static_models_when_no_active_connections(
     assert!(!ids.contains(&"openrouter/openai/text-embedding-3-large"));
 }
 
+/// Verifies that GET /v1 returns the expected API metadata (version + endpoint list).
 #[tokio::test]
-async fn v1_root_matches_v1_models_listing() {
+async fn v1_root_returns_api_metadata() {
     let app = openproxy::build_app(app_state().await);
 
-    let root = app
+    let response = app
         .clone()
         .oneshot(
             Request::builder()
@@ -462,31 +463,18 @@ async fn v1_root_matches_v1_models_listing() {
         )
         .await
         .unwrap();
-    let models = app
-        .oneshot(
-            Request::builder()
-                .uri("/v1/models")
-                .header("authorization", "Bearer valid-bearer")
-                .body(Body::empty())
-                .unwrap(),
-        )
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    let root_json: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(root.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    let models_json: serde_json::Value = serde_json::from_slice(
-        &axum::body::to_bytes(models.into_body(), usize::MAX)
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-
-    assert_eq!(root_json, models_json);
+    assert_eq!(json["version"], "v1");
+    let endpoints = json["endpoints"].as_array().unwrap();
+    assert!(!endpoints.is_empty());
+    assert!(endpoints.contains(&json!("/v1/models")));
+    assert!(endpoints.contains(&json!("/v1/chat/completions")));
 }
 
 #[tokio::test]
