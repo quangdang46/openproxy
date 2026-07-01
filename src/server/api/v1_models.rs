@@ -167,7 +167,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
             for custom_model in snapshot
                 .custom_models
                 .iter()
-                .filter(|model| model.r#type.is_empty() || model.r#type == LLM_KIND)
+                .filter(|model| model.r#type.is_empty() || model.r#type == LLM_KIND || model.r#type == "chat")
             {
                 let model_id = custom_model.id.trim();
                 let provider_alias = custom_model.provider_alias.trim();
@@ -225,7 +225,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
             let custom_model_ids = snapshot
                 .custom_models
                 .iter()
-                .filter(|model| model.r#type.is_empty() || model.r#type == LLM_KIND)
+                .filter(|model| model.r#type.is_empty() || model.r#type == LLM_KIND || model.r#type == "chat")
                 .filter_map(|model| {
                     let provider_alias = model.provider_alias.trim();
                     let model_id = model.id.trim();
@@ -326,7 +326,7 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
     // (e.g., custom models registered on provider nodes rather than connections)
     if kind_filter.contains(&LLM_KIND) {
         for custom_model in &snapshot.custom_models {
-            if !custom_model.r#type.is_empty() && custom_model.r#type != LLM_KIND {
+            if !custom_model.r#type.is_empty() && custom_model.r#type != LLM_KIND && custom_model.r#type != "chat" {
                 continue;
             }
             let model_id = custom_model.id.trim();

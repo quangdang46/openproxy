@@ -42,6 +42,10 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/keys/{id}", get(get_key))
         .route("/api/proxy-pools/{id}", get(get_proxy_pool))
+        // Batch operations
+        .route("/api/batch/providers", axum::routing::delete(batch_delete_providers))
+        .route("/api/batch/combos", axum::routing::delete(batch_delete_combos))
+        .route("/api/batch/keys", axum::routing::delete(batch_delete_keys))
 }
 
 async fn get_provider(
@@ -855,6 +859,112 @@ fn internal_error(error: impl ToString) -> Response {
         Json(json!({ "error": error.to_string() })),
     )
         .into_response()
+}
+
+// ── Batch operations ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchDeleteRequest {
+    ids: Vec<String>,
+}
+
+/// DELETE /api/batch/providers — delete multiple provider connections
+async fn batch_delete_providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<BatchDeleteRequest>,
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+    if req.ids.is_empty() {
+        return bad_request("ids array must not be empty");
+    }
+
+    let ids = req.ids;
+    let count = ids.len();
+    match state
+        .db
+        .update(move |db| {
+            db.provider_connections
+                .retain(|connection| !ids.contains(&connection.id));
+        })
+        .await
+    {
+        Ok(_) => Json(json!({ "deleted": count })).into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+/// DELETE /api/batch/combos — delete multiple combos
+async fn batch_delete_combos(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<BatchDeleteRequest>,
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+    if req.ids.is_empty() {
+        return bad_request("ids array must not be empty");
+    }
+
+    // Collect combo names before deleting (for quarantine/rotation cleanup)
+    let ids = req.ids;
+    let count = ids.len();
+    let snapshot = state.db.snapshot();
+    let names_to_clean: Vec<String> = snapshot
+        .combos
+        .iter()
+        .filter(|c| ids.contains(&c.id))
+        .map(|c| c.name.clone())
+        .collect();
+
+    match state
+        .db
+        .update(move |db| {
+            db.combos.retain(|combo| !ids.contains(&combo.id));
+        })
+        .await
+    {
+        Ok(_) => {
+            // Clean up rotation/quarantine state for deleted combos
+            for name in &names_to_clean {
+                reset_combo_rotation(Some(name));
+                clear_combo_quarantine(name);
+            }
+            Json(json!({ "deleted": count })).into_response()
+        }
+        Err(error) => internal_error(error),
+    }
+}
+
+/// DELETE /api/batch/keys — delete multiple API keys
+async fn batch_delete_keys(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<BatchDeleteRequest>,
+) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+    if req.ids.is_empty() {
+        return bad_request("ids array must not be empty");
+    }
+
+    let ids = req.ids;
+    let count = ids.len();
+    match state
+        .db
+        .update(move |db| {
+            db.api_keys.retain(|key| !ids.contains(&key.id));
+        })
+        .await
+    {
+        Ok(_) => Json(json!({ "deleted": count })).into_response(),
+        Err(error) => internal_error(error),
+    }
 }
 
 #[cfg(test)]
