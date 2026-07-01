@@ -1,0 +1,23 @@
+---
+// Landing / Marketing page.
+// The index page (`/`) redirects to the dashboard; this page is the
+// standalone marketing splash that feature links and external referrals
+// point to.
+import Layout from '@/layouts/Layout.astro';
+import Navigation from '@/components/landing/Navigation';
+import HeroSection from '@/components/landing/HeroSection';
+import Features from '@/components/landing/Features';
+import HowItWorks from '@/components/landing/HowItWorks';
+import GetStarted from '@/components/landing/GetStarted';
+import Footer from '@/components/landing/Footer';
+---
+<Layout>
+  <main className="min-h-screen bg-[#0d0b0a] text-white">
+    <Navigation client:only="react" />
+    <HeroSection client:only="react" />
+    <Features client:only="react" />
+    <HowItWorks client:only="react" />
+    <GetStarted client:only="react" />
+    <Footer client:only="react" />
+  </main>
+</Layout>

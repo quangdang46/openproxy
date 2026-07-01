@@ -552,7 +552,7 @@
   "Open Dashboard": "打开仪表盘",
   "Route Requests": "路由请求",
   "npm install -g openproxy": "npm install -g openproxy",
-  "open http://localhost:9099": "open http://localhost:9099",
+  "open http://localhost:4623": "open http://localhost:4623",
   "Ready! Requests route automatically through your configured providers.": "就绪！请求将自动通过您配置的提供商路由。",
 
   "How it Works": "工作原理",

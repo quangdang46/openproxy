@@ -15,6 +15,7 @@
 #   --from-source          Skip release download, build from source via cargo
 #   --no-skill             Skip installing the agent skill into ~/.agents/skills/openproxy/SKILL.md
 #   --skill-dest <dir>     Override the skills root. Default: ~/.agents/skills
+#   --with-completions     Install shell completions for bash/zsh/fish
 #   --quiet, -q            Suppress info logs
 #   --uninstall            Remove the binary and any easy-mode PATH lines
 #   -h, --help             Show this help and exit
@@ -39,6 +40,7 @@ FROM_SOURCE=0
 UNINSTALL=0
 NO_SKILL=0
 SKILL_DEST="${SKILL_DEST:-$HOME/.agents/skills}"
+WITH_COMPLETIONS=0
 MAX_RETRIES=3
 DOWNLOAD_TIMEOUT=120
 LOCK_DIR="/tmp/${BINARY_NAME}-install.lock.d"
@@ -112,6 +114,7 @@ while [ $# -gt 0 ]; do
         --skill-dest)   SKILL_DEST="$2"; shift 2;;
         --skill-dest=*) SKILL_DEST="${1#*=}"; shift;;
         --quiet|-q)     QUIET=1; shift;;
+        --with-completions) WITH_COMPLETIONS=1; shift;;
         --uninstall)    UNINSTALL=1; shift;;
         -h|--help)      usage;;
         *) log_warn "unknown argument: $1 (ignored)"; shift;;
@@ -333,6 +336,63 @@ install_agent_skill() {
 }
 
 # ════════════════════════════════════════════════════════════════════════════
+# Shell completion install
+# ════════════════════════════════════════════════════════════════════════════
+
+install_completions() {
+    [ "$WITH_COMPLETIONS" -ne 1 ] && return 0
+
+    local completions_url
+    if [ -n "$VERSION" ]; then
+        completions_url="https://raw.githubusercontent.com/${OWNER}/${REPO}/${VERSION}/shell-completions"
+    else
+        completions_url="https://raw.githubusercontent.com/${OWNER}/${REPO}/main/shell-completions"
+    fi
+
+    # bash
+    if [ -n "${BASH_COMPLETION_DIR:-}" ]; then
+        local bash_dir="$BASH_COMPLETION_DIR"
+    elif [ -d "/usr/local/etc/bash_completion.d" ]; then
+        local bash_dir="/usr/local/etc/bash_completion.d"
+    elif [ -d "/etc/bash_completion.d" ]; then
+        local bash_dir="/etc/bash_completion.d"
+    else
+        local bash_dir="$HOME/.local/share/bash-completion/completions"
+    fi
+    mkdir -p "$bash_dir" 2>/dev/null || true
+    if curl -fsSL --connect-timeout 10 --max-time 15 -o "$bash_dir/openproxy" "$completions_url/openproxy.bash" 2>/dev/null; then
+        log_success "bash completions → $bash_dir/openproxy"
+    else
+        log_warn "could not install bash completions (continuing)"
+    fi
+
+    # zsh
+    local zsh_dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/completions"
+    if [ ! -d "$zsh_dir" ]; then
+        zsh_dir="$HOME/.zsh/completions"
+    fi
+    # Also check standard zsh site-functions dir
+    if [ -d "/usr/local/share/zsh/site-functions" ]; then
+        zsh_dir="/usr/local/share/zsh/site-functions"
+    fi
+    mkdir -p "$zsh_dir" 2>/dev/null || true
+    if curl -fsSL --connect-timeout 10 --max-time 15 -o "$zsh_dir/_openproxy" "$completions_url/openproxy.zsh" 2>/dev/null; then
+        log_success "zsh completions → $zsh_dir/_openproxy"
+    else
+        log_warn "could not install zsh completions (continuing)"
+    fi
+
+    # fish
+    local fish_dir="$HOME/.config/fish/completions"
+    mkdir -p "$fish_dir" 2>/dev/null || true
+    if curl -fsSL --connect-timeout 10 --max-time 15 -o "$fish_dir/openproxy.fish" "$completions_url/openproxy.fish" 2>/dev/null; then
+        log_success "fish completions → $fish_dir/openproxy.fish"
+    else
+        log_warn "could not install fish completions (continuing)"
+    fi
+}
+
+# ════════════════════════════════════════════════════════════════════════════
 # Build from source
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -418,6 +478,7 @@ main() {
 
     maybe_add_path
     install_agent_skill
+    install_completions
 
     if [ "$VERIFY" -eq 1 ]; then
         log_info "running self-test: $DEST/$BINARY_NAME --version"
