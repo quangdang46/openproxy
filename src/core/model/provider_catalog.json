@@ -59,6 +59,7 @@
     "cloudflare-ai": "cloudflare-ai",
     "xiaomi-mimo": "xiaomi-mimo",
     "inference-net": "inference-net",
+    "venice": "venice",
     "vercel-ai-gateway": "vercel-ai-gateway",
     "xiaomi-tokenplan": "xiaomi-tokenplan",
     "github-models": "ghm",

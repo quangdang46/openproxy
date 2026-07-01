@@ -6,7 +6,7 @@ use axum::{routing, Json, Router};
 use bytes::Bytes;
 use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::time::{self, Duration};
 
@@ -515,7 +515,7 @@ struct ChartQuery {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UsageChartBucket {
-    label: String,
+    date: String,
     tokens: u64,
     cost: f64,
 }
@@ -540,7 +540,7 @@ async fn get_usage_chart(
 
     let tracker = UsageTracker::new(state.db.clone());
     let usage_db = tracker.get_usage_db();
-    Json(build_usage_chart(&usage_db, period)).into_response()
+    Json(json!({ "data": build_usage_chart(&usage_db, period) })).into_response()
 }
 
 fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> {
@@ -558,7 +558,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             .map(|index| {
                 let ts = start + ChronoDuration::hours(index as i64);
                 UsageChartBucket {
-                    label: ts.format("%H:%M").to_string(),
+                    date: ts.format("%H:%M").to_string(),
                     tokens: 0,
                     cost: 0.0,
                 }
@@ -592,7 +592,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             .map(|index| {
                 let ts = start + ChronoDuration::hours(index as i64);
                 UsageChartBucket {
-                    label: ts.format("%H:%M").to_string(),
+                    date: ts.format("%H:%M").to_string(),
                     tokens: 0,
                     cost: 0.0,
                 }
@@ -631,7 +631,7 @@ fn build_usage_chart(usage_db: &UsageDb, period: &str) -> Vec<UsageChartBucket> 
             let summary = usage_db.daily_summary.get(&date_key);
 
             UsageChartBucket {
-                label: format_daily_chart_label(date),
+                date: format_daily_chart_label(date),
                 tokens: summary
                     .map(|day| day.prompt_tokens + day.completion_tokens)
                     .unwrap_or(0),
@@ -1057,7 +1057,7 @@ mod tests {
     #[test]
     fn test_chart_bucket_serialization() {
         let point = UsageChartBucket {
-            label: "Jan 15".to_string(),
+            date: "Jan 15".to_string(),
             tokens: 7500,
             cost: 1.50,
         };
