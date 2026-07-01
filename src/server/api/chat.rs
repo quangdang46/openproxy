@@ -531,10 +531,27 @@ async fn execute_single_model(
         });
     }
 
-    // 1. RTK tool-result compression (gated by rtk_enabled)
+    // 1. Strip unsupported modalities in source format before translation
+    let caps = capabilities_for_format(plan.source_format);
+    strip_unsupported_modalities(&mut body, plan.source_format, &caps);
+
+    // 2. Translate request body from source format to target format
+    //     before applying RTK/Headroom/Caveman (9router order: translate first, then post-process).
+    if plan.needs_translation() {
+        registry::global_registry().translate_request(
+            plan.source_format,
+            plan.target_format,
+            &plan.model,
+            &mut body,
+            plan.stream,
+            None,
+        );
+    }
+
+    // 3. RTK tool-result compression (after translate — 9router parity)
     compress_messages(&mut body, snapshot.settings.rtk_enabled);
 
-    // 2. Headroom external token compression (gated by headroom_enabled)
+    // 4. Headroom external token compression (after translate — 9router parity)
     {
         let headroom_cfg = HeadroomConfig {
             enabled: snapshot.settings.headroom_enabled,
@@ -555,7 +572,8 @@ async fn execute_single_model(
         }
     }
 
-    // 9router parity: provider-level thinking config override (chatCore.js:44-57).
+    // 5. 9router parity: provider-level thinking config override (chatCore.js:44-57).
+    //     After Headroom so token budgets are applied to any external-compressed body.
     if let Some(provider_thinking) = snapshot
         .settings
         .extra
@@ -597,24 +615,7 @@ async fn execute_single_model(
         }
     }
 
-    // 3. Strip unsupported modalities in source format before translation
-    let caps = capabilities_for_format(plan.source_format);
-    strip_unsupported_modalities(&mut body, plan.source_format, &caps);
-
-    // 4. Translate request body from source format to target format
-    //     before applying token savers (9router order: translate first, then preprocess).
-    if plan.needs_translation() {
-        registry::global_registry().translate_request(
-            plan.source_format,
-            plan.target_format,
-            &plan.model,
-            &mut body,
-            plan.stream,
-            None,
-        );
-    }
-
-    // 5. Caveman + Ponytail prompt injection (after translate — 9router parity)
+    // 6. Caveman + Ponytail prompt injection (after translate — 9router parity)
     let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
 
     // Prefetch remote images for providers that need inline base64
