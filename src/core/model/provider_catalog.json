@@ -4527,6 +4527,17 @@
       "hasFetch": false
     },
     {
+      "id": "venice",
+      "alias": "venice",
+      "serviceKinds": [
+        "llm"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
       "id": "vercel-ai-gateway",
       "alias": "vercel-ai-gateway",
       "serviceKinds": [
