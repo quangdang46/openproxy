@@ -3464,6 +3464,46 @@
     {
       "alias": "hc",
       "models": []
+    },
+    {
+      "alias": "venice",
+      "models": [
+        {
+          "id": "venice-latest",
+          "name": "venice-latest",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "alias": "vercel-ai-gateway",
+      "models": [
+        {
+          "id": "openai/gpt-4.1",
+          "name": "openai/gpt-4.1",
+          "kind": "llm"
+        },
+        {
+          "id": "anthropic/claude-4-sonnet",
+          "name": "anthropic/claude-4-sonnet",
+          "kind": "llm"
+        },
+        {
+          "id": "google/gemini-2.5-pro",
+          "name": "google/gemini-2.5-pro",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/kimi-k2",
+          "name": "moonshotai/kimi-k2",
+          "kind": "llm"
+        },
+        {
+          "id": "vercel/v0-1.5-md",
+          "name": "vercel/v0-1.5-md",
+          "kind": "llm"
+        }
+      ]
     }
   ],
   "providers": [
