@@ -158,7 +158,11 @@ impl KiroExecutor {
         let path = format!("/v1/{model}/{action}",);
         // Build list of candidate URLs with multi-host failover parity
         let mut urls = Vec::new();
-        urls.push(format!("{}{}", KIRO_PRIMARY_ENDPOINT.trim_end_matches('/'), path));
+        urls.push(format!(
+            "{}{}",
+            KIRO_PRIMARY_ENDPOINT.trim_end_matches('/'),
+            path
+        ));
         for fallback in KIRO_FALLBACK_ENDPOINTS {
             urls.push(format!("{}{}", fallback.trim_end_matches('/'), path));
         }
@@ -186,19 +190,18 @@ impl KiroExecutor {
                 .unwrap_or(false);
 
             if is_aws_auth {
-                let credentials = match Self::parse_aws_credentials(
-                    request
-                        .credentials
-                        .access_token
-                        .as_deref()
-                        .ok_or_else(|| KiroExecutorError::MissingCredentials("kiro".to_string()))?,
-                ) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        last_error = Some(e);
-                        continue;
-                    }
-                };
+                let credentials =
+                    match Self::parse_aws_credentials(
+                        request.credentials.access_token.as_deref().ok_or_else(|| {
+                            KiroExecutorError::MissingCredentials("kiro".to_string())
+                        })?,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            last_error = Some(e);
+                            continue;
+                        }
+                    };
 
                 let signed_headers = self
                     .sign_request(url, &credentials, &content_hash, request.stream)
@@ -294,9 +297,11 @@ impl KiroExecutor {
         let date_stamp = timestamp.format("%Y%m%d").to_string();
 
         // Extract host from the actual URL for SigV4 signing
-        let parsed_url = url::Url::parse(url)
-            .map_err(|e| KiroExecutorError::SigningError(e.to_string()))?;
-        let host = parsed_url.host_str().unwrap_or("runtime.us-east-1.kiro.dev");
+        let parsed_url =
+            url::Url::parse(url).map_err(|e| KiroExecutorError::SigningError(e.to_string()))?;
+        let host = parsed_url
+            .host_str()
+            .unwrap_or("runtime.us-east-1.kiro.dev");
         let region = KIRO_REGION;
         let service = KIRO_SERVICE;
 

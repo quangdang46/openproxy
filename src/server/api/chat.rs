@@ -737,7 +737,9 @@ async fn forward_with_provider_fallback(
 
     loop {
         let snapshot = state.db.snapshot();
-        let Some(connection) = select_connection(&snapshot, provider, model, &excluded, Some(registry)) else {
+        let Some(connection) =
+            select_connection(&snapshot, provider, model, &excluded, Some(registry))
+        else {
             let retry_after = earliest_retry_after(&snapshot, provider, model, &excluded);
             if let Some(mut error) = last_error {
                 if retry_after.is_some() {

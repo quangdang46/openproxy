@@ -353,7 +353,11 @@ impl VertexExecutor {
         let base = format!(
             "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}",
             location,
-            if project_id.is_empty() { "unknown" } else { project_id },
+            if project_id.is_empty() {
+                "unknown"
+            } else {
+                project_id
+            },
             location,
         );
 
@@ -394,11 +398,9 @@ impl VertexExecutor {
         } else if let Some(credentials_json) = &request.credentials.access_token {
             let service_account = Self::parse_service_account_json(credentials_json)?;
             let jwt = Self::create_rs256_jwt(&service_account)?;
-            let cached_token = Self::exchange_jwt_for_token(&jwt, &service_account.token_uri).await?;
-            let project_id = service_account
-                .project_id
-                .clone()
-                .unwrap_or_default();
+            let cached_token =
+                Self::exchange_jwt_for_token(&jwt, &service_account.token_uri).await?;
+            let project_id = service_account.project_id.clone().unwrap_or_default();
             (project_id, cached_token.token)
         } else {
             // Try ADC (Application Default Credentials) via metadata server

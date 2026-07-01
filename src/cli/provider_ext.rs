@@ -509,10 +509,14 @@ async fn run_apply(
             json!({ "diff": diff, "summary": summary, "prune": prune, "dry_run": dry_run }),
         )?;
     } else {
-        humanln(ctx, format!("provider apply ({}{}): {summary}",
-            if dry_run { "DRY RUN, " } else { "" },
-            if prune { "prune" } else { "no prune" },
-        ));
+        humanln(
+            ctx,
+            format!(
+                "provider apply ({}{}): {summary}",
+                if dry_run { "DRY RUN, " } else { "" },
+                if prune { "prune" } else { "no prune" },
+            ),
+        );
     }
     Ok(())
 }
@@ -722,10 +726,7 @@ mod tests {
         assert!(diff.updated.is_empty());
         assert!(diff.unchanged.is_empty());
         assert_eq!(app.provider_connections.len(), 1);
-        assert_eq!(
-            app.provider_connections[0].api_key,
-            Some("sk-test".into())
-        );
+        assert_eq!(app.provider_connections[0].api_key, Some("sk-test".into()));
     }
 
     #[test]
@@ -867,10 +868,7 @@ mod tests {
         assert_eq!(diff.deleted.len(), 1);
         assert_eq!(diff.deleted[0], "delete-me");
         assert_eq!(app.provider_connections.len(), 1);
-        assert_eq!(
-            app.provider_connections[0].name,
-            Some("keep-me".into())
-        );
+        assert_eq!(app.provider_connections[0].name, Some("keep-me".into()));
     }
 
     #[test]
@@ -891,9 +889,10 @@ mod tests {
             proxy_url: Some("http://proxy:8080".into()),
             proxy_label: Some("corp-proxy".into()),
             use_connection_proxy: Some(true),
-            provider_specific_data: Some(BTreeMap::from([
-                ("extraField".into(), Value::String("extra".into())),
-            ])),
+            provider_specific_data: Some(BTreeMap::from([(
+                "extraField".into(),
+                Value::String("extra".into()),
+            )])),
         }];
         let names: HashSet<_> = items.iter().map(|i| i.name.clone()).collect();
         let mut diff = ApplyDiff::default();
