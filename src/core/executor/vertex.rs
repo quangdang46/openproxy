@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use hyper::http::{self as hyper_http, uri::InvalidUri};
-use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use time::Duration;
@@ -340,22 +340,33 @@ impl VertexExecutor {
 
     fn build_vertex_url(
         model: &str,
-        _project_id: &str,
+        project_id: &str,
         location: &str,
         is_partner: bool,
+        stream: bool,
     ) -> String {
         let model_stripped = model.strip_prefix("vertex/").unwrap_or(model);
 
-        if is_partner {
-            format!(
-                "https://{}-{}/publishers/{}",
-                location, VERTEX_AI_BASE_URL, model_stripped
-            )
+        // 9router VertexExecutor v1 URL pattern:
+        //   https://LOCATION-aiplatform.googleapis.com/v1/projects/PROJECT/locations/LOCATION/publishers/google/MODEL:streamGenerateContent
+        //   ?alt=sse
+        let base = format!(
+            "https://{}-aiplatform.googleapis.com/v1/projects/{}/locations/{}",
+            location,
+            if project_id.is_empty() { "unknown" } else { project_id },
+            location,
+        );
+
+        let url = if is_partner {
+            format!("{base}/publishers/{model_stripped}:streamGenerateContent",)
         } else {
-            format!(
-                "https://{}-{}/publishers/google/{}",
-                location, VERTEX_AI_BASE_URL, model_stripped
-            )
+            format!("{base}/publishers/google/{model_stripped}:streamGenerateContent",)
+        };
+
+        if stream {
+            format!("{}?alt=sse", url)
+        } else {
+            url
         }
     }
 
@@ -363,29 +374,66 @@ impl VertexExecutor {
         &self,
         request: VertexExecutionRequest,
     ) -> Result<VertexExecutorResponse, VertexExecutorError> {
-        let credentials_json = request.credentials.access_token.as_deref().ok_or_else(|| {
-            VertexExecutorError::MissingCredentials(
-                "access_token (service account JSON) is required for Vertex AI".to_string(),
-            )
-        })?;
+        // Extract project_id and location from model or credentials
+        let (location, _, _, is_partner) = Self::parse_vertex_model(&request.model);
 
-        let service_account = Self::parse_service_account_json(credentials_json)?;
-        let jwt = Self::create_rs256_jwt(&service_account)?;
-        let access_token = Self::exchange_jwt_for_token(&jwt, &service_account.token_uri).await?;
+        // Determine auth path:
+        // 1. Raw API key (api_key field) -> ADC or x-goog-api-key
+        // 2. Service account JSON (access_token field) -> JWT exchange
+        // 3. No credentials -> try ADC (metadata server)
+        let (project_id, auth_token) = if let Some(api_key) = &request.credentials.api_key {
+            // Raw API key auth path
+            let project_id = request
+                .credentials
+                .provider_specific_data
+                .get("projectId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            (project_id, format!("{}", api_key))
+        } else if let Some(credentials_json) = &request.credentials.access_token {
+            let service_account = Self::parse_service_account_json(credentials_json)?;
+            let jwt = Self::create_rs256_jwt(&service_account)?;
+            let cached_token = Self::exchange_jwt_for_token(&jwt, &service_account.token_uri).await?;
+            let project_id = service_account
+                .project_id
+                .clone()
+                .unwrap_or_default();
+            (project_id, cached_token.token)
+        } else {
+            // Try ADC (Application Default Credentials) via metadata server
+            let project_id = String::new();
+            let token = Self::fetch_adc_token().await?;
+            (project_id, token)
+        };
 
-        let (location, project_id, _, is_partner) = Self::parse_vertex_model(&request.model);
-        let url = Self::build_vertex_url(&request.model, &project_id, &location, is_partner);
+        let url = Self::build_vertex_url(
+            &request.model,
+            &project_id,
+            &location,
+            is_partner,
+            request.stream,
+        );
 
         let transformed_body =
             Self::build_vertex_request_body(&request.body, &request.model, request.stream)?;
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {}", access_token.token))
-                .map_err(VertexExecutorError::InvalidHeader)?,
-        );
+
+        // Use x-goog-api-key for API key auth, Bearer token for OAuth/ADC
+        if request.credentials.api_key.is_some() {
+            headers.insert(
+                HeaderName::from_bytes(b"x-goog-api-key").unwrap(),
+                HeaderValue::from_str(&auth_token).map_err(VertexExecutorError::InvalidHeader)?,
+            );
+        } else {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {}", auth_token))
+                    .map_err(VertexExecutorError::InvalidHeader)?,
+            );
+        }
 
         let client = self.pool.get("vertex", request.proxy.as_ref())?;
         let response = client
@@ -402,6 +450,26 @@ impl VertexExecutor {
             transformed_body,
             transport: TransportKind::Reqwest,
         })
+    }
+
+    /// Fetch an access token from the GCP metadata server (ADC).
+    async fn fetch_adc_token() -> Result<String, VertexExecutorError> {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=https://aiplatform.googleapis.com&format=full")
+            .header("Metadata-Flavor", "Google")
+            .send()
+            .await
+            .map_err(|e| {
+                VertexExecutorError::MissingCredentials(format!(
+                    "ADC token fetch failed: {}",
+                    e
+                ))
+            })?;
+        let token = resp.text().await.map_err(|e| {
+            VertexExecutorError::InvalidToken(format!("ADC token parse failed: {}", e))
+        })?;
+        Ok(token)
     }
 }
 

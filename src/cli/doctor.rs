@@ -41,7 +41,7 @@ pub async fn run(ctx: OutputCtx, cfg: &ResolvedConfig) -> anyhow::Result<i32> {
 
     checks.push(check_data_dir(&cfg.data_dir));
     checks.push(check_db_file(&cfg.data_dir));
-    checks.push(check_db_loadable().await);
+    checks.push(check_db_loadable(&cfg.data_dir).await);
 
     if let Some(url) = cfg.remote_url.as_deref() {
         checks.push(check_server_reachable(url).await);
@@ -109,18 +109,10 @@ fn check_db_file(dir: &Path) -> Check {
     }
 }
 
-async fn check_db_loadable() -> Check {
+async fn check_db_loadable(dir: &Path) -> Check {
     // Use a non-side-effecting probe: open SQLite read-only and export
     // the snapshot, instead of `Db::load()` which would *create* the file
     // (causing a misleading FAIL/ok flip on the very first run — bug #5).
-    let dir = std::env::var_os("DATA_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|| std::path::PathBuf::from("."));
-            home.join(".openproxy")
-        });
     let db_path = dir.join("openproxy.sqlite");
     if !db_path.exists() {
         return Check::fail(
