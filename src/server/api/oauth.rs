@@ -4456,9 +4456,18 @@ async fn codex_bulk_import(
                 continue;
             }
         };
-        let refresh_token = account.get("refreshToken").and_then(Value::as_str).map(str::to_string);
-        let id_token = account.get("idToken").and_then(Value::as_str).map(str::to_string);
-        let machine_id = account.get("machineId").and_then(Value::as_str).map(str::to_string);
+        let refresh_token = account
+            .get("refreshToken")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let id_token = account
+            .get("idToken")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let machine_id = account
+            .get("machineId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
 
         let email = account
             .get("email")
@@ -4476,8 +4485,14 @@ async fn codex_bulk_import(
             });
 
         let mut provider_specific_data = std::collections::BTreeMap::new();
-        provider_specific_data.insert("authMethod".to_string(), Value::String("bulk-import".to_string()));
-        provider_specific_data.insert("provider".to_string(), Value::String("Imported".to_string()));
+        provider_specific_data.insert(
+            "authMethod".to_string(),
+            Value::String("bulk-import".to_string()),
+        );
+        provider_specific_data.insert(
+            "provider".to_string(),
+            Value::String("Imported".to_string()),
+        );
         if let Some(mid) = &machine_id {
             provider_specific_data.insert("machineId".to_string(), Value::String(mid.clone()));
         }
@@ -4512,10 +4527,7 @@ async fn codex_bulk_import(
 
 pub fn routes() -> Router<AppState> {
     Router::new()
-        .route(
-            "/api/oauth/codex/bulk-import",
-            post(codex_bulk_import),
-        )
+        .route("/api/oauth/codex/bulk-import", post(codex_bulk_import))
         .route(
             "/api/oauth/cursor/auto-import",
             get(cursor_auto_import_route),

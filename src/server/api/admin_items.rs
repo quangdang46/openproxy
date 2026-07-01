@@ -43,8 +43,14 @@ pub fn routes() -> Router<AppState> {
         .route("/api/keys/{id}", get(get_key))
         .route("/api/proxy-pools/{id}", get(get_proxy_pool))
         // Batch operations
-        .route("/api/batch/providers", axum::routing::delete(batch_delete_providers))
-        .route("/api/batch/combos", axum::routing::delete(batch_delete_combos))
+        .route(
+            "/api/batch/providers",
+            axum::routing::delete(batch_delete_providers),
+        )
+        .route(
+            "/api/batch/combos",
+            axum::routing::delete(batch_delete_combos),
+        )
         .route("/api/batch/keys", axum::routing::delete(batch_delete_keys))
 }
 

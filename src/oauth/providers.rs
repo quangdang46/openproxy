@@ -219,12 +219,16 @@ pub fn xai() -> OAuthProviderConfig {
         client_id: "b1a00492-073a-073a-47ea-816f-4c329264a828",
         authorize_url: "https://auth.x.ai/oauth2/authorize",
         token_url: "https://auth.x.ai/oauth2/token",
-        scopes: &["openid", "profile", "email", "offline_access", "grok-cli:access", "api:access"],
-        uses_pkce: true,
-        extra_params: &[
-            ("plan", "generic"),
-            ("referrer", "cli-proxy-api"),
+        scopes: &[
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "grok-cli:access",
+            "api:access",
         ],
+        uses_pkce: true,
+        extra_params: &[("plan", "generic"), ("referrer", "cli-proxy-api")],
         refresh_lead_ms: 5 * 60 * 1000,
     }
 }
@@ -236,7 +240,11 @@ pub fn gemini_cli() -> OAuthProviderConfig {
         client_id: "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com",
         authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
         token_url: "https://oauth2.googleapis.com/token",
-        scopes: &["https://www.googleapis.com/auth/cloud-platform", "https://www.googleapis.com/auth/userinfo.email", "https://www.googleapis.com/auth/userinfo.profile"],
+        scopes: &[
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+        ],
         uses_pkce: true,
         extra_params: &[],
         refresh_lead_ms: 4 * 60 * 60 * 1000,
