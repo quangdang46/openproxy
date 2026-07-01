@@ -1,0 +1,25 @@
+---
+// Pricing settings page.
+// Provides a dedicated page view for the pricing configuration that was
+// previously only available as a modal.
+import Layout from '@/layouts/Layout.astro';
+import PricingModal from '@/shared/components/PricingModal';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+---
+<Layout>
+  <DashboardLayout client:only="react">
+    <div className="flex flex-col gap-6">
+      <div className="flex flex-col gap-1">
+        <h1 className="text-2xl font-semibold">Pricing</h1>
+        <p className="text-sm text-text-muted">
+          Customize pricing for provider models
+        </p>
+      </div>
+      <PricingModal
+        isOpen={true}
+        onClose={() => window.history.back()}
+        client:only="react"
+      />
+    </div>
+  </DashboardLayout>
+</Layout>
