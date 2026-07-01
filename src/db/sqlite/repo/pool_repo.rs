@@ -6,7 +6,7 @@ use crate::types::ProxyPool;
 
 pub fn get_active(conn: &Connection) -> rusqlite::Result<Vec<ProxyPool>> {
     let mut stmt = conn.prepare(
-        "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools WHERE isActive = 1"
+        "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools WHERE isActive IS NOT 0"
     )?;
     let rows = stmt.query_map([], row_to_pool)?;
     rows.collect()
