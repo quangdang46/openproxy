@@ -137,7 +137,8 @@ fn default_model_kind() -> String {
 /// Translation from upstream "kind" to openproxy's CustomModel `type` field.
 fn kind_to_type(kind: &str) -> &'static str {
     match kind {
-        "llm" | "chat" => "chat",
+        "llm" => "llm",
+        "chat" => "chat",
         "embedding" => "embedding",
         "image" => "image",
         "tts" => "tts",
@@ -648,7 +649,7 @@ mod tests {
         let m = &plan.new_models[0];
         assert_eq!(m.provider_alias, "fakeprov");
         assert_eq!(m.id, "fakeprov/unique-model-id");
-        assert_eq!(m.r#type, "chat");
+        assert_eq!(m.r#type, "llm");
         assert_eq!(m.extra.get("source").unwrap().as_str(), Some("9router"));
         assert_eq!(m.extra.get("sourceRef").unwrap().as_str(), Some("v0.4.55"));
         assert_eq!(
