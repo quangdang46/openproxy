@@ -73,7 +73,7 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
                     item.get("name").and_then(Value::as_str),
                     item.get("email").and_then(Value::as_str),
                     item.get("priority").and_then(Value::as_i64),
-                    item.get("isActive").and_then(Value::as_bool).map(|v| v as i32),
+                    item.get("isActive").and_then(Value::as_bool).map(|v| v as i32).unwrap_or(1),
                     data_json,
                     item.get("createdAt").and_then(Value::as_str).unwrap_or(""),
                     item.get("updatedAt").and_then(Value::as_str).unwrap_or(""),
@@ -106,7 +106,7 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
                 "INSERT INTO proxyPools(id, isActive, testStatus, data, createdAt, updatedAt) VALUES(?1,?2,?3,?4,?5,?6)",
                 rusqlite::params![
                     item.get("id").and_then(Value::as_str).unwrap_or(""),
-                    item.get("isActive").and_then(Value::as_bool).map(|v| v as i32),
+                    item.get("isActive").and_then(Value::as_bool).map(|v| v as i32).unwrap_or(1),
                     item.get("testStatus").and_then(Value::as_str),
                     "{}",
                     item.get("createdAt").and_then(Value::as_str).unwrap_or(""),
@@ -126,7 +126,7 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
                     item.get("key").and_then(Value::as_str).unwrap_or(""),
                     item.get("name").and_then(Value::as_str),
                     item.get("machineId").and_then(Value::as_str),
-                    item.get("isActive").and_then(Value::as_bool).map(|v| v as i32),
+                    item.get("isActive").and_then(Value::as_bool).map(|v| v as i32).unwrap_or(1),
                     item.get("createdAt").and_then(Value::as_str).unwrap_or(""),
                 ],
             )?;

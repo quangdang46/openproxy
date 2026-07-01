@@ -6,7 +6,7 @@ use crate::types::ApiKey;
 
 pub fn get_active(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
     let mut stmt = conn.prepare(
-        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE isActive = 1",
+        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE isActive IS NOT 0",
     )?;
     let rows = stmt.query_map([], row_to_api_key)?;
     rows.collect()

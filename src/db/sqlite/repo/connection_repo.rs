@@ -131,7 +131,7 @@ fn connection_to_data(c: &ProviderConnection, encryption_key: &str) -> String {
 
 pub fn get_active(conn: &Connection, provider: &str) -> rusqlite::Result<Vec<ProviderConnection>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS}, data FROM providerConnections WHERE provider = ?1 AND isActive = 1 ORDER BY priority"
+        "SELECT {COLUMNS}, data FROM providerConnections WHERE provider = ?1 AND isActive IS NOT 0 ORDER BY priority"
     ))?;
     let rows = stmt.query_map(params![provider], row_to_connection)?;
     rows.collect()
