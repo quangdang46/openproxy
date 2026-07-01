@@ -13,7 +13,9 @@ use futures_util::TryStreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Value};
 
-use crate::core::account_fallback::{build_model_lock_update, filter_available_accounts, StrategyType};
+use crate::core::account_fallback::{
+    build_model_lock_update, filter_available_accounts, StrategyType,
+};
 use crate::core::chat::RequestPlan;
 use crate::core::combo::fusion::handle_fusion_chat;
 use crate::core::combo::{

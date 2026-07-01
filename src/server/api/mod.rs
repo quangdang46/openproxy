@@ -1649,6 +1649,8 @@ struct UpdateSettingsRequest {
     oidc_enabled: Option<bool>,
     client_ping_url: Option<String>,
     client_ping_any: Option<bool>,
+    headroom_enabled: Option<bool>,
+    ponytail_enabled: Option<bool>,
 }
 
 async fn update_settings_api(
@@ -1744,6 +1746,12 @@ async fn update_settings_api(
             }
             if let Some(v) = req.client_ping_any {
                 db.settings.client_ping_any = v;
+            }
+            if let Some(v) = req.headroom_enabled {
+                db.settings.headroom_enabled = v;
+            }
+            if let Some(v) = req.ponytail_enabled {
+                db.settings.ponytail_enabled = v;
             }
             db.settings.normalize();
         })
