@@ -4414,8 +4414,108 @@ pub async fn oauth_status(
     }
 }
 
+/// POST /api/oauth/codex/bulk-import
+/// Accepts `{ accounts: [{ accessToken, refreshToken?, idToken?, machineId? }] }`
+/// Imports each as a "codex" provider connection.
+async fn codex_bulk_import(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 512 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let accounts = match body.get("accounts").and_then(Value::as_array) {
+        Some(arr) => arr,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "\"accounts\" array is required" })),
+            )
+                .into_response();
+        }
+    };
+    if accounts.is_empty() {
+        return Json(json!({ "success": 0, "failed": 0, "results": [] })).into_response();
+    }
+
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(accounts.len());
+    let mut success = 0usize;
+    let mut failed = 0usize;
+
+    for (idx, account) in accounts.iter().enumerate() {
+        let access_token = match account.get("accessToken").and_then(Value::as_str) {
+            Some(t) if !t.is_empty() => t.to_string(),
+            _ => {
+                failed += 1;
+                results.push(json!({ "index": idx, "ok": false, "error": "Missing accessToken" }));
+                continue;
+            }
+        };
+        let refresh_token = account.get("refreshToken").and_then(Value::as_str).map(str::to_string);
+        let id_token = account.get("idToken").and_then(Value::as_str).map(str::to_string);
+        let machine_id = account.get("machineId").and_then(Value::as_str).map(str::to_string);
+
+        let email = account
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                // Try to extract email from decoded JWT
+                let claims = decode_jwt_claims(&access_token);
+                claims
+                    .as_ref()
+                    .and_then(|v| v.get("email"))
+                    .or_else(|| claims.as_ref().and_then(|v| v.get("sub")))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+
+        let mut provider_specific_data = std::collections::BTreeMap::new();
+        provider_specific_data.insert("authMethod".to_string(), Value::String("bulk-import".to_string()));
+        provider_specific_data.insert("provider".to_string(), Value::String("Imported".to_string()));
+        if let Some(mid) = &machine_id {
+            provider_specific_data.insert("machineId".to_string(), Value::String(mid.clone()));
+        }
+
+        let connection = ProviderConnection {
+            provider: "codex".to_string(),
+            auth_type: "oauth".to_string(),
+            email: email.clone(),
+            access_token: Some(access_token),
+            refresh_token,
+            id_token,
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(86_400)).to_rfc3339()),
+            test_status: Some("active".to_string()),
+            provider_specific_data,
+            ..Default::default()
+        };
+
+        match create_imported_oauth_connection(&state.db, connection).await {
+            Ok(conn) => {
+                success += 1;
+                results.push(json!({ "index": idx, "ok": true, "id": conn.id }));
+            }
+            Err(e) => {
+                failed += 1;
+                results.push(json!({ "index": idx, "ok": false, "error": e.to_string() }));
+            }
+        }
+    }
+
+    Json(json!({ "success": success, "failed": failed, "results": results })).into_response()
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
+        .route(
+            "/api/oauth/codex/bulk-import",
+            post(codex_bulk_import),
+        )
         .route(
             "/api/oauth/cursor/auto-import",
             get(cursor_auto_import_route),

@@ -180,6 +180,14 @@ pub fn routes() -> Router<AppState> {
             "/v1/v1/search",
             post(media::search).options(media::cors_options),
         )
+        .route(
+            "/v1/audio/voices",
+            get(media::audio_voices).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/audio/voices",
+            get(media::audio_voices).options(media::cors_options),
+        )
         .merge(cloud_sync::routes())
         .merge(cloud_credentials::routes())
         .merge(locale::routes())

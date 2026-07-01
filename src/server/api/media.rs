@@ -55,7 +55,7 @@ pub async fn images_generations(
 
 /// GET /v1/audio/voices?provider={p}[&lang=xx]
 /// Returns OpenAI-style voice list for TTS providers.
-async fn audio_voices(
+pub async fn audio_voices(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
