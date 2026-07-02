@@ -92,11 +92,7 @@ impl HeadroomHooks {
 pub fn estimate_phantom_savings(messages: &[Value]) -> HeadroomStats {
     let char_count: usize = messages
         .iter()
-        .filter_map(|msg| {
-            msg.get("content")
-                .and_then(|c| c.as_str())
-                .map(|s| s.len())
-        })
+        .filter_map(|msg| msg.get("content").and_then(|c| c.as_str()).map(|s| s.len()))
         .sum();
 
     let tokens_before = (char_count + PHANTOM_CHARS_PER_TOKEN - 1) / PHANTOM_CHARS_PER_TOKEN;
@@ -726,17 +722,15 @@ mod tests {
             timeout_ms: 100,
             ..HeadroomConfig::default()
         };
-        assert!(
-            compress_with_headroom(
-                &mut body,
-                &config,
-                "claude-sonnet-4-20250514",
-                "claude",
-                None,
-            )
-            .await
-            .is_none()
-        );
+        assert!(compress_with_headroom(
+            &mut body,
+            &config,
+            "claude-sonnet-4-20250514",
+            "claude",
+            None,
+        )
+        .await
+        .is_none());
     }
 
     #[tokio::test]

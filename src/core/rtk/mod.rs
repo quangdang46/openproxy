@@ -1319,5 +1319,4 @@ mod tests {
         // No tool messages → no hits, but the function still returns Some.
         assert_eq!(stats.unwrap().hits.len(), 0);
     }
-
 }

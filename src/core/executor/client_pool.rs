@@ -86,9 +86,8 @@ impl ClientPool {
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
         let timeout = self.timeout;
-        let result = self.get_or_insert_with(provider_key, proxy, || {
-            build_reqwest_client(proxy, timeout)
-        });
+        let result =
+            self.get_or_insert_with(provider_key, proxy, || build_reqwest_client(proxy, timeout));
         if result.is_ok() {
             self.touch(client_key(provider_key, proxy));
         }

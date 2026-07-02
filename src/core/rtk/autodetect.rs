@@ -37,9 +37,7 @@ static RE_TEST_RUNNER: Lazy<Regex> = Lazy::new(|| {
 
 /// JSON/NDJSON bulk detector: checks if text starts with `[`, `{`, or has
 /// many newline-separated `{` lines.
-static RE_NDJSON_LINE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?m)^\{.*\}\s*$").unwrap()
-});
+static RE_NDJSON_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^\{.*\}\s*$").unwrap());
 
 pub type FilterFn = fn(&str) -> String;
 
@@ -327,7 +325,10 @@ mod tests {
             lines.push(format!("test case_{} ... ok", i));
         }
         lines.push("".to_string());
-        lines.push("test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out".to_string());
+        lines.push(
+            "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+                .to_string(),
+        );
         let input = lines.join("\n");
         let result = auto_detect_filter(&input);
         assert!(result.is_some(), "test-runner should be detected");
@@ -339,7 +340,11 @@ mod tests {
         // Pad the JSON payload to exceed JSON_SUMMARY_MIN_BYTES (2000)
         let large_json = format!("{{{}}}", "\"key\": ".repeat(2000));
         let result = auto_detect_filter(&large_json);
-        assert!(result.is_some(), "json-summary should be detected: len={}", large_json.len());
+        assert!(
+            result.is_some(),
+            "json-summary should be detected: len={}",
+            large_json.len()
+        );
         assert_eq!(result.unwrap().filter_name, FILTER_JSON_SUMMARY);
     }
 
@@ -350,9 +355,18 @@ mod tests {
             .map(|i| format!("{{\"id\": {:>4}, \"name\": \"test_value_{}\"}}", i, i))
             .collect();
         let input = lines.join("\n");
-        assert!(input.len() > JSON_SUMMARY_MIN_BYTES, "fixture too small: {} < {}", input.len(), JSON_SUMMARY_MIN_BYTES);
+        assert!(
+            input.len() > JSON_SUMMARY_MIN_BYTES,
+            "fixture too small: {} < {}",
+            input.len(),
+            JSON_SUMMARY_MIN_BYTES
+        );
         let result = auto_detect_filter(&input);
-        assert!(result.is_some(), "NDJSON should be detected for large blobs: len={}", input.len());
+        assert!(
+            result.is_some(),
+            "NDJSON should be detected for large blobs: len={}",
+            input.len()
+        );
         assert_eq!(result.unwrap().filter_name, FILTER_JSON_SUMMARY);
     }
 }

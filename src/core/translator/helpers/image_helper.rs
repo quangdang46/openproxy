@@ -20,14 +20,14 @@ const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 
 /// Known image magic-byte prefixes for validation.
 const IMAGE_MAGIC_BYTES: &[&[u8]] = &[
-    b"\xff\xd8\xff",       // JPEG
-    b"\x89PNG\r\n\x1a\n",  // PNG
-    b"GIF87a",              // GIF87a
-    b"GIF89a",              // GIF89a
-    b"RIFF",                // WebP (RIFF....WEBP)
-    b"\x00\x00\x01\x00",   // ICO
-    b"BM",                  // BMP
-    b"\x00\x00\x00\x0c",   // JXL (ISO/IEC 18181)
+    b"\xff\xd8\xff",            // JPEG
+    b"\x89PNG\r\n\x1a\n",       // PNG
+    b"GIF87a",                  // GIF87a
+    b"GIF89a",                  // GIF89a
+    b"RIFF",                    // WebP (RIFF....WEBP)
+    b"\x00\x00\x01\x00",        // ICO
+    b"BM",                      // BMP
+    b"\x00\x00\x00\x0c",        // JXL (ISO/IEC 18181)
     b"\x8aMNG\x0d\x0a\x1a\x0a", // MNG
 ];
 
@@ -230,9 +230,15 @@ mod tests {
     #[test]
     fn detects_private_ipv6() {
         assert!(is_private_ip(IpAddr::V6("::1".parse().unwrap())));
-        assert!(is_private_ip(IpAddr::V6("::ffff:127.0.0.1".parse().unwrap())));
-        assert!(is_private_ip(IpAddr::V6("::ffff:10.0.0.1".parse().unwrap())));
-        assert!(!is_private_ip(IpAddr::V6("::ffff:8.8.8.8".parse().unwrap())));
+        assert!(is_private_ip(IpAddr::V6(
+            "::ffff:127.0.0.1".parse().unwrap()
+        )));
+        assert!(is_private_ip(IpAddr::V6(
+            "::ffff:10.0.0.1".parse().unwrap()
+        )));
+        assert!(!is_private_ip(IpAddr::V6(
+            "::ffff:8.8.8.8".parse().unwrap()
+        )));
     }
 
     #[test]

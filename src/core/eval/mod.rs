@@ -17,7 +17,6 @@
 ///
 /// let result = suite.run("claude", &response_text).unwrap();
 /// ```
-
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -57,7 +56,11 @@ pub struct EvalCase {
 
 impl EvalCase {
     /// Create a new eval case with the given id, description, and expected value.
-    pub fn new(id: impl Into<String>, description: impl Into<String>, expected: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        description: impl Into<String>,
+        expected: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             description: description.into(),
@@ -154,11 +157,7 @@ impl EvalCase {
                 details.push(format!("length {} <= {}", output.len(), max));
             } else {
                 passed = false;
-                details.push(format!(
-                    "length {} exceeds max {}",
-                    output.len(),
-                    max
-                ));
+                details.push(format!("length {} exceeds max {}", output.len(), max));
             }
         }
 
@@ -167,11 +166,7 @@ impl EvalCase {
                 details.push(format!("length {} >= {}", output.len(), min));
             } else {
                 passed = false;
-                details.push(format!(
-                    "length {} below min {}",
-                    output.len(),
-                    min
-                ));
+                details.push(format!("length {} below min {}", output.len(), min));
             }
         }
 
@@ -524,8 +519,7 @@ mod tests {
 
     #[test]
     fn test_eval_case_substring_pass() {
-        let case = EvalCase::new("test", "Test", "expected")
-            .with_expected_substring("expected");
+        let case = EvalCase::new("test", "Test", "expected").with_expected_substring("expected");
         let score = case.evaluate("this contains expected value");
         assert!(score.passed);
         assert!(score.details[0].contains("found"));
@@ -533,8 +527,8 @@ mod tests {
 
     #[test]
     fn test_eval_case_substring_fail() {
-        let case = EvalCase::new("test", "Test", "expected")
-            .with_expected_substring("missing_string");
+        let case =
+            EvalCase::new("test", "Test", "expected").with_expected_substring("missing_string");
         let score = case.evaluate("this does not contain it");
         assert!(!score.passed);
         assert!(score.details[0].contains("NOT found"));
@@ -550,8 +544,7 @@ mod tests {
 
     #[test]
     fn test_eval_case_regex_fail() {
-        let case = EvalCase::new("test", "Test", "123-456-7890")
-            .with_expected_pattern(r"\d{5}");
+        let case = EvalCase::new("test", "Test", "123-456-7890").with_expected_pattern(r"\d{5}");
         let score = case.evaluate("Call me at 123-456-7890");
         assert!(!score.passed);
     }
@@ -576,14 +569,8 @@ mod tests {
     fn test_suite_evaluate_all() {
         let suite = EvalSuite::new("test-suite")
             .with_description("Test suite description")
-            .add_case(
-                EvalCase::new("c1", "Case 1", "hello")
-                    .with_expected_substring("hello"),
-            )
-            .add_case(
-                EvalCase::new("c2", "Case 2", "world")
-                    .with_expected_substring("world"),
-            );
+            .add_case(EvalCase::new("c1", "Case 1", "hello").with_expected_substring("hello"))
+            .add_case(EvalCase::new("c2", "Case 2", "world").with_expected_substring("world"));
 
         let result = suite.evaluate_all("test-provider", "hello beautiful world");
         assert_eq!(result.suite, "test-suite");
@@ -597,14 +584,8 @@ mod tests {
     #[test]
     fn test_suite_evaluate_all_partial_pass() {
         let suite = EvalSuite::new("test-suite")
-            .add_case(
-                EvalCase::new("c1", "Case 1", "hello")
-                    .with_expected_substring("hello"),
-            )
-            .add_case(
-                EvalCase::new("c2", "Case 2", "world")
-                    .with_expected_substring("missing"),
-            );
+            .add_case(EvalCase::new("c1", "Case 1", "hello").with_expected_substring("hello"))
+            .add_case(EvalCase::new("c2", "Case 2", "world").with_expected_substring("missing"));
 
         let result = suite.evaluate_all("test-provider", "hello");
         assert_eq!(result.total, 2);
@@ -646,8 +627,7 @@ mod tests {
     #[test]
     fn test_eval_runner_basic() {
         let suite = EvalSuite::new("echo")
-            .add_case(EvalCase::new("hello", "Say hello", "hello")
-                .with_expected_substring("Hi"));
+            .add_case(EvalCase::new("hello", "Say hello", "hello").with_expected_substring("Hi"));
 
         // Simulated requester that always returns "Hi there!"
         let requester = |_provider: &str, prompt: &str| -> Result<String, String> {
@@ -663,12 +643,10 @@ mod tests {
 
     #[test]
     fn test_eval_runner_request_failure() {
-        let suite = EvalSuite::new("fail")
-            .add_case(EvalCase::new("f1", "Case 1", "prompt"));
+        let suite = EvalSuite::new("fail").add_case(EvalCase::new("f1", "Case 1", "prompt"));
 
-        let requester = |_: &str, _: &str| -> Result<String, String> {
-            Err("network error".to_string())
-        };
+        let requester =
+            |_: &str, _: &str| -> Result<String, String> { Err("network error".to_string()) };
 
         let runner = suite.runner().build(requester);
         let result = runner.run("broken-provider", |case| case.expected.clone());

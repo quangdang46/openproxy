@@ -499,7 +499,6 @@ fn raw_json_response(status: StatusCode, body_bytes: Bytes) -> Response {
     response
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

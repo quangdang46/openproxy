@@ -195,11 +195,16 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
             let provider = match resolved.provider.as_deref() {
                 Some(p) if !p.is_empty() => p.to_string(),
                 _ => {
-                    return with_cors_response(json_error(StatusCode::BAD_REQUEST, "Invalid model format"));
+                    return with_cors_response(json_error(
+                        StatusCode::BAD_REQUEST,
+                        "Invalid model format",
+                    ));
                 }
             };
             let model = resolved.model.clone();
-            with_cors_response(dispatch_with_fallback(&state, &snapshot, &provider, &model, &req).await)
+            with_cors_response(
+                dispatch_with_fallback(&state, &snapshot, &provider, &model, &req).await,
+            )
         }
     }
 }
@@ -1097,7 +1102,6 @@ fn status_to_type(status: StatusCode) -> &'static str {
         _ => "api_error",
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // Unit tests.

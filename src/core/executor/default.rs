@@ -881,7 +881,8 @@ impl DefaultExecutor {
     ) -> Result<ExecutionResponse, ExecutorError> {
         // Build headers and transformed body once, reused across retries and
         // fallback URLs.
-        let mut headers = self.build_headers(&request.model, &request.credentials, request.stream)?;
+        let mut headers =
+            self.build_headers(&request.model, &request.credentials, request.stream)?;
         let transformed_body = self.transform_request(&request.body);
 
         // Try primary then fallback URLs.
@@ -913,8 +914,7 @@ impl DefaultExecutor {
                 }
 
                 // 401 / 403: try credential refresh and retry once with new creds.
-                if status == http::StatusCode::UNAUTHORIZED
-                    || status == http::StatusCode::FORBIDDEN
+                if status == http::StatusCode::UNAUTHORIZED || status == http::StatusCode::FORBIDDEN
                 {
                     if retry == 0 {
                         if let Some(new_creds) =
@@ -999,7 +999,11 @@ impl DefaultExecutor {
             let body_bytes = serde_json::to_vec(transformed_body)?;
             let mut req = HyperRequest::post(uri).body(Full::new(body_bytes.into()))?;
             *req.headers_mut() = headers.clone();
-            client.request(req).await.map_err(ExecutorError::Hyper).map(UpstreamResponse::Hyper)
+            client
+                .request(req)
+                .await
+                .map_err(ExecutorError::Hyper)
+                .map(UpstreamResponse::Hyper)
         } else {
             let client = self.pool.get(&self.provider, request.proxy.as_ref())?;
             client
@@ -1054,8 +1058,7 @@ impl DefaultExecutor {
                     updated.refresh_token = Some(new_refresh);
                 }
                 if let Some(expires_in) = result.expires_in {
-                    let expiry = chrono::Utc::now()
-                        + chrono::Duration::seconds(expires_in);
+                    let expiry = chrono::Utc::now() + chrono::Duration::seconds(expires_in);
                     updated.expires_at = Some(expiry.to_rfc3339());
                 }
                 Some(updated)
@@ -1082,7 +1085,6 @@ impl DefaultExecutor {
                 .next()
                 .is_some_and(|path| path.ends_with("/chat/completions"))
     }
-
 }
 
 fn compatible_value(value: Option<&Value>) -> Option<&str> {

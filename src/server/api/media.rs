@@ -170,8 +170,10 @@ pub async fn audio_voices(
                 }
             }
         }
-        Err(e) => Json(json!({ "error": { "message": e.to_string(), "type": "server_error", "code": null } }))
-            .into_response(),
+        Err(e) => Json(
+            json!({ "error": { "message": e.to_string(), "type": "server_error", "code": null } }),
+        )
+        .into_response(),
     }
 }
 

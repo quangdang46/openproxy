@@ -919,14 +919,18 @@ pub fn test_runner_impl(input: &str) -> String {
         Lazy::new(|| Regex::new(r"(?im)^(ok |PASS|✓|PASSED|\bpass\b|\d+ passed)").unwrap());
     static RE_FAIL: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?im)^(not ok |FAIL|✗|FAILED|\bfail\b|\bFAILURES\b)").unwrap());
-    static RE_SKIP: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"(?im)^(ok \d+ # SKIP|SKIP|SKIPPED|- \[skip\]|\bskip\b)").unwrap());
+    static RE_SKIP: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?im)^(ok \d+ # SKIP|SKIP|SKIPPED|- \[skip\]|\bskip\b)").unwrap()
+    });
     static RE_FUNC_FAIL_HEADER: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?im)^\s*(failures|error|----|thread '.+' panicked)").unwrap());
     static RE_FUNC_FAIL_NAME: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?im)^\s*(test\s+\S+\s+.*FAILED|FAIL\s+|failure\s+)").unwrap());
     static RE_SUMMARY: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"(?im)^(test result|testsuite|ok|FAIL|PASS|FAILED|result:|Ran |test file|test from)").unwrap()
+        Regex::new(
+            r"(?im)^(test result|testsuite|ok|FAIL|PASS|FAILED|result:|Ran |test file|test from)",
+        )
+        .unwrap()
     });
     static RE_CARGO_LINE: Lazy<Regex> =
         Lazy::new(|| Regex::new(r"(?im)^\s*(running |test |doc-test|checking)").unwrap());
@@ -1182,17 +1186,16 @@ pub fn json_summary_impl(input: &str) -> String {
         }
         Ok(Value::Array(arr)) => {
             let len = arr.len();
-            let mut out = format!(
-                "JSON array with {} items ({} bytes):\n",
-                len,
-                input.len()
-            );
+            let mut out = format!("JSON array with {} items ({} bytes):\n", len, input.len());
             for (i, item) in arr.iter().enumerate().take(JSON_SUMMARY_MAX_ITEMS) {
                 let type_desc = describe_json_value(item);
                 out.push_str(&format!("  [{}] {}\n", i, type_desc));
             }
             if len > JSON_SUMMARY_MAX_ITEMS {
-                out.push_str(&format!("  ... +{} more items\n", len - JSON_SUMMARY_MAX_ITEMS));
+                out.push_str(&format!(
+                    "  ... +{} more items\n",
+                    len - JSON_SUMMARY_MAX_ITEMS
+                ));
             }
             out.push_str(&format!(
                 "\n[original: {} bytes — compressed by rtk json-summary]",
@@ -1394,7 +1397,10 @@ mod tests {
             lines.push(line);
         }
         lines.push(String::new());
-        lines.push("test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out".to_string());
+        lines.push(
+            "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out"
+                .to_string(),
+        );
         let input = lines.join("\n");
         let result = test_runner_impl(&input);
         assert!(result.contains("passed"));

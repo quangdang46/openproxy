@@ -16,8 +16,8 @@ pub mod tunnel;
 pub mod usage;
 pub mod utils;
 
-pub mod chat;
 pub mod cache;
+pub mod chat;
 pub mod circuit_breaker;
 pub mod eval;
 pub mod tls;

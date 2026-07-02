@@ -324,16 +324,10 @@ impl CodexExecutor {
                     }
                     let mut parts: Vec<Value> = Vec::new();
                     for part in arr {
-                        let part_type = part
-                            .get("type")
-                            .and_then(Value::as_str)
-                            .unwrap_or("text");
+                        let part_type = part.get("type").and_then(Value::as_str).unwrap_or("text");
                         // Convert "text" type to "input_text" for Responses API
                         if part_type == "text" {
-                            let text = part
-                                .get("text")
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
+                            let text = part.get("text").and_then(Value::as_str).unwrap_or("");
                             if !text.is_empty() {
                                 parts.push(json!({"type": "input_text", "text": text}));
                             }
@@ -408,7 +402,8 @@ impl CodexExecutor {
             .as_deref()
             .or(request.credentials.id.as_str().into())
             .or(request.credentials.display_name.as_deref());
-        let headers = self.build_headers(api_key, request.stream, connection_id, &request.credentials)?;
+        let headers =
+            self.build_headers(api_key, request.stream, connection_id, &request.credentials)?;
         let transformed_body = self.transform_request_body(&request.body, &actual_model)?;
 
         let client = self.pool.get("openai", request.proxy.as_ref())?;
@@ -438,7 +433,9 @@ impl CodexExecutor {
             if attempt + 1 < MAX_RETRIES {
                 let peek_end = body_bytes.len().min(4096);
                 let head_str = String::from_utf8_lossy(&body_bytes[..peek_end]);
-                if head_str.contains("server_is_overloaded") || head_str.contains("service_unavailable_error") {
+                if head_str.contains("server_is_overloaded")
+                    || head_str.contains("service_unavailable_error")
+                {
                     let delay = Duration::from_millis(500 * 2u64.pow(attempt as u32));
                     tokio::time::sleep(delay).await;
                     continue;
@@ -539,7 +536,10 @@ mod tests {
         assert_eq!(result["model"], "o4-mini");
         assert_eq!(result["stream"], true);
         assert_eq!(result["store"], false);
-        assert!(result.get("temperature").is_none(), "temperature should be stripped by allowlist");
+        assert!(
+            result.get("temperature").is_none(),
+            "temperature should be stripped by allowlist"
+        );
 
         // input should be an array of Response API items
         let input = result["input"].as_array().unwrap();
@@ -604,7 +604,10 @@ mod tests {
         let input = result["input"].as_array().unwrap();
         // "system" should now be "developer"
         assert_eq!(input[0]["role"], "developer");
-        assert_eq!(input[0]["content"][0]["text"], "You are a helpful assistant.");
+        assert_eq!(
+            input[0]["content"][0]["text"],
+            "You are a helpful assistant."
+        );
         assert_eq!(input[1]["role"], "user");
         assert_eq!(input[1]["content"][0]["text"], "Hello!");
         assert_eq!(input.len(), 2);
@@ -669,7 +672,10 @@ mod tests {
         let items = CodexExecutor::extract_input_items(&body).unwrap();
         assert_eq!(items.len(), 2);
         // First item had "msg_" prefix -> stripped, no id field expected
-        assert!(items[0].get("id").is_none(), "server-generated msg_ id should be stripped");
+        assert!(
+            items[0].get("id").is_none(),
+            "server-generated msg_ id should be stripped"
+        );
         // Second item had custom ID -> preserved
         assert_eq!(items[1]["id"], "my-custom-id");
     }
@@ -709,6 +715,9 @@ mod tests {
     fn test_build_url_compact_suffix() {
         let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
         let url = executor.build_url("o4-mini_compact");
-        assert_eq!(url, "https://chatgpt.com/backend-api/codex/responses/compact");
+        assert_eq!(
+            url,
+            "https://chatgpt.com/backend-api/codex/responses/compact"
+        );
     }
 }

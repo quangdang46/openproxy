@@ -243,7 +243,10 @@ impl KiroExecutor {
 
                 let mut headers = HeaderMap::new();
                 headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.amazon.eventstream"));
+                headers.insert(
+                    ACCEPT,
+                    HeaderValue::from_static("application/vnd.amazon.eventstream"),
+                );
                 headers.insert(
                     HeaderName::from_bytes(b"x-api-key").unwrap(),
                     HeaderValue::from_str(api_key).map_err(KiroExecutorError::InvalidHeader)?,
@@ -293,7 +296,10 @@ impl KiroExecutor {
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.amazon.eventstream"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.amazon.eventstream"),
+        );
 
         let timestamp = chrono::Utc::now();
         let date_time = timestamp.format("%Y%m%dT%H%M%SZ").to_string();
@@ -359,10 +365,7 @@ impl KiroExecutor {
         } else {
             "accept;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-nonce"
         };
-        let credential_scope = format!(
-            "{}/{}/{}/aws4_request",
-            date_stamp, region, service
-        );
+        let credential_scope = format!("{}/{}/{}/aws4_request", date_stamp, region, service);
 
         let canonical_request = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
@@ -486,32 +489,38 @@ impl EventStreamDecoder {
         while offset + Self::PRELUDE_LEN <= data.len() {
             // Parse the 12-byte prelude
             let prelude = &data[offset..offset + Self::PRELUDE_LEN];
-            let total_length = u32::from_be_bytes([prelude[0], prelude[1], prelude[2], prelude[3]]) as usize;
-            let headers_length = u32::from_be_bytes([prelude[4], prelude[5], prelude[6], prelude[7]]) as usize;
-            let prelude_crc = u32::from_be_bytes([prelude[8], prelude[9], prelude[10], prelude[11]]);
+            let total_length =
+                u32::from_be_bytes([prelude[0], prelude[1], prelude[2], prelude[3]]) as usize;
+            let headers_length =
+                u32::from_be_bytes([prelude[4], prelude[5], prelude[6], prelude[7]]) as usize;
+            let prelude_crc =
+                u32::from_be_bytes([prelude[8], prelude[9], prelude[10], prelude[11]]);
 
             // Validate total length
             if total_length < Self::PRELUDE_LEN + Self::TRAILING_CRC_LEN
                 || total_length > MAX_EVENTSTREAM_MESSAGE_LENGTH
             {
-                return Err(KiroExecutorError::EventStreamDecode(
-                    format!("invalid message total_length={}", total_length),
-                ));
+                return Err(KiroExecutorError::EventStreamDecode(format!(
+                    "invalid message total_length={}",
+                    total_length
+                )));
             }
 
             // Validate headers length
             if headers_length > total_length - Self::PRELUDE_LEN - Self::TRAILING_CRC_LEN {
-                return Err(KiroExecutorError::EventStreamDecode(
-                    format!("invalid headers_length={} for total_length={}", headers_length, total_length),
-                ));
+                return Err(KiroExecutorError::EventStreamDecode(format!(
+                    "invalid headers_length={} for total_length={}",
+                    headers_length, total_length
+                )));
             }
 
             // Verify prelude CRC (CRC32 of first 8 bytes)
             let expected_crc = crc32fast::hash(&prelude[..8]);
             if prelude_crc != expected_crc {
-                return Err(KiroExecutorError::EventStreamDecode(
-                    format!("prelude CRC mismatch: got {:#010x}, expected {:#010x}", prelude_crc, expected_crc),
-                ));
+                return Err(KiroExecutorError::EventStreamDecode(format!(
+                    "prelude CRC mismatch: got {:#010x}, expected {:#010x}",
+                    prelude_crc, expected_crc
+                )));
             }
 
             // Check we have enough data for the full message
@@ -532,9 +541,10 @@ impl EventStreamDecoder {
             ]);
             let expected_message_crc = crc32fast::hash(&data[offset..crc_start]);
             if message_crc != expected_message_crc {
-                return Err(KiroExecutorError::EventStreamDecode(
-                    format!("message CRC mismatch: got {:#010x}, expected {:#010x}", message_crc, expected_message_crc),
-                ));
+                return Err(KiroExecutorError::EventStreamDecode(format!(
+                    "message CRC mismatch: got {:#010x}, expected {:#010x}",
+                    message_crc, expected_message_crc
+                )));
             }
 
             // Extract payload and parse SSE lines

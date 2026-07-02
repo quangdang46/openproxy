@@ -256,7 +256,11 @@ impl GeminiCliExecutor {
     ///   `provider_specific_data["projectId"]` if present.
     ///
     /// Returns the transformed body and the derived session_id (OAuth mode only).
-    fn transform_request(&self, body: &Value, credentials: &ProviderConnection) -> (Value, Option<String>) {
+    fn transform_request(
+        &self,
+        body: &Value,
+        credentials: &ProviderConnection,
+    ) -> (Value, Option<String>) {
         let is_oauth = Self::is_oauth(credentials);
         let (transformed, session_id) = self.transform_request_inner(body, credentials, is_oauth);
         (transformed, if is_oauth { session_id } else { None })
@@ -437,9 +441,13 @@ mod tests {
 
     #[test]
     fn build_gemini_cli_headers_includes_all_expected_headers() {
-        let hdrs =
-            GeminiCliExecutor::build_gemini_cli_headers("tok-test", false, "gemini-2.0-flash", None)
-                .unwrap();
+        let hdrs = GeminiCliExecutor::build_gemini_cli_headers(
+            "tok-test",
+            false,
+            "gemini-2.0-flash",
+            None,
+        )
+        .unwrap();
 
         assert_eq!(
             hdrs.get("Authorization").unwrap().to_str().unwrap(),
@@ -508,8 +516,11 @@ mod tests {
 
     #[test]
     fn build_cloud_code_url_picks_stream_or_unary() {
-        assert!(GeminiCliExecutor::build_cloud_code_url(true).contains("v1internal:streamGenerateContent?alt=sse"));
-        assert!(GeminiCliExecutor::build_cloud_code_url(false).contains("v1internal:generateContent"));
+        assert!(GeminiCliExecutor::build_cloud_code_url(true)
+            .contains("v1internal:streamGenerateContent?alt=sse"));
+        assert!(
+            GeminiCliExecutor::build_cloud_code_url(false).contains("v1internal:generateContent")
+        );
     }
 
     #[test]

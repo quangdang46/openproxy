@@ -556,8 +556,10 @@ async fn reset_connection_credits(
                 conn.last_error = None;
                 conn.last_error_at = None;
                 conn.error_code = None;
-                conn.extra
-                    .insert("credits_reset_at".to_string(), json!(chrono::Utc::now().to_rfc3339()));
+                conn.extra.insert(
+                    "credits_reset_at".to_string(),
+                    json!(chrono::Utc::now().to_rfc3339()),
+                );
             }
         })
         .await

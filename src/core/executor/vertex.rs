@@ -123,7 +123,9 @@ impl std::fmt::Display for VertexExecutorError {
         match self {
             Self::UnsupportedProvider(msg) => write!(f, "unsupported provider: {msg}"),
             Self::MissingCredentials(msg) => write!(f, "missing credentials: {msg}"),
-            Self::MissingServiceAccountJson(msg) => write!(f, "missing service account JSON: {msg}"),
+            Self::MissingServiceAccountJson(msg) => {
+                write!(f, "missing service account JSON: {msg}")
+            }
             Self::JwtGenerationFailed(msg) => write!(f, "JWT generation failed: {msg}"),
             Self::InvalidToken(msg) => write!(f, "invalid token: {msg}"),
             Self::RequestFailed(msg) => write!(f, "request failed: {msg}"),
@@ -538,9 +540,7 @@ impl VertexExecutor {
     /// - `type: "authorized_user"` — uses `refresh_token` against Google's OAuth
     ///   token endpoint to mint a new access token.
     /// - `type: "service_account"` — uses the existing service account JWT flow.
-    async fn resolve_adc_file(
-        path: &PathBuf,
-    ) -> Result<(String, String), VertexExecutorError> {
+    async fn resolve_adc_file(path: &PathBuf) -> Result<(String, String), VertexExecutorError> {
         let contents = tokio::fs::read_to_string(path).await.map_err(|e| {
             VertexExecutorError::MissingCredentials(format!(
                 "Failed to read ADC credential file '{}': {}",
@@ -556,10 +556,7 @@ impl VertexExecutor {
             ))
         })?;
 
-        let cred_type = raw
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let cred_type = raw.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
         match cred_type {
             "authorized_user" => {
@@ -623,8 +620,7 @@ impl VertexExecutor {
             let body = response.text().await.unwrap_or_default();
             return Err(VertexExecutorError::InvalidToken(format!(
                 "Authorized user token refresh returned {}: {}",
-                status,
-                body
+                status, body
             )));
         }
 
@@ -671,7 +667,10 @@ impl VertexExecutor {
                 ))
             })?;
         let token = resp.text().await.map_err(|e| {
-            VertexExecutorError::InvalidToken(format!("ADC metadata server token parse failed: {}", e))
+            VertexExecutorError::InvalidToken(format!(
+                "ADC metadata server token parse failed: {}",
+                e
+            ))
         })?;
         // Metadata server does not return a project id via this path.
         Ok((String::new(), token))

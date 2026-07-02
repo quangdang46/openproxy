@@ -23,7 +23,6 @@
 /// The breaker is thread-safe and uses `DashMap` for O(1) lookups per
 /// provider+endpoint key, with `Mutex`-guarded per-entry state to allow
 /// atomic transitions.
-
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -263,9 +262,11 @@ impl CircuitBreakerRegistry {
 
     /// Ensure a key exists in the registry with the given (or default) config.
     pub fn register(&self, key: &str, config: Option<CircuitBreakerConfig>) {
-        self.entries
-            .entry(key.to_string())
-            .or_insert_with(|| Mutex::new(Entry::new(config.unwrap_or_else(|| self.default_config.clone()))));
+        self.entries.entry(key.to_string()).or_insert_with(|| {
+            Mutex::new(Entry::new(
+                config.unwrap_or_else(|| self.default_config.clone()),
+            ))
+        });
     }
 
     /// Reset a specific entry back to Closed (useful for manual intervention or tests).

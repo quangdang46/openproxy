@@ -21,7 +21,10 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/translator/translate", post(translate_pipeline))
         .route("/api/translator/formats", get(get_formats))
-        .route("/api/translator/load", get(load_translations_get).post(load_translations))
+        .route(
+            "/api/translator/load",
+            get(load_translations_get).post(load_translations),
+        )
         .route("/api/translator/save", post(save_translations))
         .route("/api/translator/send", post(send_to_provider))
         .route(

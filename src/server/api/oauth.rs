@@ -4774,10 +4774,7 @@ async fn kiro_import_cli_proxy(
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/oauth/codex/bulk-import", post(codex_bulk_import))
-        .route(
-            "/api/oauth/codex/import-token",
-            post(codex_import_token),
-        )
+        .route("/api/oauth/codex/import-token", post(codex_import_token))
         .route(
             "/api/oauth/cursor/auto-import",
             get(cursor_auto_import_route),
