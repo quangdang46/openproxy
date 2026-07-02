@@ -1,0 +1,34 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "max_tokens": 64000,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Write a fibonacci function",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": false,
+  "system": [
+    {
+      "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+      "type": "text"
+    },
+    {
+      "cache_control": {
+        "ttl": "1h",
+        "type": "ephemeral"
+      },
+      "text": "You are an expert Rust developer.",
+      "type": "text"
+    }
+  ]
+}

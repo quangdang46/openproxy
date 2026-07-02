@@ -12,7 +12,41 @@
 #
 # Build:    docker build -t openproxy .
 # Run:      docker run -d --name openproxy -p 4623:4623 \
-#               -v openproxy-data:/app/data openproxy
+#               -v openproxy-data:/app/data \
+#               -e TRUST_PROXY=false \
+#               openproxy
+#
+# ──────────────────────────────────────────────────────────────────────────
+# Reverse-proxy deployment notes
+# ──────────────────────────────────────────────────────────────────────────
+#
+# When deploying OpenProxy behind nginx, Caddy, Traefik, or another
+# reverse proxy, set TRUST_PROXY=true so that upstream forwarding headers
+# (X-Forwarded-For, X-Real-IP, etc.) are read from the proxy rather than
+# stripped. Without TRUST_PROXY=true, reverse-proxy clients connecting
+# from 127.0.0.1 (localhost) also bypass auth — set requireLogin=on in the
+# dashboard settings or configure auth at the reverse-proxy layer.
+#
+# Examples:
+#
+#   nginx (location /):
+#       proxy_pass http://127.0.0.1:4623;
+#       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+#       proxy_set_header X-Forwarded-Proto $scheme;
+#       proxy_set_header Host $host;
+#
+#   Caddy (reverse_proxy):
+#       reverse_proxy 127.0.0.1:4623
+#
+#   Traefik:
+#       - "traefik.http.services.openproxy.loadbalancer.server.port=4623"
+#
+# CORS: the embedded Axum server already sets permissive
+# Access-Control-Allow-Origin:* headers on all API responses. When the
+# dashboard and API live behind the same reverse-proxy origin, no
+# additional CORS configuration is needed. If they are served from
+# different origins, adjust CORS headers in the reverse proxy.
+#
 
 # ──────────────────────────────────────────────────────────────────────────
 # Stage 1: build the dashboard

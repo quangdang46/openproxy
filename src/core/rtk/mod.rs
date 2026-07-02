@@ -10,6 +10,7 @@ pub mod autodetect;
 pub mod constants;
 pub mod filters;
 pub mod headroom;
+pub mod smartcrusher;
 
 use apply_filter::{safe_apply, RtkHit, RtkStats};
 use autodetect::{auto_detect_filter, FilterFn};

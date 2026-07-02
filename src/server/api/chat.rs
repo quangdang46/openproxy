@@ -46,6 +46,57 @@ use crate::types::{AppDb, ProviderConnection, TokenUsage};
 
 use super::auth_error_response;
 
+/// Check whether the process should trust reverse-proxy forwarding headers
+/// (`X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto`, etc.).
+///
+/// Set `TRUST_PROXY=true` in the environment to enable. **Default is `false`**
+/// — when disabled, all forwarding headers are stripped from the incoming
+/// request so that spoofed IPs / protocols from untrusted intermediaries
+/// are never propagated upstream or used for rate-limiting decisions.
+///
+/// # Examples
+///
+/// ```ignore
+/// TRUST_PROXY=true            # trust reverse-proxy headers
+/// TRUST_PROXY=false           # strip them (default)
+///                             # not set → same as false
+/// ```
+fn trust_proxy_enabled() -> bool {
+    matches!(
+        std::env::var("TRUST_PROXY").as_deref(),
+        Ok("true") | Ok("1") | Ok("yes")
+    )
+}
+
+/// Remove reverse-proxy forwarding headers from `headers` when
+/// [`trust_proxy_enabled`] returns `false`.
+///
+/// This runs at the top of every chat-completions handler so that:
+///   - `X-Forwarded-For` / `X-Real-IP` are not forwarded upstream.
+///   - `X-Forwarded-Proto` is not used to infer TLS state.
+///   - `X-Forwarded-Host` is not used to infer the target host.
+///
+/// When deployed directly (not behind nginx/Caddy/Traefik), stripping
+/// these headers also prevents malicious clients from injecting them.
+fn strip_forwarding_headers(headers: &mut HeaderMap) {
+    if trust_proxy_enabled() {
+        return;
+    }
+    // Common headers set by reverse proxies (nginx, Caddy, Traefik, HAProxy,
+    // Cloudflare, AWS ALB, …) that should not be trusted when TRUST_PROXY
+    // is not explicitly enabled.
+    static FORWARDING_HEADERS: &[&str] = &[
+        "x-forwarded-for",
+        "x-forwarded-proto",
+        "x-forwarded-host",
+        "x-forwarded-server",
+        "x-real-ip",
+    ];
+    for &name in FORWARDING_HEADERS {
+        headers.remove(name);
+    }
+}
+
 /// Maximum time we'll wait for the next byte from an upstream SSE stream before
 /// considering the connection stalled. 3 minutes matches what most providers
 /// use for their keep-alive heartbeats (OpenAI sends a comment every ~30s,
@@ -192,11 +243,18 @@ pub async fn chat_completions_for_endpoint(
 
 async fn chat_completions_impl(
     state: AppState,
-    headers: HeaderMap,
+    mut headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
     endpoint: Option<&'static str>,
     require_api_key_auth: bool,
 ) -> Response {
+    // Security: strip reverse-proxy forwarding headers unless TRUST_PROXY=true.
+    // When running without a trusted reverse proxy (default), headers like
+    // X-Forwarded-For / X-Real-IP / X-Forwarded-Proto are spoofable by any
+    // client and must not be used for rate limiting, IP logging, or TLS
+    // inference decisions downstream.
+    strip_forwarding_headers(&mut headers);
+
     let presented_api_key = extract_api_key(&headers);
     if require_api_key_auth {
         if let Err(error) = require_api_key(&headers, &state.db) {

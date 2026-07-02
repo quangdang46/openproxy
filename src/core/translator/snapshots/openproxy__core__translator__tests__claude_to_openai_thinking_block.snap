@@ -1,0 +1,18 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "messages": [
+    {
+      "content": "Think step by step",
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": false,
+  "thinking": {
+    "budget_tokens": 4096,
+    "type": "enabled"
+  }
+}

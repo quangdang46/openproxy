@@ -1,0 +1,18 @@
+---
+source: src/core/translator/tests.rs
+expression: clean_first
+---
+{
+  "choices": [
+    {
+      "delta": {
+        "role": "assistant"
+      },
+      "finish_reason": null,
+      "index": 0
+    }
+  ],
+  "id": "chatcmpl-test-gemini-response-1",
+  "model": "gemini",
+  "object": "chat.completion.chunk"
+}

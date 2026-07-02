@@ -92,6 +92,9 @@ pub const FILTER_BUILD_OUTPUT: &str = "build-output";
 pub const FILTER_TEST_RUNNER: &str = "test-runner";
 pub const FILTER_JSON_SUMMARY: &str = "json-summary";
 
+/// SmartCrusher filter: tabular data (CSV, JSON arrays) compression
+pub const FILTER_SMARTCRUSHER: &str = "smartcrusher";
+
 /// test-runner filter: max output lines kept (beyond summary) before truncation
 pub const TEST_RUNNER_MAX_LINES: usize = 100;
 

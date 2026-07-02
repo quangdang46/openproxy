@@ -176,6 +176,46 @@ pub fn routes() -> Router<AppState> {
             post(media::images_generations).options(media::cors_options),
         )
         .route(
+            "/v1/images/edits",
+            post(media::images_edits).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/images/edits",
+            post(media::images_edits).options(media::cors_options),
+        )
+        .route(
+            "/v1/video/generations",
+            post(media::video_generations).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/video/generations",
+            post(media::video_generations).options(media::cors_options),
+        )
+        .route(
+            "/v1/audio/music",
+            post(media::audio_music).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/audio/music",
+            post(media::audio_music).options(media::cors_options),
+        )
+        .route(
+            "/v1/rerank",
+            post(media::rerank).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/rerank",
+            post(media::rerank).options(media::cors_options),
+        )
+        .route(
+            "/v1/moderations",
+            post(media::moderations).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/moderations",
+            post(media::moderations).options(media::cors_options),
+        )
+        .route(
             "/v1/search",
             post(media::search).options(media::cors_options),
         )

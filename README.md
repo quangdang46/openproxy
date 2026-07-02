@@ -33,7 +33,7 @@ OpenProxy runs as one binary on `127.0.0.1:4623`. Point any tool that speaks the
 - tracks per-account quota so you can use subscription tiers fully before paying for API calls
 - serves a local dashboard at `/` for configuration, monitoring, and account management
 
-There is no cloud component required. All state lives in `~/.openproxy/db.json`.
+There is no cloud component required. All state lives in `~/.openproxy/` (SQLite database at `openproxy.sqlite`).
 
 ---
 
@@ -176,7 +176,7 @@ error, and report the captured admin API key back to me at the end.
        openproxy --robot server init | tee /tmp/op-init.json
        APIKEY=$(jq -r '.data.admin_key.key' /tmp/op-init.json)
        export OPENPROXY_API_KEY="$APIKEY"
-   If `server init` reports `db.json already exists`, STOP and tell me — the
+   If `server init` reports `openproxy.sqlite already exists`, STOP and tell me — the
    data dir is pre-populated and I need to decide whether to overwrite.
 
 4. Start the server detached and headless, then self-test:
@@ -241,7 +241,7 @@ Most operators only set `JWT_SECRET` and `INITIAL_PASSWORD` and leave the rest a
 |---|---|---|
 | `JWT_SECRET` | `openproxy-default-secret-change-me` | Sign the dashboard session cookie. **Change in production.** |
 | `INITIAL_PASSWORD` | `123456` | First-login password (one-time, replaced on first save). |
-| `DATA_DIR` | `~/.openproxy` | Where `db.json`, `usage.json`, `log.txt` live. |
+| `DATA_DIR` | `~/.openproxy` | Where `openproxy.sqlite`, data, and logs live. |
 | `PORT` | `4623` | HTTP listen port. |
 | `HOSTNAME` | `127.0.0.1` | Bind host. Set `0.0.0.0` to expose on LAN. |
 | `BASE_URL` | `http://localhost:4623` | Internal base URL for cloud-sync jobs. |
@@ -335,7 +335,7 @@ openproxy sync omniroute [--dry-run] [--prune]
 ```
 
 `openproxy sync` applies embedded snapshots of sister open-source routers
-into `customModels` of your `db.json`, tagged with `source` so a later
+into `customModels` in the SQLite store, tagged with `source` so a later
 `--prune` only removes entries it previously added. Maintainers refresh
 the snapshots via `node scripts/sync/normalize-sources.mjs`
 ([scripts/sync/README.md](scripts/sync/README.md)).
@@ -402,7 +402,7 @@ The dashboard at `/` is the same authenticated API surface in HTML form. Admin e
                           [ provider APIs: Anthropic, OpenAI, GLM, ... ]
 ```
 
-Stack: Rust 1.76+, axum 0.8, hyper 1, rusqlite (bundled), Astro 4 (static, embedded), React 19, Tailwind. Storage: `db.json` + SQLite.
+Stack: Rust 1.76+, axum 0.8, hyper 1, rusqlite (bundled), Astro 4 (static, embedded), React 19, Tailwind. Storage: SQLite (`openproxy.sqlite`) with legacy JSON import on first run.
 
 ---
 
@@ -473,7 +473,7 @@ docker run -d \
   openproxy
 ```
 
-Container defaults: `HOSTNAME=0.0.0.0`, `PORT=4623`, `DATA_DIR=/app/data`. The dashboard is embedded — no separate volume needed for it. Mount `/app/data` to persist `db.json`, `usage.json`, and request logs across container restarts.
+Container defaults: `HOSTNAME=0.0.0.0`, `PORT=4623`, `DATA_DIR=/app/data`. The dashboard is embedded — no separate volume needed for it. Mount `/app/data` to persist the SQLite database, `db_backups/`, and request logs across container restarts.
 
 > First-time pulls from GHCR for this repo may require the package to be set to public at https://github.com/quangdang46/openproxy/pkgs/container/openproxy.
 

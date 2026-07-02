@@ -1,0 +1,50 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "messages": [
+    {
+      "content": "Get weather",
+      "role": "user"
+    },
+    {
+      "content": "I'll check the weather.",
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{\"location\":\"Tokyo\"}",
+            "name": "get_weather"
+          },
+          "id": "tu_123",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "{\"temp\": 28}",
+      "role": "tool",
+      "tool_call_id": "tu_123"
+    }
+  ],
+  "model": "test-model",
+  "stream": false,
+  "tools": [
+    {
+      "function": {
+        "description": "Get weather",
+        "name": "get_weather",
+        "parameters": {
+          "properties": {
+            "location": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

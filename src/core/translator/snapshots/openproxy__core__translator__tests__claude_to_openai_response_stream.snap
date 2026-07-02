@@ -1,0 +1,21 @@
+---
+source: src/core/translator/tests.rs
+expression: last
+---
+{
+  "choices": [
+    {
+      "delta": {},
+      "finish_reason": "stop",
+      "index": 0
+    }
+  ],
+  "id": "chatcmpl-msg_abc123",
+  "model": "claude-sonnet-4-6",
+  "object": "chat.completion.chunk",
+  "usage": {
+    "completion_tokens": 12,
+    "prompt_tokens": 0,
+    "total_tokens": 12
+  }
+}

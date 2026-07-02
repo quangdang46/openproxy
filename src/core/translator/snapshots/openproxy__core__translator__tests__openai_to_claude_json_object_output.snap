@@ -1,0 +1,26 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "max_tokens": 64000,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Give me a JSON object",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": false,
+  "system": [
+    {
+      "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+      "type": "text"
+    }
+  ]
+}

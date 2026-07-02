@@ -11,7 +11,9 @@ use crate::core::combo::{get_combo_models_from_data, ComboStrategy};
 use crate::core::executor::{ClientPool, DefaultExecutor, ExecutionRequest};
 use crate::core::model::get_model_info;
 use crate::core::proxy::resolve_proxy_target;
-use crate::core::rtk::headroom::{compress_with_headroom, HeadroomConfig};
+use crate::core::rtk::headroom::{
+    compress_with_headroom, estimate_phantom_savings, HeadroomConfig,
+};
 use crate::core::rtk::{apply_request_preprocessing, compress_messages};
 use crate::db::Db;
 use crate::types::{ApiKey, AppDb, ProviderConnection, ProxyPool};
@@ -1628,6 +1630,13 @@ async fn run_direct_route(
             timeout_ms: snapshot.settings.headroom_timeout_ms,
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
         };
+        let phantom_saved = estimate_phantom_savings(&request_body);
+        if phantom_saved > 0 {
+            eprintln!(
+                "headroom estimated savings ~{} tokens (phantom)",
+                phantom_saved
+            );
+        }
         let handle = tokio::runtime::Handle::current();
         if let Some(stats) = handle.block_on(compress_with_headroom(
             &mut request_body,
@@ -1636,7 +1645,15 @@ async fn run_direct_route(
             "openai",
             None,
         )) {
-            eprintln!("{}", stats.format_headroom_log().unwrap_or_default());
+            let log = stats.format_headroom_log().unwrap_or_default();
+            if phantom_saved > 0 {
+                eprintln!(
+                    "headroom actual savings {} tokens (estimated ~{}), {}",
+                    stats.tokens_saved, phantom_saved, log
+                );
+            } else {
+                eprintln!("{}", log);
+            }
         }
     }
     let _ = apply_request_preprocessing(&mut request_body, &snapshot.settings, &resolved.model);
@@ -1789,6 +1806,13 @@ async fn run_combo_route(
             timeout_ms: snapshot.settings.headroom_timeout_ms,
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
         };
+        let phantom_saved = estimate_phantom_savings(&request_body);
+        if phantom_saved > 0 {
+            eprintln!(
+                "headroom estimated savings ~{} tokens (phantom)",
+                phantom_saved
+            );
+        }
         let handle = tokio::runtime::Handle::current();
         if let Some(stats) = handle.block_on(compress_with_headroom(
             &mut request_body,
@@ -1797,7 +1821,15 @@ async fn run_combo_route(
             "openai",
             None,
         )) {
-            eprintln!("{}", stats.format_headroom_log().unwrap_or_default());
+            let log = stats.format_headroom_log().unwrap_or_default();
+            if phantom_saved > 0 {
+                eprintln!(
+                    "headroom actual savings {} tokens (estimated ~{}), {}",
+                    stats.tokens_saved, phantom_saved, log
+                );
+            } else {
+                eprintln!("{}", log);
+            }
         }
     }
     let _ = apply_request_preprocessing(&mut request_body, &snapshot.settings, &resolved.model);
