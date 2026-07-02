@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use std::collections::HashMap;
-use tokio::sync::RwLock;
+use tokio::sync::{Notify, RwLock};
 
 use crate::core::account_fallback::AccountRegistry;
 use crate::core::executor::ClientPool;
@@ -74,6 +74,10 @@ pub struct AppState {
     /// Live MITM proxy listener handle, when one is running. Drop or
     /// `stop()` to shut it down. `None` while the proxy is not running.
     pub mitm_handle: Arc<tokio::sync::Mutex<Option<MitmProxyHandle>>>,
+
+    /// Triggered on graceful shutdown (SIGTERM, SIGINT, or API call).
+    /// Await `.notified()` to block until shutdown is requested.
+    pub shutdown_signal: Arc<Notify>,
 }
 
 impl AppState {
@@ -97,6 +101,7 @@ impl AppState {
             dashboard_client: None,
             web_dir: None,
             mitm_handle: Arc::new(tokio::sync::Mutex::new(None)),
+            shutdown_signal: Arc::new(Notify::new()),
         }
     }
 
@@ -173,5 +178,11 @@ impl AppState {
     /// the latest pricing configuration from the database.
     pub fn usage_tracker(&self) -> UsageTracker {
         UsageTracker::new(self.db.clone())
+    }
+
+    /// Trigger graceful shutdown. Notifies all waiters and
+    /// signals axum to stop accepting new connections.
+    pub fn signal_shutdown(&self) {
+        self.shutdown_signal.notify_waiters();
     }
 }

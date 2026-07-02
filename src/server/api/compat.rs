@@ -33,7 +33,11 @@ pub async fn messages(
         .as_ref()
         .ok()
         .and_then(|b| b.get("model").and_then(|m| m.as_str()));
-    let _log = crate::server::request_logger::RequestLog::start("POST", "/v1/messages", model);
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok());
+    let _log = crate::server::request_logger::RequestLog::start("POST", "/v1/messages", model)
+        .with_request_id(request_id);
     let response = forward_compat(state, headers, body, CompatMode::Messages).await;
     _log.finish(response.status().as_u16());
     response
@@ -48,7 +52,11 @@ pub async fn responses(
         .as_ref()
         .ok()
         .and_then(|b| b.get("model").and_then(|m| m.as_str()));
-    let _log = crate::server::request_logger::RequestLog::start("POST", "/v1/responses", model);
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok());
+    let _log = crate::server::request_logger::RequestLog::start("POST", "/v1/responses", model)
+        .with_request_id(request_id);
     let response = forward_compat(
         state,
         headers,
@@ -69,8 +77,12 @@ pub async fn responses_compact(
         .as_ref()
         .ok()
         .and_then(|b| b.get("model").and_then(|m| m.as_str()));
+    let request_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok());
     let _log =
-        crate::server::request_logger::RequestLog::start("POST", "/v1/responses/compact", model);
+        crate::server::request_logger::RequestLog::start("POST", "/v1/responses/compact", model)
+            .with_request_id(request_id);
     let response = forward_compat(
         state,
         headers,

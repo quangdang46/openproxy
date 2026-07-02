@@ -18,7 +18,7 @@
 //!   now we forward tool parameters verbatim.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
@@ -61,6 +61,7 @@ pub enum AntigravityExecutorError {
     Request(reqwest::Error),
     InvalidHeader(reqwest::header::InvalidHeaderValue),
     MissingCredentials(String),
+    RetryExhausted(String),
 }
 
 impl From<reqwest::Error> for AntigravityExecutorError {
@@ -695,6 +696,29 @@ impl AntigravityExecutor {
         Ok(derive_session_id(connection_id))
     }
 
+    /// Parse the Retry-After header value into a Duration.
+    /// Handles both HTTP-date and integer-seconds formats.
+    fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
+        let value = headers.get("Retry-After")?;
+        let value_str = value.to_str().ok()?.trim();
+
+        // Try integer seconds first.
+        if let Ok(seconds) = value_str.parse::<u64>() {
+            let capped = seconds.min(120); // cap at 2 minutes
+            return Some(Duration::from_secs(capped));
+        }
+
+        // Try HTTP-date format (not commonly used, but handle it).
+        if let Ok(expires) = chrono::DateTime::parse_from_rfc2822(value_str) {
+            let now = chrono::Utc::now();
+            let duration = expires.signed_duration_since(now);
+            let secs = duration.num_seconds().max(1).min(120) as u64;
+            return Some(Duration::from_secs(secs));
+        }
+
+        None
+    }
+
     pub async fn execute_request(
         &self,
         mut request: AntigravityExecutionRequest,
@@ -749,29 +773,79 @@ impl AntigravityExecutor {
 
         let session_id = Self::transform_request(&mut request.body, &request.credentials)?;
         let url = Self::build_url(request.stream);
-        let mut headers = Self::build_headers(&access_token, request.stream, Some(&session_id))?;
 
-        // Add Antigravity-specific headers (Client-Metadata, etc.).
-        let ag_headers = Self::build_antigravity_headers()?;
-        for (key, value) in ag_headers.iter() {
-            headers.insert(key, value.clone());
+        // Retry up to 3 times with exponential backoff and Retry-After support.
+        const MAX_RETRIES: usize = 3;
+        for attempt in 0..MAX_RETRIES {
+            let mut headers =
+                Self::build_headers(&access_token, request.stream, Some(&session_id))?;
+
+            // Add Antigravity-specific headers (Client-Metadata, etc.).
+            let ag_headers = Self::build_antigravity_headers()?;
+            for (key, value) in ag_headers.iter() {
+                headers.insert(key, value.clone());
+            }
+
+            let client = self.pool.get("antigravity", request.proxy.as_ref())?;
+            let response = client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&request.body)
+                .send()
+                .await?;
+
+            let status = response.status();
+
+            // Success — return immediately.
+            if status.is_success() {
+                return Ok(AntigravityExecutorResponse {
+                    response: UpstreamResponse::Reqwest(response),
+                    url,
+                    headers,
+                    transformed_body: request.body,
+                    transport: TransportKind::Reqwest,
+                });
+            }
+
+            // Only retry on overload / server-error status codes.
+            let is_retryable = status.as_u16() == 429
+                || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
+                || status == reqwest::StatusCode::BAD_GATEWAY
+                || status == reqwest::StatusCode::GATEWAY_TIMEOUT;
+
+            if !is_retryable || attempt + 1 >= MAX_RETRIES {
+                // Not retryable or no retries left — return the response as-is.
+                return Ok(AntigravityExecutorResponse {
+                    response: UpstreamResponse::Reqwest(response),
+                    url,
+                    headers,
+                    transformed_body: request.body,
+                    transport: TransportKind::Reqwest,
+                });
+            }
+
+            // Determine wait duration: Retry-After header wins, otherwise
+            // exponential backoff: 500ms * 2^attempt (jittered).
+            let delay = Self::parse_retry_after(response.headers()).unwrap_or_else(|| {
+                let base_ms = 500u64 * (1u64 << attempt);
+                let jitter = rand::random::<u64>() % (base_ms / 2 + 1);
+                Duration::from_millis(base_ms + jitter)
+            });
+
+            tracing::info!(
+                "antigravity request got HTTP {}, retrying in {:?} (attempt {}/{})",
+                status.as_u16(),
+                delay,
+                attempt + 1,
+                MAX_RETRIES,
+            );
+
+            tokio::time::sleep(delay).await;
         }
 
-        let client = self.pool.get("antigravity", request.proxy.as_ref())?;
-        let response = client
-            .post(&url)
-            .headers(headers.clone())
-            .json(&request.body)
-            .send()
-            .await?;
-
-        Ok(AntigravityExecutorResponse {
-            response: UpstreamResponse::Reqwest(response),
-            url,
-            headers,
-            transformed_body: request.body,
-            transport: TransportKind::Reqwest,
-        })
+        Err(AntigravityExecutorError::RetryExhausted(
+            "antigravity request failed after max retries".into(),
+        ))
     }
 }
 

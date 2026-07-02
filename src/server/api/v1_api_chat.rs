@@ -16,6 +16,7 @@ use serde_json::{json, Map, Value};
 use crate::server::state::AppState;
 
 use super::chat;
+use super::cors::{cors_preflight_response, with_cors_json};
 
 pub fn routes() -> Router<AppState> {
     Router::new().route(
@@ -25,7 +26,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn cors_options() -> Response {
-    cors_preflight_response("GET, POST, OPTIONS")
+    cors_preflight_response()
 }
 
 async fn handle_ollama_chat(
@@ -498,32 +499,6 @@ fn raw_json_response(status: StatusCode, body_bytes: Bytes) -> Response {
     response
 }
 
-fn with_cors_json(status: StatusCode, payload: Value) -> Response {
-    let mut response = (status, Json(payload)).into_response();
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    response
-}
-
-fn cors_preflight_response(methods: &str) -> Response {
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = StatusCode::OK;
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("GET, POST, OPTIONS")),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("*"),
-    );
-    response
-}
 
 #[cfg(test)]
 mod tests {

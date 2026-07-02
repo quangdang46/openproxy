@@ -49,12 +49,16 @@ pub struct MitmProxyConfig {
     pub ca_key_pem: Vec<u8>,
     pub capture_dir: PathBuf,
     pub state: AppState,
+    /// Optional listen port. 0 or None = OS-assigned ephemeral.
+    pub port: Option<u16>,
 }
 
 pub async fn start_mitm_proxy(
     config: MitmProxyConfig,
 ) -> Result<MitmProxyHandle, Box<dyn std::error::Error>> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let port = config.port.unwrap_or(0);
+    let bind_addr_str = format!("127.0.0.1:{port}");
+    let listener = TcpListener::bind(&bind_addr_str).await?;
     let local_addr = listener.local_addr()?;
     let port = local_addr.port();
     let bind_addr = format!("127.0.0.1:{port}");

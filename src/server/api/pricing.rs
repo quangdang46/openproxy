@@ -4,6 +4,9 @@ use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Json, Router};
 use serde_json::Value;
 use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::server::state::AppState;
 
@@ -12,6 +15,20 @@ type ProviderPricing = BTreeMap<String, ModelPricing>;
 type PricingTable = BTreeMap<String, ProviderPricing>;
 
 const VALID_PRICING_FIELDS: &[&str] = &["input", "output", "cached", "reasoning", "cache_creation"];
+
+/// 5-second in-memory cache for merged pricing to avoid recomputing on every request.
+const PRICING_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn pricing_cache() -> &'static Mutex<Option<(Instant, PricingTable)>> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, PricingTable)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn invalidate_pricing_cache() {
+    if let Ok(mut cache) = pricing_cache().lock() {
+        *cache = None;
+    }
+}
 
 pub fn routes() -> Router<AppState> {
     Router::new().route(
@@ -157,8 +174,22 @@ fn validate_pricing_payload(payload: &Value) -> Result<PricingTable, String> {
 }
 
 async fn get_pricing(State(state): State<AppState>) -> Response {
+    // Check cache first
+    if let Ok(cache) = pricing_cache().lock() {
+        if let Some((fetched_at, cached)) = cache.as_ref() {
+            if fetched_at.elapsed() < PRICING_CACHE_TTL {
+                return Json(cached).into_response();
+            }
+        }
+    }
+
+    // Compute and cache
     let snapshot = state.db.snapshot();
-    Json(merged_pricing(&user_pricing(&snapshot))).into_response()
+    let pricing = merged_pricing(&user_pricing(&snapshot));
+    if let Ok(mut cache) = pricing_cache().lock() {
+        *cache = Some((Instant::now(), pricing.clone()));
+    }
+    Json(pricing).into_response()
 }
 
 async fn update_pricing(State(state): State<AppState>, Json(payload): Json<Value>) -> Response {
@@ -189,7 +220,10 @@ async fn update_pricing(State(state): State<AppState>, Json(payload): Json<Value
         .await;
 
     match result {
-        Ok(snapshot) => Json(user_pricing(&snapshot)).into_response(),
+        Ok(snapshot) => {
+            invalidate_pricing_cache();
+            Json(user_pricing(&snapshot)).into_response()
+        }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "Failed to update pricing" })),
@@ -235,7 +269,10 @@ async fn reset_pricing(
         .await;
 
     match result {
-        Ok(snapshot) => Json(merged_pricing(&user_pricing(&snapshot))).into_response(),
+        Ok(snapshot) => {
+            invalidate_pricing_cache();
+            Json(merged_pricing(&user_pricing(&snapshot))).into_response()
+        }
         Err(_) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": "Failed to reset pricing" })),

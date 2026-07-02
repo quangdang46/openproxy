@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use hyper::http::{self as hyper_http, uri::InvalidUri};
@@ -13,6 +14,11 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const VERTEX_AI_BASE_URL: &str = "https://aiplatform.googleapis.com/v2beta";
 const VERTEX_DEFAULT_LOCATION: &str = "us-central1";
+
+/// Environment variable pointing to the GCP ADC credential file.
+const ADC_CREDENTIALS_ENV: &str = "GOOGLE_APPLICATION_CREDENTIALS";
+/// Default path for `gcloud auth application-default login` credentials.
+const ADC_DEFAULT_PATH: &str = ".config/gcloud/application_default_credentials.json";
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -112,6 +118,32 @@ pub struct VertexExecutorResponse {
     pub transport: TransportKind,
 }
 
+impl std::fmt::Display for VertexExecutorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedProvider(msg) => write!(f, "unsupported provider: {msg}"),
+            Self::MissingCredentials(msg) => write!(f, "missing credentials: {msg}"),
+            Self::MissingServiceAccountJson(msg) => write!(f, "missing service account JSON: {msg}"),
+            Self::JwtGenerationFailed(msg) => write!(f, "JWT generation failed: {msg}"),
+            Self::InvalidToken(msg) => write!(f, "invalid token: {msg}"),
+            Self::RequestFailed(msg) => write!(f, "request failed: {msg}"),
+            Self::Serialize(e) => write!(f, "serialization error: {e}"),
+            Self::HyperClientInit(e) => write!(f, "hyper client init error: {e}"),
+            Self::Hyper(e) => write!(f, "hyper error: {e}"),
+            Self::Request(e) => write!(f, "request error: {e}"),
+            Self::InvalidUri(e) => write!(f, "invalid URI: {e}"),
+            Self::InvalidHeader(e) => write!(f, "invalid header: {e}"),
+            Self::RsaPemParse(msg) => write!(f, "RSA PEM parse error: {msg}"),
+            Self::RsaSigning(msg) => write!(f, "RSA signing error: {msg}"),
+            Self::Base64Decode(e) => write!(f, "base64 decode error: {e}"),
+            Self::StreamingResponseFailed(msg) => write!(f, "streaming response failed: {msg}"),
+            Self::JsonWebToken(e) => write!(f, "JWT error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for VertexExecutorError {}
+
 impl std::fmt::Debug for VertexExecutorResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VertexExecutorResponse")
@@ -136,6 +168,24 @@ struct ServiceAccountJson {
     token_uri: String,
     #[serde(rename = "project_id")]
     project_id: Option<String>,
+}
+
+/// Represents `gcloud auth application-default login` credentials
+/// (type = "authorized_user").
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct AuthorizedUserCredential {
+    #[serde(rename = "type")]
+    credential_type: String,
+    #[serde(rename = "client_id")]
+    client_id: String,
+    #[serde(rename = "client_secret")]
+    client_secret: String,
+    #[serde(rename = "refresh_token")]
+    refresh_token: String,
+    /// Optional; the quota project.
+    #[serde(rename = "quota_project_id")]
+    quota_project_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -384,7 +434,7 @@ impl VertexExecutor {
         // Determine auth path:
         // 1. Raw API key (api_key field) -> ADC or x-goog-api-key
         // 2. Service account JSON (access_token field) -> JWT exchange
-        // 3. No credentials -> try ADC (metadata server)
+        // 3. No credentials -> try ADC (file-based then metadata server)
         let (project_id, auth_token) = if let Some(api_key) = &request.credentials.api_key {
             // Raw API key auth path
             let project_id = request
@@ -403,9 +453,11 @@ impl VertexExecutor {
             let project_id = service_account.project_id.clone().unwrap_or_default();
             (project_id, cached_token.token)
         } else {
-            // Try ADC (Application Default Credentials) via metadata server
-            let project_id = String::new();
-            let token = Self::fetch_adc_token().await?;
+            // Try ADC (Application Default Credentials):
+            // 1. GOOGLE_APPLICATION_CREDENTIALS env var (authorized_user or service_account)
+            // 2. ~/.config/gcloud/application_default_credentials.json
+            // 3. GCP metadata server (Compute Engine, Cloud Run, etc.)
+            let (project_id, token) = Self::fetch_adc_token().await?;
             (project_id, token)
         };
 
@@ -454,8 +506,158 @@ impl VertexExecutor {
         })
     }
 
-    /// Fetch an access token from the GCP metadata server (ADC).
-    async fn fetch_adc_token() -> Result<String, VertexExecutorError> {
+    /// Resolve the default ADC credential path (Unix/macOS).
+    fn adc_credential_path() -> Option<PathBuf> {
+        // 1. Check GOOGLE_APPLICATION_CREDENTIALS env var.
+        if let Ok(path) = std::env::var(ADC_CREDENTIALS_ENV) {
+            let p = PathBuf::from(path);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        // 2. Fall back to ~/.config/gcloud/application_default_credentials.json.
+        if let Some(home) = Self::home_dir() {
+            let p = home.join(ADC_DEFAULT_PATH);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    /// Get the user's home directory.
+    fn home_dir() -> Option<PathBuf> {
+        std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    }
+
+    /// Read an ADC credential file and resolve to a (project_id, access_token) pair.
+    ///
+    /// Supports:
+    /// - `type: "authorized_user"` — uses `refresh_token` against Google's OAuth
+    ///   token endpoint to mint a new access token.
+    /// - `type: "service_account"` — uses the existing service account JWT flow.
+    async fn resolve_adc_file(
+        path: &PathBuf,
+    ) -> Result<(String, String), VertexExecutorError> {
+        let contents = tokio::fs::read_to_string(path).await.map_err(|e| {
+            VertexExecutorError::MissingCredentials(format!(
+                "Failed to read ADC credential file '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let raw: Value = serde_json::from_str(&contents).map_err(|e| {
+            VertexExecutorError::MissingCredentials(format!(
+                "Failed to parse ADC credential file: {}",
+                e
+            ))
+        })?;
+
+        let cred_type = raw
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        match cred_type {
+            "authorized_user" => {
+                let cred: AuthorizedUserCredential = serde_json::from_value(raw).map_err(|e| {
+                    VertexExecutorError::MissingCredentials(format!(
+                        "Invalid authorized_user credential: {}",
+                        e
+                    ))
+                })?;
+                Self::exchange_authorized_user_refresh(&cred).await
+            }
+            "service_account" => {
+                let service_account = Self::parse_service_account_json(&contents)?;
+                let jwt = Self::create_rs256_jwt(&service_account)?;
+                let cached_token =
+                    Self::exchange_jwt_for_token(&jwt, &service_account.token_uri).await?;
+                let project_id = service_account.project_id.clone().unwrap_or_default();
+                Ok((project_id, cached_token.token))
+            }
+            other => Err(VertexExecutorError::MissingCredentials(format!(
+                "Unsupported ADC credential type: '{}'",
+                other
+            ))),
+        }
+    }
+
+    /// Exchange an authorized_user refresh token for an access token.
+    async fn exchange_authorized_user_refresh(
+        cred: &AuthorizedUserCredential,
+    ) -> Result<(String, String), VertexExecutorError> {
+        let client = reqwest::Client::new();
+        let params = [
+            ("grant_type", "refresh_token"),
+            ("refresh_token", &cred.refresh_token),
+            ("client_id", &cred.client_id),
+            ("client_secret", &cred.client_secret),
+        ];
+
+        #[derive(Deserialize)]
+        struct TokenResponse {
+            access_token: String,
+            expires_in: Option<u64>,
+            #[serde(default)]
+            scope: Option<String>,
+        }
+
+        let response = client
+            .post("https://oauth2.googleapis.com/token")
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| {
+                VertexExecutorError::MissingCredentials(format!(
+                    "Authorized user token refresh failed: {}",
+                    e
+                ))
+            })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(VertexExecutorError::InvalidToken(format!(
+                "Authorized user token refresh returned {}: {}",
+                status,
+                body
+            )));
+        }
+
+        let token_resp: TokenResponse = response.json().await.map_err(|e| {
+            VertexExecutorError::InvalidToken(format!(
+                "Failed to parse authorized user token response: {}",
+                e
+            ))
+        })?;
+
+        let project_id = cred.quota_project_id.clone().unwrap_or_default();
+        Ok((project_id, token_resp.access_token))
+    }
+
+    /// Fetch credentials from ADC sources in priority order:
+    /// 1. ADC credential file (authorized_user or service_account)
+    /// 2. GCP metadata server (Compute Engine, Cloud Run, etc.)
+    async fn fetch_adc_token() -> Result<(String, String), VertexExecutorError> {
+        // Try file-based ADC first.
+        if let Some(path) = Self::adc_credential_path() {
+            match Self::resolve_adc_file(&path).await {
+                Ok(result) => return Ok(result),
+                Err(e) => {
+                    tracing::warn!(
+                        "ADC credential file '{}' failed: {}; falling back to metadata server",
+                        path.display(),
+                        e
+                    );
+                }
+            }
+        }
+
+        // Fall back to GCP metadata server.
         let client = reqwest::Client::new();
         let resp = client
             .get("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=https://aiplatform.googleapis.com&format=full")
@@ -464,14 +666,15 @@ impl VertexExecutor {
             .await
             .map_err(|e| {
                 VertexExecutorError::MissingCredentials(format!(
-                    "ADC token fetch failed: {}",
+                    "ADC metadata server token fetch failed: {}",
                     e
                 ))
             })?;
         let token = resp.text().await.map_err(|e| {
-            VertexExecutorError::InvalidToken(format!("ADC token parse failed: {}", e))
+            VertexExecutorError::InvalidToken(format!("ADC metadata server token parse failed: {}", e))
         })?;
-        Ok(token)
+        // Metadata server does not return a project id via this path.
+        Ok((String::new(), token))
     }
 }
 

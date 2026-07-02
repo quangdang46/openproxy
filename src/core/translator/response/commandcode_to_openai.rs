@@ -77,8 +77,20 @@ fn make_chunk_line(
         }
     }
 
+    // Wire Responses API event-based SSE framing.
+    // The first chunk gets event: response.created, the final
+    // chunk gets event: response.done; intermediate content
+    // chunks carry no event line (bare data: lines).
+    let event_prefix = if state.chunk_index == 0 && finish_reason.is_none() {
+        "event: response.created\n"
+    } else if finish_reason.is_some() {
+        "event: response.done\n"
+    } else {
+        ""
+    };
+
     let json_str = serde_json::to_string(&obj).unwrap_or_default();
-    format!("data: {}\n\n", json_str)
+    format!("{event_prefix}data: {}\n\n", json_str)
 }
 
 fn process_event(event: &Value, state: &mut CommandCodeResponseState) -> Vec<String> {

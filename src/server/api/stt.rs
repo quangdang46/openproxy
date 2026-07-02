@@ -28,6 +28,8 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+
+use super::cors::{cors_preflight_response, with_cors_response};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use tracing::debug;
@@ -126,7 +128,7 @@ pub fn stt_config(provider: &str) -> Option<SttProviderConfig> {
 // ---------------------------------------------------------------------------
 
 pub async fn cors_options() -> Response {
-    cors_preflight_response("POST, OPTIONS")
+    cors_preflight_response()
 }
 
 /// `POST /v1/audio/transcriptions` — content-type aware:
@@ -137,7 +139,7 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
     let headers = parts.headers.clone();
 
     if let Err(error) = require_api_key(&headers, &state.db) {
-        return with_cors(auth_error_response(error));
+        return with_cors_response(auth_error_response(error));
     }
 
     let content_type = headers
@@ -151,7 +153,7 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
             match Multipart::from_request(Request::from_parts(parts, body), &state).await {
                 Ok(m) => m,
                 Err(err) => {
-                    return with_cors(json_error(
+                    return with_cors_response(json_error(
                         StatusCode::BAD_REQUEST,
                         &format!("Invalid multipart body: {}", err),
                     ));
@@ -159,13 +161,13 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
             };
         match parse_multipart_request(&mut multipart).await {
             Ok(req) => req,
-            Err(err) => return with_cors(json_error(err.status, &err.message)),
+            Err(err) => return with_cors_response(json_error(err.status, &err.message)),
         }
     } else if content_type.starts_with("application/json") {
         let body_bytes = match axum::body::to_bytes(body, MAX_JSON_BODY).await {
             Ok(b) => b,
             Err(err) => {
-                return with_cors(json_error(
+                return with_cors_response(json_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     &format!("Body too large or unreadable: {}", err),
                 ));
@@ -173,10 +175,10 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
         };
         match parse_json_request(&body_bytes) {
             Ok(req) => req,
-            Err(err) => return with_cors(json_error(err.status, &err.message)),
+            Err(err) => return with_cors_response(json_error(err.status, &err.message)),
         }
     } else {
-        return with_cors(json_error(
+        return with_cors_response(json_error(
             StatusCode::BAD_REQUEST,
             "Content-Type must be multipart/form-data or application/json",
         ));
@@ -185,7 +187,7 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(&req.model, &snapshot);
     match resolved.route_kind {
-        ModelRouteKind::Combo => with_cors(json_error(
+        ModelRouteKind::Combo => with_cors_response(json_error(
             StatusCode::BAD_REQUEST,
             "Combos not supported for audio/transcriptions",
         )),
@@ -193,11 +195,11 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
             let provider = match resolved.provider.as_deref() {
                 Some(p) if !p.is_empty() => p.to_string(),
                 _ => {
-                    return with_cors(json_error(StatusCode::BAD_REQUEST, "Invalid model format"));
+                    return with_cors_response(json_error(StatusCode::BAD_REQUEST, "Invalid model format"));
                 }
             };
             let model = resolved.model.clone();
-            with_cors(dispatch_with_fallback(&state, &snapshot, &provider, &model, &req).await)
+            with_cors_response(dispatch_with_fallback(&state, &snapshot, &provider, &model, &req).await)
         }
     }
 }
@@ -1096,38 +1098,6 @@ fn status_to_type(status: StatusCode) -> &'static str {
     }
 }
 
-fn with_cors(mut response: Response) -> Response {
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("*"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("POST, OPTIONS"),
-    );
-    response
-}
-
-fn cors_preflight_response(methods: &str) -> Response {
-    let mut response = StatusCode::NO_CONTENT.into_response();
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("*"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("POST, OPTIONS")),
-    );
-    response
-}
 
 // ---------------------------------------------------------------------------
 // Unit tests.

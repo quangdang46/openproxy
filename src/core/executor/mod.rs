@@ -79,9 +79,9 @@ pub use opencode_go::{
 };
 pub use provider::{
     all_providers, get_api_key_providers, get_free_providers, get_oauth_providers,
-    get_provider_config, get_specialty_providers, is_supported_provider, ProviderExecutionRequest,
-    ProviderExecutionResponse, ProviderExecutorConfig, ProviderExecutorError, ProviderFormat,
-    UnifiedExecutor,
+    get_provider_config, get_specialty_providers, is_supported_provider, LogEntry, LogLevel,
+    ProviderExecutionRequest, ProviderExecutionResponse, ProviderExecutor, ProviderExecutorConfig,
+    ProviderExecutorError, ProviderFormat, ProxyOptions, UnifiedExecutor,
 };
 pub use qoder::{QoderExecutionRequest, QoderExecutor, QoderExecutorError, QoderExecutorResponse};
 pub use qwen::{QwenExecutionRequest, QwenExecutor, QwenExecutorError, QwenExecutorResponse};

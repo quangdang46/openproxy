@@ -175,11 +175,24 @@ pub fn gemini_to_openai_request(
     if let Some(config) = body_obj.get("generationConfig") {
         if let Some(max_output) = config.get("maxOutputTokens").and_then(|v| v.as_u64()) {
             let has_tools = body_obj.get("tools").is_some();
-            let adjusted = if has_tools && max_output < 32000 {
+            let mut adjusted = if has_tools && max_output < 32000 {
                 32000
             } else {
                 max_output
             };
+
+            // 9router parity: apply thinking budget_tokens + 1024 adjustment
+            // for thinking models (e.g. Gemini 2.5 Pro/Flash)
+            if let Some(thinking_cfg) = config.get("thinkingConfig") {
+                if let Some(budget_tokens) =
+                    thinking_cfg.get("budget_tokens").and_then(|v| v.as_u64())
+                {
+                    if adjusted <= budget_tokens {
+                        adjusted = budget_tokens + 1024;
+                    }
+                }
+            }
+
             result["max_tokens"] = serde_json::json!(adjusted);
         }
         if let Some(temp) = config.get("temperature") {

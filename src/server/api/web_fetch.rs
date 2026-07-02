@@ -19,6 +19,7 @@ use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
 use super::auth_error_response;
+use super::cors::cors_preflight_response;
 
 // ─── Route mount ────────────────────────────────────────────────────────────
 
@@ -54,21 +55,7 @@ fn default_format() -> String {
 // ─── CORS preflight ────────────────────────────────────────────────────────────
 
 async fn cors_options() -> Response {
-    let mut resp = Response::new(Body::empty());
-    *resp.status_mut() = StatusCode::OK;
-    resp.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    resp.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("POST, OPTIONS"),
-    );
-    resp.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("*"),
-    );
-    resp
+    cors_preflight_response()
 }
 
 // ─── Main handler ────────────────────────────────────────────────────────────

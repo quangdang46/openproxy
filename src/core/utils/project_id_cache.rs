@@ -76,7 +76,7 @@ impl ProjectIdCache {
 
 fn cache() -> &'static ProjectIdCache {
     static CACHE: OnceLock<ProjectIdCache> = OnceLock::new();
-    CACHE.get_or_init(|| ProjectIdCache::new(Duration::from_secs(300))) // 5-minute TTL
+    CACHE.get_or_init(|| ProjectIdCache::new(Duration::from_secs(3600))) // 1-hour TTL
 }
 
 /// Get a cached project ID for the given connection id.

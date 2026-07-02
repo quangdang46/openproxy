@@ -28,9 +28,16 @@ pub mod server;
 pub mod types;
 
 use axum::Router;
+use tower_http::cors::{Any, CorsLayer};
 
 pub fn build_app(state: server::state::AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     server::api::routes()
         .merge(server::dashboard::routes())
+        .layer(cors)
         .with_state(state)
 }

@@ -105,6 +105,72 @@ fn extract_first_cert_der(pem: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Err
     Ok(first.to_vec())
 }
 
+/// Install the CA certificate into the system trust store.
+///
+/// - macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <cert_path>`
+/// - Linux: copies to `/usr/local/share/ca-certificates/` and runs `update-ca-certificates`
+pub fn install_ca_cert(cert_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(target_os = "macos") {
+        let status = std::process::Command::new("sudo")
+            .args([
+                "security",
+                "add-trusted-cert",
+                "-d",
+                "-r",
+                "trustRoot",
+                "-k",
+                "/Library/Keychains/System.keychain",
+            ])
+            .arg(cert_path)
+            .status()?;
+        if !status.success() {
+            return Err("Failed to install CA cert on macOS".into());
+        }
+    } else if cfg!(target_os = "linux") {
+        let dest = PathBuf::from("/usr/local/share/ca-certificates");
+        std::fs::create_dir_all(&dest)?;
+        let dest_path = dest.join("openproxy-mitm-ca.crt");
+        std::fs::copy(cert_path, &dest_path)?;
+        let status = std::process::Command::new("sudo")
+            .args(["update-ca-certificates"])
+            .status()?;
+        if !status.success() {
+            return Err("Failed to run update-ca-certificates".into());
+        }
+    } else {
+        return Err("Unsupported platform for CA cert installation".into());
+    }
+    Ok(())
+}
+
+/// Remove the CA certificate from the system trust store.
+///
+/// - macOS: `sudo security remove-trusted-cert -d <cert_path>`
+/// - Linux: removes the copied cert and runs `update-ca-certificates --fresh`
+pub fn uninstall_ca_cert(cert_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    if cfg!(target_os = "macos") {
+        let status = std::process::Command::new("sudo")
+            .args(["security", "remove-trusted-cert", "-d"])
+            .arg(cert_path)
+            .status()?;
+        if !status.success() {
+            return Err("Failed to uninstall CA cert on macOS".into());
+        }
+    } else if cfg!(target_os = "linux") {
+        let dest_path = PathBuf::from("/usr/local/share/ca-certificates/openproxy-mitm-ca.crt");
+        let _ = std::fs::remove_file(&dest_path);
+        let status = std::process::Command::new("sudo")
+            .args(["update-ca-certificates", "--fresh"])
+            .status()?;
+        if !status.success() {
+            return Err("Failed to run update-ca-certificates".into());
+        }
+    } else {
+        return Err("Unsupported platform for CA cert uninstallation".into());
+    }
+    Ok(())
+}
+
 /// Build a tokio-rustls TlsAcceptor that presents a leaf cert for `hostname`,
 /// signed by the given CA material. Used by the MITM CONNECT handler to perform
 /// TLS interception on the client side of the tunnel.

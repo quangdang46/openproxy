@@ -377,13 +377,23 @@ pub fn claude_to_openai_request(
         result["temperature"] = temp.clone();
     }
 
-    // System message - flatten array to single string
+    // System message - flatten to single string
+    //
+    // Supports all three Claude API formats:
+    //   array:  [{"type": "text", "text": "..."}, ...]
+    //   string: "system prompt text"
+    //   object: {"type": "text", "text": "..."}
     if let Some(system) = body_obj.get("system") {
         let system_content = if let Some(arr) = system.as_array() {
             arr.iter()
                 .filter_map(|s| s.get("text").and_then(|t| t.as_str()))
                 .collect::<Vec<_>>()
                 .join("\n")
+        } else if let Some(obj) = system.as_object() {
+            obj.get("text")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string()
         } else if let Some(s) = system.as_str() {
             s.to_string()
         } else {
@@ -515,6 +525,60 @@ mod tests {
             .unwrap();
         assert!(content.contains("System prompt 1"));
         assert!(content.contains("System prompt 2"));
+    }
+
+    #[test]
+    fn test_system_object_to_string() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "claude-3",
+            "system": {"type": "text", "text": "Single object system prompt"},
+            "messages": [{"role": "user", "content": "Hello"}]
+        }"#,
+        )
+        .unwrap();
+
+        claude_to_openai_request("gpt-4", &mut body, false, None);
+
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        let system_msg = messages
+            .iter()
+            .find(|m| m.get("role").unwrap().as_str().unwrap() == "system");
+        assert!(system_msg.is_some());
+        let content = system_msg
+            .unwrap()
+            .get("content")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(content, "Single object system prompt");
+    }
+
+    #[test]
+    fn test_system_string_format_to_string() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "claude-3",
+            "system": "Plain string system prompt",
+            "messages": [{"role": "user", "content": "Hello"}]
+        }"#,
+        )
+        .unwrap();
+
+        claude_to_openai_request("gpt-4", &mut body, false, None);
+
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        let system_msg = messages
+            .iter()
+            .find(|m| m.get("role").unwrap().as_str().unwrap() == "system");
+        assert!(system_msg.is_some());
+        let content = system_msg
+            .unwrap()
+            .get("content")
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(content, "Plain string system prompt");
     }
 
     #[test]

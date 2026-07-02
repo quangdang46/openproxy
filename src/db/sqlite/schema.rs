@@ -233,12 +233,16 @@ pub const TABLES_SQL: &[&str] = &[
 /// - `foreign_keys=ON` is required for any future FK constraints; harmless
 ///   without them.
 /// - `temp_store=MEMORY` keeps temp tables in RAM.
+/// - `mmap_size=30000000` enables memory-mapped I/O for faster reads (30 MB).
+/// - `cache_size=-64000` sets the page cache to 64 MB (negative = kibibytes).
 pub const PRAGMAS: &[&str] = &[
     "PRAGMA journal_mode = WAL",
     "PRAGMA synchronous = NORMAL",
     "PRAGMA busy_timeout = 5000",
     "PRAGMA foreign_keys = ON",
     "PRAGMA temp_store = MEMORY",
+    "PRAGMA mmap_size = 30000000",
+    "PRAGMA cache_size = -64000",
 ];
 
 #[cfg(test)]

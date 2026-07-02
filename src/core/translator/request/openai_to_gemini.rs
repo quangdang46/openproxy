@@ -5,6 +5,8 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
+use crate::core::config::app_constants::ANTIGRAVITY_DEFAULT_SYSTEM;
+
 /// Sanitize function names for Gemini API.
 /// Gemini requires: starts with [a-zA-Z_], followed by [a-zA-Z0-9_.:\-], max 64 chars.
 fn sanitize_gemini_function_name(name: &str) -> String {
@@ -920,6 +922,112 @@ pub fn openai_to_gemini_cli_request(
     }
 
     *body = gemini;
+    true
+}
+
+/// OpenAI to Antigravity request translation.
+///
+/// Unlike plain Gemini translation, this function:
+/// 1. Wraps the Gemini-shaped body in a Cloud Code envelope (`{"request": body}`).
+/// 2. Injects the Antigravity default system prompt into `systemInstruction`
+///    using a double-prompt pattern (Cloud Code system + Antigravity system).
+/// 3. Sets `toolConfig.functionCallingConfig.mode = "VALIDATED"` when tools
+///    are present (Gemini 3+ requirement for validated function calling).
+pub fn openai_to_antigravity_request(
+    model: &str,
+    body: &mut Value,
+    stream: bool,
+    _credentials: Option<&Value>,
+) -> bool {
+    let mut gemini =
+        openai_to_gemini_base(model, body, stream, DEFAULT_THINKING_AG_SIGNATURE);
+
+    // Add thinking config from reasoning_effort
+    if let Some(reasoning_effort) = body.get("reasoning_effort").and_then(|v| v.as_str()) {
+        let budget = match reasoning_effort {
+            "low" => 1024,
+            "high" => 32768,
+            _ => 8192, // medium
+        };
+        gemini["generationConfig"]["thinkingConfig"] = serde_json::json!({
+            "thinkingBudget": budget,
+            "include_thoughts": true
+        });
+    }
+
+    // Thinking config from Claude format
+    if let Some(thinking) = body.get("thinking") {
+        if thinking.get("type").and_then(|v| v.as_str()) == Some("enabled") {
+            if let Some(budget) = thinking.get("budget_tokens").and_then(|v| v.as_u64()) {
+                gemini["generationConfig"]["thinkingConfig"] = serde_json::json!({
+                    "thinkingBudget": budget,
+                    "include_thoughts": true
+                });
+            }
+        }
+    }
+
+    // Clean schema for tools
+    if let Some(tools_arr) = gemini.get_mut("tools").and_then(|v| v.as_array_mut()) {
+        if let Some(first_tool) = tools_arr.first_mut() {
+            if let Some(func_decls) = first_tool
+                .get_mut("functionDeclarations")
+                .and_then(|v| v.as_array_mut())
+            {
+                for fn_decl in func_decls {
+                    if let Some(params) = fn_decl.get_mut("parameters") {
+                        let cleaned = clean_json_schema(params);
+                        *params = cleaned;
+                    }
+                }
+            }
+        }
+    }
+
+    // Inject Antigravity default system prompt into systemInstruction.
+    // Use the double-prompt pattern: the Cloud Code system prompt is inserted
+    // as a separate part at the beginning, followed by the user's own system
+    // instruction. This mirrors how the Antigravity executor expects it.
+    let ag_system_text = ANTIGRAVITY_DEFAULT_SYSTEM;
+    let existing_system = gemini.get("systemInstruction").cloned();
+    gemini["systemInstruction"] = serde_json::json!({
+        "role": "user",
+        "parts": [
+            {"text": ag_system_text},
+            {"text": "\n\n---\n\n"}
+        ]
+    });
+    if let Some(si) = existing_system {
+        if let Some(parts) = si.get("parts").and_then(|v| v.as_array()) {
+            for part in parts {
+                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                    if !text.is_empty() {
+                        gemini["systemInstruction"]["parts"]
+                            .as_array_mut()
+                            .unwrap()
+                            .push(serde_json::json!({"text": text}));
+                    }
+                }
+            }
+        }
+    }
+
+    // Wrap in Cloud Code envelope
+    let inner = std::mem::replace(&mut gemini, Value::Null);
+    *body = serde_json::json!({"request": inner});
+
+    // Set toolConfig when tools are present
+    if let Some(req_obj) = body.get_mut("request").and_then(|v| v.as_object_mut()) {
+        if req_obj.contains_key("tools") {
+            req_obj.insert(
+                "toolConfig".to_string(),
+                serde_json::json!({
+                    "functionCallingConfig": {"mode": "VALIDATED"}
+                }),
+            );
+        }
+    }
+
     true
 }
 

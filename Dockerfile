@@ -68,8 +68,9 @@ FROM debian:bookworm-slim AS runtime
 
 # ca-certificates: required for outbound HTTPS to provider APIs.
 # tini: clean signal handling for ctrl+c / SIGTERM in the container.
+# curl: required for HEALTHCHECK probe.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates tini \
+    && apt-get install -y --no-install-recommends ca-certificates tini curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust /src/target/release/openproxy /usr/local/bin/openproxy
@@ -82,6 +83,9 @@ ENV HOSTNAME=0.0.0.0 \
 
 WORKDIR /app
 VOLUME ["/app/data"]
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:4623/health || exit 1
 
 EXPOSE 4623
 

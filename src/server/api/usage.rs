@@ -84,6 +84,10 @@ pub fn routes() -> Router<AppState> {
             "/api/usage/{connection_id}",
             routing::get(get_connection_usage),
         )
+        .route(
+            "/api/usage/{connection_id}/codex-reset-credits",
+            routing::post(reset_connection_credits),
+        )
         .route("/api/usage/chart", routing::get(get_usage_chart))
         .route("/api/usage/providers", routing::get(get_usage_by_provider))
         .route(
@@ -503,6 +507,72 @@ async fn get_connection_usage(
         message,
         quotas: live_quotas,
     })
+    .into_response()
+}
+
+// Handler for POST /api/usage/:connection_id/codex-reset-credits
+async fn reset_connection_credits(
+    State(state): State<AppState>,
+    axum::extract::Path(connection_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_usage_access(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let Some(connection) = snapshot
+        .provider_connections
+        .iter()
+        .find(|entry| entry.id == connection_id)
+    else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Connection not found" })),
+        )
+            .into_response();
+    };
+
+    if connection.provider != "codex" {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Credit reset is only available for codex connections" })),
+        )
+            .into_response();
+    }
+
+    // Codex credit reset: clear the rate-limited state and reset usage counters
+    if let Err(e) = state
+        .db
+        .update(|db| {
+            if let Some(conn) = db
+                .provider_connections
+                .iter_mut()
+                .find(|entry| entry.id == connection_id)
+            {
+                conn.rate_limited_until = None;
+                conn.consecutive_errors = Some(0);
+                conn.backoff_level = Some(0);
+                conn.last_error = None;
+                conn.last_error_at = None;
+                conn.error_code = None;
+                conn.extra
+                    .insert("credits_reset_at".to_string(), json!(chrono::Utc::now().to_rfc3339()));
+            }
+        })
+        .await
+    {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response();
+    }
+
+    Json(serde_json::json!({
+        "success": true,
+        "message": "Codex credits reset. Rate limits and backoff have been cleared."
+    }))
     .into_response()
 }
 

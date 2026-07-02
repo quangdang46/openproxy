@@ -90,29 +90,48 @@ impl AzureExecutor {
     }
 
     fn build_url(&self, credentials: &ProviderConnection, model: &str) -> String {
-        let endpoint = credentials
-            .provider_specific_data
-            .get("azureEndpoint")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_AZURE_ENDPOINT);
+        // Prefer env vars over config values for deployment-specific overrides.
+        let endpoint = std::env::var("AZURE_OPENAI_ENDPOINT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                credentials
+                    .provider_specific_data
+                    .get("azureEndpoint")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| DEFAULT_AZURE_ENDPOINT.to_string());
 
-        let api_version = credentials
-            .provider_specific_data
-            .get("apiVersion")
-            .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_API_VERSION);
+        let api_version = std::env::var("AZURE_OPENAI_API_VERSION")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                credentials
+                    .provider_specific_data
+                    .get("apiVersion")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| DEFAULT_API_VERSION.to_string());
 
-        let deployment = credentials
-            .provider_specific_data
-            .get("deployment")
-            .and_then(|v| v.as_str())
-            .unwrap_or(model);
-
-        let deployment = if deployment.is_empty() {
-            DEFAULT_DEPLOYMENT
-        } else {
-            deployment
-        };
+        let deployment = std::env::var("AZURE_OPENAI_DEPLOYMENT")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                credentials
+                    .provider_specific_data
+                    .get("deployment")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| {
+                if model.is_empty() {
+                    DEFAULT_DEPLOYMENT.to_string()
+                } else {
+                    model.to_string()
+                }
+            });
 
         let endpoint = endpoint.trim_end_matches('/');
         format!(

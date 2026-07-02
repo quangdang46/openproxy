@@ -39,8 +39,14 @@ pub mod memory_config {
     pub const PROXY_DISPATCHERS_MAX_SIZE: usize = 20;
 }
 
-/// Abort an upstream stream if no chunk arrives within this window.
-pub const STREAM_STALL_TIMEOUT_MS: u64 = 3 * 60 * 1000;
+/// Abort an upstream stream if no chunk arrives within this window (360s,
+/// matching the 9router default).
+pub const STREAM_STALL_TIMEOUT_MS: u64 = 6 * 60 * 1000;
+
+/// Time-to-first-token: abort if the first SSE chunk does not arrive within
+/// this window (200s). After the first chunk, the per-chunk stall timeout
+/// (`STREAM_STALL_TIMEOUT_MS`) applies.
+pub const STREAM_FIRST_CHUNK_TIMEOUT_MS: u64 = 200_000;
 
 /// Hard cap on `max_tokens` we forward upstream (clamped down from any
 /// caller-supplied value above this).

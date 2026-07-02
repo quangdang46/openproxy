@@ -4525,9 +4525,259 @@ async fn codex_bulk_import(
     Json(json!({ "success": success, "failed": failed, "results": results })).into_response()
 }
 
+/// POST /api/oauth/codex/import-token
+/// Imports a Codex access/refresh token pair as a provider connection.
+async fn codex_import_token(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let Some(access_token) = body.get("accessToken").and_then(Value::as_str) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "accessToken is required" })),
+        )
+            .into_response();
+    };
+    if access_token.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "accessToken is required" })),
+        )
+            .into_response();
+    }
+
+    let access_token = access_token.trim();
+    let refresh_token = body
+        .get("refreshToken")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let email = body
+        .get("email")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let connection = ProviderConnection {
+        provider: "codex".to_string(),
+        auth_type: "oauth".to_string(),
+        email: email.clone(),
+        access_token: Some(access_token.to_string()),
+        refresh_token,
+        expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(86_400)).to_rfc3339()),
+        test_status: Some("active".to_string()),
+        provider_specific_data: std::collections::BTreeMap::from([
+            (
+                "authMethod".to_string(),
+                Value::String("import-token".to_string()),
+            ),
+            (
+                "provider".to_string(),
+                Value::String("Imported".to_string()),
+            ),
+        ]),
+        ..Default::default()
+    };
+
+    match create_imported_oauth_connection(&state.db, connection).await {
+        Ok(connection) => Json(json!({
+            "success": true,
+            "connection": {
+                "id": connection.id,
+                "provider": connection.provider,
+                "email": connection.email
+            }
+        }))
+        .into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
+/// POST /api/oauth/kiro/api-key
+/// Imports a Kiro API key as a provider connection.
+async fn kiro_api_key_import(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let Some(api_key) = body.get("apiKey").and_then(Value::as_str) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "apiKey is required" })),
+        )
+            .into_response();
+    };
+    if api_key.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "apiKey is required" })),
+        )
+            .into_response();
+    }
+
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Kiro API Key".to_string());
+
+    let api_key = api_key.trim();
+    let connection_id = Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let result = state
+        .db
+        .update(|db| {
+            db.provider_connections.push(ProviderConnection {
+                id: connection_id.clone(),
+                provider: "kiro".to_string(),
+                auth_type: "apikey".to_string(),
+                name: Some(name.clone()),
+                email: Some(name.clone()),
+                api_key: Some(api_key.to_string()),
+                is_active: Some(true),
+                created_at: Some(now.clone()),
+                updated_at: Some(now.clone()),
+                test_status: Some("active".to_string()),
+                ..Default::default()
+            });
+        })
+        .await;
+
+    match result {
+        Ok(_) => Json(json!({
+            "success": true,
+            "connection": {
+                "id": connection_id,
+                "provider": "kiro",
+                "name": name
+            }
+        }))
+        .into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
+/// POST /api/oauth/kiro/import-cli-proxy
+/// Imports Kiro CLI proxy credentials as a provider connection.
+async fn kiro_import_cli_proxy(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let access_token = body
+        .get("accessToken")
+        .or_else(|| body.get("access_token"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+
+    if access_token.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "accessToken is required" })),
+        )
+            .into_response();
+    }
+
+    let refresh_token = body
+        .get("refreshToken")
+        .or_else(|| body.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let profile_arn = body
+        .get("profileArn")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let claims = decode_jwt_claims(&access_token);
+    let email = claims
+        .as_ref()
+        .and_then(|v| v.get("email"))
+        .or_else(|| claims.as_ref().and_then(|v| v.get("preferred_username")))
+        .or_else(|| claims.as_ref().and_then(|v| v.get("sub")))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+
+    let mut provider_specific_data = std::collections::BTreeMap::new();
+    provider_specific_data.insert(
+        "authMethod".to_string(),
+        Value::String("cli-proxy".to_string()),
+    );
+    provider_specific_data.insert(
+        "provider".to_string(),
+        Value::String("Kiro CLI Proxy".to_string()),
+    );
+    if let Some(arn) = profile_arn {
+        provider_specific_data.insert("profileArn".to_string(), Value::String(arn));
+    }
+
+    let connection = ProviderConnection {
+        provider: "kiro".to_string(),
+        auth_type: "oauth".to_string(),
+        email,
+        access_token: Some(access_token),
+        refresh_token,
+        expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(3600)).to_rfc3339()),
+        test_status: Some("active".to_string()),
+        provider_specific_data,
+        ..Default::default()
+    };
+
+    match create_imported_oauth_connection(&state.db, connection).await {
+        Ok(connection) => Json(json!({
+            "success": true,
+            "connection": {
+                "id": connection.id,
+                "provider": connection.provider,
+                "email": connection.email
+            }
+        }))
+        .into_response(),
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/oauth/codex/bulk-import", post(codex_bulk_import))
+        .route(
+            "/api/oauth/codex/import-token",
+            post(codex_import_token),
+        )
         .route(
             "/api/oauth/cursor/auto-import",
             get(cursor_auto_import_route),
@@ -4538,6 +4788,11 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/oauth/kiro/auto-import", get(kiro_auto_import_route))
         .route("/api/oauth/kiro/import", post(kiro_import_auth))
+        .route("/api/oauth/kiro/api-key", post(kiro_api_key_import))
+        .route(
+            "/api/oauth/kiro/import-cli-proxy",
+            post(kiro_import_cli_proxy),
+        )
         .route(
             "/api/oauth/kiro/social-authorize",
             get(kiro_social_authorize),

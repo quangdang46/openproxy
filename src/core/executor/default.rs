@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use http_body_util::Full;
 use hyper::body::Incoming as HyperIncoming;
@@ -13,6 +14,7 @@ use serde_json::Value;
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::translator::helpers::openai_helper::normalize_developer_role;
+use crate::oauth::token_refresh::dispatch_oauth_refresh;
 use crate::types::{ProviderConnection, ProviderNode};
 
 use super::ClientPool;
@@ -401,6 +403,7 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub format: String,
     pub default_headers: Vec<(String, String)>,
+    pub fallback_urls: Vec<String>,
 }
 
 impl ProviderConfig {
@@ -409,6 +412,7 @@ impl ProviderConfig {
             base_url: base_url.to_string(),
             format: "openai".into(),
             default_headers: Vec::new(),
+            fallback_urls: Vec::new(),
         }
     }
 
@@ -417,6 +421,7 @@ impl ProviderConfig {
             base_url: base_url.to_string(),
             format: "gemini".into(),
             default_headers: Vec::new(),
+            fallback_urls: Vec::new(),
         }
     }
 
@@ -436,6 +441,12 @@ impl ProviderConfig {
     fn with_header(mut self, name: &str, value: &str) -> Self {
         self.default_headers
             .push((name.to_string(), value.to_string()));
+        self
+    }
+
+    #[allow(dead_code)]
+    fn with_fallback(mut self, url: &str) -> Self {
+        self.fallback_urls.push(url.to_string());
         self
     }
 }
@@ -503,6 +514,9 @@ pub enum ExecutorError {
     HyperClientInit(io::Error),
     Hyper(hyper_util::client::legacy::Error),
     Request(reqwest::Error),
+    CredentialRefreshFailed(String),
+    MaxRetriesExhausted(String),
+    UpstreamStatus(http::StatusCode, String),
 }
 
 impl From<reqwest::Error> for ExecutorError {
@@ -863,17 +877,198 @@ impl DefaultExecutor {
 
     pub async fn execute(
         &self,
-        request: ExecutionRequest,
+        mut request: ExecutionRequest,
     ) -> Result<ExecutionResponse, ExecutorError> {
-        let url = self.build_url(&request.model, request.stream, &request.credentials)?;
-        let headers = self.build_headers(&request.model, &request.credentials, request.stream)?;
+        // Build headers and transformed body once, reused across retries and
+        // fallback URLs.
+        let mut headers = self.build_headers(&request.model, &request.credentials, request.stream)?;
         let transformed_body = self.transform_request(&request.body);
-        if self.use_hyper_transport(&request, &url) {
-            return self.execute_via_hyper(url, headers, transformed_body).await;
+
+        // Try primary then fallback URLs.
+        let urls = self.resolve_urls(&request.model, request.stream, &request.credentials);
+
+        for url in &urls {
+            let use_hyper = self.use_hyper_transport(&request, url);
+
+            // The retry loop for this URL.
+            for retry in 0..3 {
+                let upstream = self
+                    .send_one(url, &headers, &transformed_body, &request, use_hyper)
+                    .await?;
+                let status = upstream.status();
+
+                // Success: return immediately.
+                if status.is_success() {
+                    return Ok(ExecutionResponse {
+                        response: upstream,
+                        url: url.clone(),
+                        headers,
+                        transformed_body,
+                        transport: if use_hyper {
+                            TransportKind::Hyper
+                        } else {
+                            TransportKind::Reqwest
+                        },
+                    });
+                }
+
+                // 401 / 403: try credential refresh and retry once with new creds.
+                if status == http::StatusCode::UNAUTHORIZED
+                    || status == http::StatusCode::FORBIDDEN
+                {
+                    if retry == 0 {
+                        if let Some(new_creds) =
+                            self.try_refresh_credentials(&request.credentials).await
+                        {
+                            request.credentials = new_creds;
+                            headers = self.build_headers(
+                                &request.model,
+                                &request.credentials,
+                                request.stream,
+                            )?;
+                            // Retry immediately with refreshed credentials.
+                            let retry_resp = self
+                                .send_one(url, &headers, &transformed_body, &request, use_hyper)
+                                .await?;
+                            if retry_resp.status().is_success() {
+                                return Ok(ExecutionResponse {
+                                    response: retry_resp,
+                                    url: url.clone(),
+                                    headers,
+                                    transformed_body,
+                                    transport: if use_hyper {
+                                        TransportKind::Hyper
+                                    } else {
+                                        TransportKind::Reqwest
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    // No refresh or refresh didn't help — try next fallback URL.
+                    break;
+                }
+
+                // 502 Bad Gateway: 3 retries x 3s
+                if status == http::StatusCode::BAD_GATEWAY {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    continue;
+                }
+
+                // 503 Service Unavailable: 3 retries x 2s
+                if status == http::StatusCode::SERVICE_UNAVAILABLE {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+
+                // 504 Gateway Timeout: 2 retries x 3s
+                if status == http::StatusCode::GATEWAY_TIMEOUT {
+                    if retry < 1 {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
+                    // After 2 retries, fall through to next fallback URL.
+                    break;
+                }
+
+                // Other non-success status: propagate upstream error.
+                return Err(ExecutorError::UpstreamStatus(
+                    status,
+                    format!("upstream returned {} for URL {}", status.as_u16(), url),
+                ));
+            }
         }
 
-        self.execute_via_reqwest(url, headers, transformed_body, request.proxy)
-            .await
+        Err(ExecutorError::MaxRetriesExhausted(
+            "all retries and fallback URLs exhausted".into(),
+        ))
+    }
+
+    /// Send a single request without retries, returning the raw upstream response.
+    async fn send_one(
+        &self,
+        url: &str,
+        headers: &HeaderMap,
+        transformed_body: &Value,
+        request: &ExecutionRequest,
+        use_hyper: bool,
+    ) -> Result<UpstreamResponse, ExecutorError> {
+        if use_hyper {
+            let client = self.pool.get_hyper_direct(&self.provider)?;
+            let uri: Uri = url.parse()?;
+            let body_bytes = serde_json::to_vec(transformed_body)?;
+            let mut req = HyperRequest::post(uri).body(Full::new(body_bytes.into()))?;
+            *req.headers_mut() = headers.clone();
+            client.request(req).await.map_err(ExecutorError::Hyper).map(UpstreamResponse::Hyper)
+        } else {
+            let client = self.pool.get(&self.provider, request.proxy.as_ref())?;
+            client
+                .post(url)
+                .headers(headers.clone())
+                .json(transformed_body)
+                .send()
+                .await
+                .map_err(ExecutorError::Request)
+                .map(UpstreamResponse::Reqwest)
+        }
+    }
+
+    /// Resolve primary and fallback URLs for the given request.
+    fn resolve_urls(
+        &self,
+        model: &str,
+        stream: bool,
+        credentials: &ProviderConnection,
+    ) -> Vec<String> {
+        let primary = match self.build_url(model, stream, credentials) {
+            Ok(url) => url,
+            Err(_) => return Vec::new(),
+        };
+        let mut urls = vec![primary];
+        urls.extend(self.config.fallback_urls.clone());
+        urls
+    }
+
+    /// Try to refresh OAuth credentials when the upstream returns 401/403.
+    /// Returns `Some(updated_creds)` on success, `None` on failure.
+    async fn try_refresh_credentials(
+        &self,
+        credentials: &ProviderConnection,
+    ) -> Option<ProviderConnection> {
+        let refresh_token = credentials.refresh_token.as_deref()?;
+        if refresh_token.is_empty() {
+            return None;
+        }
+
+        match dispatch_oauth_refresh(
+            &self.provider,
+            refresh_token,
+            &credentials.provider_specific_data,
+        )
+        .await
+        {
+            Ok(result) => {
+                let mut updated = credentials.clone();
+                updated.access_token = Some(result.access_token);
+                if let Some(new_refresh) = result.refresh_token {
+                    updated.refresh_token = Some(new_refresh);
+                }
+                if let Some(expires_in) = result.expires_in {
+                    let expiry = chrono::Utc::now()
+                        + chrono::Duration::seconds(expires_in);
+                    updated.expires_at = Some(expiry.to_rfc3339());
+                }
+                Some(updated)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "credential refresh failed for provider {}: {}",
+                    self.provider,
+                    e
+                );
+                None
+            }
+        }
     }
 
     pub fn pool(&self) -> &Arc<ClientPool> {
@@ -888,51 +1083,6 @@ impl DefaultExecutor {
                 .is_some_and(|path| path.ends_with("/chat/completions"))
     }
 
-    async fn execute_via_reqwest(
-        &self,
-        url: String,
-        headers: HeaderMap,
-        transformed_body: Value,
-        proxy: Option<ProxyTarget>,
-    ) -> Result<ExecutionResponse, ExecutorError> {
-        let client = self.pool.get(&self.provider, proxy.as_ref())?;
-        let response = client
-            .post(&url)
-            .headers(headers.clone())
-            .json(&transformed_body)
-            .send()
-            .await?;
-
-        Ok(ExecutionResponse {
-            response: UpstreamResponse::Reqwest(response),
-            url,
-            headers,
-            transformed_body,
-            transport: TransportKind::Reqwest,
-        })
-    }
-
-    async fn execute_via_hyper(
-        &self,
-        url: String,
-        headers: HeaderMap,
-        transformed_body: Value,
-    ) -> Result<ExecutionResponse, ExecutorError> {
-        let client = self.pool.get_hyper_direct(&self.provider)?;
-        let uri: Uri = url.parse()?;
-        let body_bytes = serde_json::to_vec(&transformed_body)?;
-        let mut request = HyperRequest::post(uri).body(Full::new(body_bytes.into()))?;
-        *request.headers_mut() = headers.clone();
-        let response = client.request(request).await?;
-
-        Ok(ExecutionResponse {
-            response: UpstreamResponse::Hyper(response),
-            url,
-            headers,
-            transformed_body,
-            transport: TransportKind::Hyper,
-        })
-    }
 }
 
 fn compatible_value(value: Option<&Value>) -> Option<&str> {

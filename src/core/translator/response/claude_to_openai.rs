@@ -279,7 +279,7 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
                         }
                         if cache_create > 0 {
                             details
-                                .insert("cache_creation_tokens".into(), Value::from(cache_create));
+                                .insert("cache_creation_input_tokens".into(), Value::from(cache_create));
                         }
                         openai_usage["prompt_tokens_details"] = Value::Object(details);
                     }
@@ -380,6 +380,27 @@ fn convert_stop_reason(reason: &str) -> &'static str {
         "stop_sequence" => "stop",
         _ => "stop",
     }
+}
+
+/// Registry-compatible wrapper: parses raw bytes, calls the typed
+/// `claude_to_openai_response`, and serialises results back to SSE lines.
+///
+/// Signature matches `registry::ResponseTransformFn`.
+pub fn claude_to_openai_streaming(
+    chunk: &[u8],
+    state: &mut crate::core::translator::registry::ResponseTransformState,
+) -> Vec<String> {
+    use crate::core::translator::registry::ResponseTransformState;
+    let val: Value = match serde_json::from_slice(chunk) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let inner = &mut state.anthropic.claude_state;
+    let results = claude_to_openai_response(&val, inner);
+    results
+        .into_iter()
+        .map(|v| format!("data: {}\n\n", serde_json::to_string(&v).unwrap_or_default()))
+        .collect()
 }
 
 #[cfg(test)]

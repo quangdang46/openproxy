@@ -86,6 +86,9 @@ aws-sigv4 = "1.4"
 # Compression
 flate2 = "1"
 
+# CRC for AWS EventStream
+crc32fast = "1.4"
+
 # Random
 rand = "0.8"
 

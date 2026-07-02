@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use hyper::http;
 use hyper::http::uri::InvalidUri;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+use reqwest::Body as ReqwestBody;
 use serde_json::{json, Value};
 
 use crate::core::proxy::ProxyTarget;
@@ -10,7 +12,7 @@ use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
-const OPENAI_RESPONSES_API_BASE: &str = "https://api.openai.com/v1";
+const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 #[derive(Clone)]
 #[allow(dead_code)]
@@ -134,20 +136,34 @@ impl CodexExecutor {
         }
     }
 
-    /// Build the URL for OpenAI Responses API.
-    fn build_url(&self, _model: &str) -> String {
-        format!(
-            "{}/responses",
-            OPENAI_RESPONSES_API_BASE.trim_end_matches('/')
-        )
+    /// Build the URL for Codex Responses API at chatgpt.com.
+    ///
+    /// When the model name ends with `_compact` or the `provider_node`
+    /// carries a custom field `"_compact": true`, the `/compact` suffix
+    /// is appended to reduce response size.
+    fn build_url(&self, model: &str) -> String {
+        let base = CODEX_RESPONSES_URL.trim_end_matches('/').to_string();
+        let is_compact_model = model.ends_with("_compact");
+        let is_compact_node = self
+            .provider_node
+            .as_ref()
+            .and_then(|n| n.extra.get("_compact"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_compact_model || is_compact_node {
+            format!("{}/compact", base)
+        } else {
+            base
+        }
     }
 
-    /// Build request headers for OpenAI Responses API.
+    /// Build request headers for Codex Responses API.
     fn build_headers(
         &self,
         api_key: &str,
         stream: bool,
         connection_id: Option<&str>,
+        credentials: &ProviderConnection,
     ) -> Result<HeaderMap, CodexExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -158,7 +174,6 @@ impl CodexExecutor {
         );
 
         // 9router parity: session_id header for request session continuity.
-        // Derives from connection_id or falls back to "default".
         let session_id = connection_id
             .and_then(|cid| if cid.is_empty() { None } else { Some(cid) })
             .unwrap_or("default");
@@ -170,6 +185,22 @@ impl CodexExecutor {
         // 9router parity: identify client type to Codex backend.
         headers.insert("originator", HeaderValue::from_static("codex_cli_rs"));
 
+        // 9router parity: workspace binding for account scope + cache affinity.
+        {
+            let ws_id = credentials
+                .provider_specific_data
+                .get("workspaceId")
+                .or_else(|| credentials.provider_specific_data.get("chatgptAccountId"))
+                .and_then(|v| v.as_str())
+                .or(connection_id);
+            if let Some(ws) = ws_id {
+                headers.insert(
+                    "chatgpt-account-id",
+                    HeaderValue::from_str(ws).map_err(CodexExecutorError::InvalidHeader)?,
+                );
+            }
+        }
+
         if stream {
             headers.insert("Accept", HeaderValue::from_static("text/event-stream"));
         }
@@ -177,65 +208,81 @@ impl CodexExecutor {
         Ok(headers)
     }
 
-    /// Transform the request body from Chat Completions format to OpenAI Responses API format.
+    /// Default instructions injected when none are present in the request body.
+    const DEFAULT_CODEX_INSTRUCTIONS: &'static str =
+        "You are a highly capable coding agent. Use the tools and instructions provided to fulfill the user's request.";
+
+    /// Transform the request body from Chat Completions format to Codex Responses API format.
     ///
-    /// The Responses API uses `input` instead of `messages`.
-    /// Input can be a string or an array of content parts.
+    /// The Codex Responses API at chatgpt.com uses `input` as an array of message items.
+    /// This function:
+    /// - Converts messages[] to input[] with type "message", role, and content as input_text blocks
+    /// - Converts "system" role to "developer"
+    /// - Strips server-generated IDs (rs_, fc_, resp_, msg_ prefixes) to avoid 404s with store:false
+    /// - Forces stream: true and store: false (required by Codex backend)
+    /// - Injects instructions from body or a default
+    /// - Applies an allowlist: only model, input, instructions, tools, tool_choice,
+    ///   stream, store, reasoning, include, prompt_cache_key survive
     fn transform_request_body(
         &self,
         body: &Value,
         actual_model: &str,
     ) -> Result<Value, CodexExecutorError> {
-        // Extract the prompt from the messages array
-        let input_text = Self::extract_input_from_body(body)?;
+        // Convert messages[] to Responses API input[] array format
+        let input_items = Self::extract_input_items(body)?;
 
-        // Build the request body in OpenAI Responses API format
+        // Extract instructions from body, or use a default if empty
+        let instructions = body
+            .get("instructions")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(Self::DEFAULT_CODEX_INSTRUCTIONS);
+
+        // Build allowlisted request body with required fields
         let mut request_body = json!({
             "model": actual_model,
-            "input": input_text,
+            "input": input_items,
+            "instructions": instructions,
+            "stream": true,
+            "store": false,
         });
 
-        // Copy streaming flag
-        if let Some(stream) = body.get("stream").and_then(Value::as_bool) {
-            request_body["stream"] = json!(stream);
+        // Pass through allowlisted optional fields
+        if let Some(tools) = body.get("tools") {
+            request_body["tools"] = tools.clone();
         }
 
-        // Copy temperature if present
-        if let Some(temp) = body.get("temperature").and_then(Value::as_f64) {
-            request_body["temperature"] = json!(temp);
+        if let Some(tool_choice) = body.get("tool_choice") {
+            request_body["tool_choice"] = tool_choice.clone();
         }
 
-        // Copy max_tokens / max_completion_tokens if present
-        if let Some(max_tokens) = body
-            .get("max_tokens")
-            .or_else(|| body.get("max_completion_tokens"))
-            .and_then(Value::as_u64)
-        {
-            request_body["max_tokens"] = json!(max_tokens);
+        if let Some(reasoning) = body.get("reasoning") {
+            request_body["reasoning"] = reasoning.clone();
         }
 
-        // Copy top_p if present
-        if let Some(top_p) = body.get("top_p").and_then(Value::as_f64) {
-            request_body["top_p"] = json!(top_p);
+        if let Some(include) = body.get("include") {
+            request_body["include"] = include.clone();
         }
 
-        // Copy stop sequences if present
-        if let Some(stop) = body.get("stop").and_then(Value::as_array) {
-            let stop_vec: Vec<String> = stop
-                .iter()
-                .filter_map(Value::as_str)
-                .map(String::from)
-                .collect();
-            if !stop_vec.is_empty() {
-                request_body["stop"] = json!(stop_vec);
-            }
+        if let Some(prompt_cache_key) = body.get("prompt_cache_key") {
+            request_body["prompt_cache_key"] = prompt_cache_key.clone();
         }
 
         Ok(request_body)
     }
 
-    /// Extract the input text from a Chat Completions style request body.
-    fn extract_input_from_body(body: &Value) -> Result<String, CodexExecutorError> {
+    /// Extract input items array from a Chat Completions style request body.
+    ///
+    /// Returns a Vec of Responses API input items, where each message becomes:
+    /// ```json
+    /// {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Hello"}]}
+    /// ```
+    ///
+    /// - "system" role is converted to "developer"
+    /// - Server-generated IDs (prefixes rs_, fc_, resp_, msg_) are stripped
+    /// - String content is wrapped in an input_text array
+    /// - Content arrays have text parts converted to input_text type
+    fn extract_input_items(body: &Value) -> Result<Vec<Value>, CodexExecutorError> {
         let messages = body
             .get("messages")
             .and_then(Value::as_array)
@@ -243,30 +290,99 @@ impl CodexExecutor {
                 CodexExecutorError::UnsupportedFormat("Missing messages array".to_string())
             })?;
 
-        let mut input_parts = Vec::new();
-
-        for msg in messages {
-            let role = msg.get("role").and_then(Value::as_str).unwrap_or("user");
-            let content = msg.get("content").and_then(Value::as_str).unwrap_or("");
-
-            // Skip system messages as they're handled differently in Responses API
-            if role == "system" || role == "developer" {
-                continue;
-            }
-
-            if !content.is_empty() {
-                input_parts.push(content.to_string());
-            }
+        if messages.is_empty() {
+            return Err(CodexExecutorError::UnsupportedFormat(
+                "No messages found in request body".to_string(),
+            ));
         }
 
-        if input_parts.is_empty() {
+        let mut items: Vec<Value> = Vec::new();
+
+        for msg in messages {
+            let mut role = msg
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("user")
+                .to_string();
+
+            // Convert "system" role to "developer" (Responses API convention)
+            if role == "system" {
+                role = "developer".to_string();
+            }
+
+            // Extract and transform content into Responses API format
+            let content_arr: Value = match msg.get("content") {
+                Some(Value::String(s)) => {
+                    if s.is_empty() {
+                        continue;
+                    }
+                    json!([{"type": "input_text", "text": s}])
+                }
+                Some(Value::Array(arr)) => {
+                    if arr.is_empty() {
+                        continue;
+                    }
+                    let mut parts: Vec<Value> = Vec::new();
+                    for part in arr {
+                        let part_type = part
+                            .get("type")
+                            .and_then(Value::as_str)
+                            .unwrap_or("text");
+                        // Convert "text" type to "input_text" for Responses API
+                        if part_type == "text" {
+                            let text = part
+                                .get("text")
+                                .and_then(Value::as_str)
+                                .unwrap_or("");
+                            if !text.is_empty() {
+                                parts.push(json!({"type": "input_text", "text": text}));
+                            }
+                        } else {
+                            // Pass through other content types (image_url, etc.)
+                            parts.push(part.clone());
+                        }
+                    }
+                    json!(parts)
+                }
+                _ => continue,
+            };
+
+            // Build the input item
+            let mut item = json!({
+                "type": "message",
+                "role": role,
+                "content": content_arr,
+            });
+
+            // Strip server-generated IDs (prefixes rs_, fc_, resp_, msg_)
+            // Keep user-provided IDs that don't match these patterns
+            if let Some(id) = msg.get("id").and_then(Value::as_str) {
+                let is_server_id = id.starts_with("rs_")
+                    || id.starts_with("fc_")
+                    || id.starts_with("resp_")
+                    || id.starts_with("msg_");
+                if !is_server_id {
+                    item["id"] = json!(id);
+                }
+            }
+
+            // Preserve "name" field if present
+            if let Some(name) = msg.get("name").and_then(Value::as_str) {
+                if !name.is_empty() {
+                    item["name"] = json!(name);
+                }
+            }
+
+            items.push(item);
+        }
+
+        if items.is_empty() {
             return Err(CodexExecutorError::UnsupportedFormat(
                 "No valid content found in messages".to_string(),
             ));
         }
 
-        // Join all content parts with newlines
-        Ok(input_parts.join("\n"))
+        Ok(items)
     }
 
     pub async fn execute(
@@ -276,7 +392,7 @@ impl CodexExecutor {
         let actual_model = Self::parse_codex_model(&request.model);
         let url = self.build_url(&actual_model);
 
-        // Get API key from credentials
+        // Get API key from credentials (try api_key first, then access_token for OAuth)
         let api_key = request
             .credentials
             .api_key
@@ -292,24 +408,62 @@ impl CodexExecutor {
             .as_deref()
             .or(request.credentials.id.as_str().into())
             .or(request.credentials.display_name.as_deref());
-        let headers = self.build_headers(api_key, request.stream, connection_id)?;
+        let headers = self.build_headers(api_key, request.stream, connection_id, &request.credentials)?;
         let transformed_body = self.transform_request_body(&request.body, &actual_model)?;
 
         let client = self.pool.get("openai", request.proxy.as_ref())?;
-        let response = client
-            .post(&url)
-            .headers(headers.clone())
-            .json(&transformed_body)
-            .send()
-            .await?;
 
-        Ok(CodexExecutorResponse {
-            response: UpstreamResponse::Reqwest(response),
-            url,
-            headers,
-            transformed_body,
-            transport: TransportKind::Reqwest,
-        })
+        // Retry up to 3 times with exponential backoff when the response
+        // body (first 4096 bytes) contains "server_is_overloaded" or
+        // "service_unavailable_error" (transient overload errors inside 200 OK).
+        const MAX_RETRIES: usize = 3;
+        for attempt in 0..MAX_RETRIES {
+            let resp = client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&transformed_body)
+                .send()
+                .await?;
+
+            // Capture parts before consuming the body.
+            let status = resp.status();
+            let resp_headers = resp.headers().clone();
+
+            // Read the full body so we can inspect it for overload errors
+            // and then reconstruct the response downstream.
+            let body_bytes = resp.bytes().await?;
+
+            // Peek at the first 4096 bytes for overload indicators,
+            // but only when we still have retries remaining.
+            if attempt + 1 < MAX_RETRIES {
+                let peek_end = body_bytes.len().min(4096);
+                let head_str = String::from_utf8_lossy(&body_bytes[..peek_end]);
+                if head_str.contains("server_is_overloaded") || head_str.contains("service_unavailable_error") {
+                    let delay = Duration::from_millis(500 * 2u64.pow(attempt as u32));
+                    tokio::time::sleep(delay).await;
+                    continue;
+                }
+            }
+
+            // Reconstruct the reqwest::Response from its parts so the body
+            // remains available for downstream consumers (bytes_stream / text / bytes).
+            let mut http_resp = http::Response::new(ReqwestBody::from(body_bytes));
+            *http_resp.status_mut() = status;
+            *http_resp.headers_mut() = resp_headers;
+            let reconstructed = reqwest::Response::from(http_resp);
+
+            return Ok(CodexExecutorResponse {
+                response: UpstreamResponse::Reqwest(reconstructed),
+                url,
+                headers,
+                transformed_body,
+                transport: TransportKind::Reqwest,
+            });
+        }
+
+        Err(CodexExecutorError::StreamingResponseFailed(
+            "max retries exhausted for overloaded SSE response".into(),
+        ))
     }
 }
 
@@ -383,9 +537,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(result["model"], "o4-mini");
-        assert_eq!(result["input"], "Hello, world!");
         assert_eq!(result["stream"], true);
-        assert_eq!(result["temperature"], 0.7);
+        assert_eq!(result["store"], false);
+        assert!(result.get("temperature").is_none(), "temperature should be stripped by allowlist");
+
+        // input should be an array of Response API items
+        let input = result["input"].as_array().unwrap();
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "message");
+        assert_eq!(input[0]["role"], "user");
+        let content = input[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "Hello, world!");
+
+        // instructions should be injected
+        assert_eq!(
+            result["instructions"],
+            CodexExecutor::DEFAULT_CODEX_INSTRUCTIONS
+        );
     }
 
     #[test]
@@ -405,11 +575,18 @@ mod tests {
             .transform_request_body(&chat_body, "o4-mini")
             .unwrap();
 
-        assert_eq!(result["input"], "Hello\nHi there!\nHow are you?");
+        let input = result["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["role"], "user");
+        assert_eq!(input[0]["content"][0]["text"], "Hello");
+        assert_eq!(input[1]["role"], "assistant");
+        assert_eq!(input[1]["content"][0]["text"], "Hi there!");
+        assert_eq!(input[2]["role"], "user");
+        assert_eq!(input[2]["content"][0]["text"], "How are you?");
     }
 
     #[test]
-    fn test_codex_request_body_skips_system_messages() {
+    fn test_codex_request_body_converts_system_to_developer() {
         let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
 
         let chat_body = json!({
@@ -424,7 +601,13 @@ mod tests {
             .transform_request_body(&chat_body, "o4-mini")
             .unwrap();
 
-        assert_eq!(result["input"], "Hello!");
+        let input = result["input"].as_array().unwrap();
+        // "system" should now be "developer"
+        assert_eq!(input[0]["role"], "developer");
+        assert_eq!(input[0]["content"][0]["text"], "You are a helpful assistant.");
+        assert_eq!(input[1]["role"], "user");
+        assert_eq!(input[1]["content"][0]["text"], "Hello!");
+        assert_eq!(input.len(), 2);
     }
 
     #[test]
@@ -454,23 +637,78 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_input_from_body_missing_messages() {
+    fn test_extract_input_items_missing_messages() {
         let body = json!({
             "model": "codex/o4-mini"
         });
 
-        let result = CodexExecutor::extract_input_from_body(&body);
+        let result = CodexExecutor::extract_input_items(&body);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_extract_input_from_body_empty_messages() {
+    fn test_extract_input_items_empty_messages() {
         let body = json!({
             "model": "codex/o4-mini",
             "messages": []
         });
 
-        let result = CodexExecutor::extract_input_from_body(&body);
+        let result = CodexExecutor::extract_input_items(&body);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_input_items_server_ids_stripped() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "Hello", "id": "msg_abc123"},
+                {"role": "user", "content": "World", "id": "my-custom-id"}
+            ]
+        });
+
+        let items = CodexExecutor::extract_input_items(&body).unwrap();
+        assert_eq!(items.len(), 2);
+        // First item had "msg_" prefix -> stripped, no id field expected
+        assert!(items[0].get("id").is_none(), "server-generated msg_ id should be stripped");
+        // Second item had custom ID -> preserved
+        assert_eq!(items[1]["id"], "my-custom-id");
+    }
+
+    #[test]
+    fn test_extract_input_items_content_array_with_text_type() {
+        let body = json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Hello "},
+                        {"type": "text", "text": "world"}
+                    ]
+                }
+            ]
+        });
+
+        let items = CodexExecutor::extract_input_items(&body).unwrap();
+        assert_eq!(items.len(), 1);
+        let content = items[0]["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "input_text");
+        assert_eq!(content[0]["text"], "Hello ");
+        assert_eq!(content[1]["type"], "input_text");
+        assert_eq!(content[1]["text"], "world");
+    }
+
+    #[test]
+    fn test_build_url_base() {
+        let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+        let url = executor.build_url("o4-mini");
+        assert_eq!(url, "https://chatgpt.com/backend-api/codex/responses");
+    }
+
+    #[test]
+    fn test_build_url_compact_suffix() {
+        let executor = CodexExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+        let url = executor.build_url("o4-mini_compact");
+        assert_eq!(url, "https://chatgpt.com/backend-api/codex/responses/compact");
     }
 }
