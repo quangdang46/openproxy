@@ -345,9 +345,7 @@ mod tests {
             &serde_json::json!({"model": "test"}),
             &config,
             |_model: String, _body: Value| async { Ok(serde_json::json!({"ok": true})) },
-            |model: String, _body: Value| async move {
-                Ok(serde_json::json!({"from": model}))
-            },
+            |model: String, _body: Value| async move { Ok(serde_json::json!({"from": model})) },
             None,
         )
         .await;
@@ -364,9 +362,7 @@ mod tests {
             &serde_json::json!({"model": "test"}),
             &config,
             |_model: String, _body: Value| async { Err(anyhow::anyhow!("primary failed")) },
-            |model: String, _body: Value| async move {
-                Ok(serde_json::json!({"from": model}))
-            },
+            |model: String, _body: Value| async move { Ok(serde_json::json!({"from": model})) },
             None,
         )
         .await;
@@ -387,9 +383,7 @@ mod tests {
             &serde_json::json!({"model": "test"}),
             &config,
             |_model: String, _body: Value| async { Err(anyhow::anyhow!("primary failed")) },
-            |model: String, _body: Value| async move {
-                Ok(serde_json::json!({"from": model}))
-            },
+            |model: String, _body: Value| async move { Ok(serde_json::json!({"from": model})) },
             None,
         )
         .await;

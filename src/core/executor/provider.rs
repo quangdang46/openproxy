@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::translator::helpers::openai_helper::normalize_developer_role;
-use crate::oauth::token_refresh::{needs_refresh as oauth_needs_refresh, dispatch_oauth_refresh};
+use crate::oauth::token_refresh::{dispatch_oauth_refresh, needs_refresh as oauth_needs_refresh};
 use crate::types::ProviderConnection;
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
@@ -259,7 +259,13 @@ pub trait ProviderExecutor: Send + Sync {
         request: ProviderExecutionRequest,
     ) -> Result<ProviderExecutionResponse, ProviderExecutorError>;
 
-    fn build_url(&self, model: &str, stream: bool, url_index: Option<usize>, credentials: Option<&ProviderConnection>) -> String;
+    fn build_url(
+        &self,
+        model: &str,
+        stream: bool,
+        url_index: Option<usize>,
+        credentials: Option<&ProviderConnection>,
+    ) -> String;
 
     fn build_headers(
         &self,
@@ -267,7 +273,13 @@ pub trait ProviderExecutor: Send + Sync {
         stream: bool,
     ) -> Result<HeaderMap, ProviderExecutorError>;
 
-    fn transform_request(&self, body: &Value, _model: &str, _stream: bool, _credentials: &ProviderConnection) -> Value {
+    fn transform_request(
+        &self,
+        body: &Value,
+        _model: &str,
+        _stream: bool,
+        _credentials: &ProviderConnection,
+    ) -> Value {
         body.clone()
     }
 
@@ -275,7 +287,10 @@ pub trait ProviderExecutor: Send + Sync {
     ///
     /// Returns `Some(updated_connection)` on success, or `None` if the
     /// provider does not support credential refresh or the refresh failed.
-    async fn refresh_credentials(&self, credentials: &ProviderConnection) -> Option<ProviderConnection> {
+    async fn refresh_credentials(
+        &self,
+        credentials: &ProviderConnection,
+    ) -> Option<ProviderConnection> {
         let _ = credentials;
         None
     }
@@ -312,7 +327,13 @@ impl UnifiedExecutor {
         &self.provider
     }
 
-    pub fn build_url(&self, model: &str, stream: bool, _url_index: Option<usize>, _credentials: Option<&ProviderConnection>) -> String {
+    pub fn build_url(
+        &self,
+        model: &str,
+        stream: bool,
+        _url_index: Option<usize>,
+        _credentials: Option<&ProviderConnection>,
+    ) -> String {
         let path = if stream {
             &self.config.stream_path
         } else {
@@ -428,7 +449,13 @@ impl UnifiedExecutor {
         Ok(headers)
     }
 
-    pub fn transform_request(&self, body: &Value, _model: &str, _stream: bool, _credentials: &ProviderConnection) -> Value {
+    pub fn transform_request(
+        &self,
+        body: &Value,
+        _model: &str,
+        _stream: bool,
+        _credentials: &ProviderConnection,
+    ) -> Value {
         let mut body = self.apply_json_schema_fallback(body);
 
         normalize_developer_role(&mut body);
@@ -519,10 +546,20 @@ impl UnifiedExecutor {
         let url = if self.provider == "gemini" && api_key.is_some() {
             self.build_url_with_api_key(&request.model, request.stream, api_key)
         } else {
-            self.build_url(&request.model, request.stream, url_index, Some(&request.credentials))
+            self.build_url(
+                &request.model,
+                request.stream,
+                url_index,
+                Some(&request.credentials),
+            )
         };
         let headers = self.build_headers(&request.credentials, request.stream)?;
-        let transformed_body = self.transform_request(&request.body, &request.model, request.stream, &request.credentials);
+        let transformed_body = self.transform_request(
+            &request.body,
+            &request.model,
+            request.stream,
+            &request.credentials,
+        );
 
         let body_bytes = serde_json::to_vec(&transformed_body)?;
 
@@ -544,13 +581,22 @@ impl UnifiedExecutor {
     }
 
     /// Refresh OAuth/access-token credentials.
-    async fn refresh_credentials(&self, credentials: &ProviderConnection) -> Option<ProviderConnection> {
+    async fn refresh_credentials(
+        &self,
+        credentials: &ProviderConnection,
+    ) -> Option<ProviderConnection> {
         let refresh_token = credentials.refresh_token.as_deref()?;
         if refresh_token.is_empty() {
             return None;
         }
 
-        match dispatch_oauth_refresh(&self.provider, refresh_token, &credentials.provider_specific_data).await {
+        match dispatch_oauth_refresh(
+            &self.provider,
+            refresh_token,
+            &credentials.provider_specific_data,
+        )
+        .await
+        {
             Ok(result) => {
                 let mut updated = credentials.clone();
                 updated.access_token = Some(result.access_token);
@@ -564,7 +610,11 @@ impl UnifiedExecutor {
                 Some(updated)
             }
             Err(e) => {
-                tracing::warn!("credential refresh failed for provider {}: {}", self.provider, e);
+                tracing::warn!(
+                    "credential refresh failed for provider {}: {}",
+                    self.provider,
+                    e
+                );
                 None
             }
         }
@@ -589,7 +639,13 @@ impl ProviderExecutor for UnifiedExecutor {
         UnifiedExecutor::execute(self, request).await
     }
 
-    fn build_url(&self, model: &str, stream: bool, url_index: Option<usize>, credentials: Option<&ProviderConnection>) -> String {
+    fn build_url(
+        &self,
+        model: &str,
+        stream: bool,
+        url_index: Option<usize>,
+        credentials: Option<&ProviderConnection>,
+    ) -> String {
         self.build_url(model, stream, url_index, credentials)
     }
 
@@ -601,11 +657,20 @@ impl ProviderExecutor for UnifiedExecutor {
         self.build_headers(credentials, stream)
     }
 
-    fn transform_request(&self, body: &Value, model: &str, stream: bool, credentials: &ProviderConnection) -> Value {
+    fn transform_request(
+        &self,
+        body: &Value,
+        model: &str,
+        stream: bool,
+        credentials: &ProviderConnection,
+    ) -> Value {
         self.transform_request(body, model, stream, credentials)
     }
 
-    async fn refresh_credentials(&self, credentials: &ProviderConnection) -> Option<ProviderConnection> {
+    async fn refresh_credentials(
+        &self,
+        credentials: &ProviderConnection,
+    ) -> Option<ProviderConnection> {
         UnifiedExecutor::refresh_credentials(self, credentials).await
     }
 

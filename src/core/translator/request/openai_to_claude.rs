@@ -132,9 +132,7 @@ fn try_parse_json<T: for<'de> Deserialize<'de>>(str: &str) -> Option<T> {
     serde_json::from_str(str).ok()
 }
 
-fn get_content_blocks_from_message(
-    msg: &Value,
-) -> Vec<ClaudeContentBlock> {
+fn get_content_blocks_from_message(msg: &Value) -> Vec<ClaudeContentBlock> {
     let mut blocks = Vec::new();
     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
 

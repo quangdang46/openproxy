@@ -16,10 +16,7 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/api/shutdown", post(shutdown))
 }
 
-async fn shutdown(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn shutdown(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if std::env::var("NODE_ENV").ok().as_deref() == Some("production") {
         return (
             StatusCode::FORBIDDEN,

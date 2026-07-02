@@ -66,10 +66,7 @@ async fn tasks_send(
 }
 
 /// Get a task by ID.
-async fn tasks_get(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
+async fn tasks_get(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     match state.a2a_task_store.get(&id).await {
         Some(task) => Json(task).into_response(),
         None => (
@@ -81,11 +78,12 @@ async fn tasks_get(
 }
 
 /// Cancel a running task.
-async fn tasks_cancel(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Response {
-    match state.a2a_task_store.update_state(&id, a2a::TaskState::Canceled).await {
+async fn tasks_cancel(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    match state
+        .a2a_task_store
+        .update_state(&id, a2a::TaskState::Canceled)
+        .await
+    {
         Some(task) => Json(task).into_response(),
         None => (
             StatusCode::NOT_FOUND,

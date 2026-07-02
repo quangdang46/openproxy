@@ -279,6 +279,11 @@ pub fn gemini_to_openai_streaming(
     let results = gemini_to_openai_response(&val, inner);
     results
         .into_iter()
-        .map(|v| format!("data: {}\n\n", serde_json::to_string(&v).unwrap_or_default()))
+        .map(|v| {
+            format!(
+                "data: {}\n\n",
+                serde_json::to_string(&v).unwrap_or_default()
+            )
+        })
         .collect()
 }

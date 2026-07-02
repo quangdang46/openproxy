@@ -1603,7 +1603,11 @@ fn status_text(status: reqwest::StatusCode) -> Option<String> {
 fn get_mitm_port(state: &AppState) -> Option<u16> {
     let snapshot = state.db.snapshot();
     let port = snapshot.settings.mitm_port;
-    if port == 0 { None } else { Some(port) }
+    if port == 0 {
+        None
+    } else {
+        Some(port)
+    }
 }
 
 async fn test_vercel_relay(relay_url: &str, timeout_ms: u64) -> TestResult {

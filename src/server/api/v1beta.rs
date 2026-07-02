@@ -371,7 +371,6 @@ async fn with_cors_nonstream_response(response: Response) -> Response {
     proxied
 }
 
-
 fn models_for_connection(connection: &ProviderConnection) -> Vec<String> {
     if let Some(enabled_models) = connection
         .provider_specific_data

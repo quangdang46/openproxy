@@ -7,9 +7,9 @@
 //! This is the equivalent of OmniRoute's response cache, ported to OpenProxy.
 
 use std::collections::BTreeMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::hash::Hash;
 
 use dashmap::DashMap;
 use serde_json::Value;
@@ -112,12 +112,29 @@ impl ResponseCache {
     fn canonicalize_body(body: &Value) -> String {
         // If we have an object, extract only the relevant fields in sorted order
         let relevant_keys = [
-            "model", "messages", "tools", "tool_choice",
-            "temperature", "top_p", "max_tokens", "stop",
-            "presence_penalty", "frequency_penalty", "logit_bias",
-            "user", "response_format", "seed", "reasoning_effort",
-            "thinking", "metadata", "n", "modalities", "audio",
-            "input", "instructions", "include",
+            "model",
+            "messages",
+            "tools",
+            "tool_choice",
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "stop",
+            "presence_penalty",
+            "frequency_penalty",
+            "logit_bias",
+            "user",
+            "response_format",
+            "seed",
+            "reasoning_effort",
+            "thinking",
+            "metadata",
+            "n",
+            "modalities",
+            "audio",
+            "input",
+            "instructions",
+            "include",
         ];
 
         let canonical = match body {
@@ -275,7 +292,10 @@ fn parse_max_age_from_cache_control(header_value: &str) -> Option<u64> {
 
     // s-maxage takes precedence over max-age (per HTTP spec for shared caches)
     for directive in lower.split(',').map(|d| d.trim()) {
-        if let Some(value) = directive.strip_prefix("s-maxage=").or_else(|| directive.strip_prefix("max-age=")) {
+        if let Some(value) = directive
+            .strip_prefix("s-maxage=")
+            .or_else(|| directive.strip_prefix("max-age="))
+        {
             if let Ok(secs) = value.trim().parse::<u64>() {
                 return Some(secs);
             }
@@ -352,7 +372,10 @@ mod tests {
         let key1 = ResponseCache::build_cache_key(&body1);
         let key2 = ResponseCache::build_cache_key(&body2);
 
-        assert_ne!(key1, key2, "different content should produce different keys");
+        assert_ne!(
+            key1, key2,
+            "different content should produce different keys"
+        );
     }
 
     #[test]
@@ -404,7 +427,12 @@ mod tests {
         let response = b"response".to_vec();
 
         // Upstream says cache for 10 seconds
-        cache.set(&body, response.clone(), "openai", Some("public, max-age=10"));
+        cache.set(
+            &body,
+            response.clone(),
+            "openai",
+            Some("public, max-age=10"),
+        );
 
         let cached = cache.get(&body);
         assert!(cached.is_some(), "should return cached entry within TTL");
@@ -510,7 +538,10 @@ mod tests {
     #[test]
     fn test_parse_cache_control_max_age() {
         assert_eq!(parse_max_age_from_cache_control("max-age=3600"), Some(3600));
-        assert_eq!(parse_max_age_from_cache_control("s-maxage=7200"), Some(7200));
+        assert_eq!(
+            parse_max_age_from_cache_control("s-maxage=7200"),
+            Some(7200)
+        );
         assert_eq!(
             parse_max_age_from_cache_control("public, max-age=60"),
             Some(60)

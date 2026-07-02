@@ -2707,7 +2707,10 @@ fn write_streaming_error(error_msg: &str, error_type: &str) -> String {
             "code": null
         }
     });
-    format!("data: {}\n\n", serde_json::to_string(&msg).unwrap_or_default())
+    format!(
+        "data: {}\n\n",
+        serde_json::to_string(&msg).unwrap_or_default()
+    )
 }
 
 /// Build a bypass response — either streaming SSE (when `stream` is true) or

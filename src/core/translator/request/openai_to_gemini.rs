@@ -939,8 +939,7 @@ pub fn openai_to_antigravity_request(
     stream: bool,
     _credentials: Option<&Value>,
 ) -> bool {
-    let mut gemini =
-        openai_to_gemini_base(model, body, stream, DEFAULT_THINKING_AG_SIGNATURE);
+    let mut gemini = openai_to_gemini_base(model, body, stream, DEFAULT_THINKING_AG_SIGNATURE);
 
     // Add thinking config from reasoning_effort
     if let Some(reasoning_effort) = body.get("reasoning_effort").and_then(|v| v.as_str()) {

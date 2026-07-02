@@ -263,7 +263,10 @@ pub fn gemini_to_openai_non_streaming(response: &mut Value) -> bool {
             }
         }
 
-        let thoughts = usage.get("thoughtsTokenCount").and_then(|v| v.as_u64()).unwrap_or(0);
+        let thoughts = usage
+            .get("thoughtsTokenCount")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         if thoughts > 0 {
             openai_usage["completion_tokens_details"] =
                 serde_json::json!({ "reasoning_tokens": thoughts });
@@ -405,9 +408,16 @@ pub fn kiro_to_openai_non_streaming(response: &mut Value) -> bool {
     }
 
     // If it has choices but no object, fix it.
-    if response.get("choices").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
+    if response
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty())
+    {
         if let Some(obj) = response.as_object_mut() {
-            obj.insert("object".to_string(), Value::String("chat.completion".to_string()));
+            obj.insert(
+                "object".to_string(),
+                Value::String("chat.completion".to_string()),
+            );
         }
         return true;
     }
@@ -424,9 +434,16 @@ pub fn commandcode_to_openai_non_streaming(response: &mut Value) -> bool {
         return false;
     }
 
-    if response.get("choices").and_then(|v| v.as_array()).is_some_and(|a| !a.is_empty()) {
+    if response
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty())
+    {
         if let Some(obj) = response.as_object_mut() {
-            obj.insert("object".to_string(), Value::String("chat.completion".to_string()));
+            obj.insert(
+                "object".to_string(),
+                Value::String("chat.completion".to_string()),
+            );
         }
         return true;
     }
@@ -477,7 +494,11 @@ pub fn openai_to_claude_non_streaming(response: &mut Value) -> bool {
         if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
             stop_reason = "tool_use";
             for tc in tool_calls {
-                let tool_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let tool_id = tc
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let tool_name = tc
                     .get("function")
                     .and_then(|f| f.get("name"))
@@ -607,11 +628,17 @@ mod tests {
         let result = claude_to_openai_non_streaming(&mut resp);
         assert!(result);
         assert_eq!(resp["choices"][0]["finish_reason"], "tool_calls");
-        assert_eq!(resp["choices"][0]["message"]["content"], "I'll search for that.");
+        assert_eq!(
+            resp["choices"][0]["message"]["content"],
+            "I'll search for that."
+        );
         let tc = &resp["choices"][0]["message"]["tool_calls"][0];
         assert_eq!(tc["id"], "tu_123");
         assert_eq!(tc["function"]["name"], "WebSearch");
-        assert!(tc["function"]["arguments"].as_str().unwrap().contains("rust"));
+        assert!(tc["function"]["arguments"]
+            .as_str()
+            .unwrap()
+            .contains("rust"));
     }
 
     #[test]
@@ -660,7 +687,10 @@ mod tests {
         let result = gemini_to_openai_non_streaming(&mut resp);
         assert!(result);
         assert_eq!(resp["object"], "chat.completion");
-        assert_eq!(resp["choices"][0]["message"]["content"], "Hello from Gemini!");
+        assert_eq!(
+            resp["choices"][0]["message"]["content"],
+            "Hello from Gemini!"
+        );
         assert_eq!(resp["usage"]["prompt_tokens"], 10);
         assert_eq!(resp["usage"]["completion_tokens"], 20);
         assert_eq!(resp["model"], "gemini-2.0-flash");
@@ -688,7 +718,10 @@ mod tests {
         assert_eq!(resp["choices"][0]["finish_reason"], "tool_calls");
         let tc = &resp["choices"][0]["message"]["tool_calls"][0];
         assert_eq!(tc["function"]["name"], "search");
-        assert!(tc["function"]["arguments"].as_str().unwrap().contains("rust"));
+        assert!(tc["function"]["arguments"]
+            .as_str()
+            .unwrap()
+            .contains("rust"));
     }
 
     #[test]
@@ -739,7 +772,10 @@ mod tests {
         let result = ollama_to_openai_non_streaming(&mut resp);
         assert!(result);
         assert_eq!(resp["object"], "chat.completion");
-        assert_eq!(resp["choices"][0]["message"]["content"], "Hello from Ollama!");
+        assert_eq!(
+            resp["choices"][0]["message"]["content"],
+            "Hello from Ollama!"
+        );
         assert_eq!(resp["choices"][0]["finish_reason"], "stop");
         assert_eq!(resp["usage"]["prompt_tokens"], 10);
         assert_eq!(resp["usage"]["completion_tokens"], 20);

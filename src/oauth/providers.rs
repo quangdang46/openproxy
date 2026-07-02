@@ -209,7 +209,10 @@ pub fn kimchi() -> OAuthProviderConfig {
         uses_pkce: false,
         extra_params: &[
             ("web_app_url", "https://app.kimchi.dev"),
-            ("validation_url", "https://api.cast.ai/v1/llm/openai/supported-providers"),
+            (
+                "validation_url",
+                "https://api.cast.ai/v1/llm/openai/supported-providers",
+            ),
             ("user_info_url", "https://app.kimchi.dev/api/v1/me"),
         ],
         refresh_lead_ms: 4 * 60 * 60 * 1000,
@@ -291,7 +294,10 @@ pub fn codebuddy_cn() -> OAuthProviderConfig {
         scopes: &[],
         uses_pkce: false,
         extra_params: &[
-            ("refresh_url", "https://copilot.tencent.com/v2/plugin/auth/token/refresh"),
+            (
+                "refresh_url",
+                "https://copilot.tencent.com/v2/plugin/auth/token/refresh",
+            ),
             ("user_agent", "CLI/2.63.2 CodeBuddy/2.63.2"),
             ("platform", "CLI"),
             ("poll_interval", "5000"),
@@ -339,7 +345,10 @@ pub fn antigravity() -> OAuthProviderConfig {
             ("client_secret", "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"),
             ("access_type", "offline"),
             ("prompt", "consent"),
-            ("user_info_url", "https://www.googleapis.com/oauth2/v1/userinfo"),
+            (
+                "user_info_url",
+                "https://www.googleapis.com/oauth2/v1/userinfo",
+            ),
         ],
         refresh_lead_ms: 5 * 60 * 1000,
     }

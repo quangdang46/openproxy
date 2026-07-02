@@ -133,14 +133,12 @@ where
 
     if models.len() == 1 {
         // Single model shortcut: just dispatch directly.
-        return dispatch(models[0].clone())
-            .await
-            .map_err(|e| HedgingError {
-                status: 502,
-                message: format!("Hedge single model failed: {e}"),
-                attempted: 1,
-                errored: 1,
-            });
+        return dispatch(models[0].clone()).await.map_err(|e| HedgingError {
+            status: 502,
+            message: format!("Hedge single model failed: {e}"),
+            attempted: 1,
+            errored: 1,
+        });
     }
 
     let hedge_timeout = Duration::from_millis(config.hedge_timeout_ms);
@@ -205,11 +203,9 @@ mod tests {
     #[tokio::test]
     async fn empty_models_returns_400() {
         let config = HedgingConfig::default();
-        let result = execute_hedging_strategy(
-            &[],
-            &config,
-            |_model: String| async { Ok(serde_json::json!({"ok": true})) },
-        )
+        let result = execute_hedging_strategy(&[], &config, |_model: String| async {
+            Ok(serde_json::json!({"ok": true}))
+        })
         .await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().status, 400);
@@ -218,12 +214,11 @@ mod tests {
     #[tokio::test]
     async fn single_model_shortcut() {
         let config = HedgingConfig::default();
-        let result = execute_hedging_strategy(
-            &["model-a".into()],
-            &config,
-            |_model: String| async { Ok(serde_json::json!({"ok": true})) },
-        )
-        .await;
+        let result =
+            execute_hedging_strategy(&["model-a".into()], &config, |_model: String| async {
+                Ok(serde_json::json!({"ok": true}))
+            })
+            .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap()["ok"], true);
     }

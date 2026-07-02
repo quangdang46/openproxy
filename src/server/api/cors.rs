@@ -1,5 +1,5 @@
 use axum::http::{HeaderName, HeaderValue, StatusCode};
-use axum::response::{IntoResponse, Response, Json};
+use axum::response::{IntoResponse, Json, Response};
 use serde_json::Value;
 
 /// Shared CORS headers applied to all responses.

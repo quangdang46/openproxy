@@ -280,9 +280,15 @@ impl Default for TaskStore {
 
 /// Dispatch an incoming A2A task by matching its message parts to
 /// internal OpenProxy operations.
-pub async fn dispatch_task(store: &TaskStore, request: TaskSendRequest, _state: &crate::server::state::AppState) -> Task {
+pub async fn dispatch_task(
+    store: &TaskStore,
+    request: TaskSendRequest,
+    _state: &crate::server::state::AppState,
+) -> Task {
     let id = request.id.clone();
-    let skill_id = request.metadata.as_ref()
+    let skill_id = request
+        .metadata
+        .as_ref()
         .and_then(|m| m.get("skillId"))
         .and_then(Value::as_str)
         .map(String::from);
@@ -290,7 +296,10 @@ pub async fn dispatch_task(store: &TaskStore, request: TaskSendRequest, _state: 
     store.insert(Task::new(id.clone(), skill_id.clone())).await;
     let _ = store.update_state(&id, TaskState::Working).await;
 
-    let parts_text: String = request.message.parts.iter()
+    let parts_text: String = request
+        .message
+        .parts
+        .iter()
         .filter_map(|p| p.text.as_deref())
         .collect::<Vec<_>>()
         .join("\n");
@@ -309,7 +318,9 @@ pub async fn dispatch_task(store: &TaskStore, request: TaskSendRequest, _state: 
         is_history: Some(false),
     };
 
-    store.update_result(&id, task_result).await
+    store
+        .update_result(&id, task_result)
+        .await
         .unwrap_or_else(|| Task {
             id,
             state: TaskState::Unknown,
@@ -365,13 +376,14 @@ fn handle_proxy_skill(text: &str) -> Vec<TaskPart> {
 }
 
 fn handle_health_skill() -> Vec<TaskPart> {
-    vec![
-        TaskPart {
-            r#type: "text".to_string(),
-            text: Some(format!("OpenProxy v{} is running.", env!("CARGO_PKG_VERSION"))),
-            metadata: None,
-        },
-    ]
+    vec![TaskPart {
+        r#type: "text".to_string(),
+        text: Some(format!(
+            "OpenProxy v{} is running.",
+            env!("CARGO_PKG_VERSION")
+        )),
+        metadata: None,
+    }]
 }
 
 fn handle_generic_task(text: &str, state: &crate::server::state::AppState) -> Vec<TaskPart> {
@@ -384,11 +396,12 @@ fn handle_generic_task(text: &str, state: &crate::server::state::AppState) -> Ve
         "proxy_pools": snap.proxy_pools.len(),
         "nodes": snap.provider_nodes.len(),
     });
-    vec![
-        TaskPart {
-            r#type: "text".to_string(),
-            text: Some(format!("{text}\n\nServer state:\n{}", serde_json::to_string_pretty(&info).unwrap_or_default())),
-            metadata: None,
-        },
-    ]
+    vec![TaskPart {
+        r#type: "text".to_string(),
+        text: Some(format!(
+            "{text}\n\nServer state:\n{}",
+            serde_json::to_string_pretty(&info).unwrap_or_default()
+        )),
+        metadata: None,
+    }]
 }

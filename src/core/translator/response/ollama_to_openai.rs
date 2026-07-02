@@ -166,17 +166,17 @@ use crate::core::translator::registry::ResponseTransformState;
 
 /// Registry-compatible streaming wrapper.
 /// Signature matches `registry::ResponseTransformFn`.
-pub fn ollama_to_openai_streaming(
-    chunk: &[u8],
-    state: &mut ResponseTransformState,
-) -> Vec<String> {
+pub fn ollama_to_openai_streaming(chunk: &[u8], state: &mut ResponseTransformState) -> Vec<String> {
     let val: serde_json::Value = match serde_json::from_slice(chunk) {
         Ok(v) => v,
         Err(_) => return vec![],
     };
     let inner = &mut state.ollama.state;
     match ollama_to_openai_response(&val, inner) {
-        Some(v) => vec![format!("data: {}\n\n", serde_json::to_string(&v).unwrap_or_default())],
+        Some(v) => vec![format!(
+            "data: {}\n\n",
+            serde_json::to_string(&v).unwrap_or_default()
+        )],
         None => vec![],
     }
 }

@@ -278,8 +278,10 @@ pub fn claude_to_openai_response(chunk: &Value, state: &mut Map<String, Value>) 
                             details.insert("cached_tokens".into(), Value::from(cache_read));
                         }
                         if cache_create > 0 {
-                            details
-                                .insert("cache_creation_input_tokens".into(), Value::from(cache_create));
+                            details.insert(
+                                "cache_creation_input_tokens".into(),
+                                Value::from(cache_create),
+                            );
                         }
                         openai_usage["prompt_tokens_details"] = Value::Object(details);
                     }
@@ -399,7 +401,12 @@ pub fn claude_to_openai_streaming(
     let results = claude_to_openai_response(&val, inner);
     results
         .into_iter()
-        .map(|v| format!("data: {}\n\n", serde_json::to_string(&v).unwrap_or_default()))
+        .map(|v| {
+            format!(
+                "data: {}\n\n",
+                serde_json::to_string(&v).unwrap_or_default()
+            )
+        })
         .collect()
 }
 

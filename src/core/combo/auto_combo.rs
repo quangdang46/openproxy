@@ -75,12 +75,18 @@ impl AutoComboConfig {
                 s.deduplicate_providers = v;
             }
             if let Some(v) = cfg.get("preferredProviders").and_then(Value::as_str) {
-                s.preferred_providers =
-                    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                s.preferred_providers = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
             if let Some(v) = cfg.get("excludedProviders").and_then(Value::as_str) {
-                s.excluded_providers =
-                    v.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                s.excluded_providers = v
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
         }
         s
@@ -130,7 +136,11 @@ pub fn resolve_auto_combo_members(
     // Scan provider connections for matching models.
     for conn in &snapshot.provider_connections {
         let provider = &conn.provider;
-        if config.excluded_providers.iter().any(|p| p.eq_ignore_ascii_case(provider)) {
+        if config
+            .excluded_providers
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(provider))
+        {
             continue;
         }
 
@@ -175,7 +185,11 @@ pub fn resolve_auto_combo_members(
 
     for c in candidates {
         let provider_part = c.split('/').next().unwrap_or("");
-        if config.preferred_providers.iter().any(|p| p.eq_ignore_ascii_case(provider_part)) {
+        if config
+            .preferred_providers
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(provider_part))
+        {
             ordered.push(c);
         } else {
             remaining.push(c);
@@ -199,16 +213,15 @@ pub fn resolve_auto_combo_members(
 
 /// Apply filter rules (excluded providers, dedup, max members) to an
 /// already-resolved member list.
-fn apply_filters(
-    members: &mut Vec<String>,
-    config: &AutoComboConfig,
-    _snapshot: &AppDb,
-) {
+fn apply_filters(members: &mut Vec<String>, config: &AutoComboConfig, _snapshot: &AppDb) {
     // Excluded providers.
     if !config.excluded_providers.is_empty() {
         members.retain(|m| {
             let provider_part = m.split('/').next().unwrap_or("");
-            !config.excluded_providers.iter().any(|p| p.eq_ignore_ascii_case(provider_part))
+            !config
+                .excluded_providers
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(provider_part))
         });
     }
 
@@ -227,7 +240,11 @@ fn apply_filters(
         let mut rest: Vec<String> = Vec::new();
         for m in members.drain(..) {
             let provider_part = m.split('/').next().unwrap_or("");
-            if config.preferred_providers.iter().any(|p| p.eq_ignore_ascii_case(provider_part)) {
+            if config
+                .preferred_providers
+                .iter()
+                .any(|p| p.eq_ignore_ascii_case(provider_part))
+            {
                 preferred.push(m);
             } else {
                 rest.push(m);
@@ -249,7 +266,9 @@ fn apply_filters(
 /// base pattern.  For example, base pattern `"gpt-4o-mini"` matches model
 /// `"gpt-4o-mini"`, `"gpt-4o-mini-2024-07-18"`, etc.
 fn model_matches(model_name: &str, base_pattern: &str) -> bool {
-    model_name.to_lowercase().contains(&base_pattern.to_lowercase())
+    model_name
+        .to_lowercase()
+        .contains(&base_pattern.to_lowercase())
 }
 
 /// Retrieve the model identifier a provider connection serves,
