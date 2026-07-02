@@ -26,6 +26,9 @@ pub enum CompressionLevel {
     Lite,
     Full,
     Ultra,
+    WenyanLite,
+    Wenyan,
+    WenyanUltra,
 }
 
 impl CompressionLevel {
@@ -34,6 +37,9 @@ impl CompressionLevel {
             Self::Lite => "lite",
             Self::Full => "full",
             Self::Ultra => "ultra",
+            Self::WenyanLite => "wenyan-lite",
+            Self::Wenyan => "wenyan",
+            Self::WenyanUltra => "wenyan-ultra",
         }
     }
 
@@ -69,6 +75,19 @@ impl CompressionLevel {
                 "sequences: write normal. Resume terse style after. ",
                 "Active every response until user asks for normal mode."
             ),
+            Self::WenyanLite => concat!(
+                "Respond semi-classical Chinese. Use concise wenyan phrasing where natural, ",
+                "but fall back to modern Chinese for complex technical terms. ",
+                "Keep technical substance exact."
+            ),
+            Self::Wenyan => concat!(
+                "Respond in Classical Chinese (wenyan). Use classical grammar and vocabulary. ",
+                "Keep technical terms, code, and file paths in original form."
+            ),
+            Self::WenyanUltra => concat!(
+                "Respond in ultra-terse Classical Chinese (wenyan). Maximum compression. ",
+                "Abbreviate. Use classical idioms. Technical terms stay exact."
+            ),
         }
     }
 
@@ -85,6 +104,9 @@ impl FromStr for CompressionLevel {
             "lite" => Ok(Self::Lite),
             "full" => Ok(Self::Full),
             "ultra" => Ok(Self::Ultra),
+            "wenyan-lite" | "wenyan_lite" => Ok(Self::WenyanLite),
+            "wenyan" => Ok(Self::Wenyan),
+            "wenyan-ultra" | "wenyan_ultra" => Ok(Self::WenyanUltra),
             _ => Err(()),
         }
     }
@@ -738,6 +760,11 @@ mod tests {
         assert_eq!("lite".parse(), Ok(CompressionLevel::Lite));
         assert_eq!(" FULL ".parse(), Ok(CompressionLevel::Full));
         assert_eq!("Ultra".parse(), Ok(CompressionLevel::Ultra));
+        assert_eq!("wenyan-lite".parse(), Ok(CompressionLevel::WenyanLite));
+        assert_eq!("wenyan".parse(), Ok(CompressionLevel::Wenyan));
+        assert_eq!("wenyan-ultra".parse(), Ok(CompressionLevel::WenyanUltra));
+        assert_eq!("wenyan_lite".parse(), Ok(CompressionLevel::WenyanLite));
+        assert_eq!("wenyan_ultra".parse(), Ok(CompressionLevel::WenyanUltra));
         assert!("unknown".parse::<CompressionLevel>().is_err());
         assert_eq!(
             CompressionLevel::parse_or_default("unknown"),
@@ -999,15 +1026,37 @@ mod tests {
     }
 
     #[test]
-    fn compression_level_all_three_levels_have_different_prompts() {
+    fn compression_level_all_six_levels_have_distinct_prompts() {
         let lite = CompressionLevel::Lite.prompt();
         let full = CompressionLevel::Full.prompt();
         let ultra = CompressionLevel::Ultra.prompt();
+        let wl = CompressionLevel::WenyanLite.prompt();
+        let w = CompressionLevel::Wenyan.prompt();
+        let wu = CompressionLevel::WenyanUltra.prompt();
         assert!(!lite.is_empty());
         assert!(!full.is_empty());
         assert!(!ultra.is_empty());
+        assert!(!wl.is_empty());
+        assert!(!w.is_empty());
+        assert!(!wu.is_empty());
         assert_ne!(lite, full);
         assert_ne!(full, ultra);
+        assert_ne!(ultra, wl);
+        assert_ne!(wl, w);
+        assert_ne!(w, wu);
+        assert!(wl.contains("wenyan"));
+        assert!(w.contains("Classical Chinese"));
+        assert!(wu.contains("ultra-terse"));
+    }
+
+    #[test]
+    fn compression_level_as_str() {
+        assert_eq!(CompressionLevel::Lite.as_str(), "lite");
+        assert_eq!(CompressionLevel::Full.as_str(), "full");
+        assert_eq!(CompressionLevel::Ultra.as_str(), "ultra");
+        assert_eq!(CompressionLevel::WenyanLite.as_str(), "wenyan-lite");
+        assert_eq!(CompressionLevel::Wenyan.as_str(), "wenyan");
+        assert_eq!(CompressionLevel::WenyanUltra.as_str(), "wenyan-ultra");
     }
 
     /// Build a Kiro `conversationState` request body whose toolResult[0]
@@ -1271,10 +1320,4 @@ mod tests {
         assert_eq!(stats.unwrap().hits.len(), 0);
     }
 
-    #[test]
-    fn compression_level_as_str_returns_correct_strings() {
-        assert_eq!(CompressionLevel::Lite.as_str(), "lite");
-        assert_eq!(CompressionLevel::Full.as_str(), "full");
-        assert_eq!(CompressionLevel::Ultra.as_str(), "ultra");
-    }
 }

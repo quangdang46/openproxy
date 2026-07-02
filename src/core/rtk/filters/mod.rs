@@ -1,5 +1,6 @@
 use once_cell::sync::Lazy;
 use regex::Regex;
+use serde_json::Value;
 
 use crate::core::rtk::apply_filter::safe_apply;
 use crate::core::rtk::constants::*;
@@ -882,6 +883,346 @@ pub fn build_output_impl(input: &str) -> String {
     }
 }
 
+/// Filter: test-runner output (cargo test, pytest, jest, go test, etc.).
+///
+/// Detects test-run output and compresses to a structured summary:
+/// - pass/fail/skip counts
+/// - list of failing test names (if any)
+/// - full error output for failed tests
+/// - summary footer
+///
+/// Mirrors the approach of 9router's test-runner filter pattern.
+pub struct TestRunnerFilter;
+impl TestRunnerFilter {
+    pub fn apply(&self, text: &str) -> String {
+        safe_apply(test_runner_impl, text, FILTER_TEST_RUNNER)
+    }
+}
+
+pub fn test_runner_impl(input: &str) -> String {
+    let lines: Vec<&str> = input.lines().collect();
+    if lines.len() < TEST_RUNNER_MIN_LINES {
+        return input.to_string();
+    }
+
+    let mut passed: usize = 0;
+    let mut failed: usize = 0;
+    let mut skipped: usize = 0;
+    let mut failed_tests: Vec<String> = Vec::new();
+    let mut error_blocks: Vec<String> = Vec::new();
+    let mut summary_lines: Vec<String> = Vec::new();
+    let mut is_inside_fail = false;
+    let mut current_fail_out: Vec<String> = Vec::new();
+
+    // Regex patterns for different test frameworks
+    static RE_PASS: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?im)^(ok |PASS|✓|PASSED|\bpass\b|\d+ passed)").unwrap());
+    static RE_FAIL: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?im)^(not ok |FAIL|✗|FAILED|\bfail\b|\bFAILURES\b)").unwrap());
+    static RE_SKIP: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?im)^(ok \d+ # SKIP|SKIP|SKIPPED|- \[skip\]|\bskip\b)").unwrap());
+    static RE_FUNC_FAIL_HEADER: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?im)^\s*(failures|error|----|thread '.+' panicked)").unwrap());
+    static RE_FUNC_FAIL_NAME: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?im)^\s*(test\s+\S+\s+.*FAILED|FAIL\s+|failure\s+)").unwrap());
+    static RE_SUMMARY: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(r"(?im)^(test result|testsuite|ok|FAIL|PASS|FAILED|result:|Ran |test file|test from)").unwrap()
+    });
+    static RE_CARGO_LINE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?im)^\s*(running |test |doc-test|checking)").unwrap());
+
+    // Specific: cargo test `running N tests` lines
+    static RE_CARGO_RUNNING: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"(?i)^running \d+ test").unwrap());
+
+    for line in &lines {
+        let trimmed = line.trim();
+
+        // Cargo test running line — just a header, skip
+        if RE_CARGO_RUNNING.is_match(trimmed) {
+            continue;
+        }
+
+        // Cargo compilation lines that leak into test output
+        if RE_CARGO_LINE.is_match(trimmed) {
+            continue;
+        }
+
+        // TAP `ok N` = pass, `not ok N` = fail
+        if trimmed.starts_with("ok ") {
+            passed += 1;
+            is_inside_fail = false;
+            if !current_fail_out.is_empty() {
+                error_blocks.push(current_fail_out.join("\n"));
+                current_fail_out.clear();
+            }
+            continue;
+        }
+        if trimmed.starts_with("not ok ") {
+            failed += 1;
+            let test_name = &trimmed[6..].trim();
+            failed_tests.push(test_name.to_string());
+            is_inside_fail = true;
+            continue;
+        }
+        if trimmed.starts_with("ok ") && trimmed.contains("# SKIP") {
+            skipped += 1;
+            continue;
+        }
+
+        // pytest / Jest `PASS` / `FAIL` lines
+        if RE_PASS.is_match(trimmed) {
+            if !trimmed.contains("FAIL") {
+                passed += 1;
+                is_inside_fail = false;
+            }
+            continue;
+        }
+        if RE_FAIL.is_match(trimmed) && !RE_PASS.is_match(trimmed) {
+            failed += 1;
+            is_inside_fail = true;
+            // Extract test name if available
+            if let Some(name_part) = trimmed.split(':').next() {
+                if !name_part.trim().is_empty()
+                    && !name_part.contains("FAIL")
+                    && !name_part.contains("fail")
+                {
+                    failed_tests.push(name_part.trim().to_string());
+                }
+            }
+            continue;
+        }
+
+        // Collect failed test output blocks
+        if RE_FUNC_FAIL_HEADER.is_match(trimmed) {
+            is_inside_fail = true;
+            if !current_fail_out.is_empty() {
+                current_fail_out.push(line.to_string());
+            }
+            continue;
+        }
+        if is_inside_fail {
+            // Collect lines inside the failure block
+            if trimmed.starts_with("test ") && trimmed.contains("FAILED") {
+                if let Some(name) = trimmed
+                    .strip_prefix("test ")
+                    .and_then(|s| s.split_whitespace().next())
+                {
+                    failed_tests.push(name.to_string());
+                }
+                continue;
+            }
+            current_fail_out.push(line.to_string());
+            // End of failure block signaled by blank line after non-indented text
+            if trimmed.is_empty() && current_fail_out.len() > 1
+                || (RE_SUMMARY.is_match(trimmed) && !current_fail_out.is_empty())
+            {
+                error_blocks.push(current_fail_out.join("\n"));
+                current_fail_out.clear();
+                is_inside_fail = false;
+            }
+        }
+
+        // Track summary lines
+        if RE_SUMMARY.is_match(trimmed) {
+            summary_lines.push(trimmed.to_string());
+        }
+    }
+
+    // Flush any remaining failure output
+    if !current_fail_out.is_empty() {
+        error_blocks.push(current_fail_out.join("\n"));
+    }
+
+    // Build the compressed output
+    let mut out = String::new();
+
+    if passed > 0 || failed > 0 || skipped > 0 {
+        out.push_str(&format!(
+            "Tests: {} passed, {} failed, {} skipped",
+            passed, failed, skipped
+        ));
+
+        if !failed_tests.is_empty() {
+            out.push_str("\n\nFailed tests:\n");
+            for ft in &failed_tests {
+                out.push_str(&format!("  - {}\n", ft));
+            }
+        }
+
+        if !error_blocks.is_empty() {
+            out.push_str("\nError output:\n");
+            for eb in error_blocks.iter().take(3) {
+                out.push_str(eb);
+                out.push('\n');
+                out.push_str("---\n");
+            }
+            if error_blocks.len() > 3 {
+                out.push_str(&format!(
+                    "... +{} more error blocks\n",
+                    error_blocks.len() - 3
+                ));
+            }
+        }
+
+        if !summary_lines.is_empty() {
+            out.push_str("\nSummary:\n");
+            for sl in summary_lines.iter().take(5) {
+                out.push_str(sl);
+                out.push('\n');
+            }
+            if summary_lines.len() > 5 {
+                out.push_str(&format!(
+                    "... +{} more summary lines\n",
+                    summary_lines.len() - 5
+                ));
+            }
+        }
+
+        // If we collapsed substantial output, append a hint
+        if lines.len() > TEST_RUNNER_MAX_LINES {
+            out.push_str(&format!(
+                "\n[original output: {} lines, compressed by rtk test-runner]\n",
+                lines.len()
+            ));
+        }
+
+        return out;
+    }
+
+    input.to_string()
+}
+
+/// Filter: JSON/NDJSON blob summarizer.
+///
+/// Detects large JSON text dumps (API responses, config dumps, etc.)
+/// and compresses to a structural summary showing keys, lengths, and counts.
+///
+/// Mirrors the upstream json-summary filter pattern from 9router.
+pub struct JsonSummaryFilter;
+impl JsonSummaryFilter {
+    pub fn apply(&self, text: &str) -> String {
+        safe_apply(json_summary_impl, text, FILTER_JSON_SUMMARY)
+    }
+}
+
+pub fn json_summary_impl(input: &str) -> String {
+    if input.len() < JSON_SUMMARY_MIN_BYTES {
+        return input.to_string();
+    }
+
+    // Try to parse the first meaningful chunk as JSON
+    let text = input.trim();
+    let count_newlines = text.chars().filter(|&c| c == '\n').count();
+
+    // NDJSON: many lines each being a JSON object
+    if count_newlines >= 5 {
+        let non_empty_lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        if non_empty_lines.len() >= 3 {
+            let all_json = non_empty_lines
+                .iter()
+                .all(|l| l.trim().starts_with('{') || l.trim().starts_with('['));
+            if all_json {
+                let total_lines = non_empty_lines.len();
+                // Show first few as samples
+                let mut out = format!(
+                    "NDJSON: {} records\n\nFirst {}:\n",
+                    total_lines,
+                    JSON_SUMMARY_MAX_ITEMS.min(total_lines)
+                );
+                for line in non_empty_lines.iter().take(JSON_SUMMARY_MAX_ITEMS) {
+                    // Truncate each line to 200 chars
+                    let display = if line.len() > 200 {
+                        format!("{}...", &line[..200])
+                    } else {
+                        line.to_string()
+                    };
+                    out.push_str(&display);
+                    out.push('\n');
+                }
+                if total_lines > JSON_SUMMARY_MAX_ITEMS {
+                    out.push_str(&format!(
+                        "... +{} more records\n",
+                        total_lines - JSON_SUMMARY_MAX_ITEMS
+                    ));
+                }
+                out.push_str(&format!(
+                    "\n[original: {} lines, {} bytes — compressed by rtk json-summary]",
+                    total_lines,
+                    input.len()
+                ));
+                return out;
+            }
+        }
+    }
+
+    // Single large JSON object/array — show structural summary
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(text);
+    match parsed {
+        Ok(Value::Object(map)) => {
+            let mut out = format!(
+                "JSON object with {} keys ({} bytes):\n",
+                map.len(),
+                input.len()
+            );
+            let mut keys: Vec<(&str, &Value)> = map.iter().map(|(k, v)| (k.as_str(), v)).collect();
+            keys.sort_by(|a, b| a.0.cmp(b.0));
+            for (key, val) in keys.iter().take(15) {
+                let type_desc = describe_json_value(val);
+                out.push_str(&format!("  {}: {}\n", key, type_desc));
+            }
+            if map.len() > 15 {
+                out.push_str(&format!("  ... +{} more keys\n", map.len() - 15));
+            }
+            out.push_str(&format!(
+                "\n[original: {} bytes — compressed by rtk json-summary]",
+                input.len()
+            ));
+            out
+        }
+        Ok(Value::Array(arr)) => {
+            let len = arr.len();
+            let mut out = format!(
+                "JSON array with {} items ({} bytes):\n",
+                len,
+                input.len()
+            );
+            for (i, item) in arr.iter().enumerate().take(JSON_SUMMARY_MAX_ITEMS) {
+                let type_desc = describe_json_value(item);
+                out.push_str(&format!("  [{}] {}\n", i, type_desc));
+            }
+            if len > JSON_SUMMARY_MAX_ITEMS {
+                out.push_str(&format!("  ... +{} more items\n", len - JSON_SUMMARY_MAX_ITEMS));
+            }
+            out.push_str(&format!(
+                "\n[original: {} bytes — compressed by rtk json-summary]",
+                input.len()
+            ));
+            out
+        }
+        _ => input.to_string(),
+    }
+}
+
+/// Describe a JSON value for summary display. String values show truncated content;
+/// objects/arrays show structure; primitives show their value.
+fn describe_json_value(val: &Value) -> String {
+    match val {
+        Value::Null => "null".into(),
+        Value::Bool(b) => format!("bool({})", b),
+        Value::Number(n) => format!("number({})", n),
+        Value::String(s) => {
+            if s.len() > 80 {
+                format!("\"{}\"... ({} chars)", &s[..80], s.len())
+            } else {
+                format!("\"{}", s)
+            }
+        }
+        Value::Array(arr) => format!("array[{}]", arr.len()),
+        Value::Object(obj) => format!("object{{{}}}", obj.len()),
+    }
+}
+
 fn is_build_summary_line(trimmed: &str, lower: &str) -> bool {
     // Mirror the regex set from buildOutput.js. Each branch is a cheap
     // heuristic; precise patterns are not needed because false positives
@@ -1030,6 +1371,116 @@ mod tests {
     fn build_output_returns_input_when_nothing_matches() {
         let input = "just some prose\nthat is not a build log";
         let result = build_output_impl(input);
+        assert_eq!(result, input);
+    }
+
+    // -----------------------------------------------------------------------
+    // test_runner_impl
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_runner_below_min_lines_passthrough() {
+        let input = "ok 1 test_a\nnot ok 2 test_b\nok 3 test_c";
+        let result = test_runner_impl(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn test_runner_cargo_test_output() {
+        let mut lines = Vec::new();
+        lines.push("running 3 tests".to_string());
+        for i in 1..=10 {
+            let line = format!("test test_{} ... ok", i);
+            lines.push(line);
+        }
+        lines.push(String::new());
+        lines.push("test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out".to_string());
+        let input = lines.join("\n");
+        let result = test_runner_impl(&input);
+        assert!(result.contains("passed"));
+    }
+
+    #[test]
+    fn test_runner_tap_output() {
+        let mut lines: Vec<String> = (1..=12)
+            .map(|i| format!("ok {} - test_case_{}", i, i))
+            .collect();
+        lines.push("not ok 13 - test_case_13".to_string());
+        lines.push("not ok 14 - test_case_14".to_string());
+        let input = lines.join("\n");
+        let result = test_runner_impl(&input);
+        assert!(result.contains("12 passed"));
+        assert!(result.contains("2 failed"));
+        assert!(result.contains("test_case_13"));
+    }
+
+    #[test]
+    fn test_runner_empty_failure_block_without_panic() {
+        // Failure block with header but no detail should not panic
+        let mut lines: Vec<String> = (1..=12)
+            .map(|i| format!("ok {} - passing_test_{}", i, i))
+            .collect();
+        lines.push("not ok 13 - failing_test".to_string());
+        let input = lines.join("\n");
+        let result = test_runner_impl(&input);
+        assert!(result.contains("12 passed"));
+        assert!(result.contains("1 failed"));
+    }
+
+    // -----------------------------------------------------------------------
+    // json_summary_impl
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn json_summary_below_min_bytes_passthrough() {
+        let input = r#"{"key": "short"}"#;
+        let result = json_summary_impl(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn json_summary_large_object() {
+        let mut keys = Vec::new();
+        for i in 0..20 {
+            keys.push(format!(r#""key_{}": "value_{}""#, i, i));
+        }
+        let input = format!("{{{}}}", keys.join(","));
+        // Pad to exceed JSON_SUMMARY_MIN_BYTES
+        let padded = format!("{}{}", input, " ".repeat(2000));
+        let result = json_summary_impl(&padded);
+        assert!(result.contains("JSON object"));
+        assert!(result.contains("keys"));
+        assert!(result.contains("key_0"));
+    }
+
+    #[test]
+    fn json_summary_large_array() {
+        let items: Vec<String> = (0..25).map(|i| format!(r#""item_{}""#, i)).collect();
+        let mut input = format!("[{}]", items.join(","));
+        // Pad to exceed JSON_SUMMARY_MIN_BYTES
+        input.push_str(&" ".repeat(2000));
+        let result = json_summary_impl(&input);
+        assert!(result.contains("JSON array"));
+        assert!(result.contains("items"));
+    }
+
+    #[test]
+    fn json_summary_ndjson_detected() {
+        let mut lines = Vec::new();
+        for i in 0..10 {
+            lines.push(format!(r#"{{"id": {}, "name": "test_{}"}}"#, i, i));
+        }
+        let input = lines.join("\n");
+        let padded = format!("{}\n{}", input, " ".repeat(2000));
+        let result = json_summary_impl(&padded);
+        assert!(result.contains("NDJSON"));
+    }
+
+    #[test]
+    fn json_summary_non_json_is_passthrough() {
+        let mut input = "just some plain long text that is not json\n".repeat(200);
+        assert!(input.len() > 2000);
+        let result = json_summary_impl(&input);
         assert_eq!(result, input);
     }
 }

@@ -68,6 +68,63 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         ("grok-web", "grok-web"),
         ("pw", "perplexity-web"),
         ("perplexity-web", "perplexity-web"),
+        // ── Enterprise & Cloud ──
+        ("databricks", "databricks"),
+        ("snowflake", "snowflake"),
+        ("heroku", "heroku"),
+        ("lambda-ai", "lambda-ai"),
+        ("ovhcloud", "ovhcloud"),
+        ("wandb", "wandb"),
+        // ── Gateway / Bridge ──
+        ("kilo-gateway", "kilo-gateway"),
+        ("v0-vercel", "v0-vercel"),
+        // ── Regional CN ──
+        ("alibaba", "alibaba"),
+        ("ali", "alibaba"),
+        ("alibaba-cn", "alibaba-cn"),
+        ("ali-cn", "alibaba-cn"),
+        ("moonshot", "moonshot"),
+        ("qianfan", "qianfan"),
+        ("volcengine", "volcengine"),
+        ("zai", "zai"),
+        // ── Regional international ──
+        ("gigachat", "gigachat"),
+        ("upstage", "upstage"),
+        ("maritalk", "maritalk"),
+        // ── Inference APIs ──
+        ("venice", "venice"),
+        ("featherless-ai", "featherless-ai"),
+        ("friendliai", "friendliai"),
+        ("galadriel", "galadriel"),
+        ("llamagate", "llamagate"),
+        ("nanogpt", "nanogpt"),
+        ("synthetic", "synthetic"),
+        ("pollinations", "pollinations"),
+        ("meta-llama", "meta-llama"),
+        // ── Coding / CLI ──
+        ("opencode-zen", "opencode-zen"),
+        ("kimi-coding-apikey", "kimi-coding-apikey"),
+        ("kmca", "kimi-coding-apikey"),
+        ("devin-cli", "devin-cli"),
+        ("dv", "devin-cli"),
+        ("windsurf", "windsurf"),
+        ("ws", "windsurf"),
+        ("crof", "crof"),
+        // ── Media ──
+        ("haiper", "haiper"),
+        ("hp", "haiper"),
+        ("leonardo", "leonardo"),
+        ("leo", "leonardo"),
+        ("ideogram", "ideogram"),
+        ("ideo", "ideogram"),
+        ("suno", "suno"),
+        ("udio", "udio"),
+        // ── Web / Chat ──
+        ("chatgpt-web", "chatgpt-web"),
+        ("gemini-web", "gemini-web"),
+        ("gweb", "gemini-web"),
+        ("muse-spark-web", "muse-spark-web"),
+        ("ms-web", "muse-spark-web"),
     ])
 });
 

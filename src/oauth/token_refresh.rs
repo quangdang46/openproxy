@@ -721,6 +721,24 @@ pub async fn refresh_codebuddy_token(refresh_token: &str) -> Result<RefreshResul
     parse_json_refresh_response(resp).await
 }
 
+/// Refresh a CodeBuddy CN access token.
+pub async fn refresh_codebuddy_cn_token(refresh_token: &str) -> Result<RefreshResult, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://copilot.tencent.com/v2/plugin/auth/token/refresh")
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(ACCEPT, "application/json")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+            ("client_id", "openproxy"),
+        ])
+        .send()
+        .await
+        .map_err(|e| format!("CodeBuddy CN refresh request failed: {e}"))?;
+    parse_json_refresh_response(resp).await
+}
+
 /// Qoder does not support token refresh. This function always returns an error.
 pub async fn refresh_qoder_token(_refresh_token: &str) -> Result<RefreshResult, String> {
     Err("Qoder does not support token refresh".to_string())
@@ -826,6 +844,14 @@ pub async fn dispatch_oauth_refresh(
             dedup_refresh(provider, refresh_token, move || {
                 let rt = rt.clone();
                 async move { refresh_codebuddy_token(&rt).await }
+            })
+            .await
+        }
+        "codebuddy-cn" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_codebuddy_cn_token(&rt).await }
             })
             .await
         }

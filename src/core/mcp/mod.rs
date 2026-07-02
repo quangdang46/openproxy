@@ -1,15 +1,16 @@
-//! Local stdio→SSE bridge for MCP plugins. Ports
-//! `src/lib/mcp/stdioSseBridge.js` from upstream 9router so existing MCP
-//! clients (Claude desktop, etc.) can connect to openproxy via the same
-//! `/api/mcp/<plugin>/sse` + `/api/mcp/<plugin>/message` wire protocol.
+//! MCP (Model Context Protocol) support for OpenProxy.
 //!
-//! Layout:
-//!   * [`smart_filter`] — text noise stripper + frame filter (pure logic).
-//!   * [`plugins`]      — built-in plugin catalog + allowlist + custom store.
-//!   * [`bridge`]       — per-plugin child process + broadcast channel.
-//!
-//! The HTTP handlers live in `crate::server::api::mcp`.
+//! Two MCP modes:
+//!   * **Stdio-bridge mode** — spawns external MCP child processes (e.g.
+//!     `browsermcp`) and bridges their stdio to SSE at `/api/mcp/<plugin>/*`.
+//!     Layout: [`bridge`], [`plugins`], [`smart_filter`].
+//!     The HTTP handlers live in `crate::server::api::mcp`.
+//!   * **Native server mode** — implements the MCP JSON-RPC 2.0 protocol
+//!     directly inside OpenProxy with a built-in tool registry of ~15
+//!     administrative tools. Served at `/api/mcp-server/*` and `/api/mcp`.
+//!     Layout: [`server`].
 
 pub mod bridge;
 pub mod plugins;
+pub mod server;
 pub mod smart_filter;

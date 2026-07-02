@@ -198,7 +198,7 @@ pub fn kilocode() -> OAuthProviderConfig {
     }
 }
 
-/// Kimchi — browser_token OAuth flow.
+/// Kimchi — browser_token OAuth flow (user copies token from kimchi.dev).
 pub fn kimchi() -> OAuthProviderConfig {
     OAuthProviderConfig {
         id: "kimchi",
@@ -207,8 +207,12 @@ pub fn kimchi() -> OAuthProviderConfig {
         token_url: "",
         scopes: &[],
         uses_pkce: false,
-        extra_params: &[],
-        refresh_lead_ms: 0,
+        extra_params: &[
+            ("web_app_url", "https://app.kimchi.dev"),
+            ("validation_url", "https://api.cast.ai/v1/llm/openai/supported-providers"),
+            ("user_info_url", "https://app.kimchi.dev/api/v1/me"),
+        ],
+        refresh_lead_ms: 4 * 60 * 60 * 1000,
     }
 }
 
@@ -274,6 +278,70 @@ pub fn cline() -> OAuthProviderConfig {
         uses_pkce: true,
         extra_params: &[("refresh_url", "https://api.cline.bot/api/v1/auth/refresh")],
         refresh_lead_ms: 4 * 60 * 60 * 1000,
+    }
+}
+
+/// CodeBuddy CN — device-code flow (Tencent Copilot, distinct from intl codebuddy).
+pub fn codebuddy_cn() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "codebuddy-cn",
+        client_id: "openproxy",
+        authorize_url: "https://copilot.tencent.com/v2/plugin/auth/state",
+        token_url: "https://copilot.tencent.com/v2/plugin/auth/token",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[
+            ("refresh_url", "https://copilot.tencent.com/v2/plugin/auth/token/refresh"),
+            ("user_agent", "CLI/2.63.2 CodeBuddy/2.63.2"),
+            ("platform", "CLI"),
+            ("poll_interval", "5000"),
+        ],
+        refresh_lead_ms: 4 * 60 * 60 * 1000,
+    }
+}
+
+/// Cursor IDE — import-token flow (reads from local SQLite DB).
+/// OAuth endpoints are empty; authentication happens via the cursor_import module.
+pub fn cursor() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "cursor",
+        client_id: "openproxy",
+        authorize_url: "https://api2.cursor.sh",
+        token_url: "",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[
+            ("api_endpoint", "https://api2.cursor.sh"),
+            ("agent_endpoint", "https://agent.api5.cursor.sh"),
+            ("client_version", "3.1.0"),
+            ("client_type", "ide"),
+        ],
+        refresh_lead_ms: 24 * 60 * 60 * 1000,
+    }
+}
+
+/// Antigravity — Google OAuth authorization-code flow (with client_secret).
+pub fn antigravity() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "antigravity",
+        client_id: "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com",
+        authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
+        token_url: "https://oauth2.googleapis.com/token",
+        scopes: &[
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/cclog",
+            "https://www.googleapis.com/auth/experimentsandconfigs",
+        ],
+        uses_pkce: false,
+        extra_params: &[
+            ("client_secret", "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"),
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            ("user_info_url", "https://www.googleapis.com/oauth2/v1/userinfo"),
+        ],
+        refresh_lead_ms: 5 * 60 * 1000,
     }
 }
 
@@ -364,7 +432,9 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "gemini-cli" => Some(gemini_cli()),
         "qoder" => Some(qoder()),
         "kimchi" => Some(kimchi()),
-        "antigravity" | "openai" => None,
+        "cursor" => Some(cursor()),
+        "antigravity" => Some(antigravity()),
+        "codebuddy-cn" => Some(codebuddy_cn()),
         _ => None,
     }
 }

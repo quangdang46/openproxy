@@ -1634,6 +1634,7 @@ async fn run_direct_route(
             &hc,
             &resolved.model,
             "openai",
+            None,
         )) {
             eprintln!("{}", stats.format_headroom_log().unwrap_or_default());
         }
@@ -1794,6 +1795,7 @@ async fn run_combo_route(
             &hc,
             &resolved.model,
             "openai",
+            None,
         )) {
             eprintln!("{}", stats.format_headroom_log().unwrap_or_default());
         }

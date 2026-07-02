@@ -106,6 +106,19 @@ fn test_compression_level_all_prompts_different() {
 }
 
 #[test]
+fn test_wenyan_levels_have_distinct_prompts() {
+    let wl = CompressionLevel::WenyanLite.prompt();
+    let w = CompressionLevel::Wenyan.prompt();
+    let wu = CompressionLevel::WenyanUltra.prompt();
+    assert_ne!(wl, w);
+    assert_ne!(w, wu);
+    assert!(wl.contains("wenyan"));
+    assert!(w.contains("Classical Chinese"));
+    assert!(wu.contains("ultra-terse"));
+    assert!(wu.contains("Classical Chinese"));
+}
+
+#[test]
 fn test_compression_level_ultra_prompt_contains_abbreviation_hint() {
     let ultra_prompt = CompressionLevel::Ultra.prompt();
     assert!(ultra_prompt.contains("abbreviate") || ultra_prompt.contains("terse"));
@@ -126,6 +139,9 @@ fn test_normalize_caveman_level_valid() {
     assert_eq!(normalize_caveman_level("lite"), "lite");
     assert_eq!(normalize_caveman_level("full"), "full");
     assert_eq!(normalize_caveman_level("ultra"), "ultra");
+    assert_eq!(normalize_caveman_level("wenyan-lite"), "wenyan-lite");
+    assert_eq!(normalize_caveman_level("wenyan"), "wenyan");
+    assert_eq!(normalize_caveman_level("wenyan-ultra"), "wenyan-ultra");
 }
 
 #[test]

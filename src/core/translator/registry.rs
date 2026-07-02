@@ -180,6 +180,8 @@ pub struct ResponsesResponseState {
     pub func_call_ids: std::collections::HashMap<usize, String>,
     pub msg_item_done: std::collections::HashMap<usize, bool>,
     pub completed_sent: bool,
+    /// Generic state used by responses_to_chat_response (OpenAiResponses -> OpenAi).
+    pub state: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -187,18 +189,24 @@ pub struct CursorResponseState {
     pub frame_buffer: Vec<u8>,
     pub decompress_buffer: Vec<u8>,
     pub in_message: bool,
+    /// Generic state used by cursor_to_openai_response.
+    pub state: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct OllamaResponseState {
     pub line_buffer: String,
     pub message_idx: usize,
+    /// Generic state used by ollama_to_openai_response.
+    pub state: std::collections::HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct KiroResponseState {
     pub event_buffer: Vec<u8>,
     pub current_event_type: Option<String>,
+    /// Generic state used by kiro_to_openai_response.
+    pub state: std::collections::HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -722,7 +730,11 @@ pub fn global_registry() -> &'static TranslationRegistry {
     use crate::core::translator::request::openai_to_vertex::openai_to_vertex_request;
     use crate::core::translator::response::claude_to_openai::claude_to_openai_streaming;
     use crate::core::translator::response::commandcode_to_openai::commandcode_to_openai_response;
+    use crate::core::translator::response::cursor_to_openai::cursor_to_openai_streaming;
     use crate::core::translator::response::gemini_to_openai::gemini_to_openai_streaming;
+    use crate::core::translator::response::kiro_to_openai::kiro_to_openai_streaming;
+    use crate::core::translator::response::ollama_to_openai::ollama_to_openai_streaming;
+    use crate::core::translator::response::openai_responses::responses_to_chat_streaming;
     use crate::core::translator::response::openai_to_gemini::openai_to_gemini_response;
 
     REGISTRY.get_or_init(|| {
@@ -828,6 +840,26 @@ pub fn global_registry() -> &'static TranslationRegistry {
             Format::Gemini,
             Format::OpenAi,
             gemini_to_openai_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::Ollama,
+            Format::OpenAi,
+            ollama_to_openai_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::Cursor,
+            Format::OpenAi,
+            cursor_to_openai_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::Kiro,
+            Format::OpenAi,
+            kiro_to_openai_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::OpenAiResponses,
+            Format::OpenAi,
+            responses_to_chat_streaming as ResponseTransformFn,
         );
 
         reg
