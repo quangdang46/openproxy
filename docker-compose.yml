@@ -1,0 +1,20 @@
+version: "3.8"
+services:
+  openproxy:
+    build: .
+    ports:
+      - "4623:4623"
+    volumes:
+      - ~/.config/openproxy:/root/.config/openproxy:ro
+      - ~/.local/share/openproxy:/root/.local/share/openproxy
+    environment:
+      - PORT=4623
+      - HOST=0.0.0.0
+      - JWT_SECRET=${JWT_SECRET:-}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4623/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
