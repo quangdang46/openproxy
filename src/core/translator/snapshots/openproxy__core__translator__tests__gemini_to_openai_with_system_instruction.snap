@@ -1,0 +1,18 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "messages": [
+    {
+      "content": "You are a Gemini assistant.",
+      "role": "system"
+    },
+    {
+      "content": "Explain quantum computing",
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": false
+}

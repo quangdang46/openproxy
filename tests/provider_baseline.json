@@ -1,0 +1,1427 @@
+[
+  {
+    "id": "kiro",
+    "alias": "kr",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "MiniMax-M2.5",
+      "claude-haiku-4.5",
+      "claude-opus-4.5",
+      "claude-sonnet-4.5",
+      "deepseek-3.2",
+      "glm-5",
+      "qwen3-coder-next"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "qwen",
+    "alias": "qw",
+    "serviceKinds": [
+      "llm",
+      "tts",
+      "stt"
+    ],
+    "models": [
+      "coder-model",
+      "qwen3-coder-flash",
+      "qwen3-coder-next",
+      "qwen3-coder-plus",
+      "vision-model"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "gemini-cli",
+    "alias": "gc",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "gemini-3-flash-preview",
+      "gemini-3-pro-preview"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "iflow",
+    "alias": "if",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "deepseek-r1",
+      "deepseek-v3",
+      "deepseek-v3.1",
+      "deepseek-v3.2",
+      "glm-4.7",
+      "iflow-rome-30ba3b",
+      "kimi-k2",
+      "qwen3-235b",
+      "qwen3-235b-a22b-instruct",
+      "qwen3-235b-a22b-thinking-2507",
+      "qwen3-32b",
+      "qwen3-coder-plus",
+      "qwen3-max",
+      "qwen3-max-preview",
+      "qwen3-vl-plus"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "opencode",
+    "alias": "oc",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "big-pickle",
+      "deepseek-v4-flash-free",
+      "mimo-v2.5-free",
+      "nemotron-3-ultra-free",
+      "north-mini-code-free"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "openrouter",
+    "alias": "openrouter",
+    "serviceKinds": [
+      "llm",
+      "embedding",
+      "tts",
+      "imageToText"
+    ],
+    "models": [
+      "black-forest-labs/FLUX.1-schnell",
+      "google/imagen-3.0-generate-002",
+      "nvidia/llama-nemotron-embed-vl-1b-v2:free",
+      "openai/dall-e-3",
+      "openai/gpt-4o-mini-tts",
+      "openai/gpt-image-1",
+      "openai/text-embedding-3-large",
+      "openai/text-embedding-3-small",
+      "openai/text-embedding-ada-002",
+      "openai/tts-1",
+      "openai/tts-1-hd",
+      "perplexity/pplx-embed-v1-0.6b",
+      "perplexity/pplx-embed-v1-4b",
+      "qwen/qwen3-embedding-8b"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "nvidia",
+    "alias": "nvidia",
+    "serviceKinds": [
+      "llm",
+      "tts",
+      "embedding",
+      "stt"
+    ],
+    "models": [
+      "minimaxai/minimax-m2.7",
+      "nvidia/nv-embedqa-e5-v5",
+      "nvidia/parakeet-ctc-1.1b-asr",
+      "z-ai/glm4.7"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "ollama",
+    "alias": "ollama",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "deepseek-v4-flash:cloud",
+      "deepseek-v4-pro:cloud",
+      "glm-4.7-flash",
+      "glm-5",
+      "glm-5.1:cloud",
+      "gpt-oss:120b",
+      "kimi-k2.5",
+      "kimi-k2.6:cloud",
+      "minimax-m2.5",
+      "minimax-m2.7:cloud",
+      "qwen3.5",
+      "qwen3.5:cloud"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "vertex",
+    "alias": "vx",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "gemini",
+    "alias": "gemini",
+    "serviceKinds": [
+      "llm",
+      "embedding",
+      "image",
+      "imageToText",
+      "webSearch"
+    ],
+    "models": [
+      "gemini-2.0-flash",
+      "gemini-2.0-flash-lite",
+      "gemini-2.5-flash",
+      "gemini-2.5-flash-image",
+      "gemini-2.5-flash-lite",
+      "gemini-2.5-pro",
+      "gemini-3-flash-preview",
+      "gemini-3-pro-image-preview",
+      "gemini-3.1-flash-image-preview",
+      "gemini-3.1-flash-lite-preview",
+      "gemini-3.1-pro-preview",
+      "gemini-embedding-001",
+      "gemini-embedding-2-preview",
+      "gemma-4-31b-it",
+      "text-embedding-004",
+      "text-embedding-005"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "cloudflare-ai",
+    "alias": "cf",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "byteplus",
+    "alias": "bpm",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "claude",
+    "alias": "cc",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "claude-haiku-4-5-20251001",
+      "claude-opus-4-5-20251101",
+      "claude-opus-4-6",
+      "claude-opus-4-7",
+      "claude-sonnet-4-5-20250929",
+      "claude-sonnet-4-6"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "antigravity",
+    "alias": "ag",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "claude-opus-4-6-thinking",
+      "claude-sonnet-4-6",
+      "gemini-3-flash",
+      "gemini-3.1-pro-high",
+      "gemini-3.1-pro-low",
+      "gpt-oss-120b-medium"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "codex",
+    "alias": "cx",
+    "serviceKinds": [
+      "llm",
+      "image"
+    ],
+    "models": [
+      "gpt-5-codex",
+      "gpt-5-codex-mini",
+      "gpt-5-codex-mini-review",
+      "gpt-5-codex-review",
+      "gpt-5.1",
+      "gpt-5.1-codex",
+      "gpt-5.1-codex-max",
+      "gpt-5.1-codex-max-review",
+      "gpt-5.1-codex-mini",
+      "gpt-5.1-codex-mini-high",
+      "gpt-5.1-codex-mini-high-review",
+      "gpt-5.1-codex-mini-review",
+      "gpt-5.1-codex-review",
+      "gpt-5.1-review",
+      "gpt-5.2",
+      "gpt-5.2-codex",
+      "gpt-5.2-codex-review",
+      "gpt-5.2-image",
+      "gpt-5.2-review",
+      "gpt-5.3-codex",
+      "gpt-5.3-codex-high",
+      "gpt-5.3-codex-high-review",
+      "gpt-5.3-codex-low",
+      "gpt-5.3-codex-low-review",
+      "gpt-5.3-codex-none",
+      "gpt-5.3-codex-none-review",
+      "gpt-5.3-codex-review",
+      "gpt-5.3-codex-spark",
+      "gpt-5.3-codex-spark-review",
+      "gpt-5.3-codex-xhigh",
+      "gpt-5.3-codex-xhigh-review",
+      "gpt-5.3-image",
+      "gpt-5.4",
+      "gpt-5.4-image",
+      "gpt-5.4-review",
+      "gpt-5.5",
+      "gpt-5.5-image",
+      "gpt-5.5-review"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "github",
+    "alias": "gh",
+    "serviceKinds": [
+      "llm",
+      "embedding"
+    ],
+    "models": [
+      "claude-haiku-4.5",
+      "claude-opus-4.5",
+      "claude-opus-4.6",
+      "claude-opus-4.7",
+      "claude-sonnet-4",
+      "claude-sonnet-4.5",
+      "claude-sonnet-4.6",
+      "gemini-2.5-pro",
+      "gemini-3-flash-preview",
+      "gemini-3.1-pro-preview",
+      "goldeneye-free-auto",
+      "gpt-3.5-turbo",
+      "gpt-4",
+      "gpt-4.1",
+      "gpt-4o",
+      "gpt-4o-mini",
+      "gpt-5-mini",
+      "gpt-5.2",
+      "gpt-5.2-codex",
+      "gpt-5.3-codex",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "grok-code-fast-1",
+      "oswe-vscode-prime",
+      "text-embedding-3-large",
+      "text-embedding-3-small"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "cursor",
+    "alias": "cu",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "claude-4.5-haiku",
+      "claude-4.5-opus",
+      "claude-4.5-opus-high",
+      "claude-4.5-opus-high-thinking",
+      "claude-4.5-sonnet",
+      "claude-4.5-sonnet-thinking",
+      "claude-4.6-opus-max",
+      "claude-4.6-sonnet-medium-thinking",
+      "default",
+      "gemini-3-flash-preview",
+      "gpt-5.2",
+      "gpt-5.2-codex",
+      "gpt-5.3-codex",
+      "kimi-k2.5"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "kilocode",
+    "alias": "kc",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "anthropic/claude-opus-4-20250514",
+      "anthropic/claude-sonnet-4-20250514",
+      "deepseek/deepseek-chat",
+      "deepseek/deepseek-reasoner",
+      "google/gemini-2.5-flash",
+      "google/gemini-2.5-pro",
+      "openai/gpt-4.1",
+      "openai/o3"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "cline",
+    "alias": "cl",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "anthropic/claude-opus-4.6",
+      "anthropic/claude-opus-4.7",
+      "anthropic/claude-sonnet-4.6",
+      "google/gemini-3.1-flash-lite-preview",
+      "google/gemini-3.1-pro-preview",
+      "kwaipilot/kat-coder-pro",
+      "openai/gpt-5.3-codex",
+      "openai/gpt-5.4"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "glm",
+    "alias": "glm",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "glm-4.6v",
+      "glm-4.7",
+      "glm-5",
+      "glm-5.1"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "glm-cn",
+    "alias": "glm-cn",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "glm-4.5-air",
+      "glm-4.6",
+      "glm-4.7",
+      "glm-5",
+      "glm-5.1"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "kimi",
+    "alias": "kimi",
+    "serviceKinds": [
+      "llm",
+      "webSearch"
+    ],
+    "models": [
+      "kimi-k2.5",
+      "kimi-k2.5-thinking",
+      "kimi-k2.6",
+      "kimi-latest"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "minimax",
+    "alias": "minimax",
+    "serviceKinds": [
+      "llm",
+      "image",
+      "imageToText",
+      "webSearch"
+    ],
+    "models": [
+      "MiniMax-M2.1",
+      "MiniMax-M2.5",
+      "MiniMax-M2.7",
+      "minimax-image-01"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "minimax-cn",
+    "alias": "minimax-cn",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "MiniMax-M2.1",
+      "MiniMax-M2.5",
+      "MiniMax-M2.7"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "alicode",
+    "alias": "alicode",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "MiniMax-M2.5",
+      "glm-4.7",
+      "glm-5",
+      "kimi-k2.5",
+      "qwen3-coder-next",
+      "qwen3-coder-plus",
+      "qwen3-max-2026-01-23",
+      "qwen3.5-plus"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "alicode-intl",
+    "alias": "alicode-intl",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "MiniMax-M2.5",
+      "glm-4.7",
+      "glm-5",
+      "kimi-k2.5",
+      "qwen3-coder-next",
+      "qwen3-coder-plus",
+      "qwen3.5-plus"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "xiaomi-mimo",
+    "alias": "mimo",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "volcengine-ark",
+    "alias": "ark",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "openai",
+    "alias": "openai",
+    "serviceKinds": [
+      "llm",
+      "embedding",
+      "tts",
+      "image",
+      "imageToText",
+      "webSearch"
+    ],
+    "models": [
+      "dall-e-2",
+      "dall-e-3",
+      "gpt-4-turbo",
+      "gpt-4.1",
+      "gpt-4.1-mini",
+      "gpt-4.1-nano",
+      "gpt-4o",
+      "gpt-4o-mini",
+      "gpt-4o-mini-tts",
+      "gpt-5",
+      "gpt-5-mini",
+      "gpt-5-nano",
+      "gpt-5.1",
+      "gpt-5.2",
+      "gpt-5.4",
+      "gpt-5.4-mini",
+      "gpt-5.4-nano",
+      "gpt-image-1",
+      "o1",
+      "o1-mini",
+      "o3",
+      "o3-mini",
+      "o3-pro",
+      "o4-mini",
+      "text-embedding-3-large",
+      "text-embedding-3-small",
+      "text-embedding-ada-002",
+      "tts-1",
+      "tts-1-hd",
+      "whisper-1"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "anthropic",
+    "alias": "anthropic",
+    "serviceKinds": [
+      "llm",
+      "imageToText"
+    ],
+    "models": [
+      "claude-3-5-sonnet-20241022",
+      "claude-opus-4-20250514",
+      "claude-sonnet-4-20250514"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "opencode-go",
+    "alias": "ocg",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "azure",
+    "alias": "azure",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "deepseek",
+    "alias": "ds",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "groq",
+    "alias": "groq",
+    "serviceKinds": [
+      "llm",
+      "imageToText"
+    ],
+    "models": [
+      "llama-3.3-70b-versatile",
+      "meta-llama/llama-4-maverick-17b-128e-instruct",
+      "openai/gpt-oss-120b",
+      "qwen/qwen3-32b",
+      "whisper-large-v3"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "xai",
+    "alias": "xai",
+    "serviceKinds": [
+      "llm",
+      "imageToText",
+      "webSearch"
+    ],
+    "models": [
+      "grok-3",
+      "grok-4",
+      "grok-4-fast-reasoning",
+      "grok-code-fast-1"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "mistral",
+    "alias": "mistral",
+    "serviceKinds": [
+      "llm",
+      "imageToText",
+      "embedding"
+    ],
+    "models": [
+      "codestral-latest",
+      "mistral-embed",
+      "mistral-large-latest",
+      "mistral-medium-latest"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "perplexity",
+    "alias": "pplx",
+    "serviceKinds": [
+      "llm",
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "together",
+    "alias": "together",
+    "serviceKinds": [
+      "llm",
+      "embedding"
+    ],
+    "models": [
+      "BAAI/bge-large-en-v1.5",
+      "Qwen/Qwen3-235B-A22B",
+      "deepseek-ai/DeepSeek-R1",
+      "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+      "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "togethercomputer/m2-bert-80M-8k-retrieval"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "fireworks",
+    "alias": "fireworks",
+    "serviceKinds": [
+      "llm",
+      "embedding"
+    ],
+    "models": [
+      "accounts/fireworks/models/deepseek-v3p1",
+      "accounts/fireworks/models/llama-v3p3-70b-instruct",
+      "accounts/fireworks/models/qwen3-235b-a22b",
+      "nomic-ai/nomic-embed-text-v1.5"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "cerebras",
+    "alias": "cerebras",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "gpt-oss-120b",
+      "llama-3.3-70b",
+      "llama-4-scout-17b-16e-instruct",
+      "qwen-3-235b-a22b-instruct-2507",
+      "qwen-3-32b",
+      "zai-glm-4.7"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "cohere",
+    "alias": "cohere",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "command-a-03-2025",
+      "command-r-08-2024",
+      "command-r-plus-08-2024"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "nebius",
+    "alias": "nebius",
+    "serviceKinds": [
+      "llm",
+      "embedding"
+    ],
+    "models": [
+      "Qwen/Qwen3-Embedding-8B",
+      "meta-llama/Llama-3.3-70B-Instruct"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "siliconflow",
+    "alias": "siliconflow",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "Qwen/Qwen3-32B",
+      "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+      "baidu/ERNIE-4.5-300B-A47B",
+      "deepseek-ai/DeepSeek-R1",
+      "deepseek-ai/DeepSeek-V3.1",
+      "deepseek-ai/DeepSeek-V3.2",
+      "moonshotai/Kimi-K2.5",
+      "openai/gpt-oss-120b",
+      "zai-org/GLM-4.7"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "hyperbolic",
+    "alias": "hyp",
+    "serviceKinds": [
+      "llm",
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "deepgram",
+    "alias": "dg",
+    "serviceKinds": [
+      "stt",
+      "imageToText",
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "assemblyai",
+    "alias": "aai",
+    "serviceKinds": [
+      "stt"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "nanobanana",
+    "alias": "nb",
+    "serviceKinds": [
+      "image"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "elevenlabs",
+    "alias": "el",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "cartesia",
+    "alias": "cartesia",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "playht",
+    "alias": "playht",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "local-device",
+    "alias": "local-device",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [
+      "default"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "google-tts",
+    "alias": "google-tts",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [
+      "af",
+      "ar",
+      "bg",
+      "bn",
+      "bs",
+      "ca",
+      "cs",
+      "cy",
+      "da",
+      "de",
+      "el",
+      "en",
+      "eo",
+      "es",
+      "et",
+      "fi",
+      "fr",
+      "gu",
+      "hi",
+      "hr",
+      "hu",
+      "hy",
+      "id",
+      "is",
+      "it",
+      "ja",
+      "jw",
+      "km",
+      "kn",
+      "ko",
+      "la",
+      "lv",
+      "mk",
+      "ml",
+      "mr",
+      "my",
+      "ne",
+      "nl",
+      "no",
+      "pl",
+      "pt",
+      "ro",
+      "ru",
+      "si",
+      "sk",
+      "sq",
+      "sr",
+      "su",
+      "sv",
+      "sw",
+      "ta",
+      "te",
+      "th",
+      "tl",
+      "tr",
+      "uk",
+      "ur",
+      "vi",
+      "zh-CN",
+      "zh-TW"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "edge-tts",
+    "alias": "edge-tts",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [
+      "de-DE-KatjaNeural",
+      "en-GB-SoniaNeural",
+      "en-US-AriaNeural",
+      "en-US-GuyNeural",
+      "fr-FR-DeniseNeural",
+      "ja-JP-NanamiNeural",
+      "ko-KR-SunHiNeural",
+      "vi-VN-HoaiMyNeural",
+      "vi-VN-NamMinhNeural",
+      "zh-CN-XiaoxiaoNeural",
+      "zh-CN-YunxiNeural"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "coqui",
+    "alias": "coqui",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "tortoise",
+    "alias": "tortoise",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "inworld",
+    "alias": "inworld",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "voyage-ai",
+    "alias": "voyage",
+    "serviceKinds": [
+      "embedding"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "sdwebui",
+    "alias": "sdwebui",
+    "serviceKinds": [
+      "image"
+    ],
+    "models": [
+      "sdxl-base-1.0",
+      "stable-diffusion-v1-5"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "comfyui",
+    "alias": "comfyui",
+    "serviceKinds": [
+      "image"
+    ],
+    "models": [
+      "flux-dev",
+      "sdxl"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "huggingface",
+    "alias": "hf",
+    "serviceKinds": [
+      "image",
+      "imageToText",
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "blackbox",
+    "alias": "bb",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "chutes",
+    "alias": "ch",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "ollama-local",
+    "alias": "ollama-local",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "vertex-partner",
+    "alias": "vxp",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "tavily",
+    "alias": "tavily",
+    "serviceKinds": [
+      "webSearch",
+      "webFetch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": true
+  },
+  {
+    "id": "brave-search",
+    "alias": "brave",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "serper",
+    "alias": "serper",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "exa",
+    "alias": "exa",
+    "serviceKinds": [
+      "webSearch",
+      "webFetch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": true
+  },
+  {
+    "id": "searxng",
+    "alias": "searxng",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "google-pse",
+    "alias": "gpse",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "linkup",
+    "alias": "linkup",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "searchapi",
+    "alias": "searchapi",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "youcom",
+    "alias": "youcom",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "firecrawl",
+    "alias": "firecrawl",
+    "serviceKinds": [
+      "webFetch"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": true
+  },
+  {
+    "id": "fal-ai",
+    "alias": "fal",
+    "serviceKinds": [
+      "image"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "stability-ai",
+    "alias": "stability",
+    "serviceKinds": [
+      "image"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "black-forest-labs",
+    "alias": "bfl",
+    "serviceKinds": [
+      "image"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "recraft",
+    "alias": "recraft",
+    "serviceKinds": [
+      "image"
+    ],
+    "models": [
+      "recraftv2",
+      "recraftv3"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "topaz",
+    "alias": "topaz",
+    "serviceKinds": [
+      "image"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "runwayml",
+    "alias": "runway",
+    "serviceKinds": [
+      "image",
+      "video"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "aws-polly",
+    "alias": "polly",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "jina-ai",
+    "alias": "jina",
+    "serviceKinds": [
+      "embedding"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "jina-reader",
+    "alias": "jina",
+    "serviceKinds": [
+      "webFetch"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": true
+  },
+  {
+    "id": "grok-web",
+    "alias": "gw",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "perplexity-web",
+    "alias": "pw",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "inference-net",
+    "alias": "inference-net",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "deepseek/deepseek-v3-0324",
+      "meta-llama/llama-3.3-70b-instruct/fp-16",
+      "mistralai/mistral-nemo-12b-instruct/fp-16"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "venice",
+    "alias": "venice",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "venice-latest"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "vercel-ai-gateway",
+    "alias": "vercel-ai-gateway",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [
+      "anthropic/claude-4-sonnet",
+      "google/gemini-2.5-pro",
+      "moonshotai/kimi-k2",
+      "openai/gpt-4.1",
+      "vercel/v0-1.5-md"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "xiaomi-tokenplan",
+    "alias": "xiaomi-tokenplan",
+    "serviceKinds": [
+      "llm",
+      "tts"
+    ],
+    "models": [
+      "mimo-v2-omni",
+      "mimo-v2-pro",
+      "mimo-v2-tts",
+      "mimo-v2.5",
+      "mimo-v2.5-pro",
+      "mimo-v2.5-tts",
+      "mimo-v2.5-tts-voiceclone",
+      "mimo-v2.5-tts-voicedesign"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "github-models",
+    "alias": "ghm",
+    "serviceKinds": [
+      "llm",
+      "embedding"
+    ],
+    "models": [
+      "cohere/Cohere-embed-v4",
+      "deepseek/DeepSeek-R1",
+      "meta/Llama-4-Maverick-17B-128E-Instruct",
+      "meta/Llama-4-Scout-17B-16E-Instruct",
+      "mistral-ai/Mistral-Medium-3",
+      "openai/gpt-4.1",
+      "openai/gpt-4o",
+      "openai/gpt-4o-mini",
+      "openai/o1",
+      "openai/o3",
+      "openai/o4-mini",
+      "openai/text-embedding-3-large",
+      "openai/text-embedding-3-small",
+      "xai/grok-3"
+    ],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "hackclub",
+    "alias": "hc",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "codebuddy-cn",
+    "alias": "codebuddy-cn",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "mimo-free",
+    "alias": "mimo-free",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  }
+]

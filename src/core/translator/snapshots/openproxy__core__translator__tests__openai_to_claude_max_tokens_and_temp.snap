@@ -1,0 +1,27 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "max_tokens": 500,
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "Write a poem",
+          "type": "text"
+        }
+      ],
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": false,
+  "system": [
+    {
+      "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+      "type": "text"
+    }
+  ],
+  "temperature": 0.7
+}

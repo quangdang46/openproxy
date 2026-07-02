@@ -65,14 +65,12 @@ jobs:
           retention-days: 1
 
   # ──────────────────────────────────────────────────────────────────────
-  # NOTE: tests/unit/*.test.js exists in the tree but imports `vitest`
-  # and resolves `../../open-sse/...` source modules — both leftovers
-  # from upstream decolua/9router (the Node project this repo was
-  # forked from before being rewritten in Rust). The JS source has
-  # since been deleted; only the test files remain. We intentionally
-  # do NOT run them in CI. Once they're either ported to native
-  # `node:test` against the Rust binary or deleted, replace this
-  # comment with an actual `js-tests` job.
+  # NOTE: tests/unit/ previously held 17 legacy JS test files imported
+  # from upstream decolua/9router.  The JS source (open-sse/) has been
+  # rewritten in Rust and all test files have been removed.  Translator
+  # coverage is now provided by Rust golden-snapshot tests in
+  # src/core/translator/tests.rs.  Provider-model regression coverage is
+  # in tests/provider_baseline.json + tests/verify_no_regression.mjs.
   # ──────────────────────────────────────────────────────────────────────
 
   # ──────────────────────────────────────────────────────────────────────

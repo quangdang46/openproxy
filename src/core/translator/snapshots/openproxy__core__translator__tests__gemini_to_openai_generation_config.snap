@@ -1,0 +1,17 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "max_tokens": 2048,
+  "messages": [
+    {
+      "content": "Write a story",
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": false,
+  "temperature": 0.8,
+  "top_p": 0.9
+}

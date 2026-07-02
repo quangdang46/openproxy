@@ -1,0 +1,14 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "messages": [
+    {
+      "content": "Hello!",
+      "role": "user"
+    }
+  ],
+  "model": "test-model",
+  "stream": false
+}

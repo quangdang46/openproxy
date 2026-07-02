@@ -874,6 +874,30 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
                 ProviderExecutorConfig::openai("https://copilot.tencent.com/v1"),
             ),
             (
+                "codebuddy-cn",
+                ProviderExecutorConfig::openai("https://api.codebuddy.cn/v1"),
+            ),
+            (
+                "gemini-cli",
+                ProviderExecutorConfig::gemini("https://cloudcode-pa.googleapis.com/v1internal"),
+            ),
+            (
+                "iflow",
+                ProviderExecutorConfig::openai("https://apis.iflow.cn/v1"),
+            ),
+            (
+                "mimo-free",
+                ProviderExecutorConfig::openai("https://mimo.kiro.dev/v1"),
+            ),
+            (
+                "qoder",
+                ProviderExecutorConfig::openai("https://api.qoder.com/v1"),
+            ),
+            (
+                "qwen",
+                ProviderExecutorConfig::openai("https://portal.qwen.ai/v1"),
+            ),
+            (
                 "kilocode",
                 ProviderExecutorConfig::openai("https://api.kilo.ai/api/openrouter/v1"),
             ),
@@ -1050,6 +1074,22 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             (
                 "comfyui",
                 ProviderExecutorConfig::openai("http://127.0.0.1:8188"),
+            ),
+            (
+                "lm-studio",
+                ProviderExecutorConfig::openai("http://localhost:1234/v1"),
+            ),
+            (
+                "vllm",
+                ProviderExecutorConfig::openai("http://localhost:8000/v1"),
+            ),
+            (
+                "trae",
+                ProviderExecutorConfig::openai("https://core-normal.trae.ai/api/remote/v1"),
+            ),
+            (
+                "kimchi",
+                ProviderExecutorConfig::openai("https://llm.kimchi.dev/openai/v1"),
             ),
             (
                 "huggingface",
@@ -1474,6 +1514,16 @@ pub fn get_api_key_providers() -> Vec<&'static str> {
         "runwayml",
         "sdwebui",
         "comfyui",
+        "lm-studio",
+        "vllm",
+        "codebuddy-cn",
+        "gemini-cli",
+        "iflow",
+        "mimo-free",
+        "qoder",
+        "qwen",
+        "trae",
+        "kimchi",
         "huggingface",
         "jina-ai",
         "linkup",

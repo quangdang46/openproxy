@@ -1,0 +1,9 @@
+---
+source: src/core/translator/tests.rs
+expression: b
+---
+{
+  "messages": [],
+  "model": "test-model",
+  "stream": false
+}

@@ -228,6 +228,14 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         ("comfyui", ProviderConfig::openai("http://127.0.0.1:8188")),
         (
+            "lm-studio",
+            ProviderConfig::openai("http://localhost:1234/v1/chat/completions"),
+        ),
+        (
+            "vllm",
+            ProviderConfig::openai("http://localhost:8000/v1/chat/completions"),
+        ),
+        (
             "huggingface",
             ProviderConfig::openai("https://api-inference.huggingface.co"),
         ),

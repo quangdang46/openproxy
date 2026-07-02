@@ -12,9 +12,59 @@ services:
       - HOST=0.0.0.0
       - JWT_SECRET=${JWT_SECRET:-}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+      # When deploying behind nginx/Caddy/Traefik, set TRUST_PROXY=true
+      # so the server reads X-Forwarded-For / X-Forwarded-Proto from the
+      # trusted proxy rather than stripping them.
+      - TRUST_PROXY=${TRUST_PROXY:-false}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4623/health"]
       interval: 30s
       timeout: 3s
       retries: 3
       start_period: 5s
+
+# ──────────────────────────────────────────────────────────────────────
+# Reverse-proxy deployment notes
+# ──────────────────────────────────────────────────────────────────────
+#
+# 1. Set TRUST_PROXY=true to preserve client IP from reverse-proxy
+#    forwarding headers (default false for security).
+#
+# 2. CORS: The embedded Axum server already sets:
+#      Access-Control-Allow-Origin: *
+#      Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+#      Access-Control-Allow-Headers: Content-Type, Authorization, ...
+#    When the dashboard and API are served from the same origin via a
+#    reverse proxy, no additional CORS configuration is needed.  For
+#    cross-origin setups, add CORS headers in the reverse proxy.
+#
+# Example docker-compose behind nginx:
+#
+#   services:
+#     nginx:
+#       image: nginx:alpine
+#       ports:
+#         - "80:80"
+#         - "443:443"
+#       volumes:
+#         - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+#       depends_on:
+#         - openproxy
+#     openproxy:
+#       build: .
+#       environment:
+#         - TRUST_PROXY=true
+#         - JWT_SECRET=${JWT_SECRET:-}
+#         - ENCRYPTION_KEY=${ENCRYPTION_KEY:-}
+#       # No ports exposed — only nginx talks to openproxy internally
+#
+# For Traefik, label the openproxy service and omit the `ports` block:
+#
+#   services:
+#     openproxy:
+#       ...
+#       labels:
+#         - "traefik.enable=true"
+#         - "traefik.http.routers.openproxy.rule=Host(`proxy.example.com`)"
+#         - "traefik.http.services.openproxy.loadbalancer.server.port=4623"
+#       # No ports; Traefik reaches the container via the internal docker network

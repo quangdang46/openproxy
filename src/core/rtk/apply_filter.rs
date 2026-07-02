@@ -104,3 +104,7 @@ pub fn json_summary(text: &str) -> String {
     use crate::core::rtk::filters::JsonSummaryFilter;
     JsonSummaryFilter.apply(text)
 }
+
+pub fn smartcrusher(text: &str) -> String {
+    crate::core::rtk::smartcrusher::smartcrusher_impl(text)
+}

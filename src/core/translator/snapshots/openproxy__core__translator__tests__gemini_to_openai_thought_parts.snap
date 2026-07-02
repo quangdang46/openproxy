@@ -1,0 +1,19 @@
+---
+source: src/core/translator/tests.rs
+expression: result
+---
+{
+  "messages": [
+    {
+      "content": "Think step by step: 23 * 45",
+      "role": "user"
+    },
+    {
+      "content": "The answer is 1035.",
+      "reasoning_content": "Let me compute 23 * 45 = 1035",
+      "role": "assistant"
+    }
+  ],
+  "model": "test-model",
+  "stream": false
+}

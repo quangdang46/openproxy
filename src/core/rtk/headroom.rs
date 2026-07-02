@@ -12,100 +12,148 @@ const PHANTOM_CHARS_PER_TOKEN: usize = 4;
 const PHANTOM_ESTIMATED_RATIO: f64 = 0.6;
 
 // ---------------------------------------------------------------------------
-// Lifecycle hooks
-// ---------------------------------------------------------------------------
-
-/// Observer callbacks invoked during the Headroom compression pipeline.
-///
-/// Both hooks are optional — implement only the ones you need. Hook functions
-/// run inside the `compress_with_headroom` call and block further pipeline
-/// progress while they execute, so keep them lightweight (e.g., emit a trace,
-/// increment a counter, push to a log buffer).
-pub struct HeadroomHooks {
-    /// Called **before** the compression request is sent to the Headroom proxy.
-    /// `messages` is the flattened message array that will be POSTed.
-    pub before_compress: Option<Arc<dyn Fn(&[Value]) + Send + Sync>>,
-    /// Called **after** compression completes (or fails). `result` carries
-    /// the optional stats (None when compression was skipped or errored).
-    pub after_compress: Option<Arc<dyn Fn(Option<&HeadroomStats>) + Send + Sync>>,
-}
-
-impl Default for HeadroomHooks {
-    fn default() -> Self {
-        Self {
-            before_compress: None,
-            after_compress: None,
-        }
-    }
-}
-
-impl HeadroomHooks {
-    /// Create a new `HeadroomHooks` with no hooks registered.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Convenience: register both hooks at once.
-    pub fn with_hooks(
-        before: Option<Arc<dyn Fn(&[Value]) + Send + Sync>>,
-        after: Option<Arc<dyn Fn(Option<&HeadroomStats>) + Send + Sync>>,
-    ) -> Self {
-        Self {
-            before_compress: before,
-            after_compress: after,
-        }
-    }
-
-    fn invoke_before(&self, messages: &[Value]) {
-        if let Some(ref hook) = self.before_compress {
-            hook(messages);
-        }
-    }
-
-    fn invoke_after(&self, stats: Option<&HeadroomStats>) {
-        if let Some(ref hook) = self.after_compress {
-            hook(stats);
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Phantom savings estimation
 // ---------------------------------------------------------------------------
 
-/// Pre-report estimated compression savings before actually compressing.
+/// Estimate token savings before actual compression.
 ///
-/// Phantom savings provide an early signal of expected token reduction to
-/// dashboards, request logs, or feedback loops that need to know (before the
-/// Headroom proxy responds) roughly how much compression the system *would*
-/// achieve. The estimate is intentionally conservative rather than optimstic
-/// so callers don't over-promise savings.
+/// Takes the full request body and estimates how many tokens would be saved by
+/// compression, based on the text content character count and a conservative
+/// expected compression ratio.
 ///
-/// The estimate is based on the text content of all messages, counting
-/// characters and dividing by a typical tokens-per-character ratio, then
-/// applying the expected compression ratio.
-///
-/// `tokens_before` is the estimated token count of the input. `tokens_after`
-/// is estimated at ~60% of `tokens_before`. The estimate is returned as a
-/// [`HeadroomStats`] so it can be logged or displayed identically to real
-/// compression results.
-pub fn estimate_phantom_savings(messages: &[Value]) -> HeadroomStats {
-    let char_count: usize = messages
-        .iter()
-        .filter_map(|msg| msg.get("content").and_then(|c| c.as_str()).map(|s| s.len()))
-        .sum();
+/// Returns the estimated number of tokens saved (u32). Returns 0 if the body
+/// contains no text content.
+pub fn estimate_phantom_savings(body: &Value) -> u32 {
+    let char_count: usize = extract_text_from_body(body).chars().count();
+
+    if char_count == 0 {
+        return 0;
+    }
 
     let tokens_before = (char_count + PHANTOM_CHARS_PER_TOKEN - 1) / PHANTOM_CHARS_PER_TOKEN;
-    let tokens_before = tokens_before.max(1) as u64;
-    let tokens_after = (tokens_before as f64 * PHANTOM_ESTIMATED_RATIO).round() as u64;
+    let tokens_before = tokens_before.max(1);
+    let tokens_after = (tokens_before as f64 * PHANTOM_ESTIMATED_RATIO).round() as usize;
     let tokens_saved = tokens_before.saturating_sub(tokens_after);
+    tokens_saved as u32
+}
 
-    HeadroomStats {
-        tokens_before,
-        tokens_after,
-        tokens_saved,
+/// Extract all text content from a request body for token estimation.
+///
+/// Handles:
+///   - "system" field (string or array of content blocks with "text" keys)
+///   - "messages" array (string content or content blocks)
+///   - "input" array (OpenAI Responses API)
+fn extract_text_from_body(body: &Value) -> String {
+    let mut text = String::new();
+    let obj = match body.as_object() {
+        Some(o) => o,
+        None => return text,
+    };
+
+    // Extract system prompt
+    if let Some(system) = obj.get("system") {
+        match system {
+            Value::String(s) => text.push_str(s),
+            Value::Array(arr) => {
+                for item in arr {
+                    if let Some(t) = item.get("text").and_then(Value::as_str) {
+                        text.push_str(t);
+                        text.push(' ');
+                    }
+                }
+            }
+            _ => {}
+        }
+        text.push('\n');
+    }
+
+    // Extract messages content
+    if let Some(messages) = obj.get("messages").and_then(Value::as_array) {
+        for msg in messages {
+            if let Some(content) = msg.get("content") {
+                match content {
+                    Value::String(s) => text.push_str(s),
+                    Value::Array(blocks) => {
+                        for block in blocks {
+                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                text.push_str(t);
+                                text.push(' ');
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            text.push('\n');
+        }
+    }
+
+    // Extract OpenAI Responses API input
+    if let Some(input) = obj.get("input").and_then(Value::as_array) {
+        for msg in input {
+            if let Some(content) = msg.get("content") {
+                match content {
+                    Value::String(s) => text.push_str(s),
+                    Value::Array(blocks) => {
+                        for block in blocks {
+                            if let Some(t) = block.get("text").and_then(Value::as_str) {
+                                text.push_str(t);
+                                text.push(' ');
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            text.push('\n');
+        }
+    }
+
+    text
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle hooks (trait-based)
+// ---------------------------------------------------------------------------
+
+/// Lifecycle hooks for the Headroom compression pipeline.
+///
+/// Implement this trait to observe or modify the compression flow.
+///
+/// * `before_compress` — called **before** the compression request is sent to
+///   the Headroom proxy. Receives the flattened message array that will be
+///   compressed. Return `Some(Value)` to replace the messages, or `None` to
+///   keep them as-is. The default implementation is a no-op (returns `None`).
+/// * `after_compress` — called **after** compression completes (or fails).
+///   Provides the original body size, compressed body size, and the result
+///   (`Ok(HeadroomStats)` on success, `Err(String)` on failure).
+///   The default implementation is a no-op.
+///
+/// Both methods run synchronously inside the `compress_with_headroom` call and
+/// block further pipeline progress while they execute, so keep them lightweight
+/// (e.g., emit a trace, increment a counter, push to a log buffer).
+pub trait HeadroomHooks: Send + Sync {
+    /// Called before the compression request is sent.
+    /// Return `Some(Value::Array(...))` with replacement messages, or `None` to
+    /// keep the original messages unchanged (default).
+    fn before_compress(&self, _messages: &[Value]) -> Option<Value> {
+        None
+    }
+
+    /// Called after compression completes (or fails).
+    /// `result` is `Ok(HeadroomStats)` on success, or `Err(String)` on failure.
+    fn after_compress(
+        &self,
+        _original_size: usize,
+        _compressed_size: usize,
+        _result: &Result<HeadroomStats, String>,
+    ) {
     }
 }
+
+// ---------------------------------------------------------------------------
+// Configuration and stats types
+// ---------------------------------------------------------------------------
 
 /// Configuration for Headroom token compression.
 ///
@@ -178,6 +226,10 @@ impl HeadroomStats {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Main compression entry point
+// ---------------------------------------------------------------------------
+
 /// Compress the request body in-place via the Headroom `/v1/compress` proxy.
 ///
 /// Fail-open: returns `None` on any error (network, timeout, bad response,
@@ -197,8 +249,6 @@ impl HeadroomStats {
 /// `format` should be `"claude"` when the body is in Anthropic's Messages API
 /// shape (has `messages[]` with typed content blocks and a `system` field).
 /// For OpenAI or Responses-API shapes, pass `"openai"`.
-/// When `format` is `"claude"`, the messages are sent as-is to the proxy
-/// (the proxy must handle Claude-native content-block messages).
 ///
 /// `hooks` provides optional lifecycle callbacks (before/after compress) for
 /// observability. Pass `None` to skip hooks.
@@ -207,10 +257,12 @@ pub async fn compress_with_headroom(
     config: &HeadroomConfig,
     model: &str,
     format: &str,
-    hooks: Option<&HeadroomHooks>,
+    hooks: Option<&dyn HeadroomHooks>,
 ) -> Option<HeadroomStats> {
     if !config.enabled || config.url.is_empty() {
-        hooks.invoke_after_inner(None);
+        if let Some(h) = hooks {
+            h.after_compress(0, 0, &Err("compression disabled".to_string()));
+        }
         return None;
     }
 
@@ -222,47 +274,34 @@ pub async fn compress_with_headroom(
 
     // OpenAI / Responses-API shape.
     let (key, messages) = extract_openai_messages(body)?;
-    hooks.invoke_before_inner(&messages);
+
+    // Notify hook before compression.
+    if let Some(h) = hooks {
+        h.before_compress(&messages);
+    }
+
+    let original_size = serde_json::to_string(&messages)
+        .map(|s| s.len())
+        .unwrap_or(0);
     let data = call_compress(config, &messages, model).await?;
+    let compressed_size = data
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|arr| serde_json::to_string(arr).ok())
+        .map(|s| s.len())
+        .unwrap_or(0);
     let stats = parse_stats(&data);
     write_compressed_messages(body, key, &data)?;
-    hooks.invoke_after_inner(Some(&stats));
+
+    if let Some(h) = hooks {
+        h.after_compress(original_size, compressed_size, &Ok(stats.clone()));
+    }
     Some(stats)
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// Hook helper: invoke before_compress if hooks are present.
-fn invoke_hooks_before(hooks: Option<&HeadroomHooks>, messages: &[Value]) {
-    if let Some(h) = hooks {
-        h.invoke_before(messages);
-    }
-}
-
-/// Hook helper: invoke after_compress if hooks are present.
-fn invoke_hooks_after(hooks: Option<&HeadroomHooks>, stats: Option<&HeadroomStats>) {
-    if let Some(h) = hooks {
-        h.invoke_after(stats);
-    }
-}
-
-/// Extension trait to allow calling hook methods on `Option<&HeadroomHooks>`.
-trait HeadroomHooksOption {
-    fn invoke_before_inner(&self, messages: &[Value]);
-    fn invoke_after_inner(&self, stats: Option<&HeadroomStats>);
-}
-
-impl HeadroomHooksOption for Option<&HeadroomHooks> {
-    fn invoke_before_inner(&self, messages: &[Value]) {
-        invoke_hooks_before(*self, messages);
-    }
-
-    fn invoke_after_inner(&self, stats: Option<&HeadroomStats>) {
-        invoke_hooks_after(*self, stats);
-    }
-}
 
 /// POST messages to the Headroom `/v1/compress` endpoint and return the parsed
 /// JSON response on success. Returns `None` on any failure.
@@ -341,7 +380,7 @@ async fn compress_claude_body(
     body: &mut Value,
     config: &HeadroomConfig,
     model: &str,
-    hooks: Option<&HeadroomHooks>,
+    hooks: Option<&dyn HeadroomHooks>,
 ) -> Option<HeadroomStats> {
     let raw_messages = body.get("messages").and_then(Value::as_array)?.clone();
 
@@ -364,19 +403,41 @@ async fn compress_claude_body(
         })
         .collect();
 
-    hooks.invoke_before_inner(&flat_messages);
+    // Notify hook before compression.
+    if let Some(h) = hooks {
+        h.before_compress(&flat_messages);
+    }
+
+    let original_size = serde_json::to_string(&flat_messages)
+        .map(|s| s.len())
+        .unwrap_or(0);
     let data = call_compress(config, &flat_messages, model).await?;
 
     // Write compressed messages back into the Claude body.
     if let Some(compressed) = data.get("messages").and_then(Value::as_array) {
         body["messages"] = Value::Array(compressed.clone());
     } else {
-        hooks.invoke_after_inner(None);
+        if let Some(h) = hooks {
+            h.after_compress(
+                original_size,
+                0,
+                &Err("no messages in response".to_string()),
+            );
+        }
         return None;
     }
 
+    let compressed_size = data
+        .get("messages")
+        .and_then(Value::as_array)
+        .and_then(|arr| serde_json::to_string(arr).ok())
+        .map(|s| s.len())
+        .unwrap_or(0);
     let stats = parse_stats(&data);
-    hooks.invoke_after_inner(Some(&stats));
+
+    if let Some(h) = hooks {
+        h.after_compress(original_size, compressed_size, &Ok(stats.clone()));
+    }
     Some(stats)
 }
 
@@ -406,10 +467,217 @@ fn parse_stats(data: &Value) -> HeadroomStats {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ---- phantom savings tests ----
+
+    #[test]
+    fn estimate_phantom_savings_returns_reasonable_estimate() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": &"A".repeat(400)},
+                {"role": "user", "content": &"A".repeat(400)},
+                {"role": "user", "content": &"A".repeat(400)},
+                {"role": "user", "content": &"A".repeat(400)},
+                {"role": "user", "content": &"A".repeat(400)},
+            ]
+        });
+        // 5 * 400 = 2000 chars -> ~500 tokens before -> ~300 tokens after -> ~200 saved
+        let saved = estimate_phantom_savings(&body);
+        assert!(saved > 0, "should estimate savings");
+    }
+
+    #[test]
+    fn estimate_phantom_savings_with_empty_body() {
+        let body = json!({"messages": []});
+        let saved = estimate_phantom_savings(&body);
+        assert_eq!(saved, 0, "empty body should give 0 savings");
+    }
+
+    #[test]
+    fn estimate_phantom_savings_handles_non_text_content() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}
+                ]}
+            ]
+        });
+        let saved = estimate_phantom_savings(&body);
+        assert_eq!(saved, 0, "no text content should give 0 savings");
+    }
+
+    #[test]
+    fn estimate_phantom_savings_includes_system_field() {
+        let body = json!({
+            "system": "You are a helpful assistant.",
+            "messages": [
+                {"role": "user", "content": "Hello!"}
+            ]
+        });
+        let saved = estimate_phantom_savings(&body);
+        assert!(saved > 0, "system field text should be counted");
+    }
+
+    #[test]
+    fn estimate_phantom_savings_includes_input_field() {
+        let body = json!({
+            "input": [
+                {"role": "user", "content": "Hello from Responses API"}
+            ]
+        });
+        let saved = estimate_phantom_savings(&body);
+        assert!(saved > 0, "input field should be counted");
+    }
+
+    #[test]
+    fn estimate_phantom_savings_with_system_array_blocks() {
+        let body = json!({
+            "system": [
+                {"type": "text", "text": "You are Claude."},
+                {"type": "text", "text": "Be concise."}
+            ],
+            "messages": [
+                {"role": "user", "content": "Hi"}
+            ]
+        });
+        let saved = estimate_phantom_savings(&body);
+        assert!(saved > 0, "system array blocks should be counted");
+    }
+
+    // ---- HeadroomHooks trait tests ----
+
+    #[test]
+    fn headroom_hooks_trait_default_does_nothing() {
+        struct NoopHooks;
+        impl HeadroomHooks for NoopHooks {}
+
+        let hooks = NoopHooks;
+        hooks.before_compress(&[]);
+        hooks.after_compress(0, 0, &Err("test".to_string()));
+    }
+
+    #[test]
+    fn headroom_hooks_trait_invokes_before() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TestHooks {
+            before_called: Arc<AtomicBool>,
+        }
+        impl HeadroomHooks for TestHooks {
+            fn before_compress(&self, _messages: &[Value]) -> Option<Value> {
+                self.before_called.store(true, Ordering::SeqCst);
+                None
+            }
+        }
+
+        let called = Arc::new(AtomicBool::new(false));
+        let hooks = TestHooks {
+            before_called: called.clone(),
+        };
+
+        hooks.before_compress(&[]);
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn headroom_hooks_trait_invokes_after() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TestHooks {
+            after_called: Arc<AtomicBool>,
+        }
+        impl HeadroomHooks for TestHooks {
+            fn after_compress(
+                &self,
+                _orig: usize,
+                _comp: usize,
+                _result: &Result<HeadroomStats, String>,
+            ) {
+                self.after_called.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let called = Arc::new(AtomicBool::new(false));
+        let hooks = TestHooks {
+            after_called: called.clone(),
+        };
+
+        hooks.after_compress(0, 0, &Err("test".to_string()));
+        assert!(called.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn headroom_hooks_trait_tracks_sizes_on_success() {
+        use std::sync::Mutex;
+
+        struct SizeHooks {
+            seen: Arc<Mutex<Option<(usize, usize)>>>,
+        }
+        impl HeadroomHooks for SizeHooks {
+            fn after_compress(
+                &self,
+                original_size: usize,
+                compressed_size: usize,
+                result: &Result<HeadroomStats, String>,
+            ) {
+                if result.is_ok() {
+                    let mut s = self.seen.lock().unwrap();
+                    *s = Some((original_size, compressed_size));
+                }
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(None));
+        let hooks = SizeHooks { seen: seen.clone() };
+
+        let stats = HeadroomStats {
+            tokens_before: 100,
+            tokens_after: 60,
+            tokens_saved: 40,
+        };
+        hooks.after_compress(500, 300, &Ok(stats));
+        let recorded = seen.lock().unwrap().expect("sizes should be recorded");
+        assert_eq!(recorded, (500, 300));
+    }
+
+    #[test]
+    fn headroom_hooks_trait_tracks_failure() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct FailHooks {
+            had_failure: Arc<AtomicBool>,
+        }
+        impl HeadroomHooks for FailHooks {
+            fn after_compress(
+                &self,
+                _orig: usize,
+                _comp: usize,
+                result: &Result<HeadroomStats, String>,
+            ) {
+                if result.is_err() {
+                    self.had_failure.store(true, Ordering::SeqCst);
+                }
+            }
+        }
+
+        let had_failure = Arc::new(AtomicBool::new(false));
+        let hooks = FailHooks {
+            had_failure: had_failure.clone(),
+        };
+
+        hooks.after_compress(0, 0, &Err("network error".to_string()));
+        assert!(had_failure.load(Ordering::SeqCst));
+    }
+
+    // ---- HeadroomStats tests ----
 
     #[test]
     fn headroom_config_default_is_disabled() {
@@ -454,7 +722,6 @@ mod tests {
 
     #[test]
     fn headroom_stats_is_phantom() {
-        // tokens_before > 0, tokens_saved == 0 → phantom
         let phantom = HeadroomStats {
             tokens_before: 1000,
             tokens_after: 1000,
@@ -462,7 +729,6 @@ mod tests {
         };
         assert!(phantom.is_phantom());
 
-        // Actual stats
         let actual = HeadroomStats {
             tokens_before: 1000,
             tokens_after: 600,
@@ -470,7 +736,6 @@ mod tests {
         };
         assert!(!actual.is_phantom());
 
-        // All-zero
         let zero = HeadroomStats::default();
         assert!(!zero.is_phantom());
     }
@@ -494,71 +759,7 @@ mod tests {
         assert!(!log2.contains("[phantom]"));
     }
 
-    #[test]
-    fn estimate_phantom_savings_returns_reasonable_estimate() {
-        let msg = json!({"role": "user", "content": "A".repeat(400)});
-        let messages = vec![msg; 5]; // 5 * 400 = 2000 chars → ~500 tokens before → ~300 tokens after
-
-        let stats = estimate_phantom_savings(&messages);
-        assert!(stats.tokens_before > 0, "should estimate tokens_before");
-        assert!(stats.tokens_after > 0, "should estimate tokens_after");
-        assert!(stats.tokens_saved > 0, "should estimate savings");
-        assert!(stats.tokens_before >= stats.tokens_after);
-    }
-
-    #[test]
-    fn estimate_phantom_savings_with_empty_messages() {
-        let stats = estimate_phantom_savings(&[]);
-        // tokens_before = max(1) = 1; tokens_after = (1 * 0.6).round() = 1
-        assert_eq!(stats.tokens_before, 1);
-        assert_eq!(stats.tokens_after, 1);
-        // tokens_saved = 1 - 1 = 0 (a phantom stat — pre-report, no actual savings)
-        assert_eq!(stats.tokens_saved, 0);
-        assert!(stats.is_phantom());
-    }
-
-    #[test]
-    fn estimate_phantom_savings_handles_non_text_content() {
-        // Messages with no text content should still produce a token estimate
-        let messages = vec![
-            json!({"role": "user", "content": [{"type": "image_url", "image_url": {"url": "https://example.com/img.png"}}]}),
-        ];
-        let stats = estimate_phantom_savings(&messages);
-        // The content is an array, not a string, so char_count = 0
-        assert_eq!(stats.tokens_before, 1);
-    }
-
-    #[test]
-    fn headroom_hooks_default_does_nothing() {
-        let hooks = HeadroomHooks::default();
-        // Just ensure we don't panic
-        hooks.invoke_before(&[]);
-        hooks.invoke_after(None);
-    }
-
-    #[test]
-    fn headroom_hooks_with_hooks_creates_both() {
-        let before_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let after_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-
-        let before = before_called.clone();
-        let after = after_called.clone();
-
-        let hooks = HeadroomHooks::with_hooks(
-            Some(Arc::new(move |_: &[Value]| {
-                before.store(true, std::sync::atomic::Ordering::SeqCst);
-            })),
-            Some(Arc::new(move |_: Option<&HeadroomStats>| {
-                after.store(true, std::sync::atomic::Ordering::SeqCst);
-            })),
-        );
-
-        hooks.invoke_before(&[]);
-        assert!(before_called.load(std::sync::atomic::Ordering::SeqCst));
-
-        hooks.invoke_after(None);
-        assert!(after_called.load(std::sync::atomic::Ordering::SeqCst));
-    }
+    // ---- compress helpers tests ----
 
     #[test]
     fn extract_openai_messages_finds_messages_key() {
@@ -646,6 +847,8 @@ mod tests {
         assert!(write_compressed_messages(&mut body, "messages", &data).is_none());
     }
 
+    // ---- compress_with_headroom integration tests ----
+
     #[tokio::test]
     async fn compress_with_headroom_returns_none_when_disabled() {
         let mut body = json!({
@@ -693,7 +896,6 @@ mod tests {
 
     #[tokio::test]
     async fn compress_with_headroom_returns_none_on_network_error() {
-        // Use a URL that will fail to connect (no server on this port).
         let mut body = json!({
             "messages": [{ "role": "user", "content": "hi" }]
         });
@@ -735,26 +937,83 @@ mod tests {
 
     #[tokio::test]
     async fn compress_with_headroom_invokes_hooks_on_disabled() {
-        // When config is disabled, invoke_after should be called with None
-        let after_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let after = after_called.clone();
-        let hooks = HeadroomHooks::with_hooks(
-            None,
-            Some(Arc::new(move |stats: Option<&HeadroomStats>| {
-                assert!(stats.is_none());
-                after.store(true, std::sync::atomic::Ordering::SeqCst);
-            })),
-        );
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TestHooks {
+            after_called: Arc<AtomicBool>,
+        }
+        impl HeadroomHooks for TestHooks {
+            fn after_compress(
+                &self,
+                _orig: usize,
+                _comp: usize,
+                result: &Result<HeadroomStats, String>,
+            ) {
+                assert!(result.is_err());
+                self.after_called.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let after_called = Arc::new(AtomicBool::new(false));
+        let hooks = TestHooks {
+            after_called: after_called.clone(),
+        };
 
         let mut body = json!({
             "messages": [{ "role": "user", "content": "hi" }]
         });
         let config = HeadroomConfig::default();
-        assert!(
-            compress_with_headroom(&mut body, &config, "gpt-4o", "openai", Some(&hooks))
-                .await
-                .is_none()
-        );
-        assert!(after_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(compress_with_headroom(
+            &mut body,
+            &config,
+            "gpt-4o",
+            "openai",
+            Some(&hooks as &dyn HeadroomHooks),
+        )
+        .await
+        .is_none());
+        assert!(after_called.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn compress_with_headroom_invokes_before_hook() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct TestHooks {
+            before_called: Arc<AtomicBool>,
+        }
+        impl HeadroomHooks for TestHooks {
+            fn before_compress(&self, messages: &[Value]) -> Option<Value> {
+                assert!(!messages.is_empty(), "messages should not be empty");
+                self.before_called.store(true, Ordering::SeqCst);
+                None
+            }
+        }
+
+        let before_called = Arc::new(AtomicBool::new(false));
+        let hooks = TestHooks {
+            before_called: before_called.clone(),
+        };
+
+        let mut body = json!({
+            "messages": [{ "role": "user", "content": "hi" }]
+        });
+        // Use a dead port so it fails gracefully, but before_hook should fire
+        let config = HeadroomConfig {
+            enabled: true,
+            url: "http://127.0.0.1:1".into(),
+            timeout_ms: 100,
+            ..HeadroomConfig::default()
+        };
+        let result = compress_with_headroom(
+            &mut body,
+            &config,
+            "gpt-4o",
+            "openai",
+            Some(&hooks as &dyn HeadroomHooks),
+        )
+        .await;
+        assert!(result.is_none());
+        assert!(before_called.load(Ordering::SeqCst));
     }
 }

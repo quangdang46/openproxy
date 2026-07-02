@@ -20,4 +20,5 @@ pub mod cache;
 pub mod chat;
 pub mod circuit_breaker;
 pub mod eval;
+pub mod guardrails;
 pub mod tls;

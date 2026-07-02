@@ -51,7 +51,7 @@
     "gitlab": "gitlab",
     "codebuddy": "codebuddy",
     "codebuddy-cn": "codebuddy-cn",
-    "mimo-free": "mimo-free",
+    "mimo-free": "mmf",
     "opencode-go": "opencode-go",
     "grok-web": "grok-web",
     "perplexity-web": "perplexity-web",
@@ -71,6 +71,7 @@
     "ovhcloud": "ovhcloud",
     "wandb": "wandb",
     "kilo-gateway": "kg",
+    "kimchi": "kimchi",
     "v0-vercel": "v0",
     "alibaba": "ali",
     "alibaba-cn": "ali-cn",
@@ -463,13 +464,43 @@
       "alias": "ag",
       "models": [
         {
-          "id": "gemini-3.1-pro-high",
-          "name": "Gemini 3 Pro High",
+          "id": "gemini-3.5-flash-agent",
+          "name": "Gemini 3.5 Flash (High)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.5-flash-low",
+          "name": "Gemini 3.5 Flash (Medium)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.5-flash-extra-low",
+          "name": "Gemini 3.5 Flash (Low)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-pro-agent",
+          "name": "Gemini 3.1 Pro (High)",
           "kind": "llm"
         },
         {
           "id": "gemini-3.1-pro-low",
-          "name": "Gemini 3 Pro Low",
+          "name": "Gemini 3.1 Pro (Low)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4-6-thinking",
+          "name": "Claude Opus 4.6 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-oss-120b-medium",
+          "name": "GPT-OSS 120B (Medium)",
           "kind": "llm"
         },
         {
@@ -478,19 +509,9 @@
           "kind": "llm"
         },
         {
-          "id": "claude-sonnet-4-6",
-          "name": "Claude Sonnet 4.6",
-          "kind": "llm"
-        },
-        {
-          "id": "claude-opus-4-6-thinking",
-          "name": "Claude Opus 4.6 Thinking",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-oss-120b-medium",
-          "name": "GPT OSS 120B Medium",
-          "kind": "llm"
+          "id": "gemini-3.1-flash-image",
+          "name": "Gemini 3.1 Flash (Image)",
+          "kind": "image"
         }
       ]
     },
@@ -765,6 +786,51 @@
         {
           "id": "kimi-k2.6",
           "name": "Kimi K2.6",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "alias": "kimchi",
+      "models": [
+        {
+          "id": "minimax-m3",
+          "name": "MiniMax-M3",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.7",
+          "name": "Kimi-K2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi-K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi-K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "nemotron-3-ultra-fp4",
+          "name": "Nemotron 3 Ultra FP4",
+          "kind": "llm"
+        },
+        {
+          "id": "minimax-m2.7",
+          "name": "MiniMax-M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4-6",
+          "name": "Claude Opus 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
           "kind": "llm"
         }
       ]
@@ -2230,6 +2296,16 @@
       ]
     },
     {
+      "alias": "mmf",
+      "models": [
+        {
+          "id": "mimo-auto",
+          "name": "MiMo Auto",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
       "alias": "hyperbolic",
       "models": [
         {
@@ -3507,9 +3583,79 @@
       "alias": "venice",
       "models": [
         {
-          "id": "venice-latest",
-          "name": "venice-latest",
+          "id": "venice-uncensored-1-2",
+          "name": "Venice Uncensored 1.2",
           "kind": "llm"
+        },
+        {
+          "id": "zai-org-glm-5",
+          "name": "GLM-5",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-235b-a22b-instruct-2507",
+          "name": "Qwen3 235B A22B Instruct",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-480b-a35b-instruct-turbo",
+          "name": "Qwen3 Coder 480B A35B Turbo",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-vl-235b-a22b",
+          "name": "Qwen3 VL 235B A22B",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "llama-3.3-70b",
+          "name": "Llama 3.3 70B",
+          "kind": "llm"
+        },
+        {
+          "id": "hermes-3-llama-3.1-405b",
+          "name": "Hermes 3 Llama 3.1 405B",
+          "kind": "llm"
+        },
+        {
+          "id": "mistral-small-3-2-24b-instruct",
+          "name": "Mistral Small 3.2 24B",
+          "kind": "llm"
+        },
+        {
+          "id": "text-embedding-3-large",
+          "name": "Text Embedding 3 Large",
+          "kind": "embedding"
+        },
+        {
+          "id": "text-embedding-bge-m3",
+          "name": "BGE-M3 Embedding",
+          "kind": "embedding"
+        },
+        {
+          "id": "text-embedding-qwen3-8b",
+          "name": "Qwen3 8B Embedding",
+          "kind": "embedding"
+        },
+        {
+          "id": "venice-sd35",
+          "name": "Venice SD3.5",
+          "kind": "image"
+        },
+        {
+          "id": "flux-2-pro",
+          "name": "FLUX.2 Pro",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2",
+          "name": "GPT Image 2 (via Venice)",
+          "kind": "image"
         }
       ]
     },
@@ -3813,6 +3959,18 @@
       "serviceKinds": [
         "llm",
         "webSearch"
+      ],
+      "ttsModels": [],
+      "embeddingModels": [],
+      "hasSearch": false,
+      "hasFetch": false
+    },
+    {
+      "id": "kimchi",
+      "alias": "kimchi",
+      "serviceKinds": [
+        "llm",
+        "imageToText"
       ],
       "ttsModels": [],
       "embeddingModels": [],
@@ -4608,10 +4766,16 @@
       "id": "venice",
       "alias": "venice",
       "serviceKinds": [
-        "llm"
+        "llm",
+        "embedding",
+        "image"
       ],
       "ttsModels": [],
-      "embeddingModels": [],
+      "embeddingModels": [
+        "text-embedding-3-large",
+        "text-embedding-bge-m3",
+        "text-embedding-qwen3-8b"
+      ],
       "hasSearch": false,
       "hasFetch": false
     },
@@ -4683,7 +4847,7 @@
     },
     {
       "id": "mimo-free",
-      "alias": "mimo-free",
+      "alias": "mmf",
       "serviceKinds": [
         "llm"
       ],

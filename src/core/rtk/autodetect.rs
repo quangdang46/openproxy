@@ -7,6 +7,7 @@ use crate::core::rtk::filters::{
     json_summary_impl, ls_impl, read_numbered_impl, search_list_impl, smart_truncate_impl,
     test_runner_impl, tree_impl, READ_NUMBERED_LINE_RE, SEARCH_LIST_HEADER_RE,
 };
+use crate::core::rtk::smartcrusher::SmartCrusher;
 
 static RE_GIT_DIFF: Lazy<Regex> = Lazy::new(|| Regex::new(r"diff --git").unwrap());
 static RE_GIT_DIFF_HUNK: Lazy<Regex> = Lazy::new(|| Regex::new(r"@@ ").unwrap());
@@ -160,6 +161,19 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
             return Some(DetectedFilter {
                 filter_fn: json_summary_impl,
                 filter_name: FILTER_JSON_SUMMARY,
+            });
+        }
+    }
+
+    // SmartCrusher tabular data detector: catches CSV, TSV, pipe-separated,
+    // and JSON arrays of objects. Runs before dedup-log because tabular data
+    // gets better compression through GCF/TOON than deduplication alone.
+    // Only activates on bodies >= 500 B (same MIN_COMPRESS_SIZE threshold).
+    if text.len() >= MIN_COMPRESS_SIZE {
+        if let Some(table_type) = SmartCrusher::detect(text) {
+            return Some(DetectedFilter {
+                filter_fn: crate::core::rtk::apply_filter::smartcrusher,
+                filter_name: table_type.filter_name(),
             });
         }
     }
