@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use axum::{
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::post,
@@ -15,7 +16,10 @@ pub fn routes() -> Router<AppState> {
     Router::new().route("/api/shutdown", post(shutdown))
 }
 
-async fn shutdown(headers: HeaderMap) -> Response {
+async fn shutdown(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     if std::env::var("NODE_ENV").ok().as_deref() == Some("production") {
         return (
             StatusCode::FORBIDDEN,
@@ -49,9 +53,10 @@ async fn shutdown(headers: HeaderMap) -> Response {
             .into_response();
     }
 
-    tokio::spawn(async {
+    // Give the response a moment to be sent before the server shuts down.
+    tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        std::process::exit(0);
+        state.signal_shutdown();
     });
 
     Json(json!({

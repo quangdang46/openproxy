@@ -2,19 +2,23 @@ use std::sync::Arc;
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
+use uuid::Uuid;
 
 use crate::core::config::app_constants::{
     gemini_cli_client_metadata, gemini_cli_user_agent, GEMINI_CLI_API_CLIENT,
     INTERNAL_REQUEST_HEADER_NAME, INTERNAL_REQUEST_HEADER_VALUE,
 };
 use crate::core::proxy::ProxyTarget;
+use crate::core::utils::session_manager::derive_session_id;
 use crate::types::{ProviderConnection, ProviderNode};
 
 use super::project_id_cache::lookup_project_id;
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const GEMINI_CLI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// Cloud Code Assist API base URL used for OAuth (Bearer) mode.
+const CLOUD_CODE_ASSIST_BASE_URL: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
 #[derive(Clone)]
@@ -125,6 +129,17 @@ impl GeminiCliExecutor {
         }
     }
 
+    /// Build the Cloud Code Assist API URL for OAuth (Bearer) mode.
+    /// Uses the internal v1internal path on cloudcode-pa.googleapis.com.
+    fn build_cloud_code_url(stream: bool) -> String {
+        let action = if stream {
+            "streamGenerateContent?alt=sse"
+        } else {
+            "generateContent"
+        };
+        format!("{CLOUD_CODE_ASSIST_BASE_URL}:{action}")
+    }
+
     /// Detect whether this connection uses OAuth (Bearer) or API-key auth.
     fn is_oauth(credentials: &ProviderConnection) -> bool {
         credentials
@@ -137,16 +152,18 @@ impl GeminiCliExecutor {
     /// Build headers for OAuth (Bearer) mode, as emitted by the real
     /// Gemini CLI SDK.
     ///
-    /// | Header             | Value                                              |
-    /// |--------------------|----------------------------------------------------|
-    /// | Authorization      | Bearer {access_token}                              |
-    /// | User-Agent         | gemini-cli/0.34.0/{model} ({os}; {arch}; terminal) |
-    /// | X-Goog-Api-Client  | google-genai-sdk/1.41.0 gl-node/v22.19.0           |
-    /// | Client-Metadata    | {"ideType":9,"platform":<enum>,"pluginType":2}     |
+    /// | Header                | Value                                              |
+    /// |-----------------------|----------------------------------------------------|
+    /// | Authorization         | Bearer {access_token}                              |
+    /// | User-Agent            | gemini-cli/0.34.0/{model} ({os}; {arch}; terminal) |
+    /// | X-Goog-Api-Client     | google-genai-sdk/1.41.0 gl-node/v22.19.0           |
+    /// | Client-Metadata       | {"ideType":9,"platform":<enum>,"pluginType":2}     |
+    /// | X-Machine-Session-Id  | {session_id} (when provided)                       |
     fn build_gemini_cli_headers(
         access_token: &str,
         stream: bool,
         model: &str,
+        session_id: Option<&str>,
     ) -> Result<HeaderMap, GeminiCliExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -167,6 +184,13 @@ impl GeminiCliExecutor {
         let metadata_str = serde_json::to_string(&metadata).unwrap_or_default();
         if !metadata_str.is_empty() {
             headers.insert("Client-Metadata", HeaderValue::from_str(&metadata_str)?);
+        }
+
+        // X-Machine-Session-Id: required by Cloud Code Assist API.
+        if let Some(sid) = session_id {
+            if !sid.is_empty() {
+                headers.insert("X-Machine-Session-Id", HeaderValue::from_str(sid)?);
+            }
         }
 
         headers.insert(
@@ -226,12 +250,16 @@ impl GeminiCliExecutor {
     }
 
     /// Transform the request body:
-    /// - OAuth mode: inject `project` from the ProjectIdCache.
+    /// - OAuth mode: inject `project`, `requestId`, `sessionId`, `userAgent`
+    ///   for the Cloud Code Assist API.
     /// - API-key mode (existing behaviour): inject `project` from
     ///   `provider_specific_data["projectId"]` if present.
-    fn transform_request(&self, body: &Value, credentials: &ProviderConnection) -> Value {
+    ///
+    /// Returns the transformed body and the derived session_id (OAuth mode only).
+    fn transform_request(&self, body: &Value, credentials: &ProviderConnection) -> (Value, Option<String>) {
         let is_oauth = Self::is_oauth(credentials);
-        self.transform_request_inner(body, credentials, is_oauth)
+        let (transformed, session_id) = self.transform_request_inner(body, credentials, is_oauth);
+        (transformed, if is_oauth { session_id } else { None })
     }
 
     fn transform_request_inner(
@@ -239,27 +267,46 @@ impl GeminiCliExecutor {
         body: &Value,
         credentials: &ProviderConnection,
         is_oauth: bool,
-    ) -> Value {
+    ) -> (Value, Option<String>) {
         let mut transformed = body.clone();
 
-        if transformed.get("project").is_some() {
-            return transformed;
-        }
-
         if is_oauth {
-            // OAuth mode: resolve projectId via the cache (which checks
-            // provider_specific_data, ProviderConnection.project_id, etc.)
-            if let Some(project_id) = lookup_project_id(credentials) {
-                transformed["project"] = Value::String(project_id);
+            // OAuth mode: wrap for Cloud Code Assist API.
+            // Inject project from cache.
+            if transformed.get("project").is_none() {
+                if let Some(project_id) = lookup_project_id(credentials) {
+                    transformed["project"] = Value::String(project_id);
+                }
             }
+
+            // Inject requestId (per-request UUID).
+            if transformed.get("requestId").is_none() {
+                transformed["requestId"] = Value::String(Uuid::new_v4().to_string());
+            }
+
+            // Inject sessionId (stable per-connection).
+            if transformed.get("sessionId").is_none() {
+                let connection_id = credentials
+                    .email
+                    .as_deref()
+                    .or_else(|| credentials.id.as_str().into())
+                    .unwrap_or("");
+                let sid = derive_session_id(connection_id);
+                transformed["sessionId"] = Value::String(sid.clone());
+                return (transformed, Some(sid));
+            }
+
+            (transformed, None)
         } else {
             // API-key mode: original behaviour — read from provider_specific_data.
-            if let Some(project_id) = credentials.provider_specific_data.get("projectId") {
-                transformed["project"] = project_id.clone();
+            if transformed.get("project").is_none() {
+                if let Some(project_id) = credentials.provider_specific_data.get("projectId") {
+                    transformed["project"] = project_id.clone();
+                }
             }
-        }
 
-        transformed
+            (transformed, None)
+        }
     }
 
     pub async fn execute_request(
@@ -269,13 +316,20 @@ impl GeminiCliExecutor {
         let is_oauth = Self::is_oauth(&request.credentials);
 
         // Pick URL and headers according to auth mode.
-        let (url, headers) = if is_oauth {
+        let (url, headers, transformed_body, session_id) = if is_oauth {
+            // Cloud Code Assist API path (OAuth / Bearer mode).
             let access_token = request.credentials.access_token.as_deref().unwrap_or("");
-            let hdrs =
-                Self::build_gemini_cli_headers(access_token, request.stream, &request.model)?;
-            let url = self.build_url(&request.model, request.stream);
-            (url, hdrs)
+            let (body, sid) = self.transform_request(&request.body, &request.credentials);
+            let hdrs = Self::build_gemini_cli_headers(
+                access_token,
+                request.stream,
+                &request.model,
+                sid.as_deref(),
+            )?;
+            let url = Self::build_cloud_code_url(request.stream);
+            (url, hdrs, body, sid)
         } else {
+            // Original Gemini API path (API-key mode).
             let api_key = request.credentials.api_key.as_deref().ok_or_else(|| {
                 GeminiCliExecutorError::MissingCredentials(
                     "neither access_token nor api_key present".to_string(),
@@ -283,10 +337,9 @@ impl GeminiCliExecutor {
             })?;
             let url = self.build_url_with_api_key(&request.model, request.stream, api_key);
             let hdrs = self.build_headers(&request.credentials, request.stream, &request.model);
-            (url, hdrs)
+            let (body, _) = self.transform_request(&request.body, &request.credentials);
+            (url, hdrs, body, None)
         };
-
-        let transformed_body = self.transform_request(&request.body, &request.credentials);
 
         let client = self.pool.get("gemini-cli", request.proxy.as_ref())?;
         let response = client
@@ -385,7 +438,7 @@ mod tests {
     #[test]
     fn build_gemini_cli_headers_includes_all_expected_headers() {
         let hdrs =
-            GeminiCliExecutor::build_gemini_cli_headers("tok-test", false, "gemini-2.0-flash")
+            GeminiCliExecutor::build_gemini_cli_headers("tok-test", false, "gemini-2.0-flash", None)
                 .unwrap();
 
         assert_eq!(
@@ -428,9 +481,24 @@ mod tests {
     }
 
     #[test]
+    fn build_gemini_cli_headers_includes_machine_session_id_when_provided() {
+        let hdrs = GeminiCliExecutor::build_gemini_cli_headers(
+            "tok-test",
+            false,
+            "gemini-2.0-flash",
+            Some("my-session-id"),
+        )
+        .unwrap();
+        assert_eq!(
+            hdrs.get("x-machine-session-id").unwrap().to_str().unwrap(),
+            "my-session-id"
+        );
+    }
+
+    #[test]
     fn build_gemini_cli_headers_sets_stream_accept_for_stream() {
         let hdrs =
-            GeminiCliExecutor::build_gemini_cli_headers("tok-test", true, "gemini-2.0-flash")
+            GeminiCliExecutor::build_gemini_cli_headers("tok-test", true, "gemini-2.0-flash", None)
                 .unwrap();
         assert_eq!(
             hdrs.get("accept").unwrap().to_str().unwrap(),
@@ -439,18 +507,30 @@ mod tests {
     }
 
     #[test]
-    fn transform_request_injects_project_id_from_cache_for_oauth() {
+    fn build_cloud_code_url_picks_stream_or_unary() {
+        assert!(GeminiCliExecutor::build_cloud_code_url(true).contains("v1internal:streamGenerateContent?alt=sse"));
+        assert!(GeminiCliExecutor::build_cloud_code_url(false).contains("v1internal:generateContent"));
+    }
+
+    #[test]
+    fn transform_request_injects_cloud_code_envelope_for_oauth() {
         let executor = GeminiCliExecutor {
             pool: Arc::new(ClientPool::new()),
             provider_node: None,
         };
         let mut creds = ProviderConnection::default();
-        creds.access_token = Some("tok-transform".to_string());
+        creds.access_token = Some("tok-envelope".to_string());
         creds.project_id = Some("proj-from-cache".to_string());
 
         let body = json!({"contents": [{"parts": [{"text": "hello"}]}]});
-        let transformed = executor.transform_request_inner(&body, &creds, true);
+        let (transformed, sid) = executor.transform_request_inner(&body, &creds, true);
         assert_eq!(transformed["project"], "proj-from-cache");
+        assert!(transformed.get("requestId").is_some());
+        assert!(transformed.get("sessionId").is_some());
+        assert!(sid.is_some());
+        // requestId should be a valid UUID
+        let rid = transformed["requestId"].as_str().unwrap();
+        assert_eq!(rid.len(), 36); // UUID v4 length
     }
 
     #[test]
@@ -464,7 +544,7 @@ mod tests {
         creds.project_id = Some("proj-from-cache".to_string());
 
         let body = json!({"project": "existing-proj", "contents": []});
-        let transformed = executor.transform_request_inner(&body, &creds, true);
+        let (transformed, _) = executor.transform_request_inner(&body, &creds, true);
         assert_eq!(transformed["project"], "existing-proj");
     }
 
@@ -485,8 +565,13 @@ mod tests {
 
         let body = json!({"contents": [{"parts": [{"text": "hi"}]}]});
         // false = API key mode
-        let transformed = executor.transform_request_inner(&body, &creds, false);
+        let (transformed, sid) = executor.transform_request_inner(&body, &creds, false);
         assert_eq!(transformed["project"], "proj-psd");
+        // API-key mode: no session id returned.
+        assert!(sid.is_none());
+        // API-key mode: no Cloud Code envelope fields.
+        assert!(transformed.get("requestId").is_none());
+        assert!(transformed.get("sessionId").is_none());
     }
 
     #[test]
@@ -497,7 +582,10 @@ mod tests {
         };
         let creds = ProviderConnection::default(); // no access token, no project_id
         let body = json!({"contents": [{"parts": [{"text": "hi"}]}]});
-        let transformed = executor.transform_request_inner(&body, &creds, true);
+        let (transformed, _) = executor.transform_request_inner(&body, &creds, true);
         assert!(transformed.get("project").is_none());
+        // Cloud Code envelope fields still injected even without project.
+        assert!(transformed.get("requestId").is_some());
+        assert!(transformed.get("sessionId").is_some());
     }
 }

@@ -1,37 +1,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 
 const CLAUDE_SYSTEM_PROMPT: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 const DEFAULT_MAX_TOKENS: u32 = 64000;
 const DEFAULT_MIN_TOKENS: u32 = 32000;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolNameMap(HashMap<String, String>);
-
-impl ToolNameMap {
-    pub fn new() -> Self {
-        Self(HashMap::new())
-    }
-    pub fn insert(&mut self, prefixed: String, original: String) {
-        self.0.insert(prefixed, original);
-    }
-    pub fn get(&self, prefixed: &str) -> Option<&String> {
-        self.0.get(prefixed)
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-}
-
-impl Default for ToolNameMap {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Tool-name prefix the proxy uses when masking injected tools.
+/// Stripped on the way in so Claude sees the caller's original name.
+const PROXY_TOOL_PREFIX: &str = "proxy_";
 
 #[derive(Debug, Clone)]
 pub struct TransformResult {
@@ -43,7 +19,6 @@ pub struct TransformResult {
     pub tools: Vec<ClaudeTool>,
     pub tool_choice: Option<ClaudeToolChoice>,
     pub thinking: Option<ClaudeThinking>,
-    pub _tool_name_map: Option<ToolNameMap>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,7 +134,6 @@ fn try_parse_json<T: for<'de> Deserialize<'de>>(str: &str) -> Option<T> {
 
 fn get_content_blocks_from_message(
     msg: &Value,
-    tool_name_map: &mut ToolNameMap,
 ) -> Vec<ClaudeContentBlock> {
     let mut blocks = Vec::new();
     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
@@ -290,10 +264,14 @@ fn get_content_blocks_from_message(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        let name = part
+                        let raw_name = part
                             .get("name")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
+                            .to_string();
+                        let name = raw_name
+                            .strip_prefix(PROXY_TOOL_PREFIX)
+                            .unwrap_or(&raw_name)
                             .to_string();
                         let input = part.get("input").cloned().unwrap_or(Value::Null);
                         blocks.push(ClaudeContentBlock::ToolUse { id, name, input });
@@ -324,10 +302,14 @@ fn get_content_blocks_from_message(
                 let tc_type = tc.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if tc_type == "function" {
                     let func = tc.get("function");
-                    let name = func
+                    let raw_name = func
                         .and_then(|f| f.get("name"))
                         .and_then(|n| n.as_str())
                         .unwrap_or("")
+                        .to_string();
+                    let name = raw_name
+                        .strip_prefix(PROXY_TOOL_PREFIX)
+                        .unwrap_or(&raw_name)
                         .to_string();
                     let arguments = func
                         .and_then(|f| f.get("arguments"))
@@ -429,7 +411,6 @@ pub fn openai_to_claude_request(
         return false;
     };
 
-    let mut tool_name_map = ToolNameMap::new();
     let max_tokens = adjust_max_tokens(body_obj);
 
     let mut result_messages: Vec<ClaudeMessage> = Vec::new();
@@ -456,7 +437,10 @@ pub fn openai_to_claude_request(
 
         let non_system_messages: Vec<&Value> = messages
             .iter()
-            .filter(|m| m.get("role").and_then(|v| v.as_str()) != Some("system"))
+            .filter(|m| {
+                let role = m.get("role").and_then(|v| v.as_str()).unwrap_or("");
+                role != "system" && role != "developer"
+            })
             .collect();
 
         let mut current_role: Option<&str> = None;
@@ -484,7 +468,7 @@ pub fn openai_to_claude_request(
                 "assistant"
             };
 
-            let blocks = get_content_blocks_from_message(msg, &mut tool_name_map);
+            let blocks = get_content_blocks_from_message(msg);
             let has_tool_use = blocks
                 .iter()
                 .any(|b| matches!(b, ClaudeContentBlock::ToolUse { .. }));
@@ -655,8 +639,10 @@ pub fn openai_to_claude_request(
                 .unwrap_or("")
                 .to_string();
 
-            let tool_name = original_name.clone();
-            tool_name_map.insert(tool_name.clone(), original_name);
+            let tool_name = original_name
+                .strip_prefix(PROXY_TOOL_PREFIX)
+                .unwrap_or(&original_name)
+                .to_string();
 
             let description = func
                 .and_then(|f| f.get("description"))
@@ -761,13 +747,6 @@ pub fn openai_to_claude_request(
         result_obj.insert("thinking".into(), serde_json::to_value(&rt).unwrap());
     }
 
-    if !tool_name_map.is_empty() {
-        result_obj.insert(
-            "_toolNameMap".into(),
-            serde_json::to_value(&tool_name_map).unwrap(),
-        );
-    }
-
     if let Some(resp_format) = body_obj.get("response_format") {
         if let Some(fmt_obj) = resp_format.as_object() {
             let fmt_type = fmt_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -800,6 +779,38 @@ pub fn openai_to_claude_request(
 
     *body = Value::Object(result_obj);
     true
+}
+
+/// OpenAi-to-Claude translator variant for Antigravity.
+///
+/// Delegates to the regular `openai_to_claude_request` then strips
+/// the Claude Code system prompt from the system array, because
+/// Antigravity's own pipeline injects its own system prompt.
+pub fn openai_to_claude_request_for_antigravity(
+    model: &str,
+    body: &mut Value,
+    stream: bool,
+    _credentials: Option<&Value>,
+) -> bool {
+    let Some(body_obj) = body.as_object_mut() else {
+        return false;
+    };
+
+    // Delegate to the regular translator.
+    // After it returns, remove the CLAUDE_SYSTEM_PROMPT from the system array.
+    let result = openai_to_claude_request(model, body, stream, _credentials);
+
+    if let Some(system_arr) = body.get_mut("system").and_then(|v| v.as_array_mut()) {
+        system_arr.retain(|block| {
+            if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                !text.contains("Claude Code")
+            } else {
+                true
+            }
+        });
+    }
+
+    result
 }
 
 #[cfg(test)]

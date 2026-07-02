@@ -379,6 +379,8 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_dashboard_sidecar_url(cli.dashboard_sidecar_url.clone())
         .with_web_dir(cli.web_dir.clone());
+    // Periodic cleanup of stale HTTP client connections.
+    state.client_pool.start_periodic_cleanup();
     let app = openproxy::build_app(state);
     let addr = format!("{}:{}", cli.host, cli.port);
     info!("Starting openproxy on {}", addr);

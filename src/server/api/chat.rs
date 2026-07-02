@@ -2026,6 +2026,10 @@ async fn proxy_response_with_pending_tracking(
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
                                 .await;
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(write_streaming_error(
+                                "Upstream SSE stream stalled",
+                                "server_error",
+                            )));
                             return;
                         }
                         Ok(Ok(Some(chunk))) => {
@@ -2045,6 +2049,10 @@ async fn proxy_response_with_pending_tracking(
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
                                 .await;
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(write_streaming_error(
+                                "Upstream stream error",
+                                "server_error",
+                            )));
                             return;
                         }
                     }
@@ -2086,6 +2094,10 @@ async fn proxy_response_with_pending_tracking(
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
                                 .await;
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(write_streaming_error(
+                                "Upstream SSE stream stalled",
+                                "server_error",
+                            )));
                             return;
                         }
                         Ok(Some(result)) => result,
@@ -2127,6 +2139,10 @@ async fn proxy_response_with_pending_tracking(
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
                                 .await;
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(write_streaming_error(
+                                "Upstream stream error",
+                                "server_error",
+                            )));
                             return;
                         }
                     }
@@ -2659,6 +2675,21 @@ fn cors_preflight_response(methods: &str) -> Response {
         HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("GET, POST, OPTIONS")),
     );
     response
+}
+
+/// Produce an OpenAI-compatible SSE error chunk for mid-stream errors.
+/// Clients (Claude Code, Gemini CLI, etc.) parse error chunks and surface
+/// the message, so writing one before closing the stream lets them show
+/// a useful error instead of a generic "connection closed" message.
+fn write_streaming_error(error_msg: &str, error_type: &str) -> String {
+    let msg = serde_json::json!({
+        "error": {
+            "message": error_msg,
+            "type": error_type,
+            "code": null
+        }
+    });
+    format!("data: {}\n\n", serde_json::to_string(&msg).unwrap_or_default())
 }
 
 /// Build a bypass response — either streaming SSE (when `stream` is true) or

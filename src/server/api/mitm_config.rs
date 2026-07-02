@@ -448,6 +448,7 @@ async fn start_mitm(
         ca_key_pem: key_pem.clone(),
         capture_dir: capture_dir.clone(),
         state: state.clone(),
+        port: get_mitm_port(&state),
     };
 
     let handle = match mitm::server::start_mitm_proxy(config).await {
@@ -1595,6 +1596,14 @@ fn normalize_string(value: Option<&str>) -> String {
 
 fn status_text(status: reqwest::StatusCode) -> Option<String> {
     status.canonical_reason().map(str::to_string)
+}
+
+/// Read the configured MITM proxy port from settings.
+/// Returns `None` (OS-assigned ephemeral) if port is 0.
+fn get_mitm_port(state: &AppState) -> Option<u16> {
+    let snapshot = state.db.snapshot();
+    let port = snapshot.settings.mitm_port;
+    if port == 0 { None } else { Some(port) }
 }
 
 async fn test_vercel_relay(relay_url: &str, timeout_ms: u64) -> TestResult {

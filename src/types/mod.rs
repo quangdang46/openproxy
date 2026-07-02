@@ -361,6 +361,11 @@ pub struct Settings {
     )]
     pub mitm_router_base_url: String,
     #[serde(
+        default = "default_mitm_port",
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub mitm_port: u16,
+    #[serde(
         default = "default_true",
         deserialize_with = "deserialize_null_default"
     )]
@@ -434,6 +439,7 @@ impl Default for Settings {
             outbound_proxy_url: String::new(),
             outbound_no_proxy: String::new(),
             mitm_router_base_url: default_mitm_router_base_url(),
+            mitm_port: default_mitm_port(),
             rtk_enabled: true,
             caveman_enabled: false,
             caveman_level: default_caveman_level(),
@@ -696,6 +702,11 @@ fn default_observability_max_json_size() -> u32 {
 
 fn default_mitm_router_base_url() -> String {
     DEFAULT_MITM_ROUTER_BASE.into()
+}
+
+/// Default MITM proxy port. 0 = OS-assigned ephemeral port.
+fn default_mitm_port() -> u16 {
+    0
 }
 
 fn default_caveman_level() -> String {

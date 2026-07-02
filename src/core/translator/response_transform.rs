@@ -41,6 +41,10 @@ pub struct AnthropicStreamingState {
     /// Without this buffer, partial_json from input_json_delta events is forwarded as bare text
     /// content and tool call arguments vanish during streaming.
     pub tool_arg_buffers: std::collections::HashMap<usize, String>,
+    /// Response id/created/model from the first chunk, reused for all subsequent chunks
+    pub response_id: Option<String>,
+    pub response_created: u64,
+    pub response_model: Option<String>,
 }
 
 /// Gemini streaming state

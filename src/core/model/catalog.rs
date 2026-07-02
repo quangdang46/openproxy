@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use once_cell::sync::Lazy;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -11,12 +11,24 @@ struct ProviderCatalogFile {
     providers: Vec<ProviderCatalogProvider>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProviderCatalogModel {
     pub id: String,
     #[serde(default)]
     pub name: Option<String>,
     pub kind: String,
+    #[serde(default)]
+    pub quota_family: Option<String>,
+    #[serde(default)]
+    pub strip: Option<String>,
+    #[serde(default)]
+    pub target_format: Option<String>,
+    #[serde(default)]
+    pub upstream_model_id: Option<String>,
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,7 +38,7 @@ pub struct ProviderModelsEntry {
     pub models: Vec<ProviderCatalogModel>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderCatalogProvider {
     pub id: String,
@@ -36,6 +48,16 @@ pub struct ProviderCatalogProvider {
     pub embedding_models: Vec<String>,
     pub has_search: bool,
     pub has_fetch: bool,
+    #[serde(default)]
+    pub vision: Option<bool>,
+    #[serde(default)]
+    pub reasoning: Option<bool>,
+    #[serde(default)]
+    pub context_window: Option<u32>,
+    #[serde(default)]
+    pub max_output: Option<u32>,
+    #[serde(default)]
+    pub tools: Option<bool>,
 }
 
 #[derive(Debug)]
@@ -63,6 +85,13 @@ impl ProviderCatalog {
 
     pub fn models_for_alias(&self, alias: &str) -> Option<&[ProviderCatalogModel]> {
         self.provider_models_by_alias.get(alias).map(Vec::as_slice)
+    }
+
+    pub fn find_model(&self, provider_id: &str, model_id: &str) -> Option<&ProviderCatalogModel> {
+        let alias = self.static_alias_for_provider(provider_id)?;
+        self.models_for_alias(alias)?
+            .iter()
+            .find(|m| m.id == model_id)
     }
 
     pub fn alias_to_provider_id(&self) -> HashMap<String, String> {

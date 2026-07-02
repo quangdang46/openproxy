@@ -26,12 +26,17 @@ fn log_dir() -> PathBuf {
 /// created atomically on first write.  Every call opens, writes, and
 /// flushes — no open file handle is retained between calls so the file
 /// can be safely rotated (renamed/deleted) by an external process.
+#[allow(clippy::too_many_arguments)]
 pub fn append_request_log(
     method: &str,
     path: &str,
     status: u16,
     duration_ms: u64,
     model: Option<&str>,
+    request_id: Option<&str>,
+    token_prompt: Option<u64>,
+    token_completion: Option<u64>,
+    time_to_first_token_ms: Option<u64>,
 ) {
     if !enabled() {
         return;
@@ -53,6 +58,10 @@ pub fn append_request_log(
         "status": status,
         "duration_ms": duration_ms,
         "model": model,
+        "request_id": request_id,
+        "token_prompt": token_prompt,
+        "token_completion": token_completion,
+        "time_to_first_token_ms": time_to_first_token_ms,
     });
 
     // Open in append/create mode and write one JSON line.
@@ -118,7 +127,11 @@ pub struct RequestLog {
     method: &'static str,
     path: String,
     model: Option<String>,
+    request_id: Option<String>,
     start: Instant,
+    token_prompt: Option<u64>,
+    token_completion: Option<u64>,
+    time_to_first_token_ms: Option<u64>,
 }
 
 impl RequestLog {
@@ -135,8 +148,31 @@ impl RequestLog {
             method,
             path: path.to_owned(),
             model: model.map(str::to_string),
+            request_id: None,
             start: Instant::now(),
+            token_prompt: None,
+            token_completion: None,
+            time_to_first_token_ms: None,
         }
+    }
+
+    /// Set the X-Request-ID header value for structured logging.
+    pub fn with_request_id(mut self, request_id: Option<&str>) -> Self {
+        self.request_id = request_id.map(str::to_string);
+        self
+    }
+
+    /// Set prompt and completion token counts for structured logging.
+    pub fn with_tokens(mut self, prompt: Option<u64>, completion: Option<u64>) -> Self {
+        self.token_prompt = prompt;
+        self.token_completion = completion;
+        self
+    }
+
+    /// Set the time to first token for streaming requests.
+    pub fn with_time_to_first_token(mut self, ms: u64) -> Self {
+        self.time_to_first_token_ms = Some(ms);
+        self
     }
 
     pub fn finish(self, status: u16) {
@@ -153,6 +189,10 @@ impl RequestLog {
             status,
             elapsed,
             self.model.as_deref(),
+            self.request_id.as_deref(),
+            self.token_prompt,
+            self.token_completion,
+            self.time_to_first_token_ms,
         );
     }
 }

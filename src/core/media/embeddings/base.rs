@@ -145,10 +145,10 @@ impl EmbeddingAdapter for OpenAiCompatAdapter {
             .input()
             .ok_or_else(|| "Missing required field: input".to_string())?;
         let mut body = json!({"model": request.model, "input": input.clone()});
-        if let Some(fmt) = request.encoding_format() {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert("encoding_format".into(), json!(fmt));
-            }
+        // Default encoding_format to "float" if not specified by caller.
+        let encoding_fmt = request.encoding_format().unwrap_or("float");
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("encoding_format".into(), json!(encoding_fmt));
         }
         if let Some(dim) = request.dimensions() {
             if let Some(obj) = body.as_object_mut() {
@@ -234,6 +234,8 @@ impl EmbeddingAdapter for GeminiAdapter {
             .input()
             .ok_or_else(|| "Missing required field: input".to_string())?;
         let m = model_path(request.model);
+        // Forward dimensions as outputDimensionality for Gemini (Gemini API name).
+        let dim = request.dimensions().map(|d| json!(d));
         if let Some(arr) = input.as_array() {
             let requests: Vec<Value> = arr
                 .iter()
@@ -242,10 +244,16 @@ impl EmbeddingAdapter for GeminiAdapter {
                         Value::String(s) => s.clone(),
                         other => other.to_string(),
                     };
-                    json!({
+                    let mut req = json!({
                         "model": m,
                         "content": {"parts": [{"text": text}]},
-                    })
+                    });
+                    if let Some(ref d) = dim {
+                        if let Some(obj) = req.as_object_mut() {
+                            obj.insert("outputDimensionality".into(), d.clone());
+                        }
+                    }
+                    req
                 })
                 .collect();
             Ok(json!({"requests": requests}))
@@ -254,7 +262,13 @@ impl EmbeddingAdapter for GeminiAdapter {
                 Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            Ok(json!({"model": m, "content": {"parts": [{"text": text}]}}))
+            let mut body = json!({"model": m, "content": {"parts": [{"text": text}]}});
+            if let Some(d) = dim {
+                if let Some(obj) = body.as_object_mut() {
+                    obj.insert("outputDimensionality".into(), d);
+                }
+            }
+            Ok(body)
         }
     }
 

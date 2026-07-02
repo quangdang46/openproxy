@@ -253,6 +253,52 @@ Most operators only set `JWT_SECRET` and `INITIAL_PASSWORD` and leave the rest a
 | `ENABLE_REQUEST_LOGS` | `false` | Write per-request logs under `logs/`. |
 | `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` | _unset_ | Forward outbound provider calls through an HTTP proxy. Lowercase variants also honored. |
 
+### TOML config profiles
+
+For advanced setups (multiple OpenProxy instances, remote server management) the CLI
+reads an optional TOML profile file at `~/.config/openproxy/config.toml`
+(`%APPDATA%\openproxy\config.toml` on Windows; override via `$OPENPROXY_CONFIG`).
+
+```toml
+default_profile = "work"
+
+[profiles.work]
+data_dir = "/home/me/proxy-data"
+url = "https://proxy.example.com"
+api_key_env = "MY_PROXY_KEY"        # read API key from this env var
+
+[profiles.local]
+data_dir = "/tmp/proxy-test"
+```
+
+Resolution precedence (highest first):
+1. Explicit CLI flags (`--data-dir`, `--url`, `--api-key`, `--profile`, `--port`)
+2. `OPENPROXY_*` environment variables
+3. Selected profile (`--profile <name>` or `default_profile`)
+4. Built-in defaults
+
+Profiles are created programmatically by `openproxy auth login` / `openproxy auth logout`
+— you do not normally need to hand-edit the TOML file.
+
+### Compiled-in constants
+
+Unlike 9router, the following are **not** hot-reloadable or config-file driven.
+They are compiled into the binary and require a rebuild to change:
+
+| Constant | Source file | Default |
+|---|---|---|
+| Stream stall timeout | `src/core/config/runtime_config.rs` | 360 s (6 min) |
+| First-chunk timeout | `src/core/config/runtime_config.rs` | 200 s |
+| Default max tokens | `src/core/config/runtime_config.rs` | 64 000 |
+| Retry config (502, 503, 504) | `src/core/config/runtime_config.rs` | 2–3 attempts, 2–3 s delay |
+| Provider catalog (models, aliases) | `src/core/model/provider_catalog.json` | ~70 providers, ~200 models |
+| OAuth provider registry | `src/oauth/providers.rs` | 18 built-in OAuth configs |
+| Gemini CLI version string | `src/core/config/app_constants.rs` | `0.34.0` |
+| GitHub Copilot versions | `src/core/config/app_constants.rs` | Chat `0.38.0`, VS Code `1.110.0` |
+| Default tool-name decoys | `src/core/config/app_constants.rs` | Claude Code / Antigravity tool sets |
+| Kiro suffixes & system prompt | `src/core/config/kiro_constants.rs` | `-agentic`, `-thinking` |
+| Thinking-mode signatures | `src/core/config/default_thinking_signature.rs` | Claude, AG, Vertex, Gemini CLI |
+
 ---
 
 ## CLI reference

@@ -262,3 +262,23 @@ pub fn gemini_to_openai_response(chunk: &Value, state: &mut HashMap<String, Valu
 
     results
 }
+
+/// Registry-compatible wrapper: parses raw bytes, calls the typed
+/// `gemini_to_openai_response`, and serialises results back to SSE lines.
+///
+/// Signature matches `registry::ResponseTransformFn`.
+pub fn gemini_to_openai_streaming(
+    chunk: &[u8],
+    state: &mut crate::core::translator::registry::ResponseTransformState,
+) -> Vec<String> {
+    let val: Value = match serde_json::from_slice(chunk) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let inner = &mut state.gemini.gemini_state;
+    let results = gemini_to_openai_response(&val, inner);
+    results
+        .into_iter()
+        .map(|v| format!("data: {}\n\n", serde_json::to_string(&v).unwrap_or_default()))
+        .collect()
+}

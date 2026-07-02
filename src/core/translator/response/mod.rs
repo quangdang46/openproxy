@@ -8,5 +8,6 @@ pub mod kiro_to_openai;
 pub mod ollama_to_openai;
 pub mod openai_responses;
 pub mod openai_to_antigravity;
+pub mod non_streaming;
 pub mod openai_to_claude;
 pub mod openai_to_gemini;

@@ -601,7 +601,7 @@ pub async fn models_info(
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    use crate::core::model::get_model_info;
+    use crate::core::model::{get_model_info, parse_model, resolve_provider_alias};
     let model_str = params.get("model").map(String::as_str).unwrap_or("");
     if model_str.is_empty() {
         return (
@@ -611,12 +611,72 @@ pub async fn models_info(
     }
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(model_str, &snapshot);
-    let info = json!({
+
+    // Look up catalog-level model metadata if available
+    let catalog = provider_catalog();
+    let (catalog_model, provider_info) = match &resolved.provider {
+        Some(provider_id) => {
+            let parsed = parse_model(model_str);
+            let model_id = parsed.model.as_deref().unwrap_or(&resolved.model);
+            let cm = catalog.find_model(provider_id, model_id);
+            let pi = catalog.provider_info(provider_id);
+            (cm, pi)
+        }
+        None => (None, None),
+    };
+
+    let mut info = json!({
         "id": model_str,
         "provider": resolved.provider,
         "model": resolved.model,
         "routeKind": format!("{:?}", resolved.route_kind),
     });
+
+    // Merge catalog model fields
+    if let Some(cm) = catalog_model {
+        if let Some(v) = &cm.name {
+            info["name"] = json!(v);
+        }
+        if let Some(v) = &cm.quota_family {
+            info["quotaFamily"] = json!(v);
+        }
+        if let Some(v) = &cm.strip {
+            info["strip"] = json!(v);
+        }
+        if let Some(v) = &cm.target_format {
+            info["targetFormat"] = json!(v);
+        }
+        if let Some(v) = &cm.upstream_model_id {
+            info["upstreamModelId"] = json!(v);
+        }
+        if let Some(v) = cm.context_window {
+            info["contextWindow"] = json!(v);
+        }
+        if let Some(v) = &cm.capabilities {
+            info["capabilities"] = json!(v);
+        }
+        info["kind"] = json!(cm.kind);
+    }
+
+    // Merge provider-level fields
+    if let Some(pi) = provider_info {
+        if let Some(v) = pi.vision {
+            info["vision"] = json!(v);
+        }
+        if let Some(v) = pi.reasoning {
+            info["reasoning"] = json!(v);
+        }
+        if let Some(v) = pi.context_window {
+            info["providerContextWindow"] = json!(v);
+        }
+        if let Some(v) = pi.max_output {
+            info["providerMaxOutput"] = json!(v);
+        }
+        if let Some(v) = pi.tools {
+            info["tools"] = json!(v);
+        }
+    }
+
     Json(json!({ "object": "model.info", "data": info })).into_response()
 }
 

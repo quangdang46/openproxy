@@ -2257,6 +2257,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "crc32fast",
  "dashmap",
  "directories",
  "dotenvy",

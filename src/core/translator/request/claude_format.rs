@@ -146,9 +146,20 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
         obj.remove("output_config");
     }
 
-    // ── clamp max_tokens to ceiling ──
+    // ── clamp max_tokens to model-aware ceiling ──
     if let Some(max_tokens) = obj.get("max_tokens").and_then(Value::as_u64) {
-        let ceiling = DEFAULT_MAX_TOKENS as u64;
+        let model_lower = obj
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_lowercase();
+        let ceiling: u64 = if model_lower.contains("opus") {
+            200_000 // Opus: 200k context
+        } else if model_lower.contains("sonnet") {
+            128_000
+        } else {
+            DEFAULT_MAX_TOKENS as u64 // 64_000 (haiku, unknown, non-Claude)
+        };
         if max_tokens > ceiling {
             obj.insert("max_tokens".to_string(), json!(ceiling));
         }

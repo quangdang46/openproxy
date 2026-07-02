@@ -21,7 +21,7 @@ pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/translator/translate", post(translate_pipeline))
         .route("/api/translator/formats", get(get_formats))
-        .route("/api/translator/load", post(load_translations))
+        .route("/api/translator/load", get(load_translations_get).post(load_translations))
         .route("/api/translator/save", post(save_translations))
         .route("/api/translator/send", post(send_to_provider))
         .route(
@@ -488,6 +488,16 @@ pub struct SaveTranslationsRequest {
     pub file: Option<String>,
     pub content: Option<String>,
     pub translations: Option<BTreeMap<String, String>>,
+}
+
+async fn load_translations_get(State(state): State<AppState>) -> Json<Value> {
+    let snapshot = state.db.snapshot();
+    let translations = snapshot
+        .extra
+        .get("translator_translations")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Json(json!({ "success": true, "translations": translations }))
 }
 
 async fn load_translations(Json(_req): Json<Value>) -> Json<Value> {

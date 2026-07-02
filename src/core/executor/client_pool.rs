@@ -1,6 +1,6 @@
 use std::io;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -18,6 +18,11 @@ pub const CLIENT_POOL_MAX_IDLE_PER_HOST: usize = 8;
 pub const CLIENT_POOL_TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const DEFAULT_STREAM_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How often the stale-connection cleaner runs.
+const CLEANUP_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
+/// Connections unused for longer than this are removed.
+const CLEANUP_MAX_IDLE: Duration = Duration::from_secs(600); // 10 minutes
 
 /// Timeout configuration for HTTP clients built by [`build_reqwest_client`]
 /// and [`build_hyper_client`].
@@ -41,6 +46,9 @@ impl Default for ClientTimeout {
 pub struct ClientPool {
     reqwest_clients: DashMap<String, Arc<reqwest::Client>>,
     hyper_clients: DashMap<String, Arc<DirectHyperClient>>,
+    /// Tracks the last access time for each client key, used by the periodic
+    /// cleaner to remove stale connections.
+    last_accessed: Arc<DashMap<String, Instant>>,
     timeout: ClientTimeout,
 }
 
@@ -49,6 +57,7 @@ impl Default for ClientPool {
         Self {
             reqwest_clients: DashMap::new(),
             hyper_clients: DashMap::new(),
+            last_accessed: Arc::new(DashMap::new()),
             timeout: ClientTimeout::default(),
         }
     }
@@ -77,7 +86,13 @@ impl ClientPool {
         proxy: Option<&ProxyTarget>,
     ) -> Result<Arc<reqwest::Client>, reqwest::Error> {
         let timeout = self.timeout;
-        self.get_or_insert_with(provider_key, proxy, || build_reqwest_client(proxy, timeout))
+        let result = self.get_or_insert_with(provider_key, proxy, || {
+            build_reqwest_client(proxy, timeout)
+        });
+        if result.is_ok() {
+            self.touch(client_key(provider_key, proxy));
+        }
+        result
     }
 
     pub fn get_hyper_direct(
@@ -89,6 +104,7 @@ impl ClientPool {
             .hyper_clients
             .entry(provider_key.to_string())
             .or_try_insert_with(|| build_hyper_client(timeout))?;
+        self.touch(provider_key.to_string());
         Ok(entry.clone())
     }
 
@@ -106,6 +122,49 @@ impl ClientPool {
         // cannot build duplicate pools and then discard the extras.
         let entry = self.reqwest_clients.entry(key).or_try_insert_with(build)?;
         Ok(entry.clone())
+    }
+
+    /// Record that a key was just accessed (for staleness tracking).
+    fn touch(&self, key: String) {
+        self.last_accessed.insert(key, Instant::now());
+    }
+
+    /// Remove all clients that have not been accessed in more than
+    /// [`CLEANUP_MAX_IDLE`]. Runs synchronously — call from a background
+    /// task or spawn_blocking.
+    pub fn cleanup_stale(&self) {
+        let now = Instant::now();
+        let mut stale = Vec::new();
+
+        // Check reqwest clients
+        for entry in self.last_accessed.iter() {
+            if now.duration_since(*entry.value()) > CLEANUP_MAX_IDLE {
+                stale.push(entry.key().clone());
+            }
+        }
+        for key in &stale {
+            self.reqwest_clients.remove(key);
+            self.hyper_clients.remove(key);
+            self.last_accessed.remove(key);
+        }
+    }
+
+    /// Spawn a background task that periodically removes stale connections.
+    /// See [`CLEANUP_INTERVAL`] and [`CLEANUP_MAX_IDLE`].
+    pub fn start_periodic_cleanup(self: &Arc<Self>) {
+        let pool = self.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(CLEANUP_INTERVAL).await;
+                pool.cleanup_stale();
+                tracing::trace!(
+                    target: "openproxy::client_pool",
+                    "cleaned stale connections: {} reqwest, {} hyper remaining",
+                    pool.reqwest_clients.len(),
+                    pool.hyper_clients.len(),
+                );
+            }
+        });
     }
 
     pub fn len(&self) -> usize {

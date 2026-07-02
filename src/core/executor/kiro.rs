@@ -7,6 +7,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+/// Maximum total AWS EventStream message length (1 MiB).
+const MAX_EVENTSTREAM_MESSAGE_LENGTH: usize = 1024 * 1024;
+
 use crate::core::proxy::ProxyTarget;
 use crate::types::{ProviderConnection, ProviderNode};
 
@@ -240,7 +243,7 @@ impl KiroExecutor {
 
                 let mut headers = HeaderMap::new();
                 headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+                headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.amazon.eventstream"));
                 headers.insert(
                     HeaderName::from_bytes(b"x-api-key").unwrap(),
                     HeaderValue::from_str(api_key).map_err(KiroExecutorError::InvalidHeader)?,
@@ -290,7 +293,7 @@ impl KiroExecutor {
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.amazon.eventstream"));
 
         let timestamp = chrono::Utc::now();
         let date_time = timestamp.format("%Y%m%dT%H%M%SZ").to_string();
@@ -309,6 +312,12 @@ impl KiroExecutor {
         headers.insert(
             x_amz_date,
             HeaderValue::from_str(&date_time).map_err(KiroExecutorError::InvalidHeader)?,
+        );
+
+        let x_amz_content_sha256 = HeaderName::from_bytes(b"x-amz-content-sha256").unwrap();
+        headers.insert(
+            x_amz_content_sha256,
+            HeaderValue::from_str(content_hash).map_err(KiroExecutorError::InvalidHeader)?,
         );
 
         let nonce = generate_nonce();
@@ -333,8 +342,9 @@ impl KiroExecutor {
         let query = parsed_url.query().unwrap_or("");
 
         let canonical_headers = format!(
-            "accept:application/json\ncontent-type:application/json\nhost:{}\nx-amz-date:{}\nx-amz-nonce:{}{}",
+            "accept:application/vnd.amazon.eventstream\ncontent-type:application/json\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\nx-amz-nonce:{}{}",
             host,
+            content_hash,
             date_time,
             nonce,
             if let Some(token) = &credentials.session_token {
@@ -344,10 +354,14 @@ impl KiroExecutor {
             }
         );
 
-        let signed_headers_str = "accept;content-type;host;x-amz-date;x-amz-nonce";
+        let signed_headers_str = if credentials.session_token.is_some() {
+            "accept;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-nonce;x-amz-security-token"
+        } else {
+            "accept;content-type;host;x-amz-content-sha256;x-amz-date;x-amz-nonce"
+        };
         let credential_scope = format!(
-            "{}/{}/{}/{}/aws4_request",
-            date_stamp, region, service, "aws4_request"
+            "{}/{}/{}/aws4_request",
+            date_stamp, region, service
         );
 
         let canonical_request = format!(
@@ -358,8 +372,8 @@ impl KiroExecutor {
         let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
 
         let string_to_sign = format!(
-            "AWS4-HMAC-SHA256\n{}\n{}\n{}\n{}",
-            date_time, credential_scope, canonical_request_hash, canonical_request_hash
+            "AWS4-HMAC-SHA256\n{}\n{}\n{}",
+            date_time, credential_scope, canonical_request_hash
         );
 
         let mut k_date =
@@ -456,6 +470,11 @@ fn strip_thinking_tags(data: &str) -> String {
 pub struct EventStreamDecoder;
 
 impl EventStreamDecoder {
+    /// AWS EventStream v1 binary message prelude: 12 bytes.
+    const PRELUDE_LEN: usize = 12;
+    /// Trailing message CRC: 4 bytes.
+    const TRAILING_CRC_LEN: usize = 4;
+
     pub fn decode_chunk(data: &[u8]) -> Result<Vec<SseEvent>, KiroExecutorError> {
         if data.is_empty() {
             return Ok(Vec::new());
@@ -464,41 +483,77 @@ impl EventStreamDecoder {
         let mut events = Vec::new();
         let mut offset = 0;
 
-        while offset < data.len() {
-            if data[offset] == 0xFF {
-                if offset + 4 > data.len() {
-                    break;
-                }
-                let length = u32::from_be_bytes([
-                    data[offset + 1],
-                    data[offset + 2],
-                    data[offset + 3],
-                    data[offset + 4],
-                ]) as usize;
+        while offset + Self::PRELUDE_LEN <= data.len() {
+            // Parse the 12-byte prelude
+            let prelude = &data[offset..offset + Self::PRELUDE_LEN];
+            let total_length = u32::from_be_bytes([prelude[0], prelude[1], prelude[2], prelude[3]]) as usize;
+            let headers_length = u32::from_be_bytes([prelude[4], prelude[5], prelude[6], prelude[7]]) as usize;
+            let prelude_crc = u32::from_be_bytes([prelude[8], prelude[9], prelude[10], prelude[11]]);
 
-                if offset + 8 + length > data.len() {
-                    break;
-                }
+            // Validate total length
+            if total_length < Self::PRELUDE_LEN + Self::TRAILING_CRC_LEN
+                || total_length > MAX_EVENTSTREAM_MESSAGE_LENGTH
+            {
+                return Err(KiroExecutorError::EventStreamDecode(
+                    format!("invalid message total_length={}", total_length),
+                ));
+            }
 
-                let payload = &data[offset + 8..offset + 8 + length];
-                offset += 8 + length;
+            // Validate headers length
+            if headers_length > total_length - Self::PRELUDE_LEN - Self::TRAILING_CRC_LEN {
+                return Err(KiroExecutorError::EventStreamDecode(
+                    format!("invalid headers_length={} for total_length={}", headers_length, total_length),
+                ));
+            }
 
+            // Verify prelude CRC (CRC32 of first 8 bytes)
+            let expected_crc = crc32fast::hash(&prelude[..8]);
+            if prelude_crc != expected_crc {
+                return Err(KiroExecutorError::EventStreamDecode(
+                    format!("prelude CRC mismatch: got {:#010x}, expected {:#010x}", prelude_crc, expected_crc),
+                ));
+            }
+
+            // Check we have enough data for the full message
+            if offset + total_length > data.len() {
+                break;
+            }
+
+            let payload_start = offset + Self::PRELUDE_LEN + headers_length;
+            let payload_end = offset + total_length - Self::TRAILING_CRC_LEN;
+            let crc_start = offset + total_length - Self::TRAILING_CRC_LEN;
+
+            // Verify message CRC (CRC32 of everything except the trailing 4 bytes)
+            let message_crc = u32::from_be_bytes([
+                data[crc_start],
+                data[crc_start + 1],
+                data[crc_start + 2],
+                data[crc_start + 3],
+            ]);
+            let expected_message_crc = crc32fast::hash(&data[offset..crc_start]);
+            if message_crc != expected_message_crc {
+                return Err(KiroExecutorError::EventStreamDecode(
+                    format!("message CRC mismatch: got {:#010x}, expected {:#010x}", message_crc, expected_message_crc),
+                ));
+            }
+
+            // Extract payload and parse SSE lines
+            if payload_end > payload_start {
+                let payload = &data[payload_start..payload_end];
                 if let Ok(text) = std::str::from_utf8(payload) {
                     for line in text.lines() {
                         if line.starts_with("data: ") {
                             let data_content = line.trim_start_matches("data: ");
                             if !data_content.is_empty() && data_content != "[DONE]" {
-                                // Strip <thinking>...</thinking> blocks from Kiro streamed content
-                                // 9router open-sse/executors/kiro.js:~L165-180 parity
                                 let cleaned = strip_thinking_tags(data_content);
                                 events.push(SseEvent { data: cleaned });
                             }
                         }
                     }
                 }
-            } else {
-                offset += 1;
             }
+
+            offset += total_length;
         }
 
         Ok(events)

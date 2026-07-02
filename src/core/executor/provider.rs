@@ -4,12 +4,37 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::translator::helpers::openai_helper::normalize_developer_role;
+use crate::oauth::token_refresh::{needs_refresh as oauth_needs_refresh, dispatch_oauth_refresh};
 use crate::types::ProviderConnection;
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
+
+/// Log severity level for per-request log messages.
+#[derive(Debug, Clone)]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+/// A single log entry attached to a request.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub level: LogLevel,
+    pub message: String,
+}
+
+/// Options that control proxy/retry behaviour for a single execution.
+#[derive(Debug, Clone, Default)]
+pub struct ProxyOptions {
+    /// URL index to try (for round-robin / fallback rotation).
+    pub url_index: Option<usize>,
+}
 
 pub struct ProviderExecutionRequest {
     pub model: String,
@@ -17,6 +42,12 @@ pub struct ProviderExecutionRequest {
     pub stream: bool,
     pub credentials: ProviderConnection,
     pub proxy: Option<ProxyTarget>,
+    /// Signal for aborting an in-flight request.
+    pub signal: Option<CancellationToken>,
+    /// Request-scoped log entries.
+    pub log: Option<Vec<LogEntry>>,
+    /// Options controlling proxy/retry behaviour.
+    pub proxy_options: Option<ProxyOptions>,
 }
 
 pub struct ProviderExecutionResponse {
@@ -228,7 +259,7 @@ pub trait ProviderExecutor: Send + Sync {
         request: ProviderExecutionRequest,
     ) -> Result<ProviderExecutionResponse, ProviderExecutorError>;
 
-    fn build_url(&self, model: &str, stream: bool) -> String;
+    fn build_url(&self, model: &str, stream: bool, url_index: Option<usize>, credentials: Option<&ProviderConnection>) -> String;
 
     fn build_headers(
         &self,
@@ -236,8 +267,24 @@ pub trait ProviderExecutor: Send + Sync {
         stream: bool,
     ) -> Result<HeaderMap, ProviderExecutorError>;
 
-    fn transform_request(&self, body: &Value) -> Value {
+    fn transform_request(&self, body: &Value, _model: &str, _stream: bool, _credentials: &ProviderConnection) -> Value {
         body.clone()
+    }
+
+    /// Refresh the OAuth / access-token credentials for this provider.
+    ///
+    /// Returns `Some(updated_connection)` on success, or `None` if the
+    /// provider does not support credential refresh or the refresh failed.
+    async fn refresh_credentials(&self, credentials: &ProviderConnection) -> Option<ProviderConnection> {
+        let _ = credentials;
+        None
+    }
+
+    /// Returns `true` if the credentials are expired (or close to expiring)
+    /// and should be refreshed before the next request.
+    fn needs_refresh(&self, credentials: &ProviderConnection) -> bool {
+        let _ = credentials;
+        false
     }
 }
 
@@ -265,7 +312,7 @@ impl UnifiedExecutor {
         &self.provider
     }
 
-    pub fn build_url(&self, model: &str, stream: bool) -> String {
+    pub fn build_url(&self, model: &str, stream: bool, _url_index: Option<usize>, _credentials: Option<&ProviderConnection>) -> String {
         let path = if stream {
             &self.config.stream_path
         } else {
@@ -296,7 +343,7 @@ impl UnifiedExecutor {
         stream: bool,
         api_key: Option<&str>,
     ) -> String {
-        let base_url = self.build_url(model, stream);
+        let base_url = self.build_url(model, stream, None, None);
         if let Some(key) = api_key {
             format!("{base_url}&key={key}")
         } else {
@@ -381,7 +428,7 @@ impl UnifiedExecutor {
         Ok(headers)
     }
 
-    pub fn transform_request(&self, body: &Value) -> Value {
+    pub fn transform_request(&self, body: &Value, _model: &str, _stream: bool, _credentials: &ProviderConnection) -> Value {
         let mut body = self.apply_json_schema_fallback(body);
 
         normalize_developer_role(&mut body);
@@ -468,13 +515,14 @@ impl UnifiedExecutor {
         request: ProviderExecutionRequest,
     ) -> Result<ProviderExecutionResponse, ProviderExecutorError> {
         let api_key = request.credentials.api_key.as_deref();
+        let url_index = request.proxy_options.as_ref().and_then(|o| o.url_index);
         let url = if self.provider == "gemini" && api_key.is_some() {
             self.build_url_with_api_key(&request.model, request.stream, api_key)
         } else {
-            self.build_url(&request.model, request.stream)
+            self.build_url(&request.model, request.stream, url_index, Some(&request.credentials))
         };
         let headers = self.build_headers(&request.credentials, request.stream)?;
-        let transformed_body = self.transform_request(&request.body);
+        let transformed_body = self.transform_request(&request.body, &request.model, request.stream, &request.credentials);
 
         let body_bytes = serde_json::to_vec(&transformed_body)?;
 
@@ -494,6 +542,38 @@ impl UnifiedExecutor {
             transport: TransportKind::Reqwest,
         })
     }
+
+    /// Refresh OAuth/access-token credentials.
+    async fn refresh_credentials(&self, credentials: &ProviderConnection) -> Option<ProviderConnection> {
+        let refresh_token = credentials.refresh_token.as_deref()?;
+        if refresh_token.is_empty() {
+            return None;
+        }
+
+        match dispatch_oauth_refresh(&self.provider, refresh_token, &credentials.provider_specific_data).await {
+            Ok(result) => {
+                let mut updated = credentials.clone();
+                updated.access_token = Some(result.access_token);
+                if let Some(new_refresh) = result.refresh_token {
+                    updated.refresh_token = Some(new_refresh);
+                }
+                if let Some(expires_in) = result.expires_in {
+                    let expiry = chrono::Utc::now() + chrono::Duration::seconds(expires_in);
+                    updated.expires_at = Some(expiry.to_rfc3339());
+                }
+                Some(updated)
+            }
+            Err(e) => {
+                tracing::warn!("credential refresh failed for provider {}: {}", self.provider, e);
+                None
+            }
+        }
+    }
+
+    /// Returns true if the credentials are expired or near-expiration.
+    fn needs_refresh(&self, credentials: &ProviderConnection) -> bool {
+        oauth_needs_refresh(&credentials.expires_at)
+    }
 }
 
 #[async_trait]
@@ -509,8 +589,8 @@ impl ProviderExecutor for UnifiedExecutor {
         UnifiedExecutor::execute(self, request).await
     }
 
-    fn build_url(&self, model: &str, stream: bool) -> String {
-        self.build_url(model, stream)
+    fn build_url(&self, model: &str, stream: bool, url_index: Option<usize>, credentials: Option<&ProviderConnection>) -> String {
+        self.build_url(model, stream, url_index, credentials)
     }
 
     fn build_headers(
@@ -519,6 +599,18 @@ impl ProviderExecutor for UnifiedExecutor {
         stream: bool,
     ) -> Result<HeaderMap, ProviderExecutorError> {
         self.build_headers(credentials, stream)
+    }
+
+    fn transform_request(&self, body: &Value, model: &str, stream: bool, credentials: &ProviderConnection) -> Value {
+        self.transform_request(body, model, stream, credentials)
+    }
+
+    async fn refresh_credentials(&self, credentials: &ProviderConnection) -> Option<ProviderConnection> {
+        UnifiedExecutor::refresh_credentials(self, credentials).await
+    }
+
+    fn needs_refresh(&self, credentials: &ProviderConnection) -> bool {
+        UnifiedExecutor::needs_refresh(self, credentials)
     }
 }
 

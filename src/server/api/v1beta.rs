@@ -17,6 +17,7 @@ use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
 use super::chat;
+use super::cors::{cors_preflight_response, with_cors_json};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -31,11 +32,11 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn cors_options_get() -> Response {
-    cors_preflight_response("GET, OPTIONS")
+    cors_preflight_response()
 }
 
 async fn cors_options_post() -> Response {
-    cors_preflight_response("GET, POST, OPTIONS")
+    cors_preflight_response()
 }
 
 async fn list_gemini_models(State(state): State<AppState>) -> Response {
@@ -370,32 +371,6 @@ async fn with_cors_nonstream_response(response: Response) -> Response {
     proxied
 }
 
-fn with_cors_json(status: StatusCode, payload: Value) -> Response {
-    let mut response = (status, Json(payload)).into_response();
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    response
-}
-
-fn cors_preflight_response(methods: &str) -> Response {
-    let mut response = Response::new(Body::empty());
-    *response.status_mut() = StatusCode::OK;
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("GET, POST, OPTIONS")),
-    );
-    response.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("*"),
-    );
-    response
-}
 
 fn models_for_connection(connection: &ProviderConnection) -> Vec<String> {
     if let Some(enabled_models) = connection

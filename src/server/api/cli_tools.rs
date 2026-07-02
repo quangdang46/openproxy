@@ -2494,6 +2494,10 @@ pub fn routes() -> Router<AppState> {
             get(get_cowork_mcp_registry),
         )
         .route(
+            "/api/cli-tools/cowork-mcp-tools",
+            get(get_cowork_mcp_tools),
+        )
+        .route(
             "/api/cli-tools/antigravity-mitm/alias",
             delete(delete_mitm_alias),
         )
@@ -2584,6 +2588,32 @@ async fn get_cowork_mcp_registry() -> Response {
     }
 
     Json(json!({ "servers": servers })).into_response()
+}
+
+// GET /api/cli-tools/cowork-mcp-tools
+// Returns locally installed CoWork MCP tools configuration
+async fn get_cowork_mcp_tools(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) =
+        super::require_dashboard_or_management_api_key(&headers, &state)
+    {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let tools = snapshot
+        .extra
+        .get("cowork_mcp_tools")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    Json(json!({
+        "success": true,
+        "tools": tools
+    }))
+    .into_response()
 }
 
 #[cfg(test)]

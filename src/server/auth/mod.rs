@@ -16,6 +16,12 @@ pub mod oidc;
 pub const API_KEY_HEADER: &str = "x-api-key";
 pub const AUTHORIZATION_HEADER: &str = "authorization";
 pub const AUTH_COOKIE_NAME: &str = "auth_token";
+pub const GOOGLE_API_KEY_HEADER: &str = "x-goog-api-key";
+
+/// Internal header injected by [`crate::server::middleware::incoming_request_middleware`]
+/// when the request URI carries a `?key=` query parameter. Checked last in
+/// the priority chain so that header-based auth always wins.
+pub const QUERY_KEY_HEADER: &str = "x-9r-query-key";
 
 /// Resolves the JWT signing secret at runtime:
 /// 1. `JWT_SECRET` env var if set and non-empty.
@@ -86,7 +92,9 @@ pub fn increment_token_epoch() {
 enum PresentedKeySource {
     AuthorizationBearer,
     ApiKeyHeader,
+    GoogleApiKeyHeader,
     CliTokenHeader,
+    QueryKeyParam,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,14 +244,40 @@ fn extract_presented_key(headers: &HeaderMap) -> Option<PresentedKey> {
         });
     }
 
-    headers
+    if let Some(key) = headers
+        .get(GOOGLE_API_KEY_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    {
+        return Some(PresentedKey {
+            key,
+            source: PresentedKeySource::GoogleApiKeyHeader,
+        });
+    }
+
+    if let Some(key) = headers
         .get(CLI_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    {
+        return Some(PresentedKey {
+            key,
+            source: PresentedKeySource::CliTokenHeader,
+        });
+    }
+
+    headers
+        .get(QUERY_KEY_HEADER)
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|key| PresentedKey {
             key: key.to_string(),
-            source: PresentedKeySource::CliTokenHeader,
+            source: PresentedKeySource::QueryKeyParam,
         })
 }
 

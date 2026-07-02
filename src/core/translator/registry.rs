@@ -149,6 +149,8 @@ pub struct AnthropicResponseState {
     pub cache_lookaheads: Vec<String>,
     pub message_id: Option<String>,
     pub model: Option<String>,
+    /// Dynamic state used by claude_to_openai_response streaming transform
+    pub claude_state: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -163,6 +165,8 @@ pub struct GeminiResponseState {
     pub model: String,
     /// Whether we have already emitted a finish chunk (guard against duplicates)
     pub finish_emitted: bool,
+    /// Dynamic state used by gemini_to_openai_response streaming transform
+    pub gemini_state: std::collections::HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -716,7 +720,9 @@ pub fn global_registry() -> &'static TranslationRegistry {
     use crate::core::translator::request::openai_to_kiro::openai_to_kiro_request;
     use crate::core::translator::request::openai_to_ollama::openai_to_ollama_request;
     use crate::core::translator::request::openai_to_vertex::openai_to_vertex_request;
+    use crate::core::translator::response::claude_to_openai::claude_to_openai_streaming;
     use crate::core::translator::response::commandcode_to_openai::commandcode_to_openai_response;
+    use crate::core::translator::response::gemini_to_openai::gemini_to_openai_streaming;
     use crate::core::translator::response::openai_to_gemini::openai_to_gemini_response;
 
     REGISTRY.get_or_init(|| {
@@ -812,6 +818,16 @@ pub fn global_registry() -> &'static TranslationRegistry {
             Format::OpenAi,
             Format::Gemini,
             openai_to_gemini_response as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::Claude,
+            Format::OpenAi,
+            claude_to_openai_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::Gemini,
+            Format::OpenAi,
+            gemini_to_openai_streaming as ResponseTransformFn,
         );
 
         reg

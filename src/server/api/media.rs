@@ -15,6 +15,8 @@ use crate::server::auth::require_api_key;
 use crate::server::state::AppState;
 use crate::types::AppDb;
 
+use crate::core::config::error_config::error_type_for;
+
 use super::auth_error_response;
 
 pub async fn cors_options() -> Response {
@@ -80,7 +82,8 @@ pub async fn audio_voices(
                 Json(json!({
                     "error": {
                         "message": "provider must be one of: elevenlabs, deepgram, inworld, edge-tts, local-device",
-                        "type": "invalid_request_error"
+                        "type": "invalid_request_error",
+                        "code": null
                     }
                 })),
             ).into_response();
@@ -117,7 +120,8 @@ pub async fn audio_voices(
                         return Json(json!({
                             "error": {
                                 "message": data.get("error").and_then(|e| e.as_str()).unwrap_or("Upstream error"),
-                                "type": "server_error"
+                                "type": "server_error",
+                                "code": null
                             }
                         })).into_response();
                     }
@@ -161,12 +165,12 @@ pub async fn audio_voices(
                     Json(json!({ "object": "list", "data": data_out })).into_response()
                 }
                 Err(e) => {
-                    Json(json!({ "error": { "message": e.to_string(), "type": "server_error" } }))
+                    Json(json!({ "error": { "message": e.to_string(), "type": "server_error", "code": null } }))
                         .into_response()
                 }
             }
         }
-        Err(e) => Json(json!({ "error": { "message": e.to_string(), "type": "server_error" } }))
+        Err(e) => Json(json!({ "error": { "message": e.to_string(), "type": "server_error", "code": null } }))
             .into_response(),
     }
 }
@@ -630,12 +634,19 @@ fn media_result_to_response(result: Result<Value, crate::core::media::MediaError
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
+    let (e_type, e_code) = match error_type_for(status.as_u16()) {
+        Some(info) => (info.r#type, info.code),
+        None if status.as_u16() >= 500 => ("server_error", "internal_server_error"),
+        None => ("invalid_request_error", ""),
+    };
     with_cors_response(
         (
             status,
             Json(json!({
                 "error": {
-                    "message": message
+                    "message": message,
+                    "type": e_type,
+                    "code": e_code
                 }
             })),
         )

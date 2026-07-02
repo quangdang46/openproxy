@@ -5,6 +5,7 @@ pub mod cli_tools;
 pub mod cloud_credentials;
 pub mod cloud_sync;
 pub mod compat;
+pub mod cors;
 pub mod db_backups;
 pub mod headroom;
 pub mod locale;
