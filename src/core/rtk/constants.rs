@@ -89,3 +89,17 @@ pub const FILTER_SMART_TRUNCATE: &str = "smart-truncate";
 pub const FILTER_READ_NUMBERED: &str = "read-numbered";
 pub const FILTER_SEARCH_LIST: &str = "search-list";
 pub const FILTER_BUILD_OUTPUT: &str = "build-output";
+pub const FILTER_TEST_RUNNER: &str = "test-runner";
+pub const FILTER_JSON_SUMMARY: &str = "json-summary";
+
+/// test-runner filter: max output lines kept (beyond summary) before truncation
+pub const TEST_RUNNER_MAX_LINES: usize = 100;
+
+/// test-runner filter: minimum line count before test-runner filter activates
+pub const TEST_RUNNER_MIN_LINES: usize = 10;
+
+/// json-summary filter: max items to enumerate at top level
+pub const JSON_SUMMARY_MAX_ITEMS: usize = 20;
+
+/// json-summary filter: minimum text length before json-summary filter activates
+pub const JSON_SUMMARY_MIN_BYTES: usize = 2000;

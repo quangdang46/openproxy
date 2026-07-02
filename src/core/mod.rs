@@ -1,3 +1,4 @@
+pub mod a2a;
 pub mod account_fallback;
 pub mod auth;
 pub mod combo;
@@ -16,4 +17,7 @@ pub mod usage;
 pub mod utils;
 
 pub mod chat;
+pub mod cache;
+pub mod circuit_breaker;
+pub mod eval;
 pub mod tls;

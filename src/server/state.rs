@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::sync::{Notify, RwLock};
 
+use crate::core::a2a::TaskStore;
 use crate::core::account_fallback::AccountRegistry;
+use crate::core::circuit_breaker::CircuitBreakerRegistry;
 use crate::core::executor::ClientPool;
 use crate::core::mitm::server::MitmProxyHandle;
 use crate::core::tunnel::TunnelManager;
@@ -78,6 +80,14 @@ pub struct AppState {
     /// Triggered on graceful shutdown (SIGTERM, SIGINT, or API call).
     /// Await `.notified()` to block until shutdown is requested.
     pub shutdown_signal: Arc<Notify>,
+
+    /// Circuit breaker registry for provider endpoint resilience.
+    /// Tracked per provider+endpoint to fast-fail when upstreams are down.
+    pub circuit_breaker: Arc<CircuitBreakerRegistry>,
+
+    /// A2A (Agent-to-Agent) task store. Used by the A2A protocol endpoints
+    /// to track task lifecycle across agent interactions.
+    pub a2a_task_store: TaskStore,
 }
 
 impl AppState {
@@ -102,6 +112,8 @@ impl AppState {
             web_dir: None,
             mitm_handle: Arc::new(tokio::sync::Mutex::new(None)),
             shutdown_signal: Arc::new(Notify::new()),
+            circuit_breaker: Arc::new(CircuitBreakerRegistry::default()),
+            a2a_task_store: TaskStore::new(),
         }
     }
 

@@ -859,3 +859,23 @@ pub fn responses_to_chat_response(
         _ => vec![],
     }
 }
+
+use crate::core::translator::registry::ResponseTransformState;
+
+/// Registry-compatible streaming wrapper: Responses API -> OpenAI chat completion chunks.
+/// Signature matches `registry::ResponseTransformFn`.
+pub fn responses_to_chat_streaming(
+    chunk: &[u8],
+    state: &mut ResponseTransformState,
+) -> Vec<String> {
+    let val: serde_json::Value = match serde_json::from_slice(chunk) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let inner = &mut state.responses.state;
+    let results = responses_to_chat_response(&val, inner);
+    results
+        .into_iter()
+        .map(|v| format!("data: {}\n\n", serde_json::to_string(&v).unwrap_or_default()))
+        .collect()
+}

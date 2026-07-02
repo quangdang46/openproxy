@@ -4,8 +4,8 @@ use regex::Regex;
 use crate::core::rtk::constants::*;
 use crate::core::rtk::filters::{
     build_output_impl, dedup_log_impl, find_impl, git_diff_impl, git_status_impl, grep_impl,
-    ls_impl, read_numbered_impl, search_list_impl, smart_truncate_impl, tree_impl,
-    READ_NUMBERED_LINE_RE, SEARCH_LIST_HEADER_RE,
+    json_summary_impl, ls_impl, read_numbered_impl, search_list_impl, smart_truncate_impl,
+    test_runner_impl, tree_impl, READ_NUMBERED_LINE_RE, SEARCH_LIST_HEADER_RE,
 };
 
 static RE_GIT_DIFF: Lazy<Regex> = Lazy::new(|| Regex::new(r"diff --git").unwrap());
@@ -20,12 +20,25 @@ static RE_TREE_GLYPH: Lazy<Regex> = Lazy::new(|| Regex::new(r"[├└]──|│
 static RE_LS_ROW: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[-dlbcps][rwx-]{9}").unwrap());
 static RE_LS_TOTAL: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^total \d+$").unwrap());
 /// Build-tool output detector. Catches npm/yarn/cargo/pip-style logs so
-/// they can be compressed before being treated as porcelain or grep
-/// output. Match priority is intentionally above `RE_GIT_STATUS` to avoid
-/// misclassifying cargo `Compiling` lines as porcelain status.
+/// they can be compressed before being treated as git-status porcelain.
+/// Priority: after explicit RE_GIT_STATUS (to match 9router), but before
+/// the heuristic is_mostly_porcelain check, preventing cargo "Compiling"
+/// lines from being misclassified as porcelain status.
 static RE_BUILD_OUTPUT: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"(?im)^(npm (warn|error|ERR!)|yarn (warn|error)|\s*Compiling\s+\S+|\s*Downloading\s+\S+|added \d+ package|\[ERROR\]|BUILD (SUCCESS|FAILED)|\s*Finished\s+|Successfully (installed|built)|ERROR:)")
         .unwrap()
+});
+
+/// Test-runner output detector. Catches cargo test, pytest, jest, go test output.
+static RE_TEST_RUNNER: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?im)^(running \d+ test(s)?|ok \d+|not ok \d+|test result:|test \S+ \.\.\.\s+(ok|FAILED)|PASS|FAIL(ED)?|testsuite:\s+)" )
+        .unwrap()
+});
+
+/// JSON/NDJSON bulk detector: checks if text starts with `[`, `{`, or has
+/// many newline-separated `{` lines.
+static RE_NDJSON_LINE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(?m)^\{.*\}\s*$").unwrap()
 });
 
 pub type FilterFn = fn(&str) -> String;
@@ -49,6 +62,15 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
         });
     }
 
+    // Explicit git-status match BEFORE build-output check: "On branch ..." etc.
+    // should be treated as git status, not parsed as build tool output.
+    if RE_GIT_STATUS.is_match(head) {
+        return Some(DetectedFilter {
+            filter_fn: git_status_impl,
+            filter_name: FILTER_GIT_STATUS,
+        });
+    }
+
     // Build-output BEFORE porcelain check: prevents cargo "Compiling" lines
     // from being misclassified as git-status porcelain.
     if RE_BUILD_OUTPUT.is_match(head) {
@@ -58,7 +80,19 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
         });
     }
 
-    if RE_GIT_STATUS.is_match(head) || is_mostly_porcelain(head) {
+    // Test-runner detection: check for test output patterns BEFORE generic
+    // text heuristics so cargo test/pytest/jest output gets proper compression.
+    if RE_TEST_RUNNER.is_match(head) {
+        let test_lines: Vec<&str> = head.lines().collect();
+        if test_lines.len() >= TEST_RUNNER_MIN_LINES {
+            return Some(DetectedFilter {
+                filter_fn: test_runner_impl,
+                filter_name: FILTER_TEST_RUNNER,
+            });
+        }
+    }
+
+    if is_mostly_porcelain(head) {
         return Some(DetectedFilter {
             filter_fn: git_status_impl,
             filter_name: FILTER_GIT_STATUS,
@@ -114,6 +148,22 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
             filter_fn: read_numbered_impl,
             filter_name: FILTER_READ_NUMBERED,
         });
+    }
+
+    // JSON/NDJSON bulk detector: catches large JSON blobs (API response dumps,
+    // config dumps) before they hit dedup-log. Check is cheap — just peek at
+    // first non-whitespace char and count NDJSON lines.
+    // Use text.len() (not head.len()) because JSON_SUMMARY_MIN_BYTES (2000)
+    // exceeds DETECT_WINDOW (1024), so the head window would never trigger.
+    if text.len() >= JSON_SUMMARY_MIN_BYTES {
+        let peek_start = text[..DETECT_WINDOW.min(text.len())].trim_start();
+        let is_json_like = peek_start.starts_with('{') || peek_start.starts_with('[');
+        if is_json_like || is_mostly_ndjson(&text[..DETECT_WINDOW.min(text.len())]) {
+            return Some(DetectedFilter {
+                filter_fn: json_summary_impl,
+                filter_name: FILTER_JSON_SUMMARY,
+            });
+        }
     }
 
     if non_empty.len() >= 5 {
@@ -186,6 +236,22 @@ fn count_matches(text: &str, re: &Regex) -> usize {
     re.find_iter(text).count()
 }
 
+/// Check if text is mostly NDJSON: at least 3 non-empty lines and >=80% of them
+/// look like JSON objects (start with `{`).
+fn is_mostly_ndjson(text: &str) -> bool {
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() < 3 {
+        return false;
+    }
+    let sample: Vec<&&str> = lines.iter().take(50).collect();
+    let sampled = sample.len();
+    if sampled < 3 {
+        return false;
+    }
+    let hits = sample.iter().filter(|l| RE_NDJSON_LINE.is_match(l)).count();
+    hits * 10 >= sampled * 8
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -251,5 +317,42 @@ mod tests {
         let input = "hello world";
         let result = auto_detect_filter(input);
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_detects_test_runner_cargo_output() {
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("running 12 tests".to_string());
+        for i in 0..12 {
+            lines.push(format!("test case_{} ... ok", i));
+        }
+        lines.push("".to_string());
+        lines.push("test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out".to_string());
+        let input = lines.join("\n");
+        let result = auto_detect_filter(&input);
+        assert!(result.is_some(), "test-runner should be detected");
+        assert_eq!(result.unwrap().filter_name, FILTER_TEST_RUNNER);
+    }
+
+    #[test]
+    fn test_detects_json_summary_bracket_start() {
+        // Pad the JSON payload to exceed JSON_SUMMARY_MIN_BYTES (2000)
+        let large_json = format!("{{{}}}", "\"key\": ".repeat(2000));
+        let result = auto_detect_filter(&large_json);
+        assert!(result.is_some(), "json-summary should be detected: len={}", large_json.len());
+        assert_eq!(result.unwrap().filter_name, FILTER_JSON_SUMMARY);
+    }
+
+    #[test]
+    fn test_detects_ndjson_blob() {
+        // Build enough lines to exceed JSON_SUMMARY_MIN_BYTES (2000)
+        let lines: Vec<String> = (0..100)
+            .map(|i| format!("{{\"id\": {:>4}, \"name\": \"test_value_{}\"}}", i, i))
+            .collect();
+        let input = lines.join("\n");
+        assert!(input.len() > JSON_SUMMARY_MIN_BYTES, "fixture too small: {} < {}", input.len(), JSON_SUMMARY_MIN_BYTES);
+        let result = auto_detect_filter(&input);
+        assert!(result.is_some(), "NDJSON should be detected for large blobs: len={}", input.len());
+        assert_eq!(result.unwrap().filter_name, FILTER_JSON_SUMMARY);
     }
 }

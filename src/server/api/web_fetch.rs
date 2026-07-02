@@ -199,6 +199,12 @@ fn combo_strategy_for(snapshot: &crate::types::AppDb, combo_name: &str) -> Combo
         ComboStrategy::RoundRobin
     } else if value.eq_ignore_ascii_case("fusion") {
         ComboStrategy::Fusion
+    } else if value.eq_ignore_ascii_case("auto-combo") {
+        ComboStrategy::AutoCombo
+    } else if value.eq_ignore_ascii_case("hedging") {
+        ComboStrategy::Hedging
+    } else if value.eq_ignore_ascii_case("shadow") {
+        ComboStrategy::Shadow
     } else {
         ComboStrategy::Fallback
     }

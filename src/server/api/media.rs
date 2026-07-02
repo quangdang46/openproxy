@@ -183,6 +183,46 @@ pub async fn search(
     with_cors_response(generic_media_handler(state, headers, body, "search").await)
 }
 
+pub async fn video_generations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    with_cors_response(generic_media_handler(state, headers, body, "video/generations").await)
+}
+
+pub async fn audio_music(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    with_cors_response(generic_media_handler(state, headers, body, "audio/music").await)
+}
+
+pub async fn rerank(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    with_cors_response(generic_media_handler(state, headers, body, "rerank").await)
+}
+
+pub async fn moderations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    with_cors_response(generic_media_handler(state, headers, body, "moderations").await)
+}
+
+pub async fn images_edits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    with_cors_response(generic_media_handler(state, headers, body, "images/edits").await)
+}
+
 async fn generic_media_handler(
     state: AppState,
     headers: HeaderMap,

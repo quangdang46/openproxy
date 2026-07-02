@@ -13,7 +13,10 @@ use tokio::sync::mpsc;
 use crate::core::account_fallback::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, MAX_BACKOFF_LEVEL};
 use crate::types::Combo;
 
+pub mod auto_combo;
 pub mod fusion;
+pub mod hedging;
+pub mod shadow;
 
 const LONG_COOLDOWN: Duration = Duration::from_secs(120);
 const SHORT_COOLDOWN: Duration = Duration::from_secs(5);
@@ -115,6 +118,9 @@ pub enum ComboStrategy {
     Fallback,
     RoundRobin,
     Fusion,
+    AutoCombo,
+    Hedging,
+    Shadow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

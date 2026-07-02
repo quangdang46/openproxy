@@ -1,3 +1,4 @@
+pub mod a2a;
 pub mod admin_items;
 mod auth;
 pub mod chat;
@@ -10,6 +11,7 @@ pub mod db_backups;
 pub mod headroom;
 pub mod locale;
 pub mod mcp;
+pub mod mcp_server;
 pub mod media;
 pub mod media_providers;
 pub mod mitm_config;
@@ -252,6 +254,10 @@ pub fn routes() -> Router<AppState> {
         .merge(cli_tools::routes())
         .merge(settings_payload_rules::routes())
         .merge(db_backups::routes())
+        // A2A (Agent-to-Agent) protocol routes
+        .merge(a2a::routes())
+        // Native MCP server routes (SSE stream + POST message)
+        .merge(mcp_server::routes())
         // Headroom API routes
         .route("/api/headroom/status", get(headroom::status))
         .route("/api/headroom/start", post(headroom::start))
@@ -472,7 +478,7 @@ pub(super) fn redact_provider_connection(connection: &ProviderConnection) -> Pro
     redacted
 }
 
-fn safe_settings_payload(settings: &crate::types::Settings) -> Value {
+pub(crate) fn safe_settings_payload(settings: &crate::types::Settings) -> Value {
     let mut value = serde_json::to_value(settings).unwrap_or_else(|_| json!({}));
     if let Some(fields) = value.as_object_mut() {
         fields.remove("password");

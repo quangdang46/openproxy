@@ -554,6 +554,11 @@ async fn execute_single_model(
     compress_messages(&mut body, snapshot.settings.rtk_enabled);
 
     // 4. Headroom external token compression (after translate — 9router parity)
+    //     Bug #278 fix: use target_format instead of source_format — the body
+    //     has already been translated by step 2, so Headroom needs to know what
+    //     shape the request body is in right now (target format).
+    //     Uses the same format string as compress_with_headroom expects:
+    //     "claude" for Claude-shaped bodies, "openai" for everything else.
     {
         let headroom_cfg = HeadroomConfig {
             enabled: snapshot.settings.headroom_enabled,
@@ -562,13 +567,26 @@ async fn execute_single_model(
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
         };
         let headroom_format =
-            if plan.source_format == crate::core::translator::registry::Format::Claude {
+            if plan.target_format == crate::core::translator::registry::Format::Claude {
                 "claude"
             } else {
                 "openai"
             };
+        // Phantom savings: log an estimated pre-compression range before the
+        // actual Headroom call, so dashboards and metrics see a prediction even
+        // when the proxy is slow or unreachable.
+        if let Ok(body_str) = serde_json::to_string(&body) {
+            let est_tokens = (body_str.len() + 3) / 4;
+            if est_tokens > 0 {
+                tracing::debug!(
+                    "headroom input ~{} tokens (estimated from body size)",
+                    est_tokens
+                );
+            }
+        }
         if let Some(stats) =
-            compress_with_headroom(&mut body, &headroom_cfg, &plan.model, headroom_format).await
+            compress_with_headroom(&mut body, &headroom_cfg, &plan.model, headroom_format, None)
+                .await
         {
             tracing::debug!("{}", stats.format_headroom_log().unwrap_or_default());
         }

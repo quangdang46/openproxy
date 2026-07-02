@@ -1142,6 +1142,174 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
                 "hackclub",
                 ProviderExecutorConfig::openai("https://ai.hackclub.com/proxy/v1"),
             ),
+            // ── Enterprise & Cloud ──────────────────────────────────────
+            (
+                "databricks",
+                ProviderExecutorConfig::openai("https://adb-0000000000000000.0.azuredatabricks.net/serving-endpoints"),
+            ),
+            (
+                "snowflake",
+                ProviderExecutorConfig::openai("https://{account}.snowflakecomputing.com/api/v2"),
+            ),
+            (
+                "heroku",
+                ProviderExecutorConfig::openai("https://us.inference.heroku.com/v1"),
+            ),
+            (
+                "lambda-ai",
+                ProviderExecutorConfig::openai("https://api.lambda.ai/v1"),
+            ),
+            (
+                "ovhcloud",
+                ProviderExecutorConfig::openai("https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"),
+            ),
+            (
+                "wandb",
+                ProviderExecutorConfig::openai("https://api.inference.wandb.ai/v1"),
+            ),
+            // ── Gateway / Bridge ──────────────────────────────────────────
+            (
+                "kilo-gateway",
+                ProviderExecutorConfig::openai("https://api.kilo.ai/api/gateway"),
+            ),
+            (
+                "v0-vercel",
+                ProviderExecutorConfig::openai("https://api.v0.dev/v1"),
+            ),
+            // ── Regional CN providers ─────────────────────────────────────
+            (
+                "alibaba",
+                ProviderExecutorConfig::openai("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"),
+            ),
+            (
+                "alibaba-cn",
+                ProviderExecutorConfig::openai("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+            ),
+            (
+                "moonshot",
+                ProviderExecutorConfig::openai("https://api.moonshot.ai/v1"),
+            ),
+            (
+                "qianfan",
+                ProviderExecutorConfig::openai("https://qianfan.baidubce.com/v2"),
+            ),
+            (
+                "volcengine",
+                ProviderExecutorConfig::openai("https://ark.cn-beijing.volces.com/api/v3"),
+            ),
+            (
+                "zai",
+                ProviderExecutorConfig::claude_compatible("https://api.z.ai/api/anthropic/v1"),
+            ),
+            // ── Regional international ────────────────────────────────────
+            (
+                "gigachat",
+                ProviderExecutorConfig::openai("https://gigachat.devices.sberbank.ru/api/v1"),
+            ),
+            (
+                "upstage",
+                ProviderExecutorConfig::openai("https://api.upstage.ai/v1"),
+            ),
+            (
+                "maritalk",
+                ProviderExecutorConfig::openai("https://chat.maritaca.ai/api"),
+            ),
+            // ── Inference APIs (openai-compatible) ────────────────────────
+            (
+                "venice",
+                ProviderExecutorConfig::openai("https://api.venice.ai/api/v1"),
+            ),
+            (
+                "nanobanana",
+                ProviderExecutorConfig::openai("https://api.nanobananaapi.ai/v1"),
+            ),
+            (
+                "featherless-ai",
+                ProviderExecutorConfig::openai("https://api.featherless.ai/v1"),
+            ),
+            (
+                "friendliai",
+                ProviderExecutorConfig::openai("https://api.friendli.ai/serverless/v1"),
+            ),
+            (
+                "galadriel",
+                ProviderExecutorConfig::openai("https://api.galadriel.ai/v1"),
+            ),
+            (
+                "llamagate",
+                ProviderExecutorConfig::openai("https://llamagate.ai/v1"),
+            ),
+            (
+                "nanogpt",
+                ProviderExecutorConfig::openai("https://nano-gpt.com/api/v1"),
+            ),
+            (
+                "synthetic",
+                ProviderExecutorConfig::openai("https://api.synthetic.new/openai/v1"),
+            ),
+            (
+                "pollinations",
+                ProviderExecutorConfig::openai("https://gen.pollinations.ai/v1"),
+            ),
+            (
+                "meta-llama",
+                ProviderExecutorConfig::openai("https://api.llama.com/compat/v1"),
+            ),
+            // ── Coding / CLI tool providers ───────────────────────────────
+            (
+                "opencode-zen",
+                ProviderExecutorConfig::openai("https://opencode.ai/zen/v1"),
+            ),
+            (
+                "kimi-coding-apikey",
+                ProviderExecutorConfig::claude_compatible("https://api.kimi.com/coding/v1"),
+            ),
+            (
+                "devin-cli",
+                ProviderExecutorConfig::openai("devin://acp/stdio"),
+            ),
+            (
+                "windsurf",
+                ProviderExecutorConfig::openai("https://server.self-serve.windsurf.com"),
+            ),
+            (
+                "crof",
+                ProviderExecutorConfig::openai("https://crof.ai/v1"),
+            ),
+            // ── Media providers ───────────────────────────────────────────
+            (
+                "haiper",
+                ProviderExecutorConfig::openai("https://api.haiper.ai/v1"),
+            ),
+            (
+                "leonardo",
+                ProviderExecutorConfig::openai("https://cloud.leonardo.ai/api/rest/v1"),
+            ),
+            (
+                "ideogram",
+                ProviderExecutorConfig::openai("https://api.ideogram.ai"),
+            ),
+            (
+                "suno",
+                ProviderExecutorConfig::openai("https://studio-api.suno.ai/api"),
+            ),
+            (
+                "udio",
+                ProviderExecutorConfig::openai("https://www.udio.com/api"),
+            ),
+            // ── Web / Chat providers ──────────────────────────────────────
+            (
+                "chatgpt-web",
+                ProviderExecutorConfig::openai("https://chatgpt.com/backend-api"),
+            ),
+            (
+                "gemini-web",
+                ProviderExecutorConfig::gemini("https://gemini.google.com/app"),
+            ),
+            (
+                "muse-spark-web",
+                ProviderExecutorConfig::openai("https://www.meta.ai/api"),
+            ),
         ])
     });
 
@@ -1279,6 +1447,47 @@ pub fn get_api_key_providers() -> Vec<&'static str> {
         "nous-research",
         "glhf",
         "github-models",
+        // ── Newly added (enterprise, cloud, gateway, regional CN) ──
+        "databricks",
+        "snowflake",
+        "heroku",
+        "lambda-ai",
+        "ovhcloud",
+        "wandb",
+        "kilo-gateway",
+        "v0-vercel",
+        "alibaba",
+        "alibaba-cn",
+        "moonshot",
+        "qianfan",
+        "volcengine",
+        "zai",
+        "gigachat",
+        "upstage",
+        "maritalk",
+        "venice",
+        "nanobanana",
+        "featherless-ai",
+        "friendliai",
+        "galadriel",
+        "llamagate",
+        "nanogpt",
+        "synthetic",
+        "pollinations",
+        "meta-llama",
+        "opencode-zen",
+        "kimi-coding-apikey",
+        "devin-cli",
+        "windsurf",
+        "crof",
+        "haiper",
+        "leonardo",
+        "ideogram",
+        "suno",
+        "udio",
+        "chatgpt-web",
+        "gemini-web",
+        "muse-spark-web",
     ]
 }
 

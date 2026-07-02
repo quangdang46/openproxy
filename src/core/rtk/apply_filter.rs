@@ -94,3 +94,13 @@ pub fn smart_truncate(text: &str) -> String {
     use crate::core::rtk::filters::SmartTruncateFilter;
     SmartTruncateFilter.apply(text)
 }
+
+pub fn test_runner(text: &str) -> String {
+    use crate::core::rtk::filters::TestRunnerFilter;
+    TestRunnerFilter.apply(text)
+}
+
+pub fn json_summary(text: &str) -> String {
+    use crate::core::rtk::filters::JsonSummaryFilter;
+    JsonSummaryFilter.apply(text)
+}
