@@ -90,6 +90,7 @@ fn connection_with_id(provider: &str, id: &str) -> ProviderConnection {
         use_connection_proxy: None,
         provider_specific_data,
         extra: BTreeMap::new(),
+        runtime_transport: None,
     }
 }
 
