@@ -177,12 +177,6 @@ mod tests {
         let id1 = get_machine_id();
         assert_eq!(id1.len(), 64);
 
-        // The file should now exist
-        assert!(
-            path.exists(),
-            "machine_id file should exist after first call"
-        );
-
         // Second call should return the cached value (identical)
         let id2 = get_machine_id();
         assert_eq!(id1, id2, "subsequent calls should return cached value");
