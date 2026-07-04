@@ -10,6 +10,7 @@ mod gemini_cli;
 mod github;
 mod grok_web;
 mod iflow;
+mod kimchi;
 mod kiro;
 mod ollama;
 mod opencode;
@@ -18,6 +19,7 @@ mod project_id_cache;
 mod provider;
 mod qoder;
 mod qwen;
+mod strip_unsupported;
 mod vertex;
 mod xai;
 
@@ -63,6 +65,7 @@ pub use grok_web::{
     PerplexityWebExecutorResponse,
 };
 pub use iflow::{IFlowExecutionRequest, IFlowExecutor, IFlowExecutorError, IFlowExecutorResponse};
+pub use kimchi::KimchiExecutor;
 pub use kiro::{
     AwsCredentials, EventStreamDecoder, KiroExecutionRequest, KiroExecutor, KiroExecutorError,
     KiroExecutorResponse, SseEvent as KiroSseEvent,

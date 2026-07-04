@@ -20,6 +20,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
+use hyper::http;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
 
@@ -719,6 +721,50 @@ impl AntigravityExecutor {
         None
     }
 
+    /// Check whether a model ID refers to an image-generation model (Imagen).
+    fn is_image_model(model: &str) -> bool {
+        let base = model.rsplit('/').next().unwrap_or(model);
+        base.starts_with("imagen")
+    }
+
+    /// Parse a dash-separated aspect-ratio/resolution suffix from the end of a
+    /// model name.  The suffix must match `DIGITSxDIGITS` (one `x` separator).
+    ///
+    /// Returns `(&model[..last_hyphen], Some(suffix))` on a match, or
+    /// `(model, None)` when no suffix is found.
+    ///
+    /// Examples:
+    ///   `imagen-3.0-generate-002-16x9`     -> (`imagen-3.0-generate-002`, Some("16x9"))
+    ///   `imagen-3.0-generate-002-1024x768` -> (`imagen-3.0-generate-002`, Some("1024x768"))
+    ///   `imagen-3.0-generate-002`           -> (`imagen-3.0-generate-002`, None)
+    fn parse_image_model_suffix(model: &str) -> (&str, Option<&str>) {
+        if let Some(pos) = model.rfind('-') {
+            let suffix = &model[pos + 1..];
+            let parts: Vec<&str> = suffix.splitn(2, 'x').collect();
+            if parts.len() == 2
+                && !parts[0].is_empty()
+                && !parts[1].is_empty()
+                && parts[0].chars().all(|c| c.is_ascii_digit())
+                && parts[1].chars().all(|c| c.is_ascii_digit())
+                && suffix.chars().filter(|&c| c == 'x').count() == 1
+            {
+                return (&model[..pos], Some(suffix));
+            }
+        }
+        (model, None)
+    }
+
+    /// Check if an error response body suggests a transient error that should
+    /// be automatically retried.  Looks for common rate-limit and quota-exhausted
+    /// signals in the response text.
+    fn is_transient_antigravity_error(body_text: &str) -> bool {
+        let lower = body_text.to_ascii_lowercase();
+        lower.contains("rate_limit")
+            || lower.contains("quota_exceeded")
+            || lower.contains("resource_exhausted")
+            || body_text.contains("429")
+    }
+
     pub async fn execute_request(
         &self,
         mut request: AntigravityExecutionRequest,
@@ -733,7 +779,7 @@ impl AntigravityExecutor {
             })?
             .to_string();
 
-        // The translator pipeline (OpenAi → openai_to_gemini_cli_request) produces a flat
+        // The translator pipeline (OpenAi -> openai_to_gemini_cli_request) produces a flat
         // body {contents, tools, ...}.  Antigravity's Cloud Code endpoint requires the
         // Gemini-like body wrapped in a {"request": body} envelope.  If the body doesn't
         // already have a "request" key, wrap it here.
@@ -772,9 +818,54 @@ impl AntigravityExecutor {
         }
 
         let session_id = Self::transform_request(&mut request.body, &request.credentials)?;
-        let url = Self::build_url(request.stream);
 
-        // Retry up to 3 times with exponential backoff and Retry-After support.
+        // --- Image model support ---
+        // Detect image-generation models (Imagen) and, for those, use a
+        // separate non-streaming generateContent path with additional fields
+        // that the Antigravity endpoint requires (candidateCount, safetySettings).
+        let is_image = Self::is_image_model(&request.model);
+        let (clean_model, _suffix) = if is_image {
+            Self::parse_image_model_suffix(&request.model)
+        } else {
+            (request.model.as_str(), None)
+        };
+
+        let url = if is_image {
+            // Image models always use the non-streaming path.
+            Self::build_url(false)
+        } else {
+            Self::build_url(request.stream)
+        };
+
+        // For image models, inject the model name (after stripping suffix)
+        // and add candidateCount + safetySettings so the upstream returns
+        // images rather than text-only candidates.
+        if is_image {
+            if let Some(req) = request
+                .body
+                .get_mut("request")
+                .and_then(|v| v.as_object_mut())
+            {
+                req.insert("model".into(), Value::String(clean_model.to_string()));
+                req.insert("candidateCount".into(), json!(1));
+                // Minimal safety settings: block nothing.  Antigravity will
+                // apply its own server-side filtering regardless.
+                if req.get("safetySettings").is_none() {
+                    req.insert(
+                        "safetySettings".into(),
+                        json!([
+                            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+                            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+                            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+                            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+                        ]),
+                    );
+                }
+            }
+        }
+
+        // Retry up to 3 times with exponential backoff, Retry-After header,
+        // and error-body-text transient detection.
         const MAX_RETRIES: usize = 3;
         for attempt in 0..MAX_RETRIES {
             let mut headers =
@@ -796,7 +887,7 @@ impl AntigravityExecutor {
 
             let status = response.status();
 
-            // Success — return immediately.
+            // Success -- return immediately with unconsumed response.
             if status.is_success() {
                 return Ok(AntigravityExecutorResponse {
                     response: UpstreamResponse::Reqwest(response),
@@ -807,16 +898,36 @@ impl AntigravityExecutor {
                 });
             }
 
-            // Only retry on overload / server-error status codes.
+            // Save response headers before body consumption, then check
+            // for transient error signals in the body text.
+            let response_headers = response.headers().clone();
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            let body_text = String::from_utf8_lossy(&body_bytes);
+
+            // Determine retryability: status code check + body text check.
             let is_retryable = status.as_u16() == 429
                 || status == reqwest::StatusCode::SERVICE_UNAVAILABLE
                 || status == reqwest::StatusCode::BAD_GATEWAY
-                || status == reqwest::StatusCode::GATEWAY_TIMEOUT;
+                || status == reqwest::StatusCode::GATEWAY_TIMEOUT
+                || Self::is_transient_antigravity_error(&body_text);
 
             if !is_retryable || attempt + 1 >= MAX_RETRIES {
-                // Not retryable or no retries left — return the response as-is.
+                // Not retryable or no retries left -- reconstruct a
+                // reqwest::Response from status, saved headers, and body bytes.
+                let mut builder = http::Response::builder().status(status);
+                for (key, value) in response_headers.iter() {
+                    builder = builder.header(key.clone(), value.clone());
+                }
+                let reconstructed_http = builder
+                    .body(body_bytes)
+                    .map_err(|e| {
+                        AntigravityExecutorError::RequestFailed(format!(
+                            "response reconstruction: {e}"
+                        ))
+                    })?;
+                let reconstructed = reqwest::Response::from(reconstructed_http);
                 return Ok(AntigravityExecutorResponse {
-                    response: UpstreamResponse::Reqwest(response),
+                    response: UpstreamResponse::Reqwest(reconstructed),
                     url,
                     headers,
                     transformed_body: request.body,
@@ -826,7 +937,7 @@ impl AntigravityExecutor {
 
             // Determine wait duration: Retry-After header wins, otherwise
             // exponential backoff: 500ms * 2^attempt (jittered).
-            let delay = Self::parse_retry_after(response.headers()).unwrap_or_else(|| {
+            let delay = Self::parse_retry_after(&response_headers).unwrap_or_else(|| {
                 let base_ms = 500u64 * (1u64 << attempt);
                 let jitter = rand::random::<u64>() % (base_ms / 2 + 1);
                 Duration::from_millis(base_ms + jitter)
@@ -977,7 +1088,7 @@ mod tests {
         let decls = groups[0]["functionDeclarations"].as_array().unwrap();
         // 2 original tools + AG_DEFAULT_TOOLS decoys (every entry, with
         // `_ide` suffix appended). The test does not assume a magic number
-        // — it computes the expected count from the same source of truth
+        // -- it computes the expected count from the same source of truth
         // the executor uses.
         let expected_count = 2 + crate::core::config::app_constants::AG_DEFAULT_TOOLS.len();
         assert_eq!(decls.len(), expected_count);
@@ -1109,5 +1220,106 @@ mod tests {
             platform <= 5,
             "platform value {platform} is in expected range"
         );
+    }
+
+    // ---- image model helper tests ----
+
+    #[test]
+    fn is_image_model_detects_imagen_prefix() {
+        assert!(AntigravityExecutor::is_image_model("google/imagen-3.0-generate-002"));
+        assert!(AntigravityExecutor::is_image_model("imagen-3.0-generate-002"));
+        assert!(AntigravityExecutor::is_image_model("imagen"));
+        assert!(!AntigravityExecutor::is_image_model("gemini-2.5-flash"));
+        assert!(!AntigravityExecutor::is_image_model("gemini-2.5-pro"));
+        assert!(!AntigravityExecutor::is_image_model(""));
+    }
+
+    #[test]
+    fn parse_image_model_suffix_handles_aspect_ratio() {
+        let (base, suffix) = AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002-16x9");
+        assert_eq!(base, "imagen-3.0-generate-002");
+        assert_eq!(suffix, Some("16x9"));
+    }
+
+    #[test]
+    fn parse_image_model_suffix_handles_resolution() {
+        let (base, suffix) = AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002-1024x768");
+        assert_eq!(base, "imagen-3.0-generate-002");
+        assert_eq!(suffix, Some("1024x768"));
+    }
+
+    #[test]
+    fn parse_image_model_suffix_returns_none_when_no_suffix() {
+        let (base, suffix) = AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002");
+        assert_eq!(base, "imagen-3.0-generate-002");
+        assert_eq!(suffix, None);
+    }
+
+    #[test]
+    fn parse_image_model_suffix_returns_none_for_non_model_suffix() {
+        let (base, suffix) = AntigravityExecutor::parse_image_model_suffix("gemini-2.5-flash");
+        assert_eq!(base, "gemini-2.5-flash");
+        assert_eq!(suffix, None);
+    }
+
+    #[test]
+    fn parse_image_model_suffix_multiple_x_not_matched() {
+        // Multiple 'x' chars should not be parsed as a valid WxH suffix.
+        let (base, suffix) = AntigravityExecutor::parse_image_model_suffix("model-16x9x2");
+        assert_eq!(base, "model-16x9x2");
+        assert_eq!(suffix, None);
+    }
+
+    // ---- transient error body-text detection tests ----
+
+    #[test]
+    fn is_transient_antigravity_error_detects_rate_limit() {
+        assert!(AntigravityExecutor::is_transient_antigravity_error(
+            "{\"error\": {\"message\": \"rate_limit exceeded\"}}"
+        ));
+    }
+
+    #[test]
+    fn is_transient_antigravity_error_detects_quota_exceeded() {
+        assert!(AntigravityExecutor::is_transient_antigravity_error(
+            "quota_exceeded: daily limit reached"
+        ));
+    }
+
+    #[test]
+    fn is_transient_antigravity_error_detects_resource_exhausted() {
+        assert!(AntigravityExecutor::is_transient_antigravity_error(
+            "RESOURCE_EXHAUSTED: quota exhausted"
+        ));
+    }
+
+    #[test]
+    fn is_transient_antigravity_error_detects_429_string() {
+        assert!(
+            AntigravityExecutor::is_transient_antigravity_error(
+                "Error code: 429 Too Many Requests"
+            )
+        );
+    }
+
+    #[test]
+    fn is_transient_antigravity_error_returns_false_for_other_errors() {
+        assert!(!AntigravityExecutor::is_transient_antigravity_error(
+            "{\"error\": {\"message\": \"invalid argument\"}}"
+        ));
+        assert!(!AntigravityExecutor::is_transient_antigravity_error(
+            "{\"error\": {\"message\": \"permission denied\"}}"
+        ));
+        assert!(!AntigravityExecutor::is_transient_antigravity_error(""));
+    }
+
+    #[test]
+    fn is_transient_antigravity_error_case_insensitive() {
+        assert!(AntigravityExecutor::is_transient_antigravity_error(
+            "RATE_LIMIT REACHED"
+        ));
+        assert!(AntigravityExecutor::is_transient_antigravity_error(
+            "Rate_Limit Exceeded"
+        ));
     }
 }

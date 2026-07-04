@@ -888,7 +888,8 @@ async fn forward_with_provider_fallback(
             CursorExecutionRequest, CursorExecutor, DefaultExecutor, ExecutionRequest,
             GeminiCliExecutionRequest, GeminiCliExecutor, GithubExecutionRequest, GithubExecutor,
             GrokWebExecutionRequest, GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor,
-            KiroExecutionRequest, KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest,
+            KimchiExecutor, KiroExecutionRequest, KiroExecutor, KiroExecutorResponse,
+            ProviderExecutionRequest, ProviderExecutor, OpenCodeExecutionRequest,
             OpenCodeExecutor, OpenCodeGoExecutionRequest, OpenCodeGoExecutor,
             PerplexityWebExecutionRequest, PerplexityWebExecutor, QoderExecutionRequest,
             QoderExecutor, QwenExecutionRequest, QwenExecutor, VertexExecutionRequest,
@@ -1350,6 +1351,36 @@ async fn forward_with_provider_fallback(
                     .map_err(|e| ComboAttemptError {
                         status: 500,
                         message: format!("PerplexityWeb execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "kimchi" {
+                let executor = KimchiExecutor::new(
+                    state.client_pool.clone(),
+                    provider_node,
+                );
+                let result = executor
+                    .execute(ProviderExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                        signal: None,
+                        log: None,
+                        proxy_options: None,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Kimchi execution failed: {:?}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
