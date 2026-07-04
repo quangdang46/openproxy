@@ -1,4 +1,5 @@
 pub mod cline_auth;
+pub mod credential_manager;
 pub mod machine_id;
 
 use hmac::{Hmac, Mac};

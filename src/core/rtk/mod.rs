@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use serde_json::{json, Map, Value};
 
-use crate::core::rtk::system_inject::{inject_system_prompt, system_inject_enabled};
+use crate::core::rtk::system_inject::inject_system_prompt;
 use crate::core::translator::ponytail::{inject_ponytail_prompt, PonytailLevel};
 use crate::types::Settings;
 
