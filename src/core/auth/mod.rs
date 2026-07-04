@@ -1,3 +1,6 @@
+pub mod cline_auth;
+pub mod machine_id;
+
 use hmac::{Hmac, Mac};
 use rand::Rng;
 use sha2::Sha256;

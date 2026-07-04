@@ -11,6 +11,7 @@ pub mod constants;
 pub mod filters;
 pub mod headroom;
 pub mod smartcrusher;
+pub mod system_inject;
 
 use apply_filter::{safe_apply, RtkHit, RtkStats};
 use autodetect::{auto_detect_filter, FilterFn};
