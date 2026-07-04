@@ -715,6 +715,7 @@ static REGISTRY: OnceLock<TranslationRegistry> = OnceLock::new();
 /// Initializes with all registered transforms on first call.
 pub fn global_registry() -> &'static TranslationRegistry {
     use crate::core::translator::request::antigravity_to_openai::antigravity_to_openai_request;
+    use crate::core::translator::request::claude_to_kiro::claude_to_kiro_request;
     use crate::core::translator::request::claude_to_openai::claude_to_openai_request;
     use crate::core::translator::request::gemini_to_openai::gemini_to_openai_request;
     use crate::core::translator::request::openai_responses::{
@@ -732,6 +733,7 @@ pub fn global_registry() -> &'static TranslationRegistry {
     use crate::core::translator::response::commandcode_to_openai::commandcode_to_openai_response;
     use crate::core::translator::response::cursor_to_openai::cursor_to_openai_streaming;
     use crate::core::translator::response::gemini_to_openai::gemini_to_openai_streaming;
+    use crate::core::translator::response::kiro_to_claude::kiro_to_claude_streaming;
     use crate::core::translator::response::kiro_to_openai::kiro_to_openai_streaming;
     use crate::core::translator::response::ollama_to_openai::ollama_to_openai_streaming;
     use crate::core::translator::response::openai_responses::responses_to_chat_streaming;

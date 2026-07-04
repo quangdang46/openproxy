@@ -2,6 +2,7 @@ use std::str::FromStr;
 
 use serde_json::{json, Map, Value};
 
+use crate::core::rtk::system_inject::{inject_system_prompt, system_inject_enabled};
 use crate::core::translator::ponytail::{inject_ponytail_prompt, PonytailLevel};
 use crate::types::Settings;
 
@@ -139,7 +140,34 @@ pub fn apply_request_preprocessing(body: &mut Value, settings: &Settings, model:
             ),
         );
     }
+    // System prompt injection at RTK layer.
+    // Reads `systemInject` (bool) and `systemPrompt` (string) from the settings
+    // `extra` map — these are unstructured/extra config keys that live alongside
+    // the known fields.
+    modified |= apply_rtk_system_injection(body, settings);
     modified
+}
+
+/// Apply system prompt injection from settings extras if enabled.
+fn apply_rtk_system_injection(body: &mut Value, settings: &Settings) -> bool {
+    let system_inject = settings
+        .extra
+        .get("systemInject")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !system_inject {
+        return false;
+    }
+    let prompt = settings
+        .extra
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+    match prompt {
+        Some(p) => inject_system_prompt(body, &p),
+        None => false,
+    }
 }
 
 pub fn should_auto_apply_caveman(body: &Value, model: &str) -> bool {

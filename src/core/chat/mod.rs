@@ -18,6 +18,7 @@
 use serde_json::Value;
 
 use crate::core::guardrails::global_guardrail_registry;
+use crate::core::rtk::system_inject::inject_system_prompt;
 use crate::core::translator::caveman::inject_caveman;
 use crate::core::translator::ponytail::{inject_ponytail_prompt, PonytailLevel};
 use crate::core::translator::registry::{self, Format};
@@ -130,7 +131,8 @@ pub async fn apply_guardrails_post_call(response: &mut Value) -> bool {
     }
 }
 
-/// Apply preprocessing steps (caveman prompt injection) to the request body.
+/// Apply preprocessing steps (caveman prompt injection, system prompt injection)
+/// to the request body.
 ///
 /// This should be called after translation but before dispatch, corresponding
 /// to step 5 in the pipeline: "Apply preprocessing (RTK, caveman)".
@@ -153,7 +155,35 @@ pub fn apply_preprocessing(
             PonytailLevel::parse_or_default(&settings.ponytail_level),
         );
     }
+    // System prompt injection at RTK layer.
+    // Reads `systemInject` (bool) and `systemPrompt` (string) from the settings
+    // `extra` map.
+    modified |= apply_chat_system_prompt_injection(body, settings);
     modified
+}
+
+/// Check the RTK-layer system injection settings and apply if enabled.
+/// Reads `systemInject` (bool) and `systemPrompt` (string) from the settings
+/// `extra` map.
+fn apply_chat_system_prompt_injection(body: &mut Value, settings: &Settings) -> bool {
+    let system_inject = settings
+        .extra
+        .get("systemInject")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !system_inject {
+        return false;
+    }
+    let prompt = settings
+        .extra
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string());
+    match prompt {
+        Some(p) => inject_system_prompt(body, &p),
+        None => false,
+    }
 }
 
 #[cfg(test)]

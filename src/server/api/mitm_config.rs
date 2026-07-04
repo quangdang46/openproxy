@@ -1,6 +1,7 @@
 use axum::{
     extract::State,
     http::StatusCode,
+    middleware,
     response::IntoResponse,
     routing::{get, post, put},
     Json, Router,
@@ -1751,19 +1752,28 @@ async fn test_proxy_url(
 }
 
 pub fn routes() -> Router<AppState> {
-    Router::new()
+    // ── LOCAL_ONLY: MITM control, cert management ──
+    let local_only = Router::new()
         .route("/api/mitm-config", get(get_config))
         .route("/api/mitm-config", put(update_config))
         .route("/api/mitm/cert/generate", post(generate_cert))
         .route("/api/mitm/start", post(start_mitm))
         .route("/api/mitm/stop", post(stop_mitm))
+        .route_layer(middleware::from_fn(
+            crate::server::api::guard::require_local_only,
+        ));
+
+    // ── Protected (non-local-only): proxy pool deploy/test ──
+    let other = Router::new()
         .route("/api/proxy-pools/vercel-deploy", post(vercel_deploy))
         .route(
             "/api/proxy-pools/cloudflare-deploy",
             post(cloudflare_deploy),
         )
         .route("/api/proxy-pools/deno-deploy", post(deno_deploy))
-        .route("/api/proxy-pools/{id}/test", post(test_pool))
+        .route("/api/proxy-pools/{id}/test", post(test_pool));
+
+    Router::new().merge(local_only).merge(other)
 }
 
 #[cfg(test)]

@@ -92,6 +92,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 ),
         )
         .merge(v1beta::routes())
+        .merge(chat_search::routes())
         .merge(web_fetch::routes())
         .route(
             "/v1/chat/completions",

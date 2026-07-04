@@ -1,6 +1,7 @@
 //! Request format translators
 
 pub mod antigravity_to_openai;
+pub mod claude_to_kiro;
 pub mod claude_to_openai;
 pub mod gemini_to_openai;
 pub mod openai_responses;

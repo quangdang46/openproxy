@@ -5,6 +5,7 @@ use anyhow::Result as AnyhowResult;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
+    middleware,
     response::{IntoResponse, Response},
     routing::get,
     Json, Router,
@@ -19,12 +20,16 @@ use crate::server::state::AppState;
 const PROVIDER: &str = "gateway";
 
 pub fn routes() -> Router<AppState> {
-    Router::new().route(
-        "/api/cli-tools/cowork-settings",
-        get(get_cowork_settings)
-            .post(save_cowork_settings)
-            .delete(delete_cowork_settings),
-    )
+    Router::new()
+        .route(
+            "/api/cli-tools/cowork-settings",
+            get(get_cowork_settings)
+                .post(save_cowork_settings)
+                .delete(delete_cowork_settings),
+        )
+        .route_layer(middleware::from_fn(
+            crate::server::api::guard::require_local_only,
+        ))
 }
 
 fn require_management_access(

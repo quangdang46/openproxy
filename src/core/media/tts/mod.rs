@@ -10,6 +10,7 @@
 //! inworld, cartesia, playht, coqui, tortoise, openai-compat).
 
 pub mod base;
+mod aws_polly;
 mod edge_tts;
 mod elevenlabs;
 mod gemini;
@@ -95,6 +96,7 @@ pub fn get_tts_adapter(provider: &str) -> Option<&'static dyn TtsAdapter> {
         "google-tts" => Some(&google_tts::ADAPTER),
         "edge-tts" => Some(&edge_tts::ADAPTER),
         "local-device" => Some(&local_device::ADAPTER),
+        "aws-polly" | "polly" => Some(&aws_polly::ADAPTER),
         _ => None,
     }
 }
@@ -178,6 +180,8 @@ mod tests {
             "google-tts",
             "edge-tts",
             "local-device",
+            "aws-polly",
+            "polly",
             "coqui",
             "inworld",
             "tortoise",
