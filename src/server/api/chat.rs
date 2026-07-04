@@ -2081,9 +2081,7 @@ fn translate_codex_non_streaming(body: &[u8]) -> Option<Bytes> {
     let val: serde_json::Value = serde_json::from_slice(body).ok()?;
 
     // Navigate: response > output > [0] > content > [{output_text}]
-    let output = val
-        .pointer("/response/output")
-        .and_then(|v| v.as_array())?;
+    let output = val.pointer("/response/output").and_then(|v| v.as_array())?;
 
     let mut text_parts: Vec<String> = Vec::new();
     for item in output {
