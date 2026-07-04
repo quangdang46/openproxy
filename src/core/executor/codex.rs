@@ -214,12 +214,17 @@ impl CodexExecutor {
 
     /// Transform the request body from Chat Completions format to Codex Responses API format.
     ///
+    /// Handles both pre-translated bodies (input[] array from `chat_to_openai_responses_request`)
+    /// and untranslated OpenAI bodies (messages[] array) — this avoids double-translation bugs
+    /// when the pipeline already ran request translation before calling the executor.
+    ///
     /// The Codex Responses API at chatgpt.com uses `input` as an array of message items.
     /// This function:
     /// - Converts messages[] to input[] with type "message", role, and content as input_text blocks
     /// - Converts "system" role to "developer"
     /// - Strips server-generated IDs (rs_, fc_, resp_, msg_ prefixes) to avoid 404s with store:false
-    /// - Forces stream: true and store: false (required by Codex backend)
+    /// - Uses the original stream flag from the request (not hardcoded)
+    /// - Forces store: false (required by Codex backend)
     /// - Injects instructions from body or a default
     /// - Applies an allowlist: only model, input, instructions, tools, tool_choice,
     ///   stream, store, reasoning, include, prompt_cache_key survive
@@ -227,9 +232,21 @@ impl CodexExecutor {
         &self,
         body: &Value,
         actual_model: &str,
+        stream: bool,
     ) -> Result<Value, CodexExecutorError> {
-        // Convert messages[] to Responses API input[] array format
-        let input_items = Self::extract_input_items(body)?;
+        // Handle both pre-translated (input[]) and untranslated (messages[]) bodies
+        let input_items = if let Some(input) = body.get("input").and_then(Value::as_array) {
+            // Already translated by the pipeline — use as-is
+            if input.is_empty() {
+                return Err(CodexExecutorError::UnsupportedFormat(
+                    "Empty input array in request body".to_string(),
+                ));
+            }
+            input.clone()
+        } else {
+            // Not yet translated — extract from messages[]
+            Self::extract_input_items(body)?
+        };
 
         // Extract instructions from body, or use a default if empty
         let instructions = body
@@ -239,11 +256,12 @@ impl CodexExecutor {
             .unwrap_or(Self::DEFAULT_CODEX_INSTRUCTIONS);
 
         // Build allowlisted request body with required fields
+        // Use the request's original stream flag (the Codex API supports both)
         let mut request_body = json!({
             "model": actual_model,
             "input": input_items,
             "instructions": instructions,
-            "stream": true,
+            "stream": stream,
             "store": false,
         });
 
@@ -404,7 +422,8 @@ impl CodexExecutor {
             .or(request.credentials.display_name.as_deref());
         let headers =
             self.build_headers(api_key, request.stream, connection_id, &request.credentials)?;
-        let transformed_body = self.transform_request_body(&request.body, &actual_model)?;
+        let transformed_body =
+            self.transform_request_body(&request.body, &actual_model, request.stream)?;
 
         let client = self.pool.get("openai", request.proxy.as_ref())?;
 
@@ -530,7 +549,7 @@ mod tests {
         });
 
         let result = executor
-            .transform_request_body(&chat_body, "o4-mini")
+            .transform_request_body(&chat_body, "o4-mini", true)
             .unwrap();
 
         assert_eq!(result["model"], "o4-mini");
@@ -572,7 +591,7 @@ mod tests {
         });
 
         let result = executor
-            .transform_request_body(&chat_body, "o4-mini")
+            .transform_request_body(&chat_body, "o4-mini", true)
             .unwrap();
 
         let input = result["input"].as_array().unwrap();
@@ -598,7 +617,7 @@ mod tests {
         });
 
         let result = executor
-            .transform_request_body(&chat_body, "o4-mini")
+            .transform_request_body(&chat_body, "o4-mini", true)
             .unwrap();
 
         let input = result["input"].as_array().unwrap();

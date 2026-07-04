@@ -856,6 +856,18 @@ pub fn responses_to_chat_response(
                 vec![]
             }
         }
+        // response.created carries the model name assigned by the backend.
+        // Capture it so subsequent chunks emit a meaningful model field instead of "unknown".
+        Some("response.created") => {
+            if let Some(response) = data.get("response") {
+                if let Some(model_name) = response.get("model").and_then(|v| v.as_str()) {
+                    if !model_name.is_empty() {
+                        state.insert("model".to_string(), Value::String(model_name.to_string()));
+                    }
+                }
+            }
+            vec![]
+        }
         _ => vec![],
     }
 }
@@ -863,24 +875,75 @@ pub fn responses_to_chat_response(
 use crate::core::translator::registry::ResponseTransformState;
 
 /// Registry-compatible streaming wrapper: Responses API -> OpenAI chat completion chunks.
+///
+/// Handles two input formats:
+///   1. Bare JSON: `{"type":"response.completed","response":{...}}`
+///   2. SSE-framed: `event: response.completed\ndata: {"type":"response.completed",...}\n\n`
+///
 /// Signature matches `registry::ResponseTransformFn`.
 pub fn responses_to_chat_streaming(
     chunk: &[u8],
     state: &mut ResponseTransformState,
 ) -> Vec<String> {
-    let val: serde_json::Value = match serde_json::from_slice(chunk) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-    let inner = &mut state.responses.state;
-    let results = responses_to_chat_response(&val, inner);
+    // Accumulate incoming bytes into the frame buffer.
+    // SSE frames (delimited by double newline \n\n) can straddle TCP chunks,
+    // so we must buffer across calls.
+    state.responses.buffer.push_str(&String::from_utf8_lossy(chunk));
+
+    // Try as bare JSON first (when the upstream delivers data: lines without event: prefix,
+    // or when the full SSE event lands as one line, or on the final flush of a single frame).
+    if let Ok(val) = serde_json::from_slice::<Value>(chunk) {
+        // Only treat as bare JSON if the buffer is its natural size (nothing left over
+        // from a previous partial frame) — otherwise fall through to SSE extraction.
+        if state.responses.buffer.len() <= chunk.len() {
+            let inner = &mut state.responses.state;
+            let results = responses_to_chat_response(&val, inner);
+            // Clear buffer — we consumed everything via the JSON path
+            state.responses.buffer.clear();
+            return results
+                .into_iter()
+                .map(|v| {
+                    format!(
+                        "data: {}\n\n",
+                        serde_json::to_string(&v).unwrap_or_default()
+                    )
+                })
+                .collect();
+        }
+    }
+
+    // SSE-framed data: the buffer may contain one or more complete frames.
+    // Split on \n\n (SSE frame delimiter), process complete frames, store leftovers.
+    let mut results = Vec::new();
+
+    loop {
+        // Find the next \n\n frame delimiter
+        let frame_end = match state.responses.buffer.find("\n\n") {
+            Some(pos) => pos,
+            None => break, // no complete frame yet, wait for next chunk
+        };
+
+        let frame = state.responses.buffer[..frame_end].to_string();
+        state.responses.buffer.drain(..frame_end + 2);
+
+        for line in frame.lines() {
+            let trimmed = line.trim();
+            if let Some(data_content) = trimmed.strip_prefix("data: ") {
+                if data_content == "[DONE]" {
+                    continue;
+                }
+                if let Ok(val) = serde_json::from_str::<Value>(data_content) {
+                    let inner = &mut state.responses.state;
+                    for v in responses_to_chat_response(&val, inner) {
+                        results.push(format!(
+                            "data: {}\n\n",
+                            serde_json::to_string(&v).unwrap_or_default()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     results
-        .into_iter()
-        .map(|v| {
-            format!(
-                "data: {}\n\n",
-                serde_json::to_string(&v).unwrap_or_default()
-            )
-        })
-        .collect()
 }

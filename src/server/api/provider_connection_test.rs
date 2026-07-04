@@ -1527,7 +1527,8 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
                     format!("Bearer {access_token}"),
                 ),
                 ("Content-Type".to_string(), "application/json".to_string()),
-                ("originator".to_string(), "codex-cli".to_string()),
+                ("originator".to_string(), "codex_cli_rs".to_string()),
+                ("session_id".to_string(), "default".to_string()),
                 (
                     "User-Agent".to_string(),
                     "codex-cli/1.0.18 (macOS; arm64)".to_string(),
