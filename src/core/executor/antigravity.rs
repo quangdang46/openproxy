@@ -918,13 +918,9 @@ impl AntigravityExecutor {
                 for (key, value) in response_headers.iter() {
                     builder = builder.header(key.clone(), value.clone());
                 }
-                let reconstructed_http = builder
-                    .body(body_bytes)
-                    .map_err(|e| {
-                        AntigravityExecutorError::RequestFailed(format!(
-                            "response reconstruction: {e}"
-                        ))
-                    })?;
+                let reconstructed_http = builder.body(body_bytes).map_err(|e| {
+                    AntigravityExecutorError::RequestFailed(format!("response reconstruction: {e}"))
+                })?;
                 let reconstructed = reqwest::Response::from(reconstructed_http);
                 return Ok(AntigravityExecutorResponse {
                     response: UpstreamResponse::Reqwest(reconstructed),
@@ -1226,8 +1222,12 @@ mod tests {
 
     #[test]
     fn is_image_model_detects_imagen_prefix() {
-        assert!(AntigravityExecutor::is_image_model("google/imagen-3.0-generate-002"));
-        assert!(AntigravityExecutor::is_image_model("imagen-3.0-generate-002"));
+        assert!(AntigravityExecutor::is_image_model(
+            "google/imagen-3.0-generate-002"
+        ));
+        assert!(AntigravityExecutor::is_image_model(
+            "imagen-3.0-generate-002"
+        ));
         assert!(AntigravityExecutor::is_image_model("imagen"));
         assert!(!AntigravityExecutor::is_image_model("gemini-2.5-flash"));
         assert!(!AntigravityExecutor::is_image_model("gemini-2.5-pro"));
@@ -1236,21 +1236,24 @@ mod tests {
 
     #[test]
     fn parse_image_model_suffix_handles_aspect_ratio() {
-        let (base, suffix) = AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002-16x9");
+        let (base, suffix) =
+            AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002-16x9");
         assert_eq!(base, "imagen-3.0-generate-002");
         assert_eq!(suffix, Some("16x9"));
     }
 
     #[test]
     fn parse_image_model_suffix_handles_resolution() {
-        let (base, suffix) = AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002-1024x768");
+        let (base, suffix) =
+            AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002-1024x768");
         assert_eq!(base, "imagen-3.0-generate-002");
         assert_eq!(suffix, Some("1024x768"));
     }
 
     #[test]
     fn parse_image_model_suffix_returns_none_when_no_suffix() {
-        let (base, suffix) = AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002");
+        let (base, suffix) =
+            AntigravityExecutor::parse_image_model_suffix("imagen-3.0-generate-002");
         assert_eq!(base, "imagen-3.0-generate-002");
         assert_eq!(suffix, None);
     }
@@ -1295,11 +1298,9 @@ mod tests {
 
     #[test]
     fn is_transient_antigravity_error_detects_429_string() {
-        assert!(
-            AntigravityExecutor::is_transient_antigravity_error(
-                "Error code: 429 Too Many Requests"
-            )
-        );
+        assert!(AntigravityExecutor::is_transient_antigravity_error(
+            "Error code: 429 Too Many Requests"
+        ));
     }
 
     #[test]

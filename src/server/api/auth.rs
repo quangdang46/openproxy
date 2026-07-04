@@ -786,10 +786,29 @@ fn build_auth_cookie(token: &str, max_age_seconds: i64, secure: bool) -> String 
 /// Best-effort client IP extraction. The dashboard binds `127.0.0.1`, so most
 /// real callers are either loopback or coming through a reverse proxy.
 ///
-/// Order: `X-Forwarded-For` (first hop), `X-Real-IP`, else loopback. When
-/// deployed without a trusted proxy the loopback fallback keeps the limiter
-/// from accidentally using `0.0.0.0` as a shared bucket.
+/// Order:
+///   1. `x-9r-real-ip` — unspoofable TCP peer IP stamped by
+///      [`crate::server::api::guard::real_ip_middleware`] (Fix 1). This is the
+///      only trusted source; the headers below are only checked when this is
+///      absent (e.g. in test environments that bypass the middleware).
+///   2. `X-Forwarded-For` (first hop) — only when TRUST_PROXY=true.
+///   3. `X-Real-IP` — only when TRUST_PROXY=true.
+///   4. Loopback (`127.0.0.1`) — safe fallback when nothing else matches.
 fn client_ip_from_headers(headers: &HeaderMap) -> std::net::IpAddr {
+    // Priority 1: unspoofable TCP peer IP. The guard middleware strips
+    // all client-supplied forwarding headers and stamps this one from
+    // the verified connection socket.
+    if let Some(value) = headers
+        .get(super::guard::REAL_IP_HEADER)
+        .and_then(|value| value.to_str().ok())
+    {
+        if let Ok(ip) = value.trim().parse::<std::net::IpAddr>() {
+            return ip;
+        }
+    }
+
+    // Priority 2-3: reverse-proxy headers (only trusted when explicitly
+    // enabled via TRUST_PROXY=true).
     if let Some(value) = headers
         .get("x-forwarded-for")
         .and_then(|value| value.to_str().ok())

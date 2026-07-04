@@ -31,13 +31,18 @@ use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 
 pub fn build_app(state: server::state::AppState) -> Router {
+    use axum::middleware;
+
     let cors = CorsLayer::new()
         .allow_origin(Any)
         .allow_methods(Any)
         .allow_headers(Any);
 
-    server::api::routes()
+    server::api::routes(state.clone())
         .merge(server::dashboard::routes())
+        // Real-IP middleware: stamps the verified TCP peer IP as
+        // `x-9r-real-ip` and strips client-supplied forwarding headers.
+        .layer(middleware::from_fn(server::api::guard::real_ip_middleware))
         .layer(cors)
         .with_state(state)
 }

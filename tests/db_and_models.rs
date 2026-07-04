@@ -50,6 +50,7 @@ fn app_db_round_trips_through_serde() {
             proxy_url: None,
             proxy_label: None,
             use_connection_proxy: None,
+            runtime_transport: None,
             provider_specific_data: BTreeMap::new(),
             extra: BTreeMap::new(),
         }],

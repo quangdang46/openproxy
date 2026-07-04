@@ -595,109 +595,9 @@ async fn execute_single_model(
     let caps = capabilities_for_format(plan.source_format);
     strip_unsupported_modalities(&mut body, plan.source_format, &caps);
 
-    // 2. Translate request body from source format to target format
-    //     before applying RTK/Headroom/Caveman (9router order: translate first, then post-process).
-    if plan.needs_translation() {
-        registry::global_registry().translate_request(
-            plan.source_format,
-            plan.target_format,
-            &plan.model,
-            &mut body,
-            plan.stream,
-            None,
-        );
-    }
-
-    // 3. RTK tool-result compression (after translate — 9router parity)
-    compress_messages(&mut body, snapshot.settings.rtk_enabled);
-
-    // 4. Headroom external token compression (after translate — 9router parity)
-    //     Bug #278 fix: use target_format instead of source_format — the body
-    //     has already been translated by step 2, so Headroom needs to know what
-    //     shape the request body is in right now (target format).
-    //     Uses the same format string as compress_with_headroom expects:
-    //     "claude" for Claude-shaped bodies, "openai" for everything else.
-    {
-        let headroom_cfg = HeadroomConfig {
-            enabled: snapshot.settings.headroom_enabled,
-            url: snapshot.settings.headroom_url.clone(),
-            timeout_ms: snapshot.settings.headroom_timeout_ms,
-            compress_user_messages: snapshot.settings.headroom_compress_user_messages,
-        };
-        let headroom_format =
-            if plan.target_format == crate::core::translator::registry::Format::Claude {
-                "claude"
-            } else {
-                "openai"
-            };
-        // Phantom savings: log an estimated pre-compression range before the
-        // actual Headroom call, so dashboards and metrics see a prediction even
-        // when the proxy is slow or unreachable.
-        if let Ok(body_str) = serde_json::to_string(&body) {
-            let est_tokens = (body_str.len() + 3) / 4;
-            if est_tokens > 0 {
-                tracing::debug!(
-                    "headroom input ~{} tokens (estimated from body size)",
-                    est_tokens
-                );
-            }
-        }
-        if let Some(stats) =
-            compress_with_headroom(&mut body, &headroom_cfg, &plan.model, headroom_format, None)
-                .await
-        {
-            tracing::debug!("{}", stats.format_headroom_log().unwrap_or_default());
-        }
-    }
-
-    // 5. 9router parity: provider-level thinking config override (chatCore.js:44-57).
-    //     After Headroom so token budgets are applied to any external-compressed body.
-    if let Some(provider_thinking) = snapshot
-        .settings
-        .extra
-        .get("providerThinking")
-        .and_then(|v| v.as_object())
-    {
-        if let Some(mode_val) = provider_thinking.get(plan.provider.as_str()) {
-            let mode = mode_val.as_str().unwrap_or("auto");
-            if mode != "auto" {
-                if mode == "on" && !body.get("thinking").and_then(|v| v.as_object()).is_some() {
-                    if let Some(obj) = body.as_object_mut() {
-                        obj.insert(
-                            "thinking".to_string(),
-                            json!({"type": "enabled", "budget_tokens": 10000}),
-                        );
-                    }
-                } else if mode == "off"
-                    && !body.get("thinking").and_then(|v| v.as_object()).is_some()
-                {
-                    if let Some(obj) = body.as_object_mut() {
-                        obj.insert("thinking".to_string(), json!({"type": "disabled"}));
-                    }
-                } else if mode != "on" && mode != "off" {
-                    if !body
-                        .get("reasoning_effort")
-                        .and_then(|v| v.as_str())
-                        .map(|s| !s.is_empty())
-                        .unwrap_or(false)
-                    {
-                        if let Some(obj) = body.as_object_mut() {
-                            obj.insert(
-                                "reasoning_effort".to_string(),
-                                Value::String(mode.to_string()),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 6. Caveman + Ponytail prompt injection (after translate — 9router parity)
-    let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
-
-    // Prefetch remote images for providers that need inline base64
-    // (9router prefetchRemoteImages parity: gate on target format).
+    // 2. Image prefetch: fetch remote images as base64 before translation
+    //     (runs before translate_request so image_url format is correct
+    //     before the body is rewritten — 9router parity).
     if plan.target_format.needs_image_prefetch() {
         if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
             let client = reqwest::Client::new();
@@ -753,6 +653,107 @@ async fn execute_single_model(
             }
         }
     }
+
+    // 3. Translate request body from source format to target format
+    //     before applying RTK/Headroom/Caveman (9router order: translate first, then post-process).
+    if plan.needs_translation() {
+        registry::global_registry().translate_request(
+            plan.source_format,
+            plan.target_format,
+            &plan.model,
+            &mut body,
+            plan.stream,
+            None,
+        );
+    }
+
+    // 4. RTK tool-result compression (after translate — 9router parity)
+    compress_messages(&mut body, snapshot.settings.rtk_enabled);
+
+    // 5. Headroom external token compression (after translate — 9router parity)
+    //     Bug #278 fix: use target_format instead of source_format — the body
+    //     has already been translated by step 2, so Headroom needs to know what
+    //     shape the request body is in right now (target format).
+    //     Uses the same format string as compress_with_headroom expects:
+    //     "claude" for Claude-shaped bodies, "openai" for everything else.
+    {
+        let headroom_cfg = HeadroomConfig {
+            enabled: snapshot.settings.headroom_enabled,
+            url: snapshot.settings.headroom_url.clone(),
+            timeout_ms: snapshot.settings.headroom_timeout_ms,
+            compress_user_messages: snapshot.settings.headroom_compress_user_messages,
+        };
+        let headroom_format =
+            if plan.target_format == crate::core::translator::registry::Format::Claude {
+                "claude"
+            } else {
+                "openai"
+            };
+        // Phantom savings: log an estimated pre-compression range before the
+        // actual Headroom call, so dashboards and metrics see a prediction even
+        // when the proxy is slow or unreachable.
+        if let Ok(body_str) = serde_json::to_string(&body) {
+            let est_tokens = (body_str.len() + 3) / 4;
+            if est_tokens > 0 {
+                tracing::debug!(
+                    "headroom input ~{} tokens (estimated from body size)",
+                    est_tokens
+                );
+            }
+        }
+        if let Some(stats) =
+            compress_with_headroom(&mut body, &headroom_cfg, &plan.model, headroom_format, None)
+                .await
+        {
+            tracing::debug!("{}", stats.format_headroom_log().unwrap_or_default());
+        }
+    }
+
+    // 6. 9router parity: provider-level thinking config override (chatCore.js:44-57).
+    //     After Headroom so token budgets are applied to any external-compressed body.
+    if let Some(provider_thinking) = snapshot
+        .settings
+        .extra
+        .get("providerThinking")
+        .and_then(|v| v.as_object())
+    {
+        if let Some(mode_val) = provider_thinking.get(plan.provider.as_str()) {
+            let mode = mode_val.as_str().unwrap_or("auto");
+            if mode != "auto" {
+                if mode == "on" && !body.get("thinking").and_then(|v| v.as_object()).is_some() {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert(
+                            "thinking".to_string(),
+                            json!({"type": "enabled", "budget_tokens": 10000}),
+                        );
+                    }
+                } else if mode == "off"
+                    && !body.get("thinking").and_then(|v| v.as_object()).is_some()
+                {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert("thinking".to_string(), json!({"type": "disabled"}));
+                    }
+                } else if mode != "on" && mode != "off" {
+                    if !body
+                        .get("reasoning_effort")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                    {
+                        if let Some(obj) = body.as_object_mut() {
+                            obj.insert(
+                                "reasoning_effort".to_string(),
+                                Value::String(mode.to_string()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 7. Caveman + Ponytail prompt injection (after translate — 9router parity)
+    let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
 
     // Deduplicate tool definitions when MCP equivalents are present
     // (9router parity: only strips for Claude client).
@@ -889,11 +890,10 @@ async fn forward_with_provider_fallback(
             GeminiCliExecutionRequest, GeminiCliExecutor, GithubExecutionRequest, GithubExecutor,
             GrokWebExecutionRequest, GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor,
             KimchiExecutor, KiroExecutionRequest, KiroExecutor, KiroExecutorResponse,
-            ProviderExecutionRequest, ProviderExecutor, OpenCodeExecutionRequest,
-            OpenCodeExecutor, OpenCodeGoExecutionRequest, OpenCodeGoExecutor,
-            PerplexityWebExecutionRequest, PerplexityWebExecutor, QoderExecutionRequest,
-            QoderExecutor, QwenExecutionRequest, QwenExecutor, VertexExecutionRequest,
-            VertexExecutor,
+            OpenCodeExecutionRequest, OpenCodeExecutor, OpenCodeGoExecutionRequest,
+            OpenCodeGoExecutor, PerplexityWebExecutionRequest, PerplexityWebExecutor,
+            ProviderExecutionRequest, ProviderExecutor, QoderExecutionRequest, QoderExecutor,
+            QwenExecutionRequest, QwenExecutor, VertexExecutionRequest, VertexExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/") || provider == "codex";
@@ -1362,10 +1362,7 @@ async fn forward_with_provider_fallback(
                     transport: result.transport,
                 })
             } else if provider == "kimchi" {
-                let executor = KimchiExecutor::new(
-                    state.client_pool.clone(),
-                    provider_node,
-                );
+                let executor = KimchiExecutor::new(state.client_pool.clone(), provider_node);
                 let result = executor
                     .execute(ProviderExecutionRequest {
                         model: model.to_string(),
@@ -3048,6 +3045,7 @@ mod tests {
             proxy_url: None,
             proxy_label: None,
             use_connection_proxy: None,
+            runtime_transport: None,
             provider_specific_data: BTreeMap::new(),
             extra: BTreeMap::new(),
         }

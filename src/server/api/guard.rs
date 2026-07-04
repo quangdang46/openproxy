@@ -110,11 +110,7 @@ pub async fn require_admin(
                 DashboardAuthError::Missing => StatusCode::UNAUTHORIZED,
                 DashboardAuthError::Invalid => StatusCode::UNAUTHORIZED,
             };
-            Err((
-                status,
-                Json(json!({ "error": e.message() })),
-            )
-                .into_response())
+            Err((status, Json(json!({ "error": e.message() }))).into_response())
         }
     }
 }

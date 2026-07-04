@@ -57,6 +57,7 @@ fn kiro_connection_with_aws_credentials(access_key: &str, secret_key: &str) -> P
         proxy_url: None,
         proxy_label: None,
         use_connection_proxy: None,
+        runtime_transport: None,
         provider_specific_data: BTreeMap::new(),
         extra: BTreeMap::new(),
     }
@@ -106,6 +107,7 @@ fn kiro_connection_with_session_token(
         proxy_url: None,
         proxy_label: None,
         use_connection_proxy: None,
+        runtime_transport: None,
         provider_specific_data: BTreeMap::new(),
         extra: BTreeMap::new(),
     }

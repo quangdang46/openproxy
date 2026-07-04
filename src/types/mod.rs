@@ -78,6 +78,15 @@ impl AppDb {
     }
 }
 
+/// Runtime transport configuration that can override the static provider config's base URL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeTransport {
+    /// Override base URL for this connection's requests.
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConnection {
@@ -147,6 +156,8 @@ pub struct ProviderConnection {
     pub proxy_label: Option<String>,
     #[serde(default)]
     pub use_connection_proxy: Option<bool>,
+    #[serde(default)]
+    pub runtime_transport: Option<RuntimeTransport>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub provider_specific_data: BTreeMap<String, Value>,
     #[serde(flatten)]

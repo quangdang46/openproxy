@@ -1,8 +1,8 @@
 #![allow(clippy::single_match)]
 use clap::CommandFactory;
 use clap::Parser;
-use std::sync::Arc;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -428,8 +428,11 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
