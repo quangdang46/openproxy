@@ -750,6 +750,17 @@ pub fn global_registry() -> &'static TranslationRegistry {
         );
         reg.register_request(
             Format::Claude,
+            Format::Kiro,
+            claude_to_kiro_request as RequestTransformFn,
+        );
+        reg.register_response(
+            Format::Kiro,
+            Format::Claude,
+            kiro_to_claude_streaming as ResponseTransformFn,
+        );
+
+        reg.register_request(
+            Format::Claude,
             Format::OpenAi,
             claude_to_openai_request as RequestTransformFn,
         );

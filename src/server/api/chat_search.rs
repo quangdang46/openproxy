@@ -8,7 +8,7 @@
 
 use axum::extract::rejection::JsonRejection;
 use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -24,19 +24,22 @@ use super::cors::{cors_preflight_response, with_cors_response};
 
 /// Supported shorthand aliases that map to a search provider id.
 fn resolve_search_provider(alias: &str) -> Option<&'static str> {
-    Some(match alias.trim().to_lowercase().as_str() {
-        // Direct provider ids
-        id if is_search_provider(id) => return Some(id),
-        // Shorthand aliases
-        "gps" | "google-pse" => "google-pse",
-        "bs" | "brave" => "brave-search",
-        "tv" | "tavily" => "tavily",
-        "you" | "youcom" => "youcom",
-        "sa" | "searchapi" => "searchapi",
-        "lu" | "linkup" => "linkup",
-        "searx" => "searxng",
+    let lowered = alias.trim().to_lowercase();
+    // Direct provider ids
+    let static_id = match lowered.as_str() {
+        "serper" => "serper",
+        "brave-search" | "brave" | "bs" => "brave-search",
+        "perplexity" => "perplexity",
+        "exa" => "exa",
+        "tavily" | "tv" => "tavily",
+        "google-pse" | "gps" => "google-pse",
+        "linkup" | "lu" => "linkup",
+        "searchapi" | "sa" => "searchapi",
+        "youcom" | "you" => "youcom",
+        "searxng" | "searx" => "searxng",
         _ => return None,
-    })
+    };
+    Some(static_id)
 }
 
 /// Extract the search query from the request body.
@@ -135,16 +138,18 @@ pub async fn handle_search_completions(
         Ok(b) => b,
         Err(_) => {
             return with_cors_response(
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "Invalid JSON body",
-                        "type": "invalid_request_error",
-                        "code": null
-                    }
-                })),
-            )
-            .into_response();
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "Invalid JSON body",
+                            "type": "invalid_request_error",
+                            "code": null
+                        }
+                    })),
+                )
+                    .into_response(),
+            );
         }
     };
 
@@ -172,16 +177,18 @@ pub async fn handle_search_completions(
         Some(q) => q,
         None => {
             return with_cors_response(
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": "Missing search query: provide a `query` field or a `messages` array with a user message",
-                        "type": "invalid_request_error",
-                        "code": null
-                    }
-                })),
-            )
-            .into_response();
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": "Missing search query: provide a `query` field or a `messages` array with a user message",
+                            "type": "invalid_request_error",
+                            "code": null
+                        }
+                    })),
+                )
+                    .into_response(),
+            );
         }
     };
 
@@ -191,16 +198,18 @@ pub async fn handle_search_completions(
         Some(c) => c,
         None => {
             return with_cors_response(
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": format!("No active credentials found for search provider: {}", provider),
-                        "type": "invalid_request_error",
-                        "code": null
-                    }
-                })),
-            )
-            .into_response();
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": format!("No active credentials found for search provider: {}", provider),
+                            "type": "invalid_request_error",
+                            "code": null
+                        }
+                    })),
+                )
+                    .into_response(),
+            );
         }
     };
 
@@ -243,16 +252,18 @@ pub async fn handle_search_completions(
         Ok(c) => c,
         Err(e) => {
             return with_cors_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": {
-                        "message": format!("Failed to create HTTP client: {}", e),
-                        "type": "server_error",
-                        "code": null
-                    }
-                })),
-            )
-            .into_response();
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "error": {
+                            "message": format!("Failed to create HTTP client: {}", e),
+                            "type": "server_error",
+                            "code": null
+                        }
+                    })),
+                )
+                    .into_response(),
+            );
         }
     };
 
@@ -270,29 +281,33 @@ pub async fn handle_search_completions(
         }
         Some(Err(err)) => {
             return with_cors_response(
-                StatusCode::BAD_GATEWAY,
-                Json(json!({
-                    "error": {
-                        "message": format!("Search failed: {}", err.message()),
-                        "type": "server_error",
-                        "code": format!("search_{}", err.status())
-                    }
-                })),
-            )
-            .into_response();
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({
+                        "error": {
+                            "message": format!("Search failed: {}", err.message()),
+                            "type": "server_error",
+                            "code": format!("search_{}", err.status())
+                        }
+                    })),
+                )
+                    .into_response(),
+            );
         }
         None => {
             return with_cors_response(
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": {
-                        "message": format!("Unsupported search provider: {}", provider),
-                        "type": "invalid_request_error",
-                        "code": null
-                    }
-                })),
-            )
-            .into_response();
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": {
+                            "message": format!("Unsupported search provider: {}", provider),
+                            "type": "invalid_request_error",
+                            "code": null
+                        }
+                    })),
+                )
+                    .into_response(),
+            );
         }
     };
 
@@ -353,10 +368,6 @@ pub async fn handle_search_completions(
         }
     });
 
-    let mut resp = (StatusCode::OK, Json(response)).into_response();
-    resp.headers_mut().insert(
-        header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    resp
+    let resp = (StatusCode::OK, Json(response)).into_response();
+    with_cors_response(resp)
 }

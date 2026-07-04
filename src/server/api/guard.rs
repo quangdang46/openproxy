@@ -38,6 +38,27 @@ pub(crate) const SPOOFABLE_FORWARDING_HEADERS: &[&str] = &[
     "x-real-ip",
 ];
 
+/// Routes that require local-only access via [`require_local_only`] middleware.
+///
+/// These are sensitive operations (headroom proxy management, MITM control,
+/// cowork settings, credential management) that must only be reachable from
+/// the loopback interface as an additional defense-in-depth layer.
+///
+/// The list is informational/documentation-only; enforcement happens at the
+/// router level via the `require_local_only` middleware.
+#[allow(dead_code)]
+pub const LOCALLY_ONLY_PATHS: &[&str] = &[
+    "/api/headroom/status",
+    "/api/headroom/start",
+    "/api/headroom/stop",
+    "/api/cli-tools/cowork-settings",
+    "/api/mitm-config",
+    "/api/mitm/cert/generate",
+    "/api/mitm/start",
+    "/api/mitm/stop",
+    "/api/keys",
+];
+
 // ─── Real-IP Middleware ───────────────────────────────────────────────
 
 /// Extracts the verified TCP peer IP from `axum`'s `ConnectInfo<SocketAddr>`,

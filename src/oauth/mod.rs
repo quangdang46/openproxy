@@ -352,6 +352,7 @@ pub mod device_code {
     }
 }
 
+pub mod refresh;
 pub mod token_refresh;
 
 pub fn needs_refresh(expires_at: &Option<String>) -> bool {

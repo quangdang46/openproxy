@@ -2,6 +2,7 @@ pub mod a2a;
 pub mod admin_items;
 mod auth;
 pub mod chat;
+pub mod chat_search;
 pub mod cli_tools;
 pub mod cloud_credentials;
 pub mod cloud_sync;
@@ -240,6 +241,18 @@ pub fn routes(state: AppState) -> Router<AppState> {
         ));
 
     // ── ADMIN: dashboard session or management API key required ──
+    let admin_local_only = Router::new()
+        // Headroom proxy management (local-only)
+        .route("/api/headroom/status", get(headroom::status))
+        .route("/api/headroom/start", post(headroom::start))
+        .route("/api/headroom/stop", post(headroom::stop))
+        // Credential management (local-only)
+        .route("/api/keys", get(list_keys_api))
+        .route("/api/keys", post(create_key_api))
+        .route("/api/keys/{id}", delete(delete_key_api))
+        .route("/api/keys/{id}", put(update_key_api))
+        .route_layer(middleware::from_fn(guard::require_local_only));
+
     let admin = Router::new()
         .merge(cli_tools::routes())
         .merge(db_backups::routes())
@@ -261,6 +274,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(translator::routes())
         .merge(shutdown::routes())
         .merge(oauth::routes())
+        .merge(admin_local_only)
         .route(
             "/api/dashboard/chat/completions",
             post(chat::dashboard_chat_completions),
@@ -275,10 +289,6 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/api/combos/test-model",
             post(provider_model_tests::test_combo_model),
         )
-        .route("/api/keys", get(list_keys_api))
-        .route("/api/keys", post(create_key_api))
-        .route("/api/keys/{id}", delete(delete_key_api))
-        .route("/api/keys/{id}", put(update_key_api))
         .route("/api/proxy-pools", get(list_pools_api))
         .route("/api/proxy-pools", post(create_pool_api))
         .route("/api/proxy-pools/{id}", put(update_pool_api))
@@ -298,9 +308,6 @@ pub fn routes(state: AppState) -> Router<AppState> {
         )
         .route("/api/settings/require-login", get(get_require_login_api))
         .route("/api/db/export", get(export_db_api))
-        .route("/api/headroom/status", get(headroom::status))
-        .route("/api/headroom/start", post(headroom::start))
-        .route("/api/headroom/stop", post(headroom::stop))
         .route_layer(middleware::from_fn_with_state(state, guard::require_admin));
 
     // ── Remaining modules: complex/mixed auth managed per-handler ──
