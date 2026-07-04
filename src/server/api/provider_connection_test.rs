@@ -323,10 +323,15 @@ async fn test_oauth_connection(
                     Err(error) => return invalid(&error),
                 };
 
-                if accepted.status().is_success()
+                // Capture status before consuming the response body
+                let status = accepted.status();
+                let body_text = accepted.text().await.unwrap_or_else(|_| String::new());
+
+                if status.is_success()
                     || matches!(
                         connection.provider.as_str(),
-                        "codex" if accepted.status().as_u16() == 400
+                        "codex" if status.as_u16() == 400
+                            && (body_text.contains("input") || body_text.contains("validation") || body_text.contains("must"))
                     )
                 {
                     return ConnectionTestResult {
@@ -337,10 +342,10 @@ async fn test_oauth_connection(
                     };
                 }
 
-                let error = match accepted.status() {
+                let error = match status {
                     StatusCode::UNAUTHORIZED => "Token invalid or revoked".to_string(),
                     StatusCode::FORBIDDEN => "Access denied".to_string(),
-                    status => format!("API returned {}", status.as_u16()),
+                    s => format!("API returned {}", s.as_u16()),
                 };
 
                 ConnectionTestResult {
