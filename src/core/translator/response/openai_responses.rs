@@ -888,7 +888,10 @@ pub fn responses_to_chat_streaming(
     // Accumulate incoming bytes into the frame buffer.
     // SSE frames (delimited by double newline \n\n) can straddle TCP chunks,
     // so we must buffer across calls.
-    state.responses.buffer.push_str(&String::from_utf8_lossy(chunk));
+    state
+        .responses
+        .buffer
+        .push_str(&String::from_utf8_lossy(chunk));
 
     // Try as bare JSON first (when the upstream delivers data: lines without event: prefix,
     // or when the full SSE event lands as one line, or on the final flush of a single frame).
