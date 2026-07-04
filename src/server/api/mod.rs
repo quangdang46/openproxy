@@ -246,14 +246,14 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/headroom/status", get(headroom::status))
         .route("/api/headroom/start", post(headroom::start))
         .route("/api/headroom/stop", post(headroom::stop))
-        // Credential management (local-only)
+        .route_layer(middleware::from_fn(guard::require_local_only));
+
+    let admin = Router::new()
+        // Credential management (admin-tier — dashboard or API key)
         .route("/api/keys", get(list_keys_api))
         .route("/api/keys", post(create_key_api))
         .route("/api/keys/{id}", delete(delete_key_api))
         .route("/api/keys/{id}", put(update_key_api))
-        .route_layer(middleware::from_fn(guard::require_local_only));
-
-    let admin = Router::new()
         .merge(cli_tools::routes())
         .merge(db_backups::routes())
         .merge(locale::routes())
