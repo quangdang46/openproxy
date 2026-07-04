@@ -73,6 +73,7 @@ fn connection(id: &str, provider: &str, api_key: &str) -> ProviderConnection {
         proxy_url: None,
         proxy_label: None,
         use_connection_proxy: None,
+        runtime_transport: None,
         provider_specific_data: BTreeMap::new(),
         extra: BTreeMap::new(),
     }

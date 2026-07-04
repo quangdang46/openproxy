@@ -14,9 +14,11 @@ use serde_json::Value;
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::translator::helpers::openai_helper::normalize_developer_role;
+use crate::core::utils::reasoning_content_injector::inject_reasoning_content;
 use crate::oauth::token_refresh::dispatch_oauth_refresh;
 use crate::types::{ProviderConnection, ProviderNode};
 
+use super::strip_unsupported::strip_unsupported_params;
 use super::ClientPool;
 
 static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::new(|| {
@@ -606,6 +608,33 @@ impl DefaultExecutor {
         stream: bool,
         credentials: &ProviderConnection,
     ) -> Result<String, ExecutorError> {
+        // Check runtime_transport base_url override on the connection first
+        if let Some(rt) = &credentials.runtime_transport {
+            if let Some(rt_base_url) = &rt.base_url {
+                let normalized = rt_base_url.trim_end_matches('/');
+                // Determine the path based on provider type
+                if let Some(node) = &self.provider_node {
+                    if node.r#type == "anthropic-compatible" {
+                        return Ok(format!("{}/messages", normalized));
+                    }
+                }
+                if matches!(
+                    self.provider.as_str(),
+                    "claude"
+                        | "anthropic"
+                        | "glm"
+                        | "kimi"
+                        | "kimi-coding"
+                        | "minimax"
+                        | "minimax-cn"
+                        | "agentrouter"
+                ) {
+                    return Ok(format!("{}/messages", normalized));
+                }
+                return Ok(format!("{}/chat/completions", normalized));
+            }
+        }
+
         if let Some(node) = &self.provider_node {
             if node.r#type == "openai-compatible" {
                 let base_url = compatible_value(credentials.provider_specific_data.get("baseUrl"))
@@ -786,7 +815,7 @@ impl DefaultExecutor {
         Ok(headers)
     }
 
-    pub fn transform_request(&self, body: &Value) -> Value {
+    pub fn transform_request(&self, body: &Value, model: &str) -> Value {
         let mut body = self.apply_json_schema_fallback(body);
 
         // Normalize developer→system role (many providers reject role:developer)
@@ -805,6 +834,12 @@ impl DefaultExecutor {
         if self.provider == "opencode-go" {
             strip_fireworks_unsupported_tools(&mut body);
         }
+
+        // Inject reasoning_content placeholder for DeepSeek/Kimi providers
+        inject_reasoning_content(&self.provider, model, &mut body);
+
+        // Strip unsupported request params for providers that don't support them
+        strip_unsupported_params(&self.provider, model, &mut body);
 
         body
     }
@@ -891,7 +926,7 @@ impl DefaultExecutor {
         // fallback URLs.
         let mut headers =
             self.build_headers(&request.model, &request.credentials, request.stream)?;
-        let transformed_body = self.transform_request(&request.body);
+        let transformed_body = self.transform_request(&request.body, &request.model);
 
         // Try primary then fallback URLs.
         let urls = self.resolve_urls(&request.model, request.stream, &request.credentials);

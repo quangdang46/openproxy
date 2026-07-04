@@ -8,6 +8,7 @@ pub mod cloud_sync;
 pub mod compat;
 pub mod cors;
 pub mod db_backups;
+pub mod guard;
 pub mod headroom;
 pub mod locale;
 pub mod mcp;
@@ -58,17 +59,22 @@ use crate::server::auth::{extract_api_key, require_api_key, require_dashboard_se
 use crate::server::state::AppState;
 use crate::types::{AppDb, HealthResponse, ProviderConnection};
 
-pub fn routes() -> Router<AppState> {
-    Router::new()
+pub fn routes(state: AppState) -> Router<AppState> {
+    use axum::middleware;
+
+    // ── PUBLIC: no auth required ──
+    let public = Router::new()
         .route("/health", get(health))
         .route("/api/health", get(api_health))
         .route("/api/catalog", get(api_catalog))
         .route("/v1", get(v1_root))
         .route("/v1/health", get(health))
-        .route("/v1/v1/health", get(health))
+        .route("/v1/v1/health", get(health));
+
+    // ── PROTECTED: valid API key required ──
+    let protected = Router::new()
         .merge(v1_api_chat::routes())
         .merge(v1_models::routes())
-        // Duplicate v1_models routes under /v1/v1 prefix
         .nest(
             "/v1/v1/models",
             Router::new()
@@ -98,10 +104,6 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/v1/v1/chat/completions",
             post(chat::chat_completions).options(chat::cors_options),
-        )
-        .route(
-            "/api/dashboard/chat/completions",
-            post(chat::dashboard_chat_completions),
         )
         .route(
             "/v1/messages",
@@ -231,36 +233,43 @@ pub fn routes() -> Router<AppState> {
             "/v1/v1/audio/voices",
             get(media::audio_voices).options(media::cors_options),
         )
-        .merge(cloud_sync::routes())
-        .merge(cloud_credentials::routes())
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            guard::require_protected,
+        ));
+
+    // ── ADMIN: dashboard session or management API key required ──
+    let admin = Router::new()
+        .merge(cli_tools::routes())
+        .merge(db_backups::routes())
         .merge(locale::routes())
-        .merge(mcp::routes())
         .merge(models_disabled::routes())
         .merge(models_alias::routes())
         .merge(models_availability::routes())
         .merge(models_custom::routes())
-        .merge(oauth::routes())
-        .merge(media_providers::routes())
-        .merge(mitm_config::routes())
+        .merge(provider_nodes::routes())
+        .merge(providers::routes())
+        .merge(settings_payload_rules::routes())
+        .merge(tunnel::routes())
+        .merge(usage::routes())
+        .merge(cloud_sync::routes())
+        .merge(cloud_credentials::routes())
+        .merge(admin_items::routes())
         .merge(pricing::routes())
         .merge(tags::routes())
-        .merge(tunnel::routes())
         .merge(translator::routes())
-        .merge(providers::routes())
-        .merge(provider_nodes::routes())
-        .merge(provider_validate::routes())
-        .merge(admin_items::routes())
-        .merge(usage::routes())
-        .merge(observability::routes())
-        // Dashboard API endpoints
+        .merge(shutdown::routes())
+        .merge(oauth::routes())
+        .route(
+            "/api/dashboard/chat/completions",
+            post(chat::dashboard_chat_completions),
+        )
         .route("/api/providers", get(list_providers_api))
         .route("/api/providers", post(create_provider_api))
-        // Provider CRUD is handled by providers::routes()
         .route("/api/nodes", get(list_nodes_api))
         .route("/api/nodes", post(create_node_api))
         .route("/api/combos", get(list_combos_api))
         .route("/api/combos", post(create_combo_api))
-        // Combo CRUD is handled by admin_items::routes() at /api/combos/{id}
         .route(
             "/api/combos/test-model",
             post(provider_model_tests::test_combo_model),
@@ -288,20 +297,24 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/settings/require-login", get(get_require_login_api))
         .route("/api/db/export", get(export_db_api))
-        // Auth, shutdown, cli-tools APIs
-        .merge(auth::routes())
-        .merge(shutdown::routes())
-        .merge(cli_tools::routes())
-        .merge(settings_payload_rules::routes())
-        .merge(db_backups::routes())
-        // A2A (Agent-to-Agent) protocol routes
-        .merge(a2a::routes())
-        // Native MCP server routes (SSE stream + POST message)
-        .merge(mcp_server::routes())
-        // Headroom API routes
         .route("/api/headroom/status", get(headroom::status))
         .route("/api/headroom/start", post(headroom::start))
         .route("/api/headroom/stop", post(headroom::stop))
+        .route_layer(middleware::from_fn_with_state(state, guard::require_admin));
+
+    // ── Remaining modules: complex/mixed auth managed per-handler ──
+    let remaining = Router::new()
+        .merge(media_providers::routes())
+        .merge(observability::routes())
+        .merge(mitm_config::routes())
+        .merge(mcp::routes())
+        .merge(mcp_server::routes())
+        .merge(auth::routes())
+        .merge(a2a::routes())
+        .merge(provider_validate::routes());
+
+    // ── Assemble ──
+    public.merge(protected).merge(admin).merge(remaining)
 }
 
 async fn v1_root() -> Response {
@@ -335,8 +348,6 @@ async fn api_health() -> Response {
 }
 
 async fn api_catalog() -> Response {
-    // Serve the embedded provider catalog as static JSON. Public (no auth)
-    // because it contains only model metadata that the dashboard renders.
     static CATALOG_JSON: &str = include_str!("../../core/model/provider_catalog.json");
     (
         [(axum::http::header::CONTENT_TYPE, "application/json")],
@@ -346,12 +357,6 @@ async fn api_catalog() -> Response {
 }
 
 async fn get_version_api() -> Response {
-    // Bug #11: previous releases reported the dashboard package version
-    // (`web/package.json` → 0.4.16) as `currentVersion`, which made the
-    // server look like a much newer build than it really was. Use the
-    // crate's `CARGO_PKG_VERSION` (the actual binary version) instead so
-    // `currentVersion`, `openproxy --version`, and the GitHub release tag
-    // are all the same number.
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let latest_version = fetch_latest_release_version().await;
     let has_update = latest_version
@@ -363,17 +368,12 @@ async fn get_version_api() -> Response {
         "currentVersion": current_version,
         "latestVersion": latest_version,
         "hasUpdate": has_update,
-        // Keep the legacy field name around for the dashboard which still
-        // reads it; this is the version of the embedded web bundle, not
-        // the binary.
         "dashboardVersion": dashboard_package_version(),
     }))
     .into_response()
 }
 
 async fn version_update_api() -> Response {
-    // In Rust standalone mode, self-update is not supported via the API.
-    // The CLI handles updates through cargo or manual binary replacement.
     (
         StatusCode::OK,
         Json(json!({
@@ -417,10 +417,6 @@ async fn fetch_latest_dashboard_version() -> Option<String> {
         .map(str::to_string)
 }
 
-/// Probe the GitHub Releases API for the latest published binary version.
-/// Strips the leading `v` from `vX.Y.Z` tag names so the value compares
-/// cleanly against `CARGO_PKG_VERSION`. Returns `None` when the network
-/// is unavailable or the API responds with anything other than 200.
 async fn fetch_latest_release_version() -> Option<String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(4))
@@ -538,7 +534,6 @@ pub(crate) fn safe_settings_payload(settings: &crate::types::Settings) -> Value 
                 .is_some_and(|value| !value.is_empty());
         fields.insert("hasPassword".to_string(), Value::Bool(has_password));
 
-        // Stamp OIDC configured status (determined at boot, not a setting toggle)
         let oidc_configured = std::env::var("OIDC_ISSUER").ok().is_some()
             && std::env::var("OIDC_CLIENT_ID").ok().is_some();
         fields.insert("oidcConfigured".to_string(), Value::Bool(oidc_configured));
@@ -558,9 +553,6 @@ async fn list_providers_api(State(state): State<AppState>, headers: HeaderMap) -
         .provider_connections
         .iter()
         .map(|c| {
-            // Stamp `hasApiKey` so the dashboard can render an "on file"
-            // pill without needing the secret itself. The key is still
-            // redacted out of the payload via redact_provider_connection.
             let has_api_key = c.api_key.as_deref().is_some_and(|k| !k.is_empty())
                 || c.provider_specific_data
                     .get("apiKey")
@@ -730,6 +722,7 @@ async fn create_provider_api(
     }
 }
 
+// Rest of the module (unchanged below this line)
 // Provider CRUD - GET, PUT, DELETE by id
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -740,7 +733,6 @@ struct UpdateProviderRequest {
     is_active: Option<bool>,
 }
 
-// Branch 1: create_provider_api ... (definition continues above at line 536)
 async fn get_provider_api(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1055,7 +1047,6 @@ async fn update_combo_api(
         return response;
     }
 
-    // First check if combo exists
     let snapshot = state.db.snapshot();
     let combo_exists = snapshot.combos.iter().any(|c| c.name == name);
 
@@ -1084,7 +1075,6 @@ async fn update_combo_api(
 
     match result {
         Ok(_) => {
-            // Fetch updated combo
             let snapshot = state.db.snapshot();
             match snapshot.combos.iter().find(|c| c.name == name) {
                 Some(combo) => (StatusCode::OK, Json(combo.clone())).into_response(),
@@ -1113,7 +1103,6 @@ async fn delete_combo_api(
         return response;
     }
 
-    // First check if combo exists
     let snapshot = state.db.snapshot();
     let combo_exists = snapshot.combos.iter().any(|c| c.name == name);
 
@@ -1245,7 +1234,6 @@ async fn update_key_api(
         return response;
     }
 
-    // Check exists
     let snapshot = state.db.snapshot();
     let exists = snapshot.api_keys.iter().any(|k| k.id == id);
 
@@ -1276,7 +1264,6 @@ async fn update_key_api(
             let snapshot = state.db.snapshot();
             match snapshot.api_keys.iter().find(|k| k.id == id) {
                 Some(key) => {
-                    // Redact key value in response
                     let mut response_key = key.clone();
                     response_key.key = "***".to_string();
                     Json(json!({ "key": response_key })).into_response()
@@ -1616,7 +1603,6 @@ async fn delete_pool_api(
             .into_response();
     }
 
-    // Check for bound connections before allowing deletion (9router parity)
     let bound_connection_count = snapshot
         .provider_connections
         .iter()
@@ -1865,9 +1851,6 @@ async fn settings_database_import_api(
     match state
         .db
         .update(move |db| {
-            // Merge: only overwrite collections that are explicitly present in the import payload.
-            // This prevents accidentally wiping providers/nodes/aliases when the caller
-            // only intends to update settings or apiKeys.
             if !imported.provider_connections.is_empty() {
                 db.provider_connections = imported.provider_connections.clone();
             }
@@ -1892,7 +1875,6 @@ async fn settings_database_import_api(
             if !imported.pricing.is_empty() {
                 db.pricing = imported.pricing.clone();
             }
-            // Settings: always merge individual fields from import
             merge_settings(&mut db.settings, &imported.settings);
         })
         .await
@@ -1906,7 +1888,6 @@ async fn settings_database_import_api(
     }
 }
 
-/// Merge settings field-by-field: only overwrite what the import explicitly provides.
 fn merge_settings(target: &mut crate::types::Settings, source: &crate::types::Settings) {
     if source.cloud_enabled != target.cloud_enabled {
         target.cloud_enabled = source.cloud_enabled;
@@ -1968,7 +1949,6 @@ fn merge_settings(target: &mut crate::types::Settings, source: &crate::types::Se
     if source.sticky_round_robin_limit != target.sticky_round_robin_limit {
         target.sticky_round_robin_limit = source.sticky_round_robin_limit;
     }
-    // Merge extra fields from import
     for (key, value) in &source.extra {
         target.extra.insert(key.clone(), value.clone());
     }

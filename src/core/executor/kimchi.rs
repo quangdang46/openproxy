@@ -123,10 +123,7 @@ fn remove_cache_control(value: &mut Value) {
             if let Some(block_obj) = block.as_object_mut() {
                 block_obj.remove("cache_control");
                 // Handle nested content within blocks
-                if let Some(nested) = block_obj
-                    .get_mut("content")
-                    .and_then(Value::as_array_mut)
-                {
+                if let Some(nested) = block_obj.get_mut("content").and_then(Value::as_array_mut) {
                     for nested_block in nested.iter_mut() {
                         if let Some(nb_obj) = nested_block.as_object_mut() {
                             nb_obj.remove("cache_control");
@@ -176,10 +173,7 @@ impl ProviderExecutor for KimchiExecutor {
         _url_index: Option<usize>,
         _credentials: Option<&ProviderConnection>,
     ) -> String {
-        format!(
-            "{}/chat/completions",
-            KIMCHI_BASE_URL.trim_end_matches('/')
-        )
+        format!("{}/chat/completions", KIMCHI_BASE_URL.trim_end_matches('/'))
     }
 
     fn build_headers(
@@ -310,12 +304,8 @@ mod tests {
             "thinking": {"type": "enabled"},
             "top_k": 40
         });
-        let result = executor.transform_request(
-            &body,
-            "gpt-4",
-            true,
-            &ProviderConnection::default(),
-        );
+        let result =
+            executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
         assert_eq!(result.get("anthropic_version"), None);
         assert_eq!(result.get("anthropic_beta"), None);
         assert_eq!(result.get("client_metadata"), None);
@@ -347,12 +337,8 @@ mod tests {
                 }
             ]
         });
-        let result = executor.transform_request(
-            &body,
-            "gpt-4",
-            true,
-            &ProviderConnection::default(),
-        );
+        let result =
+            executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
 
         // Message-level cache_control removed
         for msg in result["messages"].as_array().unwrap() {
@@ -388,12 +374,8 @@ mod tests {
                 }
             ]
         });
-        let result = executor.transform_request(
-            &body,
-            "gpt-4",
-            true,
-            &ProviderConnection::default(),
-        );
+        let result =
+            executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
 
         for tool in result["tools"].as_array().unwrap() {
             assert_eq!(
@@ -433,12 +415,8 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}],
             "reasoning_effort": "high"
         });
-        let result = executor.transform_request(
-            &body,
-            "gpt-4",
-            true,
-            &ProviderConnection::default(),
-        );
+        let result =
+            executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
         assert_eq!(
             result["reasoning_effort"], "high",
             "reasoning_effort should be preserved for non-Anthropic models"
@@ -473,10 +451,7 @@ mod tests {
             ]
         });
         remove_reasoning_content(&mut body);
-        assert_eq!(
-            body["choices"][0]["message"].get("reasoning_content"),
-            None
-        );
+        assert_eq!(body["choices"][0]["message"].get("reasoning_content"), None);
         assert_eq!(body["choices"][0]["message"]["content"], "Hello!");
     }
 
@@ -522,10 +497,7 @@ mod tests {
             ]
         });
         remove_reasoning_content(&mut body);
-        assert_eq!(
-            body["choices"][0]["message"].get("reasoning_content"),
-            None
-        );
+        assert_eq!(body["choices"][0]["message"].get("reasoning_content"), None);
         assert_eq!(body["choices"][0]["delta"].get("reasoning_content"), None);
         assert_eq!(body["choices"][0]["message"]["content"], "Final answer");
     }
@@ -542,10 +514,7 @@ mod tests {
     fn test_build_url() {
         let executor = KimchiExecutor::new(Arc::new(ClientPool::new()), None);
         let url = executor.build_url("test-model", true, None, None);
-        assert_eq!(
-            url,
-            "https://llm.kimchi.dev/openai/v1/chat/completions"
-        );
+        assert_eq!(url, "https://llm.kimchi.dev/openai/v1/chat/completions");
     }
 
     #[test]

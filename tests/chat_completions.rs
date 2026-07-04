@@ -74,6 +74,7 @@ fn connection(id: &str, provider: &str, priority: u32, api_key: &str) -> Provide
         proxy_url: None,
         proxy_label: None,
         use_connection_proxy: None,
+        runtime_transport: None,
         provider_specific_data: BTreeMap::new(),
         extra: BTreeMap::new(),
     }
