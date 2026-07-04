@@ -106,10 +106,7 @@ mod tests {
             build_cline_auth_header("workos_sk-abc123"),
             "Bearer sk-abc123"
         );
-        assert_eq!(
-            build_cline_auth_header("sk-abc123"),
-            "Bearer sk-abc123"
-        );
+        assert_eq!(build_cline_auth_header("sk-abc123"), "Bearer sk-abc123");
         assert_eq!(build_cline_auth_header(""), "Bearer ");
     }
 }

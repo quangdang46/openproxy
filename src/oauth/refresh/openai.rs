@@ -5,8 +5,8 @@
 
 use async_trait::async_trait;
 
-use crate::oauth::token_refresh::{dedup_refresh, RefreshResult};
 use super::RefreshProvider;
+use crate::oauth::token_refresh::{dedup_refresh, RefreshResult};
 
 // ---------------------------------------------------------------------------
 // Constants

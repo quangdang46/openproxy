@@ -55,10 +55,7 @@ fn read_os_uuid() -> String {
 fn read_hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
-        .or_else(|_| {
-            std::env::var("HOSTNAME")
-                .or_else(|_| std::env::var("HOST"))
-        })
+        .or_else(|_| std::env::var("HOSTNAME").or_else(|_| std::env::var("HOST")))
         .unwrap_or_else(|_| String::new())
 }
 
@@ -181,7 +178,10 @@ mod tests {
         assert_eq!(id1.len(), 64);
 
         // The file should now exist
-        assert!(path.exists(), "machine_id file should exist after first call");
+        assert!(
+            path.exists(),
+            "machine_id file should exist after first call"
+        );
 
         // Second call should return the cached value (identical)
         let id2 = get_machine_id();
