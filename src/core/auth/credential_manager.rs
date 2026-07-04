@@ -109,17 +109,15 @@ impl CredentialManager {
 
         // Perform the refresh via the existing dispatch layer.  The dispatch
         // function handles per-provider HTTP refresh, deduplication, and retry.
-        let result = dispatch_oauth_refresh(provider, refresh_token, &creds.provider_specific_data)
-            .await?;
+        let result =
+            dispatch_oauth_refresh(provider, refresh_token, &creds.provider_specific_data).await?;
 
         // Validate the response.
         let access_token = result.access_token;
 
         // Preserve the existing refresh token if the response did not include
         // a new one (some providers do not rotate the refresh token).
-        let new_refresh_token = result
-            .refresh_token
-            .or_else(|| creds.refresh_token.clone());
+        let new_refresh_token = result.refresh_token.or_else(|| creds.refresh_token.clone());
 
         // Compute the new expiry timestamp from `expires_in` (seconds).
         let expires_at: Option<String> = result.expires_in.map(|expires_in| {
@@ -146,12 +144,7 @@ impl CredentialManager {
     /// Determine whether a refresh should be attempted for the given provider
     /// connection, consulting both the in-memory state and the connection's
     /// own `expires_at` timestamp.
-    fn check_needs_refresh(
-        &self,
-        provider: &str,
-        creds: &ProviderConnection,
-        key: &str,
-    ) -> bool {
+    fn check_needs_refresh(&self, provider: &str, creds: &ProviderConnection, key: &str) -> bool {
         // If there is no refresh token, we can never refresh.
         if creds.refresh_token.is_none() {
             return false;
@@ -276,7 +269,9 @@ mod tests {
         ));
         assert!(CredentialManager::is_unrecoverable_error("access_denied"));
         assert!(CredentialManager::is_unrecoverable_error("invalid_client"));
-        assert!(CredentialManager::is_unrecoverable_error("unauthorized_client"));
+        assert!(CredentialManager::is_unrecoverable_error(
+            "unauthorized_client"
+        ));
         assert!(CredentialManager::is_unrecoverable_error("expired_token"));
     }
 
@@ -319,12 +314,14 @@ mod tests {
     #[test]
     fn test_clear_removes_all_state() {
         let cm = CredentialManager::new();
-        cm.states
-            .insert("test:conn".into(), CredentialState {
+        cm.states.insert(
+            "test:conn".into(),
+            CredentialState {
                 access_token: "tok".into(),
                 refresh_token: None,
                 expires_at: None,
-            });
+            },
+        );
         assert_eq!(cm.tracked_count(), 1);
         cm.clear();
         assert_eq!(cm.tracked_count(), 0);
@@ -333,18 +330,22 @@ mod tests {
     #[test]
     fn test_invalidate_removes_specific_key() {
         let cm = CredentialManager::new();
-        cm.states
-            .insert("p:conn_a".into(), CredentialState {
+        cm.states.insert(
+            "p:conn_a".into(),
+            CredentialState {
                 access_token: "a".into(),
                 refresh_token: None,
                 expires_at: None,
-            });
-        cm.states
-            .insert("p:conn_b".into(), CredentialState {
+            },
+        );
+        cm.states.insert(
+            "p:conn_b".into(),
+            CredentialState {
                 access_token: "b".into(),
                 refresh_token: None,
                 expires_at: None,
-            });
+            },
+        );
         assert_eq!(cm.tracked_count(), 2);
 
         cm.invalidate("p", "conn_a");
@@ -405,10 +406,10 @@ mod tests {
         assert!(cm.check_needs_refresh("test", &conn, "test:id"));
     }
 
-    // -- refresh_if_needed returns error when no refresh token --
+    // -- refresh_if_needed returns Ok when no refresh token (no-op) --
 
     #[tokio::test]
-    async fn test_refresh_fails_without_refresh_token() {
+    async fn test_refresh_noop_when_no_refresh_token() {
         let cm = CredentialManager::new();
         let conn = ProviderConnection {
             id: "no_rt".into(),
@@ -417,11 +418,10 @@ mod tests {
             ..make_empty_connection()
         };
 
-        let err = cm.refresh_if_needed("test", &conn).await.unwrap_err();
-        assert!(
-            err.contains("No refresh token"),
-            "expected 'No refresh token' error, got: {err}"
-        );
+        // No refresh needed because no refresh token -> returns Ok copy
+        let result = cm.refresh_if_needed("test", &conn).await.unwrap();
+        assert_eq!(result.id, "no_rt");
+        assert!(result.access_token.is_none());
     }
 
     // -- build_connection_from round-trips fields --

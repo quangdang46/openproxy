@@ -14,9 +14,10 @@ pub fn inject_system_prompt(body: &mut Value, prompt: &str) -> bool {
         return false;
     };
 
-    if let Some(sys_msg) = messages.iter_mut().find(|m| {
-        m.get("role").and_then(Value::as_str) == Some("system")
-    }) {
+    if let Some(sys_msg) = messages
+        .iter_mut()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+    {
         match sys_msg.get_mut("content") {
             Some(Value::String(content)) => {
                 if !content.is_empty() {
@@ -28,7 +29,10 @@ pub fn inject_system_prompt(body: &mut Value, prompt: &str) -> bool {
             _ => false,
         }
     } else {
-        messages.insert(0, serde_json::json!({ "role": "system", "content": prompt }));
+        messages.insert(
+            0,
+            serde_json::json!({ "role": "system", "content": prompt }),
+        );
         true
     }
 }
@@ -55,7 +59,10 @@ mod tests {
                 { "role": "user", "content": "Hello" }
             ]
         });
-        assert!(inject_system_prompt(&mut body, "You are a helpful assistant."));
+        assert!(inject_system_prompt(
+            &mut body,
+            "You are a helpful assistant."
+        ));
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "system");

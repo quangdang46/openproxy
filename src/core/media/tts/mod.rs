@@ -9,8 +9,8 @@
 //! `ttsConfig.format` (hyperbolic, deepgram, nvidia, huggingface,
 //! inworld, cartesia, playht, coqui, tortoise, openai-compat).
 
-pub mod base;
 mod aws_polly;
+pub mod base;
 mod edge_tts;
 mod elevenlabs;
 mod gemini;

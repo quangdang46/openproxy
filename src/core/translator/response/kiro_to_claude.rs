@@ -168,24 +168,12 @@ pub fn kiro_to_claude_streaming(
             0u64
         };
         let tool_block_idx = anthropic.current_block_index.unwrap_or(0) + 1;
-        inner.insert(
-            "nextToolBlockIndex".into(),
-            Value::from(tool_block_idx + 1),
-        );
-        inner.insert(
-            "toolBlockIndex".into(),
-            Value::from(tool_block_idx),
-        );
+        inner.insert("nextToolBlockIndex".into(), Value::from(tool_block_idx + 1));
+        inner.insert("toolBlockIndex".into(), Value::from(tool_block_idx));
 
         // Stash tool info
-        inner.insert(
-            "lastToolId".into(),
-            Value::String(tool_use_id.clone()),
-        );
-        inner.insert(
-            "lastToolName".into(),
-            Value::String(tool_name.clone()),
-        );
+        inner.insert("lastToolId".into(), Value::String(tool_use_id.clone()));
+        inner.insert("lastToolName".into(), Value::String(tool_name.clone()));
 
         emit(json!({
             "type": "content_block_start",

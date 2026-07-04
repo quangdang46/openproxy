@@ -41,9 +41,13 @@ pub fn claude_to_kiro_request(
             })
         })
         .or_else(|| {
-            body.get("system").and_then(|v| v.as_object()).and_then(|obj| {
-                obj.get("text").and_then(|t| t.as_str()).map(|s| s.to_string())
-            })
+            body.get("system")
+                .and_then(|v| v.as_object())
+                .and_then(|obj| {
+                    obj.get("text")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.to_string())
+                })
         });
 
     let mut history: Vec<Value> = Vec::new();

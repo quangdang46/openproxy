@@ -125,9 +125,7 @@ fn parse_model(model: &str) -> ParsedModel {
     let (rest, fmt) = if let Some(dot) = model.rfind('.') {
         let ext = &model[dot + 1..];
         match ext {
-            "mp3" | "pcm" | "ogg" | "wav" | "ogg_vorbis" | "ogg_opus" => {
-                (&model[..dot], Some(ext))
-            }
+            "mp3" | "pcm" | "ogg" | "wav" | "ogg_vorbis" | "ogg_opus" => (&model[..dot], Some(ext)),
             _ => (model, None),
         }
     } else {
@@ -228,9 +226,7 @@ impl TtsAdapter for AwsPollyAdapter {
             .as_deref()
             .filter(|s| !s.is_empty())
             .ok_or_else(|| {
-                TtsError::MissingCredentials(
-                    "aws-polly (api_key = AWS Secret Access Key)".into(),
-                )
+                TtsError::MissingCredentials("aws-polly (api_key = AWS Secret Access Key)".into())
             })?;
 
         let access_key = request
@@ -292,10 +288,7 @@ impl TtsAdapter for AwsPollyAdapter {
         let url = format!("https://{host}/v1/speech");
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            CONTENT_TYPE,
-            HeaderValue::from_static("application/json"),
-        );
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             HOST,
             HeaderValue::from_str(&host).map_err(|e| TtsError::Parse(e.to_string()))?,
