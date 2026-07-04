@@ -91,6 +91,7 @@ async fn usage_chart_route_returns_sidecar_compatible_buckets() {
             Request::builder()
                 .method("GET")
                 .uri("/api/usage/chart?period=7d")
+                .header("authorization", format!("Bearer {TEST_KEY}"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -117,6 +118,7 @@ async fn usage_chart_route_rejects_invalid_period() {
         .oneshot(
             Request::builder()
                 .method("GET")
+                .header("authorization", format!("Bearer {TEST_KEY}"))
                 .uri("/api/usage/chart?period=90d")
                 .body(Body::empty())
                 .unwrap(),
@@ -134,6 +136,7 @@ async fn usage_providers_route_returns_filter_options() {
         .oneshot(
             Request::builder()
                 .method("GET")
+                .header("authorization", format!("Bearer {TEST_KEY}"))
                 .uri("/api/usage/providers")
                 .body(Body::empty())
                 .unwrap(),
@@ -163,6 +166,7 @@ async fn usage_request_details_route_returns_paginated_records() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("authorization", format!("Bearer {TEST_KEY}"))
                 .method("GET")
                 .uri("/api/usage/request-details?page=1&pageSize=20&provider=openai")
                 .body(Body::empty())
