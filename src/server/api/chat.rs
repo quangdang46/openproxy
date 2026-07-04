@@ -2019,31 +2019,43 @@ async fn proxy_response_with_usage_tracking(
 
         // 9router parity: translate non-streaming response body when source
         // and target formats differ (handleNonStreamingResponse).
+        // For Responses API format (Codex), the raw body is a response.completed JSON,
+        // not SSE chunks. We parse it directly instead of using the streaming SSE transform.
         let translated_body = if plan.needs_translation() {
-            let mut state = crate::core::translator::registry::ResponseTransformState::default();
-            let chunks = registry::global_registry().translate_response(
-                plan.target_format,
-                plan.source_format,
-                decloaked_body.as_ref(),
-                &mut state,
-            );
-            if !chunks.is_empty() {
-                let mut result = String::new();
-                for chunk in &chunks {
-                    if let Some(data) = chunk.strip_prefix("data: ") {
-                        result = data.to_string();
-                        if result == "[DONE]" {
-                            continue;
+            if plan.target_format == registry::Format::OpenAiResponses
+                || plan.target_format == registry::Format::Codex
+            {
+                // The Codex/Responses API returns a response.completed JSON body for non-streaming.
+                // Parse out the text content and build a proper chat.completion response.
+                translate_codex_non_streaming(decloaked_body.as_ref())
+                    .unwrap_or_else(|| decloaked_body.clone())
+            } else {
+                use crate::core::translator::registry::ResponseTransformState;
+                let mut state = ResponseTransformState::default();
+                let chunks = registry::global_registry().translate_response(
+                    plan.target_format,
+                    plan.source_format,
+                    decloaked_body.as_ref(),
+                    &mut state,
+                );
+                if !chunks.is_empty() {
+                    let mut result = String::new();
+                    for chunk in &chunks {
+                        if let Some(data) = chunk.strip_prefix("data: ") {
+                            result = data.to_string();
+                            if result == "[DONE]" {
+                                continue;
+                            }
                         }
                     }
-                }
-                if result.is_empty() {
-                    decloaked_body.clone()
+                    if result.is_empty() {
+                        decloaked_body.clone()
+                    } else {
+                        Bytes::from(result)
+                    }
                 } else {
-                    Bytes::from(result)
+                    decloaked_body.clone()
                 }
-            } else {
-                decloaked_body.clone()
             }
         } else {
             decloaked_body.clone()
@@ -2055,6 +2067,73 @@ async fn proxy_response_with_usage_tracking(
     };
 
     build_proxied_response(status, &headers, final_body)
+}
+
+/// Translate a non-streaming Codex/Responses API response into standard Chat Completions format.
+///
+/// The Codex backend returns response.completed JSON for non-streaming requests:
+/// ```json
+/// {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":10,"output_tokens":5}}}
+/// ```
+///
+/// This extracts the text content and builds a proper chat.completion response.
+fn translate_codex_non_streaming(body: &[u8]) -> Option<Bytes> {
+    let val: serde_json::Value = serde_json::from_slice(body).ok()?;
+
+    // Navigate: response > output > [0] > content > [{output_text}]
+    let output = val
+        .pointer("/response/output")
+        .and_then(|v| v.as_array())?;
+
+    let mut text_parts: Vec<String> = Vec::new();
+    for item in output {
+        let content = item.get("content").and_then(|v| v.as_array())?;
+        for part in content {
+            if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                text_parts.push(text.to_string());
+            }
+        }
+    }
+
+    let content_text = text_parts.join("");
+
+    // Extract usage
+    let usage = val.pointer("/response/usage");
+    let prompt_tokens = usage
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+
+    let response = serde_json::json!({
+        "id": format!("chatcmpl-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000")),
+        "object": "chat.completion",
+        "created": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        "model": "codex",
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": content_text,
+            },
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+    });
+
+    serde_json::to_string(&response)
+        .ok()
+        .map(|s| Bytes::from(s))
 }
 
 async fn proxy_response_with_pending_tracking(
@@ -2086,6 +2165,12 @@ async fn proxy_response_with_pending_tracking(
             let mut pending_text = String::new();
             let stream = async_stream::stream! {
                 let mut upstream = response.bytes_stream();
+                // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
+                let mut t_state = if needs_stream_translation {
+                    Some(crate::core::translator::registry::ResponseTransformState::default())
+                } else {
+                    None
+                };
                 loop {
                     let next = tokio::time::timeout(SSE_STALL_TIMEOUT, upstream.try_next()).await;
                     match next {
@@ -2114,6 +2199,23 @@ async fn proxy_response_with_pending_tracking(
                                     if let Some(frame) = sse_frame_for_dashboard(&line) {
                                         yield Ok::<Bytes, std::io::Error>(frame);
                                     }
+                                }
+                            } else if needs_stream_translation {
+                                if let Some(ref mut t_state) = t_state {
+                                    let chunks = registry::global_registry()
+                                        .translate_response(
+                                            stream_target_format,
+                                            stream_source_format,
+                                            &chunk,
+                                            t_state,
+                                        );
+                                    for line in chunks {
+                                        if let Some(frame) = sse_frame_for_dashboard(&line) {
+                                            yield Ok::<Bytes, std::io::Error>(frame);
+                                        }
+                                    }
+                                } else {
+                                    yield Ok::<Bytes, std::io::Error>(chunk);
                                 }
                             } else {
                                 yield Ok::<Bytes, std::io::Error>(chunk);
@@ -2156,6 +2258,12 @@ async fn proxy_response_with_pending_tracking(
             let mut transformer = transformer;
             let mut pending_text = String::new();
             let stream = async_stream::stream! {
+                // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
+                let mut t_state = if needs_stream_translation {
+                    Some(crate::core::translator::registry::ResponseTransformState::default())
+                } else {
+                    None
+                };
                 loop {
                     let next = tokio::time::timeout(SSE_STALL_TIMEOUT, body.frame()).await;
                     let frame_result = match next {
@@ -2189,21 +2297,21 @@ async fn proxy_response_with_pending_tracking(
                                         }
                                     }
                                 } else if needs_stream_translation {
-                                    // 9router parity: translate SSE response chunks
-                                    // from provider format back to source format
-                                    // during streaming (translateResponse pipeline).
-                                    let mut t_state = crate::core::translator::registry::ResponseTransformState::default();
-                                    let chunks = registry::global_registry()
-                                        .translate_response(
-                                            stream_target_format,
-                                            stream_source_format,
-                                            &data,
-                                            &mut t_state,
-                                        );
-                                    for line in chunks {
-                                        if let Some(frame) = sse_frame_for_dashboard(&line) {
-                                            yield Ok::<Bytes, std::io::Error>(frame);
+                                    if let Some(ref mut t_state) = t_state {
+                                        let chunks = registry::global_registry()
+                                            .translate_response(
+                                                stream_target_format,
+                                                stream_source_format,
+                                                &data,
+                                                t_state,
+                                            );
+                                        for line in chunks {
+                                            if let Some(frame) = sse_frame_for_dashboard(&line) {
+                                                yield Ok::<Bytes, std::io::Error>(frame);
+                                            }
                                         }
+                                    } else {
+                                        yield Ok::<Bytes, std::io::Error>(data);
                                     }
                                 } else {
                                     yield Ok::<Bytes, std::io::Error>(data);
