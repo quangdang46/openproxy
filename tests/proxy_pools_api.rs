@@ -134,6 +134,7 @@ fn provider_connection(id: &str, proxy_pool_id: &str) -> ProviderConnection {
         use_connection_proxy: None,
         provider_specific_data,
         extra: BTreeMap::new(),
+        runtime_transport: None,
     }
 }
 

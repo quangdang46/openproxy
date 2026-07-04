@@ -579,7 +579,7 @@ fn default_executor_transform_request_is_passthrough() {
         "messages": [{"role": "user", "content": "hello"}]
     });
 
-    assert_eq!(executor.transform_request(&body), body);
+    assert_eq!(executor.transform_request(&body, "gpt-4.1"), body);
 }
 
 #[tokio::test]
