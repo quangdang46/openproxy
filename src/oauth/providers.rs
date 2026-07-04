@@ -271,6 +271,19 @@ pub fn qoder() -> OAuthProviderConfig {
         refresh_lead_ms: 0,
     }
 }
+pub fn clinepass() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "clinepass",
+        client_id: "openproxy",
+        authorize_url: "https://api.cline.bot/api/v1/auth/authorize",
+        token_url: "https://api.cline.bot/api/v1/auth/token",
+        scopes: &[],
+        uses_pkce: true,
+        extra_params: &[("refresh_url", "https://api.cline.bot/api/v1/auth/refresh")],
+        refresh_lead_ms: 4 * 60 * 60 * 1000,
+    }
+}
+
 pub fn cline() -> OAuthProviderConfig {
     OAuthProviderConfig {
         id: "cline",
@@ -434,6 +447,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "kimi-coding" => Some(kimi_coding()),
         "kilocode" => Some(kilocode()),
         "cline" => Some(cline()),
+        "clinepass" => Some(clinepass()),
         "gitlab" => Some(gitlab()),
         "codebuddy" => Some(codebuddy()),
         "openai-native" => Some(openai_native()),

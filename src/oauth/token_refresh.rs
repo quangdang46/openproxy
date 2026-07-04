@@ -823,7 +823,7 @@ pub async fn dispatch_oauth_refresh(
             })
             .await
         }
-        "cline" => {
+        "cline" | "clinepass" => {
             let rt = refresh_token.to_string();
             dedup_refresh(provider, refresh_token, move || {
                 let rt = rt.clone();
