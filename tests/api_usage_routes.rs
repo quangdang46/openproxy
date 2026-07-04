@@ -104,9 +104,9 @@ async fn usage_chart_route_returns_sidecar_compatible_buckets() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    let buckets = json.as_array().expect("chart array");
+    let buckets = json["data"].as_array().expect("chart data array");
     assert_eq!(buckets.len(), 7);
-    assert!(buckets[0]["label"].is_string());
+    assert!(buckets[0]["date"].is_string());
     assert!(buckets[0]["tokens"].is_number());
     assert!(buckets[0]["cost"].is_number());
 }
