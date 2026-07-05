@@ -1415,6 +1415,10 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
                 "muse-spark-web",
                 ProviderExecutorConfig::openai("https://www.meta.ai/api"),
             ),
+            (
+                "custom",
+                ProviderExecutorConfig::openai("https://api.openai.com/v1"),
+            ),
         ])
     });
 
