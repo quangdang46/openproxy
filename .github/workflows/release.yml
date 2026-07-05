@@ -85,6 +85,9 @@ jobs:
         with:
           tool: cross
 
+      - name: Generate lockfile
+        run: cargo generate-lockfile
+
       - name: Build (cross)
         if: matrix.use_cross
         run: cross build --release --locked --target ${{ matrix.target }}
