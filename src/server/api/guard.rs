@@ -99,6 +99,12 @@ pub async fn require_protected(
     request: Request,
     next: Next,
 ) -> Result<Response, Response> {
+    // When require_login is disabled, allow all requests through.
+    // This matches the pre-guard-middlware behaviour where per-handler
+    // auth checks respected the require_login setting.
+    if !state.db.snapshot().settings.require_login {
+        return Ok(next.run(request).await);
+    }
     match require_api_key(request.headers(), &state.db) {
         Ok(_) => Ok(next.run(request).await),
         Err(e) => Err(auth_error_response(e)),
