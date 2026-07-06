@@ -54,15 +54,11 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
                 obj.insert("id".into(), json!(row.get::<_, String>(0)?));
                 obj.insert("provider".into(), json!(row.get::<_, String>(1)?));
                 obj.insert("authType".into(), json!(row.get::<_, String>(2)?));
-                if let Ok(v) = row.get::<_, Option<String>>(3) {
-                    if let Some(v) = v {
-                        obj.insert("name".into(), json!(v));
-                    }
+                if let Ok(Some(v)) = row.get::<_, Option<String>>(3) {
+                    obj.insert("name".into(), json!(v));
                 }
-                if let Ok(v) = row.get::<_, Option<String>>(4) {
-                    if let Some(v) = v {
-                        obj.insert("email".into(), json!(v));
-                    }
+                if let Ok(Some(v)) = row.get::<_, Option<String>>(4) {
+                    obj.insert("email".into(), json!(v));
                 }
                 if let Ok(v) = row.get::<_, Option<i64>>(5) {
                     obj.insert("priority".into(), json!(v));

@@ -105,7 +105,7 @@ fn strip_ansi(s: &str) -> String {
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
         if c == '\x1b' {
-            while let Some(n) = chars.next() {
+            for n in chars.by_ref() {
                 if n == 'm' {
                     break;
                 }

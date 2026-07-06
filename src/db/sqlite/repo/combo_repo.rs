@@ -17,7 +17,7 @@ pub fn get_by_name(conn: &Connection, name: &str) -> rusqlite::Result<Option<Com
         "SELECT id, name, kind, models, data, createdAt, updatedAt FROM combos WHERE name = ?1",
     )?;
     let mut rows = stmt.query_map(params![name], row_to_combo)?;
-    Ok(rows.next().transpose()?)
+    rows.next().transpose()
 }
 
 pub fn create(conn: &Connection, c: &Combo) -> rusqlite::Result<()> {

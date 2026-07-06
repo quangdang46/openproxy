@@ -753,7 +753,7 @@ async fn get_provider_api(
     let connections = snapshot.provider_connections.clone();
     let found = connections
         .iter()
-        .find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false))
+        .find(|c| c.id == id || c.name.as_deref().map(|n| n == id).unwrap_or(false))
         .cloned();
     match found {
         Some(conn) => Json(json!({ "provider": conn })).into_response(),
@@ -778,7 +778,7 @@ async fn update_provider_api(
     let exists = snapshot
         .provider_connections
         .iter()
-        .any(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+        .any(|c| c.id == id || c.name.as_deref().map(|n| n == id).unwrap_or(false));
     if !exists {
         return (
             StatusCode::NOT_FOUND,
@@ -792,7 +792,7 @@ async fn update_provider_api(
             if let Some(conn) = db
                 .provider_connections
                 .iter_mut()
-                .find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false))
+                .find(|c| c.id == id || c.name.as_deref().map(|n| n == id).unwrap_or(false))
             {
                 if let Some(name) = req.name {
                     conn.name = Some(name);
@@ -817,7 +817,7 @@ async fn update_provider_api(
             match snapshot
                 .provider_connections
                 .iter()
-                .find(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false))
+                .find(|c| c.id == id || c.name.as_deref().map(|n| n == id).unwrap_or(false))
             {
                 Some(conn) => Json(json!({ "provider": conn })).into_response(),
                 None => (
@@ -847,7 +847,7 @@ async fn delete_provider_api(
     let exists = snapshot
         .provider_connections
         .iter()
-        .any(|c| c.id == id || c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+        .any(|c| c.id == id || c.name.as_deref().map(|n| n == id).unwrap_or(false));
     if !exists {
         return (
             StatusCode::NOT_FOUND,
@@ -859,7 +859,7 @@ async fn delete_provider_api(
         .db
         .update(|db| {
             db.provider_connections
-                .retain(|c| c.id != id && !c.name.as_deref().map(|n| n == &id).unwrap_or(false));
+                .retain(|c| c.id != id && !c.name.as_deref().map(|n| n == id).unwrap_or(false));
         })
         .await;
     match result {

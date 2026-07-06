@@ -60,7 +60,7 @@ pub fn get_daily(conn: &Connection, date_key: &str) -> rusqlite::Result<Option<D
         let s: String = row.get(0)?;
         serde_json::from_str(&s).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
     })?;
-    Ok(rows.next().transpose()?)
+    rows.next().transpose()
 }
 
 pub fn upsert_daily(

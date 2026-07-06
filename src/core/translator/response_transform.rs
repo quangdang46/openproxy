@@ -1001,7 +1001,7 @@ impl StreamingTransformer for CommandCodeToOpenAiTransformer {
                     .get("finishReason")
                     .and_then(|v| v.as_str())
                     .map(map_cc_finish_reason)
-                    .or_else(|| self.state.finish_reason.as_deref())
+                    .or(self.state.finish_reason.as_deref())
                     .unwrap_or("stop");
                 let delta = serde_json::json!({});
                 out.push(make_cc_chunk_line(&self.state, &delta, Some(finish_reason)));

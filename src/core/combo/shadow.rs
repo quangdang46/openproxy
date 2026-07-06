@@ -172,7 +172,7 @@ pub type ShadowOutcomeCallback = Arc<dyn Fn(Vec<ShadowOutcome>) + Send + Sync>;
 /// - `dispatch_primary` — callback to dispatch the primary request.
 /// - `dispatch_shadow` — callback to dispatch a shadow request.
 /// - `on_shadow_outcome` — optional fire-and-forget callback invoked with
-///    shadow outcomes after completion.
+///   shadow outcomes after completion.
 pub async fn execute_shadow_strategy<F, Fut, G, HG>(
     primary_model: &str,
     shadow_models: &[String],

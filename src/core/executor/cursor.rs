@@ -331,8 +331,7 @@ fn format_tool_name(name: &str) -> String {
     if name.is_empty() {
         return "mcp_custom_tool".to_string();
     }
-    if name.starts_with("mcp__") {
-        let rest = &name[5..];
+    if let Some(rest) = name.strip_prefix("mcp__") {
         if let Some(idx) = rest.find("__") {
             let server = &rest[..idx];
             let tool_name = &rest[idx + 2..];
@@ -1532,7 +1531,7 @@ impl CursorExecutor {
                 .header("content-type", content_type)
                 .header("cache-control", "no-cache")
                 .body(reqwest::Body::from(body_string))
-                .map_err(|e| CursorExecutorError::InvalidRequest(e))?;
+                .map_err(CursorExecutorError::InvalidRequest)?;
             let fake_response: reqwest::Response = http_response.into();
 
             Ok(CursorExecutorResponse {
@@ -2120,7 +2119,7 @@ pub fn transform_protobuf_to_sse(
 
     // Finalize remaining tool calls (those without isLast)
     let mut tool_calls: Vec<Value> = Vec::new();
-    for (_id, tc) in tool_call_map.iter() {
+    for tc in tool_call_map.values() {
         let finalized_tc = serde_json::json!({
             "id": tc.get("id"),
             "type": "function",
@@ -2296,7 +2295,7 @@ pub fn transform_protobuf_to_json(
 
     // Build tool_calls array
     let mut tool_calls: Vec<Value> = Vec::new();
-    for (_id, tc) in tool_call_map.iter() {
+    for tc in tool_call_map.values() {
         let finalized_tc = serde_json::json!({
             "id": tc.get("id"),
             "type": "function",

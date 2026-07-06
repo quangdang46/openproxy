@@ -277,7 +277,7 @@ fn process_event(event: &Value, state: &mut CommandCodeResponseState) -> Vec<Str
                 .get("finishReason")
                 .and_then(|v| v.as_str())
                 .map(map_finish_reason)
-                .or_else(|| state.finish_reason.as_deref())
+                .or(state.finish_reason.as_deref())
                 .unwrap_or("stop");
 
             let mut final_chunk = serde_json::json!({

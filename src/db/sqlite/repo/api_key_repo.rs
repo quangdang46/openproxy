@@ -25,7 +25,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiKey>
         "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_api_key)?;
-    Ok(rows.next().transpose()?)
+    rows.next().transpose()
 }
 
 pub fn create(conn: &Connection, k: &ApiKey) -> rusqlite::Result<()> {

@@ -322,7 +322,7 @@ impl TtsAdapter for AwsPollyAdapter {
         let (audio_bytes, format_name) = if parsed.output_format == "pcm" {
             let sr = engine_sample_rate(&parsed.engine);
             let wav = pcm_to_wav(&raw, sr);
-            (wav.into(), "wav".to_string())
+            (wav, "wav".to_string())
         } else {
             (raw.to_vec(), map_format(&parsed.output_format).to_string())
         };

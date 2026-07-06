@@ -294,10 +294,8 @@ fn scan_content_for_capabilities(content: &Value, required: &mut HashSet<String>
                 }
             }
         }
-        Value::String(text) => {
-            if text.contains("media://") {
-                required.insert("vision".to_string());
-            }
+        Value::String(text) if text.contains("media://") => {
+            required.insert("vision".to_string());
         }
         _ => {}
     }
@@ -424,7 +422,7 @@ pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -
     match status {
         // 9router ERROR_RULES: 401/402/403/404 all allow fallback with LONG_COOLDOWN
         // 400 is NOT in ERROR_RULES — falls through to default TRANSIENT_COOLDOWN (9router parity)
-        401 | 402 | 403 | 404 => FallbackDecision {
+        401..=404 => FallbackDecision {
             should_fallback: true,
             cooldown: LONG_COOLDOWN,
             new_backoff_level: None,
@@ -740,7 +738,7 @@ where
                 // falling through to the next combo member so the upstream
                 // gets a brief recovery window instead of an immediate retry.
                 // 9router caps transient wait at 5000ms to avoid 30s+ delays in the iterator
-                if matches!(error.status, 502 | 503 | 504)
+                if matches!(error.status, 502..=504)
                     && !decision.cooldown.is_zero()
                     && decision.cooldown.as_millis() <= 5000
                 {

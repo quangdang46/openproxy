@@ -277,7 +277,7 @@ fn tool_table() -> Vec<ToolHandler> {
                 let id_str = id.to_string();
                 db_update_sync(&state.db, move |db| {
                     db.provider_connections.retain(|c| {
-                        c.id != id_str && c.name.as_deref().map(|n| n != &id_str).unwrap_or(true)
+                        c.id != id_str && c.name.as_deref().map(|n| n != id_str).unwrap_or(true)
                     });
                 })?;
                 Ok(json!({ "success": true }))

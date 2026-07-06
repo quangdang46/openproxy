@@ -30,7 +30,7 @@ pub fn estimate_phantom_savings(body: &Value) -> u32 {
         return 0;
     }
 
-    let tokens_before = (char_count + PHANTOM_CHARS_PER_TOKEN - 1) / PHANTOM_CHARS_PER_TOKEN;
+    let tokens_before = char_count.div_ceil(PHANTOM_CHARS_PER_TOKEN);
     let tokens_before = tokens_before.max(1);
     let tokens_after = (tokens_before as f64 * PHANTOM_ESTIMATED_RATIO).round() as usize;
     let tokens_saved = tokens_before.saturating_sub(tokens_after);

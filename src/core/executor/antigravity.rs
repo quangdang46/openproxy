@@ -714,7 +714,7 @@ impl AntigravityExecutor {
         if let Ok(expires) = chrono::DateTime::parse_from_rfc2822(value_str) {
             let now = chrono::Utc::now();
             let duration = expires.signed_duration_since(now);
-            let secs = duration.num_seconds().max(1).min(120) as u64;
+            let secs = duration.num_seconds().clamp(1, 120) as u64;
             return Some(Duration::from_secs(secs));
         }
 

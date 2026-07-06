@@ -446,7 +446,7 @@ impl VertexExecutor {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            (project_id, format!("{}", api_key))
+            (project_id, api_key.to_string())
         } else if let Some(credentials_json) = &request.credentials.access_token {
             let service_account = Self::parse_service_account_json(credentials_json)?;
             let jwt = Self::create_rs256_jwt(&service_account)?;
