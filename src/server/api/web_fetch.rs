@@ -753,6 +753,7 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
                 c.consecutive_errors = Some(0);
                 c.test_status = None;
                 c.rate_limited_until = None;
+                c.extra.retain(|k, _| !k.starts_with("modelLock_"));
             }
         })
         .await;

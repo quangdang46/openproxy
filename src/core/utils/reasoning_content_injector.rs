@@ -101,6 +101,9 @@ fn apply_deepseek_v4_pro_alias(provider: &str, model: &str, body: &mut Value) {
             .or_insert_with(|| json!({}));
         if let Some(t) = thinking.as_object_mut() {
             t.insert("type".to_string(), Value::String(thinking_type.to_string()));
+            if thinking_type == "enabled" {
+                t.insert("budget_tokens".to_string(), json!(10000));
+            }
         }
     }
 

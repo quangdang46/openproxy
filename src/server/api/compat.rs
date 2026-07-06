@@ -118,6 +118,10 @@ async fn forward_compat(
     };
 
     let normalized = normalize_body(body, mode);
+    let stream_request = normalized
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let endpoint = match mode {
         CompatMode::Messages => Some("/v1/messages"),
         CompatMode::Responses { compact: false } => Some("/v1/responses"),
@@ -128,7 +132,7 @@ async fn forward_compat(
 
     match mode {
         CompatMode::Responses { .. } => {
-            with_cors_response(convert_to_responses_api(response).await)
+            with_cors_response(convert_to_responses_api(response, stream_request).await)
         }
         CompatMode::Messages => with_cors_response(convert_to_messages_api(response).await),
     }
@@ -140,7 +144,12 @@ async fn forward_compat(
 
 /// Convert an OpenAI chat-completion response (streaming or non-streaming) to
 /// the OpenAI Responses API format.
-async fn convert_to_responses_api(response: Response) -> Response {
+///
+/// `stream_request` indicates whether the client requested SSE (streaming)
+/// or a single JSON response (non-streaming). When the upstream returns
+/// Responses API SSE events for a non-streaming request, we collect them
+/// and reconstruct the final JSON.
+async fn convert_to_responses_api(response: Response, stream_request: bool) -> Response {
     let status = response.status();
     if !status.is_success() {
         return response;
@@ -176,104 +185,172 @@ async fn convert_to_responses_api(response: Response) -> Response {
         return Json(responses_json).into_response();
     }
 
-    // Streaming — wrap the body through the SSE converter.
+    // Streaming or pseudo-streaming — wrap the body through the SSE converter.
     // The upstream may return OpenAI SSE (chat.completion.chunk) or
     // Anthropic SSE (message_start / content_block_* / message_delta).
     // We detect Claude format by looking for "type":"message_start" in the data.
+    //
+    // NOTE: Some upstreams (esp. opencode-go) return a non-streaming
+    //       chat.completion JSON body with Content-Type: text/event-stream.
+    //       We detect this case and handle it as non-streaming by trying
+    //       to parse the full body as a single chat.completion JSON first.
     let (parts, body) = response.into_parts();
-    let data_stream = body.into_data_stream();
+    let body_bytes = match body.collect().await {
+        Ok(col) => col.to_bytes(),
+        Err(_) => return Response::from_parts(parts, Body::empty()),
+    };
+
+    // Try to detect pseudo-streaming: the entire body is a single
+    // chat.completion JSON (not SSE). If so, handle as non-streaming.
+    // The upstream may wrap the JSON in SSE framing: `data: {...}\n\n`
+    let body_str = String::from_utf8_lossy(&body_bytes);
+    let pseudo_streaming_json = serde_json::from_slice::<Value>(&body_bytes)
+        .ok()
+        .or_else(|| {
+            // Try stripping SSE framing: `data:{JSON}\n\n` or `data: {JSON}\n\n`
+            if let Some(frame) = body_str
+                .lines()
+                .find(|l| l.trim().starts_with("data:"))
+                .and_then(|l| l.splitn(2, ':').nth(1).map(|s| s.trim()))
+            {
+                serde_json::from_str::<Value>(frame).ok()
+            } else {
+                None
+            }
+        });
+    if let Some(body_value) = pseudo_streaming_json {
+        let is_pseudo_streaming = body_value
+            .get("object")
+            .and_then(|o| o.as_str())
+            .is_some_and(|o| o == "chat.completion")
+            && body_value
+                .get("choices")
+                .and_then(|a| a.as_array())
+                .and_then(|a| a.first())
+                .and_then(|c| c.get("message"))
+                .is_some();
+
+        if is_pseudo_streaming {
+            // Convert directly as non-streaming JSON (skip SSE wrapping)
+            let chat_completion =
+                if body_value.get("type").and_then(Value::as_str) == Some("message") {
+                    claude_body_to_chat_completion(&body_value)
+                } else {
+                    body_value
+                };
+            let responses_json = chat_completion_to_responses_json(&chat_completion);
+            return Json(responses_json).into_response();
+        }
+    }
+
+    // Non-streaming request but upstream returned multi-frame SSE:
+    // try to collect Responses API events and reconstruct the final JSON.
+    if !stream_request {
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        // Check if this contains Responses API SSE events
+        if body_str.contains("\"type\":\"response.") {
+            // Collect all data: JSON payloads from SSE frames
+            // Look for the final response.completed which has the full response
+            if let Some(responses_json) = extract_responses_from_sse(&body_str) {
+                return Json(responses_json).into_response();
+            }
+        }
+    }
+
+    // Real SSE streaming — convert frame-by-frame through the SSE converter.
+    // The body bytes are already collected; pseudo-streaming was already
+    // caught above, so this path only handles real SSE (OpenAI or Claude).
+    let raw_body = String::from_utf8_lossy(&body_bytes).to_string();
     let converted = async_stream::stream! {
-        // Token-buffer re-assembly: SSE frames can be split across TCP segments
-        // or combined in a single chunk. We assemble whole `data: ...` frames
-        // and pass complete JSON to the converter.
-        let mut raw_buf = String::new();
+        let mut raw_buf = raw_body;
         let mut conv_state = ResponsesSseState::new();
-        // Claude SSE → OpenAI SSE transformer (lazy init on first Claude frame)
         let mut claude_xform = AnthropicToOpenAiTransformer::new();
 
-        #[allow(unused_mut)]
-        let mut stream = data_stream;
-
+        // Process complete SSE frames from the buffer.
+        // Each frame is `data: {...}\n\n` or `event: ...\ndata: {...}\n\n`.
         loop {
-            let next = stream.next().await;
-            match next {
-                Some(Ok(chunk)) => {
-                    let chunk_str = String::from_utf8_lossy(&chunk);
-                    raw_buf.push_str(&chunk_str);
+            if let Some(frame_end) = raw_buf.find("\n\n") {
+                let frame = raw_buf[..frame_end].to_string();
+                raw_buf.drain(..frame_end + 2);
 
-                    // Process complete SSE frames from the buffer.
-                    // Each frame is `data: {...}\n\n` or `event: ...\ndata: {...}\n\n`.
-                    loop {
-                        if let Some(frame_end) = raw_buf.find("\n\n") {
-                            let frame = raw_buf[..frame_end].to_string();
-                            raw_buf.drain(..frame_end + 2);
+                let frame = frame.trim();
+                if frame.is_empty() || frame.starts_with(':') {
+                    continue; // heartbeat or comment
+                }
 
-                            let frame = frame.trim();
-                            if frame.is_empty() || frame.starts_with(':') {
-                                continue; // heartbeat or comment
-                            }
+                // Extract JSON from the data: line (may have event: prefix lines)
+                let json_str = if let Some(d) = frame.lines()
+                    .find(|l| l.trim().starts_with("data:"))
+                    .and_then(|l| l.splitn(2, ':').nth(1).map(|s| s.trim()))
+                {
+                    d
+                } else {
+                    continue;
+                };
 
-                            // Extract JSON from the data: line (may have event: prefix lines)
-                            let frame_lower = frame.to_lowercase();
-                            let json_str = if let Some(d) = frame.lines()
-                                .find(|l| l.trim().starts_with("data:"))
-                                .and_then(|l| l.splitn(2, ':').nth(1).map(|s| s.trim()))
-                            {
-                                d
-                            } else {
-                                continue;
-                            };
+                if json_str == "[DONE]" {
+                    break;
+                }
 
-                            if json_str == "[DONE]" {
+                // Detect Claude format: has "type":"message_start" or other anthropic types
+                let is_claude_event = json_str.contains("\"type\":\"")
+                    && (json_str.contains("\"message_start\"")
+                        || json_str.contains("\"content_block_")
+                        || json_str.contains("\"message_delta\"")
+                        || json_str.contains("\"message_stop\"")
+                        || json_str.contains("\"ping\""));
+
+                // Detect Responses API SSE: events with "type":"response." prefix
+                // These are already in Responses API format and should pass through.
+                let is_responses_api_event = json_str.contains("\"type\":\"response.");
+
+                if is_responses_api_event {
+                    // Already Responses API format — pass through directly.
+                    // Reconstruct the full event with event: and data: lines.
+                    // The frame lines contain the source format; yield unchanged.
+                    let event_bytes = format!("{frame}\n\n");
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                } else if is_claude_event {
+                    // Filter out ping events (no OpenAI equivalent)
+                    if json_str.contains("\"ping\"") {
+                        continue;
+                    }
+                    // Convert Claude SSE → OpenAI SSE lines via transformer
+                    let claude_bytes = Bytes::from(format!("data: {json_str}\n\n"));
+                    let openai_lines = claude_xform.transform_chunk(&claude_bytes);
+                    for line in openai_lines {
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            if data == "[DONE]" {
                                 break;
                             }
-
-                            // Detect Claude format: has "type":"message_start" or other anthropic types
-                            let is_claude_event = json_str.contains("\"type\":\"")
-                                && (json_str.contains("\"message_start\"")
-                                    || json_str.contains("\"content_block_")
-                                    || json_str.contains("\"message_delta\"")
-                                    || json_str.contains("\"message_stop\"")
-                                    || json_str.contains("\"ping\""));
-
-                            if is_claude_event {
-                                // Filter out ping events (no OpenAI equivalent)
-                                if json_str.contains("\"ping\"") {
-                                    continue;
-                                }
-                                // Convert Claude SSE → OpenAI SSE lines via transformer
-                                let claude_bytes = Bytes::from(format!("data: {json_str}\n\n"));
-                                let openai_lines = claude_xform.transform_chunk(&claude_bytes);
-                                for line in openai_lines {
-                                    if let Some(data) = line.strip_prefix("data: ") {
-                                        if data == "[DONE]" {
-                                            break;
-                                        }
-                                        if let Ok(chunk_value) = serde_json::from_str::<Value>(data) {
-                                            let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
-                                            for event_bytes in events {
-                                                yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
-                                            }
-                                        }
-                                    }
-                                }
-                            } else {
-                                // Already OpenAI format — pass through directly
-                                if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
-                                    let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
-                                    for event_bytes in events {
-                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
-                                    }
+                            if let Ok(chunk_value) = serde_json::from_str::<Value>(data) {
+                                let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
+                                for event_bytes in events {
+                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
                                 }
                             }
-                        } else {
-                            break;
+                        }
+                    }
+                } else {
+                    // Already OpenAI format — pass through directly
+                    if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
+                        let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
+                        for event_bytes in events {
+                            yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
                         }
                     }
                 }
-                Some(Err(_)) | None => break,
+            } else {
+                break;
             }
         }
+
+        // ── Flush remaining state + [DONE] ───────────────────────────
+        let flush_frames = conv_state.flush_frames();
+        for event_bytes in flush_frames {
+            yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+        }
+        yield Ok::<Bytes, std::io::Error>(Bytes::from("data: [DONE]\n\n"));
     };
 
     let body = Body::from_stream(converted);
@@ -295,8 +372,45 @@ async fn convert_to_responses_api(response: Response) -> Response {
     );
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("connection"),
+        HeaderValue::from_static("keep-alive"),
+    );
 
     resp
+}
+
+/// Extract the final Responses API JSON from a series of Responses API SSE events.
+/// Finds the `response.completed` event and returns its `response` payload.
+fn extract_responses_from_sse(body: &str) -> Option<Value> {
+    let mut latest_completed_response: Option<Value> = None;
+    for frame in body.split("\n\n") {
+        let frame = frame.trim();
+        if frame.is_empty() {
+            continue;
+        }
+        // Find the data: line in this SSE frame; skip frames without one
+        let json_str = match frame
+            .lines()
+            .find(|l| l.trim().starts_with("data:"))
+            .and_then(|l| l.splitn(2, ':').nth(1).map(|s| s.trim()))
+        {
+            Some(s) => s,
+            None => continue,
+        };
+        if let Ok(v) = serde_json::from_str::<Value>(json_str) {
+            if v.get("type").and_then(|t| t.as_str()) == Some("response.completed") {
+                if let Some(response) = v.get("response").cloned() {
+                    latest_completed_response = Some(response);
+                }
+            }
+        }
+    }
+    latest_completed_response
 }
 
 /// Convert a completed chat-completion JSON object to a Responses API JSON object.
@@ -339,12 +453,20 @@ fn chat_completion_to_responses_json(source: &Value) -> Value {
                 let mut content_parts = Vec::new();
 
                 // Reasoning content (non-standard field like DeepSeek)
+                // Emit as a SEPARATE reasoning item at output level, not as a
+                // content part inside the message — matching Responses API spec
+                // where `reasoning` is a top-level output item.
                 if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()) {
                     if !reasoning.is_empty() {
-                        content_parts.push(json!({
+                        output.push(json!({
                             "id": format!("item_{}_reasoning", idx),
-                            "type": "summary_text",
-                            "text": reasoning,
+                            "type": "reasoning",
+                            "role": role,
+                            "content": [{
+                                "id": format!("item_{}_reasoning_summary", idx),
+                                "type": "summary_text",
+                                "text": reasoning,
+                            }],
                         }));
                     }
                 }
@@ -446,6 +568,193 @@ impl ResponsesSseState {
             reasoning_content_added: false,
             completed_sent: false,
         }
+    }
+}
+
+/// Flush any incomplete event state and emit `response.completed` if it
+/// hasn't been sent yet.  Returns SSE event frames that should be yielded
+/// to the client.  Matching 9router's `responsesTransformer.js` `flush()`.
+impl ResponsesSseState {
+    fn flush_frames(&mut self) -> Vec<Vec<u8>> {
+        let mut frames: Vec<Vec<u8>> = Vec::new();
+        if self.completed_sent {
+            return frames; // already flushed
+        }
+
+        // Close any still-open message items (no finish_reason arrived)
+        let indices: Vec<usize> = self
+            .msg_item_added
+            .keys()
+            .copied()
+            .filter(|idx| !self.msg_item_done.contains_key(idx) || !self.msg_item_done[idx])
+            .collect();
+        for &idx in &indices {
+            let text = self
+                .msg_text_buf
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let part_id = self
+                .added_content_part_id_map
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let item_id = self
+                .added_item_id_map
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+
+            self.seq += 1;
+            frames.push(format_sse_event(
+                "response.output_text.done",
+                &json!({
+                    "type": "response.output_text.done",
+                    "part_index": idx,
+                    "text": text,
+                }),
+            ));
+
+            self.seq += 1;
+            frames.push(format_sse_event(
+                "response.content_part.done",
+                &json!({
+                    "type": "response.content_part.done",
+                    "part_index": idx,
+                    "part": {
+                        "id": part_id,
+                        "type": "output_text",
+                        "text": text,
+                        "annotations": [],
+                    },
+                }),
+            ));
+
+            self.seq += 1;
+            frames.push(format_sse_event(
+                "response.output_item.done",
+                &json!({
+                    "type": "response.output_item.done",
+                    "part_index": idx,
+                    "item": {
+                        "id": item_id,
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{
+                            "id": part_id,
+                            "type": "output_text",
+                            "text": text,
+                            "annotations": [],
+                        }],
+                    },
+                }),
+            ));
+
+            self.msg_item_done.insert(idx, true);
+        }
+
+        // Close reasoning if still open
+        if !self.reasoning_done && self.reasoning_item_added {
+            let reasoning_text = self
+                .reasoning_buf
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            self.reasoning_done = true;
+
+            self.seq += 1;
+            frames.push(format_sse_event(
+                "response.reasoning_summary_text.done",
+                &json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "text": reasoning_text,
+                }),
+            ));
+
+            self.seq += 1;
+            frames.push(format_sse_event(
+                "response.content_part.done",
+                &json!({
+                    "type": "response.content_part.done",
+                    "part": {
+                        "type": "summary_text",
+                    },
+                }),
+            ));
+        }
+
+        // Emit response.completed (matching 9router's sendCompleted())
+        let mut output: Vec<Value> = Vec::new();
+        for &idx in self.msg_item_done.keys() {
+            let text = self
+                .msg_text_buf
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let part_id = self
+                .added_content_part_id_map
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let item_id = self
+                .added_item_id_map
+                .get(&idx)
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            output.push(json!({
+                "id": item_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "id": part_id,
+                    "type": "output_text",
+                    "text": text,
+                    "annotations": [],
+                }],
+            }));
+        }
+        if self.reasoning_item_added {
+            let reasoning_text = self
+                .reasoning_buf
+                .as_ref()
+                .map(|s| s.as_str())
+                .unwrap_or("");
+            let reasoning_id = self.reasoning_id.as_ref().map(|s| s.as_str()).unwrap_or("");
+            output.insert(
+                0,
+                json!({
+                    "id": reasoning_id,
+                    "type": "reasoning",
+                    "role": "assistant",
+                    "content": [{
+                        "id": format!("{}_summary", reasoning_id),
+                        "type": "summary_text",
+                        "text": reasoning_text,
+                    }],
+                }),
+            );
+        }
+
+        let mut skeleton = response_skeleton(self);
+        let obj = skeleton.as_object_mut().unwrap();
+        obj.insert("status".to_string(), json!("completed"));
+        obj.insert("background".to_string(), json!(false));
+        obj.insert("error".into(), Value::Null);
+        if !output.is_empty() {
+            obj.insert("output".to_string(), json!(output));
+        }
+
+        self.completed_sent = true;
+        self.seq += 1;
+        frames.push(format_sse_event(
+            "response.completed",
+            &json!({
+                "type": "response.completed",
+                "response": skeleton,
+            }),
+        ));
+
+        frames
     }
 }
 
@@ -852,9 +1161,22 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
         }
         // Include usage from the last chunk (fix: 9router omit bug — sendCompleted()
         // in the JS version omits usage, breaking downstream consumers).
-        // Responses API spec requires usage in response.completed.
+        // Responses API spec requires usage in response.completed with field names
+        // `input_tokens` / `output_tokens`, not `prompt_tokens` / `completion_tokens`.
         if let Some(usage) = chunk.get("usage").filter(|v| !v.is_null()) {
-            obj.insert("usage".to_string(), usage.clone());
+            let mut mapped = serde_json::Map::new();
+            if let Some(v) = usage.get("prompt_tokens").and_then(|v| v.as_u64()) {
+                mapped.insert("input_tokens".into(), json!(v));
+            }
+            if let Some(v) = usage.get("completion_tokens").and_then(|v| v.as_u64()) {
+                mapped.insert("output_tokens".into(), json!(v));
+            }
+            if let Some(v) = usage.get("total_tokens").and_then(|v| v.as_u64()) {
+                mapped.insert("total_tokens".into(), json!(v));
+            }
+            if !mapped.is_empty() {
+                obj.insert("usage".into(), json!(mapped));
+            }
         }
 
         state.seq += 1;
@@ -970,6 +1292,14 @@ async fn convert_to_messages_api(response: Response) -> Response {
     );
     resp.headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("x-accel-buffering"),
+        HeaderValue::from_static("no"),
+    );
+    resp.headers_mut().insert(
+        header::HeaderName::from_static("connection"),
+        HeaderValue::from_static("keep-alive"),
+    );
 
     resp
 }

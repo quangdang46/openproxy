@@ -51,6 +51,8 @@ pub struct ResponseCache {
     provider_ttls: Arc<DashMap<String, Duration>>,
     /// Global default TTL.
     default_ttl: Duration,
+    /// Maximum number of entries before proactive eviction.
+    max_entries: usize,
 }
 
 impl Default for ResponseCache {
@@ -59,6 +61,7 @@ impl Default for ResponseCache {
             inner: Arc::new(DashMap::new()),
             provider_ttls: Arc::new(DashMap::new()),
             default_ttl: Duration::from_secs(DEFAULT_CACHE_TTL_SECS),
+            max_entries: 10_000,
         }
     }
 }
@@ -70,6 +73,7 @@ impl ResponseCache {
             inner: Arc::new(DashMap::new()),
             provider_ttls: Arc::new(DashMap::new()),
             default_ttl: Duration::from_secs(default_ttl_secs.max(1)),
+            max_entries: 10_000,
         }
     }
 
@@ -224,6 +228,32 @@ impl ResponseCache {
         };
 
         self.inner.insert(key, entry);
+
+        // Proactive eviction when cache grows too large
+        if self.inner.len() > self.max_entries {
+            let mut expired_keys = Vec::new();
+            for entry in self.inner.iter() {
+                if entry.value().created_at.elapsed() > entry.value().ttl {
+                    expired_keys.push(*entry.key());
+                }
+            }
+            for key in expired_keys {
+                self.inner.remove(&key);
+            }
+            // If still over limit, remove oldest entries
+            if self.inner.len() > self.max_entries {
+                let mut entries: Vec<([u8; 32], Instant)> = self
+                    .inner
+                    .iter()
+                    .map(|e| (*e.key(), e.value().created_at))
+                    .collect();
+                entries.sort_by_key(|e| e.1);
+                let to_remove = entries.len().saturating_sub(self.max_entries);
+                for (key, _) in entries.into_iter().take(to_remove) {
+                    self.inner.remove(&key);
+                }
+            }
+        }
     }
 
     /// Remove a cached entry by request body. Useful when a subsequent request

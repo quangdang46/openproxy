@@ -2,8 +2,9 @@
 //!
 //! Tracks all API requests with timing, status, and token usage.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
+
+use parking_lot::Mutex;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -33,37 +34,37 @@ pub struct RequestLogger {
 impl RequestLogger {
     pub fn new(max_records: usize) -> Self {
         Self {
-            logs: Mutex::new(Vec::new()),
+            logs: Mutex::new(VecDeque::new()),
             max_records: max_records.max(1),
         }
     }
 
     /// Log a request with all details.
     pub fn log(&self, entry: RequestLog) {
-        let mut logs = self.logs.lock().unwrap();
-        logs.push(entry);
+        let mut logs = self.logs.lock();
+        logs.push_back(entry);
         if logs.len() > self.max_records {
-            logs.remove(0);
+            logs.pop_front();
         }
     }
 
     /// Get all logs, newest first.
     pub fn get_logs(&self) -> Vec<RequestLog> {
-        let logs = self.logs.lock().unwrap();
-        let mut result = logs.clone();
+        let logs = self.logs.lock();
+        let mut result: Vec<RequestLog> = logs.iter().cloned().collect();
         result.reverse();
         result
     }
 
     /// Clear all logs.
     pub fn clear(&self) {
-        let mut logs = self.logs.lock().unwrap();
+        let mut logs = self.logs.lock();
         logs.clear();
     }
 
     /// Generate aggregate statistics.
     pub fn get_stats(&self) -> ObservabilityStats {
-        let logs = self.logs.lock().unwrap();
+        let logs = self.logs.lock();
 
         let total_requests = logs.len() as u64;
         let mut total_request_tokens = 0u64;

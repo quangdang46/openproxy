@@ -375,6 +375,8 @@ async fn main() -> anyhow::Result<()> {
     let db = Arc::new(db);
     spawn_watcher(db.clone());
     spawn_auto_backup(db.clone());
+    // Prune old usage/request details on startup (keep 30 days).
+    spawn_usage_retention_cleanup(db.clone());
     let state = AppState::new(db)
         .init_oidc_from_env()
         .await
@@ -382,6 +384,16 @@ async fn main() -> anyhow::Result<()> {
         .with_web_dir(cli.web_dir.clone());
     // Periodic cleanup of stale HTTP client connections.
     state.client_pool.start_periodic_cleanup();
+    // Periodic cleanup of expired OAuth pending flows (every 5 minutes).
+    {
+        let pending = state.pending_flows.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                pending.cleanup_expired();
+            }
+        });
+    }
     let app = openproxy::build_app(state);
     let addr = format!("{}:{}", cli.host, cli.port);
     info!("Starting openproxy on {}", addr);
@@ -502,6 +514,100 @@ fn spawn_auto_backup(db: Arc<Db>) {
                 ),
             }
             tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+        }
+    });
+}
+
+/// Periodic cleanup: prune usageHistory, requestDetails, and usageDaily older than 30 days.
+/// Runs once at startup and then every 24 hours.
+fn spawn_usage_retention_cleanup(db: Arc<Db>) {
+    tokio::spawn(async move {
+        loop {
+            // Run retention cleanup
+            let cutoff = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
+            // Prune usageHistory
+            match db.sqlite.with_conn(|conn| {
+                let count: u64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM usageHistory WHERE timestamp < ?1",
+                        [&cutoff],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+                if count > 0 {
+                    conn.execute("DELETE FROM usageHistory WHERE timestamp < ?1", [&cutoff])?;
+                }
+                Ok(count)
+            }) {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(
+                    target: "openproxy::db::retention",
+                    deleted = count,
+                    "pruned old usageHistory records"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "openproxy::db::retention",
+                    error = %e,
+                    "usage retention cleanup failed"
+                ),
+            }
+            // Prune requestDetails
+            match db.sqlite.with_conn(|conn| {
+                let count: u64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM requestDetails WHERE timestamp < ?1",
+                        [&cutoff],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+                if count > 0 {
+                    conn.execute("DELETE FROM requestDetails WHERE timestamp < ?1", [&cutoff])?;
+                }
+                Ok(count)
+            }) {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(
+                    target: "openproxy::db::retention",
+                    deleted = count,
+                    "pruned old requestDetails records"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "openproxy::db::retention",
+                    error = %e,
+                    "requestDetails retention cleanup failed"
+                ),
+            }
+            // Prune usageDaily older than 90 days
+            let daily_cutoff = (chrono::Utc::now() - chrono::Duration::days(90))
+                .format("%Y-%m-%d")
+                .to_string();
+            match db.sqlite.with_conn(|conn| {
+                let count: u64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM usageDaily WHERE dateKey < ?1",
+                        [&daily_cutoff],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
+                if count > 0 {
+                    conn.execute("DELETE FROM usageDaily WHERE dateKey < ?1", [&daily_cutoff])?;
+                }
+                Ok(count)
+            }) {
+                Ok(0) => {}
+                Ok(count) => tracing::info!(
+                    target: "openproxy::db::retention",
+                    deleted = count,
+                    "pruned old usageDaily records"
+                ),
+                Err(e) => tracing::warn!(
+                    target: "openproxy::db::retention",
+                    error = %e,
+                    "usageDaily retention cleanup failed"
+                ),
+            }
+            // Sleep 24 hours before next cleanup
+            tokio::time::sleep(std::time::Duration::from_secs(86400)).await;
         }
     });
 }

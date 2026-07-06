@@ -1,6 +1,6 @@
+use parking_lot::Mutex;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::sync::Mutex;
 
 /// Directory where the persisted machine ID file is stored.
 fn openproxy_dir() -> PathBuf {
@@ -105,13 +105,13 @@ static CACHED: Mutex<Option<String>> = Mutex::new(None);
 /// Resolve the machine ID: try cache, then persist, then generate.
 fn resolve_machine_id() -> String {
     // Check cache first.
-    if let Some(cached) = CACHED.lock().unwrap().as_ref() {
+    if let Some(cached) = CACHED.lock().as_ref() {
         return cached.clone();
     }
 
     // Try reading the persisted file.
     if let Some(persisted) = read_persisted_machine_id() {
-        let mut cache = CACHED.lock().unwrap();
+        let mut cache = CACHED.lock();
         *cache = Some(persisted.clone());
         return persisted;
     }
@@ -119,7 +119,7 @@ fn resolve_machine_id() -> String {
     // Generate a fresh one.
     let id = generate_machine_id();
     persist_machine_id(&id);
-    let mut cache = CACHED.lock().unwrap();
+    let mut cache = CACHED.lock();
     *cache = Some(id.clone());
     id
 }
@@ -142,7 +142,7 @@ pub fn get_machine_id() -> String {
 /// exist; `false` on unexpected I/O errors.
 pub fn reset_machine_id() -> bool {
     // Clear the in-memory cache so the next call recomputes.
-    *CACHED.lock().unwrap() = None;
+    *CACHED.lock() = None;
 
     let path = machine_id_path();
     match std::fs::remove_file(&path) {
@@ -171,7 +171,7 @@ mod tests {
         let path = machine_id_path();
         let _ = std::fs::remove_file(&path);
         // Also clear the cache
-        *CACHED.lock().unwrap() = None;
+        *CACHED.lock() = None;
 
         // First call generates and persists
         let id1 = get_machine_id();
@@ -186,7 +186,7 @@ mod tests {
     fn test_reset_machine_id_regenerates() {
         let path = machine_id_path();
         let _ = std::fs::remove_file(&path);
-        *CACHED.lock().unwrap() = None;
+        *CACHED.lock() = None;
 
         let original = get_machine_id();
         assert_eq!(original.len(), 64);
@@ -197,7 +197,7 @@ mod tests {
         assert!(!path.exists(), "file should be deleted after reset");
 
         // Cache must be empty, so get_machine_id regenerates
-        *CACHED.lock().unwrap() = None;
+        *CACHED.lock() = None;
         let regenerated = get_machine_id();
 
         // The machine identity components (hostname, OS UUID) are the same
