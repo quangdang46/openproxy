@@ -138,8 +138,10 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
     let (parts, body) = request.into_parts();
     let headers = parts.headers.clone();
 
-    if let Err(error) = require_api_key(&headers, &state.db) {
-        return with_cors_response(auth_error_response(error));
+    if state.db.snapshot().settings.require_login {
+        if let Err(error) = require_api_key(&headers, &state.db) {
+            return with_cors_response(auth_error_response(error));
+        }
     }
 
     let content_type = headers

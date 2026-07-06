@@ -62,8 +62,12 @@ pub async fn audio_voices(
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
-        return auth_error_response(e);
+    let db = state.db.clone();
+    let settings = db.snapshot().settings.require_login;
+    if settings {
+        if let Err(e) = require_api_key(&headers, &state.db) {
+            return auth_error_response(e);
+        }
     }
 
     let provider = params.get("provider").map(String::as_str).unwrap_or("");
@@ -231,8 +235,10 @@ async fn generic_media_handler(
     body_result: Result<Json<Value>, JsonRejection>,
     route_kind: &'static str,
 ) -> Response {
-    if let Err(error) = require_api_key(&headers, &state.db) {
-        return auth_error_response(error);
+    if state.db.snapshot().settings.require_login {
+        if let Err(error) = require_api_key(&headers, &state.db) {
+            return auth_error_response(error);
+        }
     }
 
     let Json(body) = match body_result {
