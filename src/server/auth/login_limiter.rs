@@ -196,11 +196,15 @@ impl LoginLimiter {
         let mut guard = self.state.lock().await;
 
         // Lazy-load from disk on first access.
-        if guard.is_none() {
-            *guard = Some(self.load_inner().await);
-        }
-
-        let map = guard.as_mut().unwrap();
+        let map = match guard.as_mut() {
+            Some(map) => map,
+            None => {
+                *guard = Some(self.load_inner().await);
+                guard
+                    .as_mut()
+                    .expect("guard should be Some after lazy load")
+            }
+        };
         let now = SystemTime::now();
 
         let record = map.entry(ip).or_insert_with(|| AttemptRecord::new(now));
