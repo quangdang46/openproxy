@@ -633,14 +633,13 @@ async fn get_edge_tts_voices_impl(lang_filter: Option<&str>) -> axum::response::
         let entry = by_lang
             .entry(lang.clone())
             .or_insert_with(|| serde_json::json!({"code": &lang, "name": &lang, "voices": []}));
-        entry
+        if let Some(voices) = entry
             .as_object_mut()
-            .unwrap()
-            .get_mut("voices")
-            .unwrap()
-            .as_array_mut()
-            .unwrap()
-            .push(voice.clone());
+            .and_then(|obj| obj.get_mut("voices"))
+            .and_then(|v| v.as_array_mut())
+        {
+            voices.push(voice.clone());
+        }
         result_voices.push(voice);
     }
 
@@ -747,14 +746,13 @@ async fn get_elevenlabs_voices_impl(
         let entry = by_lang
             .entry(lang.to_string())
             .or_insert_with(|| serde_json::json!({"code": lang, "name": lang, "voices": []}));
-        entry
+        if let Some(voices) = entry
             .as_object_mut()
-            .unwrap()
-            .get_mut("voices")
-            .unwrap()
-            .as_array_mut()
-            .unwrap()
-            .push(voice);
+            .and_then(|obj| obj.get_mut("voices"))
+            .and_then(|v| v.as_array_mut())
+        {
+            voices.push(voice);
+        }
     }
     if let Some(filter) = lang_filter {
         let voices = by_lang
