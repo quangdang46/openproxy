@@ -99,7 +99,7 @@ fn enabled() -> bool {
 ///
 /// Logs are also broadcast to the SSE console-log stream so the dashboard
 /// at `/dashboard/console-log` shows them in real time.
-
+///
 fn strip_ansi(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars();

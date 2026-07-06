@@ -896,7 +896,7 @@ async fn refresh_codex_token(refresh_token: &str) -> Result<RefreshResult, Strin
     // Per-token lock prevents Auth0 `refresh_token_reused` errors from concurrent refreshes
     let lock_key = get_refresh_lock_key("codex", refresh_token);
     let lock_arc = {
-        let mut locks = REFRESH_LOCKS.lock().unwrap();
+        let mut locks = REFRESH_LOCKS.lock();
         locks
             .entry(lock_key)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))

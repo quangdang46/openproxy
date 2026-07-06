@@ -11,6 +11,7 @@ use base64::{
     Engine,
 };
 use once_cell::sync::Lazy;
+use parking_lot::Mutex as LockMutex;
 use rand::RngCore;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -21,7 +22,6 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::str;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -104,8 +104,8 @@ const CODEX_PROXY_TIMEOUT_MS: u64 = 300_000;
 
 /// Per-provider refresh locks to prevent Auth0 `refresh_token_reused` errors.
 /// Key = `"{provider}:{connection_id}"`, value = mutex for mutual exclusion.
-pub(crate) static REFRESH_LOCKS: Lazy<StdMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
-    Lazy::new(|| StdMutex::new(HashMap::new()));
+pub(crate) static REFRESH_LOCKS: Lazy<LockMutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    Lazy::new(|| LockMutex::new(HashMap::new()));
 
 #[derive(Clone, Default)]
 pub struct CodexProxyState {
@@ -4299,7 +4299,7 @@ pub async fn refresh_token(
     let stable_id = connection.map(|c| c.id.clone()).unwrap_or_default();
     let lock_key = get_refresh_lock_key(&provider, &stable_id);
     let lock_arc = {
-        let mut locks = REFRESH_LOCKS.lock().unwrap();
+        let mut locks = REFRESH_LOCKS.lock();
         locks
             .entry(lock_key)
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))

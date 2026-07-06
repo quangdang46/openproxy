@@ -6,8 +6,8 @@
 //! on every request, and invalidated from the token refresh path so a
 //! refreshed token triggers a fresh lookup.
 
+use parking_lot::Mutex;
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::Instant;
@@ -42,7 +42,7 @@ impl ProjectIdCache {
 
     /// Look up a cached project ID. Returns `None` if missing or expired.
     pub fn get(&self, id: &str) -> Option<String> {
-        let map = self.inner.lock().ok()?;
+        let map = self.inner.lock();
         if let Some(cached) = map.get(id) {
             if cached.fetched_at.elapsed() < self.ttl {
                 return Some(cached.project_id.clone());
@@ -53,22 +53,20 @@ impl ProjectIdCache {
 
     /// Insert (or update) a cached project ID with the current timestamp.
     pub fn set(&self, id: &str, project_id: String) {
-        if let Ok(mut map) = self.inner.lock() {
-            map.insert(
-                id.to_string(),
-                CachedProject {
-                    project_id,
-                    fetched_at: Instant::now(),
-                },
-            );
-        }
+        let mut map = self.inner.lock();
+        map.insert(
+            id.to_string(),
+            CachedProject {
+                project_id,
+                fetched_at: Instant::now(),
+            },
+        );
     }
 
     /// Remove a cached entry. Safe to call even if the key does not exist.
     pub fn invalidate(&self, id: &str) {
-        if let Ok(mut map) = self.inner.lock() {
-            map.remove(id);
-        }
+        let mut map = self.inner.lock();
+        map.remove(id);
     }
 }
 

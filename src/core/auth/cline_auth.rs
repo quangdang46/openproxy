@@ -3,7 +3,7 @@
 /// Provides utilities for handling Cline authentication tokens,
 /// including stripping the "workos_" prefix that Cline uses for
 /// WorkOS-proxied tokens.
-
+///
 /// Strips the "workos_" prefix from a token if present.
 /// Returns the remainder of the token after the prefix, or the original
 /// token if no prefix is found.

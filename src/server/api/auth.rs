@@ -153,7 +153,7 @@ pub async fn login(
 /// HttpOnly cookies; and 302-redirects to the IdP's `authorization_endpoint`.
 ///
 /// Returns 400 when OIDC is not configured (no `OIDC_*` env vars at boot).
-
+///
 /// GET /api/auth/status - Check if user is authenticated.
 /// Returns the current login status.
 pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> Response {

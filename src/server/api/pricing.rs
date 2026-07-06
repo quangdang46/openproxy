@@ -2,9 +2,9 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::{routing::get, Json, Router};
+use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::time::Instant;
 
@@ -25,9 +25,7 @@ fn pricing_cache() -> &'static Mutex<Option<(Instant, PricingTable)>> {
 }
 
 fn invalidate_pricing_cache() {
-    if let Ok(mut cache) = pricing_cache().lock() {
-        *cache = None;
-    }
+    *pricing_cache().lock() = None;
 }
 
 pub fn routes() -> Router<AppState> {
@@ -175,7 +173,8 @@ fn validate_pricing_payload(payload: &Value) -> Result<PricingTable, String> {
 
 async fn get_pricing(State(state): State<AppState>) -> Response {
     // Check cache first
-    if let Ok(cache) = pricing_cache().lock() {
+    {
+        let cache = pricing_cache().lock();
         if let Some((fetched_at, cached)) = cache.as_ref() {
             if fetched_at.elapsed() < PRICING_CACHE_TTL {
                 return Json(cached).into_response();
@@ -186,9 +185,7 @@ async fn get_pricing(State(state): State<AppState>) -> Response {
     // Compute and cache
     let snapshot = state.db.snapshot();
     let pricing = merged_pricing(&user_pricing(&snapshot));
-    if let Ok(mut cache) = pricing_cache().lock() {
-        *cache = Some((Instant::now(), pricing.clone()));
-    }
+    *pricing_cache().lock() = Some((Instant::now(), pricing.clone()));
     Json(pricing).into_response()
 }
 

@@ -27,7 +27,7 @@ pub struct AutoComboMember {
 }
 
 /// Configuration stored in a combo's `extra.autoComboConfig` map.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AutoComboConfig {
     /// Base model name used for matching (e.g. `"gpt-4o-mini"`). When
     /// empty, the combo itself acts as the base and we resolve from the
@@ -42,18 +42,6 @@ pub struct AutoComboConfig {
     pub preferred_providers: Vec<String>,
     /// Comma-separated list of provider names to exclude entirely.
     pub excluded_providers: Vec<String>,
-}
-
-impl Default for AutoComboConfig {
-    fn default() -> Self {
-        Self {
-            base_model: None,
-            max_members: 0,
-            deduplicate_providers: false,
-            preferred_providers: Vec::new(),
-            excluded_providers: Vec::new(),
-        }
-    }
 }
 
 impl AutoComboConfig {
