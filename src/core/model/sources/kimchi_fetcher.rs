@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -38,7 +38,8 @@ pub async fn fetch_kimchi_models(api_key: Option<&str>) -> Vec<ProviderCatalogMo
 
 async fn fetch_models_inner(api_key: Option<&str>) -> Vec<ProviderCatalogModel> {
     // ── Cache hit (fresh enough) ──
-    if let Ok(guard) = MODEL_CACHE.lock() {
+    {
+        let guard = MODEL_CACHE.lock();
         if let Some(ref cached) = *guard {
             if cached.fetched_at.elapsed() < CACHE_TTL {
                 return cached.models.clone();
@@ -68,12 +69,10 @@ async fn fetch_models_inner(api_key: Option<&str>) -> Vec<ProviderCatalogModel> 
     };
 
     // ── Update cache (even empty — negative caching prevents hammering a dead API) ──
-    if let Ok(mut guard) = MODEL_CACHE.lock() {
-        *guard = Some(LiveCache {
-            models: models.clone(),
-            fetched_at: Instant::now(),
-        });
-    }
+    *MODEL_CACHE.lock() = Some(LiveCache {
+        models: models.clone(),
+        fetched_at: Instant::now(),
+    });
 
     models
 }

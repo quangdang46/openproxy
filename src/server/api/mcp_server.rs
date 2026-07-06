@@ -163,34 +163,26 @@ async fn stateless_mcp_handler(
 
 /// In-memory store of SSE broadcast senders, keyed by session ID.
 struct McpSessionStore {
-    inner: std::sync::Mutex<std::collections::HashMap<String, broadcast::Sender<String>>>,
+    inner: parking_lot::Mutex<std::collections::HashMap<String, broadcast::Sender<String>>>,
 }
 
 impl McpSessionStore {
     fn global() -> &'static McpSessionStore {
         static STORE: std::sync::OnceLock<McpSessionStore> = std::sync::OnceLock::new();
         STORE.get_or_init(|| McpSessionStore {
-            inner: std::sync::Mutex::new(std::collections::HashMap::new()),
+            inner: parking_lot::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
     fn register(&self, id: &str, sender: broadcast::Sender<String>) {
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.insert(id.to_string(), sender);
-        }
+        self.inner.lock().insert(id.to_string(), sender);
     }
 
     fn unregister(&self, id: &str) {
-        if let Ok(mut guard) = self.inner.lock() {
-            guard.remove(id);
-        }
+        self.inner.lock().remove(id);
     }
 
     fn get(&self, id: &str) -> Option<broadcast::Sender<String>> {
-        if let Ok(guard) = self.inner.lock() {
-            guard.get(id).cloned()
-        } else {
-            None
-        }
+        self.inner.lock().get(id).cloned()
     }
 }
