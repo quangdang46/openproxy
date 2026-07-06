@@ -517,20 +517,19 @@ async fn get_inworld_voices(
             let entry = by_lang
                 .entry(code.clone())
                 .or_insert_with(|| serde_json::json!({"code": code, "name": code, "voices": []}));
-            let list = entry
+            if let Some(list) = entry
                 .as_object_mut()
-                .unwrap()
-                .get_mut("voices")
-                .unwrap()
-                .as_array_mut()
-                .unwrap();
-            if !list
-                .iter()
-                .any(|vv| vv.get("id") == Some(&serde_json::json!(vid)))
+                .and_then(|obj| obj.get_mut("voices"))
+                .and_then(|v| v.as_array_mut())
             {
-                list.push(
-                    serde_json::json!({"id": vid, "name": dname, "gender": gender, "lang": code}),
-                );
+                if !list
+                    .iter()
+                    .any(|vv| vv.get("id") == Some(&serde_json::json!(vid)))
+                {
+                    list.push(
+                        serde_json::json!({"id": vid, "name": dname, "gender": gender, "lang": code}),
+                    );
+                }
             }
         }
     }
