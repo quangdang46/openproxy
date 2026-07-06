@@ -2560,19 +2560,28 @@ mod tests {
 
         let resp = chat_completion_to_responses_json(&chat);
 
-        assert_eq!(resp["output"][0]["type"], "message");
+        // First output item is reasoning (separate top-level item per Responses API spec)
+        assert_eq!(resp["output"][0]["type"], "reasoning");
         assert_eq!(
             resp["output"][0]["content"].as_array().unwrap().len(),
-            2,
-            "should have both reasoning and text content parts"
+            1,
+            "reasoning item has one summary_text content part"
         );
         assert_eq!(resp["output"][0]["content"][0]["type"], "summary_text");
         assert_eq!(
             resp["output"][0]["content"][0]["text"],
             "Step by step thinking..."
         );
-        assert_eq!(resp["output"][0]["content"][1]["type"], "output_text");
-        assert_eq!(resp["output"][0]["content"][1]["text"], "Final answer");
+
+        // Second output item is the message
+        assert_eq!(resp["output"][1]["type"], "message");
+        assert_eq!(
+            resp["output"][1]["content"].as_array().unwrap().len(),
+            1,
+            "message item has one output_text content part"
+        );
+        assert_eq!(resp["output"][1]["content"][0]["type"], "output_text");
+        assert_eq!(resp["output"][1]["content"][0]["text"], "Final answer");
     }
 
     fn normalize_tools_converts_anthropic_to_openai() {
