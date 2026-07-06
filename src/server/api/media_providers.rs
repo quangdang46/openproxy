@@ -411,18 +411,17 @@ async fn get_deepgram_voices(
             let entry = by_lang
                 .entry(code.clone())
                 .or_insert_with(|| serde_json::json!({"code": code, "name": code, "voices": []}));
-            let list = entry
+            if let Some(list) = entry
                 .as_object_mut()
-                .unwrap()
-                .get_mut("voices")
-                .unwrap()
-                .as_array_mut()
-                .unwrap();
-            if !list
-                .iter()
-                .any(|v| v.get("id") == Some(&serde_json::json!(canonical)))
+                .and_then(|obj| obj.get_mut("voices"))
+                .and_then(|v| v.as_array_mut())
             {
-                list.push(serde_json::json!({"id": canonical, "name": name, "gender": gender, "lang": code}));
+                if !list
+                    .iter()
+                    .any(|v| v.get("id") == Some(&serde_json::json!(canonical)))
+                {
+                    list.push(serde_json::json!({"id": canonical, "name": name, "gender": gender, "lang": code}));
+                }
             }
         }
     }
