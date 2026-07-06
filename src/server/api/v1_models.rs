@@ -79,11 +79,13 @@ async fn list_models_for_kinds(
     headers: HeaderMap,
     kind_filter: &[&str],
 ) -> Response {
-    if let Err(error) = require_api_key(&headers, &state.db) {
-        return with_cors_response(super::auth_error_response(error));
+    let snapshot = state.db.snapshot();
+    if snapshot.settings.require_login {
+        if let Err(error) = require_api_key(&headers, &state.db) {
+            return with_cors_response(super::auth_error_response(error));
+        }
     }
 
-    let snapshot = state.db.snapshot();
     let data = build_models_list(&snapshot, kind_filter).await;
 
     with_cors_response(

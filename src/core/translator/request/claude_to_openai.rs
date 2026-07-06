@@ -282,8 +282,10 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
                 "role": "assistant"
             });
             if !parts.is_empty() {
-                let content = if parts.len() == 1 && parts[0].get("text").is_some() {
-                    Value::String(parts[0].get("text").unwrap().as_str().unwrap().to_string())
+                let content = if parts.len() == 1
+                    && parts[0].get("text").and_then(|v| v.as_str()).is_some()
+                {
+                    Value::String(parts[0]["text"].as_str().unwrap_or("").to_string())
                 } else {
                     Value::Array(parts)
                 };
@@ -295,11 +297,12 @@ fn convert_claude_message(msg: &Value) -> Option<Value> {
 
         // Return content
         if !parts.is_empty() {
-            let content = if parts.len() == 1 && parts[0].get("text").is_some() {
-                Value::String(parts[0].get("text").unwrap().as_str().unwrap().to_string())
-            } else {
-                Value::Array(parts)
-            };
+            let content =
+                if parts.len() == 1 && parts[0].get("text").and_then(|v| v.as_str()).is_some() {
+                    Value::String(parts[0]["text"].as_str().unwrap_or("").to_string())
+                } else {
+                    Value::Array(parts)
+                };
             return Some(serde_json::json!({
                 "role": converted_role,
                 "content": content

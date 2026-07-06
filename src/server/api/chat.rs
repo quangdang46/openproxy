@@ -256,7 +256,7 @@ async fn chat_completions_impl(
     strip_forwarding_headers(&mut headers);
 
     let presented_api_key = extract_api_key(&headers);
-    if require_api_key_auth {
+    if require_api_key_auth && state.db.snapshot().settings.require_login {
         if let Err(error) = require_api_key(&headers, &state.db) {
             return auth_error_response(error);
         }
@@ -1743,7 +1743,9 @@ fn select_connection(
             if let Some(reg) = registry {
                 let refs: Vec<&ProviderConnection> = candidates.iter().collect();
                 if let Some(idx) = reg.select_account_by_strategy(&refs, strategy, None, 300) {
-                    return Some(candidates.into_iter().nth(idx).unwrap());
+                    if let Some(conn) = candidates.get(idx).cloned() {
+                        return Some(conn);
+                    }
                 }
             }
             // Fallback: sort by priority
@@ -1760,7 +1762,9 @@ fn select_connection(
                     Some(&combo_id),
                     300,
                 ) {
-                    return Some(candidates.into_iter().nth(idx).unwrap());
+                    if let Some(conn) = candidates.get(idx).cloned() {
+                        return Some(conn);
+                    }
                 }
             }
             candidates.sort_by_key(|connection| connection.priority.unwrap_or(999));
@@ -1776,7 +1780,9 @@ fn select_connection(
                     Some(&combo_id),
                     300,
                 ) {
-                    return Some(candidates.into_iter().nth(idx).unwrap());
+                    if let Some(conn) = candidates.get(idx).cloned() {
+                        return Some(conn);
+                    }
                 }
             }
             candidates.sort_by_key(|connection| connection.priority.unwrap_or(999));
@@ -1989,6 +1995,9 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
                 connection.backoff_level = Some(0);
                 connection.consecutive_errors = Some(0);
                 connection.test_status = None;
+                // Clear stale model locks so this connection is immediately
+                // re-usable for future requests (matching 9router behaviour).
+                connection.extra.retain(|k, _| !k.starts_with("modelLock_"));
             }
         })
         .await;

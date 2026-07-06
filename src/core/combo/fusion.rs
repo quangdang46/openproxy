@@ -594,7 +594,15 @@ where
         // with the original body (preserving stream flag, tools, etc.)
         // rather than returning the non-streaming, tool-stripped panel
         // response.  9router does the same (handleSingleModel(body, m)).
-        let survivor = outcomes.into_iter().next().unwrap();
+        let survivor = match outcomes.into_iter().next() {
+            Some(s) => s,
+            None => {
+                return Err(FusionError {
+                    status: 502,
+                    message: "Single survivor expected but outcomes empty".to_string(),
+                });
+            }
+        };
         return handle_single_model(survivor.result.model, body.clone())
             .await
             .map_err(|e| FusionError {

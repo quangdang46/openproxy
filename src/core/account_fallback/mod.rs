@@ -668,8 +668,18 @@ pub fn build_model_lock_update(model: &str, cooldown_seconds: i64) -> (String, S
 }
 
 /// Build update object to clear all model locks on a connection.
-pub fn build_clear_model_locks_update() -> Vec<(String, Option<String>)> {
-    Vec::new()
+/// Build a list of `(field, None)` updates to clear ALL model lock fields
+/// from a connection's `extra` metadata. Used when a request succeeds
+/// to reset stale locks (matching 9router's `clearModelLocks`).
+pub fn build_clear_model_locks_update(
+    connection: &ProviderConnection,
+) -> Vec<(String, Option<String>)> {
+    connection
+        .extra
+        .keys()
+        .filter(|k| k.starts_with(MODEL_LOCK_PREFIX))
+        .map(|k| (k.clone(), None))
+        .collect()
 }
 
 /// Parse RFC3339 timestamp string into DateTime<Utc>.

@@ -121,7 +121,14 @@ pub fn encryption_key() -> Option<String> {
 
 /// Encrypt sensitive fields of a [`ProviderConnection`] **in place** so the
 /// struct is safe for serialization to disk.
+///
+/// When `key` is empty (encryption disabled), the fields are left as-is.
+/// This matches 9router's behaviour where `OPENPROXY_ENCRYPTION_KEY` unset
+/// means plaintext storage — SHA-256("") is NOT a valid encryption key.
 pub fn encrypt_connection(conn: &mut ProviderConnection, key: &str) {
+    if key.is_empty() {
+        return;
+    }
     encrypt_opt(&mut conn.access_token, key);
     encrypt_opt(&mut conn.refresh_token, key);
     encrypt_opt(&mut conn.id_token, key);
@@ -130,7 +137,12 @@ pub fn encrypt_connection(conn: &mut ProviderConnection, key: &str) {
 
 /// Decrypt sensitive fields of a [`ProviderConnection`] **in place** after
 /// deserialization from disk.
+///
+/// When `key` is empty (encryption disabled), the fields are left as-is.
 pub fn decrypt_connection(conn: &mut ProviderConnection, key: &str) {
+    if key.is_empty() {
+        return;
+    }
     decrypt_opt(&mut conn.access_token, key);
     decrypt_opt(&mut conn.refresh_token, key);
     decrypt_opt(&mut conn.id_token, key);
@@ -142,8 +154,8 @@ pub fn decrypt_connection(conn: &mut ProviderConnection, key: &str) {
 // ---------------------------------------------------------------------------
 
 fn encrypt_opt(field: &mut Option<String>, key: &str) {
-    if let Some(ref plain) = field.clone() {
-        *field = Some(encrypt_value(key, plain));
+    if let Some(plain) = field.take() {
+        *field = Some(encrypt_value(key, &plain));
     }
 }
 
