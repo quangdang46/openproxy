@@ -30,7 +30,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Provide
         "SELECT id, type, name, data, createdAt, updatedAt FROM providerNodes WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_node)?;
-    Ok(rows.next().transpose()?)
+    rows.next().transpose()
 }
 
 pub fn create(conn: &Connection, n: &ProviderNode) -> rusqlite::Result<()> {

@@ -23,15 +23,11 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConnec
         obj.insert("id".into(), Value::String(row.get(0)?));
         obj.insert("provider".into(), Value::String(row.get(1)?));
         obj.insert("authType".into(), Value::String(row.get(2)?));
-        if let Ok(v) = row.get::<_, Option<String>>(3) {
-            if let Some(v) = v {
-                obj.insert("name".into(), Value::String(v));
-            }
+        if let Ok(Some(v)) = row.get::<_, Option<String>>(3) {
+            obj.insert("name".into(), Value::String(v));
         }
-        if let Ok(v) = row.get::<_, Option<String>>(4) {
-            if let Some(v) = v {
-                obj.insert("email".into(), Value::String(v));
-            }
+        if let Ok(Some(v)) = row.get::<_, Option<String>>(4) {
+            obj.insert("email".into(), Value::String(v));
         }
         if let Ok(v) = row.get::<_, Option<i64>>(5) {
             obj.insert("priority".into(), json!(v));
@@ -142,7 +138,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Provide
         "SELECT {COLUMNS}, data FROM providerConnections WHERE id = ?1"
     ))?;
     let mut rows = stmt.query_map(params![id], row_to_connection)?;
-    Ok(rows.next().transpose()?)
+    rows.next().transpose()
 }
 
 pub fn create(conn: &Connection, c: &ProviderConnection) -> rusqlite::Result<()> {

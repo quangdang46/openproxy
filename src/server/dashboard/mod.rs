@@ -108,7 +108,7 @@ async fn serve_embedded(uri: &Uri) -> Response {
         // try a `_dynamic.html` placeholder page in the parent directory. The
         // Astro build emits this file so the correct page shell (e.g.
         // ProviderDetailPageClient) is served instead of the generic dashboard.
-        if let Some(resp) = dynamic_segment_fallback(candidate, |p| lookup_embedded(p)) {
+        if let Some(resp) = dynamic_segment_fallback(candidate, lookup_embedded) {
             return resp;
         }
         // SPA fallback: requests without a file extension are client-router

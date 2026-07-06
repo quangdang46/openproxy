@@ -175,7 +175,7 @@ impl CodexExecutor {
 
         // 9router parity: session_id header for request session continuity.
         let session_id = connection_id
-            .and_then(|cid| if cid.is_empty() { None } else { Some(cid) })
+            .filter(|&cid| !cid.is_empty())
             .unwrap_or("default");
         headers.insert(
             "session_id",

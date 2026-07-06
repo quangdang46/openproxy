@@ -211,7 +211,7 @@ async fn convert_to_responses_api(response: Response, stream_request: bool) -> R
             if let Some(frame) = body_str
                 .lines()
                 .find(|l| l.trim().starts_with("data:"))
-                .and_then(|l| l.splitn(2, ':').nth(1).map(|s| s.trim()))
+                .and_then(|l| l.split_once(':').map(|x| x.1).map(|s| s.trim()))
             {
                 serde_json::from_str::<Value>(frame).ok()
             } else {
@@ -281,7 +281,7 @@ async fn convert_to_responses_api(response: Response, stream_request: bool) -> R
                 // Extract JSON from the data: line (may have event: prefix lines)
                 let json_str = if let Some(d) = frame.lines()
                     .find(|l| l.trim().starts_with("data:"))
-                    .and_then(|l| l.splitn(2, ':').nth(1).map(|s| s.trim()))
+                    .and_then(|l| l.split_once(':').map(|x| x.1).map(|s| s.trim()))
                 {
                     d
                 } else {
@@ -397,7 +397,7 @@ fn extract_responses_from_sse(body: &str) -> Option<Value> {
         let json_str = match frame
             .lines()
             .find(|l| l.trim().starts_with("data:"))
-            .and_then(|l| l.splitn(2, ':').nth(1).map(|s| s.trim()))
+            .and_then(|l| l.split_once(':').map(|x| x.1).map(|s| s.trim()))
         {
             Some(s) => s,
             None => continue,
@@ -420,8 +420,8 @@ fn chat_completion_to_responses_json(source: &Value) -> Value {
         .get("id")
         .and_then(|v| v.as_str())
         .map(|id| {
-            if id.starts_with("chatcmpl-") {
-                format!("resp_{}", &id[9..])
+            if let Some(stripped) = id.strip_prefix("chatcmpl-") {
+                format!("resp_{}", stripped)
             } else {
                 format!("resp_{}", id)
             }
@@ -655,11 +655,7 @@ impl ResponsesSseState {
 
         // Close reasoning if still open
         if !self.reasoning_done && self.reasoning_item_added {
-            let reasoning_text = self
-                .reasoning_buf
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let reasoning_text = self.reasoning_buf.as_deref().unwrap_or("");
             self.reasoning_done = true;
 
             self.seq += 1;
@@ -714,12 +710,8 @@ impl ResponsesSseState {
             }));
         }
         if self.reasoning_item_added {
-            let reasoning_text = self
-                .reasoning_buf
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            let reasoning_id = self.reasoning_id.as_ref().map(|s| s.as_str()).unwrap_or("");
+            let reasoning_text = self.reasoning_buf.as_deref().unwrap_or("");
+            let reasoning_id = self.reasoning_id.as_deref().unwrap_or("");
             output.insert(
                 0,
                 json!({
@@ -798,8 +790,8 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
             .get("id")
             .and_then(|v| v.as_str())
             .map(|id| {
-                if id.starts_with("chatcmpl-") {
-                    format!("resp_{}", &id[9..])
+                if let Some(stripped) = id.strip_prefix("chatcmpl-") {
+                    format!("resp_{}", stripped)
                 } else {
                     generate_response_id()
                 }
@@ -950,7 +942,7 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
                 ));
             }
 
-            let buf = state.msg_text_buf.entry(index).or_insert_with(String::new);
+            let buf = state.msg_text_buf.entry(index).or_default();
             buf.push_str(content);
             // Only emit delta events for non-empty content to avoid
             // flooding the client with empty frames (many providers
@@ -971,11 +963,7 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
         if let Some(_reason) = finish_reason {
             // Close reasoning if we actually emitted reasoning events
             if !state.reasoning_done && state.reasoning_item_added {
-                let reasoning_text = state
-                    .reasoning_buf
-                    .as_ref()
-                    .map(|s| s.as_str())
-                    .unwrap_or("");
+                let reasoning_text = state.reasoning_buf.as_deref().unwrap_or("");
                 state.reasoning_done = true;
                 state.seq += 1;
                 frames.push(format_sse_event(
@@ -1124,16 +1112,8 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
 
         // If we had reasoning output, include it too
         if state.reasoning_item_added {
-            let reasoning_text = state
-                .reasoning_buf
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("");
-            let reasoning_id = state
-                .reasoning_id
-                .as_ref()
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let reasoning_text = state.reasoning_buf.as_deref().unwrap_or("");
+            let reasoning_id = state.reasoning_id.as_deref().unwrap_or("");
             output.insert(
                 0,
                 json!({
@@ -1247,7 +1227,7 @@ async fn convert_to_messages_api(response: Response) -> Response {
                                 continue;
                             }
 
-                            let json_str = frame.strip_prefix("data:").unwrap_or(&frame).trim();
+                            let json_str = frame.strip_prefix("data:").unwrap_or(frame).trim();
                             if json_str == "[DONE]" {
                                 break;
                             }
@@ -1338,8 +1318,8 @@ fn chat_completion_to_messages_json(source: &Value) -> Value {
         .get("id")
         .and_then(|v| v.as_str())
         .map(|id| {
-            if id.starts_with("chatcmpl-") {
-                format!("msg_{}", &id[9..])
+            if let Some(stripped) = id.strip_prefix("chatcmpl-") {
+                format!("msg_{}", stripped)
             } else {
                 format!("msg_{}", id)
             }
@@ -1519,8 +1499,8 @@ fn openai_chunk_to_messages(state: &mut MessagesSseState, chunk: &Value) -> Vec<
             .get("id")
             .and_then(|v| v.as_str())
             .map(|id| {
-                if id.starts_with("chatcmpl-") {
-                    format!("msg_{}", &id[9..])
+                if let Some(stripped) = id.strip_prefix("chatcmpl-") {
+                    format!("msg_{}", stripped)
                 } else {
                     format!("msg_{}", id)
                 }

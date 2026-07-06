@@ -67,10 +67,9 @@ pub struct FusionPanelResult {
 /// Wraps `future` with a [`tokio::time::timeout`] of `timeout_ms`
 /// milliseconds. Returns `Some(T)` on success, `None` on expiry.
 pub async fn with_timeout<T>(future: impl Future<Output = T>, timeout_ms: u64) -> Option<T> {
-    match tokio::time::timeout(Duration::from_millis(timeout_ms), future).await {
-        Ok(val) => Some(val),
-        Err(_) => None,
-    }
+    tokio::time::timeout(Duration::from_millis(timeout_ms), future)
+        .await
+        .ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -541,23 +540,20 @@ where
         while let Some((idx, model, result)) = panel_futs.next().await {
             remaining.retain(|i| *i != idx);
 
-            match result {
-                Ok(Ok(response)) => {
-                    let (text, fmt) = extract_panel_text(&response);
-                    if !text.is_empty() {
-                        outcomes.push(PanelOutcome {
-                            result: FusionPanelResult {
-                                index: idx,
-                                model,
-                                answer: text,
-                                source_format: fmt,
-                            },
-                            raw: response,
-                        });
-                    }
+            if let Ok(Ok(response)) = result {
+                let (text, fmt) = extract_panel_text(&response);
+                if !text.is_empty() {
+                    outcomes.push(PanelOutcome {
+                        result: FusionPanelResult {
+                            index: idx,
+                            model,
+                            answer: text,
+                            source_format: fmt,
+                        },
+                        raw: response,
+                    });
                 }
-                _ => {} // fail-open: skip errors/timeouts
-            }
+            } // fail-open: skip errors/timeouts
 
             let ok_count = outcomes.len();
 

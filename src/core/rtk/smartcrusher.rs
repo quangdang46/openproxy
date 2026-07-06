@@ -415,7 +415,7 @@ fn looks_like_json_array(text: &str) -> bool {
         }
 
         arr[1..].iter().all(|v| {
-            v.as_object().map_or(false, |m| {
+            v.as_object().is_some_and(|m| {
                 m.len() == first_keys.len() && first_keys.iter().all(|k| m.contains_key(*k))
             })
         })

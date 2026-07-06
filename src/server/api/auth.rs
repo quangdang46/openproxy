@@ -157,10 +157,7 @@ pub async fn login(
 /// GET /api/auth/status - Check if user is authenticated.
 /// Returns the current login status.
 pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> Response {
-    let logged_in = match crate::server::auth::require_dashboard_session(&headers, &state.db) {
-        Ok(_) => true,
-        Err(_) => false,
-    };
+    let logged_in = crate::server::auth::require_dashboard_session(&headers, &state.db).is_ok();
     Json(json!({
         "authenticated": logged_in,
         "requireLogin": state.db.snapshot().settings.require_login,

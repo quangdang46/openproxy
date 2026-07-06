@@ -17,7 +17,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ProxyPo
         "SELECT id, isActive, testStatus, data, createdAt, updatedAt FROM proxyPools WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_pool)?;
-    Ok(rows.next().transpose()?)
+    rows.next().transpose()
 }
 
 pub fn create(conn: &Connection, p: &ProxyPool) -> rusqlite::Result<()> {

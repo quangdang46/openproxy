@@ -107,7 +107,7 @@ pub fn resolve_auto_combo_members(
 ) -> Vec<String> {
     if !models.is_empty() {
         // Explicit member list: apply filters only.
-        let mut members: Vec<String> = models.iter().cloned().collect();
+        let mut members: Vec<String> = models.to_vec();
         apply_filters(&mut members, config, snapshot);
         return members;
     }

@@ -87,8 +87,8 @@ fn extract_query(body: &Value) -> Option<String> {
 }
 
 /// Select the best active provider connection for a given search provider.
-fn select_search_connection<'a>(
-    snapshot: &'a crate::types::AppDb,
+fn select_search_connection(
+    snapshot: &crate::types::AppDb,
     provider: &str,
 ) -> Option<crate::types::ProviderConnection> {
     snapshot

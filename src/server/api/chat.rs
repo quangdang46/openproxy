@@ -693,7 +693,7 @@ async fn execute_single_model(
         // actual Headroom call, so dashboards and metrics see a prediction even
         // when the proxy is slow or unreachable.
         if let Ok(body_str) = serde_json::to_string(&body) {
-            let est_tokens = (body_str.len() + 3) / 4;
+            let est_tokens = body_str.len().div_ceil(4);
             if est_tokens > 0 {
                 tracing::debug!(
                     "headroom input ~{} tokens (estimated from body size)",
@@ -733,19 +733,19 @@ async fn execute_single_model(
                     if let Some(obj) = body.as_object_mut() {
                         obj.insert("thinking".to_string(), json!({"type": "disabled"}));
                     }
-                } else if mode != "on" && mode != "off" {
-                    if !body
+                } else if mode != "on"
+                    && mode != "off"
+                    && !body
                         .get("reasoning_effort")
                         .and_then(|v| v.as_str())
                         .map(|s| !s.is_empty())
                         .unwrap_or(false)
-                    {
-                        if let Some(obj) = body.as_object_mut() {
-                            obj.insert(
-                                "reasoning_effort".to_string(),
-                                Value::String(mode.to_string()),
-                            );
-                        }
+                {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.insert(
+                            "reasoning_effort".to_string(),
+                            Value::String(mode.to_string()),
+                        );
                     }
                 }
             }
@@ -1521,39 +1521,34 @@ async fn forward_with_provider_fallback(
                 {
                     if let Some(ref rt) = connection.refresh_token.clone() {
                         let refresh_provider = plan.provider.as_str();
-                        match crate::oauth::token_refresh::dispatch_oauth_refresh(
+                        if let Ok(result) = crate::oauth::token_refresh::dispatch_oauth_refresh(
                             refresh_provider,
-                            &rt,
+                            rt,
                             &connection.provider_specific_data,
                         )
                         .await
                         {
-                            Ok(result) => {
-                                let conn_id = connection.id.clone();
-                                let new_access = result.access_token.clone();
-                                let new_refresh = result.refresh_token.clone();
-                                let _ = state
-                                    .db
-                                    .update(move |db| {
-                                        if let Some(conn) = db
-                                            .provider_connections
-                                            .iter_mut()
-                                            .find(|c| c.id == conn_id)
-                                        {
-                                            conn.access_token = Some(new_access);
-                                            if let Some(rt) = new_refresh {
-                                                conn.refresh_token = Some(rt);
-                                            }
-                                            conn.last_error = None;
-                                            conn.last_error_at = None;
-                                            conn.error_code = None;
-                                            conn.backoff_level = Some(0);
+                            let conn_id = connection.id.clone();
+                            let new_access = result.access_token.clone();
+                            let new_refresh = result.refresh_token.clone();
+                            let _ = state
+                                .db
+                                .update(move |db| {
+                                    if let Some(conn) =
+                                        db.provider_connections.iter_mut().find(|c| c.id == conn_id)
+                                    {
+                                        conn.access_token = Some(new_access);
+                                        if let Some(rt) = new_refresh {
+                                            conn.refresh_token = Some(rt);
                                         }
-                                    })
-                                    .await;
-                                continue;
-                            }
-                            Err(_) => {}
+                                        conn.last_error = None;
+                                        conn.last_error_at = None;
+                                        conn.error_code = None;
+                                        conn.backoff_level = Some(0);
+                                    }
+                                })
+                                .await;
+                            continue;
                         }
                     }
                 }
@@ -2166,9 +2161,7 @@ fn translate_codex_non_streaming(body: &[u8]) -> Option<Bytes> {
         }
     });
 
-    serde_json::to_string(&response)
-        .ok()
-        .map(|s| Bytes::from(s))
+    serde_json::to_string(&response).ok().map(Bytes::from)
 }
 
 async fn proxy_response_with_pending_tracking(

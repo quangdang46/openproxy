@@ -88,7 +88,7 @@ pub fn decrypt_value(key: &str, ciphertext_b64: &str) -> anyhow::Result<String> 
     .decrypt_padded_mut::<Pkcs7>(&mut buf)
     .map_err(|e| anyhow::anyhow!("AES-256-CBC decryption failed: {:?}", e))?;
 
-    Ok(String::from_utf8(plaintext.to_vec()).context("decrypted data is not valid UTF-8")?)
+    String::from_utf8(plaintext.to_vec()).context("decrypted data is not valid UTF-8")
 }
 
 // ---------------------------------------------------------------------------

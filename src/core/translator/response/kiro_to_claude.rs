@@ -162,11 +162,10 @@ pub fn kiro_to_claude_streaming(
         }
 
         // Create a new block index for the tool_use
-        let next_idx = if let Some(idx) = inner.get("nextToolBlockIndex").and_then(|v| v.as_u64()) {
-            idx
-        } else {
-            0u64
-        };
+        let next_idx = inner
+            .get("nextToolBlockIndex")
+            .and_then(|v| v.as_u64())
+            .unwrap_or_default();
         let tool_block_idx = anthropic.current_block_index.unwrap_or(0) + 1;
         inner.insert("nextToolBlockIndex".into(), Value::from(tool_block_idx + 1));
         inner.insert("toolBlockIndex".into(), Value::from(tool_block_idx));

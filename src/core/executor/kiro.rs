@@ -238,7 +238,7 @@ impl KiroExecutor {
                     .credentials
                     .api_key
                     .as_deref()
-                    .or_else(|| request.credentials.access_token.as_deref())
+                    .or(request.credentials.access_token.as_deref())
                     .ok_or_else(|| KiroExecutorError::MissingCredentials("kiro".to_string()))?;
 
                 let mut headers = HeaderMap::new();
@@ -497,8 +497,8 @@ impl EventStreamDecoder {
                 u32::from_be_bytes([prelude[8], prelude[9], prelude[10], prelude[11]]);
 
             // Validate total length
-            if total_length < Self::PRELUDE_LEN + Self::TRAILING_CRC_LEN
-                || total_length > MAX_EVENTSTREAM_MESSAGE_LENGTH
+            if !(Self::PRELUDE_LEN + Self::TRAILING_CRC_LEN..=MAX_EVENTSTREAM_MESSAGE_LENGTH)
+                .contains(&total_length)
             {
                 return Err(KiroExecutorError::EventStreamDecode(format!(
                     "invalid message total_length={}",
