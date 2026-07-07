@@ -87,11 +87,23 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
             let updated_at: String = row.get(5)?;
             let data: Value =
                 serde_json::from_str(&data_str).unwrap_or(Value::Object(Default::default()));
-            Ok(json!({
-                "id": id, "type": node_type, "name": name,
-                "createdAt": created_at, "updatedAt": updated_at,
-                "data": data,
-            }))
+            // Flatten data blob fields (baseUrl, prefix, apiType, extra) into top-level
+            let mut obj = serde_json::Map::new();
+            obj.insert("id".into(), json!(id));
+            if let Some(t) = node_type {
+                obj.insert("type".into(), json!(t));
+            }
+            if let Some(n) = name {
+                obj.insert("name".into(), json!(n));
+            }
+            obj.insert("createdAt".into(), json!(created_at));
+            obj.insert("updatedAt".into(), json!(updated_at));
+            if let Some(data_obj) = data.as_object() {
+                for (k, v) in data_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+            }
+            Ok(Value::Object(obj))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };

@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use crate::cli::apply::{into_items, load_document, ApplyDiff};
 use crate::cli::output::{emit_error, emit_robot, humanln, OutputCtx};
+use crate::core::model::resolve_provider_alias;
 use crate::db::Db;
 use crate::types::Combo;
 
@@ -330,7 +331,9 @@ async fn run_test(
     for model in &combo.models {
         let provider_part = model.split('/').next().unwrap_or("");
         let resolved = !provider_part.is_empty()
-            && (known_providers.contains(provider_part) || known_node_ids.contains(provider_part));
+            && (known_providers.contains(provider_part)
+                || known_providers.contains(resolve_provider_alias(provider_part).as_str())
+                || known_node_ids.contains(provider_part));
         members.push(json!({
             "model": model,
             "provider": provider_part,

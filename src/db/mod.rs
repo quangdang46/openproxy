@@ -158,6 +158,30 @@ impl Db {
         self.snapshot.load_full()
     }
 
+    /// Reload the in-memory AppDb snapshot from SQLite.
+    /// Used when an external process (e.g. CLI `combo create`) writes to
+    /// the SQLite file directly and the server's snapshot is stale.
+    pub async fn reload_snapshot(&self) -> anyhow::Result<Arc<AppDb>> {
+        let sq = self.sqlite.clone();
+        let app_db = tokio::task::spawn_blocking(move || -> anyhow::Result<AppDb> {
+            sq.with_conn(|conn| -> rusqlite::Result<AppDb> {
+                let json_val = crate::db::sqlite::export::export_all(conn)
+                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                Ok(AppDb::from_json_value(json_val))
+            })
+            .map_err(|e| anyhow::anyhow!("SQLite reload failed: {e}"))
+        })
+        .await
+        .context("spawn_blocking for snapshot reload")??;
+        let next = Arc::new(app_db);
+        // Write-lock is NOT needed here: snapshot.load_full() + snapshot.store()
+        // is an atomic single-word CAS via ArcSwap. A concurrent update() would get
+        // the same result — the store is the sole writer and always provides a
+        // consistent snapshot.
+        self.snapshot.store(next.clone());
+        Ok(next)
+    }
+
     pub fn usage_snapshot(&self) -> Arc<UsageDb> {
         self.usage_snapshot.load_full()
     }

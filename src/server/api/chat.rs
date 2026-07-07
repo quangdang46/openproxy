@@ -281,6 +281,23 @@ async fn chat_completions_impl(
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(model_str, &snapshot);
 
+    // Stale-snapshot recovery: if the model name looks like a combo (no '/')
+    // but wasn't found, reload from SQLite and try once more. This handles
+    // combos created by the CLI process that bypasses the server's snapshot.
+    let resolved = if resolved.route_kind == ModelRouteKind::Combo || model_str.contains('/') {
+        resolved
+    } else {
+        if let Ok(fresh) = state.db.reload_snapshot().await {
+            if fresh.combos.iter().any(|c| c.name == model_str) {
+                get_model_info(model_str, &fresh)
+            } else {
+                resolved
+            }
+        } else {
+            resolved
+        }
+    };
+
     // Payload-rules + system-prompt override (OmniRoute-style).
     // Applied here, after the model field has been validated but before
     // we fan out into combo / direct dispatch — so both branches see the
@@ -356,6 +373,10 @@ async fn chat_completions_impl(
     }
     match resolved.route_kind {
         ModelRouteKind::Combo => {
+            std::fs::OpenOptions::new().create(true).append(true).open("/tmp/model_debug.log").and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "COMBO_ENTRY model_str={} resolved.model={}", model_str, resolved.model)
+            }).ok();
             let combo_name = resolved.model;
             let Some(combo_models) = get_combo_models_from_data(&combo_name, &snapshot.combos)
             else {
@@ -491,6 +512,12 @@ async fn chat_completions_impl(
                         // (e.g. "custom/gpt-fail" -> provider "node-openai", model "gpt-fail").
                         let inner_snapshot = state.db.snapshot();
                         let combo_resolved = get_model_info(&combo_model, &inner_snapshot);
+                        tracing::warn!(
+                            "COMBO model={} provider={:?} model_resolved={:?}",
+                            combo_model,
+                            combo_resolved.provider,
+                            combo_resolved.model,
+                        );
                         let combo_provider_str = combo_resolved
                             .provider
                             .as_deref()
@@ -502,6 +529,14 @@ async fn chat_completions_impl(
                         combo_plan.passthrough =
                             is_native_passthrough(client_tool_for_combo, &combo_provider_str);
                         let plan_for_combo = combo_plan.clone();
+                        std::fs::write(
+                            "/tmp/model_debug.log",
+                            format!(
+                                "COMBO_CLOSURE model={} combo_provider_str={} resolved_model={} passthrough={}\n",
+                                combo_model, combo_provider_str, resolved_model, plan_for_combo.passthrough
+                            ),
+                        )
+                        .ok();
                         async move {
                             execute_single_model(
                                 &state,
@@ -840,7 +875,7 @@ async fn forward_with_provider_fallback(
         let provider_node = snapshot
             .provider_nodes
             .iter()
-            .find(|node| node.id == provider)
+            .find(|node| node.prefix.as_deref() == Some(provider))
             .cloned();
         let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
 

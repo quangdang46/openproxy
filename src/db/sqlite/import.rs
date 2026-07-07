@@ -6,7 +6,7 @@
 //! state (fixing 9router bug: orphaned rows on partial import).
 
 use rusqlite::Connection;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use super::SqliteDb;
 
@@ -85,13 +85,31 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
     // Nodes
     if let Some(arr) = payload.get("providerNodes").and_then(Value::as_array) {
         for item in arr {
+            // Extract known ProviderNode fields into the data JSON column
+            let mut data_map = serde_json::Map::new();
+            if let Some(v) = item.get("baseUrl").and_then(Value::as_str) {
+                data_map.insert("baseUrl".into(), json!(v));
+            }
+            if let Some(v) = item.get("prefix").and_then(Value::as_str) {
+                data_map.insert("prefix".into(), json!(v));
+            }
+            if let Some(v) = item.get("apiType").and_then(Value::as_str) {
+                data_map.insert("apiType".into(), json!(v));
+            }
+            // Merge extra fields
+            if let Some(extra) = item.get("extra").and_then(Value::as_object) {
+                for (k, v) in extra {
+                    data_map.insert(k.clone(), v.clone());
+                }
+            }
+            let data_str = serde_json::to_string(&data_map).unwrap_or_default();
             conn.execute(
                 "INSERT INTO providerNodes(id, type, name, data, createdAt, updatedAt) VALUES(?1,?2,?3,?4,?5,?6)",
                 rusqlite::params![
                     item.get("id").and_then(Value::as_str).unwrap_or(""),
                     item.get("type").and_then(Value::as_str),
                     item.get("name").and_then(Value::as_str),
-                    "{}",
+                    data_str,
                     item.get("createdAt").and_then(Value::as_str).unwrap_or(""),
                     item.get("updatedAt").and_then(Value::as_str).unwrap_or(""),
                 ],
