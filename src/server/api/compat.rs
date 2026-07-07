@@ -268,80 +268,76 @@ async fn convert_to_responses_api(response: Response, stream_request: bool) -> R
 
         // Process complete SSE frames from the buffer.
         // Each frame is `data: {...}\n\n` or `event: ...\ndata: {...}\n\n`.
-        loop {
-            if let Some(frame_end) = raw_buf.find("\n\n") {
-                let frame = raw_buf[..frame_end].to_string();
-                raw_buf.drain(..frame_end + 2);
+        while let Some(frame_end) = raw_buf.find("\n\n") {
+            let frame = raw_buf[..frame_end].to_string();
+            raw_buf.drain(..frame_end + 2);
 
-                let frame = frame.trim();
-                if frame.is_empty() || frame.starts_with(':') {
-                    continue; // heartbeat or comment
-                }
+            let frame = frame.trim();
+            if frame.is_empty() || frame.starts_with(':') {
+                continue; // heartbeat or comment
+            }
 
-                // Extract JSON from the data: line (may have event: prefix lines)
-                let json_str = if let Some(d) = frame.lines()
-                    .find(|l| l.trim().starts_with("data:"))
-                    .and_then(|l| l.split_once(':').map(|x| x.1).map(|s| s.trim()))
-                {
-                    d
-                } else {
+            // Extract JSON from the data: line (may have event: prefix lines)
+            let json_str = if let Some(d) = frame.lines()
+                .find(|l| l.trim().starts_with("data:"))
+                .and_then(|l| l.split_once(':').map(|x| x.1).map(|s| s.trim()))
+            {
+                d
+            } else {
+                continue;
+            };
+
+            if json_str == "[DONE]" {
+                break;
+            }
+
+            // Detect Claude format: has "type":"message_start" or other anthropic types
+            let is_claude_event = json_str.contains("\"type\":\"")
+                && (json_str.contains("\"message_start\"")
+                    || json_str.contains("\"content_block_")
+                    || json_str.contains("\"message_delta\"")
+                    || json_str.contains("\"message_stop\"")
+                    || json_str.contains("\"ping\""));
+
+            // Detect Responses API SSE: events with "type":"response." prefix
+            // These are already in Responses API format and should pass through.
+            let is_responses_api_event = json_str.contains("\"type\":\"response.");
+
+            if is_responses_api_event {
+                // Already Responses API format — pass through directly.
+                // Reconstruct the full event with event: and data: lines.
+                // The frame lines contain the source format; yield unchanged.
+                let event_bytes = format!("{frame}\n\n");
+                yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+            } else if is_claude_event {
+                // Filter out ping events (no OpenAI equivalent)
+                if json_str.contains("\"ping\"") {
                     continue;
-                };
-
-                if json_str == "[DONE]" {
-                    break;
                 }
-
-                // Detect Claude format: has "type":"message_start" or other anthropic types
-                let is_claude_event = json_str.contains("\"type\":\"")
-                    && (json_str.contains("\"message_start\"")
-                        || json_str.contains("\"content_block_")
-                        || json_str.contains("\"message_delta\"")
-                        || json_str.contains("\"message_stop\"")
-                        || json_str.contains("\"ping\""));
-
-                // Detect Responses API SSE: events with "type":"response." prefix
-                // These are already in Responses API format and should pass through.
-                let is_responses_api_event = json_str.contains("\"type\":\"response.");
-
-                if is_responses_api_event {
-                    // Already Responses API format — pass through directly.
-                    // Reconstruct the full event with event: and data: lines.
-                    // The frame lines contain the source format; yield unchanged.
-                    let event_bytes = format!("{frame}\n\n");
-                    yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
-                } else if is_claude_event {
-                    // Filter out ping events (no OpenAI equivalent)
-                    if json_str.contains("\"ping\"") {
-                        continue;
-                    }
-                    // Convert Claude SSE → OpenAI SSE lines via transformer
-                    let claude_bytes = Bytes::from(format!("data: {json_str}\n\n"));
-                    let openai_lines = claude_xform.transform_chunk(&claude_bytes);
-                    for line in openai_lines {
-                        if let Some(data) = line.strip_prefix("data: ") {
-                            if data == "[DONE]" {
-                                break;
-                            }
-                            if let Ok(chunk_value) = serde_json::from_str::<Value>(data) {
-                                let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
-                                for event_bytes in events {
-                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
-                                }
-                            }
+                // Convert Claude SSE → OpenAI SSE lines via transformer
+                let claude_bytes = Bytes::from(format!("data: {json_str}\n\n"));
+                let openai_lines = claude_xform.transform_chunk(&claude_bytes);
+                for line in openai_lines {
+                    if let Some(data) = line.strip_prefix("data: ") {
+                        if data == "[DONE]" {
+                            break;
                         }
-                    }
-                } else {
-                    // Already OpenAI format — pass through directly
-                    if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
-                        let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
-                        for event_bytes in events {
-                            yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                        if let Ok(chunk_value) = serde_json::from_str::<Value>(data) {
+                            let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
+                            for event_bytes in events {
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                            }
                         }
                     }
                 }
             } else {
-                break;
+                // Already OpenAI format — pass through directly
+                if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
+                    let events = openai_chunk_to_responses(&mut conv_state, &chunk_value);
+                    for event_bytes in events {
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                    }
+                }
             }
         }
 
@@ -728,7 +724,7 @@ impl ResponsesSseState {
         }
 
         let mut skeleton = response_skeleton(self);
-        let obj = skeleton.as_object_mut().unwrap();
+        let obj = skeleton.as_object_mut().expect("response_skeleton returns object");
         obj.insert("status".to_string(), json!("completed"));
         obj.insert("background".to_string(), json!(false));
         obj.insert("error".into(), Value::Null);
@@ -766,7 +762,7 @@ fn response_skeleton(state: &ResponsesSseState) -> Value {
     });
     if !state.model.is_empty() {
         resp.as_object_mut()
-            .unwrap()
+            .expect("json! macro always produces object")
             .insert("model".to_string(), json!(state.model));
     }
     resp
@@ -1132,7 +1128,7 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
         }
 
         let mut skeleton = response_skeleton(state);
-        let obj = skeleton.as_object_mut().unwrap();
+        let obj = skeleton.as_object_mut().expect("response_skeleton returns object");
         obj.insert("status".to_string(), json!("completed"));
         obj.insert("background".to_string(), json!(false));
         obj.insert("error".into(), Value::Null);
@@ -1217,29 +1213,25 @@ async fn convert_to_messages_api(response: Response) -> Response {
                     let chunk_str = String::from_utf8_lossy(&chunk);
                     buf.push_str(&chunk_str);
 
-                    loop {
-                        if let Some(frame_end) = buf.find("\n\n") {
-                            let frame = buf[..frame_end].to_string();
-                            buf.drain(..frame_end + 2);
+                    while let Some(frame_end) = buf.find("\n\n") {
+                        let frame = buf[..frame_end].to_string();
+                        buf.drain(..frame_end + 2);
 
-                            let frame = frame.trim();
-                            if frame.is_empty() || frame.starts_with(':') {
-                                continue;
-                            }
+                        let frame = frame.trim();
+                        if frame.is_empty() || frame.starts_with(':') {
+                            continue;
+                        }
 
-                            let json_str = frame.strip_prefix("data:").unwrap_or(frame).trim();
-                            if json_str == "[DONE]" {
-                                break;
-                            }
-
-                            if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
-                                let events = openai_chunk_to_messages(&mut conv_state, &chunk_value);
-                                for event_bytes in events {
-                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
-                                }
-                            }
-                        } else {
+                        let json_str = frame.strip_prefix("data:").unwrap_or(frame).trim();
+                        if json_str == "[DONE]" {
                             break;
+                        }
+
+                        if let Ok(chunk_value) = serde_json::from_str::<Value>(json_str) {
+                            let events = openai_chunk_to_messages(&mut conv_state, &chunk_value);
+                            for event_bytes in events {
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from(event_bytes));
+                            }
                         }
                     }
                 }

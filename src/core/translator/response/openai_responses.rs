@@ -919,13 +919,7 @@ pub fn responses_to_chat_streaming(
     // Split on \n\n (SSE frame delimiter), process complete frames, store leftovers.
     let mut results = Vec::new();
 
-    loop {
-        // Find the next \n\n frame delimiter
-        let frame_end = match state.responses.buffer.find("\n\n") {
-            Some(pos) => pos,
-            None => break, // no complete frame yet, wait for next chunk
-        };
-
+    while let Some(frame_end) = state.responses.buffer.find("\n\n") {
         let frame = state.responses.buffer[..frame_end].to_string();
         state.responses.buffer.drain(..frame_end + 2);
 
