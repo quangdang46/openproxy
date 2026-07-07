@@ -1,7 +1,7 @@
 //! Repository for `providerNodes` table.
 
 use rusqlite::{params, Connection};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::types::ProviderNode;
 
@@ -80,6 +80,15 @@ fn row_to_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderNode> {
     // Merge data blob
     if let Ok(data_val) = serde_json::from_str::<Value>(&data_str) {
         if let Some(obj) = data_val.as_object() {
+            if let Some(base_url) = obj.get("baseUrl").and_then(|v| v.as_str()) {
+                node.base_url = Some(base_url.to_string());
+            }
+            if let Some(prefix) = obj.get("prefix").and_then(|v| v.as_str()) {
+                node.prefix = Some(prefix.to_string());
+            }
+            if let Some(api_type) = obj.get("apiType").and_then(|v| v.as_str()) {
+                node.api_type = Some(api_type.to_string());
+            }
             let json_str = serde_json::to_string(obj).unwrap_or_default();
             // Merge all fields from data JSON into node (extra, etc.)
             if let Ok(parsed) = serde_json::from_str::<ProviderNode>(&json_str) {
@@ -93,6 +102,15 @@ fn row_to_node(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderNode> {
 
 fn node_to_data(n: &ProviderNode) -> String {
     let mut fields = serde_json::Map::new();
+    if let Some(base_url) = &n.base_url {
+        fields.insert("baseUrl".into(), json!(base_url));
+    }
+    if let Some(prefix) = &n.prefix {
+        fields.insert("prefix".into(), json!(prefix));
+    }
+    if let Some(api_type) = &n.api_type {
+        fields.insert("apiType".into(), json!(api_type));
+    }
     for (k, v) in &n.extra {
         fields.insert(k.clone(), v.clone());
     }
