@@ -274,10 +274,7 @@ async fn write_jcode_config(body: &SaveJcodeSettingsRequest) -> AnyhowResult<()>
     }
 
     // Read existing config
-    let content = match fs::read_to_string(&config_path).await {
-        Ok(content) => content,
-        Err(_) => String::new(),
-    };
+    let content: String = fs::read_to_string(&config_path).await.unwrap_or_default();
     let mut root: TomlValue = toml::from_str(&content).unwrap_or(TomlValue::Table(TomlMap::new()));
 
     // Ensure we have a Table

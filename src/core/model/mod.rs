@@ -1,7 +1,6 @@
 pub mod catalog;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 
@@ -250,10 +249,6 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
                 }
             }
 
-            std::fs::write(
-                "/tmp/model_debug.log",
-                format!("COMBO_DEBUG model={} provider={:?} model_resolved={:?}\n", model_str, provider, model)
-            );
             return ResolvedModel {
                 provider: Some(provider),
                 model,
@@ -263,9 +258,7 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
     }
 
     let alias_name = parsed.model.unwrap_or_default();
-    let combo_check = db.combos.iter().any(|c| c.name == alias_name);
-    let _ = std::fs::write("/tmp/combo_lookup.log", format!("model={} is_alias={} combo_check={}\n", model_str, parsed.is_alias, combo_check));
-    if combo_check {
+    if db.combos.iter().any(|combo| combo.name == alias_name) {
         return ResolvedModel {
             provider: None,
             model: alias_name,
@@ -274,10 +267,6 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
     }
 
     if let Some(resolved) = resolve_model_alias_from_map(&alias_name, &db.model_aliases) {
-        std::fs::write(
-            "/tmp/model_debug.log",
-            format!("COMBO_DEBUG model={} -> alias -> provider={} model_resolved={}\n", model_str, resolved.provider, resolved.model)
-        ).ok();
         return ResolvedModel {
             provider: Some(resolved.provider),
             model: resolved.model,
@@ -286,14 +275,6 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
     }
 
     let fallback = infer_provider_from_model_name(&alias_name).to_string();
-    std::fs::write(
-        "/tmp/model_debug.log",
-        format!(
-            "COMBO_DEBUG model={} -> FALLBACK -> provider={} model_resolved={}\n",
-            model_str, fallback, alias_name
-        ),
-    )
-    .ok();
     ResolvedModel {
         provider: Some(fallback),
         model: alias_name,
