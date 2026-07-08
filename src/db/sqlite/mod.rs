@@ -237,11 +237,11 @@ mod tests {
         let db = SqliteDb::open_in_memory().unwrap();
         let v: i32 = db
             .with_conn(|c| {
-                Ok(c.query_row(
+                c.query_row(
                     "SELECT CAST(value AS INTEGER) FROM _meta WHERE key='schema_version'",
                     [],
                     |row| row.get(0),
-                )?)
+                )
             })
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
@@ -270,7 +270,7 @@ mod tests {
         assert!(result.is_err());
         // The first insert must have rolled back.
         let count: i64 = db
-            .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM apiKeys", [], |row| row.get(0))?))
+            .with_conn(|c| c.query_row("SELECT COUNT(*) FROM apiKeys", [], |row| row.get(0)))
             .unwrap();
         assert_eq!(count, 0);
     }

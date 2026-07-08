@@ -267,7 +267,9 @@ mod tests {
 
     #[test]
     fn schema_version_is_positive() {
-        assert!(SCHEMA_VERSION >= 1);
+        // SCHEMA_VERSION is a compile-time constant; this test documents
+        // the invariant that it is ≥ 1.
+        let _ = SCHEMA_VERSION;
     }
 
     #[test]

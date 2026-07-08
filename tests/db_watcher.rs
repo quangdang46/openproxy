@@ -25,5 +25,4 @@ use tokio::time::sleep;
 async fn watcher_picks_up_external_db_write() {
     // Compilation placeholder — see note above.
     // The original test body called Db::new_in_memory() which was removed.
-    assert!(true);
 }
