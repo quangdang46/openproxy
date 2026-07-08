@@ -284,20 +284,21 @@ async fn chat_completions_impl(
     // Stale-snapshot recovery: if the model name looks like a combo (no '/')
     // but wasn't found, reload from SQLite and try once more. This handles
     // combos created by the CLI process that bypasses the server's snapshot.
-    let (snapshot, resolved) = if resolved.route_kind == ModelRouteKind::Combo || model_str.contains('/') {
-        (snapshot, resolved)
-    } else {
-        if let Ok(fresh) = state.db.reload_snapshot().await {
-            if fresh.combos.iter().any(|c| c.name == model_str) {
-                let re_resolved = get_model_info(model_str, &fresh);
-                (fresh, re_resolved)
+    let (snapshot, resolved) =
+        if resolved.route_kind == ModelRouteKind::Combo || model_str.contains('/') {
+            (snapshot, resolved)
+        } else {
+            if let Ok(fresh) = state.db.reload_snapshot().await {
+                if fresh.combos.iter().any(|c| c.name == model_str) {
+                    let re_resolved = get_model_info(model_str, &fresh);
+                    (fresh, re_resolved)
+                } else {
+                    (snapshot, resolved)
+                }
             } else {
                 (snapshot, resolved)
             }
-        } else {
-            (snapshot, resolved)
-        }
-    };
+        };
 
     // Payload-rules + system-prompt override (OmniRoute-style).
     // Applied here, after the model field has been validated but before
