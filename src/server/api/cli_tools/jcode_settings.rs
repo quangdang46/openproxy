@@ -194,8 +194,8 @@ async fn read_provider_env() -> Option<std::collections::HashMap<String, String>
 
             // Strip surrounding quotes
             if value.len() >= 2 {
-                let first = value.chars().next().unwrap();
-                let last = value.chars().last().unwrap();
+                let first = value.chars().next().expect("value.len() >= 2");
+                let last = value.chars().last().expect("value.len() >= 2");
                 if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
                     value = value[1..value.len() - 1].to_string();
                 }
@@ -245,8 +245,8 @@ async fn clear_provider_env() -> AnyhowResult<()> {
             let key = trimmed[..eq_pos].trim().to_string();
             let mut value = trimmed[eq_pos + 1..].trim().to_string();
             if value.len() >= 2 {
-                let first = value.chars().next().unwrap();
-                let last = value.chars().last().unwrap();
+                let first = value.chars().next().expect("value.len() >= 2");
+                let last = value.chars().last().expect("value.len() >= 2");
                 if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
                     value = value[1..value.len() - 1].to_string();
                 }
