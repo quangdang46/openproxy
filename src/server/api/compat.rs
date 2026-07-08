@@ -724,7 +724,9 @@ impl ResponsesSseState {
         }
 
         let mut skeleton = response_skeleton(self);
-        let obj = skeleton.as_object_mut().expect("response_skeleton returns object");
+        let obj = skeleton
+            .as_object_mut()
+            .expect("response_skeleton returns object");
         obj.insert("status".to_string(), json!("completed"));
         obj.insert("background".to_string(), json!(false));
         obj.insert("error".into(), Value::Null);
@@ -1128,7 +1130,9 @@ fn openai_chunk_to_responses(state: &mut ResponsesSseState, chunk: &Value) -> Ve
         }
 
         let mut skeleton = response_skeleton(state);
-        let obj = skeleton.as_object_mut().expect("response_skeleton returns object");
+        let obj = skeleton
+            .as_object_mut()
+            .expect("response_skeleton returns object");
         obj.insert("status".to_string(), json!("completed"));
         obj.insert("background".to_string(), json!(false));
         obj.insert("error".into(), Value::Null);
