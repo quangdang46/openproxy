@@ -180,7 +180,7 @@ fn kiro_executor_build_url_with_various_models() {
 
     // Test with different model names
     let url1 = &executor.build_url("glm-5", true);
-    assert!(url1.len() >= 1);
+    assert!(!url1.is_empty());
     assert!(url1[0].contains("glm-5"));
     assert!(url1[0].contains("/stream"));
 
