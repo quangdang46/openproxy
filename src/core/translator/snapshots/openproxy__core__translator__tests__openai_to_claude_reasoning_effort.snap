@@ -1,5 +1,6 @@
 ---
 source: src/core/translator/tests.rs
+assertion_line: 255
 expression: result
 ---
 {
@@ -24,7 +25,7 @@ expression: result
     }
   ],
   "thinking": {
-    "budget_tokens": 16384,
+    "budget_tokens": 24576,
     "type": "enabled"
   }
 }

@@ -237,7 +237,7 @@ impl MimoFreeExecutor {
         let seed = credentials
             .api_key
             .as_deref()
-            .or_else(|| Some(credentials.id.as_str()))
+            .or(Some(credentials.id.as_str()))
             .unwrap_or("default-mimo-free-fingerprint");
         let mut hasher = Sha256::new();
         hasher.update(seed.as_bytes());

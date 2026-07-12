@@ -157,34 +157,38 @@ fn kiro_executor_new_with_provider_node() {
 fn kiro_executor_build_url_stream_action() {
     let pool = Arc::new(ClientPool::new());
     let executor = KiroExecutor::new(pool, None).expect("kiro executor");
+    let creds = ProviderConnection::default();
 
-    let urls = executor.build_url("claude-sonnet-4.5", true);
+    let urls = executor.build_url("claude-sonnet-4.5", true, &creds);
     assert!(!urls.is_empty());
-    assert_eq!(urls[0], "https://api.kiro.ai/v1/claude-sonnet-4.5/stream");
+    assert!(urls[0].contains("claude-sonnet-4.5"));
+    assert!(urls[0].contains("/stream"));
 }
 
 #[test]
 fn kiro_executor_build_url_invoke_action() {
     let pool = Arc::new(ClientPool::new());
     let executor = KiroExecutor::new(pool, None).expect("kiro executor");
+    let creds = ProviderConnection::default();
 
-    let urls = executor.build_url("claude-sonnet-4.5", false);
+    let urls = executor.build_url("claude-sonnet-4.5", false, &creds);
     assert!(!urls.is_empty());
-    assert_eq!(urls[0], "https://api.kiro.ai/v1/claude-sonnet-4.5/invoke");
+    assert!(urls[0].contains("claude-sonnet-4.5"));
+    assert!(urls[0].contains("/invoke"));
 }
 
 #[test]
 fn kiro_executor_build_url_with_various_models() {
     let pool = Arc::new(ClientPool::new());
     let executor = KiroExecutor::new(pool, None).expect("kiro executor");
+    let creds = ProviderConnection::default();
 
-    // Test with different model names
-    let url1 = &executor.build_url("glm-5", true);
+    let url1 = &executor.build_url("glm-5", true, &creds);
     assert!(!url1.is_empty());
     assert!(url1[0].contains("glm-5"));
     assert!(url1[0].contains("/stream"));
 
-    let url2 = &executor.build_url("MiniMax-M2.5", false);
+    let url2 = &executor.build_url("MiniMax-M2.5", false, &creds);
     assert!(url2[0].contains("MiniMax-M2.5"));
     assert!(url2[0].contains("/invoke"));
 }

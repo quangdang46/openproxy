@@ -466,10 +466,10 @@ impl GithubExecutor {
         let mut out = body.clone();
         if out.get("input").is_none() {
             if let Some(messages) = out.get("messages").cloned() {
-                out.as_object_mut().map(|o| {
-                    o.insert("input".into(), messages);
-                    o.remove("messages");
-                });
+                if let Some(obj) = out.as_object_mut() {
+                    obj.insert("input".into(), messages);
+                    obj.remove("messages");
+                }
             }
         }
         if let Some(obj) = out.as_object_mut() {
