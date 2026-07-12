@@ -533,43 +533,74 @@ where
             }));
         }
 
-        // Collect results until we have enough or everything resolves.
+        // Independent grace timer (9router setTimeout once quorum reached).
+        // Without a separate sleep future, grace only re-checks when another
+        // panel completes — stragglers could hold until hard timeout.
         let mut hard_deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         let mut grace_started = false;
+        let mut grace_deadline: Option<tokio::time::Instant> = None;
 
-        while let Some((idx, model, result)) = panel_futs.next().await {
-            remaining.retain(|i| *i != idx);
-
-            if let Ok(Ok(response)) = result {
-                let (text, fmt) = extract_panel_text(&response);
-                if !text.is_empty() {
-                    outcomes.push(PanelOutcome {
-                        result: FusionPanelResult {
-                            index: idx,
-                            model,
-                            answer: text,
-                            source_format: fmt,
-                        },
-                        raw: response,
-                    });
-                }
-            } // fail-open: skip errors/timeouts
-
-            let ok_count = outcomes.len();
-
-            // Quorum-grace: once we have min_panel answers, tighten deadline.
-            if ok_count >= min_panel && !grace_started {
-                grace_started = true;
-                let grace_deadline = tokio::time::Instant::now() + Duration::from_millis(grace_ms);
-                if grace_deadline < hard_deadline {
-                    hard_deadline = grace_deadline;
+        loop {
+            if panel_futs.is_empty() {
+                break;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= hard_deadline {
+                break;
+            }
+            if let Some(gd) = grace_deadline {
+                if now >= gd {
+                    break;
                 }
             }
 
-            // After processing each result, check if the deadline has expired.
-            // If so, drop the remaining in-flight futures.
-            if !panel_futs.is_empty() && tokio::time::Instant::now() >= hard_deadline {
-                break;
+            let sleep_until = match grace_deadline {
+                Some(gd) if gd < hard_deadline => gd,
+                _ => hard_deadline,
+            };
+            let sleep_dur = sleep_until.saturating_duration_since(tokio::time::Instant::now());
+
+            tokio::select! {
+                biased;
+                _ = tokio::time::sleep(sleep_dur) => {
+                    break;
+                }
+                next = panel_futs.next() => {
+                    let Some((idx, model, result)) = next else { break; };
+                    remaining.retain(|i| *i != idx);
+
+                    if let Ok(Ok(response)) = result {
+                        let (text, fmt) = extract_panel_text(&response);
+                        if !text.is_empty() {
+                            outcomes.push(PanelOutcome {
+                                result: FusionPanelResult {
+                                    index: idx,
+                                    model,
+                                    answer: text,
+                                    source_format: fmt,
+                                },
+                                raw: response,
+                            });
+                        }
+                    }
+
+                    let ok_count = outcomes.len();
+                    if ok_count >= min_panel && !grace_started {
+                        grace_started = true;
+                        let gd = tokio::time::Instant::now() + Duration::from_millis(grace_ms);
+                        grace_deadline = Some(gd);
+                        if gd < hard_deadline {
+                            hard_deadline = gd;
+                        }
+                        tracing::debug!(
+                            target: "openproxy::fusion",
+                            "FUSION quorum={} grace_ms={} remaining_panels={}",
+                            ok_count,
+                            grace_ms,
+                            panel_futs.len()
+                        );
+                    }
+                }
             }
         }
     }
@@ -634,8 +665,12 @@ where
         let obj = judge_body.as_object_mut().expect("body is an object");
 
         obj.insert("model".to_string(), json!(judge_model_id));
-        // Force non-streaming so the callback can collect the full JSON Value.
-        obj.insert("stream".to_string(), json!(false));
+        // Preserve client stream flag (9router judge keeps original body stream).
+        // Chat fusion path currently collects JSON for multi-panel; if stream was
+        // true, callers that support SSE can re-request. Default: keep original.
+        if !obj.contains_key("stream") {
+            obj.insert("stream".to_string(), json!(false));
+        }
 
         // Append judge prompt to whichever array the body uses (messages,
         // input, contents, or request.contents).  9router's appendUserTurn()

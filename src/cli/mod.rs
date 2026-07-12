@@ -1769,7 +1769,7 @@ async fn run_combo_route(
         .settings
         .combo_strategies
         .get(combo_name)
-        .map(String::as_str)
+        .map(|e| e.strategy_name())
         .unwrap_or(snapshot.settings.combo_strategy.as_str());
 
     let _combo_strategy = if strategy.eq_ignore_ascii_case("round-robin") {

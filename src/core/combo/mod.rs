@@ -200,16 +200,8 @@ pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
         return HashSet::new();
     };
 
-    // Search capability detection runs independently of message array presence.
+    // 9router currently has search detection disabled; keep empty for parity.
     let mut required = HashSet::new();
-    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
-        if tools
-            .iter()
-            .any(|t| t.get("type").and_then(Value::as_str) == Some("search"))
-        {
-            required.insert("search".to_string());
-        }
-    }
 
     // Scan trailing user messages (9router's trailingUserItems pattern):
     // find all messages after the last assistant/model turn.
@@ -224,10 +216,8 @@ pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
         .collect();
 
     if trailing_users.is_empty() {
-        return HashSet::new();
+        return required;
     }
-
-    let mut required = HashSet::new();
 
     for last_user in &trailing_users {
         // Scan OpenAI-style content (messages/input arrays).
@@ -265,10 +255,12 @@ fn scan_content_for_capabilities(content: &Value, required: &mut HashSet<String>
         Value::Array(arr) => {
             for item in arr {
                 match item.get("type").and_then(Value::as_str) {
-                    Some("image_url" | "image") => {
+                    // 9router: image_url | image | input_image
+                    Some("image_url" | "image" | "input_image") => {
                         required.insert("vision".to_string());
                     }
-                    Some("input_file" | "document") => {
+                    // 9router: file | document | input_file
+                    Some("input_file" | "document" | "file") => {
                         required.insert("pdf".to_string());
                     }
                     Some("inlineData" | "fileData") => {
@@ -388,46 +380,12 @@ pub fn reorder_by_capabilities(models: &[String], required: &HashSet<String>) ->
     result
 }
 
+/// Single source of truth: delegates to `error_config::classify_error`.
 pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -> FallbackDecision {
-    let lower = error_text.to_lowercase();
+    use crate::core::config::error_config::{classify_error, ErrorClassification};
 
-    for text_rule in [
-        ("no credentials", Some(LONG_COOLDOWN), false),
-        ("request not allowed", Some(SHORT_COOLDOWN), false),
-        ("improperly formed request", Some(LONG_COOLDOWN), false),
-        ("rate limit", None, true),
-        ("too many requests", None, true),
-        ("quota exceeded", None, true),
-        ("capacity", None, true),
-        ("overloaded", None, true),
-    ] {
-        if lower.contains(text_rule.0) {
-            return if text_rule.2 {
-                let new_level = (backoff_level + 1).min(MAX_BACKOFF_LEVEL);
-                FallbackDecision {
-                    should_fallback: true,
-                    cooldown: get_quota_cooldown(new_level),
-                    new_backoff_level: Some(new_level),
-                }
-            } else {
-                FallbackDecision {
-                    should_fallback: true,
-                    cooldown: text_rule.1.unwrap_or(TRANSIENT_COOLDOWN),
-                    new_backoff_level: None,
-                }
-            };
-        }
-    }
-
-    match status {
-        // 9router ERROR_RULES: 401/402/403/404 all allow fallback with LONG_COOLDOWN
-        // 400 is NOT in ERROR_RULES — falls through to default TRANSIENT_COOLDOWN (9router parity)
-        401..=404 => FallbackDecision {
-            should_fallback: true,
-            cooldown: LONG_COOLDOWN,
-            new_backoff_level: None,
-        },
-        429 => {
+    match classify_error(Some(error_text), Some(status)) {
+        ErrorClassification::Backoff => {
             let new_level = (backoff_level + 1).min(MAX_BACKOFF_LEVEL);
             FallbackDecision {
                 should_fallback: true,
@@ -435,7 +393,12 @@ pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -
                 new_backoff_level: Some(new_level),
             }
         }
-        _ => FallbackDecision {
+        ErrorClassification::Cooldown(d) => FallbackDecision {
+            should_fallback: true,
+            cooldown: d,
+            new_backoff_level: None,
+        },
+        ErrorClassification::NoMatch => FallbackDecision {
             should_fallback: true,
             cooldown: TRANSIENT_COOLDOWN,
             new_backoff_level: None,
@@ -647,6 +610,36 @@ where
     Fut: Future<Output = Result<T, ComboAttemptError>>,
     C: Fn(&str) -> ModelCapacity,
 {
+    execute_combo_strategy_full(
+        models,
+        combo_name,
+        strategy,
+        disabled_members,
+        1, // sticky default
+        None,
+        capacity_check,
+        handle_single_model,
+    )
+    .await
+}
+
+/// Full combo strategy with sticky limit and capability reorder after RR
+/// (9router combo.js order: rotate first, then reorderByCapabilities).
+pub async fn execute_combo_strategy_full<T, F, Fut, C>(
+    models: &[String],
+    combo_name: Option<&str>,
+    strategy: ComboStrategy,
+    disabled_members: &[String],
+    sticky_limit: u32,
+    required_caps: Option<&HashSet<String>>,
+    capacity_check: C,
+    mut handle_single_model: F,
+) -> Result<T, ComboExecutionError>
+where
+    F: FnMut(&str) -> Fut,
+    Fut: Future<Output = Result<T, ComboAttemptError>>,
+    C: Fn(&str) -> ModelCapacity,
+{
     // Manual disable + auto-quarantine pre-gate. Applied to the raw
     // member list *before* rotation so the round-robin index doesn't
     // burn turns on members that will never be dispatched to.
@@ -680,10 +673,27 @@ where
         });
     }
 
-    let rotated = get_rotated_models(&active, combo_name, strategy, 1);
+    // 9router: getRotatedModels first, then capability autoswitch
+    let mut order = get_rotated_models(
+        &active,
+        combo_name,
+        strategy,
+        sticky_limit.max(1),
+    );
+    if let Some(caps) = required_caps {
+        if !caps.is_empty() {
+            order = reorder_by_capabilities(&order, caps);
+            tracing::debug!(
+                target: "openproxy::combo",
+                "COMBO_ORDER after_rr+caps sticky={} order={:?}",
+                sticky_limit,
+                order
+            );
+        }
+    }
 
-    if strategy == ComboStrategy::RoundRobin && rotated.len() > 1 {
-        let available: Vec<String> = rotated
+    if strategy == ComboStrategy::RoundRobin && order.len() > 1 {
+        let available: Vec<String> = order
             .iter()
             .filter(|model| capacity_check(model.as_str()) == ModelCapacity::Available)
             .cloned()
@@ -700,7 +710,7 @@ where
         return iterate_combo_models(&available, &mut handle_single_model).await;
     }
 
-    iterate_combo_models(&rotated, &mut handle_single_model).await
+    iterate_combo_models(&order, &mut handle_single_model).await
 }
 
 async fn iterate_combo_models<T, F, Fut>(
@@ -712,12 +722,21 @@ where
     Fut: Future<Output = Result<T, ComboAttemptError>>,
 {
     let mut last_error = None;
+    let mut first_error: Option<ComboAttemptError> = None;
     let mut earliest_retry_after = None;
 
     for model in order {
         match handle_single_model(model).await {
             Ok(result) => return Ok(result),
             Err(error) => {
+                if first_error.is_none() {
+                    first_error = Some(ComboAttemptError {
+                        status: error.status,
+                        message: error.message.clone(),
+                        retry_after: error.retry_after,
+                        upstream_body: None,
+                    });
+                }
                 if let Some(retry_after) = error.retry_after {
                     earliest_retry_after = match earliest_retry_after {
                         Some(current) if current <= retry_after => Some(current),
@@ -750,26 +769,25 @@ where
         }
     }
 
-    let fallback_error = last_error.unwrap_or(ComboAttemptError {
-        status: 503,
-        message: "All combo models unavailable".into(),
-        retry_after: earliest_retry_after,
-        upstream_body: None,
-    });
+    // 9router keeps the *first* failure status for the final response.
+    let first_status = first_error.as_ref().map(|e| e.status);
+    let message = last_error
+        .map(|e| e.message)
+        .or_else(|| first_error.map(|e| e.message))
+        .unwrap_or_else(|| "All combo models unavailable".into());
 
-    let status = if fallback_error
-        .message
-        .to_lowercase()
-        .contains("no credentials")
-    {
+    let status = if message.to_lowercase().contains("no credentials") {
         503
     } else {
-        fallback_error.status.max(500)
+        match first_status.unwrap_or(503) {
+            0 => 503,
+            s => s,
+        }
     };
 
     Err(ComboExecutionError {
         status,
-        message: fallback_error.message,
+        message,
         earliest_retry_after,
     })
 }

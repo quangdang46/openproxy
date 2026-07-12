@@ -16,7 +16,11 @@ use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
+/// 9router registry default baseUrl + chatPath.
 const CURSOR_API_ENDPOINT: &str =
+    "https://api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools";
+/// Non-privacy agent endpoint (settings/override).
+const CURSOR_AGENTN_ENDPOINT: &str =
     "https://agentn.api5.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools";
 
 // ==================== COMPRESSION FLAGS ====================
@@ -1442,11 +1446,13 @@ impl CursorExecutor {
             .map(String::from)
     }
 
-    /// Transform the request body to Cursor protobuf format
+    /// Transform the request body to Cursor protobuf format.
+    /// `force_agent_mode` is true for Claude Code UA (9router cursor.js:178-179).
     fn transform_request_body(
         &self,
         body: &Value,
         actual_model: &str,
+        force_agent_mode: bool,
     ) -> Result<Vec<u8>, CursorExecutorError> {
         let messages = Self::extract_messages(body)?;
         let tools = Self::extract_tools(body);
@@ -1457,11 +1463,26 @@ impl CursorExecutor {
             actual_model,
             &tools,
             reasoning_effort.as_deref(),
-            false,
+            force_agent_mode,
         );
         let framed = wrap_connect_rpc_frame(&protobuf, false);
 
         Ok(framed)
+    }
+
+    fn resolve_endpoint(credentials: &ProviderConnection) -> &'static str {
+        // Optional override: agentn / non-privacy host
+        let host = credentials
+            .provider_specific_data
+            .get("cursorHost")
+            .or_else(|| credentials.provider_specific_data.get("cursor_host"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("api2");
+        if host == "agentn" || host == "agentn.api5" {
+            CURSOR_AGENTN_ENDPOINT
+        } else {
+            CURSOR_API_ENDPOINT
+        }
     }
 
     pub async fn execute(
@@ -1496,12 +1517,27 @@ impl CursorExecutor {
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
 
+        // 9router: forceAgentMode when UA is Claude Code / claude-cli
+        let force_agent_mode = request
+            .credentials
+            .provider_specific_data
+            .get("rawHeaders")
+            .and_then(|h| h.get("user-agent"))
+            .and_then(|v| v.as_str())
+            .map(|ua| {
+                let u = ua.to_lowercase();
+                u.contains("claude-cli") || u.contains("claude-code") || u.contains("claude code")
+            })
+            .unwrap_or(false);
+
         let headers = build_cursor_headers(access_token, Some(machine_id), ghost_mode)?;
-        let body_bytes = self.transform_request_body(&request.body, &actual_model)?;
+        let body_bytes =
+            self.transform_request_body(&request.body, &actual_model, force_agent_mode)?;
+        let endpoint = Self::resolve_endpoint(&request.credentials);
 
         let client = self.pool.get("cursor", request.proxy.as_ref())?;
         let raw_response = client
-            .post(CURSOR_API_ENDPOINT)
+            .post(endpoint)
             .headers(headers.clone())
             .body(body_bytes)
             .send()
@@ -1536,7 +1572,7 @@ impl CursorExecutor {
 
             Ok(CursorExecutorResponse {
                 response: UpstreamResponse::Reqwest(fake_response),
-                url: CURSOR_API_ENDPOINT.to_string(),
+                url: endpoint.to_string(),
                 headers,
                 transformed_body: request.body,
                 transport: TransportKind::Reqwest,
@@ -1544,7 +1580,7 @@ impl CursorExecutor {
         } else {
             Ok(CursorExecutorResponse {
                 response: UpstreamResponse::Reqwest(raw_response),
-                url: CURSOR_API_ENDPOINT.to_string(),
+                url: endpoint.to_string(),
                 headers,
                 transformed_body: request.body,
                 transport: TransportKind::Reqwest,

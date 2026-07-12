@@ -53,7 +53,8 @@ impl ProviderExecutor for CodeBuddyCNExecutor {
         _url_index: Option<usize>,
         _credentials: Option<&ProviderConnection>,
     ) -> String {
-        "https://api.codebuddy.cn/v1/chat/completions".to_string()
+        // 9router registry: copilot.tencent.com/v2/chat/completions
+        "https://copilot.tencent.com/v2/chat/completions".to_string()
     }
 
     fn build_headers(

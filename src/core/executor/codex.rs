@@ -223,20 +223,19 @@ impl CodexExecutor {
     /// - Converts messages[] to input[] with type "message", role, and content as input_text blocks
     /// - Converts "system" role to "developer"
     /// - Strips server-generated IDs (rs_, fc_, resp_, msg_ prefixes) to avoid 404s with store:false
-    /// - Uses the original stream flag from the request (not hardcoded)
-    /// - Forces store: false (required by Codex backend)
-    /// - Injects instructions from body or a default
-    /// - Applies an allowlist: only model, input, instructions, tools, tool_choice,
-    ///   stream, store, reasoning, include, prompt_cache_key survive
+    /// 9router codex.js parity:
+    /// - Forces stream: true (Codex backend; client JSON via forceStream SSE→JSON)
+    /// - Forces store: false
+    /// - Strips effort suffixes from model (`-high`, `-medium`, …) into reasoning.effort
+    /// - Injects instructions default when missing
     fn transform_request_body(
         &self,
         body: &Value,
         actual_model: &str,
-        stream: bool,
+        _stream: bool,
     ) -> Result<Value, CodexExecutorError> {
         // Handle both pre-translated (input[]) and untranslated (messages[]) bodies
         let input_items = if let Some(input) = body.get("input").and_then(Value::as_array) {
-            // Already translated by the pipeline — use as-is
             if input.is_empty() {
                 return Err(CodexExecutorError::UnsupportedFormat(
                     "Empty input array in request body".to_string(),
@@ -244,44 +243,61 @@ impl CodexExecutor {
             }
             input.clone()
         } else {
-            // Not yet translated — extract from messages[]
             Self::extract_input_items(body)?
         };
 
-        // Extract instructions from body, or use a default if empty
         let instructions = body
             .get("instructions")
             .and_then(Value::as_str)
             .filter(|s| !s.is_empty())
             .unwrap_or(Self::DEFAULT_CODEX_INSTRUCTIONS);
 
-        // Build allowlisted request body with required fields
-        // Use the request's original stream flag (the Codex API supports both)
+        // Strip effort suffix from model name (9router: none/minimal/low/medium/high/xhigh)
+        let effort_levels = ["none", "minimal", "low", "medium", "high", "xhigh"];
+        let mut model_id = actual_model.to_string();
+        let mut model_effort: Option<&str> = None;
+        for level in effort_levels {
+            let suffix = format!("-{level}");
+            if let Some(stripped) = model_id.strip_suffix(&suffix) {
+                model_id = stripped.to_string();
+                model_effort = Some(level);
+                break;
+            }
+            // Also support model(high) style
+            let paren = format!("({level})");
+            if let Some(idx) = model_id.rfind(&paren) {
+                model_id = model_id[..idx].trim_end().to_string();
+                model_effort = Some(level);
+                break;
+            }
+        }
+
+        // Priority: body.reasoning.effort > reasoning_effort > model suffix > default low
+        let effort = body
+            .pointer("/reasoning/effort")
+            .and_then(Value::as_str)
+            .or_else(|| body.get("reasoning_effort").and_then(Value::as_str))
+            .or(model_effort)
+            .unwrap_or("low");
+
         let mut request_body = json!({
-            "model": actual_model,
+            "model": model_id,
             "input": input_items,
             "instructions": instructions,
-            "stream": stream,
+            "stream": true, // 9router always forces stream
             "store": false,
+            "reasoning": { "effort": effort, "summary": "auto" },
         });
 
-        // Pass through allowlisted optional fields
         if let Some(tools) = body.get("tools") {
             request_body["tools"] = tools.clone();
         }
-
         if let Some(tool_choice) = body.get("tool_choice") {
             request_body["tool_choice"] = tool_choice.clone();
         }
-
-        if let Some(reasoning) = body.get("reasoning") {
-            request_body["reasoning"] = reasoning.clone();
-        }
-
         if let Some(include) = body.get("include") {
             request_body["include"] = include.clone();
         }
-
         if let Some(prompt_cache_key) = body.get("prompt_cache_key") {
             request_body["prompt_cache_key"] = prompt_cache_key.clone();
         }
@@ -420,10 +436,11 @@ impl CodexExecutor {
             .as_deref()
             .or(request.credentials.id.as_str().into())
             .or(request.credentials.display_name.as_deref());
+        // Always stream upstream (9router force stream); client JSON via chat sse_to_json
         let headers =
-            self.build_headers(api_key, request.stream, connection_id, &request.credentials)?;
+            self.build_headers(api_key, true, connection_id, &request.credentials)?;
         let transformed_body =
-            self.transform_request_body(&request.body, &actual_model, request.stream)?;
+            self.transform_request_body(&request.body, &actual_model, true)?;
 
         let client = self.pool.get("openai", request.proxy.as_ref())?;
 
@@ -544,17 +561,18 @@ mod tests {
             "messages": [
                 {"role": "user", "content": "Hello, world!"}
             ],
-            "stream": true,
+            "stream": false,
             "temperature": 0.7
         });
 
         let result = executor
-            .transform_request_body(&chat_body, "o4-mini", true)
+            .transform_request_body(&chat_body, "o4-mini-high", false)
             .unwrap();
 
-        assert_eq!(result["model"], "o4-mini");
-        assert_eq!(result["stream"], true);
+        assert_eq!(result["model"], "o4-mini"); // suffix stripped
+        assert_eq!(result["stream"], true); // forced
         assert_eq!(result["store"], false);
+        assert_eq!(result["reasoning"]["effort"], "high");
         assert!(
             result.get("temperature").is_none(),
             "temperature should be stripped by allowlist"

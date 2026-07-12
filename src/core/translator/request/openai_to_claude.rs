@@ -677,12 +677,15 @@ pub fn openai_to_claude_request(
     if body_obj.get("reasoning_effort").is_some() && body_obj.get("thinking").is_none() {
         if let Some(effort) = body_obj.get("reasoning_effort").and_then(|v| v.as_str()) {
             let effort_lower = effort.to_lowercase();
+            // 9router LEVEL_TO_BUDGET parity
             let budget = match effort_lower.as_str() {
                 "none" => Some(0u32),
-                "low" => Some(4096u32),
+                "minimal" => Some(512u32),
+                "low" => Some(1024u32),
                 "medium" => Some(8192u32),
-                "high" => Some(16384u32),
+                "high" => Some(24576u32),
                 "xhigh" => Some(32768u32),
+                "max" => Some(128000u32),
                 _ => None,
             };
             if let Some(b) = budget {

@@ -189,3 +189,38 @@ pub fn openai_to_antigravity_response(
 
     vec![response]
 }
+
+/// Registry adapter: OpenAI SSE/JSON bytes → Antigravity SSE lines.
+pub fn openai_to_antigravity_streaming(
+    chunk: &[u8],
+    state: &mut crate::core::translator::registry::ResponseTransformState,
+) -> Vec<String> {
+    let text = String::from_utf8_lossy(chunk);
+    let payload = {
+        let line = text.trim();
+        if let Some(rest) = line.strip_prefix("data:") {
+            rest.trim()
+        } else {
+            line.lines()
+                .find_map(|p| p.strip_prefix("data:").map(|r| r.trim()))
+                .unwrap_or(line)
+        }
+    };
+    if payload.is_empty() || payload == "[DONE]" {
+        return vec![];
+    }
+    let val: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let results = openai_to_antigravity_response(&val, &mut state.generic);
+    results
+        .into_iter()
+        .map(|v| {
+            format!(
+                "data: {}\n\n",
+                serde_json::to_string(&v).unwrap_or_default()
+            )
+        })
+        .collect()
+}

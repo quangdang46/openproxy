@@ -19,10 +19,9 @@ use crate::core::account_fallback::{
 use crate::core::chat::RequestPlan;
 use crate::core::combo::fusion::handle_fusion_chat;
 use crate::core::combo::{
-    check_fallback_error, detect_required_capabilities, execute_combo_strategy_with_capacity,
+    check_fallback_error, detect_required_capabilities, execute_combo_strategy_full,
     get_combo_models_from_data, get_disabled_members_for_combo, mark_combo_member_quarantined,
-    reorder_by_capabilities, ComboAttemptError, ComboExecutionError, ComboStrategy, FusionConfig,
-    ModelCapacity,
+    ComboAttemptError, ComboExecutionError, ComboStrategy, FusionConfig, ModelCapacity,
 };
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
@@ -38,6 +37,7 @@ use crate::core::translator::response_transform::{transform_sse_stream, transfor
 use crate::core::utils::bypass_handler::{detect_bypass, BypassDecision, DEFAULT_BYPASS_TEXT};
 use crate::core::utils::claude_cloaking::{cloak_claude_tools, CloakedRequest};
 use crate::core::utils::client_detector::{detect_client_tool, is_native_passthrough, ClientTool};
+use crate::core::utils::stream_flags::resolve_stream_flags;
 use crate::core::utils::tool_deduper::dedupe_tools;
 use crate::payload_rules::{apply_request_rules, apply_system_prompt};
 use crate::server::auth::{extract_api_key, require_api_key};
@@ -327,20 +327,12 @@ async fn chat_completions_impl(
 
     let client_tool = detect_client_tool(&headers_map, &body);
 
-    // 9router parity: Accept-header streaming preference (chatCore.js:87-94).
-    // When client explicitly prefers application/json over text/event-stream,
-    // force non-streaming so AI SDK / curl-style callers get a synchronous response.
-    if let Some(accept_val) = headers.get("accept") {
-        if let Ok(accept_str) = accept_val.to_str() {
-            let a = accept_str.to_lowercase();
-            let wants_json = a.contains("application/json");
-            let wants_sse = a.contains("text/event-stream");
-            if wants_json && !wants_sse && a != "*/*" {
-                body.as_object_mut()
-                    .and_then(|obj| obj.insert("stream".to_string(), Value::Bool(false)));
-            }
-        }
-    }
+    // Accept/stream preference is applied via resolve_stream_flags on the plan
+    // (does NOT mutate body.stream when client set stream:true — 9router parity).
+    let accept_header = headers
+        .get("accept")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let user_agent = headers
         .get("user-agent")
@@ -381,19 +373,17 @@ async fn chat_completions_impl(
                 return json_error_response(StatusCode::BAD_REQUEST, "Unknown combo model");
             };
 
-            // 9router parity: capability auto-switch — reorder models so that
-            // vision/pdf-capable providers are tried first when the request
-            // contains multimodal blocks. Models without required hard caps
-            // remain as last-resort fallback rather than being excluded.
+            // Capability auto-switch is applied AFTER round-robin rotation
+            // inside execute_combo_strategy_with_capacity (9router order:
+            // rotate first, then reorderByCapabilities).
             let required_caps = detect_required_capabilities(&body);
-            let combo_models = if !required_caps.is_empty() {
-                reorder_by_capabilities(&combo_models, &required_caps)
-            } else {
-                combo_models
-            };
 
             let disabled_members = get_disabled_members_for_combo(&combo_name, &snapshot.combos);
             let strategy = combo_strategy_for(&snapshot, &combo_name);
+            let sticky_limit = snapshot
+                .settings
+                .sticky_round_robin_limit
+                .max(1) as u32;
             let combo_body = body.clone();
             let combo_state = state.clone();
             let combo_api_key = presented_api_key.clone();
@@ -413,28 +403,17 @@ async fn chat_completions_impl(
             let combo_name_for_quarantine = combo_name.clone();
             let client_tool_for_combo = client_tool;
             let result = if strategy == ComboStrategy::Fusion {
-                let combo_data: serde_json::Map<String, serde_json::Value> = snapshot
-                    .combos
-                    .iter()
-                    .find(|c| c.name == combo_name)
-                    .map(|c| {
-                        c.extra
-                            .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
                 let f_state = state.clone();
                 let f_body = body.clone();
                 let f_api_key = presented_api_key.clone();
                 let f_client_tool = client_tool;
 
                 let panel_count = combo_models.len();
+                let fusion_cfg = fusion_config_for(&snapshot, &combo_name, panel_count);
                 let fusion_result = handle_fusion_chat(
                     &mut body.clone(),
                     &combo_models,
-                    &FusionConfig::from_extra(&combo_data, panel_count),
+                    &fusion_cfg,
                     None,
                     move |model: String, panel_body: Value| {
                         let state = f_state.clone();
@@ -493,11 +472,13 @@ async fn chat_completions_impl(
                 }
             } else {
                 let attempted_members = attempted_members.clone();
-                execute_combo_strategy_with_capacity(
+                execute_combo_strategy_full(
                     &combo_models,
                     Some(&combo_name),
                     strategy,
                     &disabled_members,
+                    sticky_limit,
+                    Some(&required_caps),
                     capacity_check,
                     move |combo_model| {
                         let state = combo_state.clone();
@@ -526,6 +507,14 @@ async fn chat_completions_impl(
                             RequestPlan::new(endpoint, &body, &combo_provider_str, &resolved_model);
                         combo_plan.passthrough =
                             is_native_passthrough(client_tool_for_combo, &combo_provider_str);
+                        // Accept header not available inside combo closure — use body only
+                        apply_stream_plan(
+                            &mut combo_plan,
+                            &body,
+                            None,
+                            client_tool_for_combo,
+                            None,
+                        );
                         let plan_for_combo = combo_plan.clone();
                         async move {
                             execute_single_model(
@@ -575,6 +564,13 @@ async fn chat_completions_impl(
                 &resolved.model,
             );
             plan.passthrough = is_native_passthrough(client_tool, &plan.provider);
+            apply_stream_plan(
+                &mut plan,
+                &body,
+                accept_header.as_deref(),
+                client_tool,
+                None,
+            );
             match execute_single_model(
                 &state,
                 &body,
@@ -591,6 +587,137 @@ async fn chat_completions_impl(
             }
         }
     }
+}
+
+/// Inject provider-level thinking override onto the **source** body
+/// (before translation). 9router chatCore.js:68-80.
+fn inject_provider_thinking(
+    body: &mut Value,
+    settings: &crate::types::Settings,
+    provider: &str,
+) {
+    let Some(provider_thinking) = settings
+        .extra
+        .get("providerThinking")
+        .and_then(|v| v.as_object())
+    else {
+        return;
+    };
+    let Some(mode_val) = provider_thinking.get(provider) else {
+        return;
+    };
+    let mode = mode_val.as_str().unwrap_or("auto");
+    if mode == "auto" {
+        return;
+    }
+    // JS: !body.thinking (any truthy) / !body.reasoning_effort
+    let has_thinking = body
+        .get("thinking")
+        .is_some_and(|v| !v.is_null() && v != &Value::Bool(false));
+    let has_effort = body
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
+
+    if mode == "on" && !has_thinking {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "thinking".to_string(),
+                json!({"type": "enabled", "budget_tokens": 10000}),
+            );
+        }
+    } else if mode == "off" && !has_thinking {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("thinking".to_string(), json!({"type": "disabled"}));
+        }
+    } else if mode != "on" && mode != "off" && !has_effort {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert(
+                "reasoning_effort".to_string(),
+                Value::String(mode.to_string()),
+            );
+        }
+    }
+}
+
+/// Prefetch remote images in OpenAI/Claude message content arrays.
+async fn prefetch_images_in_messages(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) else {
+        return;
+    };
+    let client = reqwest::Client::new();
+    for msg in messages.iter_mut() {
+        let content_array = match msg.get_mut("content") {
+            Some(Value::Array(arr)) => arr,
+            _ => continue,
+        };
+        for part in content_array.iter_mut() {
+            if let Some(url) = part
+                .get("image_url")
+                .and_then(|iu| iu.get("url"))
+                .and_then(|u| u.as_str())
+            {
+                if url.starts_with("http://") || url.starts_with("https://") {
+                    if let Some(fetched) = fetch_image_as_base64(&client, url).await {
+                        if let Some(img) =
+                            part.get_mut("image_url").and_then(|iu| iu.as_object_mut())
+                        {
+                            img.insert("url".into(), Value::String(fetched.data_url));
+                        }
+                    }
+                }
+            }
+            if let Some(source) = part.get("image").and_then(|im| im.get("source")) {
+                if source.get("type").and_then(|t| t.as_str()) == Some("url") {
+                    if let Some(url) = source.get("url").and_then(|u| u.as_str()) {
+                        if url.starts_with("http://") || url.starts_with("https://") {
+                            if let Some(fetched) = fetch_image_as_base64(&client, url).await {
+                                if let Some(src) = part
+                                    .get_mut("image")
+                                    .and_then(|im| im.get_mut("source"))
+                                    .and_then(|s| s.as_object_mut())
+                                {
+                                    src.insert("data".into(), Value::String(fetched.data_url));
+                                    src.insert("type".into(), Value::String("base64".into()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply 9router stream decision to a RequestPlan (mutates stream + sse_to_json).
+fn apply_stream_plan(
+    plan: &mut RequestPlan,
+    body: &Value,
+    accept: Option<&str>,
+    client_tool: Option<ClientTool>,
+    model_type: Option<&str>,
+) {
+    let body_stream = body.get("stream").and_then(Value::as_bool);
+    let sp = resolve_stream_flags(
+        body_stream,
+        accept,
+        &plan.provider,
+        &plan.model,
+        plan.source_format,
+        client_tool,
+        model_type,
+    );
+    plan.stream = sp.stream;
+    plan.sse_to_json = sp.sse_to_json;
+    tracing::debug!(
+        target: "openproxy::chat",
+        "STREAM provider={} stream={} client_requested={} force={} sse_to_json={}",
+        plan.provider,
+        sp.stream,
+        sp.client_requested_streaming,
+        sp.provider_forced,
+        sp.sse_to_json,
+    );
 }
 
 async fn execute_single_model(
@@ -616,91 +743,69 @@ async fn execute_single_model(
         });
     }
 
-    // 1. Strip unsupported modalities in source format before translation
-    let caps = capabilities_for_format(plan.source_format);
-    strip_unsupported_modalities(&mut body, plan.source_format, &caps);
+    // 0. providerThinking on SOURCE body BEFORE translate (9router chatCore.js:68-80)
+    inject_provider_thinking(&mut body, &snapshot.settings, &plan.provider);
 
-    // 2. Image prefetch: fetch remote images as base64 before translation
-    //     (runs before translate_request so image_url format is correct
-    //     before the body is rewritten — 9router parity).
-    if plan.target_format.needs_image_prefetch() {
-        if let Some(messages) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            let client = reqwest::Client::new();
-            for msg in messages.iter_mut() {
-                let content_array = match msg.get_mut("content") {
-                    Some(Value::Array(arr)) => arr,
-                    _ => continue,
-                };
-                for part in content_array.iter_mut() {
-                    // OpenAI format: image_url.url
-                    if let Some(url) = part
-                        .get("image_url")
-                        .and_then(|iu| iu.get("url"))
-                        .and_then(|u| u.as_str())
-                    {
-                        if url.starts_with("http://") || url.starts_with("https://") {
-                            if let Some(fetched) = fetch_image_as_base64(&client, url).await {
-                                if let Some(img) =
-                                    part.get_mut("image_url").and_then(|iu| iu.as_object_mut())
-                                {
-                                    img.insert("url".into(), Value::String(fetched.data_url));
-                                }
-                            }
-                        }
-                    }
-                    // Claude format: image.source.url
-                    if let Some(source) = part.get("image").and_then(|im| im.get("source")) {
-                        if source.get("type").and_then(|t| t.as_str()) == Some("url") {
-                            if let Some(url) = source.get("url").and_then(|u| u.as_str()) {
-                                if url.starts_with("http://") || url.starts_with("https://") {
-                                    if let Some(fetched) = fetch_image_as_base64(&client, url).await
-                                    {
-                                        if let Some(src) = part
-                                            .get_mut("image")
-                                            .and_then(|im| im.get_mut("source"))
-                                            .and_then(|s| s.as_object_mut())
-                                        {
-                                            src.insert(
-                                                "data".into(),
-                                                Value::String(fetched.data_url),
-                                            );
-                                            src.insert(
-                                                "type".into(),
-                                                Value::String("base64".into()),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    // Catalog stripList (image/audio) before modality strip — 9router translateRequest stripList
+    if !plan.strip_list.is_empty() {
+        let refs: Vec<&str> = plan.strip_list.iter().map(String::as_str).collect();
+        registry::strip_content_types(&mut body, &refs);
+    }
+
+    // 1–2. Modality strip + image prefetch only when NOT passthrough (9router)
+    if !plan.passthrough {
+        let caps = capabilities_for_format(plan.source_format);
+        strip_unsupported_modalities(&mut body, plan.source_format, &caps);
+
+        if plan.target_format.needs_image_prefetch() {
+            prefetch_images_in_messages(&mut body).await;
         }
     }
 
-    // 3. Translate request body from source format to target format
-    //     before applying RTK/Headroom/Caveman (9router order: translate first, then post-process).
-    if plan.needs_translation() {
-        registry::global_registry().translate_request(
+    // Dispatch uses catalog upstreamModelId when set
+    let dispatch_model = plan.dispatch_model().to_string();
+    if let Some(fields) = body.as_object_mut() {
+        fields.insert("model".into(), Value::String(dispatch_model.clone()));
+    }
+
+    // 3. Translate or native passthrough normalize
+    if plan.passthrough {
+        tracing::debug!(
+            target: "openproxy::chat",
+            "PASSTHROUGH client={:?} provider={}",
+            client_tool,
+            plan.provider
+        );
+        if client_tool == Some(ClientTool::Claude) {
+            crate::core::translator::request::claude_format::normalize_claude_passthrough(
+                &mut body,
+                &dispatch_model,
+            );
+        }
+    } else if plan.needs_translation() {
+        let creds = json!({
+            "provider": plan.provider,
+        });
+        let strip_refs: Vec<&str> = plan.strip_list.iter().map(String::as_str).collect();
+        registry::global_registry().translate_request_with_strip(
             plan.source_format,
             plan.target_format,
-            &plan.model,
+            &dispatch_model,
             &mut body,
             plan.stream,
-            None,
+            Some(&creds),
+            if strip_refs.is_empty() {
+                None
+            } else {
+                Some(&strip_refs)
+            },
         );
     }
 
     // 4. RTK tool-result compression (after translate — 9router parity)
     compress_messages(&mut body, snapshot.settings.rtk_enabled);
 
-    // 5. Headroom external token compression (after translate — 9router parity)
-    //     Bug #278 fix: use target_format instead of source_format — the body
-    //     has already been translated by step 2, so Headroom needs to know what
-    //     shape the request body is in right now (target format).
-    //     Uses the same format string as compress_with_headroom expects:
-    //     "claude" for Claude-shaped bodies, "openai" for everything else.
+    // 5. Headroom (after translate — 9router parity; format = final body shape)
     {
         let headroom_cfg = HeadroomConfig {
             enabled: snapshot.settings.headroom_enabled,
@@ -708,15 +813,9 @@ async fn execute_single_model(
             timeout_ms: snapshot.settings.headroom_timeout_ms,
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
         };
-        let headroom_format =
-            if plan.target_format == crate::core::translator::registry::Format::Claude {
-                "claude"
-            } else {
-                "openai"
-            };
-        // Phantom savings: log an estimated pre-compression range before the
-        // actual Headroom call, so dashboards and metrics see a prediction even
-        // when the proxy is slow or unreachable.
+        let final_is_claude = (plan.passthrough && plan.source_format == Format::Claude)
+            || (!plan.passthrough && plan.target_format == Format::Claude);
+        let headroom_format = if final_is_claude { "claude" } else { "openai" };
         if let Ok(body_str) = serde_json::to_string(&body) {
             let est_tokens = body_str.len().div_ceil(4);
             if est_tokens > 0 {
@@ -734,54 +833,10 @@ async fn execute_single_model(
         }
     }
 
-    // 6. 9router parity: provider-level thinking config override (chatCore.js:44-57).
-    //     After Headroom so token budgets are applied to any external-compressed body.
-    if let Some(provider_thinking) = snapshot
-        .settings
-        .extra
-        .get("providerThinking")
-        .and_then(|v| v.as_object())
-    {
-        if let Some(mode_val) = provider_thinking.get(plan.provider.as_str()) {
-            let mode = mode_val.as_str().unwrap_or("auto");
-            if mode != "auto" {
-                if mode == "on" && !body.get("thinking").and_then(|v| v.as_object()).is_some() {
-                    if let Some(obj) = body.as_object_mut() {
-                        obj.insert(
-                            "thinking".to_string(),
-                            json!({"type": "enabled", "budget_tokens": 10000}),
-                        );
-                    }
-                } else if mode == "off"
-                    && !body.get("thinking").and_then(|v| v.as_object()).is_some()
-                {
-                    if let Some(obj) = body.as_object_mut() {
-                        obj.insert("thinking".to_string(), json!({"type": "disabled"}));
-                    }
-                } else if mode != "on"
-                    && mode != "off"
-                    && !body
-                        .get("reasoning_effort")
-                        .and_then(|v| v.as_str())
-                        .map(|s| !s.is_empty())
-                        .unwrap_or(false)
-                {
-                    if let Some(obj) = body.as_object_mut() {
-                        obj.insert(
-                            "reasoning_effort".to_string(),
-                            Value::String(mode.to_string()),
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    // 7. Caveman + Ponytail prompt injection (after translate — 9router parity)
+    // 6. Caveman + Ponytail (after translate — 9router parity)
     let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
 
-    // Deduplicate tool definitions when MCP equivalents are present
-    // (9router parity: only strips for Claude client).
+    // 7. Tool dedupe for Claude clients (after translate, before dispatch)
     if client_tool == Some(ClientTool::Claude) {
         if let Some(tools_val) = body.get("tools").and_then(|t| t.as_array()) {
             let result = dedupe_tools(tools_val);
@@ -793,20 +848,43 @@ async fn execute_single_model(
         }
     }
 
+    // 8. TTS models: strip tool messages + tools (9router chatCore.js:185-189)
+    let model_lower = plan.model.to_lowercase();
+    if model_lower.contains("tts")
+        || model_lower.contains("speech")
+        || model_lower.starts_with("tts-")
+    {
+        if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+            msgs.retain(|m| m.get("role").and_then(|r| r.as_str()) != Some("tool"));
+        }
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("tools");
+        }
+    }
+
+    // Sync stream flag onto body for executors that read body.stream
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("stream".into(), Value::Bool(plan.stream));
+    }
+
     tracing::debug!(
-        "PLAN provider={} model={} source={:?} target={:?} stream={} translate={}",
+        target: "openproxy::chat",
+        "PLAN provider={} model={} upstream={} source={:?} target={:?} stream={} translate={} transport={:?} strip={:?}",
         plan.provider,
         plan.model,
+        dispatch_model,
         plan.source_format,
         plan.target_format,
         plan.stream,
         plan.needs_translation(),
+        plan.transport_base_url,
+        plan.strip_list,
     );
 
     forward_with_provider_fallback(
         state,
         &plan.provider,
-        &plan.model,
+        &dispatch_model,
         body,
         api_key,
         endpoint,
@@ -839,7 +917,7 @@ async fn forward_with_provider_fallback(
 
     loop {
         let snapshot = state.db.snapshot();
-        let Some(connection) =
+        let Some(mut connection) =
             select_connection(&snapshot, provider, model, &excluded, Some(registry))
         else {
             let retry_after = earliest_retry_after(&snapshot, provider, model, &excluded);
@@ -861,6 +939,13 @@ async fn forward_with_provider_fallback(
                 upstream_body: None,
             });
         };
+
+        // 9router resolveTransport: pin multi-endpoint base URL for this request
+        if let Some(ref base) = plan.transport_base_url {
+            connection.runtime_transport = Some(crate::types::RuntimeTransport {
+                base_url: Some(base.clone()),
+            });
+        }
 
         let provider_node = snapshot
             .provider_nodes
@@ -890,18 +975,12 @@ async fn forward_with_provider_fallback(
             fields.remove("__dashboard_stream");
         }
 
-        let stream = request_body
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-
-        // DeepSeek TUI non-interactive (-p) mode can't parse SSE
-        // (9router chatCore.js:81-86 parity).
-        let stream = if client_tool == Some(ClientTool::DeepseekTui) {
-            false
-        } else {
-            stream
-        };
+        // Stream flag already resolved on plan via resolve_stream_flags
+        // (DeepSeek-TUI, forceStream, Accept, imageGen — 9router parity).
+        let stream = plan.stream;
+        if let Some(obj) = request_body.as_object_mut() {
+            obj.insert("stream".into(), Value::Bool(stream));
+        }
 
         state
             .usage_live
@@ -1413,6 +1492,85 @@ async fn forward_with_provider_fallback(
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
+            } else if provider == "codebuddy-cn" || provider == "cbcn" {
+                use crate::core::executor::CodeBuddyCNExecutor;
+                let executor =
+                    CodeBuddyCNExecutor::new(state.client_pool.clone(), provider_node.clone());
+                let result = executor
+                    .execute(ProviderExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream: true, // force stream (9router)
+                        credentials: connection.clone(),
+                        proxy,
+                        signal: None,
+                        log: None,
+                        proxy_options: None,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("CodeBuddy CN execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "ollama-local" || provider == "ollama" {
+                use crate::core::executor::{OllamaExecutionRequest, OllamaExecutor};
+                let executor = OllamaExecutor::new(state.client_pool.clone());
+                let result = executor
+                    .execute_request(OllamaExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Ollama execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "mimo-free" || provider == "mmf" {
+                use crate::core::executor::{MimoFreeExecutionRequest, MimoFreeExecutor};
+                let executor = MimoFreeExecutor::new(state.client_pool.clone());
+                let result = executor
+                    .execute_request(MimoFreeExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("MimoFree execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
             } else {
                 let executor = DefaultExecutor::new(
                     provider.to_string(),
@@ -1460,7 +1618,7 @@ async fn forward_with_provider_fallback(
                         let reset = retry_after.timestamp();
                         registry.update_rate_limit(&connection.id, remaining, reset);
                     }
-                    clear_connection_error(state, &connection.id).await;
+                    clear_connection_error_for_model(state, &connection.id, Some(model)).await;
                     if dashboard_stream {
                         return Ok(proxy_dashboard_sse_with_usage_tracking(
                             result.response,
@@ -1470,6 +1628,26 @@ async fn forward_with_provider_fallback(
                             Some(connection.id.as_str()),
                             api_key,
                             endpoint,
+                        )
+                        .await);
+                    }
+                    // forceStream + client non-stream → collect SSE → JSON (9router)
+                    if plan.sse_to_json {
+                        tracing::debug!(
+                            target: "openproxy::chat",
+                            "FORCE_STREAM sse_to_json provider={} model={}",
+                            provider,
+                            model
+                        );
+                        return Ok(proxy_sse_to_json_response(
+                            result.response,
+                            state,
+                            provider,
+                            model,
+                            Some(connection.id.as_str()),
+                            api_key,
+                            endpoint,
+                            plan,
                         )
                         .await);
                     }
@@ -1539,8 +1717,8 @@ async fn forward_with_provider_fallback(
 
                 // Token refresh: on 401/403, try to refresh the access token
                 // before giving up on this connection (9router parity).
-                // On success, update the DB and continue the loop so the
-                // fresh snapshot picks up the renewed token.
+                // On success, merge credentials (expires_at, refresh, PSD) and
+                // continue the loop so the fresh snapshot picks up the token.
                 if (status.as_u16() == 401 || status.as_u16() == 403)
                     && connection.refresh_token.is_some()
                 {
@@ -1556,6 +1734,10 @@ async fn forward_with_provider_fallback(
                             let conn_id = connection.id.clone();
                             let new_access = result.access_token.clone();
                             let new_refresh = result.refresh_token.clone();
+                            let expires_at = result.expires_in.map(|secs| {
+                                (Utc::now() + ChronoDuration::seconds(secs as i64)).to_rfc3339()
+                            });
+                            let last_refresh_at = Utc::now().to_rfc3339();
                             let _ = state
                                 .db
                                 .update(move |db| {
@@ -1563,9 +1745,17 @@ async fn forward_with_provider_fallback(
                                         db.provider_connections.iter_mut().find(|c| c.id == conn_id)
                                     {
                                         conn.access_token = Some(new_access);
+                                        // Preserve old refresh_token when response omits it
                                         if let Some(rt) = new_refresh {
                                             conn.refresh_token = Some(rt);
                                         }
+                                        if let Some(exp) = expires_at {
+                                            conn.expires_at = Some(exp);
+                                        }
+                                        conn.provider_specific_data.insert(
+                                            "lastRefreshAt".into(),
+                                            Value::String(last_refresh_at),
+                                        );
                                         conn.last_error = None;
                                         conn.last_error_at = None;
                                         conn.error_code = None;
@@ -1950,16 +2140,60 @@ fn combo_strategy_for(snapshot: &AppDb, combo_name: &str) -> ComboStrategy {
         .settings
         .combo_strategies
         .get(combo_name)
-        .map(String::as_str)
+        .map(|e| e.strategy_name())
         .unwrap_or(snapshot.settings.combo_strategy.as_str());
 
     if value.eq_ignore_ascii_case("round-robin") {
         ComboStrategy::RoundRobin
     } else if value.eq_ignore_ascii_case("fusion") {
         ComboStrategy::Fusion
+    } else if value.eq_ignore_ascii_case("hedging") {
+        // Documented: hedging module exists; dispatcher falls back until wired
+        ComboStrategy::Fallback
+    } else if value.eq_ignore_ascii_case("shadow") {
+        ComboStrategy::Fallback
+    } else if value.eq_ignore_ascii_case("auto-combo") || value.eq_ignore_ascii_case("autocombo") {
+        ComboStrategy::Fallback
     } else {
         ComboStrategy::Fallback
     }
+}
+
+/// Merge 9router nested comboStrategies[name] (judgeModel / fusionTuning) into FusionConfig.
+fn fusion_config_for(snapshot: &AppDb, combo_name: &str, panel_count: usize) -> FusionConfig {
+    let mut extra: serde_json::Map<String, Value> = snapshot
+        .combos
+        .iter()
+        .find(|c| c.name == combo_name)
+        .map(|c| c.extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
+
+    if let Some(entry) = snapshot.settings.combo_strategies.get(combo_name) {
+        if let Some(judge) = entry.judge_model() {
+            extra.insert("judgeModel".into(), Value::String(judge.to_string()));
+            // Also nest under fusionConfig for from_extra
+            let mut fc = extra
+                .get("fusionConfig")
+                .and_then(|v| v.as_object().cloned())
+                .unwrap_or_default();
+            fc.insert("judgeModel".into(), Value::String(judge.to_string()));
+            extra.insert("fusionConfig".into(), Value::Object(fc));
+        }
+        if let Some(tuning) = entry.fusion_tuning() {
+            if let Some(obj) = tuning.as_object() {
+                let mut fc = extra
+                    .get("fusionConfig")
+                    .and_then(|v| v.as_object().cloned())
+                    .unwrap_or_default();
+                for (k, v) in obj {
+                    fc.insert(k.clone(), v.clone());
+                }
+                extra.insert("fusionConfig".into(), Value::Object(fc));
+            }
+        }
+    }
+
+    FusionConfig::from_extra(&extra, panel_count)
 }
 
 async fn mark_connection_unavailable(
@@ -2000,7 +2234,19 @@ async fn mark_connection_unavailable(
 }
 
 async fn clear_connection_error(state: &AppState, connection_id: &str) {
+    clear_connection_error_for_model(state, connection_id, None).await;
+}
+
+/// Clear error state; only remove expired model locks and optionally the
+/// succeeded model lock (9router clearAccountError selective clear).
+async fn clear_connection_error_for_model(
+    state: &AppState,
+    connection_id: &str,
+    succeeded_model: Option<&str>,
+) {
     let connection_id = connection_id.to_string();
+    let succeeded_model = succeeded_model.map(|s| s.to_string());
+    let now = Utc::now();
     let _ = state
         .db
         .update(move |db| {
@@ -2015,12 +2261,100 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
                 connection.backoff_level = Some(0);
                 connection.consecutive_errors = Some(0);
                 connection.test_status = None;
-                // Clear stale model locks so this connection is immediately
-                // re-usable for future requests (matching 9router behaviour).
-                connection.extra.retain(|k, _| !k.starts_with("modelLock_"));
+                // Selective clear: remove expired locks + lock for succeeded model only
+                let model_key = succeeded_model
+                    .as_ref()
+                    .map(|m| format!("modelLock_{m}"));
+                connection.extra.retain(|k, v| {
+                    if !k.starts_with("modelLock_") {
+                        return true;
+                    }
+                    // Drop expired
+                    if let Some(exp) = v.as_str() {
+                        if let Ok(t) = DateTime::parse_from_rfc3339(exp) {
+                            if t.with_timezone(&Utc) <= now {
+                                return false;
+                            }
+                        }
+                    }
+                    // Drop succeeded model lock
+                    if let Some(ref mk) = model_key {
+                        if k == mk {
+                            return false;
+                        }
+                    }
+                    true
+                });
             }
         })
         .await;
+}
+
+/// forceStream SSE→JSON: collect upstream SSE and collapse to chat.completion JSON.
+async fn proxy_sse_to_json_response(
+    response: UpstreamResponse,
+    state: &AppState,
+    provider: &str,
+    model: &str,
+    connection_id: Option<&str>,
+    api_key: Option<&str>,
+    endpoint: Option<&str>,
+    plan: &RequestPlan,
+) -> Response {
+    let status = response.status();
+    let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
+
+    let json_body = crate::core::media::responses::stream_to_json::sse_stream_to_json(
+        &body_bytes,
+        Some(model),
+    )
+    .unwrap_or_else(|| {
+        // Fallback: try parse as JSON already, else wrap error
+        serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
+            json!({
+                "error": {
+                    "message": "Failed to convert forced SSE stream to JSON",
+                    "type": "server_error",
+                    "code": "sse_to_json_failed"
+                }
+            })
+        })
+    });
+
+    let out = Bytes::from(serde_json::to_vec(&json_body).unwrap_or_default());
+
+    if body_complete {
+        let usage = extract_token_usage_from_bytes(&out);
+        state
+            .usage_tracker()
+            .track_request(
+                provider,
+                model,
+                usage.as_ref(),
+                connection_id,
+                api_key,
+                endpoint,
+            )
+            .await;
+    }
+    state
+        .usage_live
+        .finish_request(model, provider, connection_id, false)
+        .await;
+
+    let resp = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(out))
+        .unwrap_or_else(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build response",
+            )
+                .into_response()
+        });
+    let _ = plan; // reserved for future format-specific collapse
+    with_cors_response(resp)
 }
 
 async fn proxy_response_with_usage_tracking(
@@ -2205,6 +2539,51 @@ async fn proxy_response_with_pending_tracking(
     let stream_target_format = plan.target_format;
     let status = response.status();
     let headers = response.headers().clone();
+
+    // 9router streamingHandler: reject non-SSE content-types when client expects stream
+    let ct = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    if !ct.is_empty()
+        && !ct.contains("text/event-stream")
+        && !ct.contains("application/octet-stream")
+        && !ct.contains("application/x-ndjson")
+        && (ct.contains("text/html") || ct.contains("application/json") || ct.contains("text/plain"))
+    {
+        // Collect body and return structured error instead of piping garbage as SSE
+        let (body_bytes, _) = collect_upstream_response_bytes(response).await;
+        let msg = String::from_utf8_lossy(&body_bytes);
+        let msg = if msg.len() > 500 {
+            format!("{}…", &msg[..500])
+        } else {
+            msg.to_string()
+        };
+        tracing::warn!(
+            target: "openproxy::chat",
+            "STREAM_GUARD non-SSE content-type={} status={} body_snip={}",
+            ct,
+            status.as_u16(),
+            msg.chars().take(120).collect::<String>()
+        );
+        let err = json!({
+            "error": {
+                "message": format!("Upstream returned non-SSE content-type '{ct}': {msg}"),
+                "type": "server_error",
+                "code": "upstream_non_sse"
+            }
+        });
+        return with_cors_response(
+            (
+                StatusCode::BAD_GATEWAY,
+                [(header::CONTENT_TYPE, "application/json")],
+                err.to_string(),
+            )
+                .into_response(),
+        );
+    }
+
     let transformer = normalize_for_dashboard
         .then(|| transformer_for_provider(&provider))
         .flatten();

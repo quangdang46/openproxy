@@ -57,6 +57,7 @@ source/*
 docs/*
 !docs/ARCHITECTURE.md
 !docs/integrations/
+!docs/parity-9router.md
 test/*
 bin/*
 open-sse/test/*

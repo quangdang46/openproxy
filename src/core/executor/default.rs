@@ -608,11 +608,20 @@ impl DefaultExecutor {
         stream: bool,
         credentials: &ProviderConnection,
     ) -> Result<String, ExecutorError> {
-        // Check runtime_transport base_url override on the connection first
+        // Check runtime_transport base_url override on the connection first.
+        // 9router multi-endpoint transports store a full endpoint URL
+        // (…/chat/completions or …/messages). Use as-is when path is present;
+        // otherwise append the provider-default path.
         if let Some(rt) = &credentials.runtime_transport {
             if let Some(rt_base_url) = &rt.base_url {
                 let normalized = rt_base_url.trim_end_matches('/');
-                // Determine the path based on provider type
+                let already_endpoint = normalized.contains("/chat/completions")
+                    || normalized.ends_with("/messages")
+                    || normalized.contains("/anthropic/v1/messages")
+                    || normalized.contains("/responses");
+                if already_endpoint {
+                    return Ok(normalized.to_string());
+                }
                 if let Some(node) = &self.provider_node {
                     if node.r#type == "anthropic-compatible" {
                         return Ok(format!("{}/messages", normalized));
@@ -763,23 +772,43 @@ impl DefaultExecutor {
                 .ok_or_else(|| ExecutorError::MissingCredentials(self.provider.clone()))?;
             headers.insert("x-api-key", HeaderValue::from_str(token)?);
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
-        } else if is_anthropic_compatible {
+        } else if is_anthropic_compatible || self.provider.starts_with("anthropic-compatible") {
+            // 9router: anthropic-version + dual auth (x-api-key and/or Bearer)
             headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
             if let Some(api_key) = credentials.api_key.as_deref() {
                 headers.insert("x-api-key", HeaderValue::from_str(api_key)?);
-            } else if let Some(access_token) = credentials.access_token.as_deref() {
+                // Dual-auth: also send Bearer for third-party gateways (9router)
+                if !headers.contains_key(AUTHORIZATION) {
+                    headers.insert(
+                        AUTHORIZATION,
+                        HeaderValue::from_str(&format!("Bearer {api_key}"))?,
+                    );
+                }
+            }
+            if let Some(access_token) = credentials.access_token.as_deref() {
                 headers.insert(
                     AUTHORIZATION,
                     HeaderValue::from_str(&format!("Bearer {access_token}"))?,
                 );
-            } else {
+            }
+            if !headers.contains_key("x-api-key") && !headers.contains_key(AUTHORIZATION) {
                 return Err(ExecutorError::MissingCredentials(self.provider.clone()));
             }
+            // Strip first-party Claude Code identity headers for non-Anthropic upstreams
+            for h in [
+                "x-stainless-package-version",
+                "x-stainless-runtime",
+                "x-stainless-runtime-version",
+                "anthropic-beta",
+            ] {
+                headers.remove(h);
+            }
         } else {
+            // Prefer access_token over api_key for Bearer (9router BaseExecutor)
             let token = credentials
-                .api_key
+                .access_token
                 .as_deref()
-                .or(credentials.access_token.as_deref())
+                .or(credentials.api_key.as_deref())
                 .ok_or_else(|| ExecutorError::MissingCredentials(self.provider.clone()))?;
 
             if matches!(
@@ -797,6 +826,34 @@ impl DefaultExecutor {
                     AUTHORIZATION,
                     HeaderValue::from_str(&format!("Bearer {token}"))?,
                 );
+            }
+
+            // Header hooks: kimi / cline / claude overlay (9router default.js)
+            if self.provider == "kimi" || self.provider == "kimi-coding" {
+                headers.insert(
+                    "User-Agent",
+                    HeaderValue::from_static("Mozilla/5.0 KimiCoding"),
+                );
+            }
+            if self.provider == "cline" || self.provider == "clinepass" {
+                // Cline often needs workos: prefix handled elsewhere; keep Bearer
+            }
+            // Claude header cache overlay for anthropic/claude providers
+            if matches!(self.provider.as_str(), "claude" | "anthropic") {
+                if let Some(overlay) =
+                    crate::core::utils::claude_header_cache::get_cached_claude_headers()
+                {
+                    for (k, v) in overlay {
+                        if let (Ok(name), Ok(val)) = (
+                            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                            HeaderValue::from_str(&v),
+                        ) {
+                            if !headers.contains_key(&name) {
+                                headers.insert(name, val);
+                            }
+                        }
+                    }
+                }
             }
 
             if self.provider == "kilocode" {
@@ -989,6 +1046,11 @@ impl DefaultExecutor {
                         }
                     }
                     // No refresh or refresh didn't help — try next fallback URL.
+                    break;
+                }
+
+                // 429: try next fallback URL (9router BaseExecutor.shouldRetry)
+                if status == http::StatusCode::TOO_MANY_REQUESTS {
                     break;
                 }
 

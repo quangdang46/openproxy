@@ -245,6 +245,59 @@ pub struct CustomModel {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// Per-combo strategy entry — 9router `settings.comboStrategies[name]`.
+///
+/// Accepts either a bare strategy string (`"fusion"`) for backward compatibility
+/// or a nested object with `fallbackStrategy`, `judgeModel`, and `fusionTuning`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ComboStrategyEntry {
+    /// Legacy flat form: `"round-robin"` / `"fusion"` / `"fallback"`.
+    Name(String),
+    /// Nested form matching 9router dashboard + chat handlers.
+    Config(ComboStrategyConfig),
+}
+
+impl ComboStrategyEntry {
+    /// Strategy name used by the dispatcher (`fallback` | `round-robin` | `fusion` | …).
+    pub fn strategy_name(&self) -> &str {
+        match self {
+            Self::Name(s) => s.as_str(),
+            Self::Config(c) => c
+                .fallback_strategy
+                .as_deref()
+                .unwrap_or("fallback"),
+        }
+    }
+
+    pub fn judge_model(&self) -> Option<&str> {
+        match self {
+            Self::Config(c) => c.judge_model.as_deref().filter(|s| !s.is_empty()),
+            Self::Name(_) => None,
+        }
+    }
+
+    pub fn fusion_tuning(&self) -> Option<&Value> {
+        match self {
+            Self::Config(c) => c.fusion_tuning.as_ref(),
+            Self::Name(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ComboStrategyConfig {
+    #[serde(default)]
+    pub fallback_strategy: Option<String>,
+    #[serde(default)]
+    pub judge_model: Option<String>,
+    #[serde(default)]
+    pub fusion_tuning: Option<Value>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Combo {
@@ -323,8 +376,10 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub combo_strategy: String,
+    /// Per-combo strategy overrides. Accepts legacy string (`"fusion"`) or
+    /// 9router nested object (`{ fallbackStrategy, judgeModel, fusionTuning }`).
     #[serde(default, deserialize_with = "deserialize_null_default")]
-    pub combo_strategies: BTreeMap<String, String>,
+    pub combo_strategies: BTreeMap<String, ComboStrategyEntry>,
     #[serde(
         default = "default_true",
         deserialize_with = "deserialize_null_default"

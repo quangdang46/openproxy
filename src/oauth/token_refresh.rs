@@ -295,11 +295,17 @@ fn make_dedup_key(provider: &str, old_token: &str) -> String {
     format!("{}:{}", provider, old_token)
 }
 
+/// Codex max refresh age: 8 days (9router CODEX_MAX_REFRESH_AGE_MS).
+pub const CODEX_MAX_REFRESH_AGE_MS: u64 = 8 * 24 * 60 * 60 * 1000;
+
 /// Check whether an access token needs refreshing based on its `expires_at`
 /// RFC 3339 timestamp.
+///
+/// Missing expires_at → false for proactive path (9router isTokenExpiringSoon).
+/// Reactive 401 path still refreshes when refresh_token is present.
 pub fn needs_refresh(expires_at: &Option<String>) -> bool {
     let Some(expires_at) = expires_at else {
-        return true;
+        return false;
     };
 
     match chrono::DateTime::parse_from_rfc3339(expires_at) {
@@ -317,7 +323,7 @@ pub fn needs_refresh(expires_at: &Option<String>) -> bool {
 /// lead time.  Used by openai.rs, xai.rs, gemini_cli.rs, and antigravity.rs.
 pub fn needs_refresh_with_lead(expires_at: &Option<String>, lead_ms: u64) -> bool {
     let Some(expires_at) = expires_at else {
-        return true;
+        return false;
     };
 
     match chrono::DateTime::parse_from_rfc3339(expires_at) {
@@ -328,6 +334,30 @@ pub fn needs_refresh_with_lead(expires_at: &Option<String>, lead_ms: u64) -> boo
             expires_at - lead < now
         }
         Err(_) => true,
+    }
+}
+
+/// Full 9router shouldRefreshCredentials: lead-time OR max-refresh-age (codex).
+pub fn should_refresh_credentials(
+    provider: &str,
+    expires_at: &Option<String>,
+    last_refresh_at: Option<&str>,
+    has_refresh_token: bool,
+    lead_ms: u64,
+) -> bool {
+    if needs_refresh_with_lead(expires_at, lead_ms) {
+        return true;
+    }
+    // Codex: refresh every 8 days even if access token still valid
+    if has_refresh_token && matches!(provider, "codex" | "opencode" | "cx") {
+        let max_age = chrono::Duration::milliseconds(CODEX_MAX_REFRESH_AGE_MS as i64);
+        let now = chrono::Utc::now();
+        match last_refresh_at.and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()) {
+            Some(last) => now - last.with_timezone(&chrono::Utc) >= max_age,
+            None => true, // never refreshed → stale
+        }
+    } else {
+        false
     }
 }
 
@@ -432,6 +462,9 @@ pub async fn refresh_iflow_token(refresh_token: &str) -> Result<RefreshResult, S
     parse_json_refresh_response(resp).await
 }
 
+/// Official GitHub OAuth app client id used by 9router / GitHub Copilot flows.
+const GITHUB_OAUTH_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
+
 /// Refresh a GitHub OAuth token.
 ///
 /// Note: GitHub's token refresh response does *not* include a `refresh_token`
@@ -442,7 +475,7 @@ pub async fn refresh_github_token(refresh_token: &str) -> Result<RefreshResult, 
         vec![
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
-            ("client_id", "openproxy"),
+            ("client_id", GITHUB_OAUTH_CLIENT_ID),
         ],
     )
     .await
@@ -452,11 +485,12 @@ pub async fn refresh_github_token(refresh_token: &str) -> Result<RefreshResult, 
 ///
 /// Unlike the other refresh functions this takes a *GitHub OAuth access token*
 /// (not a refresh token) and performs a **GET** request.
+/// Auth scheme is `token` (not Bearer) — 9router parity.
 pub async fn refresh_copilot_token(access_token: &str) -> Result<RefreshResult, String> {
     let client = reqwest::Client::new();
     let resp = client
         .get(GITHUB_COPILOT_TOKEN_URL)
-        .header(AUTHORIZATION, format!("Bearer {access_token}"))
+        .header(AUTHORIZATION, format!("token {access_token}"))
         .header("User-Agent", "GitHubCopilotChat/0.38.0")
         .header("Editor-Version", "vscode/1.110.0")
         .header("Editor-Plugin-Version", "copilot-chat/0.38.0")
@@ -722,21 +756,76 @@ pub async fn refresh_codebuddy_token(refresh_token: &str) -> Result<RefreshResul
 }
 
 /// Refresh a CodeBuddy CN access token.
+///
+/// 9router wire format: POST refreshUrl with JSON body `"{}"` and
+/// `X-Refresh-Token` header (not form-urlencoded OAuth). Response:
+/// `{ code: 0, data: { accessToken, refreshToken?, expiresIn? } }`.
 pub async fn refresh_codebuddy_cn_token(refresh_token: &str) -> Result<RefreshResult, String> {
     let client = reqwest::Client::new();
     let resp = client
         .post("https://copilot.tencent.com/v2/plugin/auth/token/refresh")
-        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("refresh_token", refresh_token),
-            ("client_id", "openproxy"),
-        ])
+        .header("User-Agent", "CLI/2.63.2 CodeBuddy/2.63.2")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("X-Domain", "copilot.tencent.com")
+        .header("X-Refresh-Token", refresh_token)
+        .header("X-Auth-Refresh-Source", "plugin")
+        .header("X-Product", "SaaS")
+        .body("{}")
         .send()
         .await
         .map_err(|e| format!("CodeBuddy CN refresh request failed: {e}"))?;
-    parse_json_refresh_response(resp).await
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "CodeBuddy CN refresh returned HTTP {status}: {text}"
+        ));
+    }
+
+    let payload: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("CodeBuddy CN refresh parse failed: {e}"))?;
+
+    let code = payload.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code != 0 {
+        return Err(format!(
+            "CodeBuddy CN refresh code={code} msg={:?}",
+            payload.get("msg")
+        ));
+    }
+
+    let data = payload
+        .get("data")
+        .ok_or_else(|| "CodeBuddy CN refresh missing data".to_string())?;
+
+    let access = data
+        .get("accessToken")
+        .or_else(|| data.get("access_token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "CodeBuddy CN refresh missing accessToken".to_string())?;
+
+    let new_refresh = data
+        .get("refreshToken")
+        .or_else(|| data.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let expires_in = data
+        .get("expiresIn")
+        .or_else(|| data.get("expires_in"))
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)));
+
+    Ok(RefreshResult {
+        access_token: access.to_string(),
+        refresh_token: new_refresh,
+        expires_in,
+    })
 }
 
 /// Qoder does not support token refresh. This function always returns an error.
@@ -877,6 +966,22 @@ pub async fn dispatch_oauth_refresh(
             dedup_refresh(provider, refresh_token, move || {
                 let (rt, pdata) = (rt.clone(), pdata.clone());
                 async move { refresh_kiro_token(&rt, &pdata).await }
+            })
+            .await
+        }
+        "github" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_github_token(&rt).await }
+            })
+            .await
+        }
+        "grok-cli" | "gcli" | "gb" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_xai_token(&rt).await }
             })
             .await
         }

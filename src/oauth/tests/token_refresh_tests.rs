@@ -177,7 +177,8 @@ fn test_github_copilot_token_minimal() {
 
 #[test]
 fn test_needs_refresh_none() {
-    assert!(crate::oauth::needs_refresh(&None));
+    // Missing expires_at → false for proactive path (9router isTokenExpiringSoon)
+    assert!(!crate::oauth::needs_refresh(&None));
 }
 
 #[test]

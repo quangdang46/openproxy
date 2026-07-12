@@ -14,14 +14,14 @@ Replace 9router (Node.js) with a faster, safer Rust implementation that avoids 2
 - **Security**: HMAC API keys, bcrypt auth, SSRF protection
 
 ## Beads
-23 beads in `.beads/` organized across 7 phases. See `bv --robot-next` or `br ready` for actionable items.
+Parity work: epic `openproxy-9router-parity-mj1` (+ children). See `br ready` / `bv --robot-next`.
 
 ## Key References
-- `9router-audit-plan.md` — full plan with 9router bugs avoided per bead
-- 9router repo at `/tmp/9router` for reference implementation (do NOT copy JS patterns directly)
+- `docs/parity-9router.md` — intentional divergences, pipeline order, executor dispatch
+- 9router reference: `/tmp/9router` (open-sse) — do NOT copy JS bugs blindly
 
 ## Status
-Phase 1-6 planned, no implementation started yet. Start with `bv --robot-next`.
+Active parity port. Run `cargo test -p openproxy --lib parity_tests stream_flags` for smoke.
 
 ## Schema stability (`openproxy.v1.*`)
 

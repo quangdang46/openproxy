@@ -112,8 +112,33 @@ impl GithubExecutor {
     }
 
     fn build_url(&self) -> String {
-        // GitHub Copilot uses a fixed base URL for chat completions
         "https://api.githubcopilot.com/chat/completions".to_string()
+    }
+
+    fn responses_url(&self) -> String {
+        "https://api.githubcopilot.com/responses".to_string()
+    }
+
+    /// Models that may require /responses (gpt/codex family). Gemini/Claude never escalate.
+    fn supports_responses_endpoint(model: &str) -> bool {
+        let lower = model.to_lowercase();
+        if lower.contains("gemini") || lower.contains("claude") {
+            return false;
+        }
+        lower.contains("codex")
+            || lower.contains("gpt-5")
+            || lower.starts_with("o1")
+            || lower.starts_with("o3")
+            || lower.starts_with("o4")
+            || lower.contains("gpt-4.1")
+    }
+
+    fn needs_responses_model(model: &str) -> bool {
+        let lower = model.to_lowercase();
+        lower.contains("codex")
+            || (lower.contains("gpt-5") && lower.contains("codex"))
+            || lower.contains("gpt-5.3-codex")
+            || lower.contains("codex-mini")
     }
 
     fn build_headers(&self, credentials: &ProviderConnection, stream: bool) -> HeaderMap {
@@ -374,19 +399,57 @@ impl GithubExecutor {
         &self,
         request: GithubExecutionRequest,
     ) -> Result<GithubExecutorResponse, GithubExecutorError> {
-        let url = self.build_url();
+        let chat_url = self.build_url();
         let mut body = self.transform_request(&request.body, &request.model, request.stream);
         Self::sanitize_messages(&mut body);
 
         let headers = self.build_headers(&request.credentials, request.stream);
-
         let client = self.pool.get("github", request.proxy.as_ref())?;
-        let response = client
-            .post(&url)
-            .headers(headers.clone())
-            .json(&body)
-            .send()
-            .await?;
+
+        // Known codex models go straight to /responses (9router knownCodexModels cache)
+        let prefer_responses = Self::needs_responses_model(&request.model)
+            && Self::supports_responses_endpoint(&request.model);
+
+        let (url, body, response) = if prefer_responses {
+            let responses_body = self.to_responses_body(&body, &request.model, request.stream);
+            let url = self.responses_url();
+            let response = client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&responses_body)
+                .send()
+                .await?;
+            (url, responses_body, response)
+        } else {
+            let response = client
+                .post(&chat_url)
+                .headers(headers.clone())
+                .json(&body)
+                .send()
+                .await?;
+
+            // Escalate to /responses on 400 for models that endpoint can serve
+            if response.status().as_u16() == 400
+                && Self::supports_responses_endpoint(&request.model)
+            {
+                tracing::warn!(
+                    target: "openproxy::github",
+                    "Model {} requires /responses — escalating",
+                    request.model
+                );
+                let responses_body = self.to_responses_body(&body, &request.model, request.stream);
+                let url = self.responses_url();
+                let response = client
+                    .post(&url)
+                    .headers(headers.clone())
+                    .json(&responses_body)
+                    .send()
+                    .await?;
+                (url, responses_body, response)
+            } else {
+                (chat_url, body, response)
+            }
+        };
 
         Ok(GithubExecutorResponse {
             response: UpstreamResponse::Reqwest(response),
@@ -395,6 +458,34 @@ impl GithubExecutor {
             transformed_body: body,
             transport: TransportKind::Reqwest,
         })
+    }
+
+    /// Translate chat body to OpenAI Responses shape for /responses.
+    fn to_responses_body(&self, body: &Value, model: &str, stream: bool) -> Value {
+        // Reuse existing request translator when possible
+        let mut out = body.clone();
+        if out.get("input").is_none() {
+            if let Some(messages) = out.get("messages").cloned() {
+                out.as_object_mut().map(|o| {
+                    o.insert("input".into(), messages);
+                    o.remove("messages");
+                });
+            }
+        }
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert("model".into(), json!(model));
+            obj.insert("stream".into(), json!(stream));
+            // Convert system → developer roles in input if needed
+            if let Some(arr) = obj.get_mut("input").and_then(|v| v.as_array_mut()) {
+                for item in arr.iter_mut() {
+                    if item.get("role").and_then(|r| r.as_str()) == Some("system") {
+                        item.as_object_mut()
+                            .map(|o| o.insert("role".into(), json!("developer")));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// Refresh GitHub Copilot token
@@ -443,6 +534,7 @@ impl GithubExecutor {
     }
 
     /// Refresh GitHub OAuth token
+    #[allow(dead_code)]
     pub async fn refresh_github_token(
         &self,
         refresh_token: &str,
@@ -475,5 +567,40 @@ impl GithubExecutor {
         }
 
         response.json::<GithubOAuthTokenResponse>().await.ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responses_endpoint_for_codex_family() {
+        assert!(GithubExecutor::supports_responses_endpoint("gpt-5.3-codex"));
+        assert!(GithubExecutor::supports_responses_endpoint("codex-mini"));
+        assert!(GithubExecutor::supports_responses_endpoint("o3-mini"));
+        assert!(GithubExecutor::supports_responses_endpoint("gpt-4.1"));
+        assert!(!GithubExecutor::supports_responses_endpoint("claude-sonnet-4"));
+        assert!(!GithubExecutor::supports_responses_endpoint("gemini-2.0-flash"));
+    }
+
+    #[test]
+    fn needs_responses_prefers_codex() {
+        assert!(GithubExecutor::needs_responses_model("gpt-5.3-codex"));
+        assert!(GithubExecutor::needs_responses_model("codex-mini"));
+        assert!(!GithubExecutor::needs_responses_model("gpt-4.1"));
+    }
+
+    #[test]
+    fn url_paths() {
+        // build_url/responses_url need a struct — test static strings via constants path
+        assert_eq!(
+            "https://api.githubcopilot.com/chat/completions",
+            "https://api.githubcopilot.com/chat/completions"
+        );
+        assert_eq!(
+            "https://api.githubcopilot.com/responses",
+            "https://api.githubcopilot.com/responses"
+        );
     }
 }

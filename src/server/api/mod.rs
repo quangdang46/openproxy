@@ -1668,7 +1668,7 @@ struct UpdateSettingsRequest {
     sticky_round_robin_limit: Option<u32>,
     provider_strategies: Option<BTreeMap<String, String>>,
     combo_strategy: Option<String>,
-    combo_strategies: Option<BTreeMap<String, String>>,
+    combo_strategies: Option<BTreeMap<String, crate::types::ComboStrategyEntry>>,
     mitm_router_base_url: Option<String>,
     require_login: Option<bool>,
     rtk_enabled: Option<bool>,

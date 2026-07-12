@@ -2,6 +2,7 @@ mod antigravity;
 mod api_key;
 mod azure;
 mod client_pool;
+mod codebuddy_cn;
 mod codex;
 mod commandcode;
 mod cursor;
@@ -12,6 +13,7 @@ mod grok_web;
 mod iflow;
 mod kimchi;
 mod kiro;
+mod mimo_free;
 mod ollama;
 mod opencode;
 mod opencode_go;
@@ -65,11 +67,13 @@ pub use grok_web::{
     PerplexityWebExecutorResponse,
 };
 pub use iflow::{IFlowExecutionRequest, IFlowExecutor, IFlowExecutorError, IFlowExecutorResponse};
+pub use codebuddy_cn::CodeBuddyCNExecutor;
 pub use kimchi::KimchiExecutor;
 pub use kiro::{
     AwsCredentials, EventStreamDecoder, KiroExecutionRequest, KiroExecutor, KiroExecutorError,
     KiroExecutorResponse, SseEvent as KiroSseEvent,
 };
+pub use mimo_free::{MimoFreeExecutionRequest, MimoFreeExecutor, MimoFreeExecutorResponse};
 pub use ollama::{
     OllamaExecutionRequest, OllamaExecutor, OllamaExecutorError, OllamaExecutorResponse,
 };

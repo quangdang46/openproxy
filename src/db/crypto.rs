@@ -119,12 +119,19 @@ pub fn encryption_key() -> Option<String> {
 // ProviderConnection field-level encryption / decryption
 // ---------------------------------------------------------------------------
 
+/// Marker prefix for values encrypted by OpenProxy (prevents double-encrypt and
+/// detects ciphertext when `OPENPROXY_ENCRYPTION_KEY` is missing).
+pub const ENC_PREFIX: &str = "opxenc1:";
+
 /// Encrypt sensitive fields of a [`ProviderConnection`] **in place** so the
 /// struct is safe for serialization to disk.
 ///
 /// When `key` is empty (encryption disabled), the fields are left as-is.
 /// This matches 9router's behaviour where `OPENPROXY_ENCRYPTION_KEY` unset
 /// means plaintext storage — SHA-256("") is NOT a valid encryption key.
+///
+/// Already-prefixed ciphertext is never re-encrypted (stops monotonic growth
+/// when a previous load failed to decrypt).
 pub fn encrypt_connection(conn: &mut ProviderConnection, key: &str) {
     if key.is_empty() {
         return;
@@ -138,11 +145,13 @@ pub fn encrypt_connection(conn: &mut ProviderConnection, key: &str) {
 /// Decrypt sensitive fields of a [`ProviderConnection`] **in place** after
 /// deserialization from disk.
 ///
-/// When `key` is empty (encryption disabled), the fields are left as-is.
+/// When `key` is empty:
+/// - Prefixed ciphertext → **cleared** (fail-loud; never send blobs upstream)
+/// - Unprefixed values left as plaintext (legacy / no-encryption mode)
+///
+/// When `key` is set but decrypt fails for a prefixed (or likely-ciphertext)
+/// value → **cleared** + error log (wrong key).
 pub fn decrypt_connection(conn: &mut ProviderConnection, key: &str) {
-    if key.is_empty() {
-        return;
-    }
     decrypt_opt(&mut conn.access_token, key);
     decrypt_opt(&mut conn.refresh_token, key);
     decrypt_opt(&mut conn.id_token, key);
@@ -154,19 +163,77 @@ pub fn decrypt_connection(conn: &mut ProviderConnection, key: &str) {
 // ---------------------------------------------------------------------------
 
 fn encrypt_opt(field: &mut Option<String>, key: &str) {
-    if let Some(plain) = field.take() {
-        *field = Some(encrypt_value(key, &plain));
+    let Some(plain) = field.take() else { return };
+    // Never re-encrypt OpenProxy ciphertext
+    if plain.starts_with(ENC_PREFIX) {
+        *field = Some(plain);
+        return;
     }
+    // Legacy ciphertext without prefix: if it already decrypts, re-wrap with prefix
+    if let Ok(decoded) = decrypt_value(key, &plain) {
+        *field = Some(format!("{ENC_PREFIX}{}", encrypt_value(key, &decoded)));
+        return;
+    }
+    *field = Some(format!("{ENC_PREFIX}{}", encrypt_value(key, &plain)));
 }
 
 fn decrypt_opt(field: &mut Option<String>, key: &str) {
     let Some(cipher) = field.take() else { return };
-    match decrypt_value(key, &cipher) {
-        Ok(plain) => *field = Some(plain),
-        Err(_) => {
-            // Value was not encrypted (plaintext token), keep as-is.
+
+    let (is_marked, payload) = if let Some(rest) = cipher.strip_prefix(ENC_PREFIX) {
+        (true, rest.to_string())
+    } else {
+        (false, cipher.clone())
+    };
+
+    if key.is_empty() {
+        if is_marked {
+            tracing::error!(
+                target: "openproxy::crypto",
+                "Encrypted credential present but OPENPROXY_ENCRYPTION_KEY is unset — \
+                 clearing field so ciphertext is never sent upstream. Set the same key \
+                 used when writing the DB."
+            );
+            *field = None;
+        } else {
+            // Plaintext mode
             *field = Some(cipher);
         }
+        return;
+    }
+
+    match decrypt_value(key, &payload) {
+        Ok(plain) => *field = Some(plain),
+        Err(err) => {
+            if is_marked || looks_like_ciphertext(&payload) {
+                tracing::error!(
+                    target: "openproxy::crypto",
+                    "Failed to decrypt credential (wrong OPENPROXY_ENCRYPTION_KEY?): {err:#} — \
+                     clearing field so ciphertext is never sent upstream"
+                );
+                *field = None;
+            } else {
+                // Value was not encrypted (plaintext token), keep as-is.
+                *field = Some(cipher);
+            }
+        }
+    }
+}
+
+/// Heuristic for legacy (unprefixed) AES blobs: long standard-base64, decodable, ≥ IV+block.
+fn looks_like_ciphertext(s: &str) -> bool {
+    if s.len() < 44 {
+        return false;
+    }
+    if !s
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+    {
+        return false;
+    }
+    match base64::engine::general_purpose::STANDARD.decode(s) {
+        Ok(raw) => raw.len() >= IV_LEN + 16,
+        Err(_) => false,
     }
 }
 
@@ -240,11 +307,10 @@ pub fn open_db(bytes: &[u8], key: Option<&str>) -> anyhow::Result<AppDb> {
     let mut db: AppDb =
         serde_json::from_value(root).map_err(|e| anyhow::anyhow!("failed to parse AppDb: {e}"))?;
 
-    // Decrypt connection fields.
-    if let Some(k) = key {
-        for conn in &mut db.provider_connections {
-            decrypt_connection(conn, k);
-        }
+    // Always run decrypt path: empty key clears `opxenc1:` ciphertext (fail-loud).
+    let key_str = key.unwrap_or("");
+    for conn in &mut db.provider_connections {
+        decrypt_connection(conn, key_str);
     }
 
     Ok(db)
@@ -445,5 +511,57 @@ mod tests {
         assert_ne!(c1, c2);
         assert_eq!(decrypt_value(key, &c1).unwrap(), plain);
         assert_eq!(decrypt_value(key, &c2).unwrap(), plain);
+    }
+
+    #[test]
+    fn empty_key_does_not_encrypt() {
+        let mut conn = ProviderConnection {
+            api_key: Some("sk-plain".into()),
+            ..Default::default()
+        };
+        encrypt_connection(&mut conn, "");
+        assert_eq!(conn.api_key.as_deref(), Some("sk-plain"));
+    }
+
+    #[test]
+    fn encrypt_uses_prefix_and_round_trips() {
+        let mut conn = ProviderConnection {
+            api_key: Some("sk-secret".into()),
+            ..Default::default()
+        };
+        encrypt_connection(&mut conn, "my-key");
+        let stored = conn.api_key.clone().unwrap();
+        assert!(stored.starts_with(ENC_PREFIX));
+        // No double-encrypt
+        encrypt_connection(&mut conn, "my-key");
+        assert_eq!(conn.api_key.as_deref(), Some(stored.as_str()));
+        decrypt_connection(&mut conn, "my-key");
+        assert_eq!(conn.api_key.as_deref(), Some("sk-secret"));
+    }
+
+    #[test]
+    fn missing_key_clears_prefixed_ciphertext() {
+        let mut conn = ProviderConnection {
+            api_key: Some("sk-secret".into()),
+            ..Default::default()
+        };
+        encrypt_connection(&mut conn, "my-key");
+        assert!(conn.api_key.as_ref().unwrap().starts_with(ENC_PREFIX));
+        decrypt_connection(&mut conn, "");
+        assert!(
+            conn.api_key.is_none(),
+            "must not leave ciphertext as fake api key"
+        );
+    }
+
+    #[test]
+    fn wrong_key_clears_prefixed_ciphertext() {
+        let mut conn = ProviderConnection {
+            api_key: Some("sk-secret".into()),
+            ..Default::default()
+        };
+        encrypt_connection(&mut conn, "right-key");
+        decrypt_connection(&mut conn, "wrong-key");
+        assert!(conn.api_key.is_none());
     }
 }
