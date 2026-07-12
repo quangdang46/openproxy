@@ -53,6 +53,7 @@ pub const LOCALLY_ONLY_PATHS: &[&str] = &[
     "/api/headroom/stop",
     "/api/headroom/restart",
     "/api/headroom/extras",
+    "/api/headroom/proxy",
     "/api/cli-tools/cowork-settings",
     "/api/mitm-config",
     "/api/mitm/cert/generate",

@@ -440,8 +440,13 @@ export default function TokenSaverPageClient() {
   const headroomCanStart = !!headroomStatus.canStart;
   const headroomManaged = headroomLocalUrl && !!headroomStatus.managedPid;
 
-  // Link through the proxy route when headroom is running.
-  const headroomDashboardHref = headroomRunning ? "/api/headroom/proxy/dashboard" : null;
+  // Prefer the local reverse-proxy path so the browser stays same-origin;
+  // fall back to the direct Headroom URL when the proxy is not available.
+  const headroomDirectDashboard = `${(headroomUrl || "http://localhost:8787").replace(/\/$/, "")}/dashboard`;
+  const headroomDashboardHref = headroomRunning
+    ? "/api/headroom/proxy/dashboard"
+    : null;
+  const headroomDashboardFallback = headroomRunning ? headroomDirectDashboard : null;
 
   return (
     <div className="space-y-6 p-6">
@@ -727,14 +732,35 @@ export default function TokenSaverPageClient() {
             </span>
           </div>
           {headroomDashboardHref && (
-            <a
-              href={headroomDashboardHref}
-              target="_blank"
-              rel="noreferrer"
-              className="w-full rounded border border-border px-4 py-2 text-center text-sm hover:bg-surface-2"
-            >
-              Open Headroom Dashboard
-            </a>
+            <div className="flex flex-col gap-2">
+              <div className="flex gap-2">
+                <a
+                  href={headroomDashboardHref}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex-1 rounded border border-border px-4 py-2 text-center text-sm hover:bg-surface-2"
+                >
+                  Open Headroom Dashboard
+                </a>
+                {headroomDashboardFallback && (
+                  <a
+                    href={headroomDashboardFallback}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="rounded border border-border px-3 py-2 text-center text-xs text-text-muted hover:bg-surface-2"
+                    title="Open directly (bypass proxy)"
+                  >
+                    Direct
+                  </a>
+                )}
+              </div>
+              <iframe
+                src={headroomDashboardHref}
+                title="Headroom Dashboard"
+                className="w-full h-64 rounded border border-border bg-surface-2"
+                sandbox="allow-scripts allow-same-origin allow-forms"
+              />
+            </div>
           )}
           <div className="flex flex-col gap-1">
             <p className="text-sm font-medium">Proxy URL</p>

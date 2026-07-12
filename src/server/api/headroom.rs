@@ -1,13 +1,14 @@
 //! Headroom proxy management API
 //!
 //! Provides endpoints for managing the Headroom compression proxy:
-//! - `GET /api/headroom/status`       — check whether the Headroom proxy is reachable
-//! - `POST /api/headroom/start`       — attempt to start the local Headroom proxy
-//! - `POST /api/headroom/stop`        — attempt to stop the local Headroom proxy
-//! - `POST /api/headroom/restart`     — restart managed proxy with current extras flags
-//! - `GET /api/headroom/extras`       — query installed compression extras
-//! - `POST /api/headroom/extras`      — install compression extras
-//! - `DELETE /api/headroom/extras`    — uninstall compression extras
+//! - `GET /api/headroom/status`              — check whether the Headroom proxy is reachable
+//! - `POST /api/headroom/start`              — attempt to start the local Headroom proxy
+//! - `POST /api/headroom/stop`               — attempt to stop the local Headroom proxy
+//! - `POST /api/headroom/restart`            — restart managed proxy with current extras flags
+//! - `GET /api/headroom/extras`              — query installed compression extras
+//! - `POST /api/headroom/extras`             — install compression extras
+//! - `DELETE /api/headroom/extras`           — uninstall compression extras
+//! - `* /api/headroom/proxy/{*path}`         — reverse-proxy catch-all to configured Headroom URL
 //!
 //! The Headroom URL and extras flags are read from settings, so everything is
 //! configurable at runtime without a server restart.
@@ -15,10 +16,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Mutex;
 
-use axum::extract::{Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::body::Body;
+use axum::extract::{Path, Query, RawQuery, State};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
+use bytes::Bytes;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -953,101 +956,152 @@ pub async fn extras_delete(
 
 // ── Headroom reverse proxy (dashboard access) ────────────────────────
 
-/// GET/POST/* /api/headroom/proxy/[...path]
+/// Hop-by-hop headers that must not be forwarded (RFC 9110 §7.6.1).
+const HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS `/api/headroom/proxy/{*path}`
 ///
-/// Reverse-proxies requests to the configured Headroom dashboard/API so
-/// the browser doesn't need direct loopback access (or CORS).
-/// Pared down from the 9router proxy route — no HTML rewrite.
-/// Hop-by-hop headers are stripped per RFC 9113.
-pub(crate) async fn proxy_handler(
+/// Minimal reverse proxy to the configured Headroom URL + remaining path.
+/// Strips hop-by-hop headers; returns the upstream response as-is
+/// (no HTML rewrite — dashboard assets use relative paths when proxied).
+pub async fn proxy_handler(
     State(state): State<AppState>,
     Path(path): Path<Vec<String>>,
     headers: HeaderMap,
-    method: axum::http::Method,
-    uri: axum::http::Uri,
-    body: axum::body::Bytes,
+    method: Method,
+    RawQuery(query): RawQuery,
+    body: Bytes,
 ) -> Response {
+    if let Err(resp) = require_dashboard_or_management_api_key(&headers, &state) {
+        return resp;
+    }
+
     let snapshot = state.db.snapshot();
-    let headroom_url = if snapshot.settings.headroom_url.trim().is_empty() {
-        "http://localhost:8787".to_string()
+    let base = snapshot.settings.headroom_url.trim();
+    let base = if base.is_empty() {
+        "http://localhost:8787"
     } else {
-        snapshot.settings.headroom_url.clone().trim_end_matches('/').to_string()
+        base.trim_end_matches('/')
     };
 
-    // Reconstruct remaining path from axum wildcard
-    let target_path = if path.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{}", path.join("/"))
-    };
-    // Preserve query string from the original URI
-    let query_string = uri.query().filter(|q| !q.is_empty());
-    let target_url = match query_string {
-        Some(qs) => format!("{}{}?{}", headroom_url, target_path, qs),
-        None => format!("{}{}", headroom_url, target_path),
-    };
-    let parsed_url: url::Url = match target_url.parse() {
+    let mut target = match url::Url::parse(base) {
         Ok(u) => u,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("invalid target URL: {e}")}))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid headroom URL: {e}") })),
+            )
+                .into_response();
+        }
+    };
+    if target.scheme() != "http" && target.scheme() != "https" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Headroom URL must use http or https" })),
+        )
+            .into_response();
+    }
+
+    let path_joined = path.join("/");
+    target.set_path(&format!("/{path_joined}"));
+    if let Some(q) = query.as_deref().filter(|q| !q.is_empty()) {
+        target.set_query(Some(q));
+    }
+
+    let is_loopback = is_loopback_url(target.as_str());
+    let has_body = !matches!(method, Method::GET | Method::HEAD);
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("failed to build HTTP client: {e}") })),
+            )
+                .into_response();
         }
     };
 
-    // Build forwarded request
-    let client = reqwest::Client::new();
-    let mut req_builder = match method {
-        axum::http::Method::GET => client.get(parsed_url),
-        axum::http::Method::POST => client.post(parsed_url).body(body),
-        axum::http::Method::PUT => client.put(parsed_url).body(body),
-        axum::http::Method::PATCH => client.patch(parsed_url).body(body),
-        axum::http::Method::DELETE => client.delete(parsed_url),
-        axum::http::Method::HEAD => client.head(parsed_url),
-        axum::http::Method::OPTIONS => client.request(reqwest::Method::OPTIONS, parsed_url),
-        _ => client.get(parsed_url),
+    let reqwest_method = match method {
+        Method::GET => reqwest::Method::GET,
+        Method::POST => reqwest::Method::POST,
+        Method::PUT => reqwest::Method::PUT,
+        Method::PATCH => reqwest::Method::PATCH,
+        Method::DELETE => reqwest::Method::DELETE,
+        Method::HEAD => reqwest::Method::HEAD,
+        Method::OPTIONS => reqwest::Method::OPTIONS,
+        other => other,
     };
 
-    // Strip hop-by-hop headers
-    let hop_by_hop: std::collections::HashSet<&str> = [
-        "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-        "te", "trailer", "transfer-encoding", "upgrade",
-    ].into_iter().collect();
+    let mut req_builder = client.request(reqwest_method, target);
+    if has_body {
+        req_builder = req_builder.body(body);
+    }
 
     for (name, value) in headers.iter() {
-        let name_lower = name.as_str().to_lowercase();
-        if hop_by_hop.contains(name_lower.as_str()) {
+        let name_lower = name.as_str().to_ascii_lowercase();
+        if HOP_BY_HOP.contains(&name_lower.as_str()) || name_lower == "host" {
             continue;
         }
-        // Skip host header — let reqwest set it from the target URL
-        if name_lower == "host" {
+        // Never leak viewer credentials to a non-loopback Headroom host.
+        if !is_loopback && (name_lower == "cookie" || name_lower == "authorization") {
             continue;
         }
-        req_builder = req_builder.header(name.as_str(), value);
+        if let Ok(v) = value.to_str() {
+            req_builder = req_builder.header(name.as_str(), v);
+        }
     }
 
     match req_builder.send().await {
         Ok(resp) => {
-            let status = resp.status();
+            let status = StatusCode::from_u16(resp.status().as_u16())
+                .unwrap_or(StatusCode::BAD_GATEWAY);
             let resp_headers = resp.headers().clone();
             let resp_body = match resp.bytes().await {
                 Ok(b) => b,
-                Err(_) => return (StatusCode::BAD_GATEWAY, "upstream read error").into_response(),
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("upstream read error: {e}") })),
+                    )
+                        .into_response();
+                }
             };
 
-            let mut response_builder = axum::response::Response::builder().status(status);
+            let mut out = Response::builder().status(status);
             for (name, value) in resp_headers.iter() {
-                let name_lower = name.as_str().to_lowercase();
-                if hop_by_hop.contains(name_lower.as_str()) {
+                let name_lower = name.as_str().to_ascii_lowercase();
+                if HOP_BY_HOP.contains(&name_lower.as_str()) {
                     continue;
                 }
-                response_builder = response_builder.header(name.as_str(), value);
+                out = out.header(name.as_str(), value);
             }
-            response_builder
-                .body(axum::body::Body::from(resp_body))
-                .unwrap_or_else(|_| (StatusCode::BAD_GATEWAY, "response build error").into_response())
+            out.body(Body::from(resp_body)).unwrap_or_else(|e| {
+                (
+                    StatusCode::BAD_GATEWAY,
+                    Json(json!({ "error": format!("response build error: {e}") })),
+                )
+                    .into_response()
+            })
         }
-        Err(e) => {
-            (StatusCode::BAD_GATEWAY, Json(json!({"error": format!("proxy error: {e}")}))).into_response()
-        }
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({ "error": format!("proxy error: {e}") })),
+        )
+            .into_response(),
     }
 }
 
