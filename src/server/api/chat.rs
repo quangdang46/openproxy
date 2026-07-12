@@ -380,7 +380,7 @@ async fn chat_completions_impl(
 
             let disabled_members = get_disabled_members_for_combo(&combo_name, &snapshot.combos);
             let strategy = combo_strategy_for(&snapshot, &combo_name);
-            let sticky_limit = snapshot.settings.sticky_round_robin_limit.max(1) as u32;
+            let sticky_limit = snapshot.settings.sticky_round_robin_limit.max(1);
             let combo_body = body.clone();
             let combo_state = state.clone();
             let combo_api_key = presented_api_key.clone();
@@ -1763,7 +1763,7 @@ async fn forward_with_provider_fallback(
                             let new_access = result.access_token.clone();
                             let new_refresh = result.refresh_token.clone();
                             let expires_at = result.expires_in.map(|secs| {
-                                (Utc::now() + ChronoDuration::seconds(secs as i64)).to_rfc3339()
+                                (Utc::now() + ChronoDuration::seconds(secs)).to_rfc3339()
                             });
                             let last_refresh_at = Utc::now().to_rfc3339();
                             let _ = state

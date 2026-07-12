@@ -478,11 +478,12 @@ impl TranslationRegistry {
         apply_normalization_hooks(body);
 
         // Target-format post-hooks (9router translator/index.js)
-        if target == Format::OpenAi || target == Format::OpenAiResponses || target == Format::Codex
+        if (target == Format::OpenAi
+            || target == Format::OpenAiResponses
+            || target == Format::Codex)
+            && target == Format::OpenAi
         {
-            if target == Format::OpenAi {
-                filter_to_openai_format(body, false);
-            }
+            filter_to_openai_format(body, false);
         }
         if target == Format::Claude {
             let api_key = credentials.and_then(|c| {

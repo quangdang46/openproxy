@@ -962,7 +962,7 @@ mod tests {
         let thinking = body.get("thinking").unwrap();
         assert_eq!(
             thinking.get("budget_tokens").unwrap().as_u64().unwrap(),
-            16384
+            24576 // 9router LEVEL_TO_BUDGET: high = 24576
         );
     }
 

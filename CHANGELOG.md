@@ -1,3 +1,64 @@
+# v0.2.0 (2026-07-12)
+
+## 9router v0.5.30 full parity — 101 beads closed
+
+### P0: Grok CLI executor
+- New `GrokCliExecutor` targeting `cli-chat-proxy.grok.com/v1/responses` (Responses API)
+- Responses API allowlist, effort suffix strip, tool normalize, server-ID strip
+- Headers: `x-xai-token-auth`, `x-grok-client-*`, turn/session/machine IDs, email/user
+- Wired into chat dispatch for `grok-cli` / `gcli` / `gb` / `grok-build` aliases
+
+### P1: Dual transport for Xiaomi providers
+- `xiaomi-tokenplan`: region host (sgp/cn/ams) + Claude `/anthropic/v1/messages` path
+- `xiaomi-mimo`: OpenAI + Claude endpoints in `resolve_transport` table
+- `x-api-key` auth for Claude native transport
+
+### P1: web_fetch selective model-lock clear
+- `clear_connection_error_for_model`: only removes expired + succeeded model locks
+- Matches `chat.rs` implementation (9router `clearAccountError` parity)
+
+### P2: Global thinking suffix strip
+- `thinking_suffix.rs`: `strip_thinking_suffix` (paren `(high)` + hyphen `-high` + plain)
+- `level_to_budget` matching 9router LEVEL_TO_BUDGET (low=1024…max=128000)
+- Called from `RequestPlan::new` for all providers
+
+### P0-B: Chat pipeline order
+- `forceStream` + SSE→JSON aggregation path
+- DeepSeek-TUI only force non-stream when `stream !== true`
+- `providerThinking` injection on source body before translate
+- Accept-header stream preference parity
+
+### P0-C: Critical executors
+- GitHub `/responses` escalation for Codex-class models
+- Cursor `api2.cursor.sh` + `forceAgentMode` for Claude Code UA
+- Codex force-stream + effort suffix strip
+
+### P0-D: OAuth refresh
+- `should_refresh_credentials` with lead times + Codex 8d max refresh age
+- Kiro external_idp + Vertex SA mint
+- Full `mergeRefreshedCredentials` with `expires_at`
+
+### P1: Combo
+- RR autoswitch after rotation (9router order)
+- Fusion straggler grace timer via `tokio::select!`
+- Nested `comboStrategies` schema (legacy string + object)
+- Selective model-lock clear on success
+
+### P2: Translator
+- Direct source:target route lookup (not only OpenAI pivot)
+- Response intermediate-hop chaining
+- `openai→antigravity` registration fix
+- Missing response pairs registered
+
+### Tests
+- 13 new unit tests for Grok CLI, thinking suffix, transports
+- Full `parity-smoke.sh` harness green
+
+### Docs
+- `docs/parity-9router.md`: pipeline, dispatch matrix, intentional divergences
+
+---
+
 # v0.4.0 (2026-06-27)
 
 ## 9router parity — 18 gaps closed

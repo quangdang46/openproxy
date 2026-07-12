@@ -223,6 +223,7 @@ impl CodexExecutor {
     /// - Converts messages[] to input[] with type "message", role, and content as input_text blocks
     /// - Converts "system" role to "developer"
     /// - Strips server-generated IDs (rs_, fc_, resp_, msg_ prefixes) to avoid 404s with store:false
+    ///
     /// 9router codex.js parity:
     /// - Forces stream: true (Codex backend; client JSON via forceStream SSE→JSON)
     /// - Forces store: false

@@ -221,7 +221,10 @@ mod tests {
     fn test_build_url() {
         let executor = CodeBuddyCNExecutor::new(Arc::new(ClientPool::new()), None);
         let url = executor.build_url("claude-sonnet-4", true, None, None);
-        assert_eq!(url, "https://api.codebuddy.cn/v1/chat/completions");
+        assert_eq!(
+            url, "https://copilot.tencent.com/v2/chat/completions",
+            "URL should use copilot.tencent.com (9router parity)"
+        );
     }
 
     #[test]
