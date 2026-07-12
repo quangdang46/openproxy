@@ -980,8 +980,12 @@ pub(crate) async fn proxy_handler(
     } else {
         format!("/{}", path.join("/"))
     };
-    // Preserve query string from path_and_query
-    let target_url = format!("{}{}", headroom_url, target_path);
+    // Preserve query string from the original URI
+    let query_string = uri.query().filter(|q| !q.is_empty());
+    let target_url = match query_string {
+        Some(qs) => format!("{}{}?{}", headroom_url, target_path, qs),
+        None => format!("{}{}", headroom_url, target_path),
+    };
     let parsed_url: url::Url = match target_url.parse() {
         Ok(u) => u,
         Err(e) => {

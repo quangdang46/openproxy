@@ -440,10 +440,8 @@ export default function TokenSaverPageClient() {
   const headroomCanStart = !!headroomStatus.canStart;
   const headroomManaged = headroomLocalUrl && !!headroomStatus.managedPid;
 
-  // Prefer the proxy dashboard on the configured Headroom URL when running.
-  const headroomDashboardHref = headroomRunning
-    ? `${(headroomUrl || "http://localhost:8787").replace(/\/$/, "")}/dashboard`
-    : null;
+  // Link through the proxy route when headroom is running.
+  const headroomDashboardHref = headroomRunning ? "/api/headroom/proxy/dashboard" : null;
 
   return (
     <div className="space-y-6 p-6">

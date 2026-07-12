@@ -51,6 +51,21 @@ export default function CLIToolsPageClient({ machineId }: CLIToolsPageClientProp
 
   const fetchAllStatuses = async () => {
     try {
+      // Prefer the aggregation endpoint; fall back to per-tool parallel fetches.
+      const aggRes = await fetch("/api/cli-tools/all-statuses").catch(() => null);
+      if (aggRes && aggRes.ok) {
+        const data = await aggRes.json();
+        if (data && typeof data === "object" && !("error" in data)) {
+          setToolStatuses(data);
+          return;
+        }
+      }
+    } catch {
+      // fall through to per-tool
+    }
+
+    // Per-tool fallback
+    try {
       const entries = await Promise.all(
         Object.entries(STATUS_ENDPOINTS).map(async ([toolId, url]) => {
           try {

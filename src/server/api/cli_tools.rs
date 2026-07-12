@@ -2434,6 +2434,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/cli-tools/execute", post(execute_command))
         .route("/api/cli-tools/run/{tool_name}", post(run_tool))
         .route("/api/cli-tools/help", get(get_help))
+        .route("/api/cli-tools/all-statuses", get(get_all_statuses))
         // Codex settings
         .route("/api/cli-tools/codex-settings", get(get_codex_settings))
         .route("/api/cli-tools/codex-settings", post(save_codex_settings))
@@ -2906,8 +2907,102 @@ async fn probe_mcp_server(url: &str) -> Value {
     json!({ "tools": tools })
 }
 
+/// GET /api/cli-tools/all-statuses
+/// Fetch status of all CLI tools in parallel.
+/// Calls each tool's *-settings GET handler concurrently and returns {toolId: status}.
+async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let status_endpoints = [
+        ("claude", "/api/cli-tools/claude-settings"),
+        ("cline", "/api/cli-tools/cline-settings"),
+        ("kilo", "/api/cli-tools/kilo-settings"),
+        ("codex", "/api/cli-tools/codex-settings"),
+        ("opencode", "/api/cli-tools/opencode-settings"),
+        ("droid", "/api/cli-tools/droid-settings"),
+        ("openclaw", "/api/cli-tools/openclaw-settings"),
+        ("hermes", "/api/cli-tools/hermes-settings"),
+        ("cowork", "/api/cli-tools/cowork-settings"),
+        ("deepseek-tui", "/api/cli-tools/deepseek-tui-settings"),
+        ("jcode", "/api/cli-tools/jcode-settings"),
+        ("copilot", "/api/cli-tools/copilot-settings"),
+    ];
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_default();
+
+    // Determine base URL: use forwarded host or default localhost:4623
+    let base = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .map(|h| format!("http://{h}"))
+        .unwrap_or_else(|| {
+            headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .map(|h| format!("http://{h}"))
+                .unwrap_or_else(|| "http://127.0.0.1:4623".to_string())
+        });
+
+    // Forward auth headers so the per-tool handlers can authenticate
+    let forwarded_api_key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+    let forwarded_auth = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+    let forwarded_cookie = headers
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.to_string());
+
+    // Fetch all status endpoints in parallel
+    let results: Vec<(String, Option<Value>)> = futures_util::future::join_all(
+        status_endpoints.iter().map(|(tool_id, path)| {
+            let tool_id = tool_id.to_string();
+            let url = format!("{base}{path}");
+            let client = client.clone();
+            let api_key = forwarded_api_key.clone();
+            let auth = forwarded_auth.clone();
+            let cookie = forwarded_cookie.clone();
+            async move {
+                let mut req = client.get(&url);
+                if let Some(ref k) = api_key {
+                    req = req.header("x-api-key", k);
+                } else if let Some(ref a) = auth {
+                    req = req.header("authorization", a);
+                }
+                if let Some(ref c) = cookie {
+                    req = req.header("cookie", c);
+                }
+                let resp = req.send().await;
+                let result = match resp {
+                    Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
+                    _ => None,
+                };
+                (tool_id, result)
+            }
+        }),
+    )
+    .await;
+
+    let statuses: serde_json::Map<String, Value> = results
+        .into_iter()
+        .map(|(id, data)| (id, data.unwrap_or(Value::Null)))
+        .collect();
+
+    Json(Value::Object(statuses)).into_response()
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
     use super::*;
 
     #[test]
