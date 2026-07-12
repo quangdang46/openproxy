@@ -602,12 +602,39 @@ impl DefaultExecutor {
         })
     }
 
+    /// Xiaomi Token Plan: region host + dual OpenAI/Claude path (9router XiaomiTokenplanExecutor).
+    fn xiaomi_tokenplan_url(credentials: &ProviderConnection) -> Result<String, ExecutorError> {
+        let region =
+            compatible_value(credentials.provider_specific_data.get("region")).unwrap_or("sgp");
+        let base = match region {
+            "cn" => "https://token-plan-cn.xiaomimimo.com/v1",
+            "ams" => "https://token-plan-ams.xiaomimimo.com/v1",
+            _ => "https://token-plan-sgp.xiaomimimo.com/v1",
+        };
+        let wants_claude = credentials
+            .runtime_transport
+            .as_ref()
+            .and_then(|rt| rt.base_url.as_deref())
+            .map(|u| u.contains("/anthropic/") || u.ends_with("/messages"))
+            .unwrap_or(false);
+        if wants_claude {
+            let host = base.trim_end_matches('/').trim_end_matches("/v1");
+            return Ok(format!("{host}/anthropic/v1/messages"));
+        }
+        Ok(format!("{base}/chat/completions"))
+    }
+
     pub fn build_url(
         &self,
         model: &str,
         stream: bool,
         credentials: &ProviderConnection,
     ) -> Result<String, ExecutorError> {
+        // Region-specific providers must win over resolve_transport's default-region URL.
+        if self.provider == "xiaomi-tokenplan" || self.provider == "xmtp" {
+            return Self::xiaomi_tokenplan_url(credentials);
+        }
+
         // Check runtime_transport base_url override on the connection first.
         // 9router multi-endpoint transports store a full endpoint URL
         // (…/chat/completions or …/messages). Use as-is when path is present;
@@ -637,6 +664,8 @@ impl DefaultExecutor {
                         | "minimax"
                         | "minimax-cn"
                         | "agentrouter"
+                        | "xiaomi-mimo"
+                        | "mimo"
                 ) {
                     return Ok(format!("{}/messages", normalized));
                 }
@@ -689,17 +718,6 @@ impl DefaultExecutor {
                 self.config.base_url.trim_end_matches('/'),
                 path
             ));
-        }
-
-        if self.provider == "xiaomi-tokenplan" {
-            let region =
-                compatible_value(credentials.provider_specific_data.get("region")).unwrap_or("sgp");
-            let base = match region {
-                "cn" => "https://token-plan-cn.xiaomimimo.com/v1",
-                "ams" => "https://token-plan-ams.xiaomimimo.com/v1",
-                _ => "https://token-plan-sgp.xiaomimimo.com/v1",
-            };
-            return Ok(format!("{base}/chat/completions"));
         }
 
         if self.config.base_url.contains("{accountId}") {
@@ -765,6 +783,23 @@ impl DefaultExecutor {
                 return Err(ExecutorError::MissingCredentials(self.provider.clone()));
             }
         } else if self.provider == "opencode-go" && opencode_go_uses_claude_format(model) {
+            let token = credentials
+                .api_key
+                .as_deref()
+                .or(credentials.access_token.as_deref())
+                .ok_or_else(|| ExecutorError::MissingCredentials(self.provider.clone()))?;
+            headers.insert("x-api-key", HeaderValue::from_str(token)?);
+            headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        } else if matches!(
+            self.provider.as_str(),
+            "xiaomi-tokenplan" | "xmtp" | "xiaomi-mimo" | "mimo"
+        ) && credentials
+            .runtime_transport
+            .as_ref()
+            .and_then(|rt| rt.base_url.as_deref())
+            .is_some_and(|u| u.contains("/anthropic/") || u.ends_with("/messages"))
+        {
+            // Claude native transport: x-api-key (9router xiaomi-tokenplan / xiaomi-mimo)
             let token = credentials
                 .api_key
                 .as_deref()
