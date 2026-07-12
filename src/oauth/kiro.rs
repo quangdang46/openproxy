@@ -1,6 +1,6 @@
 //! Kiro OAuth 2.0 authentication methods
 //!
-//! Supports 5 auth methods (the `KiroAuthMethod` enum):
+//! Supports 6 auth methods (the `KiroAuthMethod` enum):
 //!
 //! 1. **BuilderId** — AWS SSO Builder ID device code flow (OIDC client registration +
 //!    device authorization + token poll).
@@ -9,6 +9,8 @@
 //! 3. **Google** — Social login via Kiro's Cognito-backed identity provider.
 //! 4. **Github** — Social login via Kiro's Cognito-backed identity provider.
 //! 5. **Imported** — Import an existing Kiro AWS SSO refresh token (`aorAAAAAG...`).
+//! 6. **ExternalIdp** — Microsoft Entra external IdP (CLIProxyAPI enterprise import).
+//!    Refresh is form-urlencoded against a validated Microsoft token endpoint.
 
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +21,7 @@ use serde::{Deserialize, Serialize};
 /// Default Kiro auth service base URL (Cognito).
 const KIRO_AUTH_SERVICE: &str = "https://prod.us-east-1.auth.desktop.kiro.dev";
 /// Pre-encoded version of the social redirect URI for URL building.
-const KIRO_SOCIAL_REDIRECT_URI_ENCODED: &str =
-    "kiro%3A%2F%2Fkiro.kiroAgent%2Fauthenticate-success";
+const KIRO_SOCIAL_REDIRECT_URI_ENCODED: &str = "kiro%3A%2F%2Fkiro.kiroAgent%2Fauthenticate-success";
 /// The raw redirect URI. **Must** be this exact value (Cognito whitelist).
 const KIRO_SOCIAL_REDIRECT_URI: &str = "kiro://kiro.kiroAgent/authenticate-success";
 
@@ -28,7 +29,7 @@ const KIRO_SOCIAL_REDIRECT_URI: &str = "kiro://kiro.kiroAgent/authenticate-succe
 // KiroAuthMethod
 // ---------------------------------------------------------------------------
 
-/// The five authentication methods supported by Kiro.
+/// The authentication methods supported by Kiro.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum KiroAuthMethod {
@@ -42,10 +43,17 @@ pub enum KiroAuthMethod {
     Github,
     /// Imported Kiro AWS SSO refresh token.
     Imported,
+    /// Microsoft Entra / external IdP (CLIProxyAPI enterprise).
+    /// Serialized as `external_idp` (snake_case) for connection PSD parity.
+    #[serde(rename = "external_idp", alias = "external-idp")]
+    ExternalIdp,
 }
 
 impl KiroAuthMethod {
-    /// Return the canonical string representation (kebab-case).
+    /// Return the canonical string representation.
+    ///
+    /// Most methods are kebab-case; `ExternalIdp` uses snake_case `external_idp`
+    /// because that is the wire value stored in connection `providerSpecificData`.
     pub fn as_str(&self) -> &'static str {
         match self {
             KiroAuthMethod::BuilderId => "builder-id",
@@ -53,6 +61,7 @@ impl KiroAuthMethod {
             KiroAuthMethod::Google => "google",
             KiroAuthMethod::Github => "github",
             KiroAuthMethod::Imported => "imported",
+            KiroAuthMethod::ExternalIdp => "external_idp",
         }
     }
 
@@ -64,6 +73,7 @@ impl KiroAuthMethod {
             "google" => Some(Self::Google),
             "github" => Some(Self::Github),
             "imported" => Some(Self::Imported),
+            "external_idp" | "external-idp" | "externalidp" => Some(Self::ExternalIdp),
             _ => None,
         }
     }
@@ -378,6 +388,360 @@ pub fn validate_import_token(token: &str) -> bool {
 // 6. Refresh
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// External IdP (Microsoft Entra) — CLIProxyAPI enterprise import
+// ---------------------------------------------------------------------------
+
+/// Allowed Microsoft login hosts for external_idp token endpoints.
+const MICROSOFT_TOKEN_ENDPOINT_HOSTS: &[&str] = &[
+    "login.microsoftonline.com",
+    "login.microsoft.com",
+    "login.windows.net",
+];
+
+const EXTERNAL_IDP_DEFAULT_EXPIRES_IN: i64 = 3600;
+
+/// Validated parameters for an external_idp form-urlencoded refresh.
+#[derive(Debug, Clone)]
+pub struct ExternalIdpRefreshParams {
+    pub token_endpoint: String,
+    pub client_id: String,
+    pub scope: String,
+}
+
+/// Validate that `raw_endpoint` is an https Microsoft login token URL.
+///
+/// Mirrors 9router `validateMicrosoftTokenEndpoint`.
+pub fn validate_microsoft_token_endpoint(raw_endpoint: &str) -> Result<String, KiroError> {
+    let token_endpoint = raw_endpoint.trim();
+    if token_endpoint.is_empty() {
+        return Err(KiroError {
+            error: "token_endpoint_required".to_string(),
+            error_description: Some("token_endpoint is required".to_string()),
+        });
+    }
+
+    let parsed = url::Url::parse(token_endpoint).map_err(|_| KiroError {
+        error: "invalid_token_endpoint".to_string(),
+        error_description: Some("token_endpoint must be a valid URL".to_string()),
+    })?;
+
+    if parsed.scheme() != "https" {
+        return Err(KiroError {
+            error: "invalid_token_endpoint".to_string(),
+            error_description: Some("token_endpoint must use https".to_string()),
+        });
+    }
+
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    if !MICROSOFT_TOKEN_ENDPOINT_HOSTS.iter().any(|h| *h == host) {
+        return Err(KiroError {
+            error: "invalid_token_endpoint".to_string(),
+            error_description: Some(
+                "token_endpoint must be a Microsoft login endpoint".to_string(),
+            ),
+        });
+    }
+
+    Ok(parsed.to_string())
+}
+
+/// Normalize scopes from a string or JSON array into a space-joined string.
+pub fn normalize_external_idp_scope(scopes: &serde_json::Value) -> String {
+    match scopes {
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" "),
+        serde_json::Value::String(s) => s.trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Build validated external_idp refresh parameters from connection PSD.
+///
+/// Mirrors 9router `buildExternalIdpRefreshParams`.
+pub fn build_external_idp_refresh_params(
+    provider_specific_data: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<ExternalIdpRefreshParams, KiroError> {
+    let client_id = provider_specific_data
+        .get("clientId")
+        .or_else(|| provider_specific_data.get("client_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| KiroError {
+            error: "missing_client_id".to_string(),
+            error_description: Some("clientId is required for external_idp refresh".to_string()),
+        })?
+        .to_string();
+
+    let token_endpoint_raw = provider_specific_data
+        .get("tokenEndpoint")
+        .or_else(|| provider_specific_data.get("token_endpoint"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| KiroError {
+            error: "missing_token_endpoint".to_string(),
+            error_description: Some(
+                "tokenEndpoint is required for external_idp refresh".to_string(),
+            ),
+        })?;
+    let token_endpoint = validate_microsoft_token_endpoint(token_endpoint_raw)?;
+
+    let scope = provider_specific_data
+        .get("scope")
+        .or_else(|| provider_specific_data.get("scopes"))
+        .map(normalize_external_idp_scope)
+        .unwrap_or_default();
+    if scope.is_empty() {
+        return Err(KiroError {
+            error: "missing_scope".to_string(),
+            error_description: Some("scope is required for external_idp refresh".to_string()),
+        });
+    }
+
+    Ok(ExternalIdpRefreshParams {
+        token_endpoint,
+        client_id,
+        scope,
+    })
+}
+
+/// Detect whether connection PSD identifies an external_idp auth method.
+pub fn is_external_idp_auth(
+    provider_specific_data: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> bool {
+    provider_specific_data
+        .get("authMethod")
+        .or_else(|| provider_specific_data.get("auth_method"))
+        .and_then(serde_json::Value::as_str)
+        .map(|s| matches!(s, "external_idp" | "external-idp" | "externalidp"))
+        .unwrap_or(false)
+}
+
+/// Normalize CLIProxyAPI / external_idp auth JSON into tokens + PSD.
+///
+/// Mirrors 9router `normalizeKiroExternalIdpAuth`.
+pub fn normalize_kiro_external_idp_auth(
+    raw: &serde_json::Value,
+) -> Result<NormalizedExternalIdpAuth, KiroError> {
+    let input = if let Some(s) = raw.as_str() {
+        serde_json::from_str::<serde_json::Value>(s).map_err(|_| KiroError {
+            error: "invalid_auth_json".to_string(),
+            error_description: Some("CLIProxyAPI auth JSON is invalid".to_string()),
+        })?
+    } else {
+        raw.clone()
+    };
+
+    if !input.is_object() {
+        return Err(KiroError {
+            error: "invalid_auth_json".to_string(),
+            error_description: Some("CLIProxyAPI auth JSON is required".to_string()),
+        });
+    }
+
+    let auth_method = input
+        .get("auth_method")
+        .or_else(|| input.get("authMethod"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or("");
+    if !auth_method.is_empty() && auth_method != "external_idp" {
+        return Err(KiroError {
+            error: "unsupported_auth_method".to_string(),
+            error_description: Some(
+                "Only external_idp Kiro auth is supported by this importer".to_string(),
+            ),
+        });
+    }
+
+    let access_token = input
+        .get("access_token")
+        .or_else(|| input.get("accessToken"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| KiroError {
+            error: "missing_access_token".to_string(),
+            error_description: Some("access_token is required".to_string()),
+        })?
+        .to_string();
+    let refresh_token = input
+        .get("refresh_token")
+        .or_else(|| input.get("refreshToken"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| KiroError {
+            error: "missing_refresh_token".to_string(),
+            error_description: Some("refresh_token is required".to_string()),
+        })?
+        .to_string();
+    let client_id = input
+        .get("client_id")
+        .or_else(|| input.get("clientId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| KiroError {
+            error: "missing_client_id".to_string(),
+            error_description: Some("client_id is required".to_string()),
+        })?
+        .to_string();
+    let token_endpoint = validate_microsoft_token_endpoint(
+        input
+            .get("token_endpoint")
+            .or_else(|| input.get("tokenEndpoint"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(""),
+    )?;
+    let profile_arn = input
+        .get("profile_arn")
+        .or_else(|| input.get("profileArn"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| KiroError {
+            error: "missing_profile_arn".to_string(),
+            error_description: Some("profile_arn is required".to_string()),
+        })?
+        .to_string();
+    let region = input
+        .get("region")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("us-east-1")
+        .to_string();
+    let scope = input
+        .get("scopes")
+        .or_else(|| input.get("scope"))
+        .map(normalize_external_idp_scope)
+        .unwrap_or_default();
+    if scope.is_empty() {
+        return Err(KiroError {
+            error: "missing_scope".to_string(),
+            error_description: Some("scopes is required".to_string()),
+        });
+    }
+
+    let expires_at = resolve_external_idp_expires_at(&input, &access_token);
+    let payload = decode_jwt_payload(&access_token);
+    let email = input
+        .get("email")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            payload.as_ref().and_then(|p| {
+                p.get("email")
+                    .or_else(|| p.get("preferred_username"))
+                    .or_else(|| p.get("upn"))
+                    .or_else(|| p.get("sub"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+        });
+
+    let mut provider_specific_data = std::collections::BTreeMap::new();
+    provider_specific_data.insert(
+        "profileArn".to_string(),
+        serde_json::Value::String(profile_arn),
+    );
+    provider_specific_data.insert("region".to_string(), serde_json::Value::String(region));
+    provider_specific_data.insert(
+        "authMethod".to_string(),
+        serde_json::Value::String("external_idp".to_string()),
+    );
+    provider_specific_data.insert(
+        "provider".to_string(),
+        serde_json::Value::String("CLIProxyAPI".to_string()),
+    );
+    provider_specific_data.insert("clientId".to_string(), serde_json::Value::String(client_id));
+    provider_specific_data.insert(
+        "tokenEndpoint".to_string(),
+        serde_json::Value::String(token_endpoint),
+    );
+    provider_specific_data.insert("scope".to_string(), serde_json::Value::String(scope));
+
+    Ok(NormalizedExternalIdpAuth {
+        access_token,
+        refresh_token,
+        expires_at,
+        email,
+        provider_specific_data,
+    })
+}
+
+/// Tokens + PSD produced by [`normalize_kiro_external_idp_auth`].
+#[derive(Debug, Clone)]
+pub struct NormalizedExternalIdpAuth {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: String,
+    pub email: Option<String>,
+    pub provider_specific_data: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+fn resolve_external_idp_expires_at(input: &serde_json::Value, access_token: &str) -> String {
+    for key in ["expired", "expires_at", "expiresAt"] {
+        if let Some(explicit) = input.get(key).and_then(serde_json::Value::as_str) {
+            if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(explicit) {
+                return dt.with_timezone(&chrono::Utc).to_rfc3339();
+            }
+            if let Ok(dt) = chrono::DateTime::parse_from_str(explicit, "%+") {
+                return dt.with_timezone(&chrono::Utc).to_rfc3339();
+            }
+        }
+    }
+
+    let expires_in = input
+        .get("expires_in")
+        .or_else(|| input.get("expiresIn"))
+        .and_then(serde_json::Value::as_i64)
+        .filter(|v| *v > 0);
+    if let Some(secs) = expires_in {
+        return (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339();
+    }
+
+    if let Some(payload) = decode_jwt_payload(access_token) {
+        if let Some(exp) = payload.get("exp").and_then(serde_json::Value::as_i64) {
+            return chrono::DateTime::from_timestamp(exp, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| {
+                    (chrono::Utc::now()
+                        + chrono::Duration::seconds(EXTERNAL_IDP_DEFAULT_EXPIRES_IN))
+                    .to_rfc3339()
+                });
+        }
+    }
+
+    (chrono::Utc::now() + chrono::Duration::seconds(EXTERNAL_IDP_DEFAULT_EXPIRES_IN)).to_rfc3339()
+}
+
+/// Decode the middle segment of a JWT into a JSON object (no signature verify).
+fn decode_jwt_payload(jwt: &str) -> Option<serde_json::Value> {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    use base64::Engine;
+    let mut padded = parts[1].replace('-', "+").replace('_', "/");
+    let rem = padded.len() % 4;
+    if rem != 0 {
+        padded.push_str(&"=".repeat(4 - rem));
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(padded)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 /// Refresh a Kiro token, switching between AWS OIDC and Cognito refresh
 /// depending on the `auth_method`.
 ///
@@ -385,6 +749,8 @@ pub fn validate_import_token(token: &str) -> bool {
 ///   with `clientId`, `clientSecret`, and `grantType=refresh_token`.
 /// - **Google / Github / Imported**: POST `{auth_service_base}/refreshToken`
 ///   with only the refresh token.
+/// - **ExternalIdp**: form-urlencoded POST to Microsoft `tokenEndpoint`
+///   (`grant_type=refresh_token&client_id&refresh_token&scope`).
 pub async fn refresh(
     auth_method: KiroAuthMethod,
     refresh_token: &str,
@@ -399,9 +765,7 @@ pub async fn refresh(
             let region = region.unwrap_or("us-east-1");
             let client_id = client_id.ok_or_else(|| KiroError {
                 error: "missing_client_id".to_string(),
-                error_description: Some(
-                    "client_id is required for AWS OIDC refresh".to_string(),
-                ),
+                error_description: Some("client_id is required for AWS OIDC refresh".to_string()),
             })?;
             let client_secret = client_secret.ok_or_else(|| KiroError {
                 error: "missing_client_secret".to_string(),
@@ -472,7 +836,93 @@ pub async fn refresh(
                 error_description: Some(e.to_string()),
             })
         }
+        KiroAuthMethod::ExternalIdp => {
+            // External IdP needs clientId / tokenEndpoint / scope from PSD;
+            // use the dedicated form-urlencoded helper via token_refresh.
+            Err(KiroError {
+                error: "external_idp_requires_psd".to_string(),
+                error_description: Some(
+                    "use refresh_external_idp_token with provider_specific_data".to_string(),
+                ),
+            })
+        }
     }
+}
+
+/// Refresh an external_idp token via Microsoft Entra form-urlencoded POST.
+///
+/// Mirrors 9router:
+/// `POST tokenEndpoint` with
+/// `grant_type=refresh_token&client_id&refresh_token&scope`.
+pub async fn refresh_external_idp_token(
+    refresh_token: &str,
+    provider_specific_data: &std::collections::BTreeMap<String, serde_json::Value>,
+) -> Result<TokenPollResponse, KiroError> {
+    if refresh_token.trim().is_empty() {
+        return Err(KiroError {
+            error: "missing_refresh_token".to_string(),
+            error_description: Some("refresh token is required".to_string()),
+        });
+    }
+
+    let params = build_external_idp_refresh_params(provider_specific_data)?;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(&params.token_endpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", params.client_id.as_str()),
+            ("refresh_token", refresh_token),
+            ("scope", params.scope.as_str()),
+        ])
+        .send()
+        .await
+        .map_err(|e| KiroError {
+            error: "request_failed".to_string(),
+            error_description: Some(e.to_string()),
+        })?;
+
+    if !response.status().is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(KiroError {
+            error: "token_refresh_failed".to_string(),
+            error_description: Some(text),
+        });
+    }
+
+    // Microsoft returns snake_case access_token / refresh_token / expires_in.
+    let payload: serde_json::Value = response.json().await.map_err(|e| KiroError {
+        error: "parse_error".to_string(),
+        error_description: Some(e.to_string()),
+    })?;
+
+    Ok(TokenPollResponse {
+        access_token: payload
+            .get("access_token")
+            .or_else(|| payload.get("accessToken"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        refresh_token: payload
+            .get("refresh_token")
+            .or_else(|| payload.get("refreshToken"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        expires_in: payload
+            .get("expires_in")
+            .or_else(|| payload.get("expiresIn"))
+            .and_then(serde_json::Value::as_i64),
+        profile_arn: None,
+        error: payload
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        error_description: payload
+            .get("error_description")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +942,7 @@ mod tests {
         assert_eq!(KiroAuthMethod::Google.as_str(), "google");
         assert_eq!(KiroAuthMethod::Github.as_str(), "github");
         assert_eq!(KiroAuthMethod::Imported.as_str(), "imported");
+        assert_eq!(KiroAuthMethod::ExternalIdp.as_str(), "external_idp");
     }
 
     #[test]
@@ -517,7 +968,127 @@ mod tests {
             KiroAuthMethod::from_str("imported"),
             Some(KiroAuthMethod::Imported)
         );
+        assert_eq!(
+            KiroAuthMethod::from_str("external_idp"),
+            Some(KiroAuthMethod::ExternalIdp)
+        );
+        assert_eq!(
+            KiroAuthMethod::from_str("external-idp"),
+            Some(KiroAuthMethod::ExternalIdp)
+        );
         assert_eq!(KiroAuthMethod::from_str("unknown"), None);
+    }
+
+    #[test]
+    fn test_validate_microsoft_token_endpoint_ok() {
+        let url = validate_microsoft_token_endpoint(
+            "https://login.microsoftonline.com/tenant/oauth2/v2.0/token",
+        )
+        .unwrap();
+        assert!(url.starts_with("https://login.microsoftonline.com/"));
+    }
+
+    #[test]
+    fn test_validate_microsoft_token_endpoint_rejects_http() {
+        assert!(validate_microsoft_token_endpoint(
+            "http://login.microsoftonline.com/tenant/oauth2/v2.0/token"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn test_validate_microsoft_token_endpoint_rejects_other_host() {
+        assert!(
+            validate_microsoft_token_endpoint("https://evil.example.com/oauth2/v2.0/token")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn test_build_external_idp_refresh_params() {
+        let mut pdata = std::collections::BTreeMap::new();
+        pdata.insert(
+            "clientId".into(),
+            serde_json::Value::String("client-123".into()),
+        );
+        pdata.insert(
+            "tokenEndpoint".into(),
+            serde_json::Value::String(
+                "https://login.microsoftonline.com/t/oauth2/v2.0/token".into(),
+            ),
+        );
+        pdata.insert(
+            "scope".into(),
+            serde_json::Value::String("openid profile offline_access".into()),
+        );
+        let params = build_external_idp_refresh_params(&pdata).unwrap();
+        assert_eq!(params.client_id, "client-123");
+        assert_eq!(params.scope, "openid profile offline_access");
+        assert!(params.token_endpoint.contains("login.microsoftonline.com"));
+    }
+
+    #[test]
+    fn test_build_external_idp_refresh_params_missing_scope() {
+        let mut pdata = std::collections::BTreeMap::new();
+        pdata.insert(
+            "clientId".into(),
+            serde_json::Value::String("client-123".into()),
+        );
+        pdata.insert(
+            "tokenEndpoint".into(),
+            serde_json::Value::String(
+                "https://login.microsoftonline.com/t/oauth2/v2.0/token".into(),
+            ),
+        );
+        assert!(build_external_idp_refresh_params(&pdata).is_err());
+    }
+
+    #[test]
+    fn test_normalize_kiro_external_idp_auth() {
+        let raw = serde_json::json!({
+            "auth_method": "external_idp",
+            "access_token": "at-1",
+            "refresh_token": "rt-1",
+            "client_id": "cid",
+            "token_endpoint": "https://login.microsoftonline.com/t/oauth2/v2.0/token",
+            "profile_arn": "arn:aws:codewhisperer:us-east-1:123:profile/p",
+            "scopes": ["openid", "profile", "offline_access"],
+            "region": "us-west-2",
+            "expires_in": 1800
+        });
+        let norm = normalize_kiro_external_idp_auth(&raw).unwrap();
+        assert_eq!(norm.access_token, "at-1");
+        assert_eq!(norm.refresh_token, "rt-1");
+        assert_eq!(
+            norm.provider_specific_data
+                .get("authMethod")
+                .and_then(|v| v.as_str()),
+            Some("external_idp")
+        );
+        assert_eq!(
+            norm.provider_specific_data
+                .get("clientId")
+                .and_then(|v| v.as_str()),
+            Some("cid")
+        );
+        assert_eq!(
+            norm.provider_specific_data
+                .get("scope")
+                .and_then(|v| v.as_str()),
+            Some("openid profile offline_access")
+        );
+        assert!(norm.expires_at.len() > 10);
+    }
+
+    #[test]
+    fn test_is_external_idp_auth() {
+        let mut pdata = std::collections::BTreeMap::new();
+        assert!(!is_external_idp_auth(&pdata));
+        pdata.insert(
+            "authMethod".into(),
+            serde_json::Value::String("external_idp".into()),
+        );
+        assert!(is_external_idp_auth(&pdata));
     }
 
     // -- import token validation -------------------------------------------
@@ -536,9 +1107,7 @@ mod tests {
     fn test_build_social_login_url_google() {
         let url = build_social_login_url("Google", "challenge123", "state456");
         assert!(url.contains("idp=Google"));
-        assert!(url.contains(
-            "redirect_uri=kiro%3A%2F%2Fkiro.kiroAgent%2Fauthenticate-success"
-        ));
+        assert!(url.contains("redirect_uri=kiro%3A%2F%2Fkiro.kiroAgent%2Fauthenticate-success"));
         assert!(url.contains("code_challenge=challenge123"));
         assert!(url.contains("code_challenge_method=S256"));
         assert!(url.contains("state=state456"));
@@ -555,8 +1124,7 @@ mod tests {
 
     #[test]
     fn test_client_registration_response_deserialize() {
-        let json =
-            r#"{"clientId":"c1","clientSecret":"s1","clientSecretExpiresAt":12345}"#;
+        let json = r#"{"clientId":"c1","clientSecret":"s1","clientSecretExpiresAt":12345}"#;
         let resp: ClientRegistrationResponse = serde_json::from_str(json).unwrap();
         assert_eq!(resp.client_id, "c1");
         assert_eq!(resp.client_secret, "s1");

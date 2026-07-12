@@ -40,6 +40,12 @@ const MINIMAX_CN_URLS: &[&str] = &[
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_RESET_CREDITS_URL: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+const CODEX_RESET_CREDITS_CONSUME_URL: &str =
+    "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume";
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
@@ -685,7 +691,7 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
     let client = http_client();
 
     let response = match client
-        .get("https://chatgpt.com/backend-api/wham/usage")
+        .get(CODEX_USAGE_URL)
         .bearer_auth(access_token)
         .header("Accept", "application/json")
         .send()
@@ -712,21 +718,26 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
 
     let mut quotas = serde_json::Map::new();
 
-    if let Some(plan) = body.get("plan_type").and_then(|v| v.as_str()) {
-        if !plan.is_empty() {
-            quotas.insert(
-                "plan".to_string(),
-                json!({
-                    "used": 0.0,
-                    "total": 0.0,
-                    "remaining": 0.0,
-                    "remainingPercentage": 0.0,
-                    "resetAt": Value::Null,
-                    "unlimited": false,
-                    "label": plan,
-                }),
-            );
-        }
+    let plan = body
+        .get("plan_type")
+        .or_else(|| body.pointer("/summary/plan"))
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    if let Some(plan_label) = plan.as_deref() {
+        quotas.insert(
+            "plan".to_string(),
+            json!({
+                "used": 0.0,
+                "total": 0.0,
+                "remaining": 0.0,
+                "remainingPercentage": 0.0,
+                "resetAt": Value::Null,
+                "unlimited": false,
+                "label": plan_label,
+            }),
+        );
     }
 
     let normal_rl = body
@@ -745,11 +756,229 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
         append_codex_quota_windows(&mut quotas, "review", &review);
     }
 
+    let available_reset_credits = body
+        .pointer("/rate_limit_reset_credits/available_count")
+        .and_then(|v| v.as_f64())
+        .or_else(|| {
+            body.pointer("/rate_limit_reset_credits/availableCount")
+                .and_then(|v| v.as_f64())
+        })
+        .unwrap_or(0.0)
+        .max(0.0);
+
     if quotas.is_empty() {
-        return json!({ "message": "Codex connected. No quota data was returned." });
+        return json!({
+            "message": "Codex connected. No quota data was returned.",
+            "plan": plan,
+            "resetCredits": { "availableCount": available_reset_credits },
+        });
     }
 
-    json!({ "quotas": Value::Object(quotas) })
+    let limit_reached = normal_rl
+        .map(|snapshot| {
+            codex_rate_limit_body(snapshot)
+                .get("limit_reached")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+
+    json!({
+        "plan": plan.unwrap_or_else(|| "unknown".to_string()),
+        "limitReached": limit_reached,
+        "resetCredits": { "availableCount": available_reset_credits },
+        "quotas": Value::Object(quotas),
+    })
+}
+
+/// Resolve ChatGPT account id for Codex reset-credit APIs.
+pub fn codex_account_id(
+    provider_specific_data: &std::collections::BTreeMap<String, Value>,
+) -> Option<String> {
+    for key in ["workspaceId", "accountId", "chatgptAccountId", "account_id"] {
+        if let Some(s) = provider_specific_data
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
+fn codex_to_iso_date(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(s) if s.trim().is_empty() => None,
+        other => parse_reset_time(other).map(|iso| {
+            // Prefer millisecond precision when parse yields seconds-only RFC3339.
+            chrono::DateTime::parse_from_rfc3339(&iso)
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Utc)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                })
+                .unwrap_or(iso)
+        }),
+    }
+}
+
+/// GET OpenAI rate-limit reset credits for a Codex connection.
+///
+/// Mirrors 9router `getCodexRateLimitResetCredits`.
+pub async fn get_codex_rate_limit_reset_credits(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Result<Value, String> {
+    if access_token.trim().is_empty() {
+        return Err(
+            "No Codex access token available. Please re-authorize the connection.".to_string(),
+        );
+    }
+
+    let client = http_client();
+    let mut request = client
+        .get(CODEX_RESET_CREDITS_URL)
+        .bearer_auth(access_token)
+        .header("Accept", "application/json")
+        .header("OpenAI-Beta", "codex-1")
+        .header("originator", "codex_cli_rs");
+    if let Some(id) = account_id.map(str::trim).filter(|s| !s.is_empty()) {
+        request = request.header("ChatGPT-Account-ID", id);
+    }
+
+    let response = request
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch Codex reset credits: {e}"))?;
+
+    let status = response.status();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+
+    if !status.is_success() {
+        let message = body
+            .get("message")
+            .or_else(|| body.get("error"))
+            .or_else(|| body.get("detail"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                format!("Codex reset credits API unavailable ({}).", status.as_u16())
+            });
+        return Err(message);
+    }
+
+    let available_count = body
+        .get("available_count")
+        .or_else(|| body.get("availableCount"))
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0)
+        .max(0.0);
+
+    let credits = body
+        .get("credits")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|credit| {
+                    json!({
+                        "status": credit
+                            .get("status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown"),
+                        "grantedAt": credit
+                            .get("granted_at")
+                            .or_else(|| credit.get("grantedAt"))
+                            .and_then(codex_to_iso_date),
+                        "expiresAt": credit
+                            .get("expires_at")
+                            .or_else(|| credit.get("expiresAt"))
+                            .and_then(codex_to_iso_date),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(json!({
+        "availableCount": available_count,
+        "credits": credits,
+    }))
+}
+
+/// Result of consuming one Codex rate-limit reset credit via OpenAI.
+#[derive(Debug, Clone)]
+pub struct CodexResetCreditConsumeResult {
+    pub ok: bool,
+    pub no_credit: bool,
+    pub status: u16,
+    pub code: Option<String>,
+    pub windows_reset: f64,
+    pub message: Option<String>,
+    pub raw: Value,
+}
+
+/// POST consume one Codex rate-limit reset credit (irreversible).
+///
+/// Mirrors 9router `consumeCodexRateLimitResetCredit`.
+pub async fn consume_codex_rate_limit_reset_credit(
+    access_token: &str,
+    redeem_request_id: &str,
+) -> Result<CodexResetCreditConsumeResult, String> {
+    if access_token.trim().is_empty() {
+        return Err(
+            "No Codex access token available. Please re-authorize the connection.".to_string(),
+        );
+    }
+    if redeem_request_id.trim().is_empty() {
+        return Err("A redeem request id is required to consume a Codex reset credit.".to_string());
+    }
+
+    let client = http_client();
+    let response = client
+        .post(CODEX_RESET_CREDITS_CONSUME_URL)
+        .bearer_auth(access_token)
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .json(&json!({ "redeem_request_id": redeem_request_id }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to consume Codex reset credit: {e}"))?;
+
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap_or_default();
+    let data: Value = if text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&text).unwrap_or(Value::Null)
+    };
+
+    let code = data
+        .get("code")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let windows_reset = data
+        .get("windows_reset")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(0.0);
+    let success =
+        (200..300).contains(&status) && (code.as_deref() == Some("reset") || windows_reset > 0.0);
+    let no_credit = (200..300).contains(&status) && code.as_deref() == Some("no_credit");
+    let message = data
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(CodexResetCreditConsumeResult {
+        ok: success,
+        no_credit,
+        status,
+        code,
+        windows_reset,
+        message,
+        raw: data,
+    })
 }
 
 fn codex_rate_limit_body(snapshot: &Value) -> &Value {

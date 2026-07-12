@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useCallback, useEffect } from "react";
-import { Card, Button, Modal } from "@/shared/components";
-import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
+import { Card, Button, Modal, CapacityBadges } from "@/shared/components";
+import { getModelsByProviderId, useEnsureCatalog, type ModelCaps } from "@/shared/constants/models";
 import { getProviderAlias } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { useModelCaps } from "@/shared/hooks/useModelCaps";
 
 interface Model {
   id: string;
@@ -25,10 +26,11 @@ interface ModelRowProps {
   onDeleteAlias?: () => void;
   onTest?: () => void;
   isTesting?: boolean;
+  caps?: ModelCaps | null;
 }
 
 // ── ModelRow ───────────────────────────────────────────────────
-export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting }: ModelRowProps) {
+export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, caps }: ModelRowProps) {
   const borderColor = testStatus === "ok" ? "border-green-500/40" : testStatus === "error" ? "border-red-500/40" : "border-border";
   const iconColor = testStatus === "ok" ? "#22c55e" : testStatus === "error" ? "#ef4444" : undefined;
 
@@ -40,7 +42,10 @@ export function ModelRow({ model, fullModel, copied, onCopy, testStatus, isCusto
         </span>
         <div className="flex flex-col gap-1">
           <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
-          {model.name && <span className="text-[9px] text-text-muted/70 italic pl-1">{model.name}</span>}
+          <span className="flex min-w-0 items-center gap-1 pl-1">
+            {model.name && <span className="text-[9px] text-text-muted/70 italic">{model.name}</span>}
+            <CapacityBadges caps={caps} colorOverride="text-text-muted/70" size={12} />
+          </span>
         </div>
         {onTest && (
           <div className="relative group/btn">
@@ -124,6 +129,7 @@ interface ModelsCardProps {
 export default function ModelsCard({ providerId, kindFilter, providerAliasOverride }: ModelsCardProps) {
   useEnsureCatalog();
   const { copied, copy } = useCopyToClipboard();
+  const { getCaps } = useModelCaps();
   const [modelAliases, setModelAliases] = useState<Record<string, string>>({});
   const [customModels, setCustomModels] = useState<Array<{ providerAlias: string; id: string; name?: string; type?: string }>>([]);
   const [modelTestResults, setModelTestResults] = useState<Record<string, "ok" | "error">>({});
@@ -258,6 +264,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
                 onTest={connections.length > 0 ? () => handleTestModel(model.id) : undefined}
                 isTesting={testingModelIds.has(model.id)}
                 isFree={model.isFree}
+                caps={getCaps(`${providerId}/${model.id}`)}
               />
             );
           })}
@@ -275,6 +282,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
               onTest={connections.length > 0 ? () => handleTestModel(model.id) : undefined}
               isTesting={testingModelIds.has(model.id)}
               isCustom
+              caps={getCaps(`${providerId}/${model.id}`)}
             />
           ))}
 

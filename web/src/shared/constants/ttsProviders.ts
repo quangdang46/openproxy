@@ -13,6 +13,8 @@ interface TTSProviderConfig {
   voiceKey?: string;
   voicesPerModel?: boolean;
   apiEndpoint?: string;
+  /** Pre-selected voice id when the picker mounts (e.g. MiniMax narrator). */
+  defaultVoiceId?: string;
 }
 
 export const TTS_PROVIDER_CONFIG: Record<string, TTSProviderConfig> = {
@@ -121,5 +123,21 @@ export const TTS_PROVIDER_CONFIG: Record<string, TTSProviderConfig> = {
     hasBrowseButton: false,
     hasVoiceIdInput: true,
     voiceSource: "config",
+  },
+  "minimax": {
+    hasModelSelector: true,
+    hasBrowseButton: true,
+    hasVoiceIdInput: true,
+    voiceSource: "api-language",
+    apiEndpoint: "/api/media-providers/tts/minimax/voices",
+    defaultVoiceId: "English_expressive_narrator",
+  },
+  "minimax-cn": {
+    hasModelSelector: true,
+    hasBrowseButton: true,
+    hasVoiceIdInput: true,
+    voiceSource: "api-language",
+    apiEndpoint: "/api/media-providers/tts/minimax/voices?provider=minimax-cn",
+    defaultVoiceId: "English_expressive_narrator",
   },
 };

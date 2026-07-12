@@ -5155,7 +5155,11 @@ async fn kiro_api_key_import(
 }
 
 /// POST /api/oauth/kiro/import-cli-proxy
-/// Imports Kiro CLI proxy credentials as a provider connection.
+/// Import Kiro CLIProxyAPI auth JSON for Microsoft external_idp accounts.
+///
+/// Mirrors 9router: normalize via `normalize_kiro_external_idp_auth`, store
+/// tokens + PSD (`authMethod=external_idp`, clientId, tokenEndpoint, scope,
+/// profileArn, region).
 async fn kiro_import_cli_proxy(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -5176,76 +5180,29 @@ async fn kiro_import_cli_proxy(
         .get("cliProxyAuth")
         .or_else(|| body.get("auth"))
         .or_else(|| body.get("json"))
-        .map(|value| {
-            if let Some(s) = value.as_str() {
-                serde_json::from_str::<Value>(s).unwrap_or(value.clone())
-            } else {
-                value.clone()
-            }
-        })
+        .cloned()
         .unwrap_or_else(|| body.clone());
 
-    let access_token = auth_payload
-        .get("accessToken")
-        .or_else(|| auth_payload.get("access_token"))
-        .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_default();
-
-    if access_token.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "accessToken is required" })),
-        )
-            .into_response();
-    }
-
-    let refresh_token = auth_payload
-        .get("refreshToken")
-        .or_else(|| auth_payload.get("refresh_token"))
-        .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let profile_arn = auth_payload
-        .get("profileArn")
-        .or_else(|| auth_payload.get("profile_arn"))
-        .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    let claims = decode_jwt_claims(&access_token);
-    let email = claims
-        .as_ref()
-        .and_then(|v| v.get("email"))
-        .or_else(|| claims.as_ref().and_then(|v| v.get("preferred_username")))
-        .or_else(|| claims.as_ref().and_then(|v| v.get("sub")))
-        .and_then(Value::as_str)
-        .map(|s| s.to_string());
-
-    let mut provider_specific_data = std::collections::BTreeMap::new();
-    provider_specific_data.insert(
-        "authMethod".to_string(),
-        Value::String("cli-proxy".to_string()),
-    );
-    provider_specific_data.insert(
-        "provider".to_string(),
-        Value::String("Kiro CLI Proxy".to_string()),
-    );
-    if let Some(arn) = profile_arn {
-        provider_specific_data.insert("profileArn".to_string(), Value::String(arn));
-    }
+    let token_data = match crate::oauth::kiro::normalize_kiro_external_idp_auth(&auth_payload) {
+        Ok(data) => data,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.to_string() })),
+            )
+                .into_response();
+        }
+    };
 
     let connection = ProviderConnection {
         provider: "kiro".to_string(),
         auth_type: "oauth".to_string(),
-        email,
-        access_token: Some(access_token),
-        refresh_token,
-        expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(3600)).to_rfc3339()),
+        email: token_data.email,
+        access_token: Some(token_data.access_token),
+        refresh_token: Some(token_data.refresh_token),
+        expires_at: Some(token_data.expires_at),
         test_status: Some("active".to_string()),
-        provider_specific_data,
+        provider_specific_data: token_data.provider_specific_data,
         ..Default::default()
     };
 

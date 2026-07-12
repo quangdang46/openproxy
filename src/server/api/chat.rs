@@ -795,6 +795,17 @@ async fn execute_single_model(
         );
     }
 
+    // 3b. Re-apply model(level) thinking onto provider-native fields
+    // (9router applyThinking after translate). Suffix overrides; without a
+    // suffix, leave providerThinking / client fields untouched.
+    crate::core::utils::thinking_suffix::reapply_thinking_after_translate(
+        plan.target_format,
+        &plan.provider,
+        &dispatch_model,
+        &mut body,
+        plan.thinking_level.as_deref(),
+    );
+
     // 4. RTK tool-result compression (after translate — 9router parity)
     compress_messages(&mut body, snapshot.settings.rtk_enabled);
 

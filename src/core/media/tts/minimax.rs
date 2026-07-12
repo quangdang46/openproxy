@@ -11,9 +11,19 @@ use super::base::{TtsAdapter, TtsError, TtsRequest, TtsResult};
 pub struct MinimaxAdapter;
 pub static ADAPTER: MinimaxAdapter = MinimaxAdapter;
 
-const DEFAULT_BASE: &str = "https://api.minimaxi.com/v1/t2a_v2";
+/// Global MiniMax TTS endpoint (api.minimax.io). China region uses
+/// `api.minimaxi.com` — see [`default_base_for`].
+const DEFAULT_BASE_GLOBAL: &str = "https://api.minimax.io/v1/t2a_v2";
+const DEFAULT_BASE_CN: &str = "https://api.minimaxi.com/v1/t2a_v2";
 const DEFAULT_MODEL: &str = "speech-2.8-hd";
 const DEFAULT_VOICE: &str = "English_expressive_narrator";
+
+fn default_base_for(provider: &str) -> &'static str {
+    match provider {
+        "minimax-cn" => DEFAULT_BASE_CN,
+        _ => DEFAULT_BASE_GLOBAL,
+    }
+}
 
 #[async_trait]
 impl TtsAdapter for MinimaxAdapter {
@@ -22,41 +32,40 @@ impl TtsAdapter for MinimaxAdapter {
         client: &Client,
         request: &TtsRequest<'_>,
     ) -> Result<TtsResult, TtsError> {
+        let provider = request.credentials.provider.as_str();
         let api_key = request
             .credentials
             .api_key
             .as_deref()
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| TtsError::MissingCredentials("minimax".to_string()))?;
+            .ok_or_else(|| TtsError::MissingCredentials(provider.to_string()))?;
 
-        let (model_id, voice_id) = if request.model.contains('/') {
-            let mut parts = request.model.splitn(2, '/');
-            (
-                parts.next().unwrap_or("").to_string(),
-                parts.next().unwrap_or("").to_string(),
-            )
-        } else if !request.model.is_empty() {
-            (DEFAULT_MODEL.to_string(), request.model.to_string())
-        } else {
-            (DEFAULT_MODEL.to_string(), DEFAULT_VOICE.to_string())
-        };
-        let model_id = if model_id.is_empty() {
-            DEFAULT_MODEL.to_string()
-        } else {
-            model_id
-        };
-        let voice_id = if voice_id.is_empty() {
-            DEFAULT_VOICE.to_string()
-        } else {
-            voice_id
-        };
+        // Accept `model`, `model/voice`, or bare voice id. Longest-known
+        // speech-* prefix wins when present.
+        let known_models = [
+            "speech-2.8-hd",
+            "speech-2.8-turbo",
+            "speech-2.6-hd",
+            "speech-2.6-turbo",
+            "speech-02-hd",
+            "speech-02-turbo",
+            "speech-01-hd",
+            "speech-01-turbo",
+        ];
+        let (model_id, voice_id) = super::base::parse_model_voice(
+            request.model,
+            DEFAULT_MODEL,
+            DEFAULT_VOICE,
+            &known_models,
+        );
 
         let base = request
             .credentials
             .provider_specific_data
             .get("baseUrl")
             .and_then(|v| v.as_str())
-            .unwrap_or(DEFAULT_BASE);
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| default_base_for(provider));
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
