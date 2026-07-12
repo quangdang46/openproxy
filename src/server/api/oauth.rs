@@ -1278,7 +1278,8 @@ async fn handle_xai_proxy_connection(
                     .await;
                 render_codex_result_page(false, &message)
             } else if let Some(code) = code {
-                match exchange_xai_compat(&code, &session.redirect_uri, &session.code_verifier).await
+                match exchange_xai_compat(&code, &session.redirect_uri, &session.code_verifier)
+                    .await
                 {
                     Ok(connection) => {
                         match create_imported_oauth_connection(&state.db, connection).await {
@@ -5113,10 +5114,7 @@ async fn kiro_api_key_import(
         "authMethod".to_string(),
         Value::String("api_key".to_string()),
     );
-    provider_specific_data.insert(
-        "provider".to_string(),
-        Value::String("API Key".to_string()),
-    );
+    provider_specific_data.insert("provider".to_string(), Value::String("API Key".to_string()));
 
     let result = state
         .db
@@ -5131,9 +5129,7 @@ async fn kiro_api_key_import(
                 // the executor can use the same path as OAuth connections.
                 api_key: Some(api_key.to_string()),
                 access_token: Some(api_key.to_string()),
-                expires_at: Some(
-                    (chrono::Utc::now() + chrono::Duration::days(365)).to_rfc3339(),
-                ),
+                expires_at: Some((chrono::Utc::now() + chrono::Duration::days(365)).to_rfc3339()),
                 is_active: Some(true),
                 created_at: Some(now.clone()),
                 updated_at: Some(now.clone()),

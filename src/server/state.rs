@@ -185,8 +185,8 @@ impl AppState {
             let issuer = std::env::var("OIDC_ISSUER").unwrap_or_default();
             let client_id = std::env::var("OIDC_CLIENT_ID").unwrap_or_default();
             let client_secret = std::env::var("OIDC_CLIENT_SECRET").unwrap_or_default();
-            let scopes = std::env::var("OIDC_SCOPES")
-                .unwrap_or_else(|_| "openid profile email".to_string());
+            let scopes =
+                std::env::var("OIDC_SCOPES").unwrap_or_else(|_| "openid profile email".to_string());
             (issuer, client_id, client_secret, scopes)
         };
 

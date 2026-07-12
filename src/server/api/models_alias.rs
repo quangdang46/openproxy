@@ -112,11 +112,7 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
                     }
                 }
                 let id_lower = model.id.to_ascii_lowercase();
-                let name_lower = model
-                    .name
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_ascii_lowercase();
+                let name_lower = model.name.as_deref().unwrap_or("").to_ascii_lowercase();
                 if !vision
                     && (id_lower.contains("vision")
                         || id_lower.contains("vl")
