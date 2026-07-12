@@ -108,6 +108,5 @@ Accepts legacy string **or** nested 9router object:
 
 ## Remaining intentional backlog
 
-- **P0/P1 open (fix next):** grok-cli executor; xiaomi-tokenplan Claude path; xiaomi-mimo transport; web_fetch selective lock.
-- **P2:** global thinking suffix; docs refresh bead `openproxy-docs-parity-gaps-refresh-wcq`.
+- **Fixed (this pass):** grok-cli specialized executor (`cli-chat-proxy`); xiaomi-tokenplan Claude dual path; xiaomi-mimo in `resolve_transport`; web_fetch selective lock; global `model(level)` strip via `thinking_suffix`.
 - **P3 product-optional:** full PXPIPE port; wire hedging/shadow/auto-combo into chat dispatcher when needed.

@@ -73,8 +73,15 @@ impl RequestPlan {
             registry::detect_source_format(body)
         };
 
-        let (model_target, upstream_model_id, strip_list) =
+        let (model_target, mut upstream_model_id, strip_list) =
             resolve_model_metadata(provider, model);
+
+        // Global model(level) / model-level strip (9router thinkingUnified.stripThinkingSuffix)
+        let (stripped, _level) =
+            crate::core::utils::thinking_suffix::strip_thinking_suffix_owned(&upstream_model_id);
+        if stripped != upstream_model_id {
+            upstream_model_id = stripped;
+        }
 
         // 9router: modelTargetFormat || resolveTransport?.format || getTargetFormat
         let transport = resolve_transport(provider, source_format);
@@ -213,6 +220,29 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
             TransportMatch {
                 format: Format::Claude,
                 base_url: "https://api.minimaxi.com/anthropic/v1/messages".into(),
+            },
+        ],
+        "xiaomi-mimo" | "mimo" => vec![
+            TransportMatch {
+                format: Format::OpenAi,
+                base_url: "https://api.xiaomimimo.com/v1/chat/completions".into(),
+            },
+            TransportMatch {
+                format: Format::Claude,
+                base_url: "https://api.xiaomimimo.com/anthropic/v1/messages".into(),
+            },
+        ],
+        // Region-specific bases are applied in DefaultExecutor; here we only
+        // signal format preference so plan.target_format / runtime_transport path work.
+        // Full regional URL is rebuilt in default.rs using PSD.region.
+        "xiaomi-tokenplan" | "xmtp" => vec![
+            TransportMatch {
+                format: Format::OpenAi,
+                base_url: "https://token-plan-sgp.xiaomimimo.com/v1/chat/completions".into(),
+            },
+            TransportMatch {
+                format: Format::Claude,
+                base_url: "https://token-plan-sgp.xiaomimimo.com/anthropic/v1/messages".into(),
             },
         ],
         _ => Vec::new(),
@@ -485,6 +515,29 @@ mod tests {
     fn resolve_transport_none_for_single_endpoint() {
         assert!(resolve_transport("openai", Format::OpenAi).is_none());
         assert!(resolve_transport("cursor", Format::Cursor).is_none());
+    }
+
+    #[test]
+    fn xiaomi_mimo_claude_transport() {
+        let t = resolve_transport("xiaomi-mimo", Format::Claude).expect("claude transport");
+        assert!(t.base_url.contains("anthropic/v1/messages"));
+        let t = resolve_transport("mimo", Format::OpenAi).expect("openai transport");
+        assert!(t.base_url.contains("chat/completions"));
+    }
+
+    #[test]
+    fn xiaomi_tokenplan_dual_transport() {
+        let t = resolve_transport("xiaomi-tokenplan", Format::Claude).expect("claude");
+        assert!(t.base_url.contains("anthropic"));
+        let t = resolve_transport("xmtp", Format::OpenAi).expect("openai");
+        assert!(t.base_url.contains("chat/completions"));
+    }
+
+    #[test]
+    fn plan_strips_model_thinking_paren_suffix() {
+        let body = json!({"model": "gpt-4o(high)", "messages": [{"role": "user", "content": "hi"}]});
+        let plan = RequestPlan::new(Some("/v1/chat/completions"), &body, "openai", "gpt-4o(high)");
+        assert_eq!(plan.dispatch_model(), "gpt-4o");
     }
 
     #[test]

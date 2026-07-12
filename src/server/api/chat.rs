@@ -1571,6 +1571,41 @@ async fn forward_with_provider_fallback(
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
+            } else if provider == "grok-cli"
+                || provider == "gcli"
+                || provider == "gb"
+                || provider == "grok-build"
+            {
+                use crate::core::executor::{GrokCliExecutionRequest, GrokCliExecutor};
+                let executor = GrokCliExecutor::new(state.client_pool.clone(), provider_node)
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("GrokCli executor creation failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                let result = executor
+                    .execute_request(GrokCliExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream: true, // forceStream (9router)
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("GrokCli execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
             } else {
                 let executor = DefaultExecutor::new(
                     provider.to_string(),

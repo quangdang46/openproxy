@@ -9,6 +9,7 @@ mod cursor;
 mod default;
 mod gemini_cli;
 mod github;
+mod grok_cli;
 mod grok_web;
 mod iflow;
 mod kimchi;
@@ -60,6 +61,11 @@ pub use gemini_cli::{
 };
 pub use github::{
     GithubExecutionRequest, GithubExecutor, GithubExecutorError, GithubExecutorResponse,
+};
+pub use grok_cli::{
+    count_grok_cli_user_turns, reset_grok_cli_turn_store, resolve_effort_from_model,
+    resolve_grok_cli_turn_idx, GrokCliExecutionRequest, GrokCliExecutor, GrokCliExecutorError,
+    GrokCliExecutorResponse,
 };
 pub use grok_web::{
     GrokWebExecutionRequest, GrokWebExecutor, GrokWebExecutorError, GrokWebExecutorResponse,

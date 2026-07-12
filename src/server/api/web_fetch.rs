@@ -737,7 +737,20 @@ async fn mark_connection_unavailable(
 }
 
 async fn clear_connection_error(state: &AppState, connection_id: &str) {
+    clear_connection_error_for_model(state, connection_id, None).await;
+}
+
+/// Selective model-lock clear (9router clearAccountError parity; matches chat.rs).
+/// Drops expired locks and optionally the succeeded model lock — not all modelLock_*.
+async fn clear_connection_error_for_model(
+    state: &AppState,
+    connection_id: &str,
+    succeeded_model: Option<&str>,
+) {
+    use chrono::{DateTime, Utc};
     let connection_id = connection_id.to_string();
+    let succeeded_model = succeeded_model.map(|s| s.to_string());
+    let now = Utc::now();
     let _ = state
         .db
         .update(move |db| {
@@ -753,7 +766,27 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
                 c.consecutive_errors = Some(0);
                 c.test_status = None;
                 c.rate_limited_until = None;
-                c.extra.retain(|k, _| !k.starts_with("modelLock_"));
+                let model_key = succeeded_model
+                    .as_ref()
+                    .map(|m| format!("modelLock_{m}"));
+                c.extra.retain(|k, v| {
+                    if !k.starts_with("modelLock_") {
+                        return true;
+                    }
+                    if let Some(exp) = v.as_str() {
+                        if let Ok(t) = DateTime::parse_from_rfc3339(exp) {
+                            if t.with_timezone(&Utc) <= now {
+                                return false;
+                            }
+                        }
+                    }
+                    if let Some(ref mk) = model_key {
+                        if k == mk {
+                            return false;
+                        }
+                    }
+                    true
+                });
             }
         })
         .await;
