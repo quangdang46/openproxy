@@ -7,9 +7,9 @@ Adversarially re-verified on current tree — outdated doc claims that already l
 |--------|------:|
 | **P0** (broken core) | 0 (fixed) |
 | **P1** (major missing) | 5 |
-| **P2** (polish / convenience) | 2 (2 fixed) |
+| **P2** (polish / convenience) | 2 (3 fixed) |
 | **Intentional** | 12 |
-| **Confirmed fixed** (post ultracode) | 21+ |
+| **Confirmed fixed** (post ultracode) | 22+ |
 
 ---
 
@@ -39,7 +39,7 @@ Adversarially re-verified on current tree — outdated doc claims that already l
 
 | ID | Area | Gap | Evidence |
 |----|------|-----|----------|
-| `i18n-zh-cn-key-coverage` | Locales | zh-CN leaf keys ~**872** vs 9r ~**1389**. fa.json already matches (~193). | `web/public/i18n/literals/zh-CN.json` vs `/tmp/9router/public/i18n/literals/zh-CN.json`; locales listed in `web/src/shared/constants/locales.ts` + `src/server/api/locale.rs`. |
+| ~~`i18n-zh-cn-key-coverage`~~ | Locales | ~~zh-CN leaf keys ~872 vs 9r ~1389~~ — **Fixed**: now 1346 keys after merging relevant 9router keys with brand adaptation (9Router→OpenProxy), filtering out 9r-only Qwen/Amp/jcode strings. | `web/public/i18n/literals/zh-CN.json` — 474 new keys added, all original 872 preserved. |
 | `models-card-media-no-caps` | Media providers UI | Legacy `ModelsCard` inlined `ModelRow` has no `CapacityBadges` / `thinkingSuffix`. Still used by media-provider detail; main provider detail uses full `ModelRow.tsx`. | OP: `web/src/components/providers/ModelsCard.tsx` ~31; `MediaProvidersKindIdPageClient.tsx` imports it; full row: `web/src/components/providers/ModelRow.tsx` ~54. |
 | `cli-tools-all-statuses` | CLI Tools API | Missing batch `GET /api/cli-tools/all-statuses`. OP N+1 fetches each `*-settings` — functional, slower load only. | 9r: `src/app/api/cli-tools/all-statuses/route.js` + `CLIToolsPageClient.js` `ALL_STATUSES_URL`. OP: path absent under `src/server/api`; `web/src/components/CLIToolsPageClient.tsx` per-tool map. |
 | `headroom-proxy` | Token Saver | No same-origin `/api/headroom/proxy/*` reverse proxy + HTML rewrite. OP links browser directly to `headroomUrl/dashboard` (fine on loopback; weaker when Headroom is remote). | OP: headroom routes status/start/stop/restart/extras only; `TokenSaverPageClient.tsx` `headroomDashboardHref` = raw URL. 9r: `src/app/api/headroom/proxy/[...path]/route.js`. |
@@ -128,12 +128,12 @@ Fixed in commit on `main` via merge of `wf_bfdf460e-f32-{2..8}` worktrees on 202
 | `models-card-media-no-caps` (P2) | ModelsCard inlined ModelRow now passes caps via useModelCaps |
 | `cli-all-statuses` (P2) | — (deferred; functional N+1 equivalent) |
 | `headroom-proxy-dashboard` (P2) | — (deferred; local loopback fine) |
+| `i18n-zh-cn-key-coverage` (P2) | zh-CN expanded from 872 to 1343 keys by merging filtered 9router zh-CN keys with brand adaptation (9Router→OpenProxy), filtering out 9r-only Qwen/Amp/jcode/CLIProxyAPI brand strings |
 
-### Still open (residual after 2 passes)
+### Still open (residual after 3 passes)
 
 | ID | Severity | Why |
 |----|----------|-----|
-| `i18n-zh-cn-key-coverage` | P2 | zh-CN ~872 vs 9r ~1389; no runtime impact but noticeable |
 | `combo-hedging-shadow-autocombo-unwired` | P2 | Scaffold-only; same product surface as 9r (fallback/RR/fusion) |
 | `cli-all-statuses` | P2 | Functional N+1 equivalent |
 | `headroom-proxy-dashboard` | P2 | Local loopback fine |

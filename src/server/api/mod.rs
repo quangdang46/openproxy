@@ -254,6 +254,16 @@ pub fn routes(state: AppState) -> Router<AppState> {
                 .post(headroom::extras_post)
                 .delete(headroom::extras_delete),
         )
+        .route(
+            "/api/headroom/proxy/{*path}",
+            get(headroom::proxy_handler)
+                .post(headroom::proxy_handler)
+                .put(headroom::proxy_handler)
+                .patch(headroom::proxy_handler)
+                .delete(headroom::proxy_handler)
+                .head(headroom::proxy_handler)
+                .options(headroom::proxy_handler),
+        )
         .route_layer(middleware::from_fn(guard::require_local_only));
 
     let admin = Router::new()
