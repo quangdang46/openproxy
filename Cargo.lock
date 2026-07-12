@@ -2308,7 +2308,7 @@ dependencies = [
  "serde_urlencoded",
  "serde_yml",
  "sha1",
- "sha2 0.10.9",
+ "sha2 0.11.0",
  "sha256",
  "simd-json",
  "tempfile",
