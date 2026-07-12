@@ -766,9 +766,7 @@ async fn clear_connection_error_for_model(
                 c.consecutive_errors = Some(0);
                 c.test_status = None;
                 c.rate_limited_until = None;
-                let model_key = succeeded_model
-                    .as_ref()
-                    .map(|m| format!("modelLock_{m}"));
+                let model_key = succeeded_model.as_ref().map(|m| format!("modelLock_{m}"));
                 c.extra.retain(|k, v| {
                     if !k.starts_with("modelLock_") {
                         return true;

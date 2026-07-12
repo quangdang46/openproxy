@@ -263,10 +263,7 @@ impl ComboStrategyEntry {
     pub fn strategy_name(&self) -> &str {
         match self {
             Self::Name(s) => s.as_str(),
-            Self::Config(c) => c
-                .fallback_strategy
-                .as_deref()
-                .unwrap_or("fallback"),
+            Self::Config(c) => c.fallback_strategy.as_deref().unwrap_or("fallback"),
         }
     }
 

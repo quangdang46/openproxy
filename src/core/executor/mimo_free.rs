@@ -250,10 +250,7 @@ impl MimoFreeExecutor {
     /// `/v1/device/authorize`.
     ///
     /// Returns the JWT token string on success.
-    async fn bootstrap_jwt(
-        &self,
-        fingerprint: &str,
-    ) -> Result<String, MimoFreeExecutorError> {
+    async fn bootstrap_jwt(&self, fingerprint: &str) -> Result<String, MimoFreeExecutorError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(BOOTSTRAP_TIMEOUT_SECS))
             .build()
@@ -281,10 +278,9 @@ impl MimoFreeExecutor {
             )));
         }
 
-        let bootstrap: BootstrapResponse = response
-            .json()
-            .await
-            .map_err(|e| MimoFreeExecutorError::BootstrapFailed(format!("JSON parse error: {}", e)))?;
+        let bootstrap: BootstrapResponse = response.json().await.map_err(|e| {
+            MimoFreeExecutorError::BootstrapFailed(format!("JSON parse error: {}", e))
+        })?;
 
         // Accept either `token`, `access_token`, or `jwt` field.
         let jwt = bootstrap
@@ -406,10 +402,7 @@ impl MimoFreeExecutor {
         headers.insert(AUTHORIZATION, HeaderValue::from_str(&auth)?);
 
         // Session affinity header.
-        headers.insert(
-            "X-Session-Id",
-            HeaderValue::from_str(session_id)?,
-        );
+        headers.insert("X-Session-Id", HeaderValue::from_str(session_id)?);
 
         if stream {
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -549,9 +542,7 @@ mod tests {
 
     #[test]
     fn test_next_user_agent_rotation() {
-        let executor = MimoFreeExecutor::new(Arc::new(
-            crate::core::executor::ClientPool::new(),
-        ));
+        let executor = MimoFreeExecutor::new(Arc::new(crate::core::executor::ClientPool::new()));
         let ua1 = executor.next_user_agent();
         let ua2 = executor.next_user_agent();
         let ua3 = executor.next_user_agent();
@@ -576,7 +567,10 @@ mod tests {
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "system");
-        assert!(messages[0]["content"].as_str().unwrap().contains("MiMoCode"));
+        assert!(messages[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("MiMoCode"));
         assert_eq!(messages[1]["role"], "user");
     }
 
@@ -592,7 +586,11 @@ mod tests {
         MimoFreeExecutor::inject_mimo_code(&mut body);
         let messages = body["messages"].as_array().unwrap();
         // Should still inject because content doesn't exactly match
-        assert_eq!(messages.len(), 2, "should not add duplicate when MiMoCode text already present");
+        assert_eq!(
+            messages.len(),
+            2,
+            "should not add duplicate when MiMoCode text already present"
+        );
 
         // Now test with exact match
         let mut body2 = serde_json::json!({
@@ -607,13 +605,9 @@ mod tests {
 
     #[test]
     fn test_build_headers() {
-        let headers = MimoFreeExecutor::build_headers(
-            "test-jwt",
-            true,
-            "test-ua",
-            "ses_test-session",
-        )
-        .unwrap();
+        let headers =
+            MimoFreeExecutor::build_headers("test-jwt", true, "test-ua", "ses_test-session")
+                .unwrap();
         assert_eq!(
             headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()),
             Some("Bearer test-jwt")
@@ -634,9 +628,7 @@ mod tests {
 
     #[test]
     fn test_jwt_cache() {
-        let executor = MimoFreeExecutor::new(Arc::new(
-            crate::core::executor::ClientPool::new(),
-        ));
+        let executor = MimoFreeExecutor::new(Arc::new(crate::core::executor::ClientPool::new()));
 
         let fp = "test-fingerprint".to_string();
 
@@ -661,19 +653,20 @@ mod tests {
 
     #[test]
     fn test_invalidate_jwt() {
-        let executor = MimoFreeExecutor::new(Arc::new(
-            crate::core::executor::ClientPool::new(),
-        ));
+        let executor = MimoFreeExecutor::new(Arc::new(crate::core::executor::ClientPool::new()));
 
         let fp = "test-fingerprint".to_string();
 
         // Insert into cache.
         {
             let mut cache = executor.jwt_cache.lock().unwrap();
-            cache.insert(fp.clone(), JwtCacheEntry {
-                token: "test".to_string(),
-                expires_at: None,
-            });
+            cache.insert(
+                fp.clone(),
+                JwtCacheEntry {
+                    token: "test".to_string(),
+                    expires_at: None,
+                },
+            );
             assert!(cache.contains_key(&fp));
         }
 

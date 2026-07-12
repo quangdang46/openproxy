@@ -121,12 +121,8 @@ impl ProviderExecutor for CodeBuddyCNExecutor {
             Some(&request.credentials),
         );
         let headers = self.build_headers(&request.credentials, true)?;
-        let transformed_body = self.transform_request(
-            &request.body,
-            &request.model,
-            true,
-            &request.credentials,
-        );
+        let transformed_body =
+            self.transform_request(&request.body, &request.model, true, &request.credentials);
 
         let body_bytes = serde_json::to_vec(&transformed_body)?;
         let client = self.pool.get("codebuddy-cn", request.proxy.as_ref())?;
@@ -161,7 +157,12 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 1024
         });
-        let result = executor.transform_request(&body, "claude-sonnet-4", false, &ProviderConnection::default());
+        let result = executor.transform_request(
+            &body,
+            "claude-sonnet-4",
+            false,
+            &ProviderConnection::default(),
+        );
         assert_eq!(result["stream"], true);
         assert_eq!(result["model"], "claude-sonnet-4");
         assert_eq!(result["max_tokens"], 1024);
@@ -175,7 +176,8 @@ mod tests {
             "messages": [{"role": "user", "content": "Hi"}],
             "stream": false
         });
-        let result = executor.transform_request(&body, "gpt-4", false, &ProviderConnection::default());
+        let result =
+            executor.transform_request(&body, "gpt-4", false, &ProviderConnection::default());
         assert_eq!(result["stream"], true);
     }
 
@@ -188,7 +190,12 @@ mod tests {
             "reasoning_effort": "high",
             "stream": true
         });
-        let result = executor.transform_request(&body, "claude-sonnet-4", true, &ProviderConnection::default());
+        let result = executor.transform_request(
+            &body,
+            "claude-sonnet-4",
+            true,
+            &ProviderConnection::default(),
+        );
         assert_eq!(result["reasoning_summary"], "auto");
         assert_eq!(result["reasoning_effort"], "high");
     }
@@ -201,7 +208,12 @@ mod tests {
             "messages": [{"role": "user", "content": "Hello"}],
             "stream": true
         });
-        let result = executor.transform_request(&body, "claude-sonnet-4", true, &ProviderConnection::default());
+        let result = executor.transform_request(
+            &body,
+            "claude-sonnet-4",
+            true,
+            &ProviderConnection::default(),
+        );
         assert!(result.get("reasoning_summary").is_none());
     }
 
@@ -227,15 +239,21 @@ mod tests {
         creds.api_key = Some("sk-test".to_string());
         let headers = executor.build_headers(&creds, true).unwrap();
         assert_eq!(
-            headers.get(reqwest::header::AUTHORIZATION).and_then(|v| v.to_str().ok()),
+            headers
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
             Some("Bearer sk-test")
         );
         assert_eq!(
-            headers.get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            headers
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
             Some("application/json")
         );
         assert_eq!(
-            headers.get(reqwest::header::ACCEPT).and_then(|v| v.to_str().ok()),
+            headers
+                .get(reqwest::header::ACCEPT)
+                .and_then(|v| v.to_str().ok()),
             Some("text/event-stream")
         );
     }

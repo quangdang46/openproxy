@@ -4,9 +4,7 @@
 //! providers (not only Kiro/Codex). Levels: none|minimal|low|medium|high|xhigh|max.
 
 /// Effort / thinking levels recognized in model suffixes.
-pub const THINKING_LEVELS: &[&str] = &[
-    "none", "minimal", "low", "medium", "high", "xhigh", "max",
-];
+pub const THINKING_LEVELS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// 9router LEVEL_TO_BUDGET for Claude-style budget_tokens.
 pub fn level_to_budget(level: &str) -> Option<u32> {
@@ -96,7 +94,10 @@ mod tests {
     #[test]
     fn leaves_plain_models() {
         assert_eq!(strip_thinking_suffix("gpt-4o"), ("gpt-4o", None));
-        assert_eq!(strip_thinking_suffix("claude-sonnet-4"), ("claude-sonnet-4", None));
+        assert_eq!(
+            strip_thinking_suffix("claude-sonnet-4"),
+            ("claude-sonnet-4", None)
+        );
     }
 
     #[test]

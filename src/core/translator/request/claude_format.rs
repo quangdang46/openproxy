@@ -24,7 +24,12 @@ fn has_valid_content(msg: &Value) -> bool {
         Some(Value::String(s)) => !s.trim().is_empty(),
         Some(Value::Array(arr)) => arr.iter().any(|block| {
             let t = block.get("type").and_then(Value::as_str).unwrap_or("");
-            t == "text" && block.get("text").and_then(Value::as_str).map(|s| !s.trim().is_empty()).unwrap_or(false)
+            t == "text"
+                && block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
                 || t == "tool_use"
                 || t == "tool_result"
         }),
@@ -250,10 +255,8 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
                     let t = block.get("type").and_then(Value::as_str).unwrap_or("");
                     if t != "thinking" && t != "redacted_thinking" {
                         if let Some(block_obj) = block.as_object_mut() {
-                            block_obj.insert(
-                                "cache_control".to_string(),
-                                json!({"type": "ephemeral"}),
-                            );
+                            block_obj
+                                .insert("cache_control".to_string(), json!({"type": "ephemeral"}));
                         }
                         break;
                     }
@@ -274,10 +277,7 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
                         has_thinking = true;
                         if is_claude_native {
                             // Preserve valid signatures, drop invalid blocks
-                            let sig = block
-                                .get("signature")
-                                .and_then(Value::as_str)
-                                .unwrap_or("");
+                            let sig = block.get("signature").and_then(Value::as_str).unwrap_or("");
                             if !sig.is_empty() {
                                 kept.push(block);
                             }
@@ -387,7 +387,9 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
 
     // ── 4. Cloaking for OAuth tokens ──
     if let Some(api_key) = api_key {
-        if (provider == "claude" || provider == "anthropic" || provider.starts_with("anthropic-compatible"))
+        if (provider == "claude"
+            || provider == "anthropic"
+            || provider.starts_with("anthropic-compatible"))
             && !api_key.is_empty()
         {
             let session_id = get_cached_claude_headers()
@@ -415,11 +417,18 @@ fn fix_tool_use_ordering(messages: Vec<Value>) -> Vec<Value> {
     // Pass 1: Fix assistant messages — remove text after tool_use
     let mut fixed: Vec<Value> = Vec::with_capacity(messages.len());
     for msg in messages {
-        let role = msg.get("role").and_then(Value::as_str).unwrap_or("").to_string();
+        let role = msg
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let content = msg.get("content");
         let has_tool_use = content
             .and_then(Value::as_array)
-            .map(|arr| arr.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")))
+            .map(|arr| {
+                arr.iter()
+                    .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+            })
             .unwrap_or(false);
 
         if role == "assistant" && has_tool_use {
@@ -455,7 +464,11 @@ fn fix_tool_use_ordering(messages: Vec<Value>) -> Vec<Value> {
     // Pass 2: Merge consecutive same-role messages
     let mut merged: Vec<Value> = Vec::with_capacity(fixed.len());
     for msg in fixed {
-        let role = msg.get("role").and_then(Value::as_str).unwrap_or("").to_string();
+        let role = msg
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let last = merged.last_mut();
         if let Some(last) = last {
             let last_role = last.get("role").and_then(Value::as_str).unwrap_or("");
@@ -483,19 +496,20 @@ fn fix_tool_use_ordering(messages: Vec<Value>) -> Vec<Value> {
                     .chain(
                         msg_content
                             .iter()
-                            .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+                            .filter(|b| {
+                                b.get("type").and_then(Value::as_str) == Some("tool_result")
+                            })
                             .cloned(),
                     )
                     .collect();
-                let other: Vec<Value> = last_content
-                    .into_iter()
-                    .filter(|b| b.get("type").and_then(Value::as_str) != Some("tool_result"))
-                    .chain(
-                        msg_content
-                            .into_iter()
-                            .filter(|b| b.get("type").and_then(Value::as_str) != Some("tool_result")),
-                    )
-                    .collect();
+                let other: Vec<Value> =
+                    last_content
+                        .into_iter()
+                        .filter(|b| b.get("type").and_then(Value::as_str) != Some("tool_result"))
+                        .chain(msg_content.into_iter().filter(|b| {
+                            b.get("type").and_then(Value::as_str) != Some("tool_result")
+                        }))
+                        .collect();
 
                 let merged_content: Vec<Value> = tool_results.into_iter().chain(other).collect();
                 if let Some(last_obj) = last.as_object_mut() {
@@ -542,8 +556,7 @@ mod tests {
         });
         normalize_claude_passthrough(&mut body, "claude-sonnet-haiku-4.7");
         assert_eq!(
-            body["thinking"]["type"],
-            "enabled",
+            body["thinking"]["type"], "enabled",
             "adaptive → enabled on Haiku"
         );
         assert_eq!(body["thinking"]["budget_tokens"], 10000);
@@ -566,7 +579,10 @@ mod tests {
             body["output_config"].get("effort").is_none(),
             "effort field removed"
         );
-        assert_eq!(body["output_config"]["other"], "x", "other fields preserved");
+        assert_eq!(
+            body["output_config"]["other"], "x",
+            "other fields preserved"
+        );
 
         // Remove output_config entirely when only effort was present
         let mut body2 = json!({
@@ -665,8 +681,14 @@ mod tests {
         });
         prepare_claude_request(&mut body, "claude", None);
         let sys = body["system"].as_array().unwrap();
-        assert!(sys[0].get("cache_control").is_none(), "first block no cache_control");
-        assert!(sys[1].get("cache_control").is_some(), "last block has cache_control");
+        assert!(
+            sys[0].get("cache_control").is_none(),
+            "first block no cache_control"
+        );
+        assert!(
+            sys[1].get("cache_control").is_some(),
+            "last block has cache_control"
+        );
         assert_eq!(sys[1]["cache_control"]["type"], "ephemeral");
     }
 
@@ -718,7 +740,10 @@ mod tests {
         let content = body["messages"][1]["content"].as_array().unwrap();
         // The non-thinking (text) block should have cache_control
         let text_block = content.iter().find(|b| b["type"] == "text").unwrap();
-        assert!(text_block.get("cache_control").is_some(), "last text gets cache_control");
+        assert!(
+            text_block.get("cache_control").is_some(),
+            "last text gets cache_control"
+        );
     }
 
     #[test]
@@ -767,13 +792,11 @@ mod tests {
 
     #[test]
     fn remove_text_after_tool_use() {
-        let msgs = vec![
-            json!({"role": "assistant", "content": [
-                {"type": "text", "text": "before"},
-                {"type": "tool_use", "id": "tu1", "name": "x", "input": {}},
-                {"type": "text", "text": "after tool use"}
-            ]}),
-        ];
+        let msgs = vec![json!({"role": "assistant", "content": [
+            {"type": "text", "text": "before"},
+            {"type": "tool_use", "id": "tu1", "name": "x", "input": {}},
+            {"type": "text", "text": "after tool use"}
+        ]})];
         let result = fix_tool_use_ordering(msgs);
         let content = result[0]["content"].as_array().unwrap();
         assert_eq!(content.len(), 2, "text after tool_use removed");

@@ -674,12 +674,7 @@ where
     }
 
     // 9router: getRotatedModels first, then capability autoswitch
-    let mut order = get_rotated_models(
-        &active,
-        combo_name,
-        strategy,
-        sticky_limit.max(1),
-    );
+    let mut order = get_rotated_models(&active, combo_name, strategy, sticky_limit.max(1));
     if let Some(caps) = required_caps {
         if !caps.is_empty() {
             order = reorder_by_capabilities(&order, caps);

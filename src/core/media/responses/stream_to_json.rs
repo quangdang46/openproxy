@@ -175,10 +175,7 @@ fn convert_chat_completion_stream(sse: &str, fallback_model: Option<&str>) -> Op
             // chunks (same pattern as concat-ing content).
             if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in tcs {
-                    let tc_idx = tc
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
+                    let tc_idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
                     // Ensure the tool_calls vec is large enough.
                     while entry.tool_calls.len() <= tc_idx {
@@ -228,7 +225,12 @@ fn convert_chat_completion_stream(sse: &str, fallback_model: Option<&str>) -> Op
         let mut message = serde_json::Map::new();
         message.insert(
             "role".to_string(),
-            Value::String(accum.role.clone().unwrap_or_else(|| "assistant".to_string())),
+            Value::String(
+                accum
+                    .role
+                    .clone()
+                    .unwrap_or_else(|| "assistant".to_string()),
+            ),
         );
 
         if !accum.tool_calls.is_empty() {
@@ -367,10 +369,7 @@ fn parse_responses_api_stream(sse: &str) -> Option<ResponsesStreamSummary> {
 
         match event.as_str() {
             "response.created" => {
-                if let Some(id_val) = parsed
-                    .pointer("/response/id")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(id_val) = parsed.pointer("/response/id").and_then(|v| v.as_str()) {
                     summary.response_id = id_val.to_string();
                 }
                 if let Some(t) = parsed
@@ -617,10 +616,7 @@ mod tests {
         let result = sse_stream_to_json(sse.as_bytes(), Some("claude-sonnet-4")).unwrap();
         assert_eq!(result["object"], "chat.completion");
         assert_eq!(result["model"], "claude-sonnet-4");
-        assert_eq!(
-            result["choices"][0]["message"]["content"],
-            "Hello world"
-        );
+        assert_eq!(result["choices"][0]["message"]["content"], "Hello world");
         assert_eq!(result["choices"][0]["finish_reason"], "stop");
         assert_eq!(result["usage"]["prompt_tokens"], 15);
         assert_eq!(result["usage"]["completion_tokens"], 25);
@@ -642,10 +638,7 @@ mod tests {
 
         let result = sse_stream_to_json(sse.as_bytes(), Some("codex/o4-mini")).unwrap();
         // Should only include the message text (reasoning items are skipped).
-        assert_eq!(
-            result["choices"][0]["message"]["content"],
-            "Final answer"
-        );
+        assert_eq!(result["choices"][0]["message"]["content"], "Final answer");
         assert_eq!(result["usage"]["total_tokens"], 15);
     }
 

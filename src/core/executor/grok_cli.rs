@@ -313,9 +313,7 @@ impl GrokCliExecutor {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             USER_AGENT,
-            HeaderValue::from_static(
-                "grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)",
-            ),
+            HeaderValue::from_static("grok-pager/0.2.93 grok-shell/0.2.93 (linux; x86_64)"),
         );
 
         let token = credentials
@@ -428,7 +426,8 @@ impl GrokCliExecutor {
         body["stream"] = json!(true);
         body["store"] = json!(false);
 
-        let mut model_effort = resolve_effort_from_model(body.get("model").and_then(Value::as_str).unwrap_or(model));
+        let mut model_effort =
+            resolve_effort_from_model(body.get("model").and_then(Value::as_str).unwrap_or(model));
         let mut resolved = body
             .get("model")
             .and_then(Value::as_str)
@@ -457,10 +456,7 @@ impl GrokCliExecutor {
             .or_else(|| body.get("reasoning_effort").and_then(Value::as_str))
             .or(model_effort)
             .unwrap_or("high");
-        let mut reasoning = body
-            .get("reasoning")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
+        let mut reasoning = body.get("reasoning").cloned().unwrap_or_else(|| json!({}));
         if !reasoning.is_object() {
             reasoning = json!({});
         }
@@ -534,8 +530,10 @@ impl GrokCliExecutor {
             request.credentials.id.clone()
         };
         let req_id = Uuid::new_v4().to_string();
-        let turn_idx =
-            resolve_grok_cli_turn_idx(Some(&session_id), transformed.get("input").unwrap_or(&json!([])));
+        let turn_idx = resolve_grok_cli_turn_idx(
+            Some(&session_id),
+            transformed.get("input").unwrap_or(&json!([])),
+        );
         let agent_id = psd_str(&request.credentials, "deviceId")
             .or_else(|| psd_str(&request.credentials, "agentId"));
         let model = transformed
@@ -661,7 +659,13 @@ mod tests {
             ..Default::default()
         };
         let h = GrokCliExecutor::build_headers(
-            &creds, true, "sess", "req", 3, "grok-4.5", Some("agent-1"),
+            &creds,
+            true,
+            "sess",
+            "req",
+            3,
+            "grok-4.5",
+            Some("agent-1"),
         )
         .unwrap();
         assert_eq!(

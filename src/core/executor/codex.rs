@@ -437,10 +437,8 @@ impl CodexExecutor {
             .or(request.credentials.id.as_str().into())
             .or(request.credentials.display_name.as_deref());
         // Always stream upstream (9router force stream); client JSON via chat sse_to_json
-        let headers =
-            self.build_headers(api_key, true, connection_id, &request.credentials)?;
-        let transformed_body =
-            self.transform_request_body(&request.body, &actual_model, true)?;
+        let headers = self.build_headers(api_key, true, connection_id, &request.credentials)?;
+        let transformed_body = self.transform_request_body(&request.body, &actual_model, true)?;
 
         let client = self.pool.get("openai", request.proxy.as_ref())?;
 

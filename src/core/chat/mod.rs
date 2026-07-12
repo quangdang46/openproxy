@@ -118,16 +118,10 @@ impl RequestPlan {
 }
 
 /// Catalog + custom-model fields: targetFormat, upstreamModelId, strip.
-fn resolve_model_metadata(
-    provider: &str,
-    model: &str,
-) -> (Option<Format>, String, Vec<String>) {
+fn resolve_model_metadata(provider: &str, model: &str) -> (Option<Format>, String, Vec<String>) {
     let catalog = provider_catalog();
     if let Some(entry) = catalog.find_model(provider, model) {
-        let target = entry
-            .target_format
-            .as_deref()
-            .and_then(Format::from_str);
+        let target = entry.target_format.as_deref().and_then(Format::from_str);
         let upstream = entry
             .upstream_model_id
             .clone()
@@ -154,9 +148,7 @@ fn parse_strip_list(raw: &str) -> Vec<String> {
 /// When matched, translation can be skipped (source == transport format) and base URL overrides.
 pub fn resolve_transport(provider: &str, source_format: Format) -> Option<TransportMatch> {
     let entries = provider_transports(provider);
-    entries
-        .into_iter()
-        .find(|t| t.format == source_format)
+    entries.into_iter().find(|t| t.format == source_format)
 }
 
 /// Static multi-transport table ported from 9router registry (deepseek, kimi, glm, …).
@@ -535,8 +527,14 @@ mod tests {
 
     #[test]
     fn plan_strips_model_thinking_paren_suffix() {
-        let body = json!({"model": "gpt-4o(high)", "messages": [{"role": "user", "content": "hi"}]});
-        let plan = RequestPlan::new(Some("/v1/chat/completions"), &body, "openai", "gpt-4o(high)");
+        let body =
+            json!({"model": "gpt-4o(high)", "messages": [{"role": "user", "content": "hi"}]});
+        let plan = RequestPlan::new(
+            Some("/v1/chat/completions"),
+            &body,
+            "openai",
+            "gpt-4o(high)",
+        );
         assert_eq!(plan.dispatch_model(), "gpt-4o");
     }
 

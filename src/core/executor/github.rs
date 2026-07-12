@@ -580,8 +580,12 @@ mod tests {
         assert!(GithubExecutor::supports_responses_endpoint("codex-mini"));
         assert!(GithubExecutor::supports_responses_endpoint("o3-mini"));
         assert!(GithubExecutor::supports_responses_endpoint("gpt-4.1"));
-        assert!(!GithubExecutor::supports_responses_endpoint("claude-sonnet-4"));
-        assert!(!GithubExecutor::supports_responses_endpoint("gemini-2.0-flash"));
+        assert!(!GithubExecutor::supports_responses_endpoint(
+            "claude-sonnet-4"
+        ));
+        assert!(!GithubExecutor::supports_responses_endpoint(
+            "gemini-2.0-flash"
+        ));
     }
 
     #[test]
