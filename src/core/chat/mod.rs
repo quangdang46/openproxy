@@ -44,6 +44,8 @@ pub struct RequestPlan {
     pub model: String,
     /// Upstream model id sent to the provider (catalog `upstreamModelId` or same as model)
     pub upstream_model_id: String,
+    /// Thinking level stripped from `model(level)` / `model-level` (re-applied post-translate).
+    pub thinking_level: Option<String>,
     /// Source format detected from the request
     pub source_format: Format,
     /// Target format for the provider
@@ -77,7 +79,8 @@ impl RequestPlan {
             resolve_model_metadata(provider, model);
 
         // Global model(level) / model-level strip (9router thinkingUnified.stripThinkingSuffix)
-        let (stripped, _level) =
+        // Keep level for post-translate re-apply (applyThinking parity).
+        let (stripped, thinking_level) =
             crate::core::utils::thinking_suffix::strip_thinking_suffix_owned(&upstream_model_id);
         if stripped != upstream_model_id {
             upstream_model_id = stripped;
@@ -95,6 +98,7 @@ impl RequestPlan {
             provider: provider.to_string(),
             model: model.to_string(),
             upstream_model_id,
+            thinking_level,
             source_format,
             target_format,
             strip_list,
@@ -167,11 +171,13 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
         "kimi" => vec![
             TransportMatch {
                 format: Format::OpenAi,
-                base_url: "https://api.moonshot.cn/v1/chat/completions".into(),
+                // Coding plan OpenAI leg (9r registry); moonshot.cn is web-search only.
+                base_url: "https://api.kimi.com/coding/v1/chat/completions".into(),
             },
             TransportMatch {
                 format: Format::Claude,
-                base_url: "https://api.moonshot.cn/anthropic/v1/messages".into(),
+                // beta baked in: runtime_transport already_endpoint would otherwise drop urlSuffix.
+                base_url: "https://api.kimi.com/coding/v1/messages?beta=true".into(),
             },
         ],
         "kimi-coding" => vec![
@@ -181,37 +187,39 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
             },
             TransportMatch {
                 format: Format::Claude,
-                base_url: "https://api.kimi.com/coding/v1/messages".into(),
+                base_url: "https://api.kimi.com/coding/v1/messages?beta=true".into(),
             },
         ],
         "glm" => vec![
             TransportMatch {
                 format: Format::OpenAi,
-                base_url: "https://open.bigmodel.cn/api/paas/v4/chat/completions".into(),
+                // GLM Coding plan (api.z.ai); open.bigmodel.cn is glm-cn.
+                base_url: "https://api.z.ai/api/coding/paas/v4/chat/completions".into(),
             },
             TransportMatch {
                 format: Format::Claude,
-                base_url: "https://open.bigmodel.cn/api/anthropic/v1/messages".into(),
+                base_url: "https://api.z.ai/api/anthropic/v1/messages?beta=true".into(),
             },
         ],
         "minimax" => vec![
             TransportMatch {
                 format: Format::OpenAi,
-                base_url: "https://api.minimax.chat/v1/text/chatcompletion_v2".into(),
+                // Modern OpenAI chat; chatcompletion_v2 is legacy/search-only in 9r.
+                base_url: "https://api.minimax.io/v1/chat/completions".into(),
             },
             TransportMatch {
                 format: Format::Claude,
-                base_url: "https://api.minimax.chat/anthropic/v1/messages".into(),
+                base_url: "https://api.minimax.io/anthropic/v1/messages?beta=true".into(),
             },
         ],
         "minimax-cn" => vec![
             TransportMatch {
                 format: Format::OpenAi,
-                base_url: "https://api.minimaxi.com/v1/text/chatcompletion_v2".into(),
+                base_url: "https://api.minimaxi.com/v1/chat/completions".into(),
             },
             TransportMatch {
                 format: Format::Claude,
-                base_url: "https://api.minimaxi.com/anthropic/v1/messages".into(),
+                base_url: "https://api.minimaxi.com/anthropic/v1/messages?beta=true".into(),
             },
         ],
         "xiaomi-mimo" | "mimo" => vec![
@@ -518,6 +526,54 @@ mod tests {
     }
 
     #[test]
+    fn multi_endpoint_transports_match_9r_registry_hosts() {
+        // kimi / kimi-coding — coding plan hosts (not moonshot.cn)
+        let t = resolve_transport("kimi", Format::OpenAi).expect("kimi openai");
+        assert_eq!(
+            t.base_url,
+            "https://api.kimi.com/coding/v1/chat/completions"
+        );
+        let t = resolve_transport("kimi", Format::Claude).expect("kimi claude");
+        assert_eq!(
+            t.base_url,
+            "https://api.kimi.com/coding/v1/messages?beta=true"
+        );
+        let t = resolve_transport("kimi-coding", Format::Claude).expect("kimi-coding claude");
+        assert_eq!(
+            t.base_url,
+            "https://api.kimi.com/coding/v1/messages?beta=true"
+        );
+
+        // glm coding plan (api.z.ai), not open.bigmodel.cn paas
+        let t = resolve_transport("glm", Format::OpenAi).expect("glm openai");
+        assert_eq!(
+            t.base_url,
+            "https://api.z.ai/api/coding/paas/v4/chat/completions"
+        );
+        let t = resolve_transport("glm", Format::Claude).expect("glm claude");
+        assert_eq!(
+            t.base_url,
+            "https://api.z.ai/api/anthropic/v1/messages?beta=true"
+        );
+
+        // minimax modern hosts/paths (not chatcompletion_v2 / minimax.chat)
+        let t = resolve_transport("minimax", Format::OpenAi).expect("minimax openai");
+        assert_eq!(t.base_url, "https://api.minimax.io/v1/chat/completions");
+        let t = resolve_transport("minimax", Format::Claude).expect("minimax claude");
+        assert_eq!(
+            t.base_url,
+            "https://api.minimax.io/anthropic/v1/messages?beta=true"
+        );
+        let t = resolve_transport("minimax-cn", Format::OpenAi).expect("minimax-cn openai");
+        assert_eq!(t.base_url, "https://api.minimaxi.com/v1/chat/completions");
+        let t = resolve_transport("minimax-cn", Format::Claude).expect("minimax-cn claude");
+        assert_eq!(
+            t.base_url,
+            "https://api.minimaxi.com/anthropic/v1/messages?beta=true"
+        );
+    }
+
+    #[test]
     fn xiaomi_tokenplan_dual_transport() {
         let t = resolve_transport("xiaomi-tokenplan", Format::Claude).expect("claude");
         assert!(t.base_url.contains("anthropic"));
@@ -536,6 +592,8 @@ mod tests {
             "gpt-4o(high)",
         );
         assert_eq!(plan.dispatch_model(), "gpt-4o");
+        // Level kept for post-translate re-apply (thinking-suffix-reapply)
+        assert_eq!(plan.thinking_level.as_deref(), Some("high"));
     }
 
     #[test]

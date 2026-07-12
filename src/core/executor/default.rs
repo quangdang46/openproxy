@@ -602,6 +602,50 @@ impl DefaultExecutor {
         })
     }
 
+    /// Full endpoint URL already (path present); optional query is ignored for matching.
+    fn is_already_endpoint(url: &str) -> bool {
+        let path = url.split('?').next().unwrap_or(url);
+        path.contains("/chat/completions")
+            || path.ends_with("/messages")
+            || path.contains("/anthropic/v1/messages")
+            || path.contains("/responses")
+    }
+
+    /// Providers that use Claude-compatible `?beta=true` (9r transport urlSuffix).
+    fn provider_wants_claude_beta(provider: &str) -> bool {
+        matches!(
+            provider,
+            "claude"
+                | "anthropic"
+                | "glm"
+                | "kimi"
+                | "kimi-coding"
+                | "minimax"
+                | "minimax-cn"
+                | "agentrouter"
+        )
+    }
+
+    /// Ensure Claude multi-endpoint absolute URLs keep `?beta=true` when missing.
+    fn ensure_claude_beta_suffix(url: &str, provider: &str) -> String {
+        if !Self::provider_wants_claude_beta(provider) {
+            return url.to_string();
+        }
+        let path = url.split('?').next().unwrap_or(url);
+        let is_messages = path.ends_with("/messages") || path.contains("/anthropic/v1/messages");
+        if !is_messages {
+            return url.to_string();
+        }
+        if url.contains("beta=") {
+            return url.to_string();
+        }
+        if url.contains('?') {
+            format!("{url}&beta=true")
+        } else {
+            format!("{url}?beta=true")
+        }
+    }
+
     /// Xiaomi Token Plan: region host + dual OpenAI/Claude path (9router XiaomiTokenplanExecutor).
     fn xiaomi_tokenplan_url(credentials: &ProviderConnection) -> Result<String, ExecutorError> {
         let region =
@@ -637,17 +681,16 @@ impl DefaultExecutor {
 
         // Check runtime_transport base_url override on the connection first.
         // 9router multi-endpoint transports store a full endpoint URL
-        // (…/chat/completions or …/messages). Use as-is when path is present;
-        // otherwise append the provider-default path.
+        // (…/chat/completions or …/messages[?beta=true]). Use as-is when path is present;
+        // otherwise append the provider-default path. Claude beta is baked into the
+        // multi-endpoint table (or appended here when missing) so already_endpoint
+        // never silently drops urlSuffix.
         if let Some(rt) = &credentials.runtime_transport {
             if let Some(rt_base_url) = &rt.base_url {
                 let normalized = rt_base_url.trim_end_matches('/');
-                let already_endpoint = normalized.contains("/chat/completions")
-                    || normalized.ends_with("/messages")
-                    || normalized.contains("/anthropic/v1/messages")
-                    || normalized.contains("/responses");
+                let already_endpoint = Self::is_already_endpoint(normalized);
                 if already_endpoint {
-                    return Ok(normalized.to_string());
+                    return Ok(Self::ensure_claude_beta_suffix(normalized, &self.provider));
                 }
                 if let Some(node) = &self.provider_node {
                     if node.r#type == "anthropic-compatible" {
@@ -667,7 +710,8 @@ impl DefaultExecutor {
                         | "xiaomi-mimo"
                         | "mimo"
                 ) {
-                    return Ok(format!("{}/messages", normalized));
+                    let messages = format!("{}/messages", normalized);
+                    return Ok(Self::ensure_claude_beta_suffix(&messages, &self.provider));
                 }
                 return Ok(format!("{}/chat/completions", normalized));
             }

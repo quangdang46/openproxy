@@ -528,13 +528,39 @@ pub async fn refresh_copilot_token(access_token: &str) -> Result<RefreshResult, 
 
 /// Refresh a Kiro access token.
 ///
-/// Branches between AWS Cognito OIDC and Kiro's own social auth service
-/// depending on whether `provider_specific_data` contains `clientId` /
-/// `clientSecret`.
+/// Branches on `authMethod` / credentials in `provider_specific_data`:
+/// - **external_idp**: form-urlencoded POST to Microsoft Entra `tokenEndpoint`
+///   (`grant_type=refresh_token&client_id&refresh_token&scope`).
+/// - **AWS OIDC** (`clientId` + `clientSecret`): JSON POST to
+///   `https://oidc.{region}.amazonaws.com/token`.
+/// - **else** (social / imported): JSON POST to Kiro Cognito `/refreshToken`.
 pub async fn refresh_kiro_token(
     refresh_token: &str,
     provider_specific_data: &std::collections::BTreeMap<String, Value>,
 ) -> Result<RefreshResult, String> {
+    // Enterprise Microsoft Entra (CLIProxyAPI) — must be checked before the
+    // clientId+clientSecret OIDC branch, because external_idp also carries
+    // clientId (without clientSecret) in PSD.
+    if crate::oauth::kiro::is_external_idp_auth(provider_specific_data) {
+        let poll =
+            crate::oauth::kiro::refresh_external_idp_token(refresh_token, provider_specific_data)
+                .await
+                .map_err(|e| e.to_string())?;
+
+        let access_token = poll
+            .access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .ok_or_else(|| "Kiro external_idp refresh response missing access token".to_string())?;
+
+        return Ok(RefreshResult {
+            access_token: access_token.to_string(),
+            refresh_token: poll.refresh_token,
+            expires_in: poll.expires_in,
+        });
+    }
+
     let client = reqwest::Client::new();
     let (url, body) = if let (Some(client_id), Some(client_secret)) = (
         provider_specific_data
@@ -578,6 +604,12 @@ pub async fn refresh_kiro_token(
         .send()
         .await
         .map_err(|e| format!("Kiro refresh request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Kiro refresh returned HTTP {status}: {text}"));
+    }
 
     let payload: Value = resp
         .json()

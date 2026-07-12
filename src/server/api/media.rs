@@ -78,6 +78,8 @@ pub async fn audio_voices(
         "elevenlabs" => "/api/media-providers/tts/elevenlabs/voices",
         "deepgram" => "/api/media-providers/tts/deepgram/voices",
         "inworld" => "/api/media-providers/tts/inworld/voices",
+        "minimax" => "/api/media-providers/tts/minimax/voices",
+        "minimax-cn" => "/api/media-providers/tts/minimax/voices?provider=minimax-cn",
         "edge-tts" => "/api/media-providers/tts/voices?provider=edge-tts",
         "local-device" => "/api/media-providers/tts/voices?provider=local-device",
         _ => {
@@ -85,7 +87,7 @@ pub async fn audio_voices(
                 StatusCode::BAD_REQUEST,
                 Json(json!({
                     "error": {
-                        "message": "provider must be one of: elevenlabs, deepgram, inworld, edge-tts, local-device",
+                        "message": "provider must be one of: elevenlabs, deepgram, inworld, minimax, minimax-cn, edge-tts, local-device",
                         "type": "invalid_request_error",
                         "code": null
                     }
@@ -154,6 +156,8 @@ pub async fn audio_voices(
                     let alias = match provider {
                         "elevenlabs" => "el",
                         "deepgram" => "dg",
+                        "minimax" => "minimax",
+                        "minimax-cn" => "minimax-cn",
                         _ => provider,
                     };
                     let data_out: Vec<Value> = voices.iter().map(|v| {

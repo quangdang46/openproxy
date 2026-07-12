@@ -1350,33 +1350,20 @@ async fn refresh_google_token(
 async fn refresh_kiro_token(
     connection: &ProviderConnection,
     refresh_token: &str,
-    effective_proxy: &EffectiveProxy,
+    _effective_proxy: &EffectiveProxy,
 ) -> Result<RefreshResult, String> {
-    if let (Some(client_id), Some(client_secret)) = (
-        connection_value(connection, "clientId"),
-        connection_value(connection, "clientSecret"),
-    ) {
-        let region =
-            connection_value(connection, "region").unwrap_or_else(|| "us-east-1".to_string());
-        refresh_json_token(
-            &format!("https://oidc.{region}.amazonaws.com/token"),
-            json!({
-                "clientId": client_id,
-                "clientSecret": client_secret,
-                "refreshToken": refresh_token,
-                "grantType": "refresh_token",
-            }),
-            effective_proxy,
-        )
-        .await
-    } else {
-        refresh_json_token(
-            KIRO_SOCIAL_REFRESH_URL,
-            json!({ "refreshToken": refresh_token }),
-            effective_proxy,
-        )
-        .await
-    }
+    // Shared path covers external_idp (Microsoft form-POST), AWS OIDC, and
+    // Cognito social/imported. Proxy routing for this path is residual.
+    let result = crate::oauth::token_refresh::refresh_kiro_token(
+        refresh_token,
+        &connection.provider_specific_data,
+    )
+    .await?;
+    Ok(RefreshResult {
+        access_token: result.access_token,
+        refresh_token: result.refresh_token,
+        expires_in: result.expires_in,
+    })
 }
 
 async fn refresh_cline_token(

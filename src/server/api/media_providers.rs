@@ -84,6 +84,8 @@ fn detect_media_type(connection: &ProviderConnection) -> Option<String> {
         || provider.contains("elevenlabs")
         || provider == "edge-tts"
         || provider == "google-tts"
+        || provider == "minimax"
+        || provider == "minimax-cn"
     {
         return Some("tts".to_string());
     }
@@ -543,6 +545,275 @@ async fn get_inworld_voices(
     Json(serde_json::json!({"languages": languages, "byLang": by_lang})).into_response()
 }
 
+// ===== MiniMax TTS voices =====
+// Port of 9router `src/app/api/media-providers/tts/minimax/voices/route.js`.
+// Single route for both global (minimax) and China (minimax-cn); provider
+// selected via `?provider=minimax|minimax-cn`.
+
+#[derive(Debug, Deserialize)]
+struct MinimaxVoicesQuery {
+    provider: Option<String>,
+    lang: Option<String>,
+    /// MiniMax `voice_type` filter; defaults to "all".
+    voice_type: Option<String>,
+}
+
+const MINIMAX_VOICE_GROUPS: &[(&str, &str)] = &[
+    ("system_voice", "System"),
+    ("voice_cloning", "Cloned"),
+    ("voice_generation", "Generated"),
+    ("music_generation", "Music"),
+];
+
+fn minimax_voice_endpoint(provider: &str) -> &'static str {
+    match provider {
+        "minimax-cn" => "https://api.minimaxi.com/v1/get_voice",
+        _ => "https://api.minimax.io/v1/get_voice",
+    }
+}
+
+fn infer_minimax_language(voice_id: &str) -> &str {
+    let value = voice_id.trim();
+    if !value.contains('_') {
+        return "Custom";
+    }
+    value
+        .split('_')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Custom")
+}
+
+fn add_minimax_voice(
+    by_lang: &mut serde_json::Map<String, serde_json::Value>,
+    code: &str,
+    voice: serde_json::Value,
+) {
+    let entry = by_lang
+        .entry(code.to_string())
+        .or_insert_with(|| serde_json::json!({ "code": code, "name": code, "voices": [] }));
+    let Some(list) = entry
+        .as_object_mut()
+        .and_then(|obj| obj.get_mut("voices"))
+        .and_then(|v| v.as_array_mut())
+    else {
+        return;
+    };
+    let voice_id = voice.get("id").cloned();
+    if list.iter().any(|v| v.get("id") == voice_id.as_ref()) {
+        return;
+    }
+    list.push(voice);
+}
+
+fn normalize_minimax_voices(
+    data: &Value,
+) -> (Vec<serde_json::Value>, serde_json::Map<String, Value>) {
+    let mut by_lang: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+    for (group_key, group_label) in MINIMAX_VOICE_GROUPS {
+        let voices = data
+            .get(*group_key)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for item in &voices {
+            let voice_id = item
+                .get("voice_id")
+                .or_else(|| item.get("voiceId"))
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if voice_id.is_empty() {
+                continue;
+            }
+            let voice_name = item
+                .get("voice_name")
+                .or_else(|| item.get("voiceName"))
+                .and_then(Value::as_str)
+                .unwrap_or(voice_id);
+            let lang = if *group_key == "system_voice" {
+                infer_minimax_language(voice_id).to_string()
+            } else {
+                "Custom".to_string()
+            };
+            let display_name = if *group_key == "system_voice" {
+                voice_name.to_string()
+            } else {
+                format!("{voice_name} · {group_label}")
+            };
+            add_minimax_voice(
+                &mut by_lang,
+                &lang,
+                serde_json::json!({
+                    "id": voice_id,
+                    "name": display_name,
+                    "lang": lang,
+                    "category": group_key,
+                }),
+            );
+        }
+    }
+
+    // Sort voices within each language alphabetically by name.
+    for entry in by_lang.values_mut() {
+        if let Some(list) = entry
+            .as_object_mut()
+            .and_then(|obj| obj.get_mut("voices"))
+            .and_then(|v| v.as_array_mut())
+        {
+            list.sort_by(|a, b| {
+                let an = a.get("name").and_then(Value::as_str).unwrap_or("");
+                let bn = b.get("name").and_then(Value::as_str).unwrap_or("");
+                an.cmp(bn)
+            });
+        }
+    }
+
+    // Languages: Custom last, otherwise alpha by name.
+    let mut languages: Vec<serde_json::Value> = by_lang
+        .iter()
+        .map(|(code, _)| serde_json::json!({ "code": code, "name": code }))
+        .collect();
+    languages.sort_by(|a, b| {
+        let ac = a.get("code").and_then(Value::as_str).unwrap_or("");
+        let bc = b.get("code").and_then(Value::as_str).unwrap_or("");
+        match (ac == "Custom", bc == "Custom") {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => ac.cmp(bc),
+        }
+    });
+
+    (languages, by_lang)
+}
+
+/// GET /api/media-providers/tts/minimax/voices[?provider=minimax|minimax-cn&voice_type=all&lang=…]
+/// Returns `{ languages, byLang }` for the shared TTS voice picker (or
+/// `{ voices }` when `lang` is set).
+async fn get_minimax_voices(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    Query(query): Query<MinimaxVoicesQuery>,
+) -> axum::response::Response {
+    if let Err(e) = require_api_key(&headers, &state.db) {
+        return crate::server::api::auth_error_response(e);
+    }
+
+    let provider = match query.provider.as_deref() {
+        Some("minimax-cn") => "minimax-cn",
+        _ => "minimax",
+    };
+    let voice_type = query
+        .voice_type
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("all");
+
+    let snapshot = state.db.snapshot();
+    let api_key = snapshot
+        .provider_connections
+        .iter()
+        .find(|c| c.provider == provider && c.is_active())
+        .and_then(|c| c.api_key.as_ref());
+    let Some(api_key) = api_key else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": format!("No {provider} connection found") })),
+        )
+            .into_response();
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default();
+
+    let resp = match client
+        .post(minimax_voice_endpoint(provider))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({ "voice_type": voice_type }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({ "error": format!("MiniMax API failed: {e}") })),
+            )
+                .into_response()
+        }
+    };
+
+    let http_status = resp.status();
+    let raw_text = resp.text().await.unwrap_or_default();
+    let data: Value = if raw_text.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(&raw_text).unwrap_or(Value::Null)
+    };
+
+    let base_resp = data
+        .get("base_resp")
+        .or_else(|| data.get("baseResp"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let status_code = base_resp
+        .get("status_code")
+        .or_else(|| base_resp.get("statusCode"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let status_message = base_resp
+        .get("status_msg")
+        .or_else(|| base_resp.get("statusMsg"))
+        .and_then(Value::as_str)
+        .or_else(|| data.get("message").and_then(Value::as_str))
+        .unwrap_or("")
+        .to_string();
+
+    if !http_status.is_success() {
+        let msg = if status_message.is_empty() {
+            if raw_text.is_empty() {
+                "Failed".to_string()
+            } else {
+                raw_text
+            }
+        } else {
+            status_message
+        };
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("MiniMax API {http_status}: {msg}") })),
+        )
+            .into_response();
+    }
+    if status_code != 0 {
+        return (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({
+                "error": if status_message.is_empty() {
+                    "MiniMax voice API error".to_string()
+                } else {
+                    status_message
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let (languages, by_lang) = normalize_minimax_voices(&data);
+    if let Some(lang) = query.lang.as_deref() {
+        let voices = by_lang
+            .get(lang)
+            .and_then(|v| v.get("voices"))
+            .cloned()
+            .unwrap_or(serde_json::json!([]));
+        return Json(serde_json::json!({ "voices": voices })).into_response();
+    }
+    Json(serde_json::json!({ "languages": languages, "byLang": by_lang })).into_response()
+}
+
 // ===== TTS Voice Routes =====
 
 #[derive(Debug, Deserialize)]
@@ -918,6 +1189,10 @@ pub fn routes() -> Router<AppState> {
         .route(
             "/api/media-providers/tts/inworld/voices",
             get(get_inworld_voices),
+        )
+        .route(
+            "/api/media-providers/tts/minimax/voices",
+            get(get_minimax_voices),
         )
         .route("/api/media-providers/tts/voices", get(get_tts_voices))
         .route(

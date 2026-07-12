@@ -11,6 +11,11 @@ import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
 import { getProviderCustomModelRows, type CustomModelEntry } from "@/shared/utils/providerCustomModels";
+import {
+  getThinkingLevels,
+  unionThinkingLevels,
+  levelsFromThinkingConfig,
+} from "@/shared/utils/thinkingLevels";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -113,27 +118,44 @@ export default function ProviderDetailPageClient() {
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
   const isAnthropicCompatible = isAnthropicCompatibleProvider(providerId);
   const isCompatible = isOpenAICompatible || isAnthropicCompatible;
-  const thinkingConfig = AI_PROVIDERS[providerId]?.thinkingConfig || THINKING_CONFIG.extended;
-
-  // Resolve thinking suffix for copy using provider THINKING_CONFIG options
-  // (open-sse getThinkingLevels is not available in OpenProxy).
-  const resolveThinkingSuffix = (_modelId: string): string | null => {
-    if (!thinkingMode || thinkingMode === "auto") return null;
-    if (!thinkingConfig?.options?.includes(thinkingMode)) return null;
-    // "off"/"none" still append so the client can force-disable thinking.
-    return thinkingMode;
-  };
-
-  // Provider-level thinking picker options derived from THINKING_CONFIG.
-  const providerThinkingLevels = thinkingConfig?.options?.length
-    ? thinkingConfig.options
-    : null;
-  
   const providerStorageAlias = isCompatible ? providerId : providerAlias;
   const providerDisplayAlias = isCompatible
     ? (providerNode?.prefix || providerId)
     : providerAlias;
+  const thinkingConfig = AI_PROVIDERS[providerId]?.thinkingConfig || THINKING_CONFIG.extended;
 
+  // Model-aware thinking levels (9router getThinkingLevels parity). Prefer
+  // format/capability matrix; fall back to provider THINKING_CONFIG when no
+  // reasoning models are known for this provider yet.
+  const resolveThinkingSuffix = (modelId: string): string | null => {
+    if (!thinkingMode || thinkingMode === "auto") return null;
+    // Normalize legacy "off" → "none" for suffix copy.
+    const mode = thinkingMode === "off" ? "none" : thinkingMode;
+    const levels = getThinkingLevels(providerId, modelId);
+    // Only append when this model supports the selected level (9router parity).
+    return levels && levels.includes(mode as never) ? mode : null;
+  };
+
+  // Union of levels across this provider's reasoning models — drives the picker.
+  // Include custom / free-tier models too (e.g. manually added gpt-5.6-sol → max).
+  const providerThinkingLevels = (() => {
+    const modelIds: string[] = [];
+    for (const m of models) {
+      if (!m?.type || m.type === "llm") modelIds.push(m.id);
+    }
+    for (const m of kiloFreeModels) modelIds.push(m.id);
+    for (const entry of customModels) {
+      if (entry.providerAlias !== providerStorageAlias) continue;
+      if ((entry.kind || entry.type || "llm") !== "llm") continue;
+      modelIds.push(entry.id);
+    }
+    const union = unionThinkingLevels(providerId, modelIds);
+    if (union) return union;
+    // Fall back to THINKING_CONFIG (always includes auto).
+    const cfg = levelsFromThinkingConfig(thinkingConfig?.options);
+    return cfg ? (["auto", ...cfg] as string[]) : null;
+  })();
+  
   const fetchDisabledModels = useCallback(async () => {
     try {
       const res = await fetch(`/api/models/disabled?providerAlias=${encodeURIComponent(providerStorageAlias)}`, { cache: "no-store" });
@@ -1395,9 +1417,10 @@ export default function ProviderDetailPageClient() {
                     title="Appends (level) suffix to copied model names"
                     className="text-xs px-2 py-1 border border-border rounded-md bg-background focus:outline-none focus:border-primary"
                   >
-                    <option value="auto">Auto</option>
                     {providerThinkingLevels.map((opt) => (
-                      <option key={opt} value={opt}>{opt.charAt(0).toUpperCase() + opt.slice(1)}</option>
+                      <option key={opt} value={opt}>
+                        {opt === "auto" ? "Auto" : opt.charAt(0).toUpperCase() + opt.slice(1)}
+                      </option>
                     ))}
                   </select>
                 </div>
@@ -1528,9 +1551,12 @@ export default function ProviderDetailPageClient() {
                 title="Appends (level) suffix to copied model names"
                 className="rounded-md border border-border bg-background px-2 py-1 text-xs focus:border-primary focus:outline-none"
               >
-                <option value="auto">Thinking: Auto</option>
                 {providerThinkingLevels.map((opt) => (
-                  <option key={opt} value={opt}>{`Thinking: ${opt.charAt(0).toUpperCase() + opt.slice(1)}`}</option>
+                  <option key={opt} value={opt}>
+                    {opt === "auto"
+                      ? "Thinking: Auto"
+                      : `Thinking: ${opt.charAt(0).toUpperCase() + opt.slice(1)}`}
+                  </option>
                 ))}
               </select>
             )}

@@ -11,10 +11,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use tokio::time::{self, Duration};
 
 use crate::core::usage::quota_fetcher::{
-    fetch_antigravity_quota, fetch_claude_quota, fetch_codex_quota, fetch_gemini_cli_quota,
-    fetch_github_quota, fetch_glm_quota, fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota,
+    codex_account_id, consume_codex_rate_limit_reset_credit, fetch_antigravity_quota,
+    fetch_claude_quota, fetch_codex_quota, fetch_gemini_cli_quota, fetch_github_quota,
+    fetch_glm_quota, fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota,
+    get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
+use crate::oauth::token_refresh::refresh_codex_token;
 use crate::server::state::AppState;
 use crate::server::usage_live::UsageEvent;
 use crate::server::usage_stream::{build_usage_stats, UsagePeriod, UsageStatsPayload};
@@ -86,7 +89,7 @@ pub fn routes() -> Router<AppState> {
         )
         .route(
             "/api/usage/{connection_id}/codex-reset-credits",
-            routing::post(reset_connection_credits),
+            routing::get(get_connection_codex_reset_credits).post(reset_connection_credits),
         )
         .route("/api/usage/chart", routing::get(get_usage_chart))
         .route("/api/usage/providers", routing::get(get_usage_by_provider))
@@ -480,6 +483,8 @@ async fn get_connection_usage(
         }
     }
 
+    let mut live_plan: Option<Value> = None;
+    let mut live_reset_credits: Option<Value> = None;
     if is_oauth {
         let result = fetch_oauth_quota(connection).await;
         if let Some(quotas) = result.get("quotas") {
@@ -487,6 +492,12 @@ async fn get_connection_usage(
         }
         if let Some(msg) = result.get("message").and_then(|v| v.as_str()) {
             live_message = Some(msg.to_string());
+        }
+        if let Some(plan) = result.get("plan") {
+            live_plan = Some(plan.clone());
+        }
+        if let Some(reset_credits) = result.get("resetCredits") {
+            live_reset_credits = Some(reset_credits.clone());
         }
     }
 
@@ -498,7 +509,7 @@ async fn get_connection_usage(
         live_message.unwrap_or_else(|| usage_message_for_provider(&connection.provider))
     };
 
-    Json(ConnectionUsageResponse {
+    let mut body = serde_json::to_value(ConnectionUsageResponse {
         connection_id,
         total_requests: request_count,
         total_prompt_tokens: prompt,
@@ -507,42 +518,95 @@ async fn get_connection_usage(
         message,
         quotas: live_quotas,
     })
-    .into_response()
+    .unwrap_or_else(|_| json!({}));
+    if let Some(obj) = body.as_object_mut() {
+        if let Some(plan) = live_plan {
+            obj.insert("plan".to_string(), plan);
+        }
+        if let Some(reset_credits) = live_reset_credits {
+            obj.insert("resetCredits".to_string(), reset_credits);
+        }
+    }
+    Json(body).into_response()
 }
 
-// Handler for POST /api/usage/:connection_id/codex-reset-credits
-async fn reset_connection_credits(
-    State(state): State<AppState>,
-    axum::extract::Path(connection_id): axum::extract::Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    if let Err(response) = require_usage_access(&headers, &state) {
-        return response;
+fn is_codex_reset_auth_type(auth_type: &str) -> bool {
+    matches!(
+        auth_type.trim().to_ascii_lowercase().as_str(),
+        "oauth" | "access_token" | "accesstoken"
+    )
+}
+
+fn is_auth_expired_message(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    [
+        "expired",
+        "authentication",
+        "unauthorized",
+        "401",
+        "re-authorize",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
+}
+
+fn is_auth_expired_consume_result(
+    result: &crate::core::usage::quota_fetcher::CodexResetCreditConsumeResult,
+) -> bool {
+    let mut values = Vec::new();
+    if let Some(m) = &result.message {
+        values.push(m.clone());
     }
-
-    let snapshot = state.db.snapshot();
-    let Some(connection) = snapshot
-        .provider_connections
-        .iter()
-        .find(|entry| entry.id == connection_id)
-    else {
-        return (
-            axum::http::StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": "Connection not found" })),
-        )
-            .into_response();
-    };
-
-    if connection.provider != "codex" {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "Credit reset is only available for codex connections" })),
-        )
-            .into_response();
+    if let Some(c) = &result.code {
+        values.push(c.clone());
     }
+    if let Some(d) = result.raw.get("detail").and_then(|v| v.as_str()) {
+        values.push(d.to_string());
+    }
+    if let Some(e) = result.raw.get("error").and_then(|v| v.as_str()) {
+        values.push(e.to_string());
+    }
+    if result.status == 401 {
+        values.push("401".to_string());
+    }
+    values.iter().any(|v| is_auth_expired_message(v))
+}
 
-    // Codex credit reset: clear the rate-limited state and reset usage counters
-    if let Err(e) = state
+async fn persist_codex_tokens(
+    state: &AppState,
+    connection_id: &str,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    expires_in: Option<i64>,
+) -> Result<(), String> {
+    state
+        .db
+        .update(|db| {
+            if let Some(conn) = db
+                .provider_connections
+                .iter_mut()
+                .find(|entry| entry.id == connection_id)
+            {
+                conn.access_token = Some(access_token.to_string());
+                if let Some(rt) = refresh_token.map(str::trim).filter(|s| !s.is_empty()) {
+                    conn.refresh_token = Some(rt.to_string());
+                }
+                if let Some(secs) = expires_in {
+                    conn.expires_in = Some(secs);
+                    conn.expires_at = Some(
+                        (chrono::Utc::now() + ChronoDuration::seconds(secs.max(0))).to_rfc3339(),
+                    );
+                }
+                conn.updated_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        })
+        .await
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+async fn clear_local_codex_rate_limit(state: &AppState, connection_id: &str) -> Result<(), String> {
+    state
         .db
         .update(|db| {
             if let Some(conn) = db
@@ -563,19 +627,377 @@ async fn reset_connection_credits(
             }
         })
         .await
-    {
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn consume_result_response(
+    result: &crate::core::usage::quota_fetcher::CodexResetCreditConsumeResult,
+    redeem_request_id: &str,
+) -> Response {
+    if result.ok {
+        return Json(json!({
+            "code": result.code,
+            "reset": true,
+            "windows_reset": result.windows_reset,
+            "redeemRequestId": redeem_request_id,
+            "credit": result.raw.get("credit").cloned().unwrap_or(Value::Null),
+        }))
+        .into_response();
+    }
+
+    if result.no_credit {
         return (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "error": e.to_string() })),
+            axum::http::StatusCode::CONFLICT,
+            Json(json!({
+                "code": "no_credit",
+                "reset": false,
+                "windows_reset": result.windows_reset,
+                "message": "No Codex reset credits available.",
+            })),
         )
             .into_response();
     }
 
-    Json(serde_json::json!({
-        "success": true,
-        "message": "Codex credits reset. Rate limits and backoff have been cleared."
-    }))
-    .into_response()
+    let status = if (400..500).contains(&result.status) {
+        axum::http::StatusCode::from_u16(result.status)
+            .unwrap_or(axum::http::StatusCode::BAD_GATEWAY)
+    } else {
+        axum::http::StatusCode::BAD_GATEWAY
+    };
+    (
+        status,
+        Json(json!({
+            "code": result.code.clone().unwrap_or_else(|| "unknown_response".to_string()),
+            "reset": false,
+            "windows_reset": result.windows_reset,
+            "message": result
+                .message
+                .clone()
+                .unwrap_or_else(|| "Codex reset credit consume returned an unexpected response.".to_string()),
+        })),
+    )
+        .into_response()
+}
+
+// Handler for GET /api/usage/:connection_id/codex-reset-credits
+async fn get_connection_codex_reset_credits(
+    State(state): State<AppState>,
+    axum::extract::Path(connection_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_usage_access(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let Some(mut connection) = snapshot
+        .provider_connections
+        .iter()
+        .find(|entry| entry.id == connection_id)
+        .cloned()
+    else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Connection not found" })),
+        )
+            .into_response();
+    };
+
+    if connection.provider != "codex" {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Codex reset credits are only available for Codex connections."
+            })),
+        )
+            .into_response();
+    }
+
+    if !is_codex_reset_auth_type(&connection.auth_type) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Codex reset credits require an OAuth or access-token connection."
+            })),
+        )
+            .into_response();
+    }
+
+    let is_oauth = connection.auth_type.eq_ignore_ascii_case("oauth");
+    if is_oauth {
+        if let Some(refresh_token) = connection
+            .refresh_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            match refresh_codex_token(refresh_token).await {
+                Ok(refreshed) => {
+                    if let Err(e) = persist_codex_tokens(
+                        &state,
+                        &connection_id,
+                        &refreshed.access_token,
+                        refreshed.refresh_token.as_deref(),
+                        refreshed.expires_in,
+                    )
+                    .await
+                    {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": e })),
+                        )
+                            .into_response();
+                    }
+                    connection.access_token = Some(refreshed.access_token);
+                    if let Some(rt) = refreshed.refresh_token {
+                        connection.refresh_token = Some(rt);
+                    }
+                }
+                Err(e) => {
+                    return (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": format!("Credential refresh failed: {e}") })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    let account_id = codex_account_id(&connection.provider_specific_data);
+    let access_token = connection
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(token) = access_token else {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": "No Codex access token available. Please re-authorize the connection."
+            })),
+        )
+            .into_response();
+    };
+
+    let mut result = get_codex_rate_limit_reset_credits(token, account_id.as_deref()).await;
+    if let Err(err) = &result {
+        if is_oauth
+            && is_auth_expired_message(err)
+            && connection
+                .refresh_token
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+        {
+            if let Some(refresh_token) = connection.refresh_token.clone() {
+                match refresh_codex_token(&refresh_token).await {
+                    Ok(refreshed) => {
+                        let _ = persist_codex_tokens(
+                            &state,
+                            &connection_id,
+                            &refreshed.access_token,
+                            refreshed.refresh_token.as_deref(),
+                            refreshed.expires_in,
+                        )
+                        .await;
+                        result = get_codex_rate_limit_reset_credits(
+                            &refreshed.access_token,
+                            account_id.as_deref(),
+                        )
+                        .await;
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+    }
+
+    match result {
+        Ok(value) => Json(value).into_response(),
+        Err(e) => {
+            tracing::warn!(provider = "codex", error = %e, "Codex reset credits GET failed");
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
+        }
+    }
+}
+
+// Handler for POST /api/usage/:connection_id/codex-reset-credits
+async fn reset_connection_credits(
+    State(state): State<AppState>,
+    axum::extract::Path(connection_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(response) = require_usage_access(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let Some(mut connection) = snapshot
+        .provider_connections
+        .iter()
+        .find(|entry| entry.id == connection_id)
+        .cloned()
+    else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "error": "Connection not found" })),
+        )
+            .into_response();
+    };
+
+    if connection.provider != "codex" {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Codex reset credits are only available for Codex connections."
+            })),
+        )
+            .into_response();
+    }
+
+    if !is_codex_reset_auth_type(&connection.auth_type) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "Codex reset credits require an OAuth or access-token connection."
+            })),
+        )
+            .into_response();
+    }
+
+    let is_oauth = connection.auth_type.eq_ignore_ascii_case("oauth");
+    if is_oauth {
+        if let Some(refresh_token) = connection
+            .refresh_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            match refresh_codex_token(refresh_token).await {
+                Ok(refreshed) => {
+                    if let Err(e) = persist_codex_tokens(
+                        &state,
+                        &connection_id,
+                        &refreshed.access_token,
+                        refreshed.refresh_token.as_deref(),
+                        refreshed.expires_in,
+                    )
+                    .await
+                    {
+                        return (
+                            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({ "error": e })),
+                        )
+                            .into_response();
+                    }
+                    connection.access_token = Some(refreshed.access_token);
+                    if let Some(rt) = refreshed.refresh_token {
+                        connection.refresh_token = Some(rt);
+                    }
+                }
+                Err(e) => {
+                    return (
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": format!("Credential refresh failed: {e}") })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    let access_token = connection
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    // Prefer OpenAI consume when we have a token; fall back to local clear only
+    // when no token is present (legacy local-only semantics).
+    let Some(token) = access_token else {
+        if let Err(e) = clear_local_codex_rate_limit(&state, &connection_id).await {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": e })),
+            )
+                .into_response();
+        }
+        return Json(json!({
+            "code": "local_clear",
+            "reset": true,
+            "windows_reset": 0,
+            "message": "No Codex access token available; cleared local rate-limit/backoff state only.",
+            "localOnly": true,
+        }))
+        .into_response();
+    };
+
+    let redeem_request_id = uuid::Uuid::new_v4().to_string();
+    let mut consume_result =
+        match consume_codex_rate_limit_reset_credit(&token, &redeem_request_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(provider = "codex", error = %e, "Codex reset credits POST failed");
+                return (
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": e })),
+                )
+                    .into_response();
+            }
+        };
+
+    if is_oauth
+        && is_auth_expired_consume_result(&consume_result)
+        && connection
+            .refresh_token
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty())
+    {
+        if let Some(refresh_token) = connection.refresh_token.clone() {
+            match refresh_codex_token(&refresh_token).await {
+                Ok(refreshed) => {
+                    let _ = persist_codex_tokens(
+                        &state,
+                        &connection_id,
+                        &refreshed.access_token,
+                        refreshed.refresh_token.as_deref(),
+                        refreshed.expires_in,
+                    )
+                    .await;
+                    if let Ok(retry) = consume_codex_rate_limit_reset_credit(
+                        &refreshed.access_token,
+                        &redeem_request_id,
+                    )
+                    .await
+                    {
+                        consume_result = retry;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = "codex",
+                        error = %e,
+                        "Codex reset credits force refresh failed"
+                    );
+                }
+            }
+        }
+    }
+
+    if consume_result.ok {
+        // Secondary: clear local rate-limit / backoff so routing can reuse the account.
+        let _ = clear_local_codex_rate_limit(&state, &connection_id).await;
+    }
+
+    consume_result_response(&consume_result, &redeem_request_id)
 }
 
 // Handler for GET /api/usage/chart?period=X
