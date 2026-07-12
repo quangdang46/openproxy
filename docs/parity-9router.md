@@ -84,6 +84,30 @@ Accepts legacy string **or** nested 9router object:
 
 `resolve_transport` static table (deepseek, kimi, kimi-coding, glm, minimax, minimax-cn): match client `source_format` → set plan target + full endpoint URL on `runtime_transport`.
 
+**Not yet in table (open beads):** `xiaomi-mimo` / `mimo`, `xiaomi-tokenplan` Claude leg (OpenAI+region already in DefaultExecutor).
+
+## Specialized executor gaps (post-close deep scan)
+
+| Provider | Status | Bead |
+|----------|--------|------|
+| **grok-cli** (`gcli`/`gb`) | OAuth refresh + forceStream + format=responses exist; **no** specialized executor / chat branch → falls through Default/xai (wrong host: needs `cli-chat-proxy.grok.com/v1/responses`) | `openproxy-executor-grok-cli-gzt` P0 |
+| **xiaomi-tokenplan** | Region OpenAI URL in DefaultExecutor; **missing** Claude `/anthropic/v1/messages` + resolve_transport | `openproxy-executor-xiaomi-tokenplan-2mz` P1 |
+| **xiaomi-mimo** | OpenAI default only; dual transport not in `resolve_transport` | `openproxy-transport-xiaomi-mimo-lyp` P1 |
+| perplexity-web | Implemented (lives in `grok_web.rs`, dispatched) | — |
+| ollama-local | Wired as ollama | — |
+
+## Other residual parity nits
+
+| Item | Severity | Bead |
+|------|----------|------|
+| `web_fetch` still clear-**all** `modelLock_*` on success (chat is selective) | P1 | `openproxy-webfetch-selective-lock-1rb` |
+| Global `model(high)` stripThinkingSuffix (only kiro/codex partial) | P2 | `openproxy-thinking-suffix-global-zya` |
+| Vertex SA JWT mint | OK in `vertex.rs` executor (not OAuth dispatch) — design split, not a gap | — |
+| PXPIPE | Intentional skip | — |
+| Hedging / shadow / auto-combo chat wire | Intentional scaffold-only | — |
+
 ## Remaining intentional backlog
 
-None for P0/P1 parity beads. P3: full PXPIPE port; wire hedging/shadow/auto-combo into chat dispatcher when needed.
+- **P0/P1 open (fix next):** grok-cli executor; xiaomi-tokenplan Claude path; xiaomi-mimo transport; web_fetch selective lock.
+- **P2:** global thinking suffix; docs refresh bead `openproxy-docs-parity-gaps-refresh-wcq`.
+- **P3 product-optional:** full PXPIPE port; wire hedging/shadow/auto-combo into chat dispatcher when needed.
