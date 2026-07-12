@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 // import { useParams, useRouter } from "next/navigation";  // ported: next.js -> Astro+React
 // import Link from "next/link";  // ported: next.js -> Astro+React
 // import Image from "next/image";  // ported: next.js -> Astro+React
@@ -8,7 +8,9 @@ import { useNotificationStore } from "@/store/notificationStore";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, THINKING_CONFIG } from "@/shared/constants/providers";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
+import { getProviderCustomModelRows, type CustomModelEntry } from "@/shared/utils/providerCustomModels";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -18,11 +20,23 @@ import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 
+const ONE_BY_ONE_DELAY_MS = 1000;
+
+const AUTO_PING_SETTINGS_KEYS: Record<string, string> = {
+  claude: "claudeAutoPing",
+  codex: "codexAutoPing",
+};
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export default function ProviderDetailPageClient() {
   // useParams/useRouter shims for Astro (no Next.js runtime)
   const [params, setParams] = useState<{ id: string }>({ id: "" });
   const [mounted, setMounted] = useState<boolean>(false);
   useEnsureCatalog();
+  const { getCaps } = useModelCaps();
   useEffect(() => {
     setMounted(true);
     setParams({ id: window.location.pathname.split("/").filter(Boolean).pop() || "" });
@@ -46,6 +60,7 @@ export default function ProviderDetailPageClient() {
   const [showBulkProxyModal, setShowBulkProxyModal] = useState(false);
   const [selectedConnection, setSelectedConnection] = useState(null);
   const [modelAliases, setModelAliases] = useState({});
+  const [customModels, setCustomModels] = useState<CustomModelEntry[]>([]);
   const [headerImgError, setHeaderImgError] = useState(false);
   const [modelTestResults, setModelTestResults] = useState({});
   const [modelsTestError, setModelsTestError] = useState("");
@@ -61,8 +76,18 @@ export default function ProviderDetailPageClient() {
   const [suggestedModels, setSuggestedModels] = useState([]);
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
   const [disabledModelIds, setDisabledModelIds] = useState([]);
+  const [autoPing, setAutoPing] = useState<{ enabled: boolean; connections: Record<string, boolean> }>({ enabled: false, connections: {} });
+  const [showAgRiskModal, setShowAgRiskModal] = useState(false);
+  const [oneByOneRunning, setOneByOneRunning] = useState(false);
+  const [oneByOneStopping, setOneByOneStopping] = useState(false);
+  const [oneByOneCurrentConnectionId, setOneByOneCurrentConnectionId] = useState<string | null>(null);
+  const [oneByOneResults, setOneByOneResults] = useState<Record<string, { state: string; error: string | null }>>({});
+  const [oneByOneSummary, setOneByOneSummary] = useState<null | { total: number; completed: number; passed: number; failed: number; stopped: boolean }>(null);
+  const stopOneByOneRef = useRef(false);
+  const [importingQoderModels, setImportingQoderModels] = useState(false);
   const { copied, copy } = useCopyToClipboard();
   const notify = useNotificationStore();
+  const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
   const [deleteConnTarget, setDeleteConnTarget] = useState<any>(null);
   const [deletingConn, setDeletingConn] = useState<boolean>(false);
   const [deleteNodeTarget, setDeleteNodeTarget] = useState<{ name: string; type: string } | null>(null);
@@ -89,6 +114,20 @@ export default function ProviderDetailPageClient() {
   const isAnthropicCompatible = isAnthropicCompatibleProvider(providerId);
   const isCompatible = isOpenAICompatible || isAnthropicCompatible;
   const thinkingConfig = AI_PROVIDERS[providerId]?.thinkingConfig || THINKING_CONFIG.extended;
+
+  // Resolve thinking suffix for copy using provider THINKING_CONFIG options
+  // (open-sse getThinkingLevels is not available in OpenProxy).
+  const resolveThinkingSuffix = (_modelId: string): string | null => {
+    if (!thinkingMode || thinkingMode === "auto") return null;
+    if (!thinkingConfig?.options?.includes(thinkingMode)) return null;
+    // "off"/"none" still append so the client can force-disable thinking.
+    return thinkingMode;
+  };
+
+  // Provider-level thinking picker options derived from THINKING_CONFIG.
+  const providerThinkingLevels = thinkingConfig?.options?.length
+    ? thinkingConfig.options
+    : null;
   
   const providerStorageAlias = isCompatible ? providerId : providerAlias;
   const providerDisplayAlias = isCompatible
@@ -177,6 +216,18 @@ export default function ProviderDetailPageClient() {
     }
   }, []);
 
+  const fetchCustomModels = useCallback(async () => {
+    try {
+      const res = await fetch("/api/models/custom", { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) {
+        setCustomModels(data.models || []);
+      }
+    } catch (error) {
+      console.log("Error fetching custom models:", error);
+    }
+  }, []);
+
   // Fetch free models from Kilo API for kilocode provider
   useEffect(() => {
     if (providerId !== "kilocode") return;
@@ -212,6 +263,10 @@ export default function ProviderDetailPageClient() {
       // Load per-provider thinking config
       const thinkingCfg = (settingsData.providerThinking || {})[providerId] || {};
       setThinkingMode(thinkingCfg.mode || "auto");
+      // Load Claude/Codex auto-ping maps (settings.extra keys)
+      const autoPingSettingsKey = AUTO_PING_SETTINGS_KEYS[providerId];
+      const apCfg = autoPingSettingsKey ? (settingsData[autoPingSettingsKey] || {}) : {};
+      setAutoPing({ enabled: apCfg.enabled === true, connections: apCfg.connections || {} });
       if (nodesRes.ok) {
         let node = (nodesData.nodes || []).find((entry) => entry.id === providerId) || null;
 
@@ -324,11 +379,219 @@ export default function ProviderDetailPageClient() {
     saveThinkingConfig(mode);
   };
 
+  const saveAutoPing = async (next: { enabled: boolean; connections: Record<string, boolean> }) => {
+    const autoPingSettingsKey = AUTO_PING_SETTINGS_KEYS[providerId];
+    if (!autoPingSettingsKey) return;
+    setAutoPing(next);
+    try {
+      await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [autoPingSettingsKey]: next }),
+      });
+    } catch (error) {
+      console.log("Error saving auto-ping config:", error);
+    }
+  };
+
+  const handleAutoPingConnection = (connectionId: string, on: boolean) => {
+    saveAutoPing({
+      ...autoPing,
+      connections: { ...autoPing.connections, [connectionId]: on },
+    });
+  };
+
+  const openOAuthConnection = () => {
+    setShowOAuthModal(true);
+  };
+
+  const triggerOAuthConnection = () => {
+    if (providerId === "antigravity" && typeof window !== "undefined") {
+      const confirmed = window.localStorage.getItem(AG_RISK_STORAGE_KEY) === "true";
+      if (!confirmed) {
+        setShowAgRiskModal(true);
+        return;
+      }
+    }
+    if (isOAuth) {
+      openOAuthConnection();
+      return;
+    }
+    setAddConnectionError("");
+    setShowAddApiKeyModal(true);
+  };
+
+  const triggerApiKeyConnection = () => {
+    setAddConnectionError("");
+    setShowAddApiKeyModal(true);
+  };
+
+  const triggerAddConnection = () => {
+    if (isOAuth) {
+      triggerOAuthConnection();
+      return;
+    }
+    triggerApiKeyConnection();
+  };
+
+  const handleAgRiskConfirm = () => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(AG_RISK_STORAGE_KEY, "true");
+    }
+    setShowAgRiskModal(false);
+    openOAuthConnection();
+  };
+
+  const handleImportQoderModels = async () => {
+    if (importingQoderModels) return;
+    const activeConnection = connections.find((conn: any) => conn.isActive !== false);
+    if (!activeConnection) {
+      notify.error("Please add an active Qoder connection first");
+      return;
+    }
+
+    setImportingQoderModels(true);
+    try {
+      const res = await fetch(`/api/providers/${activeConnection.id}/models`);
+      const data = await res.json();
+      if (!res.ok) {
+        notify.error(data.error || "Failed to fetch models");
+        return;
+      }
+      const fetched = data.models || [];
+      if (fetched.length === 0) {
+        notify.error("No models returned");
+        return;
+      }
+
+      let importedCount = 0;
+      for (const model of fetched) {
+        const modelId = model.id || model.name;
+        if (!modelId) continue;
+        // Qoder model ID format may be "qoder/auto" or "auto"
+        const cleanModelId = String(modelId).replace(/^qoder\//, "");
+        const alreadyExists =
+          Object.values(modelAliases).includes(`${providerStorageAlias}/${cleanModelId}`) ||
+          models.some((m: any) => m.id === cleanModelId);
+        if (alreadyExists) continue;
+        await handleSetAlias(cleanModelId, cleanModelId, providerStorageAlias);
+        importedCount += 1;
+      }
+
+      if (importedCount === 0) {
+        notify.success("All models already exist, no new models added");
+      } else {
+        notify.success(`Successfully added ${importedCount} models`);
+        await fetchAliases();
+      }
+    } catch (error: any) {
+      console.log("Error importing Qoder models:", error);
+      notify.error(`Error fetching models: ${error?.message || "unknown"}`);
+    } finally {
+      setImportingQoderModels(false);
+    }
+  };
+
+  const handleRunOneByOneTest = async () => {
+    if (oneByOneRunning || connections.length === 0) return;
+
+    const queuedState = Object.fromEntries(
+      connections.map((connection: any) => [connection.id, { state: "queued", error: null }]),
+    );
+
+    stopOneByOneRef.current = false;
+    setOneByOneRunning(true);
+    setOneByOneStopping(false);
+    setOneByOneCurrentConnectionId(null);
+    setOneByOneResults(queuedState);
+    setOneByOneSummary({ total: connections.length, completed: 0, passed: 0, failed: 0, stopped: false });
+
+    let passed = 0;
+    let failed = 0;
+
+    try {
+      for (let index = 0; index < connections.length; index += 1) {
+        if (stopOneByOneRef.current) {
+          setOneByOneSummary({
+            total: connections.length,
+            completed: index,
+            passed,
+            failed,
+            stopped: true,
+          });
+          break;
+        }
+
+        const connection: any = connections[index];
+        setOneByOneCurrentConnectionId(connection.id);
+        setOneByOneResults((prev) => ({
+          ...prev,
+          [connection.id]: { state: "testing", error: null },
+        }));
+
+        try {
+          const res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST" });
+          const data = await res.json();
+          const valid = !!data.valid;
+
+          if (valid) {
+            passed += 1;
+          } else {
+            failed += 1;
+          }
+
+          setOneByOneResults((prev) => ({
+            ...prev,
+            [connection.id]: {
+              state: valid ? "success" : "failed",
+              error: valid ? null : (data.error || null),
+            },
+          }));
+        } catch (error: any) {
+          failed += 1;
+          setOneByOneResults((prev) => ({
+            ...prev,
+            [connection.id]: {
+              state: "failed",
+              error: error?.message || "Test failed",
+            },
+          }));
+        }
+
+        setOneByOneSummary({
+          total: connections.length,
+          completed: index + 1,
+          passed,
+          failed,
+          stopped: false,
+        });
+
+        if (index < connections.length - 1) {
+          await sleep(ONE_BY_ONE_DELAY_MS);
+        }
+      }
+    } finally {
+      setOneByOneCurrentConnectionId(null);
+      setOneByOneRunning(false);
+      setOneByOneStopping(false);
+      stopOneByOneRef.current = false;
+      // Refresh connection statuses after tests
+      fetchConnections();
+    }
+  };
+
+  const handleStopOneByOneTest = () => {
+    if (!oneByOneRunning) return;
+    stopOneByOneRef.current = true;
+    setOneByOneStopping(true);
+  };
+
   useEffect(() => {
     fetchConnections();
     fetchAliases();
+    fetchCustomModels();
     fetchDisabledModels();
-  }, [fetchConnections, fetchAliases, fetchDisabledModels]);
+  }, [fetchConnections, fetchAliases, fetchCustomModels, fetchDisabledModels]);
 
   // Fetch suggested models from provider's public API (if configured)
   useEffect(() => {
@@ -366,6 +629,38 @@ export default function ProviderDetailPageClient() {
       }
     } catch (error) {
       console.log("Error deleting alias:", error);
+    }
+  };
+
+  const handleAddCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias) => {
+    try {
+      const res = await fetch("/api/models/custom", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerAlias: providerAliasOverride, id: modelId, type }),
+      });
+      if (res.ok) {
+        await fetchCustomModels();
+        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+      } else {
+        const data = await res.json();
+        notify.error(data.error || "Failed to add custom model");
+      }
+    } catch (error) {
+      console.log("Error adding custom model:", error);
+    }
+  };
+
+  const handleDeleteCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias) => {
+    try {
+      const params = new URLSearchParams({ providerAlias: providerAliasOverride, id: modelId, type });
+      const res = await fetch(`/api/models/custom?${params}`, { method: "DELETE" });
+      if (res.ok) {
+        await fetchCustomModels();
+        if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+      }
+    } catch (error) {
+      console.log("Error deleting custom model:", error);
     }
   };
 
@@ -602,6 +897,12 @@ export default function ProviderDetailPageClient() {
                 onMoveUp={() => handleSwapPriority(index, index - 1)}
                 onMoveDown={() => handleSwapPriority(index, index + 1)}
                 onToggleActive={(isActive) => handleUpdateConnectionStatus(conn.id, isActive)}
+                autoPing={AUTO_PING_SETTINGS_KEYS[providerId] && (conn.authType === "oauth" || isOAuth) ? {
+                  on: autoPing.connections[conn.id] === true,
+                  onToggle: (on) => handleAutoPingConnection(conn.id, on),
+                  provider: providerId,
+                } : null}
+                oneByOneStatus={oneByOneResults[conn.id] || null}
                 onUpdateProxy={async (proxyPoolId) => {
                   try {
                     const res = await fetch(`/api/providers/${conn.id}`, {
@@ -713,10 +1014,13 @@ export default function ProviderDetailPageClient() {
           providerStorageAlias={providerStorageAlias}
           providerDisplayAlias={providerDisplayAlias}
           modelAliases={modelAliases}
+          customModels={customModels}
           copied={copied}
           onCopy={copy}
           onSetAlias={handleSetAlias}
           onDeleteAlias={handleDeleteAlias}
+          onAddCustomModel={(modelId) => handleAddCustomModel(modelId, "llm", providerStorageAlias)}
+          onDeleteCustomModel={(modelId) => handleDeleteCustomModel(modelId, "llm", providerStorageAlias)}
           connections={connections}
           isAnthropic={isAnthropicCompatible}
         />
@@ -732,40 +1036,40 @@ export default function ProviderDetailPageClient() {
     const displayModels = allModels.filter((m) => !disabledSet.has(m.id));
     const disabledDisplayModels = allModels.filter((m) => disabledSet.has(m.id));
     // Custom models added by user (stored as aliases: modelId → providerAlias/modelId)
-    const customModels = Object.entries(modelAliases)
-      .filter(([alias, fullModel]) => {
-        const prefix = `${providerStorageAlias}/`;
-        if (!fullModel.startsWith(prefix)) return false;
-        const modelId = fullModel.slice(prefix.length);
-        // Only show if not already in hardcoded list
-        // For passthroughModels, include all aliases (model IDs may contain slashes like "anthropic/claude-3")
-        if (providerInfo.passthroughModels) return !models.some((m) => m.id === modelId);
-        return !models.some((m) => m.id === modelId) && alias === modelId;
-      })
-      .map(([alias, fullModel]) => ({
-        id: fullModel.slice(`${providerStorageAlias}/`.length),
-        alias,
-        fullModel,
-      }));
+    const customModelRows = getProviderCustomModelRows({
+      customModels,
+      modelAliases,
+      providerAlias: providerStorageAlias,
+      builtInModels: models,
+      type: "llm",
+    });
 
     return (
       <div className="flex flex-wrap gap-3">
         {/* Custom models first */}
-        {customModels.map((model) => (
+        {customModelRows.map((model) => (
           <ModelRow
-            key={model.id}
-            model={{ id: model.id }}
+            key={`${model.source}-${model.fullModel}`}
+            model={{ id: model.id, name: model.name }}
             fullModel={`${providerDisplayAlias}/${model.id}`}
             alias={model.alias}
             copied={copied}
             onCopy={copy}
             onSetAlias={() => {}}
-            onDeleteAlias={() => handleDeleteAlias(model.alias)}
+            onDeleteAlias={() => {
+              if (model.source === "custom") {
+                handleDeleteCustomModel(model.id, "llm", providerStorageAlias);
+              } else {
+                handleDeleteAlias(model.alias);
+              }
+            }}
             testStatus={modelTestResults[model.id]}
             onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
             isTesting={testingModelIds.has(model.id)}
             isCustom
             isFree={false}
+            caps={getCaps(`${providerId}/${model.id}`)}
+            thinkingSuffix={resolveThinkingSuffix(model.id)}
           />
         ))}
 
@@ -790,6 +1094,8 @@ export default function ProviderDetailPageClient() {
               isTesting={testingModelIds.has(model.id)}
               isFree={model.isFree}
               onDisable={() => handleDisableModel(model.id)}
+              caps={getCaps(`${providerId}/${model.id}`)}
+              thinkingSuffix={resolveThinkingSuffix(model.id)}
             />
           );
         })}
@@ -803,9 +1109,27 @@ export default function ProviderDetailPageClient() {
           Add Model
         </button>
 
+
+        {/* Import Qoder models button — only show for qoder provider */}
+        {providerId === "qoder" && connections.some((conn: any) => conn.isActive !== false) && (
+          <button
+            onClick={handleImportQoderModels}
+            disabled={importingQoderModels}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <span className="material-symbols-outlined text-sm" style={importingQoderModels ? { animation: "spin 1s linear infinite" } : undefined}>
+              {importingQoderModels ? "progress_activity" : "download"}
+            </span>
+            {importingQoderModels ? "Fetching..." : "Fetch Qoder Models"}
+          </button>
+        )}
+
         {/* Suggested models from provider API — show only models not yet added */}
         {suggestedModels.length > 0 && (() => {
-          const addedFullModels = new Set(Object.values(modelAliases));
+          const addedFullModels = new Set([
+            ...Object.values(modelAliases),
+            ...customModelRows.map((model) => model.fullModel),
+          ]);
           const hardcodedIds = new Set(models.map((m) => m.id));
           const notAdded = suggestedModels.filter(
             (m) => !addedFullModels.has(`${providerStorageAlias}/${m.id}`) && !hardcodedIds.has(m.id)
@@ -819,8 +1143,7 @@ export default function ProviderDetailPageClient() {
                   <button
                     key={m.id}
                     onClick={async () => {
-                      const alias = m.id.split("/").pop();
-                      await handleSetAlias(m.id, alias, providerStorageAlias);
+                      await handleAddCustomModel(m.id, "llm", providerStorageAlias);
                     }}
                     className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-black/10 dark:border-white/10 text-xs text-text-muted hover:text-primary hover:border-primary/40 hover:bg-primary/5 transition-colors"
                     title={`${m.name} · ${(m.contextLength / 1000).toFixed(0)}k ctx`}
@@ -1038,21 +1361,47 @@ export default function ProviderDetailPageClient() {
                   Apply Proxy
                 </Button>
               )}
+              {connections.length > 0 && (
+                <>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon="sync"
+                    onClick={handleRunOneByOneTest}
+                    disabled={oneByOneRunning}
+                  >
+                    {oneByOneRunning ? "Testing Connection One-by-One..." : "Test Connection One-by-One"}
+                  </Button>
+                  {oneByOneRunning && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      icon="stop"
+                      onClick={handleStopOneByOneTest}
+                      disabled={oneByOneStopping}
+                    >
+                      {oneByOneStopping ? "Stopping..." : "Stop"}
+                    </Button>
+                  )}
+                </>
+              )}
               {/* Thinking config */}
-              {/* {thinkingConfig && (
+              {providerThinkingLevels && (
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-text-muted font-medium">Thinking</span>
                   <select
                     value={thinkingMode}
                     onChange={(e) => handleThinkingModeChange(e.target.value)}
+                    title="Appends (level) suffix to copied model names"
                     className="text-xs px-2 py-1 border border-border rounded-md bg-background focus:outline-none focus:border-primary"
                   >
-                    {thinkingConfig.options.map((opt) => (
+                    <option value="auto">Auto</option>
+                    {providerThinkingLevels.map((opt) => (
                       <option key={opt} value={opt}>{opt.charAt(0).toUpperCase() + opt.slice(1)}</option>
                     ))}
                   </select>
                 </div>
-              )} */}
+              )}
               {/* Round Robin toggle */}
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-xs text-text-muted font-medium">Round Robin</span>
@@ -1099,14 +1448,7 @@ export default function ProviderDetailPageClient() {
                 <Button
                   size="sm"
                   icon="add"
-                  onClick={() => {
-                    if (isOAuth) {
-                      setShowOAuthModal(true);
-                      return;
-                    }
-                    setAddConnectionError("");
-                    setShowAddApiKeyModal(true);
-                  }}
+                  onClick={triggerAddConnection}
                 >
                   {isCompatible ? "Add API Key" : (providerId === "iflow" ? "OAuth" : "Add Connection")}
                 </Button>
@@ -1114,6 +1456,22 @@ export default function ProviderDetailPageClient() {
             </div>
           ) : (
             <>
+              {oneByOneSummary && (
+                <div className="mb-4 rounded-lg border border-black/10 bg-black/[0.02] px-3 py-2 text-xs text-text-muted dark:border-white/10 dark:bg-white/[0.03]">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span>Total: {oneByOneSummary.total}</span>
+                    <span>Completed: {oneByOneSummary.completed}</span>
+                    <span>Passed: {oneByOneSummary.passed}</span>
+                    <span>Failed: {oneByOneSummary.failed}</span>
+                    {oneByOneSummary.stopped && (
+                      <span className="text-amber-600 dark:text-amber-400">Stopped</span>
+                    )}
+                    {oneByOneRunning && oneByOneCurrentConnectionId && (
+                      <span>Running: {(connections.find((conn: any) => conn.id === oneByOneCurrentConnectionId) as any)?.name || oneByOneCurrentConnectionId}</span>
+                    )}
+                  </div>
+                </div>
+              )}
               {connectionsList}
               {!isCompatible && (
                 <div className="mt-4 grid grid-cols-1 gap-2 sm:flex">
@@ -1144,14 +1502,7 @@ export default function ProviderDetailPageClient() {
                   <Button
                     size="sm"
                     icon="add"
-                    onClick={() => {
-                      if (isOAuth) {
-                        setShowOAuthModal(true);
-                        return;
-                      }
-                      setAddConnectionError("");
-                      setShowAddApiKeyModal(true);
-                    }}
+                    onClick={triggerAddConnection}
                     className="w-full sm:w-auto"
                   >
                     Add
@@ -1166,9 +1517,24 @@ export default function ProviderDetailPageClient() {
       {/* Models */}
       <Card>
         <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <h2 className="text-lg font-semibold">
-            {"Available Models"}
-          </h2>
+          <div className="flex items-center gap-3">
+            <h2 className="text-lg font-semibold">
+              {"Available Models"}
+            </h2>
+            {providerThinkingLevels && (
+              <select
+                value={thinkingMode}
+                onChange={(e) => handleThinkingModeChange(e.target.value)}
+                title="Appends (level) suffix to copied model names"
+                className="rounded-md border border-border bg-background px-2 py-1 text-xs focus:border-primary focus:outline-none"
+              >
+                <option value="auto">Thinking: Auto</option>
+                {providerThinkingLevels.map((opt) => (
+                  <option key={opt} value={opt}>{`Thinking: ${opt.charAt(0).toUpperCase() + opt.slice(1)}`}</option>
+                ))}
+              </select>
+            )}
+          </div>
           {!isCompatible && (() => {
             const allIds = [
               ...models,
@@ -1279,11 +1645,7 @@ export default function ProviderDetailPageClient() {
           providerAlias={providerStorageAlias}
           providerDisplayAlias={providerDisplayAlias}
           onSave={async (modelId) => {
-            // For passthrough providers (OpenRouter), use last segment as alias to avoid slash conflicts
-            const alias = providerInfo?.passthroughModels
-              ? modelId.split("/").pop()
-              : modelId;
-            await handleSetAlias(modelId, alias, providerStorageAlias);
+            await handleAddCustomModel(modelId, "llm", providerStorageAlias);
             setShowAddCustomModel(false);
           }}
           onClose={() => setShowAddCustomModel(false)}
@@ -1346,6 +1708,18 @@ export default function ProviderDetailPageClient() {
         title="Disable all models"
         message={disableAllTarget ? <>Disable all <strong>{disableAllTarget.length}</strong> model(s) for this provider?</> : null}
         confirmText="Disable all"
+        variant="danger"
+      />
+
+      {/* Antigravity risk confirmation — gate OAuth until user acknowledges */}
+      <ConfirmModal
+        isOpen={showAgRiskModal}
+        onClose={() => setShowAgRiskModal(false)}
+        onConfirm={handleAgRiskConfirm}
+        title="Risk Notice"
+        message={providerInfo?.deprecationNotice || "This provider is designed exclusively for its official IDE. Using it with other tools may result in account restrictions or bans."}
+        confirmText="I Understand, Continue"
+        cancelText="Cancel"
         variant="danger"
       />
     </div>

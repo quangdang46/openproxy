@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
+import { getProviderCustomModelRows, type CustomModelEntry } from "@/shared/utils/providerCustomModels";
 
 interface CompatibleModelRowProps {
   modelId: string;
@@ -86,15 +87,30 @@ interface CompatibleModelsSectionProps {
   providerStorageAlias: string;
   providerDisplayAlias: string;
   modelAliases: Record<string, string>;
+  customModels?: CustomModelEntry[];
   copied: string;
   onCopy: (fullModel: string, id: string) => void;
-  onSetAlias: (modelId: string, alias: string, providerAliasOverride?: string) => Promise<void>;
+  onSetAlias?: (modelId: string, alias: string, providerAliasOverride?: string) => Promise<void>;
   onDeleteAlias: (alias: string) => Promise<void>;
+  onAddCustomModel: (modelId: string) => Promise<void>;
+  onDeleteCustomModel: (modelId: string) => Promise<void>;
   connections: Array<{ id?: string; isActive?: boolean }>;
   isAnthropic: boolean;
 }
 
-export default function CompatibleModelsSection({ providerStorageAlias, providerDisplayAlias, modelAliases, copied, onCopy, onSetAlias, onDeleteAlias, connections, isAnthropic }: CompatibleModelsSectionProps) {
+export default function CompatibleModelsSection({
+  providerStorageAlias,
+  providerDisplayAlias,
+  modelAliases,
+  customModels = [],
+  copied,
+  onCopy,
+  onDeleteAlias,
+  onAddCustomModel,
+  onDeleteCustomModel,
+  connections,
+  isAnthropic,
+}: CompatibleModelsSectionProps) {
   const [newModel, setNewModel] = useState<string>("");
   const [adding, setAdding] = useState<boolean>(false);
   const [importing, setImporting] = useState<boolean>(false);
@@ -123,44 +139,24 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
     }
   };
 
-  const providerAliases = Object.entries(modelAliases).filter(
-    ([, model]) => model.startsWith(`${providerStorageAlias}/`)
-  );
-
-  const allModels = providerAliases.map(([alias, fullModel]) => ({
-    modelId: fullModel.replace(`${providerStorageAlias}/`, ""),
-    fullModel,
-    alias,
-  }));
-
-  const generateDefaultAlias = (modelId: string) => {
-    const parts = modelId.split("/");
-    return parts[parts.length - 1];
-  };
-
-  const resolveAlias = (modelId: string): string | null => {
-    const fullModel = `${providerStorageAlias}/${modelId}`;
-    // Skip if this exact model already has an alias
-    if (Object.values(modelAliases).includes(fullModel)) return null;
-    const baseAlias = generateDefaultAlias(modelId);
-    if (!modelAliases[baseAlias]) return baseAlias;
-    const prefixedAlias = `${providerDisplayAlias}-${baseAlias}`;
-    if (!modelAliases[prefixedAlias]) return prefixedAlias;
-    return null;
-  };
+  const allModels = getProviderCustomModelRows({
+    customModels,
+    modelAliases,
+    providerAlias: providerStorageAlias,
+    type: "llm",
+  });
 
   const handleAdd = async () => {
     if (!newModel.trim() || adding) return;
     const modelId = newModel.trim();
-    const resolvedAlias = resolveAlias(modelId);
-    if (!resolvedAlias) {
-      notify.warning("All suggested aliases already exist. Please choose a different model or remove conflicting aliases.");
+    if (allModels.some((model) => model.id === modelId)) {
+      notify.warning("Model already exists for this provider.");
       return;
     }
 
     setAdding(true);
     try {
-      await onSetAlias(modelId, resolvedAlias, providerStorageAlias);
+      await onAddCustomModel(modelId);
       setNewModel("");
     } catch (error) {
       console.log("Error adding model:", error);
@@ -191,9 +187,8 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
       for (const model of models) {
         const modelId = model.id || model.name || model.model;
         if (!modelId) continue;
-        const resolvedAlias = resolveAlias(modelId);
-        if (!resolvedAlias) continue;
-        await onSetAlias(modelId, resolvedAlias, providerStorageAlias);
+        if (allModels.some((entry) => entry.id === modelId)) continue;
+        await onAddCustomModel(modelId);
         importedCount += 1;
       }
       if (importedCount === 0) {
@@ -245,17 +240,17 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
 
       {allModels.length > 0 && (
         <div className="flex flex-col gap-3">
-          {allModels.map(({ modelId, fullModel, alias }) => (
+          {allModels.map(({ id, alias, source }) => (
             <CompatibleModelRow
-              key={fullModel}
-              modelId={modelId}
-              fullModel={`${providerDisplayAlias}/${modelId}`}
+              key={`${source}-${providerStorageAlias}/${id}`}
+              modelId={id}
+              fullModel={`${providerDisplayAlias}/${id}`}
               copied={copied}
               onCopy={onCopy}
-              onDeleteAlias={() => onDeleteAlias(alias)}
-              onTest={connections.length > 0 ? () => handleTestModel(modelId) : undefined}
-              testStatus={modelTestResults[modelId]}
-              isTesting={testingModelIds.has(modelId)}
+              onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias!)}
+              onTest={connections.length > 0 ? () => handleTestModel(id) : undefined}
+              testStatus={modelTestResults[id]}
+              isTesting={testingModelIds.has(id)}
             />
           ))}
         </div>

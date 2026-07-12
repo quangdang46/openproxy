@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import type { ChangeEvent } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import type { ChangeEvent, MutableRefObject, ReactNode, MouseEvent } from "react";
 import { Card, Button, Input, Modal, CardSkeleton, Toggle } from "@/shared/components";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
@@ -44,7 +44,7 @@ interface EndpointRowProps {
   copied: string | null;
   onCopy: (url: string, id: string) => void;
   badge?: string;
-  actions?: React.ReactNode;
+  actions?: ReactNode;
 }
 
 interface StatusAlertProps {
@@ -75,6 +75,40 @@ const TUNNEL_BENEFITS: TunnelBenefit[] = [
 const TUNNEL_PING_INTERVAL_MS = 2000;
 const TUNNEL_PING_MAX_MS = 300000;
 const STATUS_POLL_INTERVAL_MS = 5000;
+/** Only flip UI to "reconnecting" after N consecutive probe misses (avoids flicker). */
+const REACHABLE_MISS_THRESHOLD = 5;
+const CLIENT_PING_FAST_MS = 10000;
+const CLIENT_PING_TIMEOUT_MS = 5000;
+
+/** Browser-side health probe against a tunnel/tailscale base URL. */
+async function clientPingUrl(url: string): Promise<boolean> {
+  if (!url) return false;
+  try {
+    const res = await fetch(`${url.replace(/\/$/, "")}/api/health`, {
+      mode: "cors",
+      cache: "no-store",
+      signal: AbortSignal.timeout(CLIENT_PING_TIMEOUT_MS),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Race multiple URLs: resolve true as soon as any one passes. */
+async function clientPingAny(...urls: Array<string | undefined | null>): Promise<boolean> {
+  const checks = urls.filter((u): u is string => !!u).map(clientPingUrl);
+  if (!checks.length) return false;
+  return new Promise((resolve) => {
+    let pending = checks.length;
+    checks.forEach((p) =>
+      p.then((ok) => {
+        if (ok) resolve(true);
+        else if (--pending === 0) resolve(false);
+      }),
+    );
+  });
+}
 
 const CAVEMAN_LEVELS: CavemanLevel[] = [
   { id: "lite", label: "Lite", desc: "Drop filler, keep grammar" },
@@ -100,6 +134,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   // Cloudflare Tunnel state
   const [tunnelChecking, setTunnelChecking] = useState<boolean>(true);
   const [tunnelEnabled, setTunnelEnabled] = useState<boolean>(false);
+  const [tunnelReachable, setTunnelReachable] = useState<boolean>(false);
   const [tunnelUrl, setTunnelUrl] = useState<string>("");
   const [tunnelPublicUrl, setTunnelPublicUrl] = useState<string>("");
   const [tunnelLoading, setTunnelLoading] = useState<boolean>(false);
@@ -110,6 +145,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
 
   // Tailscale state
   const [tsEnabled, setTsEnabled] = useState<boolean>(false);
+  const [tsReachable, setTsReachable] = useState<boolean>(false);
   const [tsUrl, setTsUrl] = useState<string>("");
   const [tsLoading, setTsLoading] = useState<boolean>(false);
   const [tsProgress, setTsProgress] = useState<string>("");
@@ -122,6 +158,12 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   const [showTsModal, setShowTsModal] = useState<boolean>(false);
   const [showDisableTsModal, setShowDisableTsModal] = useState<boolean>(false);
   const tsLogRef = useRef<HTMLDivElement>(null);
+
+  // Debounce reachable=false: only flip UI after N consecutive misses.
+  const tunnelMissRef = useRef(0);
+  const tsMissRef = useRef(0);
+  const tunnelClientReachableRef = useRef(false);
+  const tsClientReachableRef = useRef(false);
 
   // API key visibility toggle state
   const [visibleKeys, setVisibleKeys] = useState<Set<string>>(new Set());
@@ -139,21 +181,26 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
     if (tsLogRef.current) tsLogRef.current.scrollTop = tsLogRef.current.scrollHeight;
   }, [tsInstallLog]);
 
-  useEffect(() => {
-    fetchData();
-    loadSettings();
-    // Poll status periodically + on tab visible to sync after watchdog restarts
-    const interval = setInterval(() => { syncTunnelStatus(); }, STATUS_POLL_INTERVAL_MS);
-    const onVisible = () => { if (!document.hidden) syncTunnelStatus(); };
-    document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      clearInterval(interval);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, []);
+  // Miss-debounce helper: only flip reachable=false after N consecutive misses.
+  const updateReachable = useCallback(
+    (
+      clientRef: MutableRefObject<boolean>,
+      missRef: MutableRefObject<number>,
+      setter: (v: boolean) => void,
+    ) => {
+      if (clientRef.current) {
+        missRef.current = 0;
+        setter(true);
+      } else {
+        missRef.current += 1;
+        if (missRef.current >= REACHABLE_MISS_THRESHOLD) setter(false);
+      }
+    },
+    [],
+  );
 
   // Trust user intent (settingsEnabled): UI stays "enabled" while watchdog restarts process
-  const syncTunnelStatus = async (): Promise<void> => {
+  const syncTunnelStatus = useCallback(async (): Promise<void> => {
     try {
       const statusRes = await fetch("/api/tunnel/status", { cache: "no-store" });
       if (!statusRes.ok) return;
@@ -164,20 +211,115 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
       setTunnelUrl(tUrl);
       setTunnelPublicUrl(tPublicUrl);
       setTunnelEnabled(tEnabled);
+      updateReachable(tunnelClientReachableRef, tunnelMissRef, setTunnelReachable);
 
       const tsEn = data.tailscale?.settingsEnabled ?? data.tailscale?.enabled ?? false;
       const tsUrlVal = data.tailscale?.tunnelUrl || "";
       setTsUrl(tsUrlVal);
       setTsEnabled(tsEn);
+      updateReachable(tsClientReachableRef, tsMissRef, setTsReachable);
     } catch { /* ignore poll errors */ }
-  };
+  }, [updateReachable]);
+
+  useEffect(() => {
+    fetchData();
+    loadSettings();
+  }, []);
+
+  // Status poll: only while degraded (not yet reachable). Stop once healthy to avoid spam.
+  useEffect(() => {
+    const anyEnabled = tunnelEnabled || tsEnabled;
+    if (!anyEnabled) return;
+    const tunnelHealthy = !tunnelEnabled || tunnelReachable;
+    const tsHealthy = !tsEnabled || tsReachable;
+    const allHealthy = tunnelHealthy && tsHealthy;
+    const onVisible = () => {
+      if (!document.hidden) void syncTunnelStatus();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    if (allHealthy) {
+      return () => document.removeEventListener("visibilitychange", onVisible);
+    }
+    const timer = setInterval(() => {
+      if (!document.hidden) void syncTunnelStatus();
+    }, STATUS_POLL_INTERVAL_MS);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [tunnelEnabled, tsEnabled, tunnelReachable, tsReachable, syncTunnelStatus]);
+
+  // Browser-side periodic ping with miss-threshold debounce.
+  // Adaptive: slow when healthy, fast when degraded; pause when tab hidden.
+  useEffect(() => {
+    const probeBoth = async () => {
+      if (document.hidden) return;
+      if (tunnelEnabled && (tunnelUrl || tunnelPublicUrl)) {
+        const ok = await clientPingAny(tunnelPublicUrl, tunnelUrl);
+        tunnelClientReachableRef.current = ok;
+        if (ok) {
+          tunnelMissRef.current = 0;
+          setTunnelReachable(true);
+          setTunnelStatus((prev) =>
+            prev?.type === "warning" && prev.message.includes("reconnecting") ? null : prev,
+          );
+        } else {
+          tunnelMissRef.current += 1;
+          if (tunnelMissRef.current >= REACHABLE_MISS_THRESHOLD) {
+            setTunnelReachable(false);
+            setTunnelStatus({ type: "warning", message: "Tunnel reconnecting..." });
+          }
+        }
+      } else {
+        tunnelClientReachableRef.current = false;
+      }
+      if (tsEnabled && tsUrl) {
+        const ok = await clientPingUrl(tsUrl);
+        tsClientReachableRef.current = ok;
+        if (ok) {
+          tsMissRef.current = 0;
+          setTsReachable(true);
+          setTsStatus((prev) =>
+            prev?.type === "warning" && prev.message.includes("reconnecting") ? null : prev,
+          );
+        } else {
+          tsMissRef.current += 1;
+          if (tsMissRef.current >= REACHABLE_MISS_THRESHOLD) {
+            setTsReachable(false);
+            setTsStatus({ type: "warning", message: "Tailscale reconnecting..." });
+          }
+        }
+      } else {
+        tsClientReachableRef.current = false;
+      }
+    };
+    const anyEnabled =
+      (tunnelEnabled && (tunnelUrl || tunnelPublicUrl)) || (tsEnabled && tsUrl);
+    if (!anyEnabled) return;
+    void probeBoth();
+    const tunnelHealthy = !tunnelEnabled || tunnelReachable;
+    const tsHealthy = !tsEnabled || tsReachable;
+    if (tunnelHealthy && tsHealthy) return;
+    const id = setInterval(() => {
+      void probeBoth();
+    }, CLIENT_PING_FAST_MS);
+    return () => clearInterval(id);
+  }, [
+    tunnelEnabled,
+    tunnelUrl,
+    tunnelPublicUrl,
+    tsEnabled,
+    tsUrl,
+    tunnelReachable,
+    tsReachable,
+  ]);
 
   const loadSettings = async (): Promise<void> => {
     setTunnelChecking(true);
     try {
       const [settingsRes, statusRes] = await Promise.all([
         fetch("/api/settings"),
-        fetch("/api/tunnel/status", { cache: "no-store" })
+        fetch("/api/tunnel/status", { cache: "no-store" }),
       ]);
       if (settingsRes.ok) {
         const data = await settingsRes.json();
@@ -203,19 +345,6 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
         const tsUrlVal = data.tailscale?.tunnelUrl || "";
         setTsUrl(tsUrlVal);
         setTsEnabled(tsEn);
-
-        // Background reachability probes (non-blocking, only show warning)
-        if (tEnabled && (tPublicUrl || tUrl)) {
-          const healthUrl = `${tPublicUrl || tUrl}/api/health`;
-          fetch(healthUrl, { cache: "no-store" })
-            .then((r) => { if (!r.ok) setTunnelStatus({ type: "warning", message: "Tunnel reconnecting..." }); })
-            .catch(() => setTunnelStatus({ type: "warning", message: "Tunnel reconnecting..." }));
-        }
-        if (tsEn && tsUrlVal) {
-          fetch(`${tsUrlVal}/api/health`, { mode: "no-cors", cache: "no-store" })
-            .then((r) => { if (!(r.ok || r.type === "opaque")) setTsStatus({ type: "warning", message: "Tailscale reconnecting..." }); })
-            .catch(() => setTsStatus({ type: "warning", message: "Tailscale reconnecting..." }));
-        }
       }
     } catch (error) {
       console.log("Error loading settings:", error);
@@ -1344,7 +1473,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
 }
 
 /** Reusable endpoint row component */
-function EndpointRow({ label, url, copyId, copied, onCopy, badge, actions }: EndpointRowProps): React.ReactNode {
+function EndpointRow({ label, url, copyId, copied, onCopy, badge, actions }: EndpointRowProps): ReactNode {
   return (
     <div className="flex items-center gap-2">
       <span className={`text-xs font-mono px-1.5 py-0.5 rounded shrink-0 min-w-[88px] text-center ${
@@ -1363,9 +1492,9 @@ function EndpointRow({ label, url, copyId, copied, onCopy, badge, actions }: End
 }
 
 /** Reusable status alert */
-function StatusAlert({ status, className = "" }: StatusAlertProps): React.ReactNode {
+function StatusAlert({ status, className = "" }: StatusAlertProps): ReactNode {
   // Render URLs in message as clickable links
-  const renderMessage = (msg: string): React.ReactNode => {
+  const renderMessage = (msg: string): ReactNode => {
     const parts = msg.split(/(https?:\/\/[^\s]+)/g);
     return parts.map((part, i) =>
       /^https?:\/\//.test(part)
@@ -1386,7 +1515,7 @@ function StatusAlert({ status, className = "" }: StatusAlertProps): React.ReactN
 }
 
 /** Inline tooltip, Claude Code CLI style */
-function Tooltip({ text }: TooltipProps): React.ReactNode {
+function Tooltip({ text }: TooltipProps): ReactNode {
   return (
     <span className="relative group inline-flex items-center">
       <span className="material-symbols-outlined text-[14px] text-text-muted cursor-help">help</span>
@@ -1398,7 +1527,7 @@ function Tooltip({ text }: TooltipProps): React.ReactNode {
 }
 
 /** Security warning banner with optional action link */
-function SecurityWarning({ message, action }: SecurityWarningProps): React.ReactNode {
+function SecurityWarning({ message, action }: SecurityWarningProps): ReactNode {
   return (
     <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-700 dark:text-amber-400">
       <span className="material-symbols-outlined text-[16px] shrink-0 mt-0.5">warning</span>
@@ -1407,7 +1536,7 @@ function SecurityWarning({ message, action }: SecurityWarningProps): React.React
         <a
           href={action.href}
           className="text-xs font-medium underline shrink-0 hover:opacity-80"
-          onClick={action.href.startsWith("#") ? (e: React.MouseEvent<HTMLAnchorElement>) => {
+          onClick={action.href.startsWith("#") ? (e: MouseEvent<HTMLAnchorElement>) => {
             e.preventDefault();
             document.getElementById(action.href.slice(1))?.scrollIntoView({ behavior: "smooth" });
           } : undefined}

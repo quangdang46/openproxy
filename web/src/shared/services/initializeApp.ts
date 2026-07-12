@@ -1,66 +1,107 @@
 import {
-  getSettings, getApiKeys,
-  enableTunnel, getTunnelStatus,
+  getSettings,
+  enableTunnel,
+  getTunnelStatus,
   enableTailscale,
-  getMitmConfig, startMitm,
+  getMitmConfig,
+  startMitm,
+  runQuotaAutoPingTick,
 } from "@/shared/utils/backendApi";
 
-process.setMaxListeners(20);
+/**
+ * Browser-side app bootstrap for the Astro + Rust dashboard.
+ *
+ * 9router ran this as a Next.js server singleton (watchdog, network monitor,
+ * quota auto-ping scheduler). OpenProxy owns process supervision in Rust, so
+ * this client path only:
+ *   1. Resumes tunnel / tailscale / MITM when settings say they should be on
+ *   2. Kicks a best-effort quota auto-ping tick while the dashboard is open
+ *
+ * Full long-running watchdog + auto-ping scheduler belong in the Rust server
+ * (see spawn_boot_resume / residual notes). Do not reintroduce Node globals.
+ */
+
+const STARTUP_DEFER_MS = 1500;
+const QUOTA_AUTOPING_TICK_MS = 60_000;
 
 interface AppSingleton {
   initialized: boolean;
   mitmStartInProgress: boolean;
+  quotaTickTimer: ReturnType<typeof setInterval> | null;
 }
 
-// Survive Next.js hot reload
-const g: AppSingleton = (global as any).__appSingleton ??= {
-  initialized: false,
-  mitmStartInProgress: false,
-};
+function getSingleton(): AppSingleton {
+  const g = globalThis as typeof globalThis & { __opAppSingleton?: AppSingleton };
+  if (!g.__opAppSingleton) {
+    g.__opAppSingleton = {
+      initialized: false,
+      mitmStartInProgress: false,
+      quotaTickTimer: null,
+    };
+  }
+  return g.__opAppSingleton;
+}
 
 export async function initializeApp(): Promise<void> {
-  if (g.initialized) return;
+  // SSR / non-browser — nothing to do (Astro may evaluate modules at build).
+  if (typeof window === "undefined") return;
 
+  const g = getSingleton();
+  if (g.initialized) return;
+  g.initialized = true;
+
+  // Defer heavy resume so the first paint / auth cookie settle first.
+  window.setTimeout(() => {
+    runClientStartup().catch((e) =>
+      console.error("[InitApp] deferred startup failed:", (e as Error).message),
+    );
+  }, STARTUP_DEFER_MS);
+}
+
+async function runClientStartup(): Promise<void> {
   try {
     const settings = await getSettings();
 
-    // Auto-resume tunnel
     if (settings.tunnelEnabled) {
       console.log("[InitApp] Tunnel was enabled, auto-resuming...");
-      safeRestartTunnel("startup").catch((e) => console.log("[InitApp] Tunnel resume failed:", (e as Error).message));
+      safeRestartTunnel("startup").catch((e) =>
+        console.log("[InitApp] Tunnel resume failed:", (e as Error).message),
+      );
     }
 
-    // Auto-resume tailscale
     if (settings.tailscaleEnabled) {
       console.log("[InitApp] Tailscale was enabled, auto-resuming...");
-      safeRestartTailscale("startup").catch((e) => console.log("[InitApp] Tailscale resume failed:", (e as Error).message));
+      safeRestartTailscale("startup").catch((e) =>
+        console.log("[InitApp] Tailscale resume failed:", (e as Error).message),
+      );
     }
 
-    autoStartMitm();
+    autoStartMitm().catch((e) =>
+      console.log("[InitApp] MITM auto-start failed:", (e as Error).message),
+    );
 
-    g.initialized = true;
+    startQuotaAutoPingClient();
   } catch (error) {
     console.error("[InitApp] Error:", error);
   }
 }
 
 async function autoStartMitm(): Promise<void> {
+  const g = getSingleton();
   if (g.mitmStartInProgress) return;
   g.mitmStartInProgress = true;
   try {
-    const settings = await getSettings();
-    if (!settings.mitmEnabled) return;
-
     const mitmConfig = await getMitmConfig();
-    if (mitmConfig.enabled) return;
+    // OpenProxy: `enabled` means routes are configured (mitm_alias non-empty).
+    // There is no separate settings.mitmEnabled flag; if routes exist, try start
+    // (start is idempotent when already running).
+    if (!mitmConfig.enabled) return;
 
-    const keys = await getApiKeys();
-    const activeKey = keys.find(k => k.isActive !== false);
-
-    console.log("[InitApp] MITM was enabled, auto-starting...");
+    console.log("[InitApp] MITM routes configured, ensuring proxy is running...");
     await startMitm();
-    console.log("[InitApp] MITM auto-started");
+    console.log("[InitApp] MITM auto-start requested");
   } catch (err) {
+    // MITM start may require local API-key / loopback privileges — best effort.
     console.log("[InitApp] MITM auto-start failed:", (err as Error).message);
   } finally {
     g.mitmStartInProgress = false;
@@ -72,7 +113,9 @@ async function safeRestartTunnel(reason: string): Promise<void> {
   if (!settings.tunnelEnabled) return;
 
   const tunnelStatus = await getTunnelStatus();
-  if (tunnelStatus.tunnel?.running) return;
+  const running =
+    (tunnelStatus as { tunnel?: { running?: boolean } }).tunnel?.running === true;
+  if (running) return;
 
   console.log(`[Tunnel] safeRestart (${reason})`);
   try {
@@ -88,7 +131,9 @@ async function safeRestartTailscale(reason: string): Promise<void> {
   if (!settings.tailscaleEnabled) return;
 
   const tunnelStatus = await getTunnelStatus();
-  if (tunnelStatus.tailscale?.running) return;
+  const running =
+    (tunnelStatus as { tailscale?: { running?: boolean } }).tailscale?.running === true;
+  if (running) return;
 
   console.log(`[Tailscale] safeRestart (${reason})`);
   try {
@@ -97,6 +142,27 @@ async function safeRestartTailscale(reason: string): Promise<void> {
   } catch (err) {
     console.log("[Tailscale] restart failed:", (err as Error).message);
   }
+}
+
+/**
+ * While the dashboard tab is open, periodically hit the Rust tick endpoint.
+ * Full OAuth warm-ping execution lives server-side; this keeps the foundation
+ * exercised when the UI is active. Closes with the page (no Node lifetime).
+ */
+function startQuotaAutoPingClient(): void {
+  const g = getSingleton();
+  if (g.quotaTickTimer) return;
+
+  const tick = () => {
+    runQuotaAutoPingTick().catch((e) =>
+      console.log("[AutoPing] client tick failed:", (e as Error).message),
+    );
+  };
+
+  // Immediate first tick, then interval.
+  tick();
+  g.quotaTickTimer = setInterval(tick, QUOTA_AUTOPING_TICK_MS);
+  console.log("[AutoPing] client tick scheduler started");
 }
 
 export default initializeApp;

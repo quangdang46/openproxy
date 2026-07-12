@@ -394,11 +394,19 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    let app = openproxy::build_app(state);
+    // Quota auto-ping foundation: observe enabled Claude/Codex OAuth windows.
+    openproxy::server::api::quota_auto_ping::spawn_quota_auto_ping(state.clone());
+
+    let app = openproxy::build_app(state.clone());
     let addr = format!("{}:{}", cli.host, cli.port);
     info!("Starting openproxy on {}", addr);
     let listener = TcpListener::bind(&addr).await?;
     let bound = listener.local_addr().ok();
+    let bound_port = bound.map(|a| a.port()).unwrap_or(cli.port);
+
+    // Resume tunnel/tailscale if settings say they were enabled last session.
+    // Process supervision lives in Rust — not the browser tab.
+    openproxy::server::api::quota_auto_ping::spawn_boot_resume(state.clone(), bound_port);
 
     // Print startup banner to stderr so the user sees it even when
     // stdout is captured (containers, CI, …). The tracing subscriber

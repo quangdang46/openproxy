@@ -15,6 +15,7 @@ export { default as Header } from "./Header";
 export { default as Footer } from "./Footer";
 export { default as OAuthModal } from "./OAuthModal";
 export { default as ModelSelectModal } from "./ModelSelectModal";
+export { default as CapacityBadges } from "./CapacityBadges";
 export { default as ManualConfigModal } from "./ManualConfigModal";
 export { default as UsageStats } from "./UsageStats";
 export { default as LanguageSwitcher } from "./LanguageSwitcher";
@@ -35,6 +36,7 @@ export { default as SegmentedControl } from "./SegmentedControl";
 export { default as Tooltip } from "./Tooltip";
 export { default as ProviderInfoCard } from "./ProviderInfoCard";
 export { default as AnthropicSpike } from "./AnthropicSpike";
+export { default as McpMarketplaceModal } from "./McpMarketplaceModal";
 
 // Layouts
 export * from "./layouts";

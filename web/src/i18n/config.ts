@@ -1,4 +1,4 @@
-export const LOCALES: readonly string[] = ["en", "vi", "zh-CN", "zh-TW", "ja", "pt-BR", "pt-PT", "ko", "es", "de", "fr", "he", "ar", "ru", "pl", "cs", "nl", "tr", "uk", "tl", "id", "th", "hi", "bn", "ur", "ro", "sv", "it", "el", "hu", "fi", "da", "no"];
+export const LOCALES: readonly string[] = ["en", "vi", "zh-CN", "zh-TW", "ja", "pt-BR", "pt-PT", "ko", "es", "de", "fr", "he", "ar", "ru", "pl", "cs", "nl", "tr", "uk", "tl", "id", "th", "hi", "bn", "ur", "ro", "sv", "it", "el", "hu", "fi", "da", "no", "fa"];
 export const DEFAULT_LOCALE = "en";
 export const LOCALE_COOKIE = "locale";
 
@@ -8,6 +8,7 @@ export const LOCALE_NAMES: Record<string, string> = {
   "zh-CN": "简体中文",
   "zh-TW": "繁體中文",
   "ja": "日本語",
+  "fa": "فارسی",
   "pt-BR": "Português (Brasil)",
   "pt-PT": "Português (Portugal)",
   "ko": "한국어",
@@ -53,6 +54,9 @@ export function normalizeLocale(locale: string): string {
   }
   if (locale === "ja") {
     return "ja";
+  }
+  if (locale === "fa") {
+    return "fa";
   }
   if (locale === "pt-BR") {
     return "pt-BR";

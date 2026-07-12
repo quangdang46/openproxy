@@ -116,3 +116,39 @@ export const AI_MODELS: AIModelEntry[] = (() => {
   }
   return out;
 })();
+
+// ── Capacity badges ─────────────────────────────────────────────
+// Metadata for UI badges — icon + label + color per capability.
+// Keep in sync with 9router CAPACITY_META (search hidden until wired).
+
+export type CapacityKey = "vision" | "reasoning";
+
+export interface ModelCaps {
+  vision?: boolean;
+  search?: boolean;
+  reasoning?: boolean;
+  [key: string]: boolean | undefined;
+}
+
+export interface CapacityMetaEntry {
+  icon: string;
+  label: string;
+  desc: string;
+  color: string;
+}
+
+export const CAPACITY_META: Record<CapacityKey, CapacityMetaEntry> = {
+  vision: {
+    icon: "visibility",
+    label: "Vision",
+    desc: "Supports image input",
+    color: "text-blue-500",
+  },
+  // search: temporarily hidden (feature not wired yet)
+  reasoning: {
+    icon: "neurology",
+    label: "Reasoning",
+    desc: "Supports reasoning / thinking",
+    color: "text-amber-500",
+  },
+};

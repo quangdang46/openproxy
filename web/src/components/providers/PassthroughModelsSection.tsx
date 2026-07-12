@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { Button } from "@/shared/components";
 import { useNotificationStore } from "@/store/notificationStore";
+import { getProviderCustomModelRows, type CustomModelEntry } from "@/shared/utils/providerCustomModels";
 
 interface PassthroughModelRowProps {
   modelId: string;
@@ -74,7 +75,6 @@ function PassthroughModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias
         </div>
       </div>
 
-      {/* Delete button */}
       <button
         onClick={onDeleteAlias}
         className="p-1 hover:bg-red-50 rounded text-red-500"
@@ -89,48 +89,48 @@ function PassthroughModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias
 interface PassthroughModelsSectionProps {
   providerAlias: string;
   modelAliases: Record<string, string>;
+  customModels?: CustomModelEntry[];
   copied: string;
   onCopy: (fullModel: string, id: string) => void;
-  onSetAlias: (modelId: string, alias: string) => Promise<void>;
+  onSetAlias?: (modelId: string, alias: string) => Promise<void>;
   onDeleteAlias: (alias: string) => Promise<void>;
+  onAddCustomModel: (modelId: string) => Promise<void>;
+  onDeleteCustomModel: (modelId: string) => Promise<void>;
 }
 
-export default function PassthroughModelsSection({ providerAlias, modelAliases, copied, onCopy, onSetAlias, onDeleteAlias }: PassthroughModelsSectionProps) {
+export default function PassthroughModelsSection({
+  providerAlias,
+  modelAliases,
+  customModels = [],
+  copied,
+  onCopy,
+  onDeleteAlias,
+  onAddCustomModel,
+  onDeleteCustomModel,
+}: PassthroughModelsSectionProps) {
   const [newModel, setNewModel] = useState<string>("");
   const [adding, setAdding] = useState<boolean>(false);
   const notify = useNotificationStore();
 
-  // Filter aliases for this provider - models are persisted via alias
-  const providerAliases = Object.entries(modelAliases).filter(
-    ([, model]) => model.startsWith(`${providerAlias}/`)
-  );
-
-  const allModels = providerAliases.map(([alias, fullModel]) => ({
-    modelId: fullModel.replace(`${providerAlias}/`, ""),
-    fullModel,
-    alias,
-  }));
-
-  // Generate default alias from modelId (last part after /)
-  const generateDefaultAlias = (modelId: string) => {
-    const parts = modelId.split("/");
-    return parts[parts.length - 1];
-  };
+  const allModels = getProviderCustomModelRows({
+    customModels,
+    modelAliases,
+    providerAlias,
+    type: "llm",
+  });
 
   const handleAdd = async () => {
     if (!newModel.trim() || adding) return;
     const modelId = newModel.trim();
-    const defaultAlias = generateDefaultAlias(modelId);
-    
-    // Check if alias already exists
-    if (modelAliases[defaultAlias]) {
-      notify.warning(`Alias "${defaultAlias}" already exists. Please use a different model or edit existing alias.`);
+
+    if (allModels.some((model) => model.id === modelId)) {
+      notify.warning("Model already exists for this provider.");
       return;
     }
-    
+
     setAdding(true);
     try {
-      await onSetAlias(modelId, defaultAlias);
+      await onAddCustomModel(modelId);
       setNewModel("");
     } catch (error) {
       console.log("Error adding model:", error);
@@ -145,7 +145,6 @@ export default function PassthroughModelsSection({ providerAlias, modelAliases, 
         OpenRouter supports any model. Add models and create aliases for quick access.
       </p>
 
-      {/* Add new model */}
       <div className="flex items-end gap-2">
         <div className="flex-1">
           <label htmlFor="new-model-input" className="text-xs text-text-muted mb-1 block">Model ID (from OpenRouter)</label>
@@ -164,17 +163,16 @@ export default function PassthroughModelsSection({ providerAlias, modelAliases, 
         </Button>
       </div>
 
-      {/* Models list */}
       {allModels.length > 0 && (
         <div className="flex flex-col gap-3">
-          {allModels.map(({ modelId, fullModel, alias }) => (
+          {allModels.map(({ id, fullModel, alias, source }) => (
             <PassthroughModelRow
-              key={fullModel}
-              modelId={modelId}
+              key={`${source}-${fullModel}`}
+              modelId={id}
               fullModel={fullModel}
               copied={copied}
               onCopy={onCopy}
-              onDeleteAlias={() => onDeleteAlias(alias)}
+              onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias!)}
             />
           ))}
         </div>

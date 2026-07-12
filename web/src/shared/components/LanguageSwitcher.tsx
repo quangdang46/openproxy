@@ -27,6 +27,7 @@ const getLocaleInfo = (locale: string): LocaleInfo => {
     "zh-CN": { name: "简体中文", flag: "🇨🇳" },
     "zh-TW": { name: "繁體中文", flag: "🇹🇼" },
     "ja": { name: "日本語", flag: "🇯🇵" },
+    "fa": { name: "فارسی", flag: "🇮🇷" },
     "pt-BR": { name: "Português (Brasil)", flag: "🇧🇷" },
     "pt-PT": { name: "Português (Portugal)", flag: "🇵🇹" },
     "ko": { name: "한국어", flag: "🇰🇷" },

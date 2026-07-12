@@ -6,8 +6,9 @@ import { ConfirmModal } from "@/shared/components/Modal";
 import { useTheme } from "@/shared/hooks/useTheme";
 import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG } from "@/shared/constants/config";
-
-// ── Types ────────────────────────────────────────────────────────────
+import { LOCALE_FLAGS } from "@/shared/constants/locales";
+import { LOCALE_COOKIE, normalizeLocale } from "@/i18n/config";
+import { onLocaleChange } from "@/i18n/runtime";
 
 interface Settings {
   requireLogin?: boolean;
@@ -18,6 +19,21 @@ interface Settings {
   outboundNoProxy?: string;
   comboStrategy?: string;
   stickyRoundRobinLimit?: number;
+  /** Account-level fallback strategy: "fill-first" | "round-robin" */
+  fallbackStrategy?: string;
+  /** Sticky limit for combo round-robin (separate from account RR) */
+  comboStickyRoundRobinLimit?: number;
+  /** Dashboard auth mode: "password" | "oidc" | "both" */
+  authMode?: string;
+  oidcConfigured?: boolean;
+  oidcIssuerUrl?: string;
+  oidcClientId?: string;
+  oidcScopes?: string;
+  oidcLoginLabel?: string;
+  /** Concrete DB path from the API */
+  databasePath?: string;
+  /** Data directory path from the API (fallback display) */
+  dataDir?: string;
   [key: string]: unknown;
 }
 
@@ -25,8 +41,6 @@ interface StatusMessage {
   type: "success" | "error" | "info";
   message: string;
 }
-
-// ── Helpers ────────────────────────────────────────────────────────────
 
 function StatusAlert({ status }: { status: StatusMessage | null }) {
   if (!status) return null;
@@ -39,26 +53,34 @@ function StatusAlert({ status }: { status: StatusMessage | null }) {
   return <p className={`text-xs sm:text-sm ${cls}`}>{status.message}</p>;
 }
 
-// ── Component ────────────────────────────────────────────────────────
+/** Default on-disk path shown in Profile (matches `default_data_dir` + sqlite name). */
+const DEFAULT_DB_PATH_DISPLAY = "~/.openproxy/openproxy.sqlite";
+
+function getLocaleFromCookie(): string {
+  if (typeof document === "undefined") return "en";
+  const cookie = document.cookie
+    .split(";")
+    .find((c) => c.trim().startsWith(`${LOCALE_COOKIE}=`));
+  const value = cookie ? decodeURIComponent(cookie.split("=")[1]) : "en";
+  return normalizeLocale(value);
+}
 
 export default function ProfilePageClient() {
   const { theme, setTheme } = useTheme();
+  const [locale, setLocale] = useState("en");
   const [langOpen, setLangOpen] = useState(false);
   const [shutdownOpen, setShutdownOpen] = useState(false);
   const [isShuttingDown, setIsShuttingDown] = useState(false);
   const [settings, setSettings] = useState<Settings>({});
   const [loading, setLoading] = useState(true);
 
-  // Password fields
   const [passwords, setPasswords] = useState({ current: "", newPass: "", confirm: "" });
   const [passStatus, setPassStatus] = useState<StatusMessage | null>(null);
   const [passLoading, setPassLoading] = useState(false);
 
-  // Database
   const [dbLoading, setDbLoading] = useState(false);
   const [dbStatus, setDbStatus] = useState<StatusMessage | null>(null);
 
-  // Outbound proxy
   const [proxyForm, setProxyForm] = useState({
     outboundProxyUrl: "",
     outboundNoProxy: "",
@@ -67,12 +89,30 @@ export default function ProfilePageClient() {
   const [proxyLoading, setProxyLoading] = useState(false);
   const [proxyTestLoading, setProxyTestLoading] = useState(false);
 
-  // Combo sticky limit input
+  const [accountStickyLimitInput, setAccountStickyLimitInput] = useState("3");
   const [comboStickyLimitInput, setComboStickyLimitInput] = useState("1");
+
+  const [oidcExpanded, setOidcExpanded] = useState(false);
+  const [oidcForm, setOidcForm] = useState({
+    authMode: "password",
+    oidcIssuerUrl: "",
+    oidcClientId: "",
+    oidcScopes: "openid profile email",
+    oidcLoginLabel: "Sign in with OIDC",
+  });
+  const [oidcClientSecret, setOidcClientSecret] = useState("");
+  const [oidcStatus, setOidcStatus] = useState<StatusMessage | null>(null);
+  const [oidcLoading, setOidcLoading] = useState(false);
+  const [oidcTestLoading, setOidcTestLoading] = useState(false);
+  const [oidcTestStatus, setOidcTestStatus] = useState<StatusMessage | null>(null);
+  const [oidcRedirectUri, setOidcRedirectUri] = useState("/api/auth/oidc/callback");
 
   const importFileRef = useRef<HTMLInputElement>(null);
 
-  // ── Load settings on mount ──────────────────────────────────────────
+  useEffect(() => {
+    setLocale(getLocaleFromCookie());
+    return onLocaleChange(() => setLocale(getLocaleFromCookie()));
+  }, []);
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -84,7 +124,18 @@ export default function ProfilePageClient() {
         outboundProxyUrl: data.outboundProxyUrl ?? "",
         outboundNoProxy: data.outboundNoProxy ?? "",
       });
-      setComboStickyLimitInput(String(data.stickyRoundRobinLimit ?? 1));
+      setAccountStickyLimitInput(String(data.stickyRoundRobinLimit ?? 3));
+      setComboStickyLimitInput(String(data.comboStickyRoundRobinLimit ?? 1));
+      setOidcForm({
+        authMode: data.authMode || "password",
+        oidcIssuerUrl: data.oidcIssuerUrl || "",
+        oidcClientId: data.oidcClientId || "",
+        oidcScopes: data.oidcScopes || "openid profile email",
+        oidcLoginLabel: data.oidcLoginLabel || "Sign in with OIDC",
+      });
+      if (data.authMode === "oidc" || data.authMode === "both") {
+        setOidcExpanded(true);
+      }
     } catch (err) {
       console.error("Failed to fetch settings:", err);
     } finally {
@@ -96,30 +147,28 @@ export default function ProfilePageClient() {
     void fetchSettings();
   }, [fetchSettings]);
 
-  // ── Generic settings patch ──────────────────────────────────────────
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      setOidcRedirectUri(`${window.location.origin}/api/auth/oidc/callback`);
+    }
+  }, []);
 
   const patchSettings = useCallback(
     async (payload: Record<string, unknown>): Promise<Settings | null> => {
-      try {
-        const res = await fetch("/api/settings", {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const data = (await res.json()) as Settings;
-        if (!res.ok) {
-          const errMsg = (data as unknown as { error?: string }).error ?? "Request failed";
-          throw new Error(errMsg);
-        }
-        return data;
-      } catch (err) {
-        throw err;
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = (await res.json()) as Settings;
+      if (!res.ok) {
+        const errMsg = (data as unknown as { error?: string }).error ?? "Request failed";
+        throw new Error(errMsg);
       }
+      return data;
     },
     [],
   );
-
-  // ── Require Login toggle ────────────────────────────────────────────
 
   const updateRequireLogin = async (value: boolean) => {
     try {
@@ -129,8 +178,6 @@ export default function ProfilePageClient() {
       console.error("Failed to update requireLogin:", err);
     }
   };
-
-  // ── Password management (UI only — OpenProxy needs a dedicated endpoint) ─
 
   const handlePasswordChange = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -143,22 +190,31 @@ export default function ProfilePageClient() {
     setPassStatus(null);
 
     try {
-      const data = await patchSettings({
-        currentPassword: passwords.current,
-        newPassword: passwords.newPass,
+      // Prefer dedicated auth endpoint (9router parity + OpenProxy design)
+      const res = await fetch("/api/auth/password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          currentPassword: passwords.current || undefined,
+          newPassword: passwords.newPass,
+        }),
       });
-      if (data) {
-        setPassStatus({ type: "success", message: "Password updated successfully" });
-        setPasswords({ current: "", newPass: "", confirm: "" });
-        setSettings((prev) => ({ ...prev, ...data }));
+      const data = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to update password");
       }
+      setPassStatus({
+        type: "success",
+        message: "Password updated successfully. All sessions invalidated.",
+      });
+      setPasswords({ current: "", newPass: "", confirm: "" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "An error occurred";
-      // OpenProxy returns NOT_IMPLEMENTED for password changes via /api/settings
       if (msg.includes("NOT_IMPLEMENTED") || msg.includes("dedicated endpoint")) {
         setPassStatus({
           type: "info",
-          message: "Password management via the dashboard is not yet available. Use the `openproxy auth set-password` CLI command.",
+          message:
+            "Password management via the dashboard is not yet available. Use the `openproxy auth set-password` CLI command.",
         });
       } else {
         setPassStatus({ type: "error", message: msg });
@@ -167,8 +223,6 @@ export default function ProfilePageClient() {
       setPassLoading(false);
     }
   };
-
-  // ── Observability toggle ────────────────────────────────────────────
 
   const updateObservability = async (enabled: boolean) => {
     try {
@@ -179,7 +233,28 @@ export default function ProfilePageClient() {
     }
   };
 
-  // ── Combo strategy toggle ───────────────────────────────────────────
+  const updateFallbackStrategy = async (strategy: string) => {
+    try {
+      const data = await patchSettings({ fallbackStrategy: strategy });
+      if (data) setSettings((prev) => ({ ...prev, ...data }));
+    } catch (err) {
+      console.error("Failed to update fallback strategy:", err);
+    }
+  };
+
+  const updateAccountStickyLimit = async (raw: string) => {
+    const num = parseInt(raw, 10);
+    if (isNaN(num) || num < 1) return;
+    try {
+      const data = await patchSettings({ stickyRoundRobinLimit: num });
+      if (data) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        setAccountStickyLimitInput(String(num));
+      }
+    } catch (err) {
+      console.error("Failed to update sticky limit:", err);
+    }
+  };
 
   const updateComboStrategy = async (strategy: string) => {
     try {
@@ -190,23 +265,139 @@ export default function ProfilePageClient() {
     }
   };
 
-  // ── Sticky round-robin limit ────────────────────────────────────────
-
-  const updateStickyLimit = async (raw: string) => {
+  const updateComboStickyLimit = async (raw: string) => {
     const num = parseInt(raw, 10);
     if (isNaN(num) || num < 1) return;
     try {
-      const data = await patchSettings({ stickyRoundRobinLimit: num });
+      const data = await patchSettings({ comboStickyRoundRobinLimit: num });
       if (data) {
         setSettings((prev) => ({ ...prev, ...data }));
         setComboStickyLimitInput(String(num));
       }
     } catch (err) {
-      console.error("Failed to update sticky limit:", err);
+      console.error("Failed to update combo sticky limit:", err);
     }
   };
 
-  // ── Outbound proxy ──────────────────────────────────────────────────
+  const updateOidcForm = (field: string, value: string) => {
+    setOidcForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const saveOidcSettings = async () => {
+    const authMode = oidcForm.authMode || "password";
+    const issuerUrl = oidcForm.oidcIssuerUrl.trim();
+    const clientId = oidcForm.oidcClientId.trim();
+    const scopes = oidcForm.oidcScopes.trim();
+    const loginLabel = oidcForm.oidcLoginLabel.trim();
+    const secret = oidcClientSecret.trim();
+
+    if (authMode !== "password" && (!issuerUrl || !clientId) && !settings.oidcConfigured) {
+      setOidcStatus({
+        type: "error",
+        message: "Issuer URL and client ID are required to enable OIDC.",
+      });
+      return;
+    }
+
+    setOidcLoading(true);
+    setOidcStatus(null);
+    setOidcTestStatus(null);
+
+    try {
+      const payload: Record<string, string> = {
+        authMode,
+        oidcIssuerUrl: issuerUrl,
+        oidcClientId: clientId,
+        oidcScopes: scopes || "openid profile email",
+        oidcLoginLabel: loginLabel || "Sign in with OIDC",
+      };
+      if (secret) {
+        payload.oidcClientSecret = secret;
+      }
+
+      const data = await patchSettings(payload);
+      if (data) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        setOidcForm({
+          authMode: data.authMode || authMode,
+          oidcIssuerUrl: data.oidcIssuerUrl || issuerUrl,
+          oidcClientId: data.oidcClientId || clientId,
+          oidcScopes: data.oidcScopes || scopes || "openid profile email",
+          oidcLoginLabel: data.oidcLoginLabel || loginLabel || "Sign in with OIDC",
+        });
+        setOidcClientSecret("");
+        setOidcStatus({
+          type: "success",
+          message:
+            authMode === "oidc"
+              ? "OIDC login enabled"
+              : authMode === "both"
+                ? "Password and OIDC login enabled"
+                : "OIDC settings saved",
+        });
+      }
+    } catch (err) {
+      setOidcStatus({
+        type: "error",
+        message: err instanceof Error ? err.message : "An error occurred",
+      });
+    } finally {
+      setOidcLoading(false);
+    }
+  };
+
+  const testOidcConnection = async () => {
+    const issuerUrl = oidcForm.oidcIssuerUrl.trim();
+    const clientId = oidcForm.oidcClientId.trim();
+    const secret = oidcClientSecret.trim();
+
+    if (!issuerUrl || !clientId) {
+      setOidcTestStatus({
+        type: "error",
+        message: "Issuer URL and client ID are required to test.",
+      });
+      return;
+    }
+
+    setOidcTestLoading(true);
+    setOidcStatus(null);
+    setOidcTestStatus(null);
+
+    try {
+      const res = await fetch("/api/auth/oidc/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          issuerUrl,
+          clientId,
+          scopes: oidcForm.oidcScopes,
+          ...(secret ? { clientSecret: secret } : {}),
+        }),
+      });
+
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        issuerUrl?: string;
+        clientSecretTested?: boolean;
+        clientSecretValid?: boolean;
+      };
+      if (res.ok && data.ok === true) {
+        const statusMessage = data.clientSecretTested
+          ? data.clientSecretValid === true
+            ? `Connection OK. Discovery loaded from ${data.issuerUrl}. Client secret validated too.`
+            : `Connection OK. Discovery loaded from ${data.issuerUrl}. Client secret was not checked.`
+          : `Connection OK. Discovery loaded from ${data.issuerUrl}.`;
+        setOidcTestStatus({ type: "success", message: statusMessage });
+      } else {
+        setOidcTestStatus({ type: "error", message: data.error ?? "OIDC test failed" });
+      }
+    } catch {
+      setOidcTestStatus({ type: "error", message: "OIDC test request failed" });
+    } finally {
+      setOidcTestLoading(false);
+    }
+  };
 
   const updateProxyEnabled = async (enabled: boolean) => {
     setProxyLoading(true);
@@ -276,8 +467,6 @@ export default function ProfilePageClient() {
     }
   };
 
-  // ── Database export / import ────────────────────────────────────────
-
   const handleExportDatabase = async () => {
     setDbLoading(true);
     setDbStatus(null);
@@ -301,7 +490,10 @@ export default function ProfilePageClient() {
       URL.revokeObjectURL(url);
       setDbStatus({ type: "success", message: "Database backup downloaded" });
     } catch (err) {
-      setDbStatus({ type: "error", message: err instanceof Error ? err.message : "Failed to export database" });
+      setDbStatus({
+        type: "error",
+        message: err instanceof Error ? err.message : "Failed to export database",
+      });
     } finally {
       setDbLoading(false);
     }
@@ -315,8 +507,7 @@ export default function ProfilePageClient() {
     setDbStatus(null);
     try {
       const text = await file.text();
-      // Validate JSON before sending
-      JSON.parse(text); // throws if invalid
+      JSON.parse(text);
       const res = await fetch("/api/settings/database", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -329,26 +520,25 @@ export default function ProfilePageClient() {
       await fetchSettings();
       setDbStatus({ type: "success", message: `Database imported from ${file.name}` });
     } catch (err) {
-      setDbStatus({ type: "error", message: err instanceof Error ? err.message : "Invalid backup file" });
+      setDbStatus({
+        type: "error",
+        message: err instanceof Error ? err.message : "Invalid backup file",
+      });
     } finally {
       setDbLoading(false);
     }
   };
-
-  // ── Shutdown ────────────────────────────────────────────────────────
 
   const handleShutdown = async () => {
     setIsShuttingDown(true);
     try {
       await fetch("/api/shutdown", { method: "POST" });
     } catch {
-      // Expected to fail as server shuts down
+      // server may already be gone
     }
     setIsShuttingDown(false);
     setShutdownOpen(false);
   };
-
-  // ── Logout ──────────────────────────────────────────────────────────
 
   const handleLogout = async () => {
     try {
@@ -365,16 +555,18 @@ export default function ProfilePageClient() {
     }
   };
 
-  // ── Derived state ───────────────────────────────────────────────────
-
   const requireLogin = settings.requireLogin === true;
   const hasPassword = settings.hasPassword === true;
   const observabilityEnabled = settings.observabilityEnabled === true;
   const outboundProxyEnabled = settings.outboundProxyEnabled === true;
   const comboRoundRobin = settings.comboStrategy === "round-robin";
-  const stickyLimit = settings.stickyRoundRobinLimit ?? 1;
-
-  // ── Render ──────────────────────────────────────────────────────────
+  const accountRoundRobin = settings.fallbackStrategy === "round-robin";
+  const accountStickyLimit = settings.stickyRoundRobinLimit ?? 3;
+  const comboStickyLimit = settings.comboStickyRoundRobinLimit ?? 1;
+  const dbPath =
+    (typeof settings.databasePath === "string" && settings.databasePath) ||
+    (typeof settings.dataDir === "string" && settings.dataDir) ||
+    DEFAULT_DB_PATH_DISPLAY;
 
   return (
     <div className="max-w-2xl mx-auto">
@@ -418,7 +610,7 @@ export default function ProfilePageClient() {
               <div>
                 <p className="font-medium text-sm">Database Location</p>
                 <p className="text-xs sm:text-sm text-muted-soft font-mono break-all">
-                  {APP_CONFIG.name.toLowerCase()} internal storage
+                  {dbPath || `${APP_CONFIG.name.toLowerCase()} internal storage`}
                 </p>
               </div>
             </div>
@@ -439,7 +631,7 @@ export default function ProfilePageClient() {
             data-i18n-skip="true"
           >
             <span className="text-sm text-muted-soft">Display language</span>
-            <span className="material-symbols-outlined text-muted-soft">chevron_right</span>
+            <span className="text-2xl">{LOCALE_FLAGS[locale] || "🌐"}</span>
           </button>
         </Card>
 
@@ -467,7 +659,10 @@ export default function ProfilePageClient() {
             </div>
 
             {requireLogin && (
-              <form onSubmit={handlePasswordChange} className="flex flex-col gap-4 pt-4 border-t border-hairline-soft">
+              <form
+                onSubmit={handlePasswordChange}
+                className="flex flex-col gap-4 pt-4 border-t border-hairline-soft"
+              >
                 {hasPassword && (
                   <div className="flex flex-col gap-2">
                     <label className="text-xs sm:text-sm font-medium">Current Password</label>
@@ -518,6 +713,175 @@ export default function ProfilePageClient() {
           </div>
         </Card>
 
+        {/* ── OIDC Dashboard Login Card ───────────────────────────── */}
+        <Card>
+          <button
+            type="button"
+            onClick={() => setOidcExpanded((v) => !v)}
+            className="w-full flex items-center gap-3 text-left"
+          >
+            <div className="size-10 rounded-lg bg-indigo-500/10 text-indigo-500 flex items-center justify-center shrink-0">
+              <span className="material-symbols-outlined text-[20px]">lock_open</span>
+            </div>
+            <div className="flex-1 min-w-0">
+              <h3 className="text-base sm:text-lg font-semibold">OIDC Dashboard Login</h3>
+              <p className="text-xs text-muted-soft">
+                {settings.authMode === "oidc"
+                  ? "OIDC active"
+                  : settings.authMode === "both"
+                    ? "Password + OIDC active"
+                    : "Optional SSO via Authentik/Keycloak/Google"}
+              </p>
+            </div>
+            <span className="material-symbols-outlined text-muted-soft shrink-0">
+              {oidcExpanded ? "expand_less" : "expand_more"}
+            </span>
+          </button>
+          {oidcExpanded && (
+            <div className="flex flex-col gap-4 mt-4">
+              <p className="text-xs sm:text-sm text-muted-soft">
+                Use Authentik or any OIDC provider to sign in to the dashboard. You can enable
+                password-only, OIDC-only, or both for the dashboard; model API access still uses API
+                keys.
+              </p>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm">Auth Mode</label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {[
+                    {
+                      value: "password",
+                      title: "Password only",
+                      desc: "Keep the legacy password login.",
+                    },
+                    {
+                      value: "oidc",
+                      title: "OIDC only",
+                      desc: "Require OIDC for dashboard access.",
+                    },
+                    {
+                      value: "both",
+                      title: "Both",
+                      desc: "Allow either password or OIDC.",
+                    },
+                  ].map((option) => {
+                    const active = oidcForm.authMode === option.value;
+                    return (
+                      <button
+                        key={option.value}
+                        type="button"
+                        onClick={() => updateOidcForm("authMode", option.value)}
+                        className={cn(
+                          "text-left rounded-lg border p-3 transition-colors",
+                          active
+                            ? "border-ink bg-ink/5"
+                            : "border-hairline bg-surface-card hover:bg-surface-2",
+                        )}
+                        disabled={loading || oidcLoading}
+                      >
+                        <p className="font-medium text-sm">{option.title}</p>
+                        <p className="text-xs text-muted-soft mt-1">{option.desc}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm">Issuer URL</label>
+                <Input
+                  placeholder="https://auth.example.com/application/o/openproxy/"
+                  value={oidcForm.oidcIssuerUrl}
+                  onChange={(e) => updateOidcForm("oidcIssuerUrl", e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm">Client ID</label>
+                <Input
+                  placeholder="openproxy-dashboard"
+                  value={oidcForm.oidcClientId}
+                  onChange={(e) => updateOidcForm("oidcClientId", e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm">Client Secret</label>
+                <Input
+                  type="password"
+                  placeholder="Leave blank to keep existing secret"
+                  value={oidcClientSecret}
+                  onChange={(e) => setOidcClientSecret(e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+                <p className="text-xs text-muted-soft">This value is write-only after saving.</p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm">Scopes</label>
+                <Input
+                  placeholder="openid profile email"
+                  value={oidcForm.oidcScopes}
+                  onChange={(e) => updateOidcForm("oidcScopes", e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm">Login Button Label</label>
+                <Input
+                  placeholder="Sign in with OIDC"
+                  value={oidcForm.oidcLoginLabel}
+                  onChange={(e) => updateOidcForm("oidcLoginLabel", e.target.value)}
+                  disabled={loading || oidcLoading}
+                />
+              </div>
+
+              <div className="rounded-lg border border-hairline bg-surface-card p-3 text-xs sm:text-sm text-muted-soft">
+                <p className="font-medium text-ink mb-1">Redirect URI</p>
+                <code className="block break-all font-mono">{oidcRedirectUri}</code>
+              </div>
+
+              <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-hairline-soft">
+                <Button
+                  type="button"
+                  variant="primary"
+                  loading={oidcLoading}
+                  onClick={saveOidcSettings}
+                  className="w-full sm:w-auto"
+                >
+                  Save auth mode
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  loading={oidcTestLoading}
+                  onClick={testOidcConnection}
+                  className="w-full sm:w-auto"
+                >
+                  Test connection
+                </Button>
+              </div>
+
+              <StatusAlert status={oidcTestStatus} />
+              <StatusAlert status={oidcStatus} />
+
+              {settings.authMode === "oidc" && (
+                <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
+                  OIDC login is currently active. Password login is disabled until you switch back.
+                </p>
+              )}
+              {settings.authMode === "both" && (
+                <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
+                  Password and OIDC login are both active.
+                </p>
+              )}
+            </div>
+          )}
+        </Card>
+
         {/* ── Routing Preferences ─────────────────────────────────── */}
         <Card>
           <div className="flex items-center gap-3 mb-4">
@@ -527,8 +891,44 @@ export default function ProfilePageClient() {
             <h3 className="text-base sm:text-lg font-semibold">Routing Strategy</h3>
           </div>
           <div className="flex flex-col gap-4">
-            {/* Combo Round Robin */}
+            {/* Account Round Robin */}
             <div className="flex items-start sm:items-center justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-sm">Account Round Robin</p>
+                <p className="text-xs text-muted-soft">
+                  Cycle through accounts to distribute load instead of always picking the first
+                </p>
+              </div>
+              <Toggle
+                checked={accountRoundRobin}
+                onChange={() =>
+                  updateFallbackStrategy(accountRoundRobin ? "fill-first" : "round-robin")
+                }
+                disabled={loading}
+              />
+            </div>
+
+            {accountRoundRobin && (
+              <div className="flex items-start sm:items-center justify-between gap-4 pt-2 border-t border-hairline-soft">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm">Account Sticky Limit</p>
+                  <p className="text-xs text-muted-soft">Requests per account before switching</p>
+                </div>
+                <Input
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={accountStickyLimitInput}
+                  onChange={(e) => setAccountStickyLimitInput(e.target.value)}
+                  onBlur={() => updateAccountStickyLimit(accountStickyLimitInput)}
+                  disabled={loading}
+                  className="w-16 sm:w-20 text-center shrink-0"
+                />
+              </div>
+            )}
+
+            {/* Combo Round Robin */}
+            <div className="flex items-start sm:items-center justify-between gap-4 pt-4 border-t border-hairline-soft">
               <div className="flex-1 min-w-0">
                 <p className="font-medium text-sm">Combo Round Robin</p>
                 <p className="text-xs text-muted-soft">
@@ -542,30 +942,32 @@ export default function ProfilePageClient() {
               />
             </div>
 
-            {/* Sticky Round Robin Limit */}
-            <div className="flex items-start sm:items-center justify-between gap-4 pt-2 border-t border-hairline-soft">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm">Sticky Limit</p>
-                <p className="text-xs text-muted-soft">
-                  Provider requests per account before switching
-                </p>
+            {comboRoundRobin && (
+              <div className="flex items-start sm:items-center justify-between gap-4 pt-2 border-t border-hairline-soft">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm">Combo Sticky Limit</p>
+                  <p className="text-xs text-muted-soft">Requests per combo model before switching</p>
+                </div>
+                <Input
+                  type="number"
+                  min="1"
+                  max="100"
+                  value={comboStickyLimitInput}
+                  onChange={(e) => setComboStickyLimitInput(e.target.value)}
+                  onBlur={() => updateComboStickyLimit(comboStickyLimitInput)}
+                  disabled={loading}
+                  className="w-16 sm:w-20 text-center shrink-0"
+                />
               </div>
-              <Input
-                type="number"
-                min="1"
-                max="100"
-                value={comboStickyLimitInput}
-                onChange={(e) => setComboStickyLimitInput(e.target.value)}
-                onBlur={() => updateStickyLimit(comboStickyLimitInput)}
-                disabled={loading}
-                className="w-16 sm:w-20 text-center shrink-0"
-              />
-            </div>
+            )}
 
             <p className="text-xs text-muted-soft italic pt-2 border-t border-hairline-soft">
+              {accountRoundRobin
+                ? `Accounts use round-robin with up to ${accountStickyLimit} request${accountStickyLimit === 1 ? "" : "s"} per account.`
+                : "Accounts use fill-first (priority order)."}{" "}
               {comboRoundRobin
-                ? `Combos rotate across providers, with up to ${stickyLimit} call${stickyLimit === 1 ? "" : "s"} per account before switching.`
-                : "Combos always start with their first model (fallback strategy)."}
+                ? `Combos rotate after ${comboStickyLimit} call${comboStickyLimit === 1 ? "" : "s"} per model.`
+                : "Combos always start with their first model."}
             </p>
           </div>
         </Card>
@@ -595,7 +997,10 @@ export default function ProfilePageClient() {
             </div>
 
             {outboundProxyEnabled && (
-              <form onSubmit={updateProxyConfig} className="flex flex-col gap-4 pt-2 border-t border-hairline-soft">
+              <form
+                onSubmit={updateProxyConfig}
+                className="flex flex-col gap-4 pt-2 border-t border-hairline-soft"
+              >
                 <div className="flex flex-col gap-2">
                   <label className="font-medium text-sm">Proxy URL</label>
                   <Input
@@ -659,11 +1064,7 @@ export default function ProfilePageClient() {
                 Record request details for inspection in the console log view
               </p>
             </div>
-            <Toggle
-              checked={observabilityEnabled}
-              onChange={updateObservability}
-              disabled={loading}
-            />
+            <Toggle checked={observabilityEnabled} onChange={updateObservability} disabled={loading} />
           </div>
         </Card>
 
@@ -737,14 +1138,15 @@ export default function ProfilePageClient() {
         </div>
       </div>
 
-      {/* ── Language Switcher Modal ───────────────────────────────── */}
       <LanguageSwitcher
         hideTrigger
         isOpen={langOpen}
-        onClose={() => setLangOpen(false)}
+        onClose={() => {
+          setLangOpen(false);
+          setLocale(getLocaleFromCookie());
+        }}
       />
 
-      {/* ── Shutdown Confirm Modal ────────────────────────────────── */}
       <ConfirmModal
         isOpen={shutdownOpen}
         onClose={() => setShutdownOpen(false)}
