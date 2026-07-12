@@ -71,6 +71,7 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
     let catalog = crate::core::model::catalog::provider_catalog();
 
     let mut models = Vec::new();
+    let alias_to_provider = catalog.alias_to_provider_id();
 
     for entry in catalog.iter_provider_models() {
         let provider_alias = &entry.alias;
@@ -78,6 +79,9 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
             .get(provider_alias)
             .map(|v| v.iter().map(String::as_str).collect())
             .unwrap_or_default();
+        let provider_info = alias_to_provider
+            .get(provider_alias)
+            .and_then(|pid| catalog.provider_info(pid));
 
         for model in &entry.models {
             if disabled_ids.contains(&model.id.as_str()) {
@@ -91,6 +95,56 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 .map(model_alias_path)
                 .unwrap_or_else(|| model.id.clone());
 
+            // Derive lightweight caps for dashboard CapacityBadges.
+            // Prefer explicit catalog capabilities; fall back to name heuristics.
+            let caps = {
+                let mut vision = false;
+                let mut reasoning = false;
+                if let Some(list) = model.capabilities.as_ref() {
+                    for c in list {
+                        let lower = c.to_ascii_lowercase();
+                        if lower.contains("vision") || lower.contains("image") {
+                            vision = true;
+                        }
+                        if lower.contains("reason") || lower.contains("think") {
+                            reasoning = true;
+                        }
+                    }
+                }
+                let id_lower = model.id.to_ascii_lowercase();
+                let name_lower = model
+                    .name
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !vision
+                    && (id_lower.contains("vision")
+                        || id_lower.contains("vl")
+                        || name_lower.contains("vision"))
+                {
+                    vision = true;
+                }
+                if !reasoning
+                    && (id_lower.contains("reason")
+                        || id_lower.contains("thinking")
+                        || id_lower.contains("o1")
+                        || id_lower.contains("o3")
+                        || id_lower.contains("o4")
+                        || name_lower.contains("reason"))
+                {
+                    reasoning = true;
+                }
+                if let Some(pi) = provider_info {
+                    if pi.vision == Some(true) {
+                        vision = true;
+                    }
+                    if pi.reasoning == Some(true) {
+                        reasoning = true;
+                    }
+                }
+                serde_json::json!({ "vision": vision, "reasoning": reasoning })
+            };
+
             models.push(serde_json::json!({
                 "provider": provider_alias,
                 "model": model.id,
@@ -98,6 +152,7 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
                 "kind": model.kind,
                 "fullModel": full_model,
                 "alias": alias,
+                "caps": caps,
             }));
         }
     }

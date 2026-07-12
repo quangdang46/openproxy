@@ -35,6 +35,8 @@ export interface Provider {
   searchViaChat?: SearchViaChatConfig;
   hidden?: boolean;
   hiddenKinds?: ServiceKind[];
+  /** Display sort weight (lower first). Mirrors 9router registry priority. */
+  priority?: number;
   authType?: "oauth" | "apikey" | "cookie";
   authHint?: string;
   searchConfig?: SearchConfig;
@@ -264,8 +266,10 @@ export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElemen
 export interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
   label?: string;
   error?: string;
+  hint?: string;
   icon?: string;
   iconRight?: string;
+  inputClassName?: string;
 }
 
 export interface ModalProps {

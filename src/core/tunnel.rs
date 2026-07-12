@@ -60,7 +60,10 @@ impl TunnelManager {
     }
 
     pub async fn start(&self, provider: TunnelProvider, port: u16) -> anyhow::Result<()> {
-        self.stop().await.ok();
+        // Tear down any previous process without wiping "desired enabled" flags
+        // for the *other* provider — stop_process_only keeps settings intact when
+        // nothing is running so boot-resume can call start safely.
+        self.stop_process_only().await.ok();
 
         let mut child = match provider {
             TunnelProvider::Cloudflare => tokio::process::Command::new("cloudflared")
@@ -116,28 +119,83 @@ impl TunnelManager {
         self.db
             .update(|db| {
                 let settings = &mut db.settings;
-                settings.tunnel_enabled = true;
-                settings.tunnel_url = tunnel_url.unwrap_or_default();
-                settings.tunnel_provider = provider.to_string();
+                match provider {
+                    TunnelProvider::Cloudflare => {
+                        settings.tunnel_enabled = true;
+                        settings.tunnel_url = tunnel_url.unwrap_or_default();
+                        settings.tunnel_provider = provider.to_string();
+                    }
+                    TunnelProvider::Tailscale => {
+                        settings.tailscale_enabled = true;
+                        if let Some(url) = tunnel_url {
+                            settings.tailscale_url = url;
+                        }
+                    }
+                }
             })
             .await?;
 
         Ok(())
     }
 
-    pub async fn stop(&self) -> anyhow::Result<()> {
+    /// Kill the child process and clear runtime status, without mutating
+    /// persisted "desired enabled" settings. Used by `start` so a no-op stop
+    /// cannot wipe resume flags before the new process is spawned.
+    async fn stop_process_only(&self) -> anyhow::Result<()> {
         if let Some(mut child) = self.process.write().await.take() {
             child.kill().await.ok();
         }
-
         *self.status.write().await = TunnelStatus::default();
+        Ok(())
+    }
+
+    /// Explicit disable: kill process and clear enabled flags.
+    ///
+    /// `provider` selects which desired-state flags to clear when the live
+    /// process provider is unknown (e.g. process already exited). Prefer
+    /// matching the caller's disable endpoint (cloudflare vs tailscale).
+    pub async fn stop(&self) -> anyhow::Result<()> {
+        self.stop_provider(None).await
+    }
+
+    pub async fn stop_provider(&self, preferred: Option<TunnelProvider>) -> anyhow::Result<()> {
+        let prev_provider = self.status.read().await.provider.clone();
+
+        // Only kill the process when it matches the provider being disabled
+        // (or when no preferred provider was specified).
+        let should_kill = match (preferred, prev_provider.as_deref()) {
+            (None, _) => true,
+            (Some(TunnelProvider::Cloudflare), Some("cloudflare") | None) => true,
+            (Some(TunnelProvider::Tailscale), Some("tailscale") | None) => true,
+            // Other provider is currently running — leave its process alone.
+            (Some(_), Some(_)) => false,
+        };
+
+        if should_kill {
+            if let Some(mut child) = self.process.write().await.take() {
+                child.kill().await.ok();
+            }
+            *self.status.write().await = TunnelStatus::default();
+        }
+
+        // Clear the desired-state flag for the provider the caller asked to disable.
+        let clear_cloudflare = matches!(preferred, Some(TunnelProvider::Cloudflare) | None)
+            && (preferred.is_some()
+                || matches!(prev_provider.as_deref(), Some("cloudflare") | None));
+        let clear_tailscale = matches!(preferred, Some(TunnelProvider::Tailscale))
+            || (preferred.is_none() && prev_provider.as_deref() == Some("tailscale"));
 
         self.db
             .update(|db| {
                 let settings = &mut db.settings;
-                settings.tunnel_enabled = false;
-                settings.tunnel_url = String::new();
-                settings.tunnel_provider = String::new();
+                if clear_cloudflare {
+                    settings.tunnel_enabled = false;
+                    settings.tunnel_url = String::new();
+                }
+                if clear_tailscale {
+                    settings.tailscale_enabled = false;
+                    settings.tailscale_url = String::new();
+                }
             })
             .await?;
 

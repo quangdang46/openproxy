@@ -18,12 +18,14 @@ import {
   WEB_COOKIE_PROVIDERS,
   OPENAI_COMPATIBLE_PREFIX,
   ANTHROPIC_COMPATIBLE_PREFIX,
+  AI_PROVIDERS,
 } from "@/shared/constants/providers";
 // import Link from "next/link";  // ported: next.js -> Astro+React
 import { getErrorCode, getRelativeTime } from "@/shared/utils";
 import { useNotificationStore } from "@/store/notificationStore";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "@/components/providers/ModelAvailabilityBadge";
+import AddApiKeyModal from "@/components/providers/AddApiKeyModal";
 
 function getStatusDisplay(connected, error, errorCode) {
   const parts = [];
@@ -103,6 +105,9 @@ export default function ProvidersPageClient() {
     useState(false);
   const [testingMode, setTestingMode] = useState(null);
   const [testResults, setTestResults] = useState(null);
+  const [showAddApiKeyModal, setShowAddApiKeyModal] = useState(false);
+  const [addProviderId, setAddProviderId] = useState(null);
+  const [proxyPools, setProxyPools] = useState([]);
   const notify = useNotificationStore();
   const searchQuery = useHeaderSearchStore((s) => s.query);
   const registerSearch = useHeaderSearchStore((s) => s.register);
@@ -120,15 +125,19 @@ export default function ProvidersPageClient() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [connectionsRes, nodesRes] = await Promise.all([
+        const [connectionsRes, nodesRes, proxyPoolsRes] = await Promise.all([
           fetch("/api/providers"),
           fetch("/api/provider-nodes"),
+          fetch("/api/proxy-pools?isActive=true"),
         ]);
         const connectionsData = await connectionsRes.json();
         const nodesData = await nodesRes.json();
+        const proxyPoolsData = await proxyPoolsRes.json().catch(() => ({}));
         if (connectionsRes.ok)
           setConnections(connectionsData.connections || []);
         if (nodesRes.ok) setProviderNodes(nodesData.nodes || []);
+        if (proxyPoolsRes.ok)
+          setProxyPools(proxyPoolsData.proxyPools || []);
       } catch (error) {
         console.log("Error fetching data:", error);
       } finally {
@@ -138,9 +147,28 @@ export default function ProvidersPageClient() {
     fetchData();
   }, []);
 
+  // Deep-link from /providers/new: ?add=<providerId> opens Add API key modal
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const addId = params.get("add");
+    if (!addId) return;
+    const info = AI_PROVIDERS[addId];
+    if (!info) return;
+    setAddProviderId(addId);
+    setShowAddApiKeyModal(true);
+    // Clear the query so refresh/back doesn't re-open the modal
+    params.delete("add");
+    const qs = params.toString();
+    const next = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash || ""}`;
+    window.history.replaceState({}, "", next);
+  }, []);
+
+  // authType may be a single string or an array (kiro counts oauth + api_key/apikey together)
   const getProviderStats = (providerId, authType) => {
+    const authTypes = Array.isArray(authType) ? authType : [authType];
     const providerConnections = connections.filter(
-      (c) => c.provider === providerId && c.authType === authType,
+      (c) => c.provider === providerId && authTypes.includes(c.authType),
     );
 
     const getEffectiveStatus = (conn) => {
@@ -181,17 +209,15 @@ export default function ProvidersPageClient() {
     return { connected, error, total, errorCode, errorTime, allDisabled };
   };
 
-  // Toggle all connections for a provider on/off
+  // Toggle all connections for a provider on/off. authType may be a single
+  // string or an array (kiro counts oauth + api_key/apikey together).
   const handleToggleProvider = async (providerId, authType, newActive) => {
-    const providerConns = connections.filter(
-      (c) => c.provider === providerId && c.authType === authType,
-    );
+    const authTypes = Array.isArray(authType) ? authType : [authType];
+    const matches = (c) =>
+      c.provider === providerId && authTypes.includes(c.authType);
+    const providerConns = connections.filter(matches);
     setConnections((prev) =>
-      prev.map((c) =>
-        c.provider === providerId && c.authType === authType
-          ? { ...c, isActive: newActive }
-          : c,
-      ),
+      prev.map((c) => (matches(c) ? { ...c, isActive: newActive } : c)),
     );
     await Promise.allSettled(
       providerConns.map((c) =>
@@ -202,6 +228,42 @@ export default function ProvidersPageClient() {
         }),
       ),
     );
+  };
+
+  const handleSaveApiKey = async (formData) => {
+    if (!addProviderId) return;
+    try {
+      const res = await fetch("/api/providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider: addProviderId, ...formData }),
+      });
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        data = null;
+      }
+      if (res.ok) {
+        // Refresh connections so the new key shows on the list card
+        try {
+          const connectionsRes = await fetch("/api/providers");
+          const connectionsData = await connectionsRes.json();
+          if (connectionsRes.ok)
+            setConnections(connectionsData.connections || []);
+        } catch {
+          /* ignore refresh errors */
+        }
+        setShowAddApiKeyModal(false);
+        setAddProviderId(null);
+        notify.success("API key added");
+        return;
+      }
+      notify.error(data?.error || "Failed to save connection");
+    } catch (error) {
+      console.log("Error saving connection:", error);
+      notify.error("Failed to save connection");
+    }
   };
 
   // Count connections per authType so we can grey out the Test All button
@@ -269,14 +331,14 @@ export default function ProvidersPageClient() {
     }))
     .filter((p) => matchSearch(p.name));
 
-  const oauthEntries = Object.entries(OAUTH_PROVIDERS).filter(([, info]) =>
-    matchSearch(info.name),
+  const oauthEntries = Object.entries(OAUTH_PROVIDERS).filter(
+    ([, info]) => !info.hidden && matchSearch(info.name),
   );
-  const freeEntries = Object.entries(FREE_PROVIDERS).filter(([, info]) =>
-    matchSearch(info.name),
+  const freeEntries = Object.entries(FREE_PROVIDERS).filter(
+    ([, info]) => !info.hidden && matchSearch(info.name),
   );
   const freeTierEntries = Object.entries(FREE_TIER_PROVIDERS).filter(
-    ([, info]) => matchSearch(info.name),
+    ([, info]) => !info.hidden && matchSearch(info.name),
   );
   // Sort APIKEY providers so ones with any connected (working) connection
   // surface first; ties break alphabetically. Mirrors 9router's
@@ -294,7 +356,9 @@ export default function ProvidersPageClient() {
   const apikeyEntries = sortApikeyByPriority(
     Object.entries(APIKEY_PROVIDERS).filter(
       ([, info]) =>
-        (info.serviceKinds ?? ["llm"]).includes("llm") && matchSearch(info.name),
+        !info.hidden &&
+        (info.serviceKinds ?? ["llm"]).includes("llm") &&
+        matchSearch(info.name),
     ),
   );
   const isApikeySearching = !!searchQuery.trim();
@@ -455,16 +519,26 @@ export default function ProvidersPageClient() {
           </button>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-          {freeEntries.map(([key, info]) => (
-            <ProviderCard
-              key={key}
-              providerId={key}
-              provider={info}
-              stats={getProviderStats(key, "oauth")}
-              authType="free"
-              onToggle={(active) => handleToggleProvider(key, "oauth", active)}
-            />
-          ))}
+          {freeEntries.map(([key, info]) => {
+            // Kiro accepts both OAuth and api-key connections; count/toggle both
+            // so the card total matches the provider detail page (#kiro-apikey).
+            // Kiro's headless api-key flow persists authType "api_key" (underscore),
+            // while generic apikey providers use "apikey" — include both spellings.
+            const freeAuthTypes =
+              key === "kiro" ? ["oauth", "apikey", "api_key"] : "oauth";
+            return (
+              <ProviderCard
+                key={key}
+                providerId={key}
+                provider={info}
+                stats={getProviderStats(key, freeAuthTypes)}
+                authType="free"
+                onToggle={(active) =>
+                  handleToggleProvider(key, freeAuthTypes, active)
+                }
+              />
+            );
+          })}
           {freeTierEntries.map(([key, info]) => (
             <ApiKeyProviderCard
               key={key}
@@ -564,6 +638,37 @@ export default function ProvidersPageClient() {
         onCreated={(node) => {
           setProviderNodes((prev) => [...prev, node]);
           setShowAddAnthropicCompatibleModal(false);
+        }}
+      />
+      <AddApiKeyModal
+        isOpen={showAddApiKeyModal}
+        provider={addProviderId || undefined}
+        providerName={
+          addProviderId
+            ? AI_PROVIDERS[addProviderId]?.name || addProviderId
+            : undefined
+        }
+        authType={
+          addProviderId ? AI_PROVIDERS[addProviderId]?.authType : undefined
+        }
+        authHint={
+          addProviderId ? AI_PROVIDERS[addProviderId]?.authHint : undefined
+        }
+        website={
+          addProviderId ? AI_PROVIDERS[addProviderId]?.website : undefined
+        }
+        proxyPools={proxyPools}
+        onSave={handleSaveApiKey}
+        onClose={() => {
+          setShowAddApiKeyModal(false);
+          setAddProviderId(null);
+          // Refresh after close — bulk-add posts directly to /api/providers
+          fetch("/api/providers")
+            .then((r) => r.json())
+            .then((data) => {
+              if (data?.connections) setConnections(data.connections);
+            })
+            .catch(() => {});
         }}
       />
 

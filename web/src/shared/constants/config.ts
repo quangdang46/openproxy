@@ -90,3 +90,31 @@ export {
   PROVIDER_MODELS,
   AI_MODELS,
 } from "./models";
+
+/**
+ * Quota auto-ping settings contract (9router parity).
+ * Persistence: PATCH /api/settings { claudeAutoPing | codexAutoPing }.
+ * Scheduler: Rust POST /api/quota/auto-ping/tick (+ boot interval).
+ * Full OAuth warm-ping (synthetic 1-token request) is residual.
+ */
+export const QUOTA_AUTOPING_CONFIG = {
+  tickIntervalMs: 60_000,
+  pingLeadMs: 5_000,
+  providers: {
+    claude: {
+      settingsKey: "claudeAutoPing",
+      quotaKey: "session (5h)",
+      pingModel: "claude-haiku-4-5-20251001",
+    },
+    codex: {
+      settingsKey: "codexAutoPing",
+      quotaKey: "session",
+      pingModel: "gpt-5.5",
+    },
+  },
+} as const;
+
+export const AUTO_PING_SETTINGS_KEYS = {
+  claude: "claudeAutoPing",
+  codex: "codexAutoPing",
+} as const;

@@ -2493,23 +2493,54 @@ pub fn routes() -> Router<AppState> {
             "/api/cli-tools/cowork-mcp-registry",
             get(get_cowork_mcp_registry),
         )
-        .route("/api/cli-tools/cowork-mcp-tools", get(get_cowork_mcp_tools))
+        .route(
+            "/api/cli-tools/cowork-mcp-tools",
+            get(get_cowork_mcp_tools).post(probe_cowork_mcp_tools),
+        )
         .route(
             "/api/cli-tools/antigravity-mitm/alias",
             delete(delete_mitm_alias),
         )
 }
 
-// GET /api/cli-tools/cowork-mcp-registry
-// Fetches MCP server registry from Anthropic + GitHub plugins
-async fn get_cowork_mcp_registry() -> Response {
-    use tokio::sync::OnceCell;
-    static CACHE: OnceCell<(std::time::Instant, Vec<Value>)> = OnceCell::const_new();
+/// Filter out claude.ai-mediated servers (broken in 3p) and tenant-required entries.
+fn is_direct_connect_mcp_url(url: &str) -> bool {
+    if url.is_empty() {
+        return false;
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.contains("mcp.claude.com") {
+        return false;
+    }
+    if lower.contains("api.anthropic.com/mcp") {
+        return false;
+    }
+    // Reject URLs with template placeholders like {tenant}
+    if url.contains('<') || url.contains('{') {
+        return false;
+    }
+    lower.starts_with("https://")
+}
 
-    let now = std::time::Instant::now();
-    if let Some((ts, data)) = CACHE.get() {
-        if now.duration_since(*ts).as_millis() < 3_600_000 {
-            return Json(json!({ "servers": data })).into_response();
+// GET /api/cli-tools/cowork-mcp-registry
+// Fetches MCP server registry from Anthropic (parity with 9router marketplace).
+async fn get_cowork_mcp_registry() -> Response {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, Vec<Value>)>> = Mutex::new(None);
+
+    {
+        if let Ok(guard) = CACHE.lock() {
+            if let Some((ts, data)) = guard.as_ref() {
+                if ts.elapsed().as_millis() < 3_600_000 {
+                    return Json(json!({
+                        "cached": true,
+                        "servers": data,
+                        "total": data.len(),
+                    }))
+                    .into_response();
+                }
+            }
         }
     }
 
@@ -2519,13 +2550,18 @@ async fn get_cowork_mcp_registry() -> Response {
         .unwrap_or_default();
 
     let mut servers = Vec::new();
+    let mut seen_urls = std::collections::HashSet::new();
 
     // Fetch Anthropic MCP registry
     let mut cursor = String::new();
     for _ in 0..20 {
         let url = format!(
             "https://api.anthropic.com/mcp-registry/v0/servers?limit=500&visibility=commercial,gsuite,gsuite-google{}",
-            if cursor.is_empty() { String::new() } else { format!("&cursor={}", urlencoding::encode(&cursor)) }
+            if cursor.is_empty() {
+                String::new()
+            } else {
+                format!("&cursor={}", urlencoding::encode(&cursor))
+            }
         );
         match client
             .get(&url)
@@ -2542,6 +2578,11 @@ async fn get_cowork_mcp_registry() -> Response {
                         .unwrap_or_default()
                     {
                         let s = item.get("server").cloned().unwrap_or_default();
+                        let meta = item
+                            .get("_meta")
+                            .and_then(|m| m.get("com.anthropic.api/mcp-registry"))
+                            .cloned()
+                            .unwrap_or_else(|| json!({}));
                         let remote = s
                             .get("remotes")
                             .and_then(|r| r.as_array())
@@ -2550,7 +2591,18 @@ async fn get_cowork_mcp_registry() -> Response {
                             .and_then(|r| r.get("url"))
                             .and_then(Value::as_str)
                             .unwrap_or("");
-                        if url.is_empty() {
+                        if !is_direct_connect_mcp_url(url) {
+                            continue;
+                        }
+                        // Skip entries that require extra tenant fields
+                        if meta
+                            .get("requiredFields")
+                            .and_then(Value::as_array)
+                            .is_some_and(|a| !a.is_empty())
+                        {
+                            continue;
+                        }
+                        if !seen_urls.insert(url.to_string()) {
                             continue;
                         }
                         let transport = remote.and_then(|r| r.get("type")).and_then(Value::as_str);
@@ -2559,14 +2611,54 @@ async fn get_cowork_mcp_registry() -> Response {
                             Some("sse") => "sse",
                             _ => "http",
                         };
+                        let tool_names = meta
+                            .get("toolNames")
+                            .and_then(Value::as_array)
+                            .cloned()
+                            .unwrap_or_default();
+                        let tool_count = tool_names.len();
+                        let name = s
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let slug = meta
+                            .get("slug")
+                            .and_then(Value::as_str)
+                            .unwrap_or(&name)
+                            .to_string();
+                        let title = s
+                            .get("title")
+                            .or_else(|| meta.get("displayName"))
+                            .or_else(|| s.get("name"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let description = s
+                            .get("description")
+                            .or_else(|| meta.get("oneLiner"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let is_authless = meta
+                            .get("isAuthless")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let icon_url = meta.get("iconUrl").cloned().unwrap_or(Value::Null);
+
                         servers.push(json!({
-                                "source": "registry",
-                                "name": s.get("name").and_then(Value::as_str).unwrap_or(""),
-                                "title": s.get("title").or(s.get("name")).and_then(Value::as_str).unwrap_or(""),
-                                "description": s.get("description").and_then(Value::as_str).unwrap_or(""),
-                                "url": url,
-                                "transport": transport,
-                            }));
+                            "source": "registry",
+                            "name": name,
+                            "slug": slug,
+                            "title": title,
+                            "description": description,
+                            "url": url,
+                            "transport": transport,
+                            "oauth": !is_authless,
+                            "toolNames": tool_names,
+                            "toolCount": tool_count,
+                            "iconUrl": icon_url,
+                        }));
                     }
                     cursor = j
                         .get("metadata")
@@ -2584,11 +2676,21 @@ async fn get_cowork_mcp_registry() -> Response {
         }
     }
 
-    Json(json!({ "servers": servers })).into_response()
+    let total = servers.len();
+    if let Ok(mut guard) = CACHE.lock() {
+        *guard = Some((Instant::now(), servers.clone()));
+    }
+
+    Json(json!({
+        "cached": false,
+        "servers": servers,
+        "total": total,
+    }))
+    .into_response()
 }
 
 // GET /api/cli-tools/cowork-mcp-tools
-// Returns locally installed CoWork MCP tools configuration
+// Returns locally stored CoWork MCP tools configuration (legacy).
 async fn get_cowork_mcp_tools(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
         return response;
@@ -2606,6 +2708,202 @@ async fn get_cowork_mcp_tools(State(state): State<AppState>, headers: HeaderMap)
         "tools": tools
     }))
     .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct ProbeMcpToolsRequest {
+    url: Option<String>,
+}
+
+// POST /api/cli-tools/cowork-mcp-tools
+// Probe a remote MCP server: initialize + tools/list (authless only).
+// OAuth servers return requiresAuth so the UI can skip tool listing.
+async fn probe_cowork_mcp_tools(Json(body): Json<ProbeMcpToolsRequest>) -> Response {
+    let url = body.url.unwrap_or_default();
+    if url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "url required", "tools": [] })),
+        )
+            .into_response();
+    }
+
+    let result = probe_mcp_server(&url).await;
+    Json(result).into_response()
+}
+
+async fn probe_mcp_server(url: &str) -> Value {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return json!({ "error": e.to_string(), "tools": [] }),
+    };
+
+    let headers = [
+        ("Content-Type", "application/json"),
+        ("Accept", "application/json, text/event-stream"),
+        ("MCP-Protocol-Version", "2025-06-18"),
+    ];
+
+    // Step 1: initialize
+    let init_res = match client
+        .post(url)
+        .headers({
+            let mut h = reqwest::header::HeaderMap::new();
+            for (k, v) in &headers {
+                if let (Ok(name), Ok(val)) = (
+                    reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(v),
+                ) {
+                    h.insert(name, val);
+                }
+            }
+            h
+        })
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "openproxy", "version": "1" }
+            }
+        }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if e.is_timeout() {
+                "timeout".to_string()
+            } else {
+                e.to_string()
+            };
+            return json!({ "error": msg, "tools": [] });
+        }
+    };
+
+    let status = init_res.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({ "requiresAuth": true, "tools": [] });
+    }
+    if !init_res.status().is_success() {
+        return json!({ "error": format!("init {status}"), "tools": [] });
+    }
+
+    let session_id = init_res
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let _ = init_res.text().await;
+
+    let mut list_headers = reqwest::header::HeaderMap::new();
+    for (k, v) in &headers {
+        if let (Ok(name), Ok(val)) = (
+            reqwest::header::HeaderName::from_bytes(k.as_bytes()),
+            reqwest::header::HeaderValue::from_str(v),
+        ) {
+            list_headers.insert(name, val);
+        }
+    }
+    if !session_id.is_empty() {
+        if let Ok(val) = reqwest::header::HeaderValue::from_str(&session_id) {
+            list_headers.insert("mcp-session-id", val);
+        }
+    }
+
+    // Step 2: notifications/initialized (best-effort)
+    let _ = client
+        .post(url)
+        .headers(list_headers.clone())
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+            "params": {}
+        }))
+        .send()
+        .await;
+
+    // Step 3: tools/list
+    let list_res = match client
+        .post(url)
+        .headers(list_headers)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list"
+        }))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = if e.is_timeout() {
+                "timeout".to_string()
+            } else {
+                e.to_string()
+            };
+            return json!({ "error": msg, "tools": [] });
+        }
+    };
+
+    let status = list_res.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({ "requiresAuth": true, "tools": [] });
+    }
+
+    let ct = list_res
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let parsed: Option<Value> = if ct.contains("text/event-stream") {
+        let text = list_res.text().await.unwrap_or_default();
+        let mut found = None;
+        for line in text.lines() {
+            if let Some(data) = line.strip_prefix("data:") {
+                if let Ok(obj) = serde_json::from_str::<Value>(data.trim()) {
+                    if obj.get("id").and_then(Value::as_i64) == Some(2)
+                        && obj.get("result").is_some()
+                    {
+                        found = Some(obj);
+                        break;
+                    }
+                }
+            }
+        }
+        found
+    } else {
+        list_res.json::<Value>().await.ok()
+    };
+
+    let tools = parsed
+        .as_ref()
+        .and_then(|p| p.get("result"))
+        .and_then(|r| r.get("tools"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|t| {
+            let name = t.get("name").and_then(Value::as_str)?.to_string();
+            let description = t
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Some(json!({ "name": name, "description": description }))
+        })
+        .collect::<Vec<_>>();
+
+    json!({ "tools": tools })
 }
 
 #[cfg(test)]

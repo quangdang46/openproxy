@@ -18,20 +18,25 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
   const [testError, setTestError] = useState<string>("");
   const [saving, setSaving] = useState<boolean>(false);
 
-  // Reset state when modal opens
   useEffect(() => {
     if (isOpen) { setModelId(""); setTestStatus(null); setTestError(""); }
   }, [isOpen]);
 
+  const stripAlias = (id: string): string => {
+    const prefix = `${providerAlias}/`;
+    return id.startsWith(prefix) ? id.slice(prefix.length) : id;
+  };
+
   const handleTest = async (): Promise<void> => {
-    if (!modelId.trim()) return;
+    const cleanId = stripAlias(modelId.trim());
+    if (!cleanId) return;
     setTestStatus("testing");
     setTestError("");
     try {
       const res = await fetch("/api/models/test", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: `${providerAlias}/${modelId.trim()}` }),
+        body: JSON.stringify({ model: `${providerAlias}/${cleanId}` }),
       });
       const data = await res.json();
       setTestStatus(data.ok ? "ok" : "error");
@@ -43,10 +48,11 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
   };
 
   const handleSave = async (): Promise<void> => {
-    if (!modelId.trim() || saving) return;
+    const cleanId = stripAlias(modelId.trim());
+    if (!cleanId || saving) return;
     setSaving(true);
     try {
-      await onSave(modelId.trim());
+      await onSave(cleanId);
     } finally {
       setSaving(false);
     }
@@ -82,11 +88,13 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
             </Button>
           </div>
           <p className="text-xs text-text-muted mt-1">
-            Sent to provider as: <code className="font-mono bg-sidebar px-1 rounded">{modelId.trim() || "model-id"}</code>
+            Sent to provider as: <code className="font-mono bg-sidebar px-1 rounded">{stripAlias(modelId.trim()) || "model-id"}</code>
+            {providerDisplayAlias ? (
+              <> · display: <code className="font-mono bg-sidebar px-1 rounded">{providerDisplayAlias}/{stripAlias(modelId.trim()) || "model-id"}</code></>
+            ) : null}
           </p>
         </div>
 
-        {/* Test result */}
         {testStatus === "ok" && (
           <div className="flex items-center gap-2 text-sm text-green-600">
             <span className="material-symbols-outlined text-base">check_circle</span>
