@@ -1,14 +1,21 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, Toggle } from "@/shared/components";
+import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, Select, CapacityBadges } from "@/shared/components";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
+
+const STRATEGY_OPTIONS = [
+  { value: "fallback", label: "Fallback — try in order" },
+  { value: "round-robin", label: "Round Robin — rotate" },
+  { value: "fusion", label: "Fusion — panel + judge" },
+];
 
 interface Combo {
   id: string;
@@ -22,6 +29,22 @@ interface Provider {
   id: string;
   provider: string;
   isActive?: boolean;
+}
+
+/** Nested form matching backend `ComboStrategyConfig` (camelCase over the wire). */
+interface ComboStrategyConfig {
+  fallbackStrategy?: string;
+  judgeModel?: string;
+  fusionTuning?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+/** Normalize settings.comboStrategies[name] which may be a bare string or nested object. */
+function normalizeStrategy(entry: unknown): ComboStrategyConfig {
+  if (!entry) return {};
+  if (typeof entry === "string") return { fallbackStrategy: entry };
+  if (typeof entry === "object") return entry as ComboStrategyConfig;
+  return {};
 }
 
 // Per-row result of the `/api/combos/test-model` ping. We keep it in the
@@ -55,6 +78,7 @@ export default function CombosPage() {
   const [deleting, setDeleting] = useState<boolean>(false);
   const notify = useNotificationStore();
   const { copied, copy } = useCopyToClipboard();
+  const { getCaps } = useModelCaps();
 
   useEffect(() => {
     fetchData();
@@ -150,13 +174,22 @@ export default function CombosPage() {
     }
   };
 
-  const handleToggleRoundRobin = async (comboName: string, enabled: boolean) => {
+  // Merge a per-combo strategy patch into settings.comboStrategies.
+  // Default fallback with no extras drops the entry (keeps settings clean).
+  const handleSetComboStrategy = async (
+    comboName: string,
+    patch: Partial<ComboStrategyConfig>,
+  ) => {
     try {
       const updated = { ...comboStrategies };
-      if (enabled) {
-        updated[comboName] = { fallbackStrategy: "round-robin" };
-      } else {
+      const next: ComboStrategyConfig = {
+        ...normalizeStrategy(updated[comboName]),
+        ...patch,
+      };
+      if (!next.fallbackStrategy || next.fallbackStrategy === "fallback") {
         delete updated[comboName];
+      } else {
+        updated[comboName] = next;
       }
 
       await fetch("/api/settings", {
@@ -187,10 +220,25 @@ export default function CombosPage() {
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold">Combos</h1>
           <p className="text-sm text-text-muted mt-1">
-            Create model combos with fallback support
+            Group models under one name, then pick a strategy per combo:
           </p>
+          <ul className="text-sm text-text-muted mt-2 flex flex-col gap-1">
+            <li>
+              <span className="font-medium text-text-main">Fallback</span> — tries models in order
+              (next on failure)
+            </li>
+            <li>
+              <span className="font-medium text-text-main">Round Robin</span> — rotates models across
+              requests to spread load
+            </li>
+            <li>
+              <span className="font-medium text-text-main">Fusion</span> — queries all models in
+              parallel, then a judge synthesizes one answer. Best quality, but costs the most: every
+              request bills all panel models + the judge (N+1 calls)
+            </li>
+          </ul>
         </div>
-        <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto">
+        <Button icon="add" onClick={() => setShowCreateModal(true)} className="w-full sm:w-auto whitespace-nowrap">
           Create Combo
         </Button>
       </div>
@@ -215,12 +263,14 @@ export default function CombosPage() {
             <ComboCard
               key={combo.id}
               combo={combo}
+              activeProviders={activeProviders}
               copied={copied}
               onCopy={copy}
               onEdit={() => setEditingCombo(combo)}
               onDelete={() => handleDelete(combo)}
-              roundRobinEnabled={comboStrategies[combo.name]?.fallbackStrategy === "round-robin"}
-              onToggleRoundRobin={(enabled) => handleToggleRoundRobin(combo.name, enabled)}
+              strategy={normalizeStrategy(comboStrategies[combo.name])}
+              onSetStrategy={(patch) => handleSetComboStrategy(combo.name, patch)}
+              getCaps={getCaps}
             />
           ))}
         </div>
@@ -265,16 +315,33 @@ export default function CombosPage() {
 
 interface ComboCardProps {
   combo: Combo;
+  activeProviders: Provider[];
   copied: string | null;
   onCopy: (name: string, id: string) => void;
   onEdit: () => void;
   onDelete: () => void;
-  roundRobinEnabled: boolean;
-  onToggleRoundRobin: (enabled: boolean) => void;
+  strategy: ComboStrategyConfig;
+  onSetStrategy: (patch: Partial<ComboStrategyConfig>) => void;
+  getCaps?: (model: string) => import("@/shared/constants/models").ModelCaps | null | undefined;
 }
 
-function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled, onToggleRoundRobin }: ComboCardProps) {
+function ComboCard({
+  combo,
+  activeProviders,
+  copied,
+  onCopy,
+  onEdit,
+  onDelete,
+  strategy,
+  onSetStrategy,
+  getCaps,
+}: ComboCardProps) {
   const [health, setHealth] = useState<ComboHealthEntry[]>([]);
+  const [showJudgeSelect, setShowJudgeSelect] = useState(false);
+
+  const current = strategy.fallbackStrategy || "fallback";
+  const judge = strategy.judgeModel || "";
+  const isFusion = current === "fusion";
 
   // Poll the combo's quarantine state so the "cooling down" pill on the
   // card reflects the backend without having to open the edit modal.
@@ -321,7 +388,7 @@ function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled,
                   return (
                     <code
                       key={index}
-                      className={`max-w-full truncate rounded px-1.5 py-0.5 font-mono text-[10px] sm:max-w-[220px] ${
+                      className={`inline-flex max-w-full items-center gap-1 truncate rounded px-1.5 py-0.5 font-mono text-[10px] sm:max-w-[220px] ${
                         isDisabled
                           ? "bg-red-500/10 text-red-500 line-through"
                           : isQuarantined
@@ -336,7 +403,8 @@ function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled,
                             : undefined
                       }
                     >
-                      {model}
+                      <span className="truncate">{model}</span>
+                      {getCaps && <CapacityBadges caps={getCaps(model)} size={11} colorOverride="text-text-muted/70" />}
                     </code>
                   );
                 })
@@ -367,18 +435,45 @@ function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled,
                 </div>
               )}
             </div>
+            {/* Fusion: judge picker (Auto = first model) */}
+            {isFusion && (
+              <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+                <span className="text-[11px] font-medium text-text-muted">Judge</span>
+                <button
+                  type="button"
+                  onClick={() => setShowJudgeSelect(true)}
+                  className="inline-flex max-w-full items-center gap-1 rounded border border-dashed border-primary/40 px-1.5 py-0.5 font-mono text-[11px] text-primary hover:border-primary hover:bg-primary/5 transition-colors"
+                  title="Pick the model that fuses panel answers"
+                >
+                  <span className="material-symbols-outlined text-[13px]">gavel</span>
+                  <span className="truncate">
+                    {judge || `Auto — ${combo.models[0] || "first model"}`}
+                  </span>
+                </button>
+                {judge && (
+                  <button
+                    type="button"
+                    onClick={() => onSetStrategy({ judgeModel: "" })}
+                    className="p-0.5 rounded text-text-muted hover:text-red-500 hover:bg-red-500/10 transition-colors"
+                    title="Reset judge to Auto"
+                  >
+                    <span className="material-symbols-outlined text-[13px]">close</span>
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
         {/* Actions */}
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3 sm:shrink-0">
-          {/* Round Robin Toggle — always visible */}
-          <div className="flex items-center justify-between gap-1.5 rounded-lg bg-black/[0.02] px-2 py-1.5 dark:bg-white/[0.02] sm:justify-start sm:bg-transparent sm:px-0 sm:py-0 sm:dark:bg-transparent">
-            <span className="text-xs text-text-muted font-medium">Round Robin</span>
-            <Toggle
-              size="sm"
-              checked={roundRobinEnabled}
-              onChange={onToggleRoundRobin}
+          {/* Strategy selector — always visible */}
+          <div className="w-full sm:w-[200px]">
+            <Select
+              options={STRATEGY_OPTIONS}
+              value={current}
+              onChange={(e) => onSetStrategy({ fallbackStrategy: e.target.value })}
+              selectClassName="py-1.5 text-xs"
             />
           </div>
 
@@ -412,6 +507,20 @@ function ComboCard({ combo, copied, onCopy, onEdit, onDelete, roundRobinEnabled,
           </div>
         </div>
       </div>
+
+      {/* Judge model picker */}
+      <ModelSelectModal
+        isOpen={showJudgeSelect}
+        onClose={() => setShowJudgeSelect(false)}
+        onSelect={(m) => {
+          onSetStrategy({ judgeModel: m?.value || "" });
+          setShowJudgeSelect(false);
+        }}
+        selectedModel={judge || undefined}
+        activeProviders={activeProviders}
+        title="Select Judge Model"
+        closeOnSelect={true}
+      />
     </Card>
   );
 }

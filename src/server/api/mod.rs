@@ -30,6 +30,7 @@ mod provider_models;
 pub mod provider_nodes;
 mod provider_validate;
 pub mod providers;
+pub mod quota_auto_ping;
 pub mod settings_payload_rules;
 pub mod shutdown;
 pub mod stt;
@@ -246,6 +247,13 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/headroom/status", get(headroom::status))
         .route("/api/headroom/start", post(headroom::start))
         .route("/api/headroom/stop", post(headroom::stop))
+        .route("/api/headroom/restart", post(headroom::restart))
+        .route(
+            "/api/headroom/extras",
+            get(headroom::extras_get)
+                .post(headroom::extras_post)
+                .delete(headroom::extras_delete),
+        )
         .route_layer(middleware::from_fn(guard::require_local_only));
 
     let admin = Router::new()
@@ -255,6 +263,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/keys/{id}", delete(delete_key_api))
         .route("/api/keys/{id}", put(update_key_api))
         .merge(cli_tools::routes())
+        .merge(quota_auto_ping::routes())
         .merge(db_backups::routes())
         .merge(locale::routes())
         .merge(models_disabled::routes())
@@ -523,9 +532,18 @@ pub(super) fn redact_provider_connection(connection: &ProviderConnection) -> Pro
 }
 
 pub(crate) fn safe_settings_payload(settings: &crate::types::Settings) -> Value {
+    safe_settings_payload_with_db_path(settings, None)
+}
+
+pub(crate) fn safe_settings_payload_with_db_path(
+    settings: &crate::types::Settings,
+    db_path: Option<&str>,
+) -> Value {
     let mut value = serde_json::to_value(settings).unwrap_or_else(|_| json!({}));
     if let Some(fields) = value.as_object_mut() {
         fields.remove("password");
+        // Never leak the OIDC client secret (also skip_serializing, belt+suspenders).
+        fields.remove("oidcClientSecret");
         fields.insert(
             "enableRequestLogs".to_string(),
             Value::Bool(std::env::var("ENABLE_REQUEST_LOGS").ok().as_deref() == Some("true")),
@@ -542,9 +560,73 @@ pub(crate) fn safe_settings_payload(settings: &crate::types::Settings) -> Value 
                 .is_some_and(|value| !value.is_empty());
         fields.insert("hasPassword".to_string(), Value::Bool(has_password));
 
-        let oidc_configured = std::env::var("OIDC_ISSUER").ok().is_some()
-            && std::env::var("OIDC_CLIENT_ID").ok().is_some();
+        // Settings-driven OIDC first; fall back to env vars for boot-time config.
+        let oidc_configured = settings.is_oidc_configured()
+            || (std::env::var("OIDC_ISSUER")
+                .ok()
+                .is_some_and(|v| !v.is_empty())
+                && std::env::var("OIDC_CLIENT_ID")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty())
+                && std::env::var("OIDC_CLIENT_SECRET")
+                    .ok()
+                    .is_some_and(|v| !v.is_empty()));
         fields.insert("oidcConfigured".to_string(), Value::Bool(oidc_configured));
+
+        // Prefer the first-class auth_mode field; fall back to legacy extra.authMode /
+        // oidc_enabled for older DB payloads.
+        let auth_mode = {
+            let mode = settings.auth_mode.trim();
+            if matches!(mode, "password" | "oidc" | "both") {
+                mode.to_string()
+            } else {
+                settings
+                    .extra
+                    .get("authMode")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| matches!(*value, "password" | "oidc" | "both"))
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| {
+                        if settings.oidc_enabled {
+                            "both".to_string()
+                        } else {
+                            "password".to_string()
+                        }
+                    })
+            }
+        };
+        fields.insert("authMode".to_string(), Value::String(auth_mode));
+
+        let oidc_login_label = {
+            let label = settings.oidc_login_label.trim();
+            if !label.is_empty() {
+                label.to_string()
+            } else {
+                settings
+                    .extra
+                    .get("oidcLoginLabel")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(|value| value.to_string())
+                    .or_else(|| {
+                        std::env::var("OIDC_LOGIN_LABEL")
+                            .ok()
+                            .map(|value| value.trim().to_string())
+                            .filter(|value| !value.is_empty())
+                    })
+                    .unwrap_or_else(|| "Sign in with OIDC".to_string())
+            }
+        };
+        fields.insert(
+            "oidcLoginLabel".to_string(),
+            Value::String(oidc_login_label),
+        );
+
+        if let Some(path) = db_path {
+            fields.insert("databasePath".to_string(), Value::String(path.to_string()));
+        }
     }
 
     value
@@ -1658,7 +1740,13 @@ async fn get_settings_api(State(state): State<AppState>, headers: HeaderMap) -> 
     }
 
     let snapshot = state.db.snapshot();
-    Json(safe_settings_payload(&snapshot.settings)).into_response()
+    let db_path = state.db.data_dir.join("openproxy.sqlite");
+    let db_path_str = db_path.display().to_string();
+    Json(safe_settings_payload_with_db_path(
+        &snapshot.settings,
+        Some(&db_path_str),
+    ))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1688,10 +1776,28 @@ struct UpdateSettingsRequest {
     new_password: Option<String>,
     current_password: Option<String>,
     oidc_enabled: Option<bool>,
+    fallback_strategy: Option<String>,
+    combo_sticky_round_robin_limit: Option<u32>,
+    auth_mode: Option<String>,
+    oidc_issuer_url: Option<String>,
+    oidc_client_id: Option<String>,
+    oidc_client_secret: Option<String>,
+    oidc_scopes: Option<String>,
+    oidc_login_label: Option<String>,
     client_ping_url: Option<String>,
     client_ping_any: Option<bool>,
     headroom_enabled: Option<bool>,
+    headroom_url: Option<String>,
+    headroom_code_aware: Option<bool>,
+    headroom_kompress: Option<bool>,
     ponytail_enabled: Option<bool>,
+    ponytail_level: Option<String>,
+    /// Stored in settings.extra so provider-detail UI can PATCH it.
+    claude_auto_ping: Option<Value>,
+    /// Stored in settings.extra so provider-detail UI can PATCH it.
+    codex_auto_ping: Option<Value>,
+    /// Per-provider thinking mode map stored in settings.extra.
+    provider_thinking: Option<Value>,
 }
 
 async fn update_settings_api(
@@ -1713,6 +1819,55 @@ async fn update_settings_api(
             .into_response();
     }
 
+    // Validate OIDC enablement before writing: non-password auth modes need a
+    // fully configured IdP (issuer + client id + secret, either already stored
+    // or supplied in this request).
+    {
+        let snapshot = state.db.snapshot();
+        let next_mode = req
+            .auth_mode
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(snapshot.settings.auth_mode.as_str());
+        if matches!(next_mode, "oidc" | "both") {
+            let issuer = req
+                .oidc_issuer_url
+                .as_deref()
+                .unwrap_or(snapshot.settings.oidc_issuer_url.as_str())
+                .trim();
+            let client_id = req
+                .oidc_client_id
+                .as_deref()
+                .unwrap_or(snapshot.settings.oidc_client_id.as_str())
+                .trim();
+            let secret = req
+                .oidc_client_secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(snapshot.settings.oidc_client_secret.as_str());
+            if issuer.is_empty() || client_id.is_empty() || secret.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({
+                        "error": "Issuer URL, client ID, and client secret are required to enable OIDC."
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let oidc_touched = req.auth_mode.is_some()
+        || req.oidc_issuer_url.is_some()
+        || req.oidc_client_id.is_some()
+        || req.oidc_client_secret.is_some()
+        || req.oidc_scopes.is_some()
+        || req.oidc_enabled.is_some();
+    // Capture before move so the oidc_enabled legacy path can still decide.
+    let auth_mode_was_set = req.auth_mode.is_some();
+
     let result = state
         .db
         .update(|db| {
@@ -1720,7 +1875,7 @@ async fn update_settings_api(
                 db.settings.tunnel_provider = v;
             }
             if let Some(v) = req.sticky_round_robin_limit {
-                db.settings.sticky_round_robin_limit = v;
+                db.settings.sticky_round_robin_limit = v.max(1);
             }
             if let Some(v) = req.provider_strategies {
                 db.settings.provider_strategies = v;
@@ -1779,8 +1934,40 @@ async fn update_settings_api(
             if let Some(v) = req.outbound_no_proxy {
                 db.settings.outbound_no_proxy = v;
             }
+            if let Some(v) = req.fallback_strategy {
+                db.settings.fallback_strategy = v;
+            }
+            if let Some(v) = req.combo_sticky_round_robin_limit {
+                db.settings.combo_sticky_round_robin_limit = v.max(1);
+            }
+            if let Some(v) = req.auth_mode {
+                db.settings.auth_mode = v;
+            }
+            if let Some(v) = req.oidc_issuer_url {
+                db.settings.oidc_issuer_url = v;
+            }
+            if let Some(v) = req.oidc_client_id {
+                db.settings.oidc_client_id = v;
+            }
+            // Write-only: empty/blank secret means "keep existing".
+            if let Some(v) = req.oidc_client_secret {
+                let trimmed = v.trim().to_string();
+                if !trimmed.is_empty() {
+                    db.settings.oidc_client_secret = trimmed;
+                }
+            }
+            if let Some(v) = req.oidc_scopes {
+                db.settings.oidc_scopes = v;
+            }
+            if let Some(v) = req.oidc_login_label {
+                db.settings.oidc_login_label = v;
+            }
             if let Some(v) = req.oidc_enabled {
+                // Legacy flag — map onto auth_mode when auth_mode itself was not set.
                 db.settings.oidc_enabled = v;
+                if !auth_mode_was_set {
+                    db.settings.auth_mode = if v { "both".into() } else { "password".into() };
+                }
             }
             if let Some(v) = req.client_ping_url {
                 db.settings.client_ping_url = v;
@@ -1791,15 +1978,50 @@ async fn update_settings_api(
             if let Some(v) = req.headroom_enabled {
                 db.settings.headroom_enabled = v;
             }
+            if let Some(v) = req.headroom_url {
+                db.settings.headroom_url = v;
+            }
+            if let Some(v) = req.headroom_code_aware {
+                db.settings.headroom_code_aware = v;
+            }
+            if let Some(v) = req.headroom_kompress {
+                db.settings.headroom_kompress = v;
+            }
             if let Some(v) = req.ponytail_enabled {
                 db.settings.ponytail_enabled = v;
+            }
+            if let Some(v) = req.ponytail_level {
+                db.settings.ponytail_level = v;
+            }
+            // Persist auto-ping + thinking maps into settings.extra (camelCase
+            // keys match the web UI PATCH body).
+            if let Some(v) = req.claude_auto_ping {
+                db.settings.extra.insert("claudeAutoPing".into(), v);
+            }
+            if let Some(v) = req.codex_auto_ping {
+                db.settings.extra.insert("codexAutoPing".into(), v);
+            }
+            if let Some(v) = req.provider_thinking {
+                db.settings.extra.insert("providerThinking".into(), v);
             }
             db.settings.normalize();
         })
         .await;
 
     match result {
-        Ok(snapshot) => Json(safe_settings_payload(&snapshot.settings)).into_response(),
+        Ok(snapshot) => {
+            if oidc_touched {
+                // Best-effort reload; discovery failure leaves the previous client.
+                state.reload_oidc_from_settings().await;
+            }
+            let db_path = state.db.data_dir.join("openproxy.sqlite");
+            let db_path_str = db_path.display().to_string();
+            Json(safe_settings_payload_with_db_path(
+                &snapshot.settings,
+                Some(&db_path_str),
+            ))
+            .into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "success": false, "error": e.to_string() })),
@@ -1808,7 +2030,6 @@ async fn update_settings_api(
     }
 }
 
-// DB Export API
 async fn export_db_api(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = require_management_api_key(&headers, &state) {
         return response;
@@ -1956,6 +2177,59 @@ fn merge_settings(target: &mut crate::types::Settings, source: &crate::types::Se
     }
     if source.sticky_round_robin_limit != target.sticky_round_robin_limit {
         target.sticky_round_robin_limit = source.sticky_round_robin_limit;
+    }
+    if source.fallback_strategy != target.fallback_strategy {
+        target.fallback_strategy = source.fallback_strategy.clone();
+    }
+    if source.combo_sticky_round_robin_limit != target.combo_sticky_round_robin_limit {
+        target.combo_sticky_round_robin_limit = source.combo_sticky_round_robin_limit;
+    }
+    if source.auth_mode != target.auth_mode {
+        target.auth_mode = source.auth_mode.clone();
+    }
+    if source.oidc_issuer_url != target.oidc_issuer_url {
+        target.oidc_issuer_url = source.oidc_issuer_url.clone();
+    }
+    if source.oidc_client_id != target.oidc_client_id {
+        target.oidc_client_id = source.oidc_client_id.clone();
+    }
+    if !source.oidc_client_secret.is_empty()
+        && source.oidc_client_secret != target.oidc_client_secret
+    {
+        target.oidc_client_secret = source.oidc_client_secret.clone();
+    }
+    if source.oidc_scopes != target.oidc_scopes {
+        target.oidc_scopes = source.oidc_scopes.clone();
+    }
+    if source.oidc_login_label != target.oidc_login_label {
+        target.oidc_login_label = source.oidc_login_label.clone();
+    }
+    if source.oidc_enabled != target.oidc_enabled {
+        target.oidc_enabled = source.oidc_enabled;
+    }
+    if source.client_ping_url != target.client_ping_url {
+        target.client_ping_url = source.client_ping_url.clone();
+    }
+    if source.client_ping_any != target.client_ping_any {
+        target.client_ping_any = source.client_ping_any;
+    }
+    if source.headroom_enabled != target.headroom_enabled {
+        target.headroom_enabled = source.headroom_enabled;
+    }
+    if source.headroom_url != target.headroom_url {
+        target.headroom_url = source.headroom_url.clone();
+    }
+    if source.headroom_code_aware != target.headroom_code_aware {
+        target.headroom_code_aware = source.headroom_code_aware;
+    }
+    if source.headroom_kompress != target.headroom_kompress {
+        target.headroom_kompress = source.headroom_kompress;
+    }
+    if source.ponytail_enabled != target.ponytail_enabled {
+        target.ponytail_enabled = source.ponytail_enabled;
+    }
+    if source.ponytail_level != target.ponytail_level {
+        target.ponytail_level = source.ponytail_level.clone();
     }
     for (key, value) in &source.extra {
         target.extra.insert(key.clone(), value.clone());

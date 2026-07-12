@@ -81,11 +81,27 @@ async fn start_tunnel(
 }
 
 async fn stop_tunnel(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
+    stop_tunnel_with_provider(state, headers, None).await
+}
+
+/// Shared stop logic that optionally targets a specific provider's settings
+/// flags. When `preferred` is `None`, clears both cloudflare+tailscale flags
+/// if the running process is already dead (legacy path).
+async fn stop_tunnel_with_provider(
+    state: AppState,
+    headers: HeaderMap,
+    preferred: Option<TunnelProvider>,
+) -> axum::response::Response {
     if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }
 
-    match state.tunnel_manager.stop().await {
+    let result = match preferred {
+        Some(p) => state.tunnel_manager.stop_provider(Some(p)).await,
+        None => state.tunnel_manager.stop().await,
+    };
+
+    match result {
         Ok(()) => (
             axum::http::StatusCode::OK,
             Json(json!({ "message": "Tunnel stopped" })),
@@ -141,7 +157,7 @@ async fn enable_tunnel(State(state): State<AppState>, headers: HeaderMap) -> imp
 }
 
 async fn disable_tunnel(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    stop_tunnel(State(state), headers).await
+    stop_tunnel_with_provider(state, headers, Some(TunnelProvider::Cloudflare)).await
 }
 
 async fn enable_tailscale(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
@@ -153,7 +169,7 @@ async fn enable_tailscale(State(state): State<AppState>, headers: HeaderMap) -> 
 }
 
 async fn disable_tailscale(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
-    stop_tunnel(State(state), headers).await
+    stop_tunnel_with_provider(state, headers, Some(TunnelProvider::Tailscale)).await
 }
 
 async fn tailscale_check(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {

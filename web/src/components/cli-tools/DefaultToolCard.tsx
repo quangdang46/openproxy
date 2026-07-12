@@ -192,7 +192,9 @@ export default function DefaultToolCard({
           if (note.type === "cloudCheck" && (cloudEnabled || tunnelEnabled)) return null;
           
           const isWarning = note.type === "warning";
-          const isError = note.type === "cloudCheck" && !cloudEnabled && !tunnelEnabled;
+          const isError =
+            note.type === "error" ||
+            (note.type === "cloudCheck" && !cloudEnabled && !tunnelEnabled);
           
           let bgClass = "bg-blue-500/10 border-blue-500/30";
           let textClass = "text-blue-600 dark:text-blue-400";

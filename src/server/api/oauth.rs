@@ -52,6 +52,11 @@ const CODEX_SCOPE: &str = "openid profile email offline_access";
 const XAI_CLIENT_ID: &str = "b1a00492-073a-073a-47ea-816f-4c329264a828";
 const CODEX_FIXED_PORT: u64 = 1455;
 const CODEX_CALLBACK_PATH: &str = "/auth/callback";
+const XAI_FIXED_PORT: u16 = 56121;
+const XAI_CALLBACK_PATH: &str = "/callback";
+const XAI_PROXY_TIMEOUT_MS: u64 = 300_000;
+const XAI_TOKEN_URL_DEFAULT: &str = "https://auth.x.ai/oauth2/token";
+const XAI_AUTHORIZE_URL_DEFAULT: &str = "https://auth.x.ai/oauth2/authorize";
 const GEMINI_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
 const GEMINI_CLIENT_SECRET: &str = "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";
@@ -200,6 +205,155 @@ impl CodexProxyState {
         });
 
         inner.server = Some(CodexProxyServer {
+            shutdown_tx: Some(shutdown_tx),
+        });
+        CodexProxyStartResult {
+            success: true,
+            reason: None,
+        }
+    }
+
+    async fn stop(&self) {
+        let server = {
+            let mut inner = self.inner.lock().await;
+            inner.server.take()
+        };
+        if let Some(mut server) = server {
+            if let Some(shutdown_tx) = server.shutdown_tx.take() {
+                let _ = shutdown_tx.send(());
+            }
+        }
+    }
+
+    async fn register_session(&self, state: &str, code_verifier: &str, redirect_uri: &str) -> bool {
+        if state.trim().is_empty()
+            || code_verifier.trim().is_empty()
+            || redirect_uri.trim().is_empty()
+        {
+            return false;
+        }
+
+        let mut inner = self.inner.lock().await;
+        inner.sessions.insert(
+            state.to_string(),
+            CodexPendingExchange {
+                code_verifier: code_verifier.to_string(),
+                redirect_uri: redirect_uri.to_string(),
+                status: "pending".to_string(),
+                created_at: chrono::Utc::now().timestamp_millis(),
+                connection_id: None,
+                email: None,
+                error: None,
+            },
+        );
+        true
+    }
+
+    async fn get_session(&self, state: &str) -> Option<CodexPendingExchange> {
+        let inner = self.inner.lock().await;
+        inner.sessions.get(state).cloned()
+    }
+
+    async fn clear_session(&self, state: &str) {
+        let mut inner = self.inner.lock().await;
+        inner.sessions.remove(state);
+    }
+
+    async fn set_session_done(&self, state: &str, connection_id: String, email: Option<String>) {
+        let mut inner = self.inner.lock().await;
+        if let Some(session) = inner.sessions.get_mut(state) {
+            session.status = "done".to_string();
+            session.connection_id = Some(connection_id);
+            session.email = email;
+            session.error = None;
+        }
+    }
+
+    async fn set_session_error(&self, state: &str, error: String) {
+        let mut inner = self.inner.lock().await;
+        if let Some(session) = inner.sessions.get_mut(state) {
+            session.status = "error".to_string();
+            session.error = Some(error);
+        }
+    }
+}
+
+/// xAI fixed-port OAuth callback proxy on 127.0.0.1:56121.
+/// Parallel to CodexProxyState (port 1455) — kept separate so the codex hot-path
+/// stays byte-equivalent.
+#[derive(Clone, Default)]
+pub struct XaiProxyState {
+    inner: Arc<Mutex<XaiProxyInner>>,
+}
+
+#[derive(Default)]
+struct XaiProxyInner {
+    server: Option<XaiProxyServer>,
+    sessions: HashMap<String, CodexPendingExchange>,
+}
+
+struct XaiProxyServer {
+    shutdown_tx: Option<oneshot::Sender<()>>,
+}
+
+impl XaiProxyState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    async fn start(&self, state: AppState, app_port: u16) -> CodexProxyStartResult {
+        let mut inner = self.inner.lock().await;
+        if inner.server.is_some() {
+            return CodexProxyStartResult {
+                success: true,
+                reason: None,
+            };
+        }
+
+        let listener = match TcpListener::bind(("127.0.0.1", XAI_FIXED_PORT)).await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
+                return CodexProxyStartResult {
+                    success: false,
+                    reason: Some("port_busy".to_string()),
+                };
+            }
+            Err(error) => {
+                return CodexProxyStartResult {
+                    success: false,
+                    reason: Some(error.to_string()),
+                };
+            }
+        };
+
+        let proxy_state = self.clone();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accept_result = listener.accept() => {
+                        let (mut stream, _) = match accept_result {
+                            Ok(pair) => pair,
+                            Err(_) => break,
+                        };
+                        let proxy_state = proxy_state.clone();
+                        let app_state = state.clone();
+                        tokio::spawn(async move {
+                            handle_xai_proxy_connection(proxy_state, app_state, app_port, &mut stream).await;
+                        });
+                    }
+                }
+            }
+        });
+
+        let proxy_state = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(XAI_PROXY_TIMEOUT_MS)).await;
+            proxy_state.stop().await;
+        });
+
+        inner.server = Some(XaiProxyServer {
             shutdown_tx: Some(shutdown_tx),
         });
         CodexProxyStartResult {
@@ -538,7 +692,15 @@ fn is_pkce_provider(provider: &str) -> bool {
 fn is_device_code_provider(provider: &str) -> bool {
     matches!(
         provider,
-        "github" | "kiro" | "kimi-coding" | "kilocode" | "codebuddy" | "codebuddy-cn"
+        "github"
+            | "kiro"
+            | "kimi-coding"
+            | "kilocode"
+            | "codebuddy"
+            | "codebuddy-cn"
+            | "qoder"
+            | "grok-cli"
+            | "qwen"
     )
 }
 
@@ -978,6 +1140,145 @@ async fn handle_codex_proxy_connection(
             } else if let Some(code) = code {
                 match exchange_codex_compat(&code, &session.redirect_uri, &session.code_verifier)
                     .await
+                {
+                    Ok(connection) => {
+                        match create_imported_oauth_connection(&state.db, connection).await {
+                            Ok(saved) => {
+                                proxy_state
+                                    .set_session_done(
+                                        state_value,
+                                        saved.id.clone(),
+                                        saved.email.clone(),
+                                    )
+                                    .await;
+                                render_codex_result_page(true, "You can close this window.")
+                            }
+                            Err(error) => {
+                                let message = error.to_string();
+                                proxy_state
+                                    .set_session_error(state_value, message.clone())
+                                    .await;
+                                render_codex_result_page(false, &message)
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        proxy_state
+                            .set_session_error(state_value, error.clone())
+                            .await;
+                        render_codex_result_page(false, &error)
+                    }
+                }
+            } else {
+                let message = "No authorization code received".to_string();
+                proxy_state
+                    .set_session_error(state_value, message.clone())
+                    .await;
+                render_codex_result_page(false, &message)
+            };
+
+            write_http_response(
+                stream,
+                "200 OK",
+                &[("Content-Type", "text/html; charset=utf-8".to_string())],
+                &response_page,
+            )
+            .await;
+            proxy_state.stop().await;
+            return;
+        }
+    }
+
+    let redirect_suffix = parsed
+        .query()
+        .map(|query| format!("?{query}"))
+        .unwrap_or_default();
+    let redirect_url = format!("http://localhost:{app_port}/callback{redirect_suffix}");
+    write_http_response(stream, "302 Found", &[("Location", redirect_url)], "").await;
+    proxy_state.stop().await;
+}
+
+async fn handle_xai_proxy_connection(
+    proxy_state: XaiProxyState,
+    state: AppState,
+    app_port: u16,
+    stream: &mut tokio::net::TcpStream,
+) {
+    let mut buffer = vec![0u8; 16 * 1024];
+    let bytes_read = match stream.read(&mut buffer).await {
+        Ok(bytes_read) if bytes_read > 0 => bytes_read,
+        _ => return,
+    };
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    let parsed = match url::Url::parse(&format!("http://localhost{target}")) {
+        Ok(url) => url,
+        Err(_) => {
+            write_http_response(
+                stream,
+                "400 Bad Request",
+                &[("Content-Type", "text/plain; charset=utf-8".to_string())],
+                "Invalid callback URL",
+            )
+            .await;
+            return;
+        }
+    };
+
+    if parsed.path() != XAI_CALLBACK_PATH && parsed.path() != "/auth/callback" {
+        write_http_response(
+            stream,
+            "404 Not Found",
+            &[("Content-Type", "text/plain; charset=utf-8".to_string())],
+            "Not found",
+        )
+        .await;
+        return;
+    }
+
+    let code = parsed.query_pairs().find_map(|(key, value)| {
+        if key == "code" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    });
+    let state_param = parsed.query_pairs().find_map(|(key, value)| {
+        if key == "state" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    });
+    let error_param = parsed.query_pairs().find_map(|(key, value)| {
+        if key == "error" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    });
+    let error_description = parsed.query_pairs().find_map(|(key, value)| {
+        if key == "error_description" {
+            Some(value.into_owned())
+        } else {
+            None
+        }
+    });
+
+    if let Some(state_value) = state_param.as_deref() {
+        if let Some(session) = proxy_state.get_session(state_value).await {
+            let response_page = if let Some(error) = error_param {
+                let message = error_description.unwrap_or(error);
+                proxy_state
+                    .set_session_error(state_value, message.clone())
+                    .await;
+                render_codex_result_page(false, &message)
+            } else if let Some(code) = code {
+                match exchange_xai_compat(&code, &session.redirect_uri, &session.code_verifier).await
                 {
                     Ok(connection) => {
                         match create_imported_oauth_connection(&state.db, connection).await {
@@ -2725,10 +3026,10 @@ async fn codex_start_proxy_compat(
     Path(provider): Path<String>,
     Query(query): Query<CodexStartProxyQuery>,
 ) -> Response {
-    if provider != "codex" {
+    if provider != "codex" && provider != "xai" {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Proxy only supported for codex" })),
+            Json(json!({ "error": "Proxy only supported for codex/xai" })),
         )
             .into_response();
     }
@@ -2741,7 +3042,11 @@ async fn codex_start_proxy_compat(
             .into_response();
     };
 
-    let result = state.codex_proxy.start(state.clone(), app_port).await;
+    let result = if provider == "xai" {
+        state.xai_proxy.start(state.clone(), app_port).await
+    } else {
+        state.codex_proxy.start(state.clone(), app_port).await
+    };
     let mut response =
         serde_json::Map::from_iter([("success".to_string(), Value::Bool(result.success))]);
     if let Some(reason) = result.reason {
@@ -2755,10 +3060,17 @@ async fn codex_start_proxy_compat(
             query.redirect_uri.as_deref(),
         ) {
             (Some(state_value), Some(code_verifier), Some(redirect_uri)) => {
-                state
-                    .codex_proxy
-                    .register_session(state_value, code_verifier, redirect_uri)
-                    .await
+                if provider == "xai" {
+                    state
+                        .xai_proxy
+                        .register_session(state_value, code_verifier, redirect_uri)
+                        .await
+                } else {
+                    state
+                        .codex_proxy
+                        .register_session(state_value, code_verifier, redirect_uri)
+                        .await
+                }
             }
             _ => false,
         }
@@ -2774,10 +3086,10 @@ async fn codex_poll_status_compat(
     Path(provider): Path<String>,
     Query(query): Query<CodexPollStatusQuery>,
 ) -> Response {
-    if provider != "codex" {
+    if provider != "codex" && provider != "xai" {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Poll only supported for codex" })),
+            Json(json!({ "error": "Poll only supported for codex/xai" })),
         )
             .into_response();
     }
@@ -2795,14 +3107,24 @@ async fn codex_poll_status_compat(
             .into_response();
     };
 
-    let Some(session) = state.codex_proxy.get_session(state_param).await else {
+    let session = if provider == "xai" {
+        state.xai_proxy.get_session(state_param).await
+    } else {
+        state.codex_proxy.get_session(state_param).await
+    };
+
+    let Some(session) = session else {
         return Json(json!({ "status": "unknown" })).into_response();
     };
 
     if session.status == "done" || session.status == "error" {
         let payload =
             serde_json::to_value(&session).unwrap_or_else(|_| json!({ "status": session.status }));
-        state.codex_proxy.clear_session(state_param).await;
+        if provider == "xai" {
+            state.xai_proxy.clear_session(state_param).await;
+        } else {
+            state.codex_proxy.clear_session(state_param).await;
+        }
         Json(payload).into_response()
     } else {
         Json(json!({ "status": session.status })).into_response()
@@ -2813,15 +3135,19 @@ async fn codex_stop_proxy_compat(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Response {
-    if provider != "codex" {
+    if provider != "codex" && provider != "xai" {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Proxy only supported for codex" })),
+            Json(json!({ "error": "Proxy only supported for codex/xai" })),
         )
             .into_response();
     }
 
-    state.codex_proxy.stop().await;
+    if provider == "xai" {
+        state.xai_proxy.stop().await;
+    } else {
+        state.codex_proxy.stop().await;
+    }
     Json(json!({ "success": true })).into_response()
 }
 
@@ -2928,6 +3254,20 @@ async fn authorize_oauth_compat(
             code_challenge,
             redirect_uri,
         ),
+        "xai" => {
+            // xAI requires a 96-byte PKCE verifier (not the default 32-byte one).
+            let code_verifier = generate_code_verifier_with_len(96);
+            let code_challenge = generate_code_challenge(&code_verifier);
+            build_auth_compat_response(
+                &provider,
+                "authorization_code_pkce",
+                build_xai_auth_url(&redirect_uri, &state, &code_challenge),
+                state,
+                code_verifier,
+                code_challenge,
+                redirect_uri,
+            )
+        }
         _ => internal_error_response(format!("Unknown provider: {provider}")),
     }
 }
@@ -3070,6 +3410,106 @@ async fn exchange_codex_compat(
             .map(crate::oauth::expires_at_from_seconds),
         test_status: Some("active".to_string()),
         provider_specific_data: provider_specific_data.into_iter().collect(),
+        ..Default::default()
+    })
+}
+
+fn xai_token_url() -> String {
+    std::env::var("OPENPROXY_XAI_TOKEN_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| XAI_TOKEN_URL_DEFAULT.to_string())
+}
+
+fn xai_authorize_url() -> String {
+    std::env::var("OPENPROXY_XAI_AUTHORIZE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| XAI_AUTHORIZE_URL_DEFAULT.to_string())
+}
+
+fn build_xai_auth_url(redirect_uri: &str, state: &str, code_challenge: &str) -> String {
+    // nonce is required by xAI OIDC
+    let mut random_bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut random_bytes);
+    let nonce = URL_SAFE_NO_PAD.encode(random_bytes);
+
+    build_query_url(
+        &xai_authorize_url(),
+        &[
+            ("response_type", "code".to_string()),
+            ("client_id", XAI_CLIENT_ID.to_string()),
+            ("redirect_uri", redirect_uri.to_string()),
+            (
+                "scope",
+                "openid profile email offline_access grok-cli:access api:access".to_string(),
+            ),
+            ("state", state.to_string()),
+            ("code_challenge", code_challenge.to_string()),
+            ("code_challenge_method", "S256".to_string()),
+            ("nonce", nonce),
+            ("plan", "generic".to_string()),
+            ("referrer", "cli-proxy-api".to_string()),
+            ("prompt", "login".to_string()),
+        ],
+    )
+}
+
+async fn exchange_xai_compat(
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<ProviderConnection, String> {
+    let response = reqwest::Client::new()
+        .post(xai_token_url())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("client_id", XAI_CLIENT_ID),
+            ("code", code),
+            ("redirect_uri", redirect_uri),
+            ("code_verifier", code_verifier),
+        ])
+        .send()
+        .await
+        .map_err(|error| error.to_string())?;
+
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return Err(format!("Token exchange failed: {error}"));
+    }
+
+    let token_response: TokenResponse = response
+        .json()
+        .await
+        .map_err(|error| format!("Token exchange failed: {error}"))?;
+
+    let email = token_response
+        .id_token
+        .as_deref()
+        .and_then(decode_jwt_claims)
+        .and_then(|claims| {
+            claims
+                .get("email")
+                .or_else(|| claims.get("preferred_username"))
+                .or_else(|| claims.get("sub"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+
+    Ok(ProviderConnection {
+        provider: "xai".to_string(),
+        auth_type: "oauth".to_string(),
+        email,
+        access_token: Some(token_response.access_token),
+        refresh_token: token_response.refresh_token,
+        expires_at: token_response
+            .expires_in
+            .map(crate::oauth::expires_at_from_seconds),
+        scope: token_response.scope,
+        id_token: token_response.id_token,
+        test_status: Some("active".to_string()),
         ..Default::default()
     })
 }
@@ -3726,6 +4166,10 @@ async fn exchange_oauth_compat(
             Err(error) => return internal_error_response(error),
         },
         "cline" => match exchange_cline_compat(code, redirect_uri).await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error),
+        },
+        "xai" => match exchange_xai_compat(code, redirect_uri, code_verifier).await {
             Ok(value) => value,
             Err(error) => return internal_error_response(error),
         },
@@ -4643,8 +5087,36 @@ async fn kiro_api_key_import(
         .unwrap_or_else(|| "Kiro API Key".to_string());
 
     let api_key = api_key.trim();
+    let region = body
+        .get("region")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(KIRO_DEFAULT_REGION)
+        .to_string();
     let connection_id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
+    let email = decode_jwt_claims(api_key)
+        .and_then(|claims| {
+            claims
+                .get("email")
+                .or_else(|| claims.get("preferred_username"))
+                .or_else(|| claims.get("sub"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| Some(name.clone()));
+
+    let mut provider_specific_data = std::collections::BTreeMap::new();
+    provider_specific_data.insert("region".to_string(), Value::String(region));
+    provider_specific_data.insert(
+        "authMethod".to_string(),
+        Value::String("api_key".to_string()),
+    );
+    provider_specific_data.insert(
+        "provider".to_string(),
+        Value::String("API Key".to_string()),
+    );
 
     let result = state
         .db
@@ -4652,14 +5124,21 @@ async fn kiro_api_key_import(
             db.provider_connections.push(ProviderConnection {
                 id: connection_id.clone(),
                 provider: "kiro".to_string(),
-                auth_type: "apikey".to_string(),
+                auth_type: "api_key".to_string(),
                 name: Some(name.clone()),
-                email: Some(name.clone()),
+                email,
+                // Long-lived bearer credential — also stored as access_token so
+                // the executor can use the same path as OAuth connections.
                 api_key: Some(api_key.to_string()),
+                access_token: Some(api_key.to_string()),
+                expires_at: Some(
+                    (chrono::Utc::now() + chrono::Duration::days(365)).to_rfc3339(),
+                ),
                 is_active: Some(true),
                 created_at: Some(now.clone()),
                 updated_at: Some(now.clone()),
                 test_status: Some("active".to_string()),
+                provider_specific_data,
                 ..Default::default()
             });
         })
@@ -4695,9 +5174,24 @@ async fn kiro_import_cli_proxy(
         Err(error) => return internal_error_response(error.to_string()),
     };
 
-    let access_token = body
+    // Accept either flat fields or a nested `json` / `cliProxyAuth` / `auth`
+    // string/object (matches 9router UI contract: { json: "<raw auth JSON>" }).
+    let auth_payload = body
+        .get("cliProxyAuth")
+        .or_else(|| body.get("auth"))
+        .or_else(|| body.get("json"))
+        .map(|value| {
+            if let Some(s) = value.as_str() {
+                serde_json::from_str::<Value>(s).unwrap_or(value.clone())
+            } else {
+                value.clone()
+            }
+        })
+        .unwrap_or_else(|| body.clone());
+
+    let access_token = auth_payload
         .get("accessToken")
-        .or_else(|| body.get("access_token"))
+        .or_else(|| auth_payload.get("access_token"))
         .and_then(Value::as_str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
@@ -4711,15 +5205,16 @@ async fn kiro_import_cli_proxy(
             .into_response();
     }
 
-    let refresh_token = body
+    let refresh_token = auth_payload
         .get("refreshToken")
-        .or_else(|| body.get("refresh_token"))
+        .or_else(|| auth_payload.get("refresh_token"))
         .and_then(Value::as_str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let profile_arn = body
+    let profile_arn = auth_payload
         .get("profileArn")
+        .or_else(|| auth_payload.get("profile_arn"))
         .and_then(Value::as_str)
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
@@ -4772,6 +5267,94 @@ async fn kiro_import_cli_proxy(
     }
 }
 
+/// POST /api/oauth/xai/manual-code
+/// Completes an xAI OAuth flow when the user pastes a bare authorization code
+/// (or when the fixed-port redirect failed and they copy the code from xAI UI).
+async fn xai_manual_code(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let code = body
+        .get("code")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let state_param = body
+        .get("state")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let Some(code) = code else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Missing xAI authorization code" })),
+        )
+            .into_response();
+    };
+    let Some(state_param) = state_param else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "xAI OAuth session not found; restart the login flow and paste the code again" })),
+        )
+            .into_response();
+    };
+
+    let Some(session) = state.xai_proxy.get_session(&state_param).await else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "xAI OAuth session not found; restart the login flow and paste the code again" })),
+        )
+            .into_response();
+    };
+
+    match exchange_xai_compat(&code, &session.redirect_uri, &session.code_verifier).await {
+        Ok(connection) => match create_imported_oauth_connection(&state.db, connection).await {
+            Ok(saved) => {
+                state.xai_proxy.clear_session(&state_param).await;
+                state.xai_proxy.stop().await;
+                let mut response_connection = serde_json::Map::from_iter([
+                    ("id".to_string(), Value::String(saved.id)),
+                    ("provider".to_string(), Value::String(saved.provider)),
+                ]);
+                if let Some(email) = saved.email {
+                    response_connection.insert("email".to_string(), Value::String(email));
+                }
+                if let Some(display_name) = saved.display_name {
+                    response_connection
+                        .insert("displayName".to_string(), Value::String(display_name));
+                }
+                Json(json!({
+                    "success": true,
+                    "connection": Value::Object(response_connection),
+                }))
+                .into_response()
+            }
+            Err(error) => {
+                state.xai_proxy.clear_session(&state_param).await;
+                state.xai_proxy.stop().await;
+                internal_error_response(error.to_string())
+            }
+        },
+        Err(error) => {
+            state.xai_proxy.clear_session(&state_param).await;
+            state.xai_proxy.stop().await;
+            internal_error_response(error)
+        }
+    }
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/oauth/codex/bulk-import", post(codex_bulk_import))
@@ -4791,6 +5374,7 @@ pub fn routes() -> Router<AppState> {
             "/api/oauth/kiro/import-cli-proxy",
             post(kiro_import_cli_proxy),
         )
+        .route("/api/oauth/xai/manual-code", post(xai_manual_code))
         .route(
             "/api/oauth/kiro/social-authorize",
             get(kiro_social_authorize),

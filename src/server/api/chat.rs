@@ -380,7 +380,7 @@ async fn chat_completions_impl(
 
             let disabled_members = get_disabled_members_for_combo(&combo_name, &snapshot.combos);
             let strategy = combo_strategy_for(&snapshot, &combo_name);
-            let sticky_limit = snapshot.settings.sticky_round_robin_limit.max(1);
+            let sticky_limit = snapshot.settings.combo_sticky_round_robin_limit.max(1);
             let combo_body = body.clone();
             let combo_state = state.clone();
             let combo_api_key = presented_api_key.clone();
@@ -1968,12 +1968,20 @@ fn select_connection(
     }
 
     // Determine strategy for this provider.
-    // Uses provider_strategies map, falling back to FillFirst.
+    // Uses provider_strategies map, then the account-level fallbackStrategy,
+    // finally FillFirst.
     let strategy = snapshot
         .settings
         .provider_strategies
         .get(provider)
         .and_then(|s| s.parse::<StrategyType>().ok())
+        .or_else(|| {
+            snapshot
+                .settings
+                .fallback_strategy
+                .parse::<StrategyType>()
+                .ok()
+        })
         .unwrap_or(StrategyType::FillFirst);
 
     match strategy {

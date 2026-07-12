@@ -24,9 +24,9 @@ pub struct LocaleResponse {
 const LOCALE_COOKIE: &str = "locale";
 const LOCALE_COOKIE_MAX_AGE_SECONDS: u64 = 60 * 60 * 24 * 365;
 const SUPPORTED_LOCALES: &[&str] = &[
-    "en", "vi", "zh-CN", "zh-TW", "ja", "pt-BR", "pt-PT", "ko", "es", "de", "fr", "he", "ar", "ru",
-    "pl", "cs", "nl", "tr", "uk", "tl", "id", "th", "hi", "bn", "ur", "ro", "sv", "it", "el", "hu",
-    "fi", "da", "no",
+    "en", "vi", "zh-CN", "zh-TW", "ja", "fa", "pt-BR", "pt-PT", "ko", "es", "de", "fr", "he", "ar",
+    "ru", "pl", "cs", "nl", "tr", "uk", "tl", "id", "th", "hi", "bn", "ur", "ro", "sv", "it", "el",
+    "hu", "fi", "da", "no",
 ];
 
 fn is_supported_locale(locale: &str) -> bool {
@@ -40,6 +40,7 @@ fn normalize_locale(locale: &str) -> String {
         "vi" => "vi".to_string(),
         "zh-TW" => "zh-TW".to_string(),
         "ja" => "ja".to_string(),
+        "fa" => "fa".to_string(),
         "pt-BR" => "pt-BR".to_string(),
         "pt-PT" => "pt-PT".to_string(),
         "ko" => "ko".to_string(),

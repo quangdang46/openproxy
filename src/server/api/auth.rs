@@ -76,6 +76,19 @@ pub async fn login(
 
     let client_ip = client_ip_from_headers(&headers);
 
+    // Block password login when auth is OIDC-only and OIDC is configured.
+    // Do this before the rate limiter so failed OIDC-mode password posts
+    // do not consume lockout budget.
+    let auth_mode = resolve_auth_mode(&snapshot.settings);
+    let oidc_configured = is_oidc_configured(&state);
+    if auth_mode == "oidc" && oidc_configured {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "Password login is disabled. Use OIDC sign in." })),
+        )
+            .into_response();
+    }
+
     // Reserve the attempt slot before checking the password so an attacker
     // cannot bypass the limit by timing requests around bcrypt. A successful
     // password check immediately resets the counter via the second call below.
@@ -103,7 +116,10 @@ pub async fn login(
         }
         return (
             StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "Invalid password" })),
+            Json(json!({
+                "error": "Invalid password",
+                "resetHint": "Forgot password? Open the OpenProxy CLI on the host → Settings → Reset Password to Default.",
+            })),
         )
             .into_response();
     }
@@ -138,12 +154,45 @@ pub async fn login(
             .map(|value| value.eq_ignore_ascii_case("https"))
             .unwrap_or(false);
 
-    let mut response = Json(json!({ "success": true })).into_response();
+    // Force a password change when the default password is still in use and the
+    // client is remote (keeps local UX intact; mirrors 9router).
+    let has_stored_hash = settings_password_hash(&snapshot.settings).is_some();
+    let must_change_password =
+        !has_stored_hash && std::env::var("INITIAL_PASSWORD").is_err() && !client_ip.is_loopback();
+
+    let mut response = Json(json!({
+        "success": true,
+        "mustChangePassword": must_change_password,
+    }))
+    .into_response();
     let cookie = build_auth_cookie(&token, 86400, secure_cookie);
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
     response
+}
+
+/// GET /api/auth/status — Check if the browser has a dashboard session and
+/// return login-page metadata (auth mode, OIDC readiness, password state).
+pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    let logged_in = crate::server::auth::require_dashboard_session(&headers, &state.db).is_ok();
+    let snapshot = state.db.snapshot();
+    let settings = &snapshot.settings;
+    let has_password = settings_password_hash(settings).is_some();
+    let oidc_configured = is_oidc_configured(&state);
+    let auth_mode = resolve_auth_mode(settings);
+    let oidc_login_label = resolve_oidc_login_label(settings);
+
+    Json(json!({
+        "authenticated": logged_in,
+        "requireLogin": settings.require_login,
+        "hasPassword": has_password,
+        "authMode": auth_mode,
+        "oidcConfigured": oidc_configured,
+        "oidcLoginLabel": oidc_login_label,
+        "oidcEnabled": settings.oidc_enabled,
+    }))
+    .into_response()
 }
 
 /// GET /api/auth/oidc/login
@@ -153,17 +202,6 @@ pub async fn login(
 /// HttpOnly cookies; and 302-redirects to the IdP's `authorization_endpoint`.
 ///
 /// Returns 400 when OIDC is not configured (no `OIDC_*` env vars at boot).
-///
-/// GET /api/auth/status - Check if user is authenticated.
-/// Returns the current login status.
-pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> Response {
-    let logged_in = crate::server::auth::require_dashboard_session(&headers, &state.db).is_ok();
-    Json(json!({
-        "authenticated": logged_in,
-        "requireLogin": state.db.snapshot().settings.require_login,
-    }))
-    .into_response()
-}
 
 pub async fn oidc_login(headers: HeaderMap, State(state): State<AppState>) -> Response {
     // Apply login rate limiter to prevent DoS against the IdP redirect.
@@ -174,14 +212,17 @@ pub async fn oidc_login(headers: HeaderMap, State(state): State<AppState>) -> Re
         return lockout_response(retry_after_secs);
     }
 
-    let client = match state.oidc_client.as_ref() {
-        Some(c) => c.clone(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "OIDC not configured" })),
-            )
-                .into_response();
+    let client = {
+        let guard = state.oidc_client.read().await;
+        match guard.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "OIDC not configured" })),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -218,14 +259,17 @@ pub async fn oidc_callback(
     Query(params): Query<std::collections::HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let client = match state.oidc_client.as_ref() {
-        Some(c) => c.clone(),
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "OIDC not configured" })),
-            )
-                .into_response();
+    let client = {
+        let guard = state.oidc_client.read().await;
+        match guard.as_ref() {
+            Some(c) => c.clone(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "OIDC not configured" })),
+                )
+                    .into_response();
+            }
         }
     };
 
@@ -707,14 +751,225 @@ pub async fn change_password(
             .into_response();
     }
 
-    // Bump the token epoch to invalidate all outstanding sessions. Future
-    // `generate_jti()` calls will produce tokens with the new epoch, and
-    // `require_dashboard_session` will reject any token with an older one.
-    crate::server::auth::increment_token_epoch();
+    // Only revoke existing sessions when rotating an already-set password.
+    // First-time password set (force-change after default login) keeps the
+    // freshly issued session cookie valid so the user can enter the dashboard.
+    if current_hash.is_some() {
+        crate::server::auth::increment_token_epoch();
+        return Json(json!({
+            "success": true,
+            "message": "Password changed. All sessions have been invalidated. Please log in again.",
+            "sessionsInvalidated": true,
+        }))
+        .into_response();
+    }
 
     Json(json!({
         "success": true,
-        "message": "Password changed. All sessions have been invalidated. Please log in again."
+        "message": "Password set successfully.",
+        "sessionsInvalidated": false,
+    }))
+    .into_response()
+}
+
+/// POST /api/auth/oidc/test
+///
+/// Validate OIDC discovery (and optionally the client secret) without
+/// completing a full login. Uses the request body when provided, otherwise
+/// falls back to the currently saved settings.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OidcTestRequest {
+    issuer_url: Option<String>,
+    client_id: Option<String>,
+    scopes: Option<String>,
+    client_secret: Option<String>,
+}
+
+pub async fn oidc_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<OidcTestRequest>,
+) -> Response {
+    // Require a dashboard session when login is required.
+    let snapshot = state.db.snapshot();
+    if snapshot.settings.require_login {
+        if let Err(err) = crate::server::auth::require_dashboard_session(&headers, &state.db) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": err.message() })),
+            )
+                .into_response();
+        }
+    }
+
+    let issuer_url = req
+        .issuer_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(snapshot.settings.oidc_issuer_url.as_str())
+        .to_string();
+    let client_id = req
+        .client_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(snapshot.settings.oidc_client_id.as_str())
+        .to_string();
+    let scopes = req
+        .scopes
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(snapshot.settings.oidc_scopes.as_str())
+        .to_string();
+    let client_secret = req
+        .client_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(snapshot.settings.oidc_client_secret.as_str())
+        .to_string();
+
+    if issuer_url.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Issuer URL is required" })),
+        )
+            .into_response();
+    }
+    if client_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Client ID is required" })),
+        )
+            .into_response();
+    }
+
+    let redirect_uri = std::env::var("OIDC_REDIRECT_URI")
+        .unwrap_or_else(|_| "http://127.0.0.1:4623/api/auth/oidc/callback".to_string());
+
+    // Discovery-only probe: pass a placeholder secret when none is available so
+    // discover() can still fetch the openid-configuration document.
+    let probe_secret = if client_secret.is_empty() {
+        "__probe__".to_string()
+    } else {
+        client_secret.clone()
+    };
+
+    let client = match crate::server::auth::oidc::OidcClient::discover(
+        &issuer_url,
+        &client_id,
+        &probe_secret,
+        &redirect_uri,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("OIDC discovery failed: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut client_secret_tested = false;
+    let mut client_secret_valid: Option<bool> = None;
+    let mut secret_message = String::new();
+
+    if !client_secret.is_empty() {
+        // Soft probe: POST an intentionally invalid code. A client-auth error
+        // means the secret is wrong; other token-endpoint errors (invalid_grant
+        // etc.) mean discovery + client credentials are fine.
+        client_secret_tested = true;
+        let http = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "error": format!("Failed to build HTTP client: {e}") })),
+                )
+                    .into_response();
+            }
+        };
+        match http
+            .post(&client.token_endpoint)
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", "__oidc_test_invalid_code__"),
+                ("redirect_uri", redirect_uri.as_str()),
+                ("client_id", client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
+                ("code_verifier", "__oidc_test_invalid_verifier__"),
+            ])
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+                let lower = body_text.to_ascii_lowercase();
+                if status.as_u16() == 401
+                    || lower.contains("invalid_client")
+                    || lower.contains("unauthorized_client")
+                    || lower.contains("client authentication failed")
+                {
+                    client_secret_valid = Some(false);
+                    secret_message = "Client secret was rejected by the token endpoint".into();
+                } else {
+                    // Any other response (including invalid_grant for our fake code)
+                    // means client credentials were accepted.
+                    client_secret_valid = Some(true);
+                    secret_message = "Client secret appears valid".into();
+                }
+            }
+            Err(e) => {
+                client_secret_valid = None;
+                secret_message = format!("Could not reach token endpoint: {e}");
+            }
+        }
+
+        if client_secret_valid == Some(false) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "ok": false,
+                    "discoveryOk": true,
+                    "clientSecretTested": true,
+                    "clientSecretValid": false,
+                    "issuerUrl": issuer_url,
+                    "clientId": client_id,
+                    "scopes": scopes,
+                    "redirectUri": redirect_uri,
+                    "authorizationEndpoint": client.authorization_endpoint,
+                    "tokenEndpoint": client.token_endpoint,
+                    "jwksUri": client.jwks_uri,
+                    "error": format!("Discovery loaded, but the client secret is not valid: {secret_message}"),
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    Json(json!({
+        "ok": true,
+        "discoveryOk": true,
+        "clientSecretTested": client_secret_tested,
+        "clientSecretValid": client_secret_valid,
+        "issuerUrl": issuer_url,
+        "clientId": client_id,
+        "scopes": scopes,
+        "redirectUri": redirect_uri,
+        "authorizationEndpoint": client.authorization_endpoint,
+        "tokenEndpoint": client.token_endpoint,
+        "jwksUri": client.jwks_uri,
+        "message": secret_message,
     }))
     .into_response()
 }
@@ -730,6 +985,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/oidc/login", get(oidc_login))
         .route("/api/auth/oidc/callback", get(oidc_callback))
+        .route("/api/auth/oidc/test", post(oidc_test))
         .route("/api/user", get(get_user))
 }
 
@@ -830,11 +1086,17 @@ fn client_ip_from_headers(headers: &HeaderMap) -> std::net::IpAddr {
 /// HTTP 429 response for a rate-limited login attempt. Includes a
 /// `Retry-After` header (seconds) and a JSON body the dashboard can render.
 fn lockout_response(retry_after_secs: u64) -> Response {
+    let reset_hint = "Forgot password? Open the OpenProxy CLI on the host → Settings → Reset Password to Default.";
     let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         Json(json!({
-            "error": "Too many login attempts",
+            "error": format!(
+                "Too many failed attempts. Try again in {retry_after_secs}s."
+            ),
             "retry_after_secs": retry_after_secs,
+            // camelCase alias for the login UI countdown
+            "retryAfter": retry_after_secs,
+            "resetHint": reset_hint,
         })),
     )
         .into_response();
@@ -842,4 +1104,73 @@ fn lockout_response(retry_after_secs: u64) -> Response {
         response.headers_mut().append(header::RETRY_AFTER, value);
     }
     response
+}
+
+/// Resolve dashboard auth mode for the login page.
+///
+/// Preference order:
+/// 1. Explicit `settings.auth_mode` (`password` | `oidc` | `both`)
+/// 2. Explicit `authMode` in settings.extra
+/// 3. `settings.oidc_enabled` → `"both"` (password kept as recovery)
+/// 4. Default `"password"`
+fn resolve_auth_mode(settings: &Settings) -> String {
+    let mode = settings.auth_mode.trim();
+    if matches!(mode, "password" | "oidc" | "both") {
+        return mode.to_string();
+    }
+    if let Some(mode) = settings
+        .extra
+        .get("authMode")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "password" | "oidc" | "both"))
+    {
+        return mode.to_string();
+    }
+    if settings.oidc_enabled {
+        "both".to_string()
+    } else {
+        "password".to_string()
+    }
+}
+
+fn resolve_oidc_login_label(settings: &Settings) -> String {
+    let label = settings.oidc_login_label.trim();
+    if !label.is_empty() {
+        return label.to_string();
+    }
+    if let Some(label) = settings
+        .extra
+        .get("oidcLoginLabel")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return label.to_string();
+    }
+    if let Ok(label) = std::env::var("OIDC_LOGIN_LABEL") {
+        let trimmed = label.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "Sign in with OIDC".to_string()
+}
+
+fn is_oidc_configured(state: &AppState) -> bool {
+    // Runtime client may be set from settings or env; also accept env-only readiness.
+    if state
+        .oidc_client
+        .try_read()
+        .map(|guard| guard.is_some())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    std::env::var("OIDC_ISSUER")
+        .ok()
+        .is_some_and(|v| !v.trim().is_empty())
+        && std::env::var("OIDC_CLIENT_ID")
+            .ok()
+            .is_some_and(|v| !v.trim().is_empty())
 }

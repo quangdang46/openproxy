@@ -3,6 +3,8 @@
 import { useState, useMemo, useEffect } from "react";
 import Modal from "./Modal";
 import Button from "./Button";
+import CapacityBadges from "./CapacityBadges";
+import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 import React from "react";
@@ -84,6 +86,7 @@ export default function ModelSelectModal({
   closeOnSelect = true,
 }: ModelSelectModalProps) {
   useEnsureCatalog();
+  const { getCaps } = useModelCaps();
   // Filter activeProviders by serviceKinds when kindFilter set (e.g. "webSearch", "webFetch")
   const filteredActiveProviders = useMemo(() => {
     if (!kindFilter) return activeProviders;
@@ -490,8 +493,14 @@ export default function ModelSelectModal({
                       <span className="flex items-center gap-1">
                         {model.name}
                         <span className="text-[9px] opacity-60 font-normal">custom</span>
+                        <CapacityBadges caps={getCaps(model.value)} size={12} colorOverride={isSelected ? "text-white/80" : undefined} />
                       </span>
-                    ) : model.name}
+                    ) : (
+                      <span className="flex items-center gap-1">
+                        {model.name}
+                        <CapacityBadges caps={getCaps(model.value)} size={12} colorOverride={isSelected ? "text-white/80" : undefined} />
+                      </span>
+                    )}
                   </button>
                 );
               })}
