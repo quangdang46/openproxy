@@ -1,16 +1,20 @@
-<h1 align="center">OpenProxy</h1>
+# OpenProxy
 
-<p align="center">
-  <b>Single-binary AI router for AI coding tools.</b><br/>
-  Embedded dashboard · OpenAI-compatible API · auto-fallback across 40+ providers · ~20–40% input-token savings via RTK.
-</p>
+<div align="center">
+  <img src="openproxy_illustration.webp" alt="OpenProxy — local AI router. 40+ providers. Auto-fallback.">
+</div>
 
-<p align="center">
-  <a href="https://github.com/quangdang46/openproxy/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/quangdang46/openproxy/actions/workflows/ci.yml/badge.svg?branch=main" /></a>
-  <a href="https://github.com/quangdang46/openproxy/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/quangdang46/openproxy?display_name=tag&sort=semver&label=release&color=brightgreen" /></a>
-  <a href="https://github.com/quangdang46/openproxy/blob/main/README.md#license"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a>
-  <a href="#install"><img alt="Install" src="https://img.shields.io/badge/install-curl%20%7C%20npm-1e90ff" /></a>
-</p>
+<div align="center">
+
+![CI](https://img.shields.io/github/actions/workflow/status/quangdang46/openproxy/ci.yml?branch=main)
+![Release](https://img.shields.io/github/v/release/quangdang46/openproxy?display_name=tag&sort=semver&label=release&color=brightgreen)
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
+![Install](https://img.shields.io/badge/install-curl%20%7C%20npm-1e90ff)
+
+</div>
+
+**Single-binary AI router for AI coding tools.**  
+Routes to 40+ providers with auto-fallback combos. Embedded dashboard, OpenAI-compatible API, RTK compression. Run on `127.0.0.1:4623` — no cloud required.
 
 <p align="center">
   <a href="#install">Install</a> ·
@@ -20,6 +24,37 @@
   <a href="#for-ai-agents">For AI Agents</a> ·
   <a href="#configuration">Configuration</a>
 </p>
+
+<div align="center">
+
+```bash
+# Start locally (auto-opens dashboard)
+curl -fsSL "https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh" | bash
+openproxy
+```
+
+</div>
+
+---
+
+## 🤖 Agent Quickstart (API / Robot Mode)
+
+Point your coding agent CLI at `http://127.0.0.1:4623`:
+
+```bash
+# Claude Code
+claude config set proxyUrl http://127.0.0.1:4623
+
+# Codex CLI
+codex --proxy http://127.0.0.1:4623
+
+# Any OpenAI-compatible tool
+curl http://127.0.0.1:4623/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"claude/claude-opus-4-8","messages":[{"role":"user","content":"hi"}]}'
+```
+
+**Dashboard** — open `http://127.0.0.1:4623/` in browser for provider config, combo chains, quota tracking, and request logs.
 
 ---
 
