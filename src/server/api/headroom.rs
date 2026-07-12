@@ -159,7 +159,8 @@ fn check_python_version(python: &str) -> bool {
 
 fn find_headroom_binary() -> Option<String> {
     let current_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut parts: Vec<std::path::PathBuf> = EXTRA_BINS.iter().map(std::path::PathBuf::from).collect();
+    let mut parts: Vec<std::path::PathBuf> =
+        EXTRA_BINS.iter().map(std::path::PathBuf::from).collect();
     parts.extend(std::env::split_paths(&current_path));
     let extended_path = std::env::join_paths(&parts).ok()?;
 
@@ -782,7 +783,9 @@ pub async fn extras_post(
         Err(e) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("pip install failed: {e}"), "code": "INSTALL_FAILED"})),
+                Json(
+                    json!({"error": format!("pip install failed: {e}"), "code": "INSTALL_FAILED"}),
+                ),
             )
                 .into_response();
         }
@@ -883,12 +886,7 @@ pub async fn extras_delete(
     reset_install_log();
     append_install_log(&format!("Uninstalling: {}", pkg_list.join(" ")));
 
-    let mut args: Vec<String> = vec![
-        "-m".into(),
-        "pip".into(),
-        "uninstall".into(),
-        "-y".into(),
-    ];
+    let mut args: Vec<String> = vec!["-m".into(), "pip".into(), "uninstall".into(), "-y".into()];
     args.extend(pkg_list.iter().cloned());
 
     let child = match std::process::Command::new(&python)

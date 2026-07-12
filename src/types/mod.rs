@@ -466,7 +466,10 @@ pub struct Settings {
     pub headroom_code_aware: bool,
     /// When false, pass `--disable-kompress` to the managed Headroom proxy.
     /// Defaults to true (Kompress is on by default in Headroom).
-    #[serde(default = "default_true", deserialize_with = "deserialize_null_default")]
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_null_default"
+    )]
     pub headroom_kompress: bool,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub payload_rules: PayloadRulesConfig,
