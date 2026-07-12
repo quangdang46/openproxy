@@ -3,8 +3,8 @@
 //! Single pure function used by chat so DeepSeek-TUI, Accept preference,
 //! forceStream, and imageGen rules cannot drift from each other.
 
-use crate::core::utils::client_detector::ClientTool;
 use crate::core::translator::registry::Format;
+use crate::core::utils::client_detector::ClientTool;
 
 /// Providers that force upstream streaming (9router registry forceStream: true).
 /// Client may still receive JSON via SSE→JSON aggregation.
@@ -66,12 +66,10 @@ pub fn resolve_stream_flags(
     };
 
     // Image generation models require non-streaming (Google generateContent)
-    let is_image_gen = model_type == Some("imageGen")
-        || model_type == Some("image")
-        || {
-            let m = model.to_lowercase();
-            m.contains("image") || m.contains("imagen") || m.contains("image-generation")
-        };
+    let is_image_gen = model_type == Some("imageGen") || model_type == Some("image") || {
+        let m = model.to_lowercase();
+        m.contains("image") || m.contains("imagen") || m.contains("image-generation")
+    };
     if is_image_gen && (provider == "antigravity" || provider == "gemini-cli") {
         stream = false;
     }

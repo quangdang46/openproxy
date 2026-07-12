@@ -156,7 +156,12 @@ impl KiroExecutor {
 
     /// Auth-aware URL order (9router getOrderedBaseUrls).
     /// api_key / external_idp / idc → amazonaws.com hosts first.
-    pub fn build_url(&self, _model: &str, _stream: bool, credentials: &ProviderConnection) -> Vec<String> {
+    pub fn build_url(
+        &self,
+        _model: &str,
+        _stream: bool,
+        credentials: &ProviderConnection,
+    ) -> Vec<String> {
         let auth_method = credentials
             .provider_specific_data
             .get("authMethod")
@@ -215,14 +220,11 @@ impl KiroExecutor {
         let is_api_key = auth_method == "api_key";
         let is_external_idp = auth_method == "external_idp";
 
-        let api_key = credentials
-            .api_key
-            .as_deref()
-            .or(if is_api_key {
-                credentials.access_token.as_deref()
-            } else {
-                None
-            });
+        let api_key = credentials.api_key.as_deref().or(if is_api_key {
+            credentials.access_token.as_deref()
+        } else {
+            None
+        });
 
         if is_api_key {
             let key = api_key
@@ -277,17 +279,18 @@ impl KiroExecutor {
                 .unwrap_or(false);
 
             let headers = if is_aws_auth {
-                let credentials = match Self::parse_aws_credentials(
-                    request.credentials.access_token.as_deref().ok_or_else(|| {
-                        KiroExecutorError::MissingCredentials("kiro".to_string())
-                    })?,
-                ) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        last_error = Some(e);
-                        continue;
-                    }
-                };
+                let credentials =
+                    match Self::parse_aws_credentials(
+                        request.credentials.access_token.as_deref().ok_or_else(|| {
+                            KiroExecutorError::MissingCredentials("kiro".to_string())
+                        })?,
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            last_error = Some(e);
+                            continue;
+                        }
+                    };
                 match self
                     .sign_request(url, &credentials, &content_hash, request.stream)
                     .await

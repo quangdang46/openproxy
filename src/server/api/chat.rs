@@ -380,10 +380,7 @@ async fn chat_completions_impl(
 
             let disabled_members = get_disabled_members_for_combo(&combo_name, &snapshot.combos);
             let strategy = combo_strategy_for(&snapshot, &combo_name);
-            let sticky_limit = snapshot
-                .settings
-                .sticky_round_robin_limit
-                .max(1) as u32;
+            let sticky_limit = snapshot.settings.sticky_round_robin_limit.max(1) as u32;
             let combo_body = body.clone();
             let combo_state = state.clone();
             let combo_api_key = presented_api_key.clone();
@@ -591,11 +588,7 @@ async fn chat_completions_impl(
 
 /// Inject provider-level thinking override onto the **source** body
 /// (before translation). 9router chatCore.js:68-80.
-fn inject_provider_thinking(
-    body: &mut Value,
-    settings: &crate::types::Settings,
-    provider: &str,
-) {
+fn inject_provider_thinking(body: &mut Value, settings: &crate::types::Settings, provider: &str) {
     let Some(provider_thinking) = settings
         .extra
         .get("providerThinking")
@@ -1027,7 +1020,7 @@ async fn forward_with_provider_fallback(
                         retry_after: None,
                         upstream_body: None,
                     })
-            } else if provider == "vertex" {
+            } else if provider == "vertex" || provider == "vertex-partner" || provider == "vxp" {
                 let executor = VertexExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
@@ -2200,7 +2193,12 @@ fn fusion_config_for(snapshot: &AppDb, combo_name: &str, panel_count: usize) -> 
         .combos
         .iter()
         .find(|c| c.name == combo_name)
-        .map(|c| c.extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .map(|c| {
+            c.extra
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        })
         .unwrap_or_default();
 
     if let Some(entry) = snapshot.settings.combo_strategies.get(combo_name) {
@@ -2297,9 +2295,7 @@ async fn clear_connection_error_for_model(
                 connection.consecutive_errors = Some(0);
                 connection.test_status = None;
                 // Selective clear: remove expired locks + lock for succeeded model only
-                let model_key = succeeded_model
-                    .as_ref()
-                    .map(|m| format!("modelLock_{m}"));
+                let model_key = succeeded_model.as_ref().map(|m| format!("modelLock_{m}"));
                 connection.extra.retain(|k, v| {
                     if !k.starts_with("modelLock_") {
                         return true;
@@ -2339,22 +2335,20 @@ async fn proxy_sse_to_json_response(
     let status = response.status();
     let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
 
-    let json_body = crate::core::media::responses::stream_to_json::sse_stream_to_json(
-        &body_bytes,
-        Some(model),
-    )
-    .unwrap_or_else(|| {
-        // Fallback: try parse as JSON already, else wrap error
-        serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
-            json!({
-                "error": {
-                    "message": "Failed to convert forced SSE stream to JSON",
-                    "type": "server_error",
-                    "code": "sse_to_json_failed"
-                }
-            })
-        })
-    });
+    let json_body =
+        crate::core::media::responses::stream_to_json::sse_stream_to_json(&body_bytes, Some(model))
+            .unwrap_or_else(|| {
+                // Fallback: try parse as JSON already, else wrap error
+                serde_json::from_slice(&body_bytes).unwrap_or_else(|_| {
+                    json!({
+                        "error": {
+                            "message": "Failed to convert forced SSE stream to JSON",
+                            "type": "server_error",
+                            "code": "sse_to_json_failed"
+                        }
+                    })
+                })
+            });
 
     let out = Bytes::from(serde_json::to_vec(&json_body).unwrap_or_default());
 
@@ -2585,7 +2579,9 @@ async fn proxy_response_with_pending_tracking(
         && !ct.contains("text/event-stream")
         && !ct.contains("application/octet-stream")
         && !ct.contains("application/x-ndjson")
-        && (ct.contains("text/html") || ct.contains("application/json") || ct.contains("text/plain"))
+        && (ct.contains("text/html")
+            || ct.contains("application/json")
+            || ct.contains("text/plain"))
     {
         // Collect body and return structured error instead of piping garbage as SSE
         let (body_bytes, _) = collect_upstream_response_bytes(response).await;
