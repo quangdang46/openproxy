@@ -953,7 +953,6 @@ pub async fn extras_delete(
     .into_response()
 }
 
-
 // ── Headroom reverse proxy (dashboard access) ────────────────────────
 
 /// Hop-by-hop headers that must not be forwarded (RFC 9110 §7.6.1).
@@ -1067,8 +1066,8 @@ pub async fn proxy_handler(
 
     match req_builder.send().await {
         Ok(resp) => {
-            let status = StatusCode::from_u16(resp.status().as_u16())
-                .unwrap_or(StatusCode::BAD_GATEWAY);
+            let status =
+                StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let resp_headers = resp.headers().clone();
             let resp_body = match resp.bytes().await {
                 Ok(b) => b,
@@ -1104,4 +1103,3 @@ pub async fn proxy_handler(
             .into_response(),
     }
 }
-
