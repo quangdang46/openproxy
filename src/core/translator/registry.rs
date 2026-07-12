@@ -132,6 +132,9 @@ pub struct ResponseTransformState {
     pub kiro: KiroResponseState,
     /// CommandCode streaming state
     pub commandcode: CommandCodeResponseState,
+    /// Generic scratch map for Value-based response transforms
+    /// (openai→claude, openai→antigravity, chat→responses, etc.).
+    pub generic: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -222,12 +225,19 @@ pub struct CommandCodeResponseState {
 }
 
 /// Detect source format from request body structure.
-/// Mirrors open-sse/services/provider.js:detectFormat() logic.
-/// Priority: Responses > Antigravity > Gemini > OpenAI-specific fields > Claude hints > default OpenAI.
+/// Mirrors open-sse/services/provider.js:detectFormat() order carefully:
+/// Responses (input array|string && !messages) → Antigravity → Gemini contents[]
+/// → OpenAI-specific fields → Claude heuristics → default OpenAI.
+/// CommandCode is a Rust extension (threadId + params.messages).
 pub fn detect_source_format(body: &Value) -> Format {
-    // 1. OpenAI Responses API: has `input` instead of `messages[]`
-    if body.get("input").is_some() {
-        return Format::OpenAiResponses;
+    // 1. OpenAI Responses API: input as array or string, and no messages
+    //    (JS requires !body.messages — bodies with both stay non-responses)
+    if let Some(input) = body.get("input") {
+        let input_ok = input.is_array() || input.is_string();
+        // JS: !body.messages — any messages key blocks responses detection
+        if input_ok && body.get("messages").is_none() {
+            return Format::OpenAiResponses;
+        }
     }
 
     // 2. Antigravity format: Gemini wrapped in body.request
@@ -243,45 +253,19 @@ pub fn detect_source_format(body: &Value) -> Format {
         return Format::Antigravity;
     }
 
-    // 3. CommandCode: has `threadId` and `params.messages` instead of top-level `messages`
+    // 3. CommandCode (Rust extension): threadId + params.messages
     if body.get("threadId").is_some()
         && body.get("params").and_then(|p| p.get("messages")).is_some()
     {
         return Format::CommandCode;
     }
 
-    // 4. Gemini format: has `contents[]` or `systemInstruction[]`
-    if body.get("contents").is_some() || body.get("systemInstruction").is_some() {
+    // 4. Gemini format: contents must be an array (JS)
+    if body.get("contents").and_then(Value::as_array).is_some() {
         return Format::Gemini;
     }
 
-    // 5. Claude-specific indicators
-    // Check first message for Claude-style content types
-    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
-        if let Some(first) = messages.first() {
-            // Check for Claude-specific fields at body level
-            if body.get("system").is_some() || body.get("anthropic_version").is_some() {
-                return Format::Claude;
-            }
-
-            // Check first message content array for Claude types
-            if let Some(content) = first.get("content").and_then(Value::as_array) {
-                for part in content {
-                    let t = part.get("type").and_then(Value::as_str);
-                    // Claude uses `image` with `source.type`, tool_use, tool_result
-                    if t == Some("tool_use") || t == Some("tool_result") {
-                        return Format::Claude;
-                    }
-                    // Claude image: {type:"image", source:{type:"base64", ...}}
-                    if t == Some("image") && part.get("source").is_some() {
-                        return Format::Claude;
-                    }
-                }
-            }
-        }
-    }
-
-    // 6. OpenAI-specific indicators (fields that never appear in Claude format)
+    // 5. OpenAI-specific indicators BEFORE Claude (9router order)
     if body.get("stream_options").is_some()
         || body.get("response_format").is_some()
         || body.get("logprobs").is_some()
@@ -295,25 +279,82 @@ pub fn detect_source_format(body: &Value) -> Format {
         return Format::OpenAi;
     }
 
+    // 6. Claude-specific indicators
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        if body.get("system").is_some() || body.get("anthropic_version").is_some() {
+            return Format::Claude;
+        }
+        if let Some(first) = messages.first() {
+            if let Some(content) = first.get("content").and_then(Value::as_array) {
+                for part in content {
+                    let t = part.get("type").and_then(Value::as_str);
+                    if t == Some("tool_use") || t == Some("tool_result") {
+                        return Format::Claude;
+                    }
+                    // Claude image: source.type === base64 (JS)
+                    if t == Some("image")
+                        && part
+                            .get("source")
+                            .and_then(|s| s.get("type"))
+                            .and_then(Value::as_str)
+                            == Some("base64")
+                    {
+                        return Format::Claude;
+                    }
+                    if t == Some("image_url") {
+                        return Format::OpenAi;
+                    }
+                }
+            }
+        }
+    }
+
     // 7. Default to OpenAI
     Format::OpenAi
 }
 
-/// Detect source format from endpoint path.
-/// Mirrors open-sse/services/provider.js:detectFormatByEndpoint() logic.
+/// Detect source format from endpoint path (+ optional body for Cursor CLI).
+/// Mirrors open-sse/translator/formats.js:detectFormatByEndpoint.
 pub fn detect_source_format_by_endpoint(path: &str) -> Option<Format> {
+    detect_source_format_by_endpoint_with_body(path, None)
+}
+
+/// Body-aware endpoint detection (Cursor CLI: /v1/chat/completions + input[] → openai).
+pub fn detect_source_format_by_endpoint_with_body(
+    path: &str,
+    body: Option<&Value>,
+) -> Option<Format> {
     if path.contains("/v1/responses") {
         return Some(Format::OpenAiResponses);
     }
     if path.contains("/v1/messages") {
         return Some(Format::Claude);
     }
+    // Cursor CLI sends Responses-shaped `input` on chat/completions — force OpenAI
+    if path.contains("/v1/chat/completions") {
+        if let Some(b) = body {
+            if b.get("input").and_then(Value::as_array).is_some() {
+                return Some(Format::OpenAi);
+            }
+        }
+    }
     None
 }
 
 /// Get the default target format for a provider.
-/// Mirrors open-sse/services/provider.js:getTargetFormat().
+/// Mirrors open-sse/services/provider.js:getTargetFormat() including
+/// openai-compatible-* and anthropic-compatible-* prefixes.
 pub fn get_target_format_for_provider(provider: &str) -> Format {
+    if provider.starts_with("openai-compatible") {
+        return if provider.contains("responses") {
+            Format::OpenAiResponses
+        } else {
+            Format::OpenAi
+        };
+    }
+    if provider.starts_with("anthropic-compatible") {
+        return Format::Claude;
+    }
     match provider {
         "openai" => Format::OpenAi,
         "anthropic" | "claude" | "glm" | "kimi" | "minimax" | "minimax-cn" | "kimi-coding" => {
@@ -321,14 +362,13 @@ pub fn get_target_format_for_provider(provider: &str) -> Format {
         }
         "gemini" => Format::Gemini,
         "gemini-cli" => Format::GeminiCli,
-        "vertex" => Format::Vertex,
-        "codex" => Format::OpenAiResponses,
-        "cursor" => Format::Cursor,
+        "vertex" | "vertex-partner" => Format::Vertex,
+        "codex" | "grok-cli" | "gcli" | "gb" | "perplexity-agent" => Format::OpenAiResponses,
+        "cursor" | "cu" => Format::Cursor,
         "kiro" => Format::Kiro,
         "ollama" | "ollama-local" | "ollama-cloud" => Format::Ollama,
         "antigravity" => Format::Antigravity,
         "commandcode" | "command-code" => Format::CommandCode,
-        // All OpenAI-compatible providers default to OpenAI
         _ => Format::OpenAi,
     }
 }
@@ -367,8 +407,12 @@ impl TranslationRegistry {
         self.response_transforms.contains_key(&(from, to))
     }
 
-    /// Apply request transform: source -> OpenAI intermediate -> target.
-    /// If source == target, applies normalization only.
+    /// Apply request transform with 9router parity:
+    /// 1. Direct route if `source:target` is registered
+    /// 2. Else pivot source→OpenAI→target
+    /// 3. Normalization + target-specific hooks (filter OpenAI / prepare Claude)
+    ///
+    /// `source` = client format, `target` = provider format.
     pub fn translate_request(
         &self,
         source: Format,
@@ -378,36 +422,94 @@ impl TranslationRegistry {
         stream: bool,
         credentials: Option<&Value>,
     ) -> bool {
-        if source == target && source == Format::OpenAi {
-            // Same format, apply normalization only
-            return apply_normalization_hooks(body);
-        }
-
-        if source == Format::OpenAi && target == Format::OpenAi {
-            return apply_normalization_hooks(body);
-        }
-
-        // Step 1: source -> OpenAI intermediate (if needed)
-        if source != Format::OpenAi {
-            let key = (source, Format::OpenAi);
-            if let Some(transform) = self.request_transforms.get(&key) {
-                let _ = transform(model, body, stream, credentials);
-            }
-        }
-
-        // Step 2: OpenAI intermediate -> target (if needed)
-        if target != Format::OpenAi {
-            let key = (Format::OpenAi, target);
-            if let Some(transform) = self.request_transforms.get(&key) {
-                let _ = transform(model, body, stream, credentials);
-            }
-        }
-
-        // Always apply normalization
-        apply_normalization_hooks(body)
+        self.translate_request_with_strip(source, target, model, body, stream, credentials, None)
     }
 
-    /// Apply response transform.
+    /// Like [`translate_request`] but applies optional content-type strip list
+    /// (9router `stripList`) before normalization.
+    pub fn translate_request_with_strip(
+        &self,
+        source: Format,
+        target: Format,
+        model: &str,
+        body: &mut Value,
+        stream: bool,
+        credentials: Option<&Value>,
+        strip_list: Option<&[&str]>,
+    ) -> bool {
+        if source != target {
+            // Direct route: exact source→target pair (lossless for claude→kiro etc.)
+            if let Some(transform) = self.request_transforms.get(&(source, target)) {
+                tracing::debug!(
+                    target: "openproxy::translator",
+                    "route=direct request {}→{}",
+                    source.as_str(),
+                    target.as_str()
+                );
+                let _ = transform(model, body, stream, credentials);
+            } else {
+                tracing::debug!(
+                    target: "openproxy::translator",
+                    "route=pivot request {}→openai→{}",
+                    source.as_str(),
+                    target.as_str()
+                );
+                // Step 1: source -> OpenAI intermediate
+                if source != Format::OpenAi {
+                    if let Some(transform) = self.request_transforms.get(&(source, Format::OpenAi))
+                    {
+                        let _ = transform(model, body, stream, credentials);
+                    }
+                }
+                // Step 2: OpenAI intermediate -> target
+                if target != Format::OpenAi {
+                    if let Some(transform) = self.request_transforms.get(&(Format::OpenAi, target))
+                    {
+                        let _ = transform(model, body, stream, credentials);
+                    }
+                }
+            }
+        }
+
+        if let Some(list) = strip_list {
+            strip_content_types(body, list);
+        }
+
+        apply_normalization_hooks(body);
+
+        // Target-format post-hooks (9router translator/index.js)
+        if target == Format::OpenAi || target == Format::OpenAiResponses || target == Format::Codex
+        {
+            if target == Format::OpenAi {
+                filter_to_openai_format(body, false);
+            }
+        }
+        if target == Format::Claude {
+            let api_key = credentials.and_then(|c| {
+                c.get("accessToken")
+                    .or_else(|| c.get("access_token"))
+                    .or_else(|| c.get("apiKey"))
+                    .or_else(|| c.get("api_key"))
+                    .and_then(Value::as_str)
+            });
+            let provider = credentials
+                .and_then(|c| c.get("provider").and_then(Value::as_str))
+                .unwrap_or("claude");
+            crate::core::translator::request::claude_format::prepare_claude_request(
+                body, provider, api_key,
+            );
+        }
+
+        true
+    }
+
+    /// Apply response transform with 9router parity.
+    ///
+    /// Parameter naming matches chat.rs / JS: `source` = provider (upstream)
+    /// format, `target` = client format.
+    ///
+    /// 1. Direct route if `source:target` registered (e.g. kiro→claude)
+    /// 2. Else provider→OpenAI into intermediates, then each intermediate → client
     pub fn translate_response(
         &self,
         source: Format,
@@ -419,35 +521,53 @@ impl TranslationRegistry {
             return vec![String::from_utf8_lossy(chunk).to_string()];
         }
 
-        let mut results = Vec::new();
+        // Direct route (provider→client)
+        if let Some(transform) = self.response_transforms.get(&(source, target)) {
+            tracing::debug!(
+                target: "openproxy::translator",
+                "route=direct response {}→{}",
+                source.as_str(),
+                target.as_str()
+            );
+            return transform(chunk, state);
+        }
 
-        // Step 1: source -> OpenAI intermediate
+        tracing::debug!(
+            target: "openproxy::translator",
+            "route=pivot response {}→openai→{}",
+            source.as_str(),
+            target.as_str()
+        );
+
+        // Step 1: provider (source) -> OpenAI intermediate
+        let mut intermediates: Vec<String> = Vec::new();
         if source != Format::OpenAi {
-            let key = (source, Format::OpenAi);
-            if let Some(transform) = self.response_transforms.get(&key) {
+            if let Some(transform) = self.response_transforms.get(&(source, Format::OpenAi)) {
                 let converted = transform(chunk, state);
                 if !converted.is_empty() {
-                    results = converted;
+                    intermediates = converted;
                 }
             }
         } else {
-            results.push(String::from_utf8_lossy(chunk).to_string());
+            intermediates.push(String::from_utf8_lossy(chunk).to_string());
         }
 
-        // Step 2: OpenAI intermediate -> target
+        // Step 2: OpenAI intermediate -> client (target)
+        // Critical 9router parity: feed INTERMEDIATE strings, not the raw chunk.
         if target != Format::OpenAi {
-            let key = (Format::OpenAi, target);
-            if let Some(transform) = self.response_transforms.get(&key) {
-                // Use the same persistent state so the transform can accumulate
-                // tool calls and other per-stream data across chunks.
-                let converted = transform(chunk, state);
-                if !converted.is_empty() {
-                    return converted;
+            if let Some(transform) = self.response_transforms.get(&(Format::OpenAi, target)) {
+                let mut final_results = Vec::new();
+                for mid in &intermediates {
+                    let converted = transform(mid.as_bytes(), state);
+                    final_results.extend(converted);
+                }
+                if !final_results.is_empty() {
+                    return final_results;
                 }
             }
         }
 
-        results
+        intermediates
     }
 }
 
@@ -455,6 +575,8 @@ impl TranslationRegistry {
 /// Mirrors the hooks in open-sse/translator/index.js:
 ///   stripContentTypes, normalizeThinkingConfig, ensureToolCallIds, fixMissingToolResponses
 fn apply_normalization_hooks(body: &mut Value) -> bool {
+    // normalizeThinkingConfig (9router): drop thinking on non-user turns
+    normalize_thinking_config(body);
     // normalizeDeveloperRole: rewrite role "developer" -> "system" so
     // OAI-compat providers (DeepSeek, Groq, Ollama, …) that pre-date the
     // Codex CLI role split don't 400 on the request.
@@ -699,12 +821,32 @@ pub fn filter_to_openai_format(body: &mut Value, preserve_cache_control: bool) {
     }
 }
 
-/// Normalize thinking config: remove if last message is not user.
-/// Stub — mirrors normalizeThinkingConfig in 9router.
-pub fn normalize_thinking_config(_body: &mut Value) {
-    // Full implementation would check if last message is user
-    // and remove/reduce thinking budget accordingly.
-    // For now, this is a no-op.
+/// Normalize thinking config: remove `thinking` if last message is not user.
+/// Keeps `reasoning_effort` (OpenAI request-level — survives tool-result turns).
+/// Mirrors open-sse/services/provider.js:normalizeThinkingConfig.
+pub fn normalize_thinking_config(body: &mut Value) {
+    if is_last_message_from_user(body) {
+        return;
+    }
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("thinking");
+    }
+}
+
+/// True if the last message/content role is user (or no messages → true).
+fn is_last_message_from_user(body: &Value) -> bool {
+    let messages = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .or_else(|| body.get("contents").and_then(Value::as_array));
+    let Some(messages) = messages else {
+        return true;
+    };
+    if messages.is_empty() {
+        return true;
+    }
+    let last = &messages[messages.len() - 1];
+    last.get("role").and_then(Value::as_str) == Some("user")
 }
 
 /// Global registry instance — lazily initialized.
@@ -724,6 +866,7 @@ pub fn global_registry() -> &'static TranslationRegistry {
     use crate::core::translator::request::openai_to_claude::openai_to_claude_request;
     use crate::core::translator::request::openai_to_commandcode::openai_to_commandcode_request;
     use crate::core::translator::request::openai_to_cursor::openai_to_cursor_request;
+    use crate::core::translator::request::openai_to_gemini::openai_to_antigravity_request;
     use crate::core::translator::request::openai_to_gemini::openai_to_gemini_cli_request;
     use crate::core::translator::request::openai_to_gemini::openai_to_gemini_request;
     use crate::core::translator::request::openai_to_kiro::openai_to_kiro_request;
@@ -736,7 +879,11 @@ pub fn global_registry() -> &'static TranslationRegistry {
     use crate::core::translator::response::kiro_to_claude::kiro_to_claude_streaming;
     use crate::core::translator::response::kiro_to_openai::kiro_to_openai_streaming;
     use crate::core::translator::response::ollama_to_openai::ollama_to_openai_streaming;
-    use crate::core::translator::response::openai_responses::responses_to_chat_streaming;
+    use crate::core::translator::response::openai_responses::{
+        chat_to_responses_streaming, responses_to_chat_streaming,
+    };
+    use crate::core::translator::response::openai_to_antigravity::openai_to_antigravity_streaming;
+    use crate::core::translator::response::openai_to_claude::openai_to_claude_streaming;
     use crate::core::translator::response::openai_to_gemini::openai_to_gemini_response;
 
     REGISTRY.get_or_init(|| {
@@ -807,7 +954,7 @@ pub fn global_registry() -> &'static TranslationRegistry {
         reg.register_request(
             Format::OpenAi,
             Format::Antigravity,
-            openai_to_gemini_cli_request as RequestTransformFn,
+            openai_to_antigravity_request as RequestTransformFn,
         );
         reg.register_request(
             Format::Antigravity,
@@ -874,7 +1021,122 @@ pub fn global_registry() -> &'static TranslationRegistry {
             Format::OpenAi,
             responses_to_chat_streaming as ResponseTransformFn,
         );
+        // OpenAI → client response pairs (required for double-hop when client ≠ OpenAI)
+        reg.register_response(
+            Format::OpenAi,
+            Format::Claude,
+            openai_to_claude_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::OpenAi,
+            Format::OpenAiResponses,
+            chat_to_responses_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::OpenAi,
+            Format::Codex,
+            chat_to_responses_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::OpenAi,
+            Format::Antigravity,
+            openai_to_antigravity_streaming as ResponseTransformFn,
+        );
+        // Gemini-family aliases (JS multi-register gemini/cli/vertex/antigravity → openai)
+        reg.register_response(
+            Format::GeminiCli,
+            Format::OpenAi,
+            gemini_to_openai_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::Vertex,
+            Format::OpenAi,
+            gemini_to_openai_streaming as ResponseTransformFn,
+        );
+        reg.register_response(
+            Format::Antigravity,
+            Format::OpenAi,
+            gemini_to_openai_streaming as ResponseTransformFn,
+        );
 
         reg
     })
+}
+
+#[cfg(test)]
+mod parity_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn detect_responses_requires_no_messages() {
+        let body = json!({"input": "hi", "messages": [{"role": "user", "content": "x"}]});
+        // With messages present, must NOT force responses (9router guard)
+        assert_ne!(detect_source_format(&body), Format::OpenAiResponses);
+    }
+
+    #[test]
+    fn detect_responses_input_string() {
+        let body = json!({"input": "hello", "stream": true});
+        assert_eq!(detect_source_format(&body), Format::OpenAiResponses);
+    }
+
+    #[test]
+    fn detect_openai_fields_before_claude_system() {
+        let body = json!({
+            "model": "gpt-4",
+            "stream_options": {"include_usage": true},
+            "system": "you are helpful",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        assert_eq!(detect_source_format(&body), Format::OpenAi);
+    }
+
+    #[test]
+    fn chat_completions_input_array_forces_openai() {
+        let body = json!({"input": [{"type": "message", "role": "user", "content": []}]});
+        assert_eq!(
+            detect_source_format_by_endpoint_with_body("/v1/chat/completions", Some(&body)),
+            Some(Format::OpenAi)
+        );
+    }
+
+    #[test]
+    fn anthropic_compatible_targets_claude() {
+        assert_eq!(
+            get_target_format_for_provider("anthropic-compatible-foo"),
+            Format::Claude
+        );
+        assert_eq!(
+            get_target_format_for_provider("openai-compatible-responses"),
+            Format::OpenAiResponses
+        );
+    }
+
+    #[test]
+    fn registry_has_direct_claude_kiro_and_antigravity() {
+        let reg = global_registry();
+        assert!(reg.has_request_transform(Format::Claude, Format::Kiro));
+        assert!(reg.has_response_transform(Format::Kiro, Format::Claude));
+        assert!(reg.has_request_transform(Format::OpenAi, Format::Antigravity));
+        assert!(reg.has_response_transform(Format::OpenAi, Format::Claude));
+        assert!(reg.has_response_transform(Format::GeminiCli, Format::OpenAi));
+    }
+
+    #[test]
+    fn normalize_thinking_strips_on_tool_turn() {
+        let mut body = json!({
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
+            "reasoning_effort": "high",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "tool", "content": "result", "tool_call_id": "1"}
+            ]
+        });
+        normalize_thinking_config(&mut body);
+        assert!(body.get("thinking").is_none());
+        // reasoning_effort survives
+        assert_eq!(body["reasoning_effort"], "high");
+    }
 }

@@ -12,4 +12,5 @@ pub mod error;
 pub mod project_id_cache;
 pub mod reasoning_content_injector;
 pub mod session_manager;
+pub mod stream_flags;
 pub mod tool_deduper;

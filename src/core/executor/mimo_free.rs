@@ -28,10 +28,11 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 // ── Constants ──────────────────────────────────────────────────────────────
 
 /// Base URL for the MimoFree bootstrap (device authorize) endpoint.
-const MIMO_BOOTSTRAP_URL: &str = "https://mimo.kiro.dev/v1/device/authorize";
+/// 9router registry uses api.xiaomimimo.com free-ai surface.
+const MIMO_BOOTSTRAP_URL: &str = "https://api.xiaomimimo.com/api/free-ai/bootstrap";
 
-/// Base URL for chat completions.
-const MIMO_CHAT_URL: &str = "https://mimo.kiro.dev/v1/chat/completions";
+/// Base URL for chat completions (9router registry).
+const MIMO_CHAT_URL: &str = "https://api.xiaomimimo.com/api/free-ai/openai/chat";
 
 /// Rotating Chrome User-Agent strings. We pick one per request in round-robin
 /// fashion to reduce fingerprinting.

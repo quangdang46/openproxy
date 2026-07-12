@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use hyper::http;
 use hyper::http::uri::InvalidUri;
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -23,15 +23,14 @@ pub struct KiroExecutionRequest {
     pub proxy: Option<ProxyTarget>,
 }
 
-/// Primary and fallback Kiro runtime endpoints.
-/// The runtime endpoint uses the Kiro Gateway (not the old Bedrock API).
-const KIRO_PRIMARY_ENDPOINT: &str = "https://runtime.us-east-1.kiro.dev/v1";
-const KIRO_FALLBACK_ENDPOINTS: &[&str] = &[
-    "https://runtime.us-east-2.kiro.dev/v1",
-    "https://runtime.eu-west-1.kiro.dev/v1",
+/// 9router registry baseUrls (generateAssistantResponse surfaces).
+const KIRO_BASE_URLS: &[&str] = &[
+    "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
+    "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+    "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
 ];
 const KIRO_REGION: &str = "us-east-1";
-const KIRO_SERVICE: &str = "kiro";
+const KIRO_SERVICE: &str = "codewhisperer";
 
 fn normalize_kiro_model(model: &str) -> String {
     if let Some(stripped) = model.strip_suffix("-thinking-agentic") {
@@ -155,36 +154,121 @@ impl KiroExecutor {
         Ok(credentials)
     }
 
-    pub fn build_url(&self, model: &str, stream: bool) -> Vec<String> {
-        let action = if stream { "stream" } else { "invoke" };
-        let model = normalize_kiro_model(model);
-        let path = format!("/v1/{model}/{action}",);
-        // Build list of candidate URLs with multi-host failover parity
-        let mut urls = Vec::new();
-        urls.push(format!(
-            "{}{}",
-            KIRO_PRIMARY_ENDPOINT.trim_end_matches('/'),
-            path
-        ));
-        for fallback in KIRO_FALLBACK_ENDPOINTS {
-            urls.push(format!("{}{}", fallback.trim_end_matches('/'), path));
+    /// Auth-aware URL order (9router getOrderedBaseUrls).
+    /// api_key / external_idp / idc → amazonaws.com hosts first.
+    pub fn build_url(&self, _model: &str, _stream: bool, credentials: &ProviderConnection) -> Vec<String> {
+        let auth_method = credentials
+            .provider_specific_data
+            .get("authMethod")
+            .or_else(|| credentials.provider_specific_data.get("auth_method"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let is_cw_surface =
+            auth_method == "api_key" || auth_method == "external_idp" || auth_method == "idc";
+
+        let mut urls: Vec<String> = KIRO_BASE_URLS.iter().map(|s| (*s).to_string()).collect();
+        if is_cw_surface {
+            let amazon: Vec<String> = urls
+                .iter()
+                .filter(|u| u.contains("amazonaws.com"))
+                .cloned()
+                .collect();
+            let others: Vec<String> = urls
+                .iter()
+                .filter(|u| !u.contains("amazonaws.com"))
+                .cloned()
+                .collect();
+            if !amazon.is_empty() {
+                urls = amazon.into_iter().chain(others).collect();
+            }
         }
         urls
+    }
+
+    fn build_bearer_headers(
+        &self,
+        credentials: &ProviderConnection,
+    ) -> Result<HeaderMap, KiroExecutorError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.amazon.eventstream"),
+        );
+        headers.insert(
+            HeaderName::from_static("amz-sdk-request"),
+            HeaderValue::from_static("attempt=1; max=3"),
+        );
+        let inv_id = uuid::Uuid::new_v4().to_string();
+        headers.insert(
+            HeaderName::from_static("amz-sdk-invocation-id"),
+            HeaderValue::from_str(&inv_id).map_err(KiroExecutorError::InvalidHeader)?,
+        );
+
+        let auth_method = credentials
+            .provider_specific_data
+            .get("authMethod")
+            .or_else(|| credentials.provider_specific_data.get("auth_method"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let is_api_key = auth_method == "api_key";
+        let is_external_idp = auth_method == "external_idp";
+
+        let api_key = credentials
+            .api_key
+            .as_deref()
+            .or(if is_api_key {
+                credentials.access_token.as_deref()
+            } else {
+                None
+            });
+
+        if is_api_key {
+            let key = api_key
+                .or(credentials.access_token.as_deref())
+                .ok_or_else(|| KiroExecutorError::MissingCredentials("kiro".into()))?;
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {key}"))
+                    .map_err(KiroExecutorError::InvalidHeader)?,
+            );
+            headers.insert(
+                HeaderName::from_static("tokentype"),
+                HeaderValue::from_static("API_KEY"),
+            );
+        } else {
+            let token = credentials
+                .access_token
+                .as_deref()
+                .ok_or_else(|| KiroExecutorError::MissingCredentials("kiro".into()))?;
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(KiroExecutorError::InvalidHeader)?,
+            );
+            if is_external_idp {
+                headers.insert(
+                    HeaderName::from_static("tokentype"),
+                    HeaderValue::from_static("EXTERNAL_IDP"),
+                );
+            }
+        }
+        Ok(headers)
     }
 
     pub async fn execute_request(
         &self,
         request: KiroExecutionRequest,
     ) -> Result<KiroExecutorResponse, KiroExecutorError> {
-        let urls = self.build_url(&request.model, request.stream);
+        let urls = self.build_url(&request.model, request.stream, &request.credentials);
         let body_bytes = serde_json::to_vec(&request.body)?;
         let content_hash = sha256_hex(&body_bytes);
 
         // Try each URL with failover
         let mut last_error = None;
         for url in &urls {
-            // Determine auth path based on credentials
-            // If access_token is AWS-style JSON -> SigV4; if plain string -> api-key header
+            // AWS JSON credentials → SigV4 (IDC / some enterprise paths)
             let is_aws_auth = request
                 .credentials
                 .access_token
@@ -192,87 +276,61 @@ impl KiroExecutor {
                 .map(|t| t.trim_start().starts_with('{'))
                 .unwrap_or(false);
 
-            if is_aws_auth {
-                let credentials =
-                    match Self::parse_aws_credentials(
-                        request.credentials.access_token.as_deref().ok_or_else(|| {
-                            KiroExecutorError::MissingCredentials("kiro".to_string())
-                        })?,
-                    ) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            last_error = Some(e);
-                            continue;
-                        }
-                    };
-
-                let signed_headers = self
+            let headers = if is_aws_auth {
+                let credentials = match Self::parse_aws_credentials(
+                    request.credentials.access_token.as_deref().ok_or_else(|| {
+                        KiroExecutorError::MissingCredentials("kiro".to_string())
+                    })?,
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        last_error = Some(e);
+                        continue;
+                    }
+                };
+                match self
                     .sign_request(url, &credentials, &content_hash, request.stream)
-                    .await?;
-
-                let client = self.pool.get("kiro", request.proxy.as_ref())?;
-                match client
-                    .post(url)
-                    .headers(signed_headers.clone())
-                    .body(body_bytes.clone())
-                    .send()
                     .await
                 {
-                    Ok(response) => {
-                        return Ok(KiroExecutorResponse {
-                            response: UpstreamResponse::Reqwest(response),
-                            url: url.clone(),
-                            headers: signed_headers,
-                            transformed_body: request.body.clone(),
-                            transport: TransportKind::Reqwest,
-                        });
-                    }
+                    Ok(h) => h,
                     Err(e) => {
-                        last_error = Some(KiroExecutorError::Request(e));
+                        last_error = Some(e);
                         continue;
                     }
                 }
             } else {
-                // API key / external IDP auth path: x-api-key header
-                let api_key = request
-                    .credentials
-                    .api_key
-                    .as_deref()
-                    .or(request.credentials.access_token.as_deref())
-                    .ok_or_else(|| KiroExecutorError::MissingCredentials("kiro".to_string()))?;
-
-                let mut headers = HeaderMap::new();
-                headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-                headers.insert(
-                    ACCEPT,
-                    HeaderValue::from_static("application/vnd.amazon.eventstream"),
-                );
-                headers.insert(
-                    HeaderName::from_bytes(b"x-api-key").unwrap(),
-                    HeaderValue::from_str(api_key).map_err(KiroExecutorError::InvalidHeader)?,
-                );
-
-                let client = self.pool.get("kiro", request.proxy.as_ref())?;
-                match client
-                    .post(url)
-                    .headers(headers.clone())
-                    .body(body_bytes.clone())
-                    .send()
-                    .await
-                {
-                    Ok(response) => {
-                        return Ok(KiroExecutorResponse {
-                            response: UpstreamResponse::Reqwest(response),
-                            url: url.clone(),
-                            headers,
-                            transformed_body: request.body.clone(),
-                            transport: TransportKind::Reqwest,
-                        });
-                    }
+                // 9router: Bearer accessToken (+ tokentype API_KEY / EXTERNAL_IDP)
+                match self.build_bearer_headers(&request.credentials) {
+                    Ok(h) => h,
                     Err(e) => {
-                        last_error = Some(KiroExecutorError::Request(e));
+                        last_error = Some(e);
                         continue;
                     }
+                }
+            };
+
+            let client = self.pool.get("kiro", request.proxy.as_ref())?;
+            match client
+                .post(url)
+                .headers(headers.clone())
+                .body(body_bytes.clone())
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    // EventStream→SSE conversion runs in kiro_to_openai_streaming
+                    // (ResponseTransform path). URLs/auth now match 9router.
+                    return Ok(KiroExecutorResponse {
+                        response: UpstreamResponse::Reqwest(response),
+                        url: url.clone(),
+                        headers,
+                        transformed_body: request.body.clone(),
+                        transport: TransportKind::Reqwest,
+                    });
+                }
+                Err(e) => {
+                    last_error = Some(KiroExecutorError::Request(e));
+                    continue;
                 }
             }
         }

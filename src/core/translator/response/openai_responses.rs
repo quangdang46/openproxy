@@ -880,6 +880,49 @@ use crate::core::translator::registry::ResponseTransformState;
 ///   1. Bare JSON: `{"type":"response.completed","response":{...}}`
 ///   2. SSE-framed: `event: response.completed\ndata: {"type":"response.completed",...}\n\n`
 ///
+/// Registry adapter: OpenAI chat SSE/JSON → Responses API SSE events.
+/// Signature matches `registry::ResponseTransformFn`.
+pub fn chat_to_responses_streaming(
+    chunk: &[u8],
+    state: &mut crate::core::translator::registry::ResponseTransformState,
+) -> Vec<String> {
+    let text = String::from_utf8_lossy(chunk);
+    let payload = {
+        let line = text.trim();
+        if let Some(rest) = line.strip_prefix("data:") {
+            rest.trim()
+        } else {
+            line.lines()
+                .find_map(|p| p.strip_prefix("data:").map(|r| r.trim()))
+                .unwrap_or(line)
+        }
+    };
+    if payload.is_empty() || payload == "[DONE]" {
+        return vec![];
+    }
+    let val: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let inner = &mut state.responses.state;
+    let events = chat_to_responses_response(&val, inner);
+    events
+        .into_iter()
+        .map(|v| {
+            let et = v
+                .get("event")
+                .and_then(|e| e.as_str())
+                .or_else(|| v.get("type").and_then(|t| t.as_str()))
+                .unwrap_or("message");
+            let data = v.get("data").cloned().unwrap_or(v.clone());
+            format!(
+                "event: {et}\ndata: {}\n\n",
+                serde_json::to_string(&data).unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
 /// Signature matches `registry::ResponseTransformFn`.
 pub fn responses_to_chat_streaming(
     chunk: &[u8],

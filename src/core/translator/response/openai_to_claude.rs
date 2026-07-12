@@ -111,6 +111,50 @@ fn is_valid_pdf_pages_arg(file_path: &str, pages: &str) -> bool {
     }
 }
 
+/// Registry adapter: OpenAI SSE/JSON bytes → Claude SSE event lines.
+/// Signature matches `registry::ResponseTransformFn`.
+pub fn openai_to_claude_streaming(
+    chunk: &[u8],
+    state: &mut crate::core::translator::registry::ResponseTransformState,
+) -> Vec<String> {
+    let text = String::from_utf8_lossy(chunk);
+    let payload = extract_sse_or_json_payload(text.trim());
+    if payload.is_empty() || payload == "[DONE]" {
+        return vec![];
+    }
+    let val: Value = match serde_json::from_str(payload) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+    let inner = &mut state.anthropic.claude_state;
+    let results = openai_to_claude_response(&val, inner);
+    results
+        .into_iter()
+        .map(|v| {
+            // Claude Messages API uses event: + data: framing
+            let et = v.get("type").and_then(|t| t.as_str()).unwrap_or("message");
+            format!(
+                "event: {et}\ndata: {}\n\n",
+                serde_json::to_string(&v).unwrap_or_default()
+            )
+        })
+        .collect()
+}
+
+fn extract_sse_or_json_payload(line: &str) -> &str {
+    let line = line.trim();
+    if let Some(rest) = line.strip_prefix("data:") {
+        return rest.trim();
+    }
+    // Multi-line SSE block: take first data: line
+    for part in line.lines() {
+        if let Some(rest) = part.strip_prefix("data:") {
+            return rest.trim();
+        }
+    }
+    line
+}
+
 /// Convert one OpenAI chat-completion chunk into zero or more Claude SSE
 /// events. `state` is the per-stream scratch space.
 pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) -> Vec<Value> {

@@ -192,7 +192,7 @@ fn combo_strategy_for(snapshot: &crate::types::AppDb, combo_name: &str) -> Combo
         .settings
         .combo_strategies
         .get(combo_name)
-        .map(String::as_str)
+        .map(|e| e.strategy_name())
         .unwrap_or(snapshot.settings.combo_strategy.as_str());
 
     if value.eq_ignore_ascii_case("round-robin") {

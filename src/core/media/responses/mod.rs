@@ -6,6 +6,8 @@
 //! at `crate::core::translator::request::openai_responses`. Stream→JSON
 //! collapsing is handled here directly.
 
+pub mod stream_to_json;
+
 use serde_json::{json, Map, Value};
 
 use crate::core::translator::request::openai_responses::openai_responses_to_chat_request;
