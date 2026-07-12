@@ -2963,8 +2963,8 @@ async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> 
         .map(|v| v.to_string());
 
     // Fetch all status endpoints in parallel
-    let results: Vec<(String, Option<Value>)> = futures_util::future::join_all(
-        status_endpoints.iter().map(|(tool_id, path)| {
+    let results: Vec<(String, Option<Value>)> =
+        futures_util::future::join_all(status_endpoints.iter().map(|(tool_id, path)| {
             let tool_id = tool_id.to_string();
             let url = format!("{base}{path}");
             let client = client.clone();
@@ -2988,9 +2988,8 @@ async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> 
                 };
                 (tool_id, result)
             }
-        }),
-    )
-    .await;
+        }))
+        .await;
 
     let statuses: serde_json::Map<String, Value> = results
         .into_iter()
