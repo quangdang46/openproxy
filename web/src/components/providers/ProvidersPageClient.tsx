@@ -314,7 +314,18 @@ export default function ProvidersPageClient() {
   // when there's nothing to test (e.g. user hasn't added an OAuth account
   // yet — pressing Test All would just spin uselessly).
   const oauthCount = connections.filter((c) => c.authType === "oauth").length;
-  const freeCount = connections.filter((c) => c.authType === "free").length;
+  // Free and free-tier connections use authTypes "oauth" or "apikey", not "free".
+  // Match by provider id membership in FREE_PROVIDERS / FREE_TIER_PROVIDERS.
+  const freeProviderIds = new Set([
+    ...Object.keys(FREE_PROVIDERS),
+    ...Object.keys(FREE_TIER_PROVIDERS),
+  ]);
+  const freeCount = connections.filter(
+    (c) =>
+      freeProviderIds.has(c.provider) &&
+      c.authType &&
+      c.authType !== "cookie",
+  ).length;
   const apikeyCount = connections.filter((c) => c.authType === "apikey").length;
 
   const handleBatchTest = async (mode, providerId = null) => {
@@ -442,13 +453,18 @@ export default function ProvidersPageClient() {
     );
   }
 
+  const pluginAndCookieSectionCount =
+    Object.entries(WEB_COOKIE_PROVIDERS).filter(
+      ([, info]) => !info.hidden && matchSearch(info.name),
+    ).length;
   const hasAnyResult =
     oauthEntries.length > 0 ||
     freeEntries.length > 0 ||
     freeTierEntries.length > 0 ||
     apikeyEntries.length > 0 ||
     compatibleProviders.length > 0 ||
-    anthropicCompatibleProviders.length > 0;
+    anthropicCompatibleProviders.length > 0 ||
+    pluginAndCookieSectionCount > 0;
 
   return (
     <div className="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
@@ -567,7 +583,7 @@ export default function ProvidersPageClient() {
           <button
             onClick={() => handleBatchTest("free")}
             disabled={!!testingMode || freeCount === 0}
-            title={freeCount === 0 ? "Enable a free provider first" : "Test all Free connections"}
+            title={freeCount === 0 ? "Add a free provider connection first" : "Test all Free connections"}
             className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
               testingMode === "free"
                 ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -669,7 +685,7 @@ export default function ProvidersPageClient() {
       )}
 
       {/* Web Cookie Providers — use browser subscription cookie instead of API key */}
-      {Object.keys(WEB_COOKIE_PROVIDERS).length > 0 && (
+      {Object.entries(WEB_COOKIE_PROVIDERS).filter(([, info]) => !info.hidden && matchSearch(info.name)).length > 0 && (
         <div className="flex flex-col gap-4">
           <div className="flex items-center justify-between">
             <h2 className="text-xl font-semibold flex items-center gap-2">
@@ -677,7 +693,7 @@ export default function ProvidersPageClient() {
             </h2>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {Object.entries(WEB_COOKIE_PROVIDERS).map(([key, info]) => (
+            {Object.entries(WEB_COOKIE_PROVIDERS).filter(([, info]) => !info.hidden && matchSearch(info.name)).map(([key, info]) => (
               <ApiKeyProviderCard
                 key={key}
                 providerId={key}

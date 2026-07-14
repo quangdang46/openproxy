@@ -19,23 +19,24 @@ interface AddApiKeyModalProps {
   authHint?: string;
   website?: string;
   proxyPools?: ProxyPool[];
+  /** Error message from parent failed save (9router parity). */
+  error?: string;
   onSave: (data: any) => Promise<void>;
   onClose: () => void;
 }
 
-export default function AddApiKeyModal({ isOpen, provider, providerName, isCompatible, isAnthropic, authType, authHint, website, proxyPools, onSave, onClose }: AddApiKeyModalProps): React.ReactNode {
+export default function AddApiKeyModal({ isOpen, provider, providerName, isCompatible, isAnthropic, authType, authHint, website, proxyPools, onSave, onClose, error }: AddApiKeyModalProps): React.ReactNode {
   const NONE_PROXY_POOL_VALUE = "__none__";
   const isOllamaLocal = provider === "ollama-local";
   const isCookie = authType === "cookie";
-  const credentialLabel = isCookie ? "Cookie Value" : "API Key";
-  const credentialPlaceholder = isCookie
-    ? (provider === "grok-web" ? "sso=xxxxx... or just the raw value" : "eyJhbGciOi...")
-    : (isXaiApiKey ? "xai-..." : "");
-
   const isAzure = provider === "azure";
   const isCloudflareAi = provider === "cloudflare-ai";
   const isXiaomiTokenplan = provider === "xiaomi-tokenplan";
   const isXaiApiKey = provider === "xai" && !isCookie;
+  const credentialLabel = isCookie ? "Cookie Value" : "API Key";
+  const credentialPlaceholder = isCookie
+    ? (provider === "grok-web" ? "sso=xxxxx... or just the raw value" : "eyJhbGciOi...")
+    : (isXaiApiKey ? "xai-..." : "");
 
   const [formData, setFormData] = useState({
     name: "",
@@ -405,6 +406,10 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
           <p className="text-xs text-text-muted">
             No active proxy pools available. Create one in Proxy Pools page first.
           </p>
+        )}
+
+        {error && (
+          <p className="text-xs text-red-500 break-words">{error}</p>
         )}
 
         <p className="text-xs text-text-muted">
