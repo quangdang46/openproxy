@@ -1,11 +1,17 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import MediaProvidersKindIdPageClient from '@/components/MediaProvidersKindIdPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+import { MEDIA_PROVIDER_KINDS } from '@/shared/constants/providers';
 
 export async function getStaticPaths() {
-  return [];
+  // Pre-render a `_dynamic` shell per media kind so the Rust static fallback
+  // can serve `/dashboard/media-providers/<kind>/<id>` for any runtime id
+  // (mirrors providers/[id] _dynamic pattern).
+  return MEDIA_PROVIDER_KINDS.map((k) => ({
+    params: { kind: k.id, id: '_dynamic' },
+  }));
 }
-import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
   <DashboardLayout client:only="react">

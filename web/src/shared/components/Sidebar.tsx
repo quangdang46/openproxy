@@ -110,7 +110,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
   const [enableTranslator, setEnableTranslator] = useState(false);
   const { copied, copy } = useCopyToClipboard(2000);
 
-  const INSTALL_CMD = UPDATER_CONFIG.installCmd;
+  const INSTALL_CMD =
+    UPDATER_CONFIG.installCmdLatest || UPDATER_CONFIG.installCmd;
   const STATUS_URL = `http://localhost:${UPDATER_CONFIG.statusPort}/update/status`;
 
   useEffect(() => {
@@ -363,25 +364,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
               ) : null;
             })}
 
-            {/* Profile */}
-            <a
-              href="/dashboard/profile"
-              onClick={onClose}
-              className={cn(
-                NAV_ITEM_BASE,
-                isActive("/dashboard/profile") ? NAV_ITEM_ACTIVE : NAV_ITEM_INACTIVE,
-              )}
-            >
-              <span
-                className={cn(
-                  "material-symbols-outlined text-[18px]",
-                  isActive("/dashboard/profile") ? "fill-1" : ""
-                )}
-              >
-                account_circle
-              </span>
-              <span className="text-[13px]">Profile</span>
-            </a>
+            {/* Settings is already in footerItems — avoid duplicate Profile entry (9router parity). */}
           </div>
         </nav>
 
@@ -456,8 +439,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
         isOpen={showUpdateModal}
         onClose={() => setShowUpdateModal(false)}
         onConfirm={handleUpdate}
-        title="Update OpenRouter"
-        message={`This will close OpenRouter and install v${updateInfo?.latestVersion || ""} in a separate window. Continue?`}
+        title="Update OpenProxy"
+        message={`This will close OpenProxy and install v${updateInfo?.latestVersion || ""} in a separate window. Continue?`}
         confirmText="Update"
         cancelText="Cancel"
         variant="primary"
@@ -503,7 +486,7 @@ function UpdateProgress({ status, latestVersion, installCmd, copied, onCopy }: U
   const errorMsg = status?.error;
 
   const steps = [
-    { key: "stopped", label: "Stopped OpenRouter server", state: "done" },
+    { key: "stopped", label: "Stopped OpenProxy server", state: "done" },
     {
       key: "launched",
       label: "Launched background installer",
@@ -545,7 +528,7 @@ function UpdateProgress({ status, latestVersion, installCmd, copied, onCopy }: U
         </div>
         <div>
           <h2 className="text-lg font-semibold">
-            {done && success ? "Update Completed" : done && !success ? "Update Failed" : "Updating OpenRouter"}
+            {done && success ? "Update Completed" : done && !success ? "Update Failed" : "Updating OpenProxy"}
           </h2>
           <p className="text-xs text-white/60">
             {done && success

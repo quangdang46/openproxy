@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, Card } from "@/shared/components";
-import { ConfirmModal } from "@/shared/components/Modal";
+import { Button, Card, Input } from "@/shared/components";
+import Modal, { ConfirmModal } from "@/shared/components/Modal";
 
 // ──────────────────────────────────────────────────────────────────────
 // Types — mirror src/db/backups.rs and src/server/api/db_backups.rs.
@@ -71,6 +71,13 @@ export default function DbBackupsPageClient() {
   const [pendingDelete, setPendingDelete] = useState<BackupInfo | null>(null);
   const [pendingCleanup, setPendingCleanup] = useState<boolean>(false);
   const [pendingImport, setPendingImport] = useState<File | null>(null);
+  const [requireLogin, setRequireLogin] = useState(false);
+  const [hasPassword, setHasPassword] = useState(false);
+  const [dbAuth, setDbAuth] = useState<{
+    open: boolean;
+    mode: "" | "export" | "import";
+    password: string;
+  }>({ open: false, mode: "", password: "" });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchList = useCallback(async () => {
@@ -92,7 +99,25 @@ export default function DbBackupsPageClient() {
 
   useEffect(() => {
     void fetchList();
+    // Load settings so we know whether password re-auth is required.
+    void (async () => {
+      try {
+        const res = await fetch("/api/settings");
+        if (!res.ok) return;
+        const json = (await res.json()) as {
+          requireLogin?: boolean;
+          hasPassword?: boolean;
+        };
+        setRequireLogin(json.requireLogin === true);
+        setHasPassword(json.hasPassword === true);
+      } catch {
+        // Best-effort; export/import still works without re-auth when
+        // requireLogin is off (server skips the check).
+      }
+    })();
   }, [fetchList]);
+
+  const needsDbPasswordReauth = requireLogin && hasPassword;
 
   const handleCreate = useCallback(async () => {
     setBusy(true);
@@ -208,56 +233,130 @@ export default function DbBackupsPageClient() {
     }
   }, [pendingRestore, fetchList]);
 
-  const handleExport = useCallback(() => {
-    // Browser handles the download via the response's Content-Disposition.
-    window.location.href = "/api/db-backups/export";
+  const runExport = useCallback(async (password?: string) => {
+    setBusy(true);
+    setStatus(null);
+    try {
+      const headers: Record<string, string> = {};
+      if (password) headers["x-op-password"] = password;
+      const res = await fetch("/api/db-backups/export", { headers });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(
+          (data as { error?: string }).error || `Server returned ${res.status}`,
+        );
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("content-disposition") || "";
+      const match = disposition.match(/filename="?([^"]+)"?/i);
+      const filename = match?.[1] || `openproxy-db-${Date.now()}.json`;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      URL.revokeObjectURL(url);
+      setStatus({ type: "success", text: "Database exported" });
+    } catch (err) {
+      setStatus({
+        type: "error",
+        text: err instanceof Error ? `Export failed: ${err.message}` : "Export failed",
+      });
+    } finally {
+      setBusy(false);
+    }
   }, []);
+
+  const handleExport = useCallback(() => {
+    if (needsDbPasswordReauth) {
+      setDbAuth({ open: true, mode: "export", password: "" });
+    } else {
+      void runExport();
+    }
+  }, [needsDbPasswordReauth, runExport]);
 
   const handleImportClick = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
 
   const handleImportFile = useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
+    (event: React.ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
       event.target.value = "";
       if (!file) return;
       setPendingImport(file);
     },
-    []
+    [],
+  );
+
+  const runImport = useCallback(
+    async (file: File, password?: string) => {
+      setBusy(true);
+      setStatus(null);
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const headers: Record<string, string> = {};
+        if (password) headers["x-op-password"] = password;
+        const res = await fetch("/api/db-backups/import", {
+          method: "POST",
+          headers,
+          body: form,
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(async () => {
+            const text = await res.text().catch(() => "");
+            return { error: text };
+          });
+          throw new Error(
+            (data as { error?: string }).error || `Server returned ${res.status}`,
+          );
+        }
+        const json = await res.json();
+        setStatus({
+          type: "success",
+          text: `Imported ${file.name} — ${json?.providerCount ?? 0} providers, ${
+            json?.comboCount ?? 0
+          } combos, ${json?.apiKeyCount ?? 0} API keys.`,
+        });
+        await fetchList();
+      } catch (err) {
+        setStatus({
+          type: "error",
+          text: err instanceof Error ? `Import failed: ${err.message}` : "Import failed",
+        });
+      } finally {
+        setBusy(false);
+      }
+    },
+    [fetchList],
   );
 
   const confirmImport = useCallback(async () => {
     const file = pendingImport;
     if (!file) return;
-    setPendingImport(null);
-    setBusy(true);
-    setStatus(null);
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      const res = await fetch("/api/db-backups/import", { method: "POST", body: form });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `Server returned ${res.status}`);
-      }
-      const json = await res.json();
-      setStatus({
-        type: "success",
-        text: `Imported ${file.name} — ${json?.providerCount ?? 0} providers, ${
-          json?.comboCount ?? 0
-        } combos, ${json?.apiKeyCount ?? 0} API keys.`,
-      });
-      await fetchList();
-    } catch (err) {
-      setStatus({
-        type: "error",
-        text: err instanceof Error ? `Import failed: ${err.message}` : "Import failed",
-      });
-    } finally {
-      setBusy(false);
+    if (needsDbPasswordReauth) {
+      // Keep pendingImport; password modal will consume it on confirm.
+      setDbAuth({ open: true, mode: "import", password: "" });
+      return;
     }
-  }, [pendingImport, fetchList]);
+    setPendingImport(null);
+    await runImport(file);
+  }, [pendingImport, needsDbPasswordReauth, runImport]);
+
+  const handleDbAuthConfirm = useCallback(async () => {
+    const { mode, password } = dbAuth;
+    setDbAuth({ open: false, mode: "", password: "" });
+    if (mode === "export") {
+      await runExport(password);
+    } else if (mode === "import") {
+      const file = pendingImport;
+      setPendingImport(null);
+      if (file) await runImport(file, password);
+    }
+  }, [dbAuth, runExport, runImport, pendingImport]);
 
   const backups = data?.backups ?? [];
 
@@ -428,7 +527,7 @@ export default function DbBackupsPageClient() {
       />
 
       <ConfirmModal
-        isOpen={!!pendingImport}
+        isOpen={!!pendingImport && !dbAuth.open}
         onClose={() => setPendingImport(null)}
         onConfirm={confirmImport}
         title="Import database?"
@@ -437,6 +536,53 @@ export default function DbBackupsPageClient() {
         variant="danger"
         loading={busy}
       />
+
+      <Modal
+        isOpen={dbAuth.open}
+        onClose={() => {
+          setDbAuth({ open: false, mode: "", password: "" });
+          if (dbAuth.mode === "import") setPendingImport(null);
+        }}
+        title="Confirm Password"
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setDbAuth({ open: false, mode: "", password: "" });
+                if (dbAuth.mode === "import") setPendingImport(null);
+              }}
+              disabled={busy}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void handleDbAuthConfirm()}
+              loading={busy}
+              disabled={!dbAuth.password}
+            >
+              Confirm
+            </Button>
+          </>
+        }
+      >
+        <p className="text-text-muted mb-3 text-sm">
+          Enter your current password to{" "}
+          {dbAuth.mode === "export" ? "export" : "import"} the database.
+        </p>
+        <Input
+          type="password"
+          value={dbAuth.password}
+          onChange={(e) => setDbAuth((s) => ({ ...s, password: e.target.value }))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && dbAuth.password) void handleDbAuthConfirm();
+          }}
+          placeholder="Current password"
+          autoFocus
+        />
+      </Modal>
     </div>
   );
 }

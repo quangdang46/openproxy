@@ -2907,94 +2907,121 @@ async fn probe_mcp_server(url: &str) -> Value {
     json!({ "tools": tools })
 }
 
+/// Extract JSON body from an axum Response (best-effort; returns Null on failure).
+async fn response_json_value(response: Response) -> Value {
+    use axum::body::to_bytes;
+    let bytes = match to_bytes(response.into_body(), 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return Value::Null,
+    };
+    serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+}
+
 /// GET /api/cli-tools/all-statuses
-/// Fetch status of all CLI tools in parallel.
-/// Calls each tool's *-settings GET handler concurrently and returns {toolId: status}.
+/// Fetch status of all CLI tools in parallel by invoking per-tool handlers
+/// in-process (no loopback HTTP). Returns {toolId: status}.
 async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }
 
-    let status_endpoints = [
-        ("claude", "/api/cli-tools/claude-settings"),
-        ("cline", "/api/cli-tools/cline-settings"),
-        ("kilo", "/api/cli-tools/kilo-settings"),
-        ("codex", "/api/cli-tools/codex-settings"),
-        ("opencode", "/api/cli-tools/opencode-settings"),
-        ("droid", "/api/cli-tools/droid-settings"),
-        ("openclaw", "/api/cli-tools/openclaw-settings"),
-        ("hermes", "/api/cli-tools/hermes-settings"),
-        ("cowork", "/api/cli-tools/cowork-settings"),
-        ("deepseek-tui", "/api/cli-tools/deepseek-tui-settings"),
-        ("jcode", "/api/cli-tools/jcode-settings"),
-        ("copilot", "/api/cli-tools/copilot-settings"),
-    ];
+    // Auth already checked above; each handler re-checks and is fine with the
+    // same headers. In-process avoids host/cookie/auth loopback failure modes.
+    let (
+        claude,
+        cline,
+        kilo,
+        codex,
+        opencode,
+        droid,
+        openclaw,
+        hermes,
+        cowork,
+        deepseek_tui,
+        jcode,
+        copilot,
+    ) = tokio::join!(
+        async {
+            response_json_value(
+                claude_settings::get_claude_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                cline_settings::get_cline_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                kilo_settings::get_kilo_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(get_codex_settings(State(state.clone()), headers.clone()).await)
+                .await
+        },
+        async {
+            response_json_value(get_opencode_settings(State(state.clone()), headers.clone()).await)
+                .await
+        },
+        async {
+            response_json_value(get_droid_settings(State(state.clone()), headers.clone()).await)
+                .await
+        },
+        async {
+            response_json_value(get_openclaw_settings(State(state.clone()), headers.clone()).await)
+                .await
+        },
+        async {
+            response_json_value(
+                hermes_settings::get_hermes_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                cowork_settings::get_cowork_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                deepseek_tui_settings::get_deepseek_tui_settings(
+                    State(state.clone()),
+                    headers.clone(),
+                )
+                .await,
+            )
+            .await
+        },
+        async {
+            response_json_value(
+                jcode_settings::get_jcode_settings(State(state.clone()), headers.clone()).await,
+            )
+            .await
+        },
+        async {
+            response_json_value(get_copilot_settings(State(state.clone()), headers.clone()).await)
+                .await
+        },
+    );
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(8))
-        .build()
-        .unwrap_or_default();
-
-    // Determine base URL: use forwarded host or default localhost:4623
-    let base = headers
-        .get("x-forwarded-host")
-        .and_then(|v| v.to_str().ok())
-        .map(|h| format!("http://{h}"))
-        .unwrap_or_else(|| {
-            headers
-                .get("host")
-                .and_then(|v| v.to_str().ok())
-                .map(|h| format!("http://{h}"))
-                .unwrap_or_else(|| "http://127.0.0.1:4623".to_string())
-        });
-
-    // Forward auth headers so the per-tool handlers can authenticate
-    let forwarded_api_key = headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_string());
-    let forwarded_auth = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_string());
-    let forwarded_cookie = headers
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.to_string());
-
-    // Fetch all status endpoints in parallel
-    let results: Vec<(String, Option<Value>)> =
-        futures_util::future::join_all(status_endpoints.iter().map(|(tool_id, path)| {
-            let tool_id = tool_id.to_string();
-            let url = format!("{base}{path}");
-            let client = client.clone();
-            let api_key = forwarded_api_key.clone();
-            let auth = forwarded_auth.clone();
-            let cookie = forwarded_cookie.clone();
-            async move {
-                let mut req = client.get(&url);
-                if let Some(ref k) = api_key {
-                    req = req.header("x-api-key", k);
-                } else if let Some(ref a) = auth {
-                    req = req.header("authorization", a);
-                }
-                if let Some(ref c) = cookie {
-                    req = req.header("cookie", c);
-                }
-                let resp = req.send().await;
-                let result = match resp {
-                    Ok(r) if r.status().is_success() => r.json::<Value>().await.ok(),
-                    _ => None,
-                };
-                (tool_id, result)
-            }
-        }))
-        .await;
-
-    let statuses: serde_json::Map<String, Value> = results
-        .into_iter()
-        .map(|(id, data)| (id, data.unwrap_or(Value::Null)))
-        .collect();
+    let mut statuses = serde_json::Map::new();
+    statuses.insert("claude".into(), claude);
+    statuses.insert("cline".into(), cline);
+    statuses.insert("kilo".into(), kilo);
+    statuses.insert("codex".into(), codex);
+    statuses.insert("opencode".into(), opencode);
+    statuses.insert("droid".into(), droid);
+    statuses.insert("openclaw".into(), openclaw);
+    statuses.insert("hermes".into(), hermes);
+    statuses.insert("cowork".into(), cowork);
+    statuses.insert("deepseek-tui".into(), deepseek_tui);
+    statuses.insert("jcode".into(), jcode);
+    statuses.insert("copilot".into(), copilot);
 
     Json(Value::Object(statuses)).into_response()
 }

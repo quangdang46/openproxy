@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, Button, Toggle, Input, LanguageSwitcher } from "@/shared/components";
-import { ConfirmModal } from "@/shared/components/Modal";
+import Modal, { ConfirmModal } from "@/shared/components/Modal";
 import { useTheme } from "@/shared/hooks/useTheme";
 import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG } from "@/shared/constants/config";
@@ -80,6 +80,13 @@ export default function ProfilePageClient() {
 
   const [dbLoading, setDbLoading] = useState(false);
   const [dbStatus, setDbStatus] = useState<StatusMessage | null>(null);
+  /** Password re-auth modal for export/import (9router parity). */
+  const [dbAuth, setDbAuth] = useState<{
+    open: boolean;
+    mode: "" | "export" | "import";
+    password: string;
+  }>({ open: false, mode: "", password: "" });
+  const pendingImportRef = useRef<File | null>(null);
 
   const [proxyForm, setProxyForm] = useState({
     outboundProxyUrl: "",
@@ -210,11 +217,16 @@ export default function ProfilePageClient() {
       setPasswords({ current: "", newPass: "", confirm: "" });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "An error occurred";
-      if (msg.includes("NOT_IMPLEMENTED") || msg.includes("dedicated endpoint")) {
+      // /api/auth/password is the real endpoint — only surface the CLI hint on
+      // hard 404/501 (misconfigured build), not on normal validation errors.
+      if (
+        /NOT_IMPLEMENTED|dedicated endpoint|404|501|Failed to fetch|NetworkError/i.test(
+          msg,
+        )
+      ) {
         setPassStatus({
-          type: "info",
-          message:
-            "Password management via the dashboard is not yet available. Use the `openproxy auth set-password` CLI command.",
+          type: "error",
+          message: `${msg} — if the dashboard password API is unavailable, use \`openproxy auth set-password\`.`,
         });
       } else {
         setPassStatus({ type: "error", message: msg });
@@ -467,11 +479,17 @@ export default function ProfilePageClient() {
     }
   };
 
-  const handleExportDatabase = async () => {
+  /** Whether password re-auth is required for DB export/import. */
+  const needsDbPasswordReauth = () =>
+    settings.requireLogin === true && settings.hasPassword === true;
+
+  const handleExportDatabase = async (password?: string) => {
     setDbLoading(true);
     setDbStatus(null);
     try {
-      const res = await fetch("/api/settings/database");
+      const headers: Record<string, string> = {};
+      if (password) headers["x-op-password"] = password;
+      const res = await fetch("/api/settings/database", { headers });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
         throw new Error((data as { error?: string }).error ?? "Failed to export database");
@@ -499,26 +517,40 @@ export default function ProfilePageClient() {
     }
   };
 
-  const handleImportDatabase = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImportDatabase = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    e.target.value = "";
+    if (importFileRef.current) importFileRef.current.value = "";
+    if (!file) return;
+    pendingImportRef.current = file;
+    setDbStatus(null);
+    if (needsDbPasswordReauth()) {
+      setDbAuth({ open: true, mode: "import", password: "" });
+    } else {
+      void runImportDatabase();
+    }
+  };
+
+  const runImportDatabase = async (password?: string) => {
+    const file = pendingImportRef.current;
     if (!file) return;
     setDbLoading(true);
-    setDbStatus(null);
     try {
-      const text = await file.text();
-      JSON.parse(text);
+      const raw = await file.text();
+      const payload = JSON.parse(raw);
+      const body =
+        password && password.length > 0 ? { ...payload, password } : payload;
       const res = await fetch("/api/settings/database", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: text,
+        body: JSON.stringify(body),
       });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
         throw new Error((data as { error?: string }).error ?? "Failed to import database");
       }
       await fetchSettings();
       setDbStatus({ type: "success", message: `Database imported from ${file.name}` });
+      pendingImportRef.current = null;
     } catch (err) {
       setDbStatus({
         type: "error",
@@ -527,6 +559,21 @@ export default function ProfilePageClient() {
     } finally {
       setDbLoading(false);
     }
+  };
+
+  const requestExportDatabase = () => {
+    if (needsDbPasswordReauth()) {
+      setDbAuth({ open: true, mode: "export", password: "" });
+    } else {
+      void handleExportDatabase();
+    }
+  };
+
+  const handleDbAuthConfirm = async () => {
+    const { mode, password } = dbAuth;
+    setDbAuth({ open: false, mode: "", password: "" });
+    if (mode === "export") await handleExportDatabase(password);
+    else if (mode === "import") await runImportDatabase(password);
   };
 
   const handleShutdown = async () => {
@@ -1049,6 +1096,26 @@ export default function ProfilePageClient() {
           </div>
         </Card>
 
+        {/* ── Pricing ─────────────────────────────────────────────── */}
+        <Card className="p-4 sm:p-5">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="size-9 rounded-lg bg-primary/10 flex items-center justify-center text-primary shrink-0">
+              <span className="material-symbols-outlined text-[20px]">payments</span>
+            </div>
+            <h3 className="text-base sm:text-lg font-semibold">Pricing</h3>
+          </div>
+          <p className="text-xs sm:text-sm text-muted-soft mb-3">
+            Configure per-model rates used for cost tracking on the Usage page.
+          </p>
+          <a
+            href="/dashboard/settings/pricing"
+            className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
+          >
+            Open Pricing Settings
+            <span className="material-symbols-outlined text-[16px]">arrow_forward</span>
+          </a>
+        </Card>
+
         {/* ── Observability ────────────────────────────────────────── */}
         <Card>
           <div className="flex items-center gap-3 mb-4">
@@ -1085,7 +1152,7 @@ export default function ProfilePageClient() {
               <Button
                 variant="secondary"
                 icon="download"
-                onClick={handleExportDatabase}
+                onClick={requestExportDatabase}
                 loading={dbLoading}
                 className="w-full sm:w-auto"
               >
@@ -1158,6 +1225,47 @@ export default function ProfilePageClient() {
         variant="danger"
         loading={isShuttingDown}
       />
+
+      <Modal
+        isOpen={dbAuth.open}
+        onClose={() => setDbAuth({ open: false, mode: "", password: "" })}
+        title="Confirm Password"
+        size="sm"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => setDbAuth({ open: false, mode: "", password: "" })}
+              disabled={dbLoading}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="primary"
+              onClick={() => void handleDbAuthConfirm()}
+              loading={dbLoading}
+              disabled={!dbAuth.password}
+            >
+              Confirm
+            </Button>
+          </>
+        }
+      >
+        <p className="text-text-muted mb-3 text-sm">
+          Enter your current password to{" "}
+          {dbAuth.mode === "export" ? "export" : "import"} the database.
+        </p>
+        <Input
+          type="password"
+          value={dbAuth.password}
+          onChange={(e) => setDbAuth((s) => ({ ...s, password: e.target.value }))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && dbAuth.password) void handleDbAuthConfirm();
+          }}
+          placeholder="Current password"
+          autoFocus
+        />
+      </Modal>
     </div>
   );
 }

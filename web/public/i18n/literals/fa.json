@@ -191,5 +191,6 @@
   "Click to add, click again to remove. Changes are saved automatically.": "کلیک برای افزودن، کلیک مجدد برای حذف. تغییرات به صورت خودکار ذخیره می‌شوند.",
   "⚠️ Risk Notice: This provider uses a subscription/OAuth session not officially licensed for proxy/router use. Account may be restricted or banned. Use at your own risk.": "⚠️ اطلاعیه ریسک: این ارائه‌دهنده از اشتراک/جلسه OAuth استفاده می‌کند که به طور رسمی برای استفاده پروکسی/روتر مجوز ندارد. حساب ممکن است محدود یا مسدود شود. با مسئولیت خود استفاده کنید.",
   "⚠️ MITM intercepts HTTPS traffic of IDE tools (Antigravity, GitHub Copilot, Kiro) via local CA to redirect requests to your providers. May violate ToS → account ban. Use at your own risk.": "⚠️ MITM ترافیک HTTPS ابزارهای IDE (Antigravity, GitHub Copilot, Kiro) را از طریق CA محلی رهگیری می‌کند تا درخواست‌ها را به ارائه‌دهندگان شما مسیردهی کند. ممکن است شرایط خدمات را نقض کند → مسدود شدن حساب. با مسئولیت خود استفاده کنید.",
-  "Endpoint is exposed without an API key.": "Endpoint بدون کلید API در معرض دسترسی است."
+  "Endpoint is exposed without an API key.": "Endpoint بدون کلید API در معرض دسترسی است.",
+  "⚠️ MITM intercepts HTTPS traffic of IDE tools (Antigravity, GitHub Copilot, Kiro) via a local CA to redirect requests to your providers. May violate ToS → account ban. Use at your own risk.": "⚠️ MITM ترافیک HTTPS ابزارهای IDE (Antigravity, GitHub Copilot, Kiro) را از طریق CA محلی رهگیری می‌کند تا درخواست‌ها را به ارائه‌دهندگان شما مسیردهی کند. ممکن است شرایط خدمات را نقض کند → مسدود شدن حساب. با مسئولیت خود استفاده کنید."
 }

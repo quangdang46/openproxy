@@ -70,7 +70,10 @@ struct SaveCoworkSettingsRequest {
     custom_plugins: Option<Vec<Value>>,
 }
 
-async fn get_cowork_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(super) async fn get_cowork_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     if let Err(response) = require_management_access(&headers, &state) {
         return response;
     }

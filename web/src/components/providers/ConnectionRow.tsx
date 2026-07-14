@@ -99,6 +99,12 @@ export default function ConnectionRow({
       ? "Auto-starts the next 5h Codex window after reset by sending a tiny gpt-5.5 request. Consumes a small amount of quota."
       : "When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.";
 
+  // Prefer per-connection authType for dual-auth providers (xAI OAuth vs API key).
+  const rowAuthType = (connection.authType || (isOAuth ? "oauth" : "apikey")).toLowerCase();
+  const isRowOAuth = rowAuthType === "oauth" || rowAuthType === "device-code";
+  const isRowCookie = rowAuthType === "cookie";
+  const authIcon = isRowOAuth ? "lock" : isRowCookie ? "cookie" : "key";
+
   let maskedProxyUrl = "";
   if (boundProxyPool?.proxyUrl || connection.providerSpecificData?.connectionProxyUrl) {
     const rawProxyUrl =
@@ -144,13 +150,13 @@ export default function ConnectionRow({
   };
 
   const isEmail = (v: string) => typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-  const displayName = isOAuth
+  const displayName = isRowOAuth
     ? isEmail(connection.email || "")
       ? connection.email
       : isEmail(connection.name || "")
         ? connection.name
         : connection.name || connection.email || connection.displayName || "OAuth Account"
-    : connection.name;
+    : connection.name || connection.displayName || connection.email || connection.id;
 
   // Use useState + useEffect for impure Date.now() to avoid calling during render
   const [isCooldown, setIsCooldown] = useState<boolean>(false);
@@ -240,7 +246,7 @@ export default function ConnectionRow({
           </button>
         </div>
         <span className="material-symbols-outlined shrink-0 text-base text-text-muted">
-          {isOAuth ? "lock" : "key"}
+          {authIcon}
         </span>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">{displayName}</p>

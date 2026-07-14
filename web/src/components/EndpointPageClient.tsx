@@ -126,6 +126,8 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   const [requireApiKey, setRequireApiKey] = useState<boolean>(false);
   const [requireLogin, setRequireLogin] = useState<boolean>(true);
   const [hasPassword, setHasPassword] = useState<boolean>(true);
+  // True when the dashboard is opened via a non-loopback host (LAN / tunnel).
+  const [isRemoteHost, setIsRemoteHost] = useState<boolean>(false);
   const [tunnelDashboardAccess, setTunnelDashboardAccess] = useState<boolean>(false);
   const [rtkEnabled, setRtkEnabledState] = useState<boolean>(true);
   const [cavemanEnabled, setCavemanEnabled] = useState<boolean>(false);
@@ -135,6 +137,8 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   const [tunnelChecking, setTunnelChecking] = useState<boolean>(true);
   const [tunnelEnabled, setTunnelEnabled] = useState<boolean>(false);
   const [tunnelReachable, setTunnelReachable] = useState<boolean>(false);
+  // Once true, subsequent unreachable periods show "reconnecting" not "checking".
+  const [tunnelEverReachable, setTunnelEverReachable] = useState<boolean>(false);
   const [tunnelUrl, setTunnelUrl] = useState<string>("");
   const [tunnelPublicUrl, setTunnelPublicUrl] = useState<string>("");
   const [tunnelLoading, setTunnelLoading] = useState<boolean>(false);
@@ -146,6 +150,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   // Tailscale state
   const [tsEnabled, setTsEnabled] = useState<boolean>(false);
   const [tsReachable, setTsReachable] = useState<boolean>(false);
+  const [tsEverReachable, setTsEverReachable] = useState<boolean>(false);
   const [tsUrl, setTsUrl] = useState<string>("");
   const [tsLoading, setTsLoading] = useState<boolean>(false);
   const [tsProgress, setTsProgress] = useState<string>("");
@@ -155,6 +160,9 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   const [tsInstallLog, setTsInstallLog] = useState<string[]>([]);
   const [tsSudoPassword, setTsSudoPassword] = useState<string>("");
   const [tsConnecting, setTsConnecting] = useState<boolean>(false);
+  // Persisted auth URL for re-opening login/connection popup (9router parity).
+  const [tsAuthUrl, setTsAuthUrl] = useState<string>("");
+  const tsAuthLabelRef = useRef<string>("Login");
   const [showTsModal, setShowTsModal] = useState<boolean>(false);
   const [showDisableTsModal, setShowDisableTsModal] = useState<boolean>(false);
   const tsLogRef = useRef<HTMLDivElement>(null);
@@ -187,10 +195,12 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
       clientRef: MutableRefObject<boolean>,
       missRef: MutableRefObject<number>,
       setter: (v: boolean) => void,
+      everSetter?: (v: boolean) => void,
     ) => {
       if (clientRef.current) {
         missRef.current = 0;
         setter(true);
+        everSetter?.(true);
       } else {
         missRef.current += 1;
         if (missRef.current >= REACHABLE_MISS_THRESHOLD) setter(false);
@@ -211,19 +221,42 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
       setTunnelUrl(tUrl);
       setTunnelPublicUrl(tPublicUrl);
       setTunnelEnabled(tEnabled);
-      updateReachable(tunnelClientReachableRef, tunnelMissRef, setTunnelReachable);
+      updateReachable(
+        tunnelClientReachableRef,
+        tunnelMissRef,
+        setTunnelReachable,
+        setTunnelEverReachable,
+      );
 
       const tsEn = data.tailscale?.settingsEnabled ?? data.tailscale?.enabled ?? false;
       const tsUrlVal = data.tailscale?.tunnelUrl || "";
       setTsUrl(tsUrlVal);
       setTsEnabled(tsEn);
-      updateReachable(tsClientReachableRef, tsMissRef, setTsReachable);
+      updateReachable(
+        tsClientReachableRef,
+        tsMissRef,
+        setTsReachable,
+        setTsEverReachable,
+      );
     } catch { /* ignore poll errors */ }
   }, [updateReachable]);
 
   useEffect(() => {
     fetchData();
     loadSettings();
+  }, []);
+
+  // Detect non-loopback access so we can warn when API key is not required.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const host = (window.location.hostname || "").toLowerCase();
+    const loopback =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "[::1]" ||
+      host === "::1" ||
+      host.endsWith(".localhost");
+    setIsRemoteHost(!loopback);
   }, []);
 
   // Status poll: only while degraded (not yet reachable). Stop once healthy to avoid spam.
@@ -260,6 +293,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
         if (ok) {
           tunnelMissRef.current = 0;
           setTunnelReachable(true);
+          setTunnelEverReachable(true);
           setTunnelStatus((prev) =>
             prev?.type === "warning" && prev.message.includes("reconnecting") ? null : prev,
           );
@@ -279,6 +313,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
         if (ok) {
           tsMissRef.current = 0;
           setTsReachable(true);
+          setTsEverReachable(true);
           setTsStatus((prev) =>
             prev?.type === "warning" && prev.message.includes("reconnecting") ? null : prev,
           );
@@ -654,6 +689,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
 
       // Needs login: redirect pre-opened tab or open new
       if (data.needsLogin && data.authUrl) {
+        setTsAuthUrl(data.authUrl);
         if (tab) tab.location.href = data.authUrl;
         else window.open(data.authUrl, "tailscale_auth", "width=600,height=700");
         setTsProgress("Waiting for login...");
@@ -694,6 +730,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
 
       // Funnel not enabled: redirect pre-opened tab
       if (data.funnelNotEnabled && data.enableUrl) {
+        setTsAuthUrl(data.enableUrl);
         await pollFunnelEnable(data.enableUrl, tab);
         return;
       }
@@ -706,11 +743,12 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
     } finally {
       setTsLoading(false);
       setTsConnecting(false);
-      setTsProgress("");
+      if (!tsAuthUrl) setTsProgress("");
     }
   };
 
   const pollFunnelEnable = async (enableUrl: string, tab: Window | null): Promise<void> => {
+    setTsAuthUrl(enableUrl);
     if (tab) tab.location.href = enableUrl;
     else window.open(enableUrl, "tailscale_auth", "width=600,height=700");
     setTsProgress("Enable Funnel in browser, waiting...");
@@ -763,7 +801,24 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
     }
   };
 
+  const isLoginUnsafe = !requireLogin || !hasPassword;
+
   const handleOpenTsModal = async (): Promise<void> => {
+    if (isLoginUnsafe) {
+      setTsStatus({
+        type: "error",
+        message:
+          "Security required: enable Require Login and set a strong password in Settings before exposing Tailscale/Funnel.",
+      });
+      return;
+    }
+    if (!requireApiKey) {
+      setTsStatus({
+        type: "error",
+        message: 'Security required: Enable "Require API key" before activating Tailscale.',
+      });
+      return;
+    }
     setTsStatus(null);
     setTsInstallLog([]);
     setShowTsModal(true);
@@ -886,7 +941,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
             <span className={`text-xs font-mono px-1.5 py-0.5 rounded shrink-0 min-w-[88px] text-center ${
               tunnelEnabled ? "bg-primary/10 text-primary" : "bg-surface-2 text-text-muted"
             }`}>Tunnel</span>
-            {tunnelEnabled && !tunnelLoading ? (
+            {tunnelEnabled && !tunnelLoading && tunnelReachable ? (
               <>
                 <Input value={`${tunnelPublicUrl || tunnelUrl}/v1`} readOnly className="flex-1 font-mono text-sm" />
                 <button
@@ -895,6 +950,20 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                 >
                   <span className="material-symbols-outlined text-[18px]">{copied === "tunnel_url" ? "check" : "content_copy"}</span>
                 </button>
+                <button
+                  onClick={() => setShowDisableTunnelModal(true)}
+                  className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
+                  title="Disable Tunnel"
+                >
+                  <span className="material-symbols-outlined text-[18px]">power_settings_new</span>
+                </button>
+              </>
+            ) : tunnelEnabled && !tunnelLoading && !tunnelReachable ? (
+              <>
+                <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded border border-amber-300/60 dark:border-amber-700/50 bg-amber-500/5 text-sm text-amber-700 dark:text-amber-400">
+                  <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
+                  {tunnelEverReachable ? "Tunnel reconnecting..." : "Checking tunnel..."}
+                </div>
                 <button
                   onClick={() => setShowDisableTunnelModal(true)}
                   className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
@@ -944,6 +1013,14 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                 size="sm"
                 icon="cloud_upload"
                 onClick={() => {
+                  if (isLoginUnsafe) {
+                    setTunnelStatus({
+                      type: "error",
+                      message:
+                        "Security required: enable Require Login and set a strong password in Settings before activating the tunnel.",
+                    });
+                    return;
+                  }
                   if (!requireApiKey) {
                     setTunnelStatus({ type: "error", message: "Security required: Enable \"Require API key\" before activating the tunnel." });
                     return;
@@ -960,7 +1037,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
             <span className={`text-xs font-mono px-1.5 py-0.5 rounded shrink-0 min-w-[88px] text-center ${
               tsEnabled ? "bg-primary/10 text-primary" : "bg-surface-2 text-text-muted"
             }`}>Tailscale</span>
-            {tsEnabled && !tsLoading ? (
+            {tsEnabled && !tsLoading && !tsConnecting && tsReachable ? (
               <>
                 <Input value={`${tsUrl}/v1`} readOnly className="flex-1 font-mono text-sm" />
                 <button
@@ -977,6 +1054,31 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                   <span className="material-symbols-outlined text-[18px]">power_settings_new</span>
                 </button>
               </>
+            ) : tsEnabled && !tsLoading && !tsConnecting && !tsReachable ? (
+              <>
+                <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded border border-amber-300/60 dark:border-amber-700/50 bg-amber-500/5 text-sm text-amber-700 dark:text-amber-400">
+                  <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
+                  {tsEverReachable ? "Tailscale reconnecting..." : "Checking Tailscale..."}
+                </div>
+                {tsAuthUrl && (tsEverReachable || tsEnabled) && (
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon="open_in_new"
+                    onClick={() => window.open(tsAuthUrl, "tailscale_auth", "width=600,height=700")}
+                    title="Re-open auth window"
+                  >
+                    Re-auth
+                  </Button>
+                )}
+                <button
+                  onClick={() => { setShowDisableTsModal(true); setTsAuthUrl(""); }}
+                  className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
+                  title="Disable Tailscale"
+                >
+                  <span className="material-symbols-outlined text-[18px]">power_settings_new</span>
+                </button>
+              </>
             ) : (tsLoading || tsConnecting) ? (
               <>
                 <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded border border-border bg-input text-sm text-text-muted">
@@ -984,7 +1086,7 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
                   {tsProgress || "Connecting..."}
                 </div>
                 <button
-                  onClick={() => { setTsLoading(false); setTsConnecting(false); setTsProgress(""); }}
+                  onClick={() => { setTsLoading(false); setTsConnecting(false); setTsProgress(""); setTsAuthUrl(""); }}
                   className="p-2 hover:bg-red-500/10 rounded text-red-500 transition-colors shrink-0"
                   title="Stop"
                 >
@@ -1012,22 +1114,39 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
           </div>
         </div>
 
-        {/* Security warnings when tunnel or tailscale is active */}
-        {(tunnelEnabled || tsEnabled) && (
+        {/* Security warnings: pre-enable login unsafe, remote host, active tunnel/ts */}
+        {(isLoginUnsafe || isRemoteHost || tunnelEnabled || tsEnabled) && (
           <div className="mt-4 flex flex-col gap-2">
-            {!requireApiKey && (
+            {isLoginUnsafe && !tunnelEnabled && !tsEnabled && (
+              <SecurityWarning
+                message={
+                  !requireLogin
+                    ? "Require login is disabled — enable it and set a password before exposing a tunnel or Tailscale Funnel."
+                    : "Dashboard password is not set — set a strong password in Settings before exposing a public endpoint."
+                }
+                action={{ label: "Open Settings", href: "/dashboard/profile" }}
+              />
+            )}
+            {isRemoteHost && !requireApiKey && (
+              <SecurityWarning
+                message="Endpoint is exposed without an API key."
+                action={{ label: "Enable", href: "#require-api-key" }}
+              />
+            )}
+            {(tunnelEnabled || tsEnabled) && !requireApiKey && !isRemoteHost && (
               <SecurityWarning
                 message="Require API key is disabled — your endpoint is publicly accessible without authentication."
                 action={{ label: "Enable", href: "#require-api-key" }}
               />
             )}
-            {(!requireLogin || !hasPassword) && (
+            {(tunnelEnabled || tsEnabled) && isLoginUnsafe && (
               <SecurityWarning
                 message={
                   !requireLogin
                     ? "Require login is disabled — anyone can access your dashboard via tunnel."
-                    : "Dashboard uses the default password — set a strong one in your config."
+                    : "Dashboard uses the default password — set a strong one in Settings."
                 }
+                action={{ label: "Open Settings", href: "/dashboard/profile" }}
               />
             )}
           </div>

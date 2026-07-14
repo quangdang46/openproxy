@@ -21,24 +21,28 @@ export default function HeroSection() {
 
         {/* Description */}
         <p className="text-lg md:text-xl text-gray-400 max-w-2xl mx-auto font-light">
-          AI endpoint proxy with web dashboard - A JavaScript port of CLIProxyAPI. Works seamlessly with Claude Code, OpenAI Codex, Cline, RooCode, and other CLI tools.
+          Rust AI proxy router with a local dashboard. Connect Claude Code, Codex, Cursor, Cline, Copilot and more to 40+ providers with auto-fallback and token saving.
         </p>
 
         {/* CTA Buttons */}
         <div className="flex flex-wrap items-center justify-center gap-4 w-full">
-          <button className="h-12 px-8 rounded-lg bg-[#f97815] hover:bg-[#e0650a] text-[#181411] text-base font-bold transition-all shadow-[0_0_15px_rgba(249,120,21,0.4)] flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => { window.location.href = "/dashboard"; }}
+            className="h-12 px-8 rounded-lg bg-[#f97815] hover:bg-[#e0650a] text-[#181411] text-base font-bold transition-all shadow-[0_0_15px_rgba(249,120,21,0.4)] flex items-center gap-2"
+          >
             <span className="material-symbols-outlined">rocket_launch</span>
             Get Started
           </button>
-          {/* <a 
-            href="https://github.com/decolua/openproxy" 
-            target="_blank" 
+          <a
+            href="https://github.com/quangdang46/openproxy"
+            target="_blank"
             rel="noopener noreferrer"
             className="h-12 px-8 rounded-lg border border-[#3a2f27] bg-[#23180f] hover:bg-[#3a2f27] text-white text-base font-bold transition-all flex items-center gap-2"
           >
             <span className="material-symbols-outlined">code</span>
             View on GitHub
-          </a> */}
+          </a>
         </div>
       </div>
     </section>

@@ -63,7 +63,7 @@ Adversarially re-verified on current tree — outdated doc claims that already l
 | `oidc-start-path-rename` | 9r `/api/auth/oidc/start` → OP `/api/auth/oidc/login` (same PKCE); UI retargeted | `src/server/api/auth.rs`, `LoginPageClient.tsx` |
 | `shutdown-path-hardening` | 9r unauth `/api/version/shutdown` → OP `/api/shutdown` + `SHUTDOWN_SECRET` + non-prod guard | `shutdown.rs`, Profile/Sidebar |
 
-Also intentional contract differences (not drop-in 9r API clones): password rotate vs reset-to-default; OAuth explicit routes vs catch-all; LLM under `/v1/*` not `/api/v1/*`.
+Also intentional contract differences (not drop-in 9r API clones): password rotate vs reset-to-default; OAuth explicit routes vs catch-all; LLM under `/v1/*` not `/api/v1/*`. `basic-chat-orphan-route`: Intentional orphan (same as 9r). Page kept at `/dashboard/basic-chat` for direct URL / layout special-case; **not** linked in sidebar nav. Do not add to nav.
 
 ---
 
@@ -130,12 +130,70 @@ Fixed in commit on `main` via merge of `wf_bfdf460e-f32-{2..8}` worktrees on 202
 | `headroom-proxy-dashboard` (P2) | — (deferred; local loopback fine) |
 | `i18n-zh-cn-key-coverage` (P2) | zh-CN expanded from 872 to 1343 keys by merging filtered 9router zh-CN keys with brand adaptation (9Router→OpenProxy), filtering out 9r-only Qwen/Amp/jcode/CLIProxyAPI brand strings |
 
-### Still open (residual after 3 passes)
+### Still open (residual after 3+4 passes)
 
 | ID | Severity | Why |
 |----|----------|-----|
 | `combo-hedging-shadow-autocombo-unwired` | P2 | Scaffold-only; same product surface as 9r (fallback/RR/fusion) |
-| `cli-all-statuses` | P2 | Functional N+1 equivalent |
-| `headroom-proxy-dashboard` | P2 | Local loopback fine |
 
 Everything else: intentional or confirmed fixed.
+
+---
+
+## Fourth residual pass (2026-07-14 ultracode) — tiny UI + logic gaps
+
+Against 9router v0.5.30 (`~/Projects/9router`, `9845a17`). Confirmed 18 real residuals (9 refuted as intentional/already fixed).
+
+### Fixed this pass (main tree)
+
+| ID | What changed |
+|----|--------------|
+| `brand-config-openrouter` | `config.ts` install/changelog → `quangdang46/openproxy` + `install.sh` (was wrong `openrouter` / decolua) |
+| `model-availability-badge-dead` | Restored trigger button on ModelAvailabilityBadge |
+| `web-cookie-providers-grid` | Un-commented Web Cookie Providers section; cookie+apikey stats/toggle |
+| `cookie-auth-type-create` | `create_provider_api` sets `auth_type: "cookie"` for grok-web/perplexity-web |
+| `landing-links-commented` | Re-enabled Docs/GitHub/Footer/Hero GitHub links + real product copy |
+| `authmodes-dual-xai` | `Provider.authModes`; xAI dual OAuth+API key on OAUTH_PROVIDERS; dual footers |
+| `conn-multiselect` | Select All + row checkboxes + Delete Selected + ConfirmModal bulk delete |
+| `qoder-fetch-custom-models` | Import writes custom models (not aliases) + dedupe against customModels |
+| `compatible-add-deeplink` | `?compatible=` + category-aware `?add=` on providers list |
+| `free-tier-llm-sort` | freeTier llm filter; noAuth-first sort; oauth priority sort |
+| `cli-list-summary-cards` | CLI index → ToolSummaryCard grid → `/cli-tools/[toolId]` |
+| `cli-amp-shorthand-comments` | Amp codeBlock shorthand alias comments |
+| `endpoint-ever-reachable` | tunnel/ts ever-reachable + checking vs reconnecting amber rows |
+| `endpoint-remote-host-warning` | Non-loopback + !requireApiKey → "Endpoint is exposed without an API key." |
+| `profile-password-fallback` | Dead NOT_IMPLEMENTED CLI-only copy narrowed to hard failures |
+| `i18n-risk-mitm-keys` | Backfilled risk/MITM/endpoint-exposed keys across non-zh locales |
+| `cli-all-statuses-inprocess` | `get_all_statuses` invokes per-tool handlers in-process via `tokio::join!` (no loopback HTTP) |
+| `profile-db-export-reauth` | `require_database_password_reauth` + `x-op-password`/`x-9r-password`; Profile + DbBackups password modals |
+| `settings-database-reauth` | `/api/settings/database` GET/POST enforces dashboard session + password re-auth |
+| `headroom-html-rewrite` | Proxy rewrites dashboard `fetch('/stats\|health|…')` → `/api/headroom/proxy/…` |
+
+### Fifth pass — deep web audit (2026-07-14 ultracode)
+
+Confirmed high-severity web gaps fixed on main:
+
+| ID | Fix |
+|----|-----|
+| `media-detail-static-paths-empty` | `[kind]/[id]` + `combo/[id]` emit `_dynamic` shells |
+| `pricing-page-broken-orphaned` | Real `PricingPageClient` + Profile link |
+| `modelrow-ondisable-dead` | ModelRow accepts/renders `onDisable` |
+| `model-kind-filter` | Filter uses `kind \|\| type` (not type-only) |
+| `grok-cli-missing-web` | `grok-cli` added to OAUTH_PROVIDERS |
+| `ep-login-unsafe-*` / `ep-ts-require-api-key` | CF+TS Enable gated on login+password+API key; pre-enable banner |
+| `nav-dual-profile-settings` | Removed duplicate Profile nav entry |
+| `update-modal-openrouter-branding` | OpenRouter → OpenProxy in update UI |
+| `connection-row-per-auth-type` | Auth icon/name from `connection.authType` |
+
+Still open (medium/low from audit, not yet fixed):
+
+| ID | Severity | Notes |
+|----|----------|-------|
+| `quota-providers-client-pagination` | low | Client-side filter/sort works; server pagination optional for 500+ connections |
+| `combo-hedging-shadow-autocombo-unwired` | P2 | Intentional scaffold |
+
+Now fixed in 5th pass: `addapikey-xai-dual-copy`, `ep-ts-auth-reopen`, `quota-auto-ping-row-toggles` (bolt on ProviderLimits), `pricing-page-client`, `media-detail-static-paths`, `model-kind-filter`, `modelrow-ondisable`, `grok-cli-oauth`, `ep-login-unsafe-gates`, `nav-dual-profile`, `brand-openproxy`.
+
+### Still intentionally open / low priority
+
+- PXPIPE, hedging/shadow/auto-combo product wire, basic-chat orphan nav, Translator flag, DonateModal brand

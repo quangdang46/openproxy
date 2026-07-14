@@ -1084,9 +1084,13 @@ async fn transcribe_gemini(
 // ---------------------------------------------------------------------------
 
 fn json_error(status: StatusCode, message: &str) -> Response {
+    let status_code =
+        crate::core::utils::error::infer_status_from_message(status.as_u16(), message);
+    let status = StatusCode::from_u16(status_code).unwrap_or(status);
+    let friendly = crate::core::utils::error::friendly_error_message(status.as_u16(), message);
     let body = Json(json!({
         "error": {
-            "message": message,
+            "message": friendly,
             "type": status_to_type(status),
         }
     }));

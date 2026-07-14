@@ -7,10 +7,12 @@ import Toggle from "@/shared/components/Toggle";
 import { parseQuotaData, calculatePercentage } from "./utils";
 import Card from "@/shared/components/Card";
 import { EditConnectionModal } from "@/shared/components";
+import { patchSettings } from "@/shared/utils/backendApi";
 import { ConfirmModal } from "@/shared/components/Modal";
 import Tooltip from "@/shared/components/Tooltip";
 import { useNotificationStore } from "@/store/notificationStore";
 import { USAGE_SUPPORTED_PROVIDERS, USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
+import { AUTO_PING_SETTINGS_KEYS } from "@/shared/constants/config";
 
 interface Connection {
   id: string;
@@ -127,6 +129,11 @@ export default function ProviderLimits() {
   const [expiringFirst, setExpiringFirst] = useState<boolean>(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState<boolean>(false);
   const [bulkToggling, setBulkToggling] = useState<boolean>(false);
+  const [autoPingMaps, setAutoPingMaps] = useState<Record<string, Record<string, boolean>>>({ claude: {}, codex: {} });
+  const autoPingTooltips: Record<string, string> = {
+    claude: "When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.",
+    codex: "Auto-starts the next 5h Codex window after reset by sending a tiny gpt-5.5 request.",
+  };
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
@@ -610,6 +617,24 @@ export default function ProviderLimits() {
     [bulkToggling],
   );
 
+  const toggleAutoPing = useCallback(
+    async (connectionId: string, provider: string, on: boolean) => {
+      const settingsKey = AUTO_PING_SETTINGS_KEYS[provider as keyof typeof AUTO_PING_SETTINGS_KEYS];
+      if (!settingsKey) return;
+      const previous = autoPingMaps[provider] || {};
+      const nextProviderMap = { ...previous, [connectionId]: on };
+      const nextMaps = { ...autoPingMaps, [provider]: nextProviderMap };
+      setAutoPingMaps(nextMaps);
+      try {
+        await patchSettings({ [settingsKey]: nextProviderMap });
+      } catch (error) {
+        console.error("Error saving auto-ping config:", error);
+        setAutoPingMaps((prev) => ({ ...prev, [provider]: previous }));
+      }
+    },
+    [autoPingMaps],
+  );
+
   const handleDisableDepleted = () => {
     const ids = sortedConnections
       .filter((c) => (c.isActive ?? true) && isConnectionDepleted(c))
@@ -863,6 +888,18 @@ export default function ProviderLimits() {
                   </div>
 
                   <div className="flex items-center gap-1 shrink-0">
+                    {AUTO_PING_SETTINGS_KEYS[conn.provider as keyof typeof AUTO_PING_SETTINGS_KEYS] && conn.authType === "oauth" && (
+                      <Tooltip text={autoPingTooltips[conn.provider] || "Auto-ping warmup"}>
+                        <button
+                          type="button"
+                          onClick={() => toggleAutoPing(conn.id, conn.provider, !(autoPingMaps[conn.provider]?.[conn.id] === true))}
+                          className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${autoPingMaps[conn.provider]?.[conn.id] === true ? "text-primary" : "text-text-muted"}`}
+                          title="Toggle auto-ping warmup"
+                        >
+                          <span className="material-symbols-outlined text-[18px]">bolt</span>
+                        </button>
+                      </Tooltip>
+                    )}
                     {isCodex && (
                       <>
                         <Tooltip
