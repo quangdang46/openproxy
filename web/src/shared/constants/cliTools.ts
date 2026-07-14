@@ -324,7 +324,10 @@ export const CLI_TOOLS: Record<string, CLITool> = {
       language: "bash",
       code: `export OPENAI_API_KEY="{{apiKey}}"
 export OPENAI_BASE_URL="{{baseUrl}}"
-amp --model "{{model}}"`,
+amp --model "{{model}}"
+# Example shorthand aliases you can map locally:
+# g25p -> gemini/gemini-2.5-pro
+# cs45 -> cc/claude-sonnet-4-5-20250929`,
     },
   },
   qwen: {

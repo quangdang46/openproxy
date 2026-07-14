@@ -17,13 +17,15 @@ interface ModelRowProps {
   isCustom?: boolean;
   isFree?: boolean;
   onDeleteAlias?: () => void;
+  /** Disable built-in catalog model (9router parity). */
+  onDisable?: () => void;
   onTest?: () => void;
   isTesting?: boolean;
   caps?: ModelCaps | null;
   thinkingSuffix?: string;
 }
 
-export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onTest, isTesting, caps, thinkingSuffix }: ModelRowProps): React.ReactNode {
+export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onDisable, onTest, isTesting, caps, thinkingSuffix }: ModelRowProps): React.ReactNode {
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -83,13 +85,22 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
             {copied === `model-${model.id}` ? "Copied!" : "Copy"}
           </span>
         </div>
-        {isCustom && (
+        {isCustom && onDeleteAlias && (
           <button
             onClick={onDeleteAlias}
             className="ml-auto rounded p-0.5 text-text-muted opacity-100 transition-opacity hover:bg-red-500/10 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100"
             title="Remove custom model"
           >
             <span className="material-symbols-outlined text-sm">close</span>
+          </button>
+        )}
+        {!isCustom && onDisable && (
+          <button
+            onClick={onDisable}
+            className="ml-auto rounded p-0.5 text-text-muted opacity-100 transition-opacity hover:bg-red-500/10 hover:text-red-500 sm:opacity-0 sm:group-hover:opacity-100"
+            title="Disable model"
+          >
+            <span className="material-symbols-outlined text-sm">block</span>
           </button>
         )}
       </div>

@@ -30,11 +30,12 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const credentialLabel = isCookie ? "Cookie Value" : "API Key";
   const credentialPlaceholder = isCookie
     ? (provider === "grok-web" ? "sso=xxxxx... or just the raw value" : "eyJhbGciOi...")
-    : "";
+    : (isXaiApiKey ? "xai-..." : "");
 
   const isAzure = provider === "azure";
   const isCloudflareAi = provider === "cloudflare-ai";
   const isXiaomiTokenplan = provider === "xiaomi-tokenplan";
+  const isXaiApiKey = provider === "xai" && !isCookie;
 
   const [formData, setFormData] = useState({
     name: "",
@@ -56,8 +57,8 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const [saving, setSaving] = useState<boolean>(false);
 
   // Bulk add: one key per line in `name|apiKey` or just `apiKey` (auto-named).
-  // Skipped for Azure/Cloudflare/Ollama since they need extra fields per key.
-  const supportsBulk = !isOllamaLocal && !isAzure && !isCloudflareAi;
+  // Skipped for Azure/Cloudflare/Ollama/xAI single-key duplica since they need extra fields.
+  const supportsBulk = !isOllamaLocal && !isAzure && !isCloudflareAi && !isXaiApiKey;
   const [mode, setMode] = useState<"single" | "bulk">("single");
   const [bulkText, setBulkText] = useState<string>("");
   const [bulkResult, setBulkResult] = useState<{ success: number; failed: number } | null>(null);
@@ -308,6 +309,15 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
               : `Validation checks ${providerName || "OpenAI Compatible"} via /models on your base URL.`
             }
           </p>
+        )}
+        {isXaiApiKey && (
+          <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">
+            <h3 className="font-semibold mb-3 text-sm">xAI API Key</h3>
+            <p className="text-xs text-text-muted leading-relaxed">
+              Use a direct xAI API key from <a href="https://console.x.ai" target="_blank" rel="noopener noreferrer" className="text-primary underline">console.x.ai</a>.
+              This is separate from Grok Build OAuth.
+            </p>
+          </div>
         )}
         {isCloudflareAi && (
           <div className="bg-sidebar/50 p-4 rounded-lg border border-accent/20">

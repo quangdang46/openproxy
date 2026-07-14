@@ -967,11 +967,25 @@ const HOP_BY_HOP: &[&str] = &[
     "upgrade",
 ];
 
+const DASHBOARD_PREFIX: &str = "/api/headroom/proxy";
+
+/// Rewrite absolute `fetch('/stats…')` calls in the Headroom dashboard HTML so
+/// they go through our same-origin reverse proxy (9router parity).
+fn rewrite_dashboard_html(html: &str) -> String {
+    let mut out = html.to_string();
+    for path in ["stats", "health", "stats-history", "transformations/feed"] {
+        let from = format!("fetch('/{path}");
+        let to = format!("fetch('{DASHBOARD_PREFIX}/{path}");
+        out = out.replace(&from, &to);
+    }
+    out
+}
+
 /// GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS `/api/headroom/proxy/{*path}`
 ///
 /// Minimal reverse proxy to the configured Headroom URL + remaining path.
-/// Strips hop-by-hop headers; returns the upstream response as-is
-/// (no HTML rewrite — dashboard assets use relative paths when proxied).
+/// Strips hop-by-hop headers. For the dashboard HTML page, rewrites absolute
+/// `fetch('/…')` API paths so the iframe stays same-origin.
 pub async fn proxy_handler(
     State(state): State<AppState>,
     Path(path): Path<Vec<String>>,
@@ -1069,6 +1083,11 @@ pub async fn proxy_handler(
             let status =
                 StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
             let resp_headers = resp.headers().clone();
+            let content_type = resp_headers
+                .get(axum::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_ascii_lowercase();
             let resp_body = match resp.bytes().await {
                 Ok(b) => b,
                 Err(e) => {
@@ -1080,15 +1099,38 @@ pub async fn proxy_handler(
                 }
             };
 
+            // Rewrite dashboard HTML so absolute fetch('/stats…') calls hit the
+            // same-origin reverse proxy instead of the OpenProxy origin root.
+            let is_dashboard_html =
+                path_joined == "dashboard" && content_type.contains("text/html");
+            let final_body: Bytes = if is_dashboard_html {
+                match std::str::from_utf8(&resp_body) {
+                    Ok(html) => Bytes::from(rewrite_dashboard_html(html)),
+                    Err(_) => resp_body,
+                }
+            } else {
+                resp_body
+            };
+
             let mut out = Response::builder().status(status);
             for (name, value) in resp_headers.iter() {
                 let name_lower = name.as_str().to_ascii_lowercase();
                 if HOP_BY_HOP.contains(&name_lower.as_str()) {
                     continue;
                 }
+                // Content-Length may no longer match after HTML rewrite.
+                if is_dashboard_html && name_lower == "content-length" {
+                    continue;
+                }
                 out = out.header(name.as_str(), value);
             }
-            out.body(Body::from(resp_body)).unwrap_or_else(|e| {
+            if is_dashboard_html {
+                out = out.header(
+                    axum::http::header::CONTENT_LENGTH,
+                    final_body.len().to_string(),
+                );
+            }
+            out.body(Body::from(final_body)).unwrap_or_else(|e| {
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": format!("response build error: {e}") })),

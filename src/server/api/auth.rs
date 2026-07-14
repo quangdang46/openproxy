@@ -989,7 +989,7 @@ pub fn routes() -> Router<AppState> {
         .route("/api/user", get(get_user))
 }
 
-fn settings_password_hash(settings: &Settings) -> Option<&str> {
+pub(crate) fn settings_password_hash(settings: &Settings) -> Option<&str> {
     if let Some(hash) = settings.password.as_deref() {
         return Some(hash);
     }
@@ -997,6 +997,22 @@ fn settings_password_hash(settings: &Settings) -> Option<&str> {
         .extra
         .get("password")
         .and_then(|value| value.as_str())
+}
+
+/// Verify a plaintext dashboard password for sensitive re-auth actions
+/// (database export/import). Mirrors 9router `verifyDashboardPassword`:
+/// bcrypt against the stored hash when present, otherwise the
+/// `INITIAL_PASSWORD` env var / default `"123456"`.
+pub(crate) fn verify_dashboard_password(password: Option<&str>, settings: &Settings) -> bool {
+    let Some(password) = password.map(str::trim).filter(|p| !p.is_empty()) else {
+        return false;
+    };
+    if let Some(hash) = settings_password_hash(settings) {
+        return verify(password, hash).unwrap_or(false);
+    }
+    let initial_password =
+        std::env::var("INITIAL_PASSWORD").unwrap_or_else(|_| "123456".to_string());
+    password == initial_password
 }
 
 fn is_tunnel_request(headers: &HeaderMap, settings: &Settings) -> bool {

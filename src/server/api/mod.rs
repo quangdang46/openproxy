@@ -57,9 +57,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use crate::core::auth::CLI_TOKEN_HEADER;
 use crate::server::auth::{extract_api_key, require_api_key, require_dashboard_session, AuthError};
 use crate::server::state::AppState;
 use crate::types::{AppDb, HealthResponse, ProviderConnection};
+
+/// Header carrying the dashboard password for sensitive re-auth (export/import).
+/// Accepts the OpenProxy name and the legacy 9router name for compatibility.
+const DB_PASSWORD_HEADERS: &[&str] = &["x-op-password", "x-9r-password"];
 
 pub fn routes(state: AppState) -> Router<AppState> {
     use axum::middleware;
@@ -520,6 +525,60 @@ pub(super) fn require_dashboard_or_management_api_key(
     }
 }
 
+/// Extra password re-auth for database export/import (9router parity).
+///
+/// Skipped when:
+/// - the request carries a CLI token (`x-9r-cli-token`) — local CLI is trusted
+/// - a valid management API key is present — automation/CLI via Bearer
+/// - `requireLogin` is off or no dashboard password is configured
+///
+/// Otherwise the caller must supply the current dashboard password via
+/// `x-op-password` / `x-9r-password` header or the `password` JSON field.
+pub(super) fn require_database_password_reauth(
+    headers: &HeaderMap,
+    state: &AppState,
+    body_password: Option<&str>,
+) -> Result<(), Response> {
+    if headers.get(CLI_TOKEN_HEADER).is_some() {
+        return Ok(());
+    }
+
+    if extract_api_key(headers).is_some() && require_api_key(headers, &state.db).is_ok() {
+        return Ok(());
+    }
+
+    let snapshot = state.db.snapshot();
+    let settings = &snapshot.settings;
+    let has_password = auth::settings_password_hash(settings).is_some();
+    if !settings.require_login || !has_password {
+        return Ok(());
+    }
+
+    let header_password = DB_PASSWORD_HEADERS.iter().find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+    });
+    let password = body_password
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or(header_password);
+
+    if auth::verify_dashboard_password(password.as_deref(), settings) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "Invalid password" })),
+        )
+            .into_response())
+    }
+}
+
 pub(super) fn redact_provider_connection(connection: &ProviderConnection) -> ProviderConnection {
     let mut redacted = connection.clone();
     redacted.access_token = None;
@@ -751,7 +810,14 @@ async fn create_provider_api(
     let mut default_conn = ProviderConnection::default();
     default_conn.id = id;
     default_conn.provider = provider.to_string();
-    default_conn.auth_type = "apikey".to_string();
+    // Web-cookie providers store a browser session cookie in the api_key field
+    // but must retain auth_type "cookie" (9router parity) so list filters,
+    // toggles, and executor dispatch treat them correctly.
+    default_conn.auth_type = if is_web_cookie_provider(provider) {
+        "cookie".to_string()
+    } else {
+        "apikey".to_string()
+    };
     default_conn.name = Some(name);
     default_conn.priority = Some(req.priority.unwrap_or(1));
     default_conn.is_active = Some(true);
@@ -2044,6 +2110,9 @@ async fn export_db_api(State(state): State<AppState>, headers: HeaderMap) -> Res
     if let Err(response) = require_management_api_key(&headers, &state) {
         return response;
     }
+    if let Err(response) = require_database_password_reauth(&headers, &state, None) {
+        return response;
+    }
 
     let snapshot = state.db.snapshot();
     let val = serde_json::to_value(snapshot.as_ref()).unwrap_or(json!({}));
@@ -2054,7 +2123,17 @@ async fn settings_database_export_api(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Response {
-    export_db_api(State(state), headers).await
+    // Dashboard path: accept session OR management key, then password re-auth.
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+    if let Err(response) = require_database_password_reauth(&headers, &state, None) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let val = serde_json::to_value(snapshot.as_ref()).unwrap_or(json!({}));
+    Json(val).into_response()
 }
 
 async fn settings_database_import_api(
@@ -2062,11 +2141,11 @@ async fn settings_database_import_api(
     headers: HeaderMap,
     body: Result<Json<Value>, axum::extract::rejection::JsonRejection>,
 ) -> Response {
-    if let Err(response) = require_management_api_key(&headers, &state) {
+    if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }
 
-    let Json(body) = match body {
+    let Json(mut body) = match body {
         Ok(body) => body,
         Err(_) => {
             return (
@@ -2083,6 +2162,17 @@ async fn settings_database_import_api(
             Json(json!({ "error": "Invalid database payload" })),
         )
             .into_response();
+    }
+
+    // Optional password field for re-auth (stripped before import).
+    let body_password = body
+        .as_object_mut()
+        .and_then(|obj| obj.remove("password"))
+        .and_then(|v| v.as_str().map(|s| s.to_string()));
+    if let Err(response) =
+        require_database_password_reauth(&headers, &state, body_password.as_deref())
+    {
+        return response;
     }
 
     let imported = AppDb::from_json_value(body);
@@ -2376,6 +2466,12 @@ fn bad_request_response(message: &str) -> Response {
         Json(json!({ "success": false, "error": message })),
     )
         .into_response()
+}
+
+/// Providers that authenticate with a browser session cookie (stored in the
+/// `api_key` field). Must match `WEB_COOKIE_PROVIDERS` in the dashboard.
+fn is_web_cookie_provider(provider: &str) -> bool {
+    matches!(provider, "grok-web" | "perplexity-web")
 }
 
 fn normalize_create_provider_proxy(

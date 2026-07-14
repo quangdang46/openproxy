@@ -14,7 +14,7 @@ use serde_json::json;
 use crate::db::backups::{BackupManager, BackupReason};
 use crate::server::state::AppState;
 
-use super::require_dashboard_or_management_api_key;
+use super::{require_dashboard_or_management_api_key, require_database_password_reauth};
 
 pub fn routes() -> Router<AppState> {
     Router::new()
@@ -199,6 +199,9 @@ async fn export_handler(State(state): State<AppState>, headers: HeaderMap) -> Re
     if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }
+    if let Err(response) = require_database_password_reauth(&headers, &state, None) {
+        return response;
+    }
 
     let (bytes, filename) = match state.db.export_db() {
         Ok(m) => m,
@@ -226,6 +229,10 @@ async fn import_handler(
     multipart: Multipart,
 ) -> Response {
     if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+    // Password via header only for multipart import (body is the backup file).
+    if let Err(response) = require_database_password_reauth(&headers, &state, None) {
         return response;
     }
 

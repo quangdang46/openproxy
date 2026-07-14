@@ -3254,24 +3254,15 @@ fn combo_error_response(error: ComboExecutionError) -> Response {
 }
 
 fn attempt_error_response(error: ComboAttemptError) -> Response {
-    let status = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
-    let (e_type, e_code) = match crate::core::config::error_config::error_type_for(status.as_u16())
-    {
-        Some(info) => (info.r#type, info.code),
-        None if status.as_u16() >= 500 => ("server_error", "internal_server_error"),
-        None => ("invalid_request_error", ""),
-    };
-    let mut response = (
-        status,
-        Json(json!({
-            "error": {
-                "message": error.message,
-                "type": e_type,
-                "code": e_code
-            }
-        })),
-    )
-        .into_response();
+    // Prefer a status that matches the error text when upstream lied about the code
+    // (e.g. free-console proxies returning 401 for "model not supported").
+    let status_code =
+        crate::core::utils::error::infer_status_from_message(error.status, &error.message);
+    let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY);
+    let friendly =
+        crate::core::utils::error::friendly_error_message(status.as_u16(), &error.message);
+    let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(&friendly));
+    let mut response = (status, Json(body)).into_response();
 
     if let Some(retry_after) = error.retry_after {
         let seconds = (retry_after - Utc::now()).num_seconds().max(1).to_string();
@@ -3284,26 +3275,12 @@ fn attempt_error_response(error: ComboAttemptError) -> Response {
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
-    let (e_type, e_code) = match crate::core::config::error_config::error_type_for(status.as_u16())
-    {
-        Some(info) => (info.r#type, info.code),
-        None if status.as_u16() >= 500 => ("server_error", "internal_server_error"),
-        None => ("invalid_request_error", ""),
-    };
-    let msg = message;
-    with_cors_response(
-        (
-            status,
-            Json(json!({
-                "error": {
-                    "message": msg,
-                    "type": e_type,
-                    "code": e_code
-                }
-            })),
-        )
-            .into_response(),
-    )
+    let status_code =
+        crate::core::utils::error::infer_status_from_message(status.as_u16(), message);
+    let status = StatusCode::from_u16(status_code).unwrap_or(status);
+    let friendly = crate::core::utils::error::friendly_error_message(status.as_u16(), message);
+    let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(&friendly));
+    with_cors_response((status, Json(body)).into_response())
 }
 
 fn json_success_response(status: StatusCode, data: Value) -> Response {
@@ -3348,9 +3325,10 @@ fn cors_preflight_response(methods: &str) -> Response {
 /// the message, so writing one before closing the stream lets them show
 /// a useful error instead of a generic "connection closed" message.
 fn write_streaming_error(error_msg: &str, error_type: &str) -> String {
+    let friendly = crate::core::utils::error::friendly_error_message(502, error_msg);
     let msg = serde_json::json!({
         "error": {
-            "message": error_msg,
+            "message": friendly,
             "type": error_type,
             "code": null
         }

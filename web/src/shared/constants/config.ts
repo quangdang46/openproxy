@@ -9,13 +9,20 @@ export const APP_CONFIG = {
 
 // GitHub configuration
 export const GITHUB_CONFIG = {
-  changelogUrl: "https://raw.githubusercontent.com/decolua/openproxy/refs/heads/master/CHANGELOG.md", // TODO: Update to openproxy repo when available
+  changelogUrl:
+    "https://raw.githubusercontent.com/quangdang46/openproxy/refs/heads/main/CHANGELOG.md",
+  repoUrl: "https://github.com/quangdang46/openproxy",
+  docsUrl: "https://github.com/quangdang46/openproxy#readme",
+  licenseUrl: "https://github.com/quangdang46/openproxy/blob/main/LICENSE",
 } as const;
 
-// Updater configuration
+// Updater configuration — binary install via install.sh (not npm)
 export const UPDATER_CONFIG = {
-  npmPackageName: "openrouter",
-  installCmd: "npm i -g openrouter",
+  npmPackageName: "openproxy",
+  installCmd:
+    "curl -fsSL https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh | bash",
+  installCmdLatest:
+    "curl -fsSL https://raw.githubusercontent.com/quangdang46/openproxy/main/install.sh | bash",
   exitDelayMs: 500,
   statusPort: 4625,
   statusPollIntervalMs: 1000,

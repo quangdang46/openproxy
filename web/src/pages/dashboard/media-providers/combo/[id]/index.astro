@@ -1,11 +1,12 @@
 ---
 import Layout from '@/layouts/Layout.astro';
 import MediaProvidersComboIdPageClient from '@/components/MediaProvidersComboIdPageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 
 export async function getStaticPaths() {
-  return [];
+  // Single dynamic shell — combo ids are runtime UUIDs unknown at build time.
+  return [{ params: { id: '_dynamic' } }];
 }
-import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
 ---
 <Layout>
   <DashboardLayout client:only="react">

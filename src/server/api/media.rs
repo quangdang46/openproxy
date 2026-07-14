@@ -15,8 +15,6 @@ use crate::server::auth::require_api_key;
 use crate::server::state::AppState;
 use crate::types::AppDb;
 
-use crate::core::config::error_config::error_type_for;
-
 use super::auth_error_response;
 
 pub async fn cors_options() -> Response {
@@ -686,24 +684,12 @@ fn media_result_to_response(result: Result<Value, crate::core::media::MediaError
 }
 
 fn json_error_response(status: StatusCode, message: &str) -> Response {
-    let (e_type, e_code) = match error_type_for(status.as_u16()) {
-        Some(info) => (info.r#type, info.code),
-        None if status.as_u16() >= 500 => ("server_error", "internal_server_error"),
-        None => ("invalid_request_error", ""),
-    };
-    with_cors_response(
-        (
-            status,
-            Json(json!({
-                "error": {
-                    "message": message,
-                    "type": e_type,
-                    "code": e_code
-                }
-            })),
-        )
-            .into_response(),
-    )
+    let status_code =
+        crate::core::utils::error::infer_status_from_message(status.as_u16(), message);
+    let status = StatusCode::from_u16(status_code).unwrap_or(status);
+    let friendly = crate::core::utils::error::friendly_error_message(status.as_u16(), message);
+    let body = crate::core::utils::error::build_error_body(status.as_u16(), Some(&friendly));
+    with_cors_response((status, Json(body)).into_response())
 }
 
 fn with_cors_response(mut response: Response) -> Response {

@@ -21,7 +21,7 @@ import {
   AI_PROVIDERS,
 } from "@/shared/constants/providers";
 // import Link from "next/link";  // ported: next.js -> Astro+React
-import { getErrorCode, getRelativeTime } from "@/shared/utils";
+import { getErrorBadgeLabel, getErrorCode, getRelativeTime } from "@/shared/utils";
 import { useNotificationStore } from "@/store/notificationStore";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "@/components/providers/ModelAvailabilityBadge";
@@ -37,12 +37,9 @@ function getStatusDisplay(connected, error, errorCode) {
     );
   }
   if (error > 0) {
-    const errText = errorCode
-      ? `${error} Error (${errorCode})`
-      : `${error} Error`;
     parts.push(
       <Badge key="error" variant="error" size="sm" dot>
-        {errText}
+        {getErrorBadgeLabel(error, errorCode)}
       </Badge>,
     );
   }
@@ -147,18 +144,65 @@ export default function ProvidersPageClient() {
     fetchData();
   }, []);
 
-  // Deep-link from /providers/new: ?add=<providerId> opens Add API key modal
+  // Deep-link from /providers/new:
+  //   ?add=<providerId> → branch by category (oauth / noAuth / apikey / cookie)
+  //   ?compatible=openai|anthropic → open the matching compatible modal
   useEffect(() => {
     if (typeof window === "undefined") return;
     const params = new URLSearchParams(window.location.search);
+    let dirty = false;
+
+    const compatible = params.get("compatible");
+    if (compatible === "openai") {
+      setShowAddCompatibleModal(true);
+      params.delete("compatible");
+      dirty = true;
+    } else if (compatible === "anthropic") {
+      setShowAddAnthropicCompatibleModal(true);
+      params.delete("compatible");
+      dirty = true;
+    }
+
     const addId = params.get("add");
-    if (!addId) return;
-    const info = AI_PROVIDERS[addId];
-    if (!info) return;
-    setAddProviderId(addId);
-    setShowAddApiKeyModal(true);
-    // Clear the query so refresh/back doesn't re-open the modal
-    params.delete("add");
+    if (addId) {
+      const info = AI_PROVIDERS[addId];
+      if (info) {
+        const inOAuth = !!OAUTH_PROVIDERS[addId];
+        const inFree = !!FREE_PROVIDERS[addId];
+        const freeNoAuth = !!FREE_PROVIDERS[addId]?.noAuth;
+        const authModes = info.authModes || [];
+        const isOAuthLike =
+          inOAuth || (inFree && !freeNoAuth) || authModes.includes("oauth");
+        const isApiKeyLike =
+          !!APIKEY_PROVIDERS[addId] ||
+          !!FREE_TIER_PROVIDERS[addId] ||
+          !!WEB_COOKIE_PROVIDERS[addId] ||
+          authModes.includes("apikey") ||
+          authModes.includes("cookie");
+
+        if (isOAuthLike && !isApiKeyLike) {
+          // Pure OAuth / free social → go to detail (or start oauth flow)
+          window.location.href = `/dashboard/providers/${encodeURIComponent(addId)}`;
+          return;
+        }
+        if (freeNoAuth) {
+          window.location.href = `/dashboard/providers/${encodeURIComponent(addId)}`;
+          return;
+        }
+        if (isApiKeyLike) {
+          setAddProviderId(addId);
+          setShowAddApiKeyModal(true);
+        } else {
+          window.location.href = `/dashboard/providers/${encodeURIComponent(addId)}`;
+          return;
+        }
+      }
+      params.delete("add");
+      dirty = true;
+    }
+
+    if (!dirty) return;
+    // Clear query so refresh/back doesn't re-open the modal
     const qs = params.toString();
     const next = `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash || ""}`;
     window.history.replaceState({}, "", next);
@@ -331,35 +375,56 @@ export default function ProvidersPageClient() {
     }))
     .filter((p) => matchSearch(p.name));
 
-  const oauthEntries = Object.entries(OAUTH_PROVIDERS).filter(
-    ([, info]) => !info.hidden && matchSearch(info.name),
-  );
-  const freeEntries = Object.entries(FREE_PROVIDERS).filter(
-    ([, info]) => !info.hidden && matchSearch(info.name),
-  );
-  const freeTierEntries = Object.entries(FREE_TIER_PROVIDERS).filter(
-    ([, info]) => !info.hidden && matchSearch(info.name),
-  );
-  // Sort APIKEY providers so ones with any connected (working) connection
-  // surface first; ties break alphabetically. Mirrors 9router's
-  // sortByPriority — when the list is long, this keeps the most useful
-  // providers above the fold.
-  const sortApikeyByPriority = (entries: Array<[string, any]>) =>
+  // sortByPriority — registry priority → connected → name (9router parity)
+  const sortByPriority = (
+    entries: Array<[string, any]>,
+    authType: string | string[] = "apikey",
+  ) =>
     [...entries].sort(([ka, a], [kb, b]) => {
-      const sa = getProviderStats(ka, "apikey");
-      const sb = getProviderStats(kb, "apikey");
+      const pa = a.priority ?? 999;
+      const pb = b.priority ?? 999;
+      if (pa !== pb) return pa - pb;
+      const sa = getProviderStats(ka, authType);
+      const sb = getProviderStats(kb, authType);
       const ca = sa.connected > 0 ? 1 : 0;
       const cb = sb.connected > 0 ? 1 : 0;
       if (ca !== cb) return cb - ca;
       return (a.name || "").localeCompare(b.name || "");
     });
-  const apikeyEntries = sortApikeyByPriority(
+  const sortNoAuthFirst = (entries: Array<[string, any]>) =>
+    [...entries].sort(([, a], [, b]) => (b.noAuth ? 1 : 0) - (a.noAuth ? 1 : 0));
+
+  const oauthEntries = sortByPriority(
+    Object.entries(OAUTH_PROVIDERS).filter(
+      ([, info]) => !info.hidden && matchSearch(info.name),
+    ),
+    "oauth",
+  );
+  const freeEntries = sortNoAuthFirst(
+    Object.entries(FREE_PROVIDERS).filter(
+      ([, info]) => !info.hidden && matchSearch(info.name),
+    ),
+  );
+  const freeTierEntries = sortNoAuthFirst(
+    Object.entries(FREE_TIER_PROVIDERS).filter(
+      ([, info]) =>
+        !info.hidden &&
+        (info.serviceKinds ?? ["llm"]).includes("llm") &&
+        matchSearch(info.name),
+    ),
+  );
+  // Sort APIKEY providers so ones with any connected (working) connection
+  // surface first; ties break alphabetically. Mirrors 9router's
+  // sortByPriority — when the list is long, this keeps the most useful
+  // providers above the fold.
+  const apikeyEntries = sortByPriority(
     Object.entries(APIKEY_PROVIDERS).filter(
       ([, info]) =>
         !info.hidden &&
         (info.serviceKinds ?? ["llm"]).includes("llm") &&
         matchSearch(info.name),
     ),
+    "apikey",
   );
   const isApikeySearching = !!searchQuery.trim();
   const visibleApikeyEntries =
@@ -604,25 +669,30 @@ export default function ProvidersPageClient() {
       )}
 
       {/* Web Cookie Providers — use browser subscription cookie instead of API key */}
-      {/* <div className="flex flex-col gap-4">
-        <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold flex items-center gap-2">
-            Web Cookie Providers{" "}
-          </h2>
+      {Object.keys(WEB_COOKIE_PROVIDERS).length > 0 && (
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold flex items-center gap-2">
+              Web Cookie Providers{" "}
+            </h2>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {Object.entries(WEB_COOKIE_PROVIDERS).map(([key, info]) => (
+              <ApiKeyProviderCard
+                key={key}
+                providerId={key}
+                provider={info}
+                // Include legacy "apikey" rows created before cookie auth_type parity
+                stats={getProviderStats(key, ["cookie", "apikey"])}
+                authType="cookie"
+                onToggle={(active) =>
+                  handleToggleProvider(key, ["cookie", "apikey"], active)
+                }
+              />
+            ))}
+          </div>
         </div>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-          {Object.entries(WEB_COOKIE_PROVIDERS).map(([key, info]) => (
-            <ApiKeyProviderCard
-              key={key}
-              providerId={key}
-              provider={info}
-              stats={getProviderStats(key, "apikey")}
-              authType="apikey"
-              onToggle={(active) => handleToggleProvider(key, "apikey", active)}
-            />
-          ))}
-        </div>
-      </div> */}
+      )}
 
       <AddOpenAICompatibleModal
         isOpen={showAddCompatibleModal}
@@ -711,12 +781,14 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
     free: "bg-green-500",
     oauth: "bg-blue-500",
     apikey: "bg-amber-500",
+    cookie: "bg-pink-500",
     compatible: "bg-orange-500",
   };
   const dotLabels = {
     free: "Free",
     oauth: "OAuth",
     apikey: "API Key",
+    cookie: "Cookie",
     compatible: "Compatible",
   };
 
@@ -830,12 +902,14 @@ function ApiKeyProviderCard({
     free: "bg-green-500",
     oauth: "bg-blue-500",
     apikey: "bg-amber-500",
+    cookie: "bg-pink-500",
     compatible: "bg-orange-500",
   };
   const dotLabels = {
     free: "Free",
     oauth: "OAuth",
     apikey: "API Key",
+    cookie: "Cookie",
     compatible: "Compatible",
   };
 

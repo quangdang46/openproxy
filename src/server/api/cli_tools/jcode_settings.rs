@@ -34,7 +34,10 @@ struct SaveJcodeSettingsRequest {
     models: Vec<String>,
 }
 
-async fn get_jcode_settings(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(super) async fn get_jcode_settings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
     if let Err(response) = super::super::require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }

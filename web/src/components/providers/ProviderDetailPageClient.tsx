@@ -73,6 +73,8 @@ export default function ProviderDetailPageClient() {
   const [showAddCustomModel, setShowAddCustomModel] = useState(false);
   const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
   const [selectedConnectionIds, setSelectedConnectionIds] = useState([]);
+  const [bulkDeletePending, setBulkDeletePending] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [bulkProxyPoolId, setBulkProxyPoolId] = useState("__none__");
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
   const [providerStrategy, setProviderStrategy] = useState(null); // null = use global, "round-robin" = override
@@ -110,7 +112,19 @@ export default function ProviderDetailPageClient() {
         type: providerNode.type,
       }
     : (OAUTH_PROVIDERS[providerId] || APIKEY_PROVIDERS[providerId] || FREE_PROVIDERS[providerId] || FREE_TIER_PROVIDERS[providerId] || WEB_COOKIE_PROVIDERS[providerId]);
-  const isOAuth = !!OAUTH_PROVIDERS[providerId] || !!FREE_PROVIDERS[providerId];
+  const authModes = (providerInfo as any)?.authModes || [];
+  // Dual-auth providers (e.g. xAI) declare oauth in authModes even when they
+  // also appear under APIKEY_PROVIDERS for the key path.
+  const isOAuth =
+    !!OAUTH_PROVIDERS[providerId] ||
+    !!FREE_PROVIDERS[providerId] ||
+    authModes.includes("oauth");
+  const supportsApiKeyAuth =
+    !!APIKEY_PROVIDERS[providerId] ||
+    !!FREE_TIER_PROVIDERS[providerId] ||
+    !!WEB_COOKIE_PROVIDERS[providerId] ||
+    authModes.includes("apikey") ||
+    authModes.includes("cookie");
   const isFreeNoAuth = !!FREE_PROVIDERS[providerId]?.noAuth;
   const models = getModelsByProviderId(providerId);
   const providerAlias = getProviderAlias(providerId);
@@ -118,6 +132,11 @@ export default function ProviderDetailPageClient() {
   const isOpenAICompatible = isOpenAICompatibleProvider(providerId);
   const isAnthropicCompatible = isAnthropicCompatibleProvider(providerId);
   const isCompatible = isOpenAICompatible || isAnthropicCompatible;
+  const hasDualAuthModes = !isCompatible && isOAuth && supportsApiKeyAuth;
+  const oauthConnectionLabel =
+    providerId === "xai" ? "Grok Build OAuth" : "OAuth";
+  const apiKeyConnectionLabel =
+    providerId === "xai" ? "xAI API Key" : "API Key";
   const providerStorageAlias = isCompatible ? providerId : providerAlias;
   const providerDisplayAlias = isCompatible
     ? (providerNode?.prefix || providerId)
@@ -141,7 +160,8 @@ export default function ProviderDetailPageClient() {
   const providerThinkingLevels = (() => {
     const modelIds: string[] = [];
     for (const m of models) {
-      if (!m?.type || m.type === "llm") modelIds.push(m.id);
+      const kind = (m as any)?.kind || m?.type;
+      if (!kind || kind === "llm") modelIds.push(m.id);
     }
     for (const m of kiloFreeModels) modelIds.push(m.id);
     for (const entry of customModels) {
@@ -493,10 +513,18 @@ export default function ProviderDetailPageClient() {
         // Qoder model ID format may be "qoder/auto" or "auto"
         const cleanModelId = String(modelId).replace(/^qoder\//, "");
         const alreadyExists =
-          Object.values(modelAliases).includes(`${providerStorageAlias}/${cleanModelId}`) ||
-          models.some((m: any) => m.id === cleanModelId);
+          customModels.some(
+            (entry: any) =>
+              entry.providerAlias === providerStorageAlias &&
+              entry.id === cleanModelId &&
+              (entry.kind || entry.type || "llm") === "llm",
+          ) ||
+          Object.values(modelAliases).includes(
+            `${providerStorageAlias}/${cleanModelId}`,
+          );
         if (alreadyExists) continue;
-        await handleSetAlias(cleanModelId, cleanModelId, providerStorageAlias);
+        // 9router parity: store under custom models, not aliases.
+        await handleAddCustomModel(cleanModelId, "llm", providerStorageAlias);
         importedCount += 1;
       }
 
@@ -504,7 +532,10 @@ export default function ProviderDetailPageClient() {
         notify.success("All models already exist, no new models added");
       } else {
         notify.success(`Successfully added ${importedCount} models`);
-        await fetchAliases();
+        await fetchCustomModels();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("customModelChanged"));
+        }
       }
     } catch (error: any) {
       console.log("Error importing Qoder models:", error);
@@ -901,6 +932,45 @@ export default function ProviderDetailPageClient() {
     return applyProxyAssignments(targets);
   };
 
+  const handleBulkDelete = () => {
+    if (selectedConnectionIds.length === 0) return;
+    setBulkDeletePending(true);
+  };
+
+  const confirmBulkDelete = async () => {
+    const idsToDelete = [...selectedConnectionIds];
+    if (idsToDelete.length === 0) {
+      setBulkDeletePending(false);
+      return;
+    }
+    setBulkDeleting(true);
+    let failed = 0;
+    try {
+      for (const id of idsToDelete) {
+        try {
+          const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
+          if (!res.ok) failed += 1;
+        } catch (error) {
+          console.log("Error deleting connection:", error);
+          failed += 1;
+        }
+      }
+      setConnections((prev) => prev.filter((c) => !idsToDelete.includes(c.id)));
+      setSelectedConnectionIds([]);
+      if (failed > 0) {
+        notify.error(
+          `Deleted ${idsToDelete.length - failed} connection(s), ${failed} failed.`,
+        );
+      } else {
+        notify.success(
+          `Deleted ${idsToDelete.length} connection${idsToDelete.length > 1 ? "s" : ""}`,
+        );
+      }
+    } finally {
+      setBulkDeleting(false);
+      setBulkDeletePending(false);
+    }
+  };
 
   const isSelected = (connectionId) => selectedConnectionIds.includes(connectionId);
 
@@ -909,6 +979,15 @@ export default function ProviderDetailPageClient() {
       {connections
         .map((conn, index) => (
           <div key={conn.id} className="flex min-w-0 items-stretch">
+            <label className="flex shrink-0 items-center px-2">
+              <input
+                type="checkbox"
+                checked={isSelected(conn.id)}
+                onChange={() => toggleSelectConnection(conn.id)}
+                className="h-3.5 w-3.5 rounded border-gray-300 text-primary focus:ring-primary"
+                aria-label={`Select connection ${conn.name || conn.id}`}
+              />
+            </label>
             <div className="flex-1 min-w-0">
               <ConnectionRow
                 connection={conn}
@@ -1053,7 +1132,10 @@ export default function ProviderDetailPageClient() {
     const allModels = [
       ...models,
       ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
-    ].filter((m) => !m.type || m.type === "llm");
+    ].filter((m) => {
+      const kind = (m as any)?.kind || m?.type;
+      return !kind || kind === "llm";
+    });
     const disabledSet = new Set(disabledModelIds);
     const displayModels = allModels.filter((m) => !disabledSet.has(m.id));
     const disabledDisplayModels = allModels.filter((m) => disabledSet.has(m.id));
@@ -1385,6 +1467,16 @@ export default function ProviderDetailPageClient() {
               )}
               {connections.length > 0 && (
                 <>
+                  {selectedConnectionIds.length > 0 && (
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      icon="delete"
+                      onClick={handleBulkDelete}
+                    >
+                      Delete Selected ({selectedConnectionIds.length})
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="secondary"
@@ -1455,26 +1547,46 @@ export default function ProviderDetailPageClient() {
                 <div className="inline-flex items-center justify-center w-9 h-9 rounded-full bg-primary/10 text-primary shrink-0">
                   <span className="material-symbols-outlined text-[18px]">{isOAuth ? "lock" : "key"}</span>
                 </div>
-                <p className="text-sm text-text-muted">No connections yet</p>
+                <div className="min-w-0">
+                  <p className="text-sm text-text-muted">No connections yet</p>
+                  {hasDualAuthModes && (
+                    <p className="text-xs text-text-muted">
+                      Choose {oauthConnectionLabel} or {apiKeyConnectionLabel}.
+                    </p>
+                  )}
+                </div>
               </div>
               <div className="flex gap-2">
-                {!isCompatible && providerId === "iflow" && (
-                  <Button size="sm" icon="cookie" variant="secondary" onClick={() => setShowIFlowCookieModal(true)}>
-                    Cookie
-                  </Button>
+                {hasDualAuthModes ? (
+                  <>
+                    <Button size="sm" icon="lock" variant="secondary" onClick={triggerOAuthConnection}>
+                      {oauthConnectionLabel}
+                    </Button>
+                    <Button size="sm" icon="key" onClick={triggerApiKeyConnection}>
+                      {apiKeyConnectionLabel}
+                    </Button>
+                  </>
+                ) : (
+                  <>
+                    {!isCompatible && providerId === "iflow" && (
+                      <Button size="sm" icon="cookie" variant="secondary" onClick={() => setShowIFlowCookieModal(true)}>
+                        Cookie
+                      </Button>
+                    )}
+                    {!isCompatible && providerId === "codex" && (
+                      <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportCodex(true)}>
+                        Bulk Add
+                      </Button>
+                    )}
+                    <Button
+                      size="sm"
+                      icon="add"
+                      onClick={triggerAddConnection}
+                    >
+                      {isCompatible ? "Add API Key" : (providerId === "iflow" ? "OAuth" : "Add Connection")}
+                    </Button>
+                  </>
                 )}
-                {!isCompatible && providerId === "codex" && (
-                  <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportCodex(true)}>
-                    Bulk Add
-                  </Button>
-                )}
-                <Button
-                  size="sm"
-                  icon="add"
-                  onClick={triggerAddConnection}
-                >
-                  {isCompatible ? "Add API Key" : (providerId === "iflow" ? "OAuth" : "Add Connection")}
-                </Button>
               </div>
             </div>
           ) : (
@@ -1495,41 +1607,78 @@ export default function ProviderDetailPageClient() {
                   </div>
                 </div>
               )}
+              {connections.length > 0 && (
+                <div className="mb-3 flex items-center gap-2 border-b border-black/[0.03] pb-2 dark:border-white/[0.03]">
+                  <label className="flex cursor-pointer items-center gap-1.5 text-xs text-text-muted hover:text-primary">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      onChange={toggleSelectAllConnections}
+                      className="h-3.5 w-3.5 rounded border-gray-300 text-primary focus:ring-primary"
+                    />
+                    Select All
+                  </label>
+                </div>
+              )}
               {connectionsList}
               {!isCompatible && (
                 <div className="mt-4 grid grid-cols-1 gap-2 sm:flex">
-                  {providerId === "iflow" && (
-                    <Button
-                      size="sm"
-                      icon="cookie"
-                      variant="secondary"
-                      onClick={() => setShowIFlowCookieModal(true)}
-                      title="Add connection using browser cookie"
-                      className="w-full sm:w-auto"
-                    >
-                      Cookie
-                    </Button>
+                  {hasDualAuthModes ? (
+                    <>
+                      <Button
+                        size="sm"
+                        icon="lock"
+                        variant="secondary"
+                        onClick={triggerOAuthConnection}
+                        className="w-full sm:w-auto"
+                      >
+                        {oauthConnectionLabel}
+                      </Button>
+                      <Button
+                        size="sm"
+                        icon="key"
+                        onClick={triggerApiKeyConnection}
+                        className="w-full sm:w-auto"
+                      >
+                        {apiKeyConnectionLabel}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      {providerId === "iflow" && (
+                        <Button
+                          size="sm"
+                          icon="cookie"
+                          variant="secondary"
+                          onClick={() => setShowIFlowCookieModal(true)}
+                          title="Add connection using browser cookie"
+                          className="w-full sm:w-auto"
+                        >
+                          Cookie
+                        </Button>
+                      )}
+                      {providerId === "codex" && (
+                        <Button
+                          size="sm"
+                          icon="playlist_add"
+                          variant="secondary"
+                          onClick={() => setShowBulkImportCodex(true)}
+                          title="Bulk import codex accounts from JSON"
+                          className="w-full sm:w-auto"
+                        >
+                          Bulk Add
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        icon="add"
+                        onClick={triggerAddConnection}
+                        className="w-full sm:w-auto"
+                      >
+                        Add
+                      </Button>
+                    </>
                   )}
-                  {providerId === "codex" && (
-                    <Button
-                      size="sm"
-                      icon="playlist_add"
-                      variant="secondary"
-                      onClick={() => setShowBulkImportCodex(true)}
-                      title="Bulk import codex accounts from JSON"
-                      className="w-full sm:w-auto"
-                    >
-                      Bulk Add
-                    </Button>
-                  )}
-                  <Button
-                    size="sm"
-                    icon="add"
-                    onClick={triggerAddConnection}
-                    className="w-full sm:w-auto"
-                  >
-                    Add
-                  </Button>
                 </div>
               )}
             </>
@@ -1565,7 +1714,10 @@ export default function ProviderDetailPageClient() {
             const allIds = [
               ...models,
               ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
-            ].filter((m) => !m.type || m.type === "llm").map((m) => m.id);
+            ].filter((m) => {
+              const kind = (m as any)?.kind || m?.type;
+              return !kind || kind === "llm";
+            }).map((m) => m.id);
             const activeIds = allIds.filter((id) => !disabledModelIds.includes(id));
             return (
               <div className="flex gap-2">
@@ -1735,6 +1887,21 @@ export default function ProviderDetailPageClient() {
         message={disableAllTarget ? <>Disable all <strong>{disableAllTarget.length}</strong> model(s) for this provider?</> : null}
         confirmText="Disable all"
         variant="danger"
+      />
+
+      <ConfirmModal
+        isOpen={bulkDeletePending}
+        onClose={() => !bulkDeleting && setBulkDeletePending(false)}
+        onConfirm={confirmBulkDelete}
+        title={`Delete ${selectedConnectionIds.length} Connection${selectedConnectionIds.length === 1 ? "" : "s"}`}
+        message={
+          selectedConnectionIds.length > 0
+            ? `Delete ${selectedConnectionIds.length} connection${selectedConnectionIds.length === 1 ? "" : "s"}? This cannot be undone.`
+            : null
+        }
+        confirmText="Delete"
+        variant="danger"
+        loading={bulkDeleting}
       />
 
       {/* Antigravity risk confirmation — gate OAuth until user acknowledges */}
