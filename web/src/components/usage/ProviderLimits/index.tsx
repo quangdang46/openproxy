@@ -19,6 +19,7 @@ interface Connection {
   provider: string;
   name?: string;
   email?: string;
+  displayName?: string;
   authType?: string;
   isActive?: boolean;
 }
@@ -40,11 +41,30 @@ const isUsageEligible = (conn: Connection) =>
   (conn.authType === "oauth" || USAGE_APIKEY_PROVIDERS.includes(conn.provider));
 
 function getConnectionLabel(connection: Connection): string {
-  const isEmail = (v?: string) =>
-    typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-  if (isEmail(connection.email)) return connection.email!.trim();
-  if (connection.name?.trim()) return connection.name.trim();
-  return "";
+  return (
+    connection.name?.trim() ||
+    connection.email?.trim() ||
+    connection.displayName?.trim() ||
+    ""
+  );
+}
+
+function getConnectionSecondaryLabel(connection: Connection): string | null {
+  if (
+    connection.name?.trim() &&
+    connection.email?.trim() &&
+    connection.name.trim() !== connection.email.trim()
+  ) {
+    return connection.email.trim();
+  }
+  if (
+    connection.name?.trim() &&
+    connection.displayName?.trim() &&
+    connection.name.trim() !== connection.displayName.trim()
+  ) {
+    return connection.displayName.trim();
+  }
+  return null;
 }
 
 function getCodexResetCreditCount(quota?: QuotaDataEntry | null): number {
@@ -348,7 +368,6 @@ export default function ProviderLimits() {
     try {
       const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
       if (res.ok) {
-        setConnections((prev) => prev.filter((c) => c.id !== id));
         setQuotaData((prev) => {
           const next = { ...prev };
           delete next[id];
@@ -364,6 +383,8 @@ export default function ProviderLimits() {
           delete next[id];
           return next;
         });
+        // Re-fetch connection list so filter/counts stay in sync without manual refresh.
+        await fetchConnections();
         notify.success("Connection deleted");
       } else {
         notify.error("Failed to delete connection");
@@ -375,7 +396,7 @@ export default function ProviderLimits() {
       setDeletingId(null);
       setDeleteConfirmId(null);
     }
-  }, [deleteConfirmId, notify]);
+  }, [deleteConfirmId, notify, fetchConnections]);
 
   const handleToggleConnectionActive = useCallback(async (id: string, isActive: boolean) => {
     setTogglingId(id);
@@ -386,16 +407,20 @@ export default function ProviderLimits() {
         body: JSON.stringify({ isActive }),
       });
       if (res.ok) {
-        setConnections((prev) =>
-          prev.map((c) => (c.id === id ? { ...c, isActive } : c)),
-        );
+        // Refresh connections list; re-fetch this connection's quota when still active.
+        const conns = await fetchConnections();
+        const conn = conns.find((c: Connection) => c.id === id);
+        if (conn && isActive && isUsageEligible(conn)) {
+          await fetchQuota(id, conn.provider);
+          setLastUpdated(new Date());
+        }
       }
     } catch (error) {
       console.error("Error updating connection status:", error);
     } finally {
       setTogglingId(null);
     }
-  }, []);
+  }, [fetchConnections, fetchQuota]);
 
   const handleUpdateConnection = useCallback(
     async (formData: Record<string, any>) => {
@@ -878,11 +903,19 @@ export default function ProviderLimits() {
                         {conn.provider}
                       </h3>
                       {(() => {
-                        const isEmail = (v: string) => typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-                        const label = isEmail(conn.email) ? conn.email : (isEmail(conn.name || "") ? conn.name : conn.name);
-                        return label ? (
-                          <p className="text-xs text-text-muted truncate">{label}</p>
-                        ) : null;
+                        const label = getConnectionLabel(conn);
+                        const secondary = getConnectionSecondaryLabel(conn);
+                        if (!label && !secondary) return null;
+                        return (
+                          <>
+                            {label && (
+                              <p className="text-xs text-text-muted truncate">{label}</p>
+                            )}
+                            {secondary && (
+                              <p className="text-[10px] text-text-muted/70 truncate">{secondary}</p>
+                            )}
+                          </>
+                        );
                       })()}
                     </div>
                   </div>

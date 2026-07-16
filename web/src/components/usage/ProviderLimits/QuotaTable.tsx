@@ -8,6 +8,8 @@ interface Quota {
   total: number;
   resetAt?: string;
   remainingPercentage?: number;
+  /** When false, resetAt is a hard expiry (one-shot pack). Defaults true. */
+  recurring?: boolean;
 }
 
 interface QuotaTableProps {
@@ -105,6 +107,22 @@ export default function QuotaTable({ quotas = [], compact = false }: QuotaTableP
             const colors = getColorClasses(remaining);
             const countdown = formatResetTime(quota.resetAt);
             const resetDisplay = formatResetTimeDisplay(quota.resetAt);
+            // recurring defaults true: a missing flag means the quota refreshes
+            // at resetAt. Bonus/one-shot packs set recurring:false and their
+            // resetAt is a hard expiry, so word it as "Expires".
+            const isRecurring = quota.recurring !== false;
+            const isExpired =
+              !!quota.resetAt &&
+              Number.isFinite(new Date(quota.resetAt).getTime()) &&
+              new Date(quota.resetAt).getTime() <= Date.now();
+            let countdownLabel: string | null = null;
+            if (isExpired) {
+              countdownLabel = "Expired";
+            } else if (countdown !== "-") {
+              countdownLabel = isRecurring
+                ? `Reset in ${countdown}`
+                : `Expires in ${countdown}`;
+            }
 
             return (
               <tr 
@@ -146,24 +164,24 @@ export default function QuotaTable({ quotas = [], compact = false }: QuotaTableP
                   </div>
                 </td>
 
-                {/* Reset Time */}
+                {/* Reset / Expiry Time */}
                 <td className={`${cellPad} w-[25%]`}>
-                  {countdown !== "-" || resetDisplay ? (
+                  {countdownLabel || resetDisplay ? (
                     compact ? (
                       <div
                         className={`${resetPrimary} text-text-primary font-medium truncate`}
                         title={resetDisplay || ""}
                       >
-                        {countdown !== "-" ? `in ${countdown}` : resetDisplay}
+                        {countdownLabel || resetDisplay}
                       </div>
                     ) : (
                       <div className="space-y-0.5">
-                        {countdown !== "-" && (
+                        {countdownLabel && (
                           <div className={`${resetPrimary} text-text-primary font-medium`}>
-                            in {countdown}
+                            {countdownLabel}
                           </div>
                         )}
-                        {resetDisplay && (
+                        {resetDisplay && !isExpired && (
                           <div className={`${resetSecondary} text-text-muted`}>
                             {resetDisplay}
                           </div>

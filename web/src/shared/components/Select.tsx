@@ -1,7 +1,7 @@
 "use client";
 
 import { cn } from "@/shared/utils/cn";
-import React from "react";
+import React, { useMemo, useState } from "react";
 
 interface SelectOption {
   value: string;
@@ -20,6 +20,9 @@ interface SelectProps extends Omit<React.SelectHTMLAttributes<HTMLSelectElement>
   required?: boolean;
   className?: string;
   selectClassName?: string;
+  /** When true, show a text filter above the native select (useful for long lists). */
+  searchable?: boolean;
+  searchPlaceholder?: string;
 }
 
 export default function Select({
@@ -34,8 +37,31 @@ export default function Select({
   required = false,
   className,
   selectClassName,
+  searchable = false,
+  searchPlaceholder = "Filter options...",
   ...props
 }: SelectProps) {
+  const [filter, setFilter] = useState("");
+
+  const filteredOptions = useMemo(() => {
+    if (!searchable || !filter.trim()) return options;
+    const q = filter.trim().toLowerCase();
+    return options.filter(
+      (option) =>
+        option.label.toLowerCase().includes(q) ||
+        option.value.toLowerCase().includes(q),
+    );
+  }, [options, searchable, filter]);
+
+  // Keep the currently selected option visible even when filtered out,
+  // so the select value stays valid while the user types.
+  const displayOptions = useMemo(() => {
+    if (!searchable || !value) return filteredOptions;
+    if (filteredOptions.some((o) => o.value === value)) return filteredOptions;
+    const selected = options.find((o) => o.value === value);
+    return selected ? [selected, ...filteredOptions] : filteredOptions;
+  }, [filteredOptions, options, searchable, value]);
+
   return (
     <div className={cn("flex flex-col gap-1.5", className)}>
       {label && (
@@ -43,6 +69,28 @@ export default function Select({
           {label}
           {required && <span className="text-red-500 ml-1">*</span>}
         </label>
+      )}
+      {searchable && (
+        <div className="relative">
+          <span className="material-symbols-outlined pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[18px] text-text-muted">
+            search
+          </span>
+          <input
+            type="text"
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            disabled={disabled}
+            placeholder={searchPlaceholder}
+            className={cn(
+              "w-full py-2 pl-9 pr-3 text-sm text-text-main",
+              "bg-surface-2 border border-transparent rounded-[10px]",
+              "focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500/40",
+              "transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed",
+              "text-[16px] sm:text-sm",
+            )}
+            aria-label={searchPlaceholder}
+          />
+        </div>
       )}
       <div className="relative">
         <select
@@ -63,7 +111,7 @@ export default function Select({
           <option value="" disabled>
             {placeholder}
           </option>
-          {options.map((option) => (
+          {displayOptions.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
@@ -73,6 +121,11 @@ export default function Select({
           <span className="material-symbols-outlined text-[20px]">expand_more</span>
         </div>
       </div>
+      {searchable && filter.trim() && (
+        <p className="text-xs text-text-muted">
+          {filteredOptions.length} of {options.length} providers
+        </p>
+      )}
       {error && (
         <p className="text-xs text-red-500 flex items-center gap-1">
           <span className="material-symbols-outlined text-[14px]">error</span>

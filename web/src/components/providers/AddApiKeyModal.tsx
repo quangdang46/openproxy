@@ -41,6 +41,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const [formData, setFormData] = useState({
     name: "",
     apiKey: "",
+    defaultModel: "",
     priority: 1,
     proxyPoolId: NONE_PROXY_POOL_VALUE,
     ollamaHostUrl: "",
@@ -57,9 +58,12 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
   const [validationResult, setValidationResult] = useState<"success" | "failed" | null>(null);
   const [saving, setSaving] = useState<boolean>(false);
 
-  // Bulk add: one key per line in `name|apiKey` or just `apiKey` (auto-named).
-  // Skipped for Azure/Cloudflare/Ollama/xAI single-key duplica since they need extra fields.
-  const supportsBulk = !isOllamaLocal && !isAzure && !isCloudflareAi && !isXaiApiKey;
+  // Bulk add: one key per line. Cloudflare uses name|apiKey|accountId.
+  // Skipped for Azure/Ollama/xAI single-key flows that need extra fields.
+  const supportsBulk = !isOllamaLocal && !isAzure && !isXaiApiKey;
+  const bulkPlaceholder = isCloudflareAi
+    ? `name1|sk-key1|acc123456\nname2|sk-key2|def789012\nsk-key-only-auto-named`
+    : `prod|sk-aaa...\nstaging|sk-bbb...\nsk-ccc...`;
   const [mode, setMode] = useState<"single" | "bulk">("single");
   const [bulkText, setBulkText] = useState<string>("");
   const [bulkResult, setBulkResult] = useState<{ success: number; failed: number } | null>(null);
@@ -78,15 +82,42 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     // POST directly: onSave from the parent closes the modal on success which
     // would interrupt the loop. The parent should refresh on onClose.
     for (let i = 0; i < lines.length; i++) {
-      const parts = lines[i].split("|");
-      const apiKey = parts.length >= 2 ? parts.slice(1).join("|").trim() : parts[0].trim();
-      const baseName = parts.length >= 2 ? parts[0].trim() : "Key";
-      const name = `${baseName} ${i + 1}`;
+      const parts = lines[i].split("|").map((p) => p.trim());
+      let name: string;
+      let apiKey: string;
+      let providerSpecificData: { accountId: string } | undefined;
+
+      if (isCloudflareAi && parts.length >= 3) {
+        // name|apiKey|accountId — apiKey may itself contain pipes
+        const baseName = parts[0] || "Key";
+        const accountId = parts[parts.length - 1];
+        apiKey = parts.slice(1, -1).join("|").trim();
+        name = `${baseName} ${i + 1}`;
+        providerSpecificData = accountId ? { accountId } : undefined;
+      } else if (parts.length >= 2) {
+        const baseName = parts[0] || "Key";
+        apiKey = parts.slice(1).join("|").trim();
+        name = `${baseName} ${i + 1}`;
+      } else {
+        apiKey = parts[0] || "";
+        name = `Key ${i + 1}`;
+      }
+      if (!apiKey) {
+        failed++;
+        continue;
+      }
       try {
         const res = await fetch("/api/providers", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ provider, name, apiKey, priority: 1, testStatus: "unknown" }),
+          body: JSON.stringify({
+            provider,
+            name,
+            apiKey,
+            priority: 1,
+            testStatus: "unknown",
+            ...(providerSpecificData ? { providerSpecificData } : {}),
+          }),
         });
         if (res.ok) success++;
         else failed++;
@@ -143,6 +174,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
       // Non-ollama providers require a name
       if (!formData.name) return;
     }
+    if (isCompatible && !formData.defaultModel.trim()) return;
 
     setSaving(true);
     try {
@@ -167,6 +199,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
       await onSave({
         name: formData.name || (isOllamaLocal ? "Ollama Local" : ""),
         apiKey: formData.apiKey,
+        defaultModel: isCompatible ? formData.defaultModel.trim() : undefined,
         priority: formData.priority,
         proxyPoolId: formData.proxyPoolId === NONE_PROXY_POOL_VALUE ? null : formData.proxyPoolId,
         testStatus: isValid ? "active" : "unknown",
@@ -210,11 +243,14 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         {supportsBulk && mode === "bulk" && (
           <div className="flex flex-col gap-3">
             <p className="text-xs text-text-muted">
-              One key per line. Format: <code>name|apiKey</code> or just <code>apiKey</code> (auto-named by index).
+              {isCloudflareAi
+                ? <>One key per line. Format: <code>name|apiKey|accountId</code> or just <code>apiKey</code> (auto-named by index).</>
+                : <>One key per line. Format: <code>name|apiKey</code> or just <code>apiKey</code> (auto-named by index).</>
+              }
             </p>
             <textarea
               className="w-full rounded border border-accent/30 bg-sidebar p-2 text-sm font-mono resize-y min-h-[140px] focus:outline-none focus:ring-1 focus:ring-primary"
-              placeholder={`prod|sk-aaa...\nstaging|sk-bbb...\nsk-ccc...`}
+              placeholder={bulkPlaceholder}
               value={bulkText}
               onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setBulkText(e.target.value)}
             />
@@ -304,11 +340,16 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
           </Badge>
         )}
         {isCompatible && (
+          <Input
+            label="Default Model"
+            value={formData.defaultModel}
+            onChange={(e: ChangeEvent<HTMLInputElement>) => setFormData({ ...formData, defaultModel: e.target.value })}
+            placeholder={isAnthropic ? "claude-3-5-sonnet-latest" : "gpt-4o"}
+          />
+        )}
+        {isCompatible && (
           <p className="text-xs text-text-muted">
-            {isAnthropic 
-              ? `Validation checks ${providerName || "Anthropic Compatible"} by verifying the API key.`
-              : `Validation checks ${providerName || "OpenAI Compatible"} via /models on your base URL.`
-            }
+            Enter the model ID exactly as your compatible endpoint expects it. This model will be saved as the connection default.
           </p>
         )}
         {isXaiApiKey && (
@@ -417,7 +458,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
         </p>
 
         <div className="flex gap-2">
-          <Button onClick={handleSubmit} fullWidth disabled={saving || (!isOllamaLocal && (!formData.name || !formData.apiKey)) || (isAzure && (!azureData.azureEndpoint || !azureData.deployment || !azureData.organization)) || (isCloudflareAi && !cloudflareData.accountId)}>
+          <Button onClick={handleSubmit} fullWidth disabled={saving || (!isOllamaLocal && (!formData.name || !formData.apiKey)) || (isCompatible && !formData.defaultModel.trim()) || (isAzure && (!azureData.azureEndpoint || !azureData.deployment || !azureData.organization)) || (isCloudflareAi && !cloudflareData.accountId)}>
             {saving ? "Saving..." : "Save"}
           </Button>
           <Button onClick={onClose} variant="ghost" fullWidth>

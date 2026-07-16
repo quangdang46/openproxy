@@ -185,14 +185,40 @@ Confirmed high-severity web gaps fixed on main:
 | `update-modal-openrouter-branding` | OpenRouter → OpenProxy in update UI |
 | `connection-row-per-auth-type` | Auth icon/name from `connection.authType` |
 
-Still open (medium/low from audit, not yet fixed):
+### New features in 9router v0.5.35 (not yet ported, significant backend work)
 
-| ID | Severity | Notes |
-|----|----------|-------|
-| `quota-providers-client-pagination` | low | Client-side filter/sort works; server pagination optional for 500+ connections |
-| `combo-hedging-shadow-autocombo-unwired` | P2 | Intentional scaffold |
+| ID | Severity | What | Technical notes |
+|----|----------|------|-----------------|
+| `cli-grok-build-tool` | P1 | Grok Build CLI dashboard integration | New `GrokBuildToolCard`, `grok-build-settings` API endpoint, CLI_TOOLS entry, ToolDetailClient case, all-statuses entry. Backend: read/write `~/.grok/config.toml` |
+| `xai-video-v1-videos` | P1 | xAI Grok Imagine async video generation | `POST /v1/videos/generations` + `GET /v1/videos/{id}` (raw proxy to api.x.ai). Catalog `videoConfig`. Optional `xai video` CLI subcommand |
+| `kiro-session-replay` | P1 | Kiro session-start msg0 freeze for prompt-cache reuse | `sessionStartStore` (`connectionId:conversationId` map), port `applyKiroSessionReplay` in `openai-to-kiro` + `claude-to-kiro` translators |
+| `github-copilot-claude-messages` | P1 | GitHub Copilot native `/v1/messages` route for Claude models | Route Claude bodies to `api.githubcopilot.com/v1/messages` (Anthropic format) for prompt-cache token savings |
 
-Now fixed in 5th pass: `addapikey-xai-dual-copy`, `ep-ts-auth-reopen`, `quota-auto-ping-row-toggles` (bolt on ProviderLimits), `pricing-page-client`, `media-detail-static-paths`, `model-kind-filter`, `modelrow-ondisable`, `grok-cli-oauth`, `ep-login-unsafe-gates`, `nav-dual-profile`, `brand-openproxy`.
+### Recent fixes (2026-07-17 — 17 items from 4th ultracode pass)
+
+| ID | What |
+|----|------|
+| `bulk-cf-accountid` | Cloudflare bulk-add: `name|apiKey|accountId` parsing + placeholder |
+| `compatible-default-model` | AddApiKeyModal collects `defaultModel` for OpenAI/Anthropic compatible nodes |
+| `providers-new-searchable` | Select component gains searchable filter; used by ProvidersNewPageClient |
+| `usage-cached-card` | OverviewCards: Cached Tokens KPI card |
+| `usage-table-cached-columns` | UsageTable: Cached / Cached Cost columns |
+| `quota-pagination` | ProviderLimits: server pagination, account filter, page-size controls |
+| `quota-table-sort` | QuotaTable: remaining-% sort modes + 10-row pagination |
+| `conn-secondary-name` | ConnectionRow: name-first display + secondary identity line |
+| `quota-label-name-first` | Quota label prefers edited name over email |
+| `pp-search-dual-empty` | Provider search hides Custom section when empty + searching |
+| `pp-apikey-sort` | API Key list sorts by total>0 then name |
+| `pp-freetier-sort` | Free Tier applies sortByPriority then noAuth |
+| `conn-edit-modal-secondary-fields` | EditConnectionModal: email, displayName, proxy pool fields |
+| `pp-global-redirect` | Global test-all chains through all auth types |
+| `compatible-sort-priority` | Compatible list sorted by connected then name |
+| `quota-recurring-label` | Quota labels: "Expires in" for non-recurring packs, "Expired" when past |
+| `quota-auto-refresh-on-change` | ProviderLimits re-fetches on toggle/delete |
+
+### Still intended as low-priority / scaffold-only
+
+- PXPIPE, hedging/shadow/auto-combo product wire, basic-chat orphan nav, Translator flag, DonateModal brand
 
 ### Still intentionally open / low priority
 
