@@ -83,6 +83,8 @@ async fn get_provider(
 #[serde(rename_all = "camelCase")]
 struct UpdateProviderRequest {
     name: Option<String>,
+    email: Option<String>,
+    display_name: Option<String>,
     priority: Option<u32>,
     global_priority: Option<u32>,
     default_model: Option<String>,
@@ -141,6 +143,14 @@ async fn update_provider(
                 {
                     if let Some(name) = req.name.clone() {
                         connection.name = Some(name);
+                    }
+                    if let Some(email) = req.email.clone() {
+                        // Empty string clears the field.
+                        connection.email = if email.is_empty() { None } else { Some(email) };
+                    }
+                    if let Some(display_name) = req.display_name.clone() {
+                        connection.display_name =
+                            if display_name.is_empty() { None } else { Some(display_name) };
                     }
                     if let Some(priority) = req.priority {
                         connection.priority = Some(priority);

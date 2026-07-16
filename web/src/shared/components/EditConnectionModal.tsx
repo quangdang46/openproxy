@@ -5,7 +5,10 @@ import Modal from "@/shared/components/Modal";
 import Input from "@/shared/components/Input";
 import Button from "@/shared/components/Button";
 import Badge from "@/shared/components/Badge";
+import Select from "@/shared/components/Select";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+
+const NONE_PROXY_POOL_VALUE = "__none__";
 
 interface ProviderSpecificData {
   azureEndpoint?: string;
@@ -13,12 +16,14 @@ interface ProviderSpecificData {
   deployment?: string;
   organization?: string;
   accountId?: string;
+  proxyPoolId?: string;
 }
 
 interface Connection {
   id: string;
   name?: string;
   email?: string;
+  displayName?: string;
   priority?: number;
   authType?: string;
   provider?: string;
@@ -43,8 +48,11 @@ interface EditConnectionModalProps {
 export default function EditConnectionModal({ isOpen, connection, proxyPools, onSave, onClose }: EditConnectionModalProps) {
   const [formData, setFormData] = useState({
     name: "",
+    email: "",
+    displayName: "",
     priority: 1,
     apiKey: "",
+    proxyPoolId: NONE_PROXY_POOL_VALUE,
   });
   const [azureData, setAzureData] = useState({
     azureEndpoint: "",
@@ -63,10 +71,13 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     if (connection) {
       setFormData({
         name: connection.name || "",
+        email: connection.email || "",
+        displayName: connection.displayName || "",
         priority: connection.priority || 1,
         apiKey: "",
+        proxyPoolId: connection.providerSpecificData?.proxyPoolId || NONE_PROXY_POOL_VALUE,
       });
-      // Load Azure-specific data if present
+
       if (connection.provider === "azure" && connection.providerSpecificData) {
         setAzureData({
           azureEndpoint: connection.providerSpecificData.azureEndpoint || "",
@@ -135,7 +146,13 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
     try {
       const updates: any = {
         name: formData.name,
+        // Secondary identity. Empty string clears on the backend.
+        email: formData.email,
+        displayName: formData.displayName,
         priority: formData.priority,
+        // Proxy pool: null clears binding; string sets it.
+        proxyPoolId:
+          formData.proxyPoolId === NONE_PROXY_POOL_VALUE ? null : formData.proxyPoolId,
       };
       if (!isOAuth && formData.apiKey) {
         updates.apiKey = formData.apiKey;
@@ -170,7 +187,6 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
         }
       }
 
-      // Add Azure-specific data if this is an Azure connection
       if (isAzure) {
         updates.providerSpecificData = {
           azureEndpoint: azureData.azureEndpoint,
@@ -200,18 +216,42 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
           placeholder={isOAuth ? "Account name" : "Production Key"}
         />
-        {isOAuth && connection.email && (
-          <div className="bg-sidebar/50 p-3 rounded-lg">
-            <p className="text-sm text-text-muted mb-1">Email</p>
-            <p className="font-medium">{connection.email}</p>
-          </div>
-        )}
+        <Input
+          label="Display Name"
+          value={formData.displayName}
+          onChange={(e) => setFormData({ ...formData, displayName: e.target.value })}
+          placeholder="Optional secondary label"
+          hint="Shown under the primary name when it differs"
+        />
+        <Input
+          label="Email"
+          value={formData.email}
+          onChange={(e) => setFormData({ ...formData, email: e.target.value })}
+          placeholder={isOAuth ? "Account email" : "Optional email"}
+          hint={isOAuth ? "OAuth account identity (editable label)" : "Optional identity label"}
+        />
         <Input
           label="Priority"
           type="number"
           value={formData.priority}
           onChange={(e) => setFormData({ ...formData, priority: Number.parseInt(e.target.value, 10) || 1 })}
         />
+
+        <Select
+          label="Proxy Pool"
+          value={formData.proxyPoolId}
+          onChange={(e) => setFormData({ ...formData, proxyPoolId: e.target.value })}
+          options={[
+            { value: NONE_PROXY_POOL_VALUE, label: "None" },
+            ...(proxyPools || []).map((pool) => ({ value: pool.id, label: pool.name })),
+          ]}
+          placeholder="None"
+        />
+        {(proxyPools || []).length === 0 && (
+          <p className="text-xs text-text-muted">
+            No active proxy pools available. Create one in Proxy Pools page first.
+          </p>
+        )}
 
         {!isOAuth && (
           <>
@@ -221,7 +261,7 @@ export default function EditConnectionModal({ isOpen, connection, proxyPools, on
                 type="password"
                 value={formData.apiKey}
                 onChange={(e) => setFormData({ ...formData, apiKey: e.target.value })}
-                placeholder={connection.hasApiKey ? "\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022 (saved — leave blank to keep)" : "Enter new API key"}
+                placeholder={connection.hasApiKey ? "•••••••• (saved — leave blank to keep)" : "Enter new API key"}
                 hint={connection.hasApiKey
                   ? "A key is already stored. Leave blank to keep it, or type a new one to replace."
                   : "Required."}

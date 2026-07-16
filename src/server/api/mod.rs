@@ -702,30 +702,211 @@ pub(crate) fn safe_settings_payload_with_db_path(
 }
 
 // Provider CRUD API
-async fn list_providers_api(State(state): State<AppState>, headers: HeaderMap) -> Response {
+//
+// Optional query params (9router ProviderLimits contract):
+//   provider, accountStatus (all|active|inactive), sort (priority|provider),
+//   page, pageSize. When page/pageSize are present, the response is scoped to
+//   usage-eligible connections and includes pagination/totals/providerOptions.
+// Without pagination params the endpoint keeps returning the full list so
+// existing dashboard consumers stay compatible.
+const LIST_PROVIDERS_DEFAULT_PAGE_SIZE: usize = 20;
+const LIST_PROVIDERS_MAX_PAGE_SIZE: usize = 500;
+
+const USAGE_SUPPORTED_PROVIDERS: &[&str] = &[
+    "claude",
+    "antigravity",
+    "kiro",
+    "github",
+    "github-copilot",
+    "codex",
+    "kimi-coding",
+    "ollama",
+    "gemini-cli",
+    "glm",
+    "glm-cn",
+    "minimax",
+    "minimax-cn",
+];
+
+const USAGE_APIKEY_PROVIDERS: &[&str] = &["glm", "glm-cn", "minimax", "minimax-cn"];
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ListProvidersQuery {
+    provider: Option<String>,
+    account_status: Option<String>,
+    sort: Option<String>,
+    page: Option<u32>,
+    page_size: Option<u32>,
+}
+
+fn is_usage_eligible_connection(connection: &ProviderConnection) -> bool {
+    if !USAGE_SUPPORTED_PROVIDERS
+        .iter()
+        .any(|provider| *provider == connection.provider.as_str())
+    {
+        return false;
+    }
+    let auth_type = connection.auth_type.as_str();
+    auth_type == "oauth"
+        || USAGE_APIKEY_PROVIDERS
+            .iter()
+            .any(|provider| *provider == connection.provider.as_str())
+}
+
+fn connection_to_list_value(connection: &ProviderConnection) -> Value {
+    let has_api_key = connection.api_key.as_deref().is_some_and(|k| !k.is_empty())
+        || connection
+            .provider_specific_data
+            .get("apiKey")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty());
+    let mut value =
+        serde_json::to_value(redact_provider_connection(connection)).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("hasApiKey".into(), Value::Bool(has_api_key));
+    }
+    value
+}
+
+fn parse_positive_page(value: Option<u32>, fallback: usize) -> usize {
+    value
+        .and_then(|v| usize::try_from(v).ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(fallback)
+}
+
+fn sort_provider_connections(connections: &mut [ProviderConnection], sort: &str) {
+    match sort {
+        "provider" => connections.sort_by(|a, b| {
+            let order_a = USAGE_SUPPORTED_PROVIDERS
+                .iter()
+                .position(|provider| *provider == a.provider.as_str())
+                .unwrap_or(usize::MAX);
+            let order_b = USAGE_SUPPORTED_PROVIDERS
+                .iter()
+                .position(|provider| *provider == b.provider.as_str())
+                .unwrap_or(usize::MAX);
+            order_a
+                .cmp(&order_b)
+                .then_with(|| a.provider.cmp(&b.provider))
+        }),
+        _ => connections.sort_by(|a, b| {
+            let priority_a = a.priority.unwrap_or(u32::MAX);
+            let priority_b = b.priority.unwrap_or(u32::MAX);
+            priority_a
+                .cmp(&priority_b)
+                .then_with(|| a.provider.cmp(&b.provider))
+        }),
+    }
+}
+
+async fn list_providers_api(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ListProvidersQuery>,
+) -> Response {
     if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
         return response;
     }
 
     let snapshot = state.db.snapshot();
-    let connections: Vec<Value> = snapshot
+    let paginate = query.page.is_some() || query.page_size.is_some();
+
+    if !paginate {
+        let connections: Vec<Value> = snapshot
+            .provider_connections
+            .iter()
+            .map(connection_to_list_value)
+            .collect();
+        return Json(json!({ "connections": connections })).into_response();
+    }
+
+    let provider_filter = query
+        .provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "all")
+        .unwrap_or("all");
+    let account_status = query
+        .account_status
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("all");
+    let sort = query
+        .sort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("priority");
+    let page_size = parse_positive_page(query.page_size, LIST_PROVIDERS_DEFAULT_PAGE_SIZE)
+        .min(LIST_PROVIDERS_MAX_PAGE_SIZE);
+    let requested_page = parse_positive_page(query.page, 1);
+
+    let eligible: Vec<ProviderConnection> = snapshot
         .provider_connections
         .iter()
-        .map(|c| {
-            let has_api_key = c.api_key.as_deref().is_some_and(|k| !k.is_empty())
-                || c.provider_specific_data
-                    .get("apiKey")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| !s.is_empty());
-            let mut value =
-                serde_json::to_value(redact_provider_connection(c)).unwrap_or_else(|_| json!({}));
-            if let Some(obj) = value.as_object_mut() {
-                obj.insert("hasApiKey".into(), Value::Bool(has_api_key));
-            }
-            value
-        })
+        .filter(|connection| is_usage_eligible_connection(connection))
+        .cloned()
         .collect();
-    Json(json!({ "connections": connections })).into_response()
+
+    let mut provider_options: Vec<String> = eligible
+        .iter()
+        .map(|connection| connection.provider.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    provider_options.sort();
+
+    let provider_filtered: Vec<ProviderConnection> = eligible
+        .iter()
+        .filter(|connection| provider_filter == "all" || connection.provider == provider_filter)
+        .cloned()
+        .collect();
+
+    let mut account_filtered: Vec<ProviderConnection> = provider_filtered
+        .iter()
+        .filter(|connection| match account_status {
+            "active" => connection.is_active.unwrap_or(true),
+            "inactive" => !connection.is_active.unwrap_or(true),
+            _ => true,
+        })
+        .cloned()
+        .collect();
+
+    sort_provider_connections(&mut account_filtered, sort);
+
+    let total = account_filtered.len();
+    let total_pages = if total == 0 {
+        1
+    } else {
+        total.div_ceil(page_size)
+    };
+    let current_page = requested_page.min(total_pages).max(1);
+    let offset = (current_page - 1) * page_size;
+    let page_connections: Vec<Value> = account_filtered
+        .into_iter()
+        .skip(offset)
+        .take(page_size)
+        .map(|connection| connection_to_list_value(&connection))
+        .collect();
+
+    Json(json!({
+        "connections": page_connections,
+        "providerOptions": provider_options,
+        "pagination": {
+            "page": current_page,
+            "pageSize": page_size,
+            "total": total,
+            "totalPages": total_pages,
+        },
+        "totals": {
+            "eligibleConnections": eligible.len(),
+            "providerFilteredConnections": provider_filtered.len(),
+        },
+    }))
+    .into_response()
 }
 
 #[derive(Debug, Deserialize)]

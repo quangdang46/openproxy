@@ -310,52 +310,71 @@ export default function ProvidersPageClient() {
     }
   };
 
-  // Count connections per authType so we can grey out the Test All button
-  // when there's nothing to test (e.g. user hasn't added an OAuth account
-  // yet — pressing Test All would just spin uselessly).
-  const oauthCount = connections.filter((c) => c.authType === "oauth").length;
-  // Free and free-tier connections use authTypes "oauth" or "apikey", not "free".
-  // Match by provider id membership in FREE_PROVIDERS / FREE_TIER_PROVIDERS.
-  const freeProviderIds = new Set([
-    ...Object.keys(FREE_PROVIDERS),
-    ...Object.keys(FREE_TIER_PROVIDERS),
-  ]);
-  const freeCount = connections.filter(
-    (c) =>
-      freeProviderIds.has(c.provider) &&
-      c.authType &&
-      c.authType !== "cookie",
-  ).length;
-  const apikeyCount = connections.filter((c) => c.authType === "apikey").length;
+  // Run a single test-batch mode. Always spins (even when count is 0) so the
+  // section never appears skipped; empty sections just return a 0-total summary.
+  const runBatchTest = async (mode: string, providerId: string | null = null) => {
+    const res = await fetch("/api/providers/test-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mode, providerId }),
+    });
+    return res.json();
+  };
 
   const handleBatchTest = async (mode, providerId = null) => {
     if (testingMode) return;
-    if (mode === "oauth" && oauthCount === 0) {
-      notify.warning("No OAuth providers connected", "Nothing to test");
+    // Global chain: oauth → free → apikey sequentially, always spin each section.
+    if (mode === "all" || mode === "global") {
+      setTestingMode("all");
+      setTestResults(null);
+      let passed = 0;
+      let failed = 0;
+      let total = 0;
+      try {
+        for (const step of ["oauth", "free", "apikey"] as const) {
+          setTestingMode(step);
+          try {
+            const data = await runBatchTest(step);
+            if (data?.summary) {
+              passed += data.summary.passed || 0;
+              failed += data.summary.failed || 0;
+              total += data.summary.total || 0;
+            }
+          } catch {
+            // Continue remaining auth types even if one step fails.
+          }
+        }
+        setTestResults({ summary: { passed, failed, total } });
+        if (total === 0) {
+          notify.warning("No providers connected", "Nothing to test");
+        } else if (failed === 0) {
+          notify.success(`All ${total} tests passed`);
+        } else {
+          notify.warning(`${passed}/${total} passed, ${failed} failed`);
+        }
+      } catch (error) {
+        setTestResults({ error: "Test request failed" });
+        notify.error("Provider test failed");
+      } finally {
+        setTestingMode(null);
+      }
       return;
     }
-    if (mode === "free" && freeCount === 0) {
-      notify.warning("No free providers connected", "Nothing to test");
-      return;
-    }
-    if (mode === "apikey" && apikeyCount === 0) {
-      notify.warning("No API key providers connected", "Nothing to test");
-      return;
-    }
+
     setTestingMode(mode === "provider" ? providerId : mode);
     setTestResults(null);
     try {
-      const res = await fetch("/api/providers/test-batch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode, providerId }),
-      });
-      const data = await res.json();
+      const data = await runBatchTest(mode, providerId);
       setTestResults(data);
       if (data.summary) {
         const { passed, failed, total } = data.summary;
-        if (failed === 0) notify.success(`All ${total} tests passed`);
-        else notify.warning(`${passed}/${total} passed, ${failed} failed`);
+        if (total === 0) {
+          notify.warning(`No ${mode} providers connected`, "Nothing to test");
+        } else if (failed === 0) {
+          notify.success(`All ${total} tests passed`);
+        } else {
+          notify.warning(`${passed}/${total} passed, ${failed} failed`);
+        }
       }
     } catch (error) {
       setTestResults({ error: "Test request failed" });
@@ -365,26 +384,40 @@ export default function ProvidersPageClient() {
     }
   };
 
-  const compatibleProviders = providerNodes
-    .filter((node) => node.type === "openai-compatible")
-    .map((node) => ({
-      id: node.id,
-      name: node.name || "OpenAI Compatible",
-      color: "#10A37F",
-      textIcon: "OC",
-      apiType: node.apiType,
-    }))
-    .filter((p) => matchSearch(p.name));
+  const sortCompatibleByConnected = (items: Array<{ id: string; name: string; [key: string]: any }>) =>
+    [...items].sort((a, b) => {
+      const sa = getProviderStats(a.id, "apikey");
+      const sb = getProviderStats(b.id, "apikey");
+      const ca = sa.connected > 0 || sa.total > 0 ? 1 : 0;
+      const cb = sb.connected > 0 || sb.total > 0 ? 1 : 0;
+      if (ca !== cb) return cb - ca;
+      return (a.name || "").localeCompare(b.name || "");
+    });
 
-  const anthropicCompatibleProviders = providerNodes
-    .filter((node) => node.type === "anthropic-compatible")
-    .map((node) => ({
-      id: node.id,
-      name: node.name || "Anthropic Compatible",
-      color: "#D97757",
-      textIcon: "AC",
-    }))
-    .filter((p) => matchSearch(p.name));
+  const compatibleProviders = sortCompatibleByConnected(
+    providerNodes
+      .filter((node) => node.type === "openai-compatible")
+      .map((node) => ({
+        id: node.id,
+        name: node.name || "OpenAI Compatible",
+        color: "#10A37F",
+        textIcon: "OC",
+        apiType: node.apiType,
+      }))
+      .filter((p) => matchSearch(p.name)),
+  );
+
+  const anthropicCompatibleProviders = sortCompatibleByConnected(
+    providerNodes
+      .filter((node) => node.type === "anthropic-compatible")
+      .map((node) => ({
+        id: node.id,
+        name: node.name || "Anthropic Compatible",
+        color: "#D97757",
+        textIcon: "AC",
+      }))
+      .filter((p) => matchSearch(p.name)),
+  );
 
   // sortByPriority — registry priority → connected → name (9router parity)
   const sortByPriority = (
@@ -416,27 +449,33 @@ export default function ProvidersPageClient() {
       ([, info]) => !info.hidden && matchSearch(info.name),
     ),
   );
+  // Free-tier: registry priority first, then noAuth providers bubble up (9r parity).
   const freeTierEntries = sortNoAuthFirst(
-    Object.entries(FREE_TIER_PROVIDERS).filter(
+    sortByPriority(
+      Object.entries(FREE_TIER_PROVIDERS).filter(
+        ([, info]) =>
+          !info.hidden &&
+          (info.serviceKinds ?? ["llm"]).includes("llm") &&
+          matchSearch(info.name),
+      ),
+      "freeTier",
+    ),
+  );
+  // API Key: any connection (total > 0) first, then alphabetical by name.
+  // OAuth keeps sortByPriority; apikey intentionally uses total>0 not connected.
+  const apikeyEntries = Object.entries(APIKEY_PROVIDERS)
+    .filter(
       ([, info]) =>
         !info.hidden &&
         (info.serviceKinds ?? ["llm"]).includes("llm") &&
         matchSearch(info.name),
-    ),
-  );
-  // Sort APIKEY providers so ones with any connected (working) connection
-  // surface first; ties break alphabetically. Mirrors 9router's
-  // sortByPriority — when the list is long, this keeps the most useful
-  // providers above the fold.
-  const apikeyEntries = sortByPriority(
-    Object.entries(APIKEY_PROVIDERS).filter(
-      ([, info]) =>
-        !info.hidden &&
-        (info.serviceKinds ?? ["llm"]).includes("llm") &&
-        matchSearch(info.name),
-    ),
-    "apikey",
-  );
+    )
+    .sort(([ka, a], [kb, b]) => {
+      const ca = getProviderStats(ka, "apikey").total > 0 ? 0 : 1;
+      const cb = getProviderStats(kb, "apikey").total > 0 ? 0 : 1;
+      if (ca !== cb) return ca - cb;
+      return (a.name || "").localeCompare(b.name || "");
+    });
   const isApikeySearching = !!searchQuery.trim();
   const visibleApikeyEntries =
     isApikeySearching || showAllApikey
@@ -477,7 +516,14 @@ export default function ProvidersPageClient() {
         </div>
       )}
 
-      {/* Custom Providers (OpenAI/Anthropic Compatible) — dynamic */}
+      {/* Custom Providers (OpenAI/Anthropic Compatible) — dynamic.
+          Hide the whole section when searching and nothing matches, so an
+          empty "No custom providers" placeholder doesn't pollute results. */}
+      {!(
+        !!searchQuery.trim() &&
+        compatibleProviders.length === 0 &&
+        anthropicCompatibleProviders.length === 0
+      ) && (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
@@ -528,6 +574,7 @@ export default function ProvidersPageClient() {
           </div>
         )}
       </div>
+      )}
 
       {/* OAuth Providers */}
       {oauthEntries.length > 0 && (
@@ -540,21 +587,21 @@ export default function ProvidersPageClient() {
             <ModelAvailabilityBadge />
             <button
               onClick={() => handleBatchTest("oauth")}
-              disabled={!!testingMode || oauthCount === 0}
-              title={oauthCount === 0 ? "Connect an OAuth provider first" : "Test all OAuth connections"}
+              disabled={!!testingMode}
+              title="Test all OAuth connections"
               className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
-                testingMode === "oauth"
+                testingMode === "oauth" || testingMode === "all"
                   ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                   : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
               }`}
               aria-label="Test all OAuth connections"
             >
               <span
-                className={`material-symbols-outlined text-[14px]${testingMode === "oauth" ? " animate-spin" : ""}`}
+                className={`material-symbols-outlined text-[14px]${testingMode === "oauth" || testingMode === "all" ? " animate-spin" : ""}`}
               >
                 play_arrow
               </span>
-              {testingMode === "oauth" ? "Testing..." : "Test All"}
+              {testingMode === "oauth" || testingMode === "all" ? "Testing..." : "Test All"}
             </button>
           </div>
         </div>
@@ -582,21 +629,21 @@ export default function ProvidersPageClient() {
           </h2>
           <button
             onClick={() => handleBatchTest("free")}
-            disabled={!!testingMode || freeCount === 0}
-            title={freeCount === 0 ? "Add a free provider connection first" : "Test all Free connections"}
+            disabled={!!testingMode}
+            title="Test all Free connections"
             className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
-              testingMode === "free"
+              testingMode === "free" || testingMode === "all"
                 ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                 : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
             }`}
             aria-label="Test all Free provider connections"
           >
             <span
-              className={`material-symbols-outlined text-[14px]${testingMode === "free" ? " animate-spin" : ""}`}
+              className={`material-symbols-outlined text-[14px]${testingMode === "free" || testingMode === "all" ? " animate-spin" : ""}`}
             >
               play_arrow
             </span>
-            {testingMode === "free" ? "Testing..." : "Test All"}
+            {testingMode === "free" || testingMode === "all" ? "Testing..." : "Test All"}
           </button>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
@@ -643,21 +690,21 @@ export default function ProvidersPageClient() {
           </h2>
           <button
             onClick={() => handleBatchTest("apikey")}
-            disabled={!!testingMode || apikeyCount === 0}
-            title={apikeyCount === 0 ? "Add an API key provider first" : "Test all API Key connections"}
+            disabled={!!testingMode}
+            title="Test all API Key connections"
             className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
-              testingMode === "apikey"
+              testingMode === "apikey" || testingMode === "all"
                 ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
                 : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
             }`}
             aria-label="Test all API Key connections"
           >
             <span
-              className={`material-symbols-outlined text-[14px]${testingMode === "apikey" ? " animate-spin" : ""}`}
+              className={`material-symbols-outlined text-[14px]${testingMode === "apikey" || testingMode === "all" ? " animate-spin" : ""}`}
             >
               play_arrow
             </span>
-            {testingMode === "apikey" ? "Testing..." : "Test All"}
+            {testingMode === "apikey" || testingMode === "all" ? "Testing..." : "Test All"}
           </button>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">

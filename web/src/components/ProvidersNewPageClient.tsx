@@ -282,6 +282,8 @@ export default function ProvidersNewPageClient() {
           <Select
             label="Provider"
             required
+            searchable
+            searchPlaceholder="Search providers..."
             placeholder="Choose a provider..."
             options={selectOptions}
             value={selectedKey}

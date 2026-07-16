@@ -149,14 +149,22 @@ export default function ConnectionRow({
     }
   };
 
-  const isEmail = (v: string) => typeof v === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
-  const displayName = isRowOAuth
-    ? isEmail(connection.email || "")
-      ? connection.email
-      : isEmail(connection.name || "")
-        ? connection.name
-        : connection.name || connection.email || connection.displayName || "OAuth Account"
-    : connection.name || connection.displayName || connection.email || connection.id;
+  // Name-first primary label; secondary line for email/displayName when distinct.
+  const displayName =
+    connection.name?.trim() ||
+    connection.email?.trim() ||
+    connection.displayName?.trim() ||
+    (isRowOAuth ? "OAuth Account" : isRowCookie ? "Cookie Account" : connection.id || "API Key");
+  const secondaryDisplayName =
+    connection.name?.trim() &&
+    connection.email?.trim() &&
+    connection.name.trim() !== connection.email.trim()
+      ? connection.email.trim()
+      : connection.name?.trim() &&
+          connection.displayName?.trim() &&
+          connection.name.trim() !== connection.displayName.trim()
+        ? connection.displayName.trim()
+        : null;
 
   // Use useState + useEffect for impure Date.now() to avoid calling during render
   const [isCooldown, setIsCooldown] = useState<boolean>(false);
@@ -250,6 +258,9 @@ export default function ConnectionRow({
         </span>
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium">{displayName}</p>
+          {secondaryDisplayName && (
+            <p className="truncate text-xs text-text-muted">{secondaryDisplayName}</p>
+          )}
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
             <Badge variant={getStatusVariant()} size="sm" dot>
               {connection.isActive === false ? "disabled" : effectiveStatus || "Unknown"}

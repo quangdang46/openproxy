@@ -30,14 +30,17 @@ function SortIcon({ field, currentSort, currentOrder }: SortIconProps) {
 interface ValueItem {
   promptTokens?: number;
   completionTokens?: number;
+  cachedTokens?: number;
   totalTokens?: number;
   inputCost?: number;
   outputCost?: number;
+  cachedCost?: number;
   cost?: number;
+  totalCost?: number;
 }
 
 /**
- * Render 3 token or cost cells based on viewMode
+ * Render token or cost cells based on viewMode (includes Cached / Cached Cost).
  */
 interface ValueCellsProps {
   item: ValueItem;
@@ -53,6 +56,9 @@ function ValueCells({ item, viewMode, isSummary = false }: ValueCellsProps) {
           {isSummary && item.promptTokens === undefined ? "—" : fmt(item.promptTokens || 0)}
         </td>
         <td className="px-6 py-3 text-right text-text-muted">
+          {item.cachedTokens ? fmt(item.cachedTokens) : "—"}
+        </td>
+        <td className="px-6 py-3 text-right text-text-muted">
           {isSummary && item.completionTokens === undefined ? "—" : fmt(item.completionTokens || 0)}
         </td>
         <td className="px-6 py-3 text-right font-medium">
@@ -65,6 +71,9 @@ function ValueCells({ item, viewMode, isSummary = false }: ValueCellsProps) {
     <>
       <td className="px-6 py-3 text-right text-text-muted">
         {isSummary && item.inputCost === undefined ? "—" : fmtCost(item.inputCost || 0)}
+      </td>
+      <td className="px-6 py-3 text-right text-text-muted">
+        {item.cachedCost ? fmtCost(item.cachedCost) : "—"}
       </td>
       <td className="px-6 py-3 text-right text-text-muted">
         {isSummary && item.outputCost === undefined ? "—" : fmtCost(item.outputCost || 0)}
@@ -165,12 +174,14 @@ export default function UsageTable({
     if (viewMode === "tokens") {
       return [
         { field: "promptTokens", label: "Input Tokens" },
+        { field: "cachedTokens", label: "Cached" },
         { field: "completionTokens", label: "Output Tokens" },
         { field: "totalTokens", label: "Total Tokens" },
       ];
     }
     return [
       { field: "promptTokens", label: "Input Cost" },
+      { field: "cachedCost", label: "Cached Cost" },
       { field: "completionTokens", label: "Output Cost" },
       { field: "cost", label: "Total Cost" },
     ];

@@ -1,16 +1,222 @@
 import { getModelsByProviderId } from "@/shared/constants/models";
 
+// ─── Pagination / filter / sort constants (9router ProviderLimits contract) ───
+export const CONNECTIONS_PAGE_SIZE = 20;
+export const ACCOUNT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
+export const ACCOUNT_PAGE_SIZE_MAX = 500;
+export const ACCOUNT_FILTER_OPTIONS = [
+  { value: "all", label: "All accounts" },
+  { value: "active", label: "Active" },
+  { value: "inactive", label: "Turned off" },
+] as const;
+export const QUOTA_SORT_OPTIONS = [
+  { value: "default", label: "Default quota order" },
+  { value: "remaining-asc", label: "% quota: low to high" },
+  { value: "remaining-desc", label: "% quota: high to low" },
+] as const;
+
+export type AccountFilterValue = (typeof ACCOUNT_FILTER_OPTIONS)[number]["value"];
+export type QuotaSortMode = (typeof QUOTA_SORT_OPTIONS)[number]["value"];
+
+export interface ConnectionsPagination {
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+}
+
+export interface ConnectionsTotals {
+  eligibleConnections: number;
+  providerFilteredConnections: number;
+}
+
+export function getConnectionQuotaRemaining(
+  connection: { id: string },
+  quotaData: Record<string, { quotas?: Array<{ remaining?: number; remainingPercentage?: number; used?: number; total?: number }> }>,
+): number {
+  const quota = quotaData[connection.id]?.quotas?.[0];
+  if (!quota) return Number.POSITIVE_INFINITY;
+  if (typeof quota.remaining === "number") return quota.remaining;
+  if (typeof quota.remainingPercentage === "number") return quota.remainingPercentage;
+  if (typeof quota.used === "number" && typeof quota.total === "number") {
+    return calculatePercentage(quota.used, quota.total);
+  }
+  return Number.POSITIVE_INFINITY;
+}
+
+export function sortVisibleConnections<T extends { id: string; provider?: string; name?: string; email?: string }>(
+  connections: T[],
+  quotaData: Record<string, { quotas?: Array<{ remaining?: number; remainingPercentage?: number; used?: number; total?: number; resetAt?: string | null }> }>,
+  expiringFirst: boolean,
+  providerFilter: string,
+  quotaSortMode: QuotaSortMode | string,
+): T[] {
+  if (providerFilter === "codex" && quotaSortMode !== "default") {
+    return [...connections].sort((a, b) => {
+      const remainingA = getConnectionQuotaRemaining(a, quotaData);
+      const remainingB = getConnectionQuotaRemaining(b, quotaData);
+      const remainingDiff =
+        quotaSortMode === "remaining-asc"
+          ? remainingA - remainingB
+          : remainingB - remainingA;
+      if (remainingDiff !== 0) return remainingDiff;
+      const labelA = a.name?.trim() || a.email?.trim() || "";
+      const labelB = b.name?.trim() || b.email?.trim() || "";
+      return labelA.localeCompare(labelB);
+    });
+  }
+
+  if (!expiringFirst) return connections;
+
+  const getEarliestResetTime = (connection: T): number => {
+    const resetTimes = (quotaData[connection.id]?.quotas || [])
+      .map((quota) =>
+        quota.resetAt
+          ? new Date(quota.resetAt).getTime()
+          : Number.POSITIVE_INFINITY,
+      )
+      .filter((time) => Number.isFinite(time));
+    return resetTimes.length > 0
+      ? Math.min(...resetTimes)
+      : Number.POSITIVE_INFINITY;
+  };
+
+  return [...connections].sort((a, b) => {
+    const expiryDiff = getEarliestResetTime(a) - getEarliestResetTime(b);
+    if (expiryDiff !== 0) return expiryDiff;
+    return (
+      (a.provider || "").localeCompare(b.provider || "") ||
+      (a.name?.trim() || a.email?.trim() || "").localeCompare(
+        b.name?.trim() || b.email?.trim() || "",
+      )
+    );
+  });
+}
+
+export function getConnectionsPageRange(pagination: ConnectionsPagination) {
+  if (!pagination.total) {
+    return { start: 0, end: 0 };
+  }
+  const start = (pagination.page - 1) * pagination.pageSize + 1;
+  const end = Math.min(pagination.page * pagination.pageSize, pagination.total);
+  return { start, end };
+}
+
+export function getConnectionsEmptyMessage(
+  totals: ConnectionsTotals,
+  providerFilter: string,
+  accountFilter: string,
+) {
+  if (!totals.eligibleConnections) {
+    return {
+      icon: "cloud_off",
+      title: "No Providers Connected",
+      description:
+        "Connect to providers with OAuth to track your API quota limits and usage.",
+    };
+  }
+  if (!totals.providerFilteredConnections) {
+    return {
+      icon: "filter_alt_off",
+      title: "No Accounts Match Current Filters",
+      description:
+        providerFilter === "all"
+          ? "Try changing the account status filter to see more quota trackers."
+          : `No ${accountFilter === "inactive" ? "turned off" : accountFilter === "active" ? "active" : "matching"} accounts found for ${providerFilter}.`,
+    };
+  }
+  return {
+    icon: "filter_alt_off",
+    title: "No Accounts On This Page",
+    description:
+      "Try moving to another page or refreshing the current filters.",
+  };
+}
+
+export function getPageSizeLabel(pageSize: number, isCustomPageSize: boolean) {
+  return isCustomPageSize ? `Custom: ${pageSize} / page` : `${pageSize} / page`;
+}
+
+export function getConnectionsPaginationSummary(pagination: ConnectionsPagination) {
+  const { start, end } = getConnectionsPageRange(pagination);
+  return `Showing ${start}-${end} of ${pagination.total}`;
+}
+
+export function getSafePagination(
+  pagination: Partial<ConnectionsPagination> | null | undefined,
+  fallbackPageSize: number,
+): ConnectionsPagination {
+  return {
+    page: pagination?.page || 1,
+    pageSize: pagination?.pageSize || fallbackPageSize,
+    total: pagination?.total ?? 0,
+    totalPages: pagination?.totalPages || 1,
+  };
+}
+
+export function getSafeTotals(
+  totals: Partial<ConnectionsTotals> | null | undefined,
+  fallbackTotal = 0,
+): ConnectionsTotals {
+  return {
+    eligibleConnections: totals?.eligibleConnections ?? fallbackTotal,
+    providerFilteredConnections: totals?.providerFilteredConnections ?? fallbackTotal,
+  };
+}
+
+export function shouldResetPage(previousValue: string, nextValue: string) {
+  return previousValue !== nextValue;
+}
+
+export function getPaginationPageValue(
+  dataPagination: Partial<ConnectionsPagination> | null | undefined,
+  fallbackPage: number,
+) {
+  return dataPagination?.page || fallbackPage;
+}
+
+export function getProviderOptions(dataProviderOptions: string[] | null | undefined) {
+  return dataProviderOptions || [];
+}
+
+export async function reconcileConnectionsPage(
+  fetchConnections: (page?: number) => Promise<unknown>,
+  targetPage: number,
+) {
+  return await fetchConnections(targetPage);
+}
+
+/**
+ * Get remaining percentage from a normalized quota row
+ */
+export function getRemainingPercentage(quota: {
+  remaining?: number;
+  remainingPercentage?: number;
+  used?: number;
+  total?: number;
+} | null | undefined): number {
+  if (quota?.remaining !== undefined) {
+    return Math.max(0, Math.round(quota.remaining));
+  }
+  if (quota?.remainingPercentage !== undefined) {
+    return Math.round(quota.remainingPercentage);
+  }
+  return calculatePercentage(quota?.used ?? 0, quota?.total ?? 0);
+}
+
 interface QuotaEntry {
   name: string;
   used: number;
   total: number;
   resetAt?: string | null;
+  recurring?: boolean;
 }
 
 interface NormalizedQuota extends QuotaEntry {
   modelKey?: string;
   remainingPercentage?: number;
   message?: string;
+  recurring?: boolean;
 }
 
 interface RawQuotaData {
@@ -119,6 +325,7 @@ export function parseQuotaData(provider: string, data: RawQuotaData | null | und
               used: quota.used || 0,
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
+              recurring: (quota as any).recurring !== false,
             });
           });
         }
@@ -134,6 +341,7 @@ export function parseQuotaData(provider: string, data: RawQuotaData | null | und
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
               remainingPercentage: quota.remainingPercentage,
+              recurring: quota.recurring !== false,
             });
           });
         }
@@ -147,6 +355,7 @@ export function parseQuotaData(provider: string, data: RawQuotaData | null | und
               used: quota.used || 0,
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
+              recurring: (quota as any).recurring !== false,
             });
           });
         }
@@ -160,6 +369,7 @@ export function parseQuotaData(provider: string, data: RawQuotaData | null | und
               used: quota.used || 0,
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
+              recurring: (quota as any).recurring !== false,
             });
           });
         }
@@ -182,6 +392,7 @@ export function parseQuotaData(provider: string, data: RawQuotaData | null | und
               used: quota.used || 0,
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
+              recurring: (quota as any).recurring !== false,
             });
           });
         }
@@ -196,6 +407,8 @@ export function parseQuotaData(provider: string, data: RawQuotaData | null | und
               used: quota.used || 0,
               total: quota.total || 0,
               resetAt: quota.resetAt || null,
+              // Forward recurring so one-shot packs render as "Expires in".
+              recurring: (quota as any).recurring !== false,
             });
           });
         }
