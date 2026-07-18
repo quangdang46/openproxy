@@ -1977,6 +1977,16 @@
           "id": "grok-3",
           "name": "Grok 3",
           "kind": "llm"
+        },
+        {
+          "id": "grok-2-image-1212",
+          "name": "Grok 2 Image",
+          "kind": "image"
+        },
+        {
+          "id": "grok-imagine-video",
+          "name": "Grok Imagine Video",
+          "kind": "video"
         }
       ]
     },
@@ -4133,7 +4143,9 @@
       "serviceKinds": [
         "llm",
         "imageToText",
-        "webSearch"
+        "webSearch",
+        "image",
+        "video"
       ],
       "ttsModels": [],
       "embeddingModels": [],

@@ -149,8 +149,11 @@ async fn update_provider(
                         connection.email = if email.is_empty() { None } else { Some(email) };
                     }
                     if let Some(display_name) = req.display_name.clone() {
-                        connection.display_name =
-                            if display_name.is_empty() { None } else { Some(display_name) };
+                        connection.display_name = if display_name.is_empty() {
+                            None
+                        } else {
+                            Some(display_name)
+                        };
                     }
                     if let Some(priority) = req.priority {
                         connection.priority = Some(priority);

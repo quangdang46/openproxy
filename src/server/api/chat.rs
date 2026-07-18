@@ -404,6 +404,7 @@ async fn chat_completions_impl(
                 let f_body = body.clone();
                 let f_api_key = presented_api_key.clone();
                 let f_client_tool = client_tool;
+                let f_headers = headers_map.clone();
 
                 let panel_count = combo_models.len();
                 let fusion_cfg = fusion_config_for(&snapshot, &combo_name, panel_count);
@@ -417,6 +418,7 @@ async fn chat_completions_impl(
                         let body = f_body.clone();
                         let api_key = f_api_key.clone();
                         let client_tool = f_client_tool;
+                        let headers = f_headers.clone();
                         async move {
                             let snapshot = state.db.snapshot();
                             let resolved = get_model_info(&model, &snapshot);
@@ -438,6 +440,7 @@ async fn chat_completions_impl(
                                 endpoint,
                                 &plan,
                                 client_tool,
+                                Some(&headers),
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("Fusion panel failed: {}", e.message))?;
@@ -469,6 +472,7 @@ async fn chat_completions_impl(
                 }
             } else {
                 let attempted_members = attempted_members.clone();
+                let combo_headers = headers_map.clone();
                 execute_combo_strategy_full(
                     &combo_models,
                     Some(&combo_name),
@@ -482,6 +486,7 @@ async fn chat_completions_impl(
                         let body = combo_body.clone();
                         let combo_model = combo_model.to_string();
                         let api_key = combo_api_key.clone();
+                        let headers = combo_headers.clone();
                         attempted_members.lock().push(combo_model.clone());
                         // Re-resolve provider/model for this combo entry so each
                         // iteration dispatches against the correct provider node
@@ -522,6 +527,7 @@ async fn chat_completions_impl(
                                 endpoint,
                                 &plan_for_combo,
                                 client_tool_for_combo,
+                                Some(&headers),
                             )
                             .await
                         }
@@ -576,6 +582,7 @@ async fn chat_completions_impl(
                 endpoint,
                 &plan,
                 client_tool,
+                Some(&headers_map),
             )
             .await
             {
@@ -721,6 +728,7 @@ async fn execute_single_model(
     endpoint: Option<&'static str>,
     plan: &RequestPlan,
     client_tool: Option<ClientTool>,
+    client_headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<Response, ComboAttemptError> {
     let snapshot = state.db.snapshot();
 
@@ -776,9 +784,20 @@ async fn execute_single_model(
             );
         }
     } else if plan.needs_translation() {
-        let creds = json!({
+        // Include rawHeaders so Kiro session-replay can resolve a stable
+        // conversationId from client session headers (x-session-id, etc.).
+        let mut creds = json!({
             "provider": plan.provider,
         });
+        if let Some(headers) = client_headers {
+            if let Some(obj) = creds.as_object_mut() {
+                let raw: serde_json::Map<String, Value> = headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect();
+                obj.insert("rawHeaders".into(), Value::Object(raw));
+            }
+        }
         let strip_refs: Vec<&str> = plan.strip_list.iter().map(String::as_str).collect();
         registry::global_registry().translate_request_with_strip(
             plan.source_format,
@@ -2468,6 +2487,22 @@ async fn proxy_response_with_usage_tracking(
                 // Parse out the text content and build a proper chat.completion response.
                 translate_codex_non_streaming(decloaked_body.as_ref())
                     .unwrap_or_else(|| decloaked_body.clone())
+            } else if plan.target_format == registry::Format::Claude
+                && plan.source_format == registry::Format::OpenAi
+            {
+                // GitHub Copilot Claude /v1/messages (and other Claude-upstream
+                // non-stream paths): full Messages JSON → chat.completion.
+                match serde_json::from_slice::<Value>(decloaked_body.as_ref()) {
+                    Ok(mut val) => {
+                        crate::core::translator::response::non_streaming::claude_to_openai_non_streaming(
+                            &mut val,
+                        );
+                        Bytes::from(
+                            serde_json::to_vec(&val).unwrap_or_else(|_| decloaked_body.to_vec()),
+                        )
+                    }
+                    Err(_) => decloaked_body.clone(),
+                }
             } else {
                 use crate::core::translator::registry::ResponseTransformState;
                 let mut state = ResponseTransformState::default();

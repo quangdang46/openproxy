@@ -437,6 +437,39 @@ amp --model "{{model}}"
       { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro", alias: "gemini", defaultValue: "gemini/gemini-3.1-pro" },
     ],
   },
+  "grok-build": {
+    id: "grok-build",
+    name: "Grok Build (Grok CLI)",
+    image: "/providers/grok-cli.png",
+    color: "#1DA1F2",
+    description: "xAI Grok Build TUI coding agent",
+    configType: "custom",
+    docsUrl: "https://x.ai/cli",
+    defaultCommand: "grok",
+    notes: [
+      {
+        type: "info",
+        text: "Grok Build uses ~/.grok/config.toml. OpenProxy writes a [model.openproxy] custom model and sets it as the default.",
+      },
+      {
+        type: "info",
+        text: "After Apply, run grok (or /model openproxy) to use the routed model. Switch back anytime with /model grok-build. You can also pass --model provider/model-id.",
+      },
+      {
+        type: "warning",
+        text: "Config path: Linux/macOS ~/.grok/config.toml • Windows %USERPROFILE%\\.grok\\config.toml",
+      },
+    ],
+    defaultModels: [
+      { id: "grok-build", name: "Grok Build", alias: "grok-build", defaultValue: "gcli/grok-build" },
+      {
+        id: "grok-composer-2.5-fast",
+        name: "Grok Composer 2.5 Fast",
+        alias: "composer",
+        defaultValue: "gcli/grok-composer-2.5-fast",
+      },
+    ],
+  },
 };
 
 interface ProviderConnection {

@@ -1,6 +1,6 @@
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -16,6 +16,14 @@ use crate::server::state::AppState;
 use crate::types::AppDb;
 
 use super::auth_error_response;
+
+/// Default provider for video routes when the request model has no `provider/` prefix.
+/// Video generation is xAI-only today (Grok Imagine).
+const DEFAULT_VIDEO_PROVIDER: &str = "xai";
+
+/// Upstream base for async xAI video jobs (POST action / GET by request id).
+/// Docs: https://docs.x.ai/developers/rest-api-reference/inference/videos
+const XAI_VIDEO_BASE_URL: &str = "https://api.x.ai/v1/videos";
 
 pub async fn cors_options() -> Response {
     cors_preflight_response("POST, OPTIONS")
@@ -191,12 +199,44 @@ pub async fn search(
     with_cors_response(generic_media_handler(state, headers, body, "search").await)
 }
 
+/// POST /v1/videos/generations (and legacy /v1/video/generations) — async video job create.
 pub async fn video_generations(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    with_cors_response(generic_media_handler(state, headers, body, "video/generations").await)
+    with_cors_response(video_create_handler(state, headers, body, "generations").await)
+}
+
+/// POST /v1/videos/edits — async video edit job create (xAI Grok Imagine).
+pub async fn video_edits(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    with_cors_response(video_create_handler(state, headers, body, "edits").await)
+}
+
+/// POST /v1/videos/extensions — async video extension job create (xAI Grok Imagine).
+pub async fn video_extensions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    with_cors_response(video_create_handler(state, headers, body, "extensions").await)
+}
+
+/// GET /v1/videos/{id} — poll async video job status (xAI Grok Imagine).
+pub async fn video_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(request_id): Path<String>,
+) -> Response {
+    with_cors_get_response(video_get_handler(state, headers, request_id).await)
+}
+
+pub async fn cors_options_get() -> Response {
+    cors_preflight_response("GET, OPTIONS")
 }
 
 pub async fn audio_music(
@@ -708,6 +748,22 @@ fn with_cors_response(mut response: Response) -> Response {
     response
 }
 
+fn with_cors_get_response(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_HEADERS,
+        HeaderValue::from_static("*"),
+    );
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("GET, OPTIONS"),
+    );
+    response
+}
+
 fn cors_preflight_response(methods: &str) -> Response {
     let mut response = StatusCode::NO_CONTENT.into_response();
     response.headers_mut().insert(
@@ -723,4 +779,279 @@ fn cors_preflight_response(methods: &str) -> Response {
         HeaderValue::from_str(methods).unwrap_or(HeaderValue::from_static("POST, OPTIONS")),
     );
     response
+}
+
+/// Transparent async video job creation proxy (xAI Grok Imagine shape).
+///
+/// Forwards the JSON body with the provider prefix stripped from `model`,
+/// and passes upstream JSON (`request_id`, status, `video.url`, error) back
+/// verbatim — no reshaping.
+async fn video_create_handler(
+    state: AppState,
+    headers: HeaderMap,
+    body_result: Result<Json<Value>, JsonRejection>,
+    action: &'static str,
+) -> Response {
+    if state.db.snapshot().settings.require_login {
+        if let Err(error) = require_api_key(&headers, &state.db) {
+            return auth_error_response(error);
+        }
+    }
+
+    let Json(mut body) = match body_result {
+        Ok(body) => body,
+        Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
+    };
+
+    let (provider, model) = match resolve_video_provider_model(&state, &body) {
+        Ok(resolved) => resolved,
+        Err(resp) => return resp,
+    };
+
+    // Strip provider prefix (e.g. "xai/grok-imagine-video" → "grok-imagine-video")
+    // before forwarding so upstream receives the bare model id.
+    if let Some(obj) = body.as_object_mut() {
+        if let Some(model_str) = model.as_deref() {
+            obj.insert("model".to_string(), json!(model_str));
+        }
+    }
+
+    let connection = match select_video_connection(&state, &provider, &headers) {
+        Ok(conn) => conn,
+        Err(resp) => return resp,
+    };
+
+    let url = format!("{}/{}", XAI_VIDEO_BASE_URL.trim_end_matches('/'), action);
+
+    let mut upstream_headers = match build_media_headers(&provider, &connection) {
+        Ok(h) => h,
+        Err(e) => {
+            return json_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
+        }
+    };
+
+    // Forward Idempotency-Key when present (creation is billable).
+    if let Some(idem) = headers
+        .get("idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .filter(|v| !v.is_empty())
+    {
+        if let Ok(val) = HeaderValue::from_str(idem) {
+            upstream_headers.insert(
+                reqwest::header::HeaderName::from_static("idempotency-key"),
+                val,
+            );
+        }
+    }
+
+    let body_bytes = match serde_json::to_vec(&body) {
+        Ok(b) => b,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Serialization error: {}", e),
+            )
+        }
+    };
+
+    let snapshot = state.db.snapshot();
+    let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+    let client = match state.client_pool.get(&provider, proxy.as_ref()) {
+        Ok(c) => c,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Client error: {:?}", e),
+            )
+        }
+    };
+
+    // Never auto-retry creation POSTs — a network error after the request left
+    // the socket may still have created the billable job upstream.
+    let response = match client
+        .post(&url)
+        .headers(upstream_headers.clone())
+        .body(body_bytes)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e))
+        }
+    };
+
+    let mut proxied = proxy_upstream_response(response, upstream_headers).await;
+    // Video jobs are account-bound — clients echo this back as `x-connection-id`
+    // on GET polls so the same account is used.
+    if let Ok(val) = HeaderValue::from_str(&connection.id) {
+        proxied
+            .headers_mut()
+            .insert("x-openproxy-connection-id", val);
+    }
+    proxied
+}
+
+/// Poll async video job status. Jobs are account-bound upstream, so no
+/// cross-account rotation: the caller pins the creating account via
+/// `x-connection-id` (returned on create as `x-openproxy-connection-id`).
+async fn video_get_handler(state: AppState, headers: HeaderMap, request_id: String) -> Response {
+    if state.db.snapshot().settings.require_login {
+        if let Err(error) = require_api_key(&headers, &state.db) {
+            return auth_error_response(error);
+        }
+    }
+
+    if request_id.trim().is_empty() {
+        return json_error_response(StatusCode::BAD_REQUEST, "Missing video request id");
+    }
+
+    let provider = DEFAULT_VIDEO_PROVIDER.to_string();
+    let connection = match select_video_connection(&state, &provider, &headers) {
+        Ok(conn) => conn,
+        Err(resp) => return resp,
+    };
+
+    let url = format!(
+        "{}/{}",
+        XAI_VIDEO_BASE_URL.trim_end_matches('/'),
+        urlencoding::encode(&request_id)
+    );
+
+    let upstream_headers = match build_media_headers(&provider, &connection) {
+        Ok(h) => h,
+        Err(e) => {
+            return json_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
+        }
+    };
+
+    let snapshot = state.db.snapshot();
+    let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+    let client = match state.client_pool.get(&provider, proxy.as_ref()) {
+        Ok(c) => c,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Client error: {:?}", e),
+            )
+        }
+    };
+
+    let response = match client
+        .get(&url)
+        .headers(upstream_headers.clone())
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return json_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e))
+        }
+    };
+
+    let mut proxied = proxy_upstream_response(response, upstream_headers).await;
+    if let Ok(val) = HeaderValue::from_str(&connection.id) {
+        proxied
+            .headers_mut()
+            .insert("x-openproxy-connection-id", val);
+    }
+    proxied
+}
+
+/// Resolve `(provider, bare_model)` for a video create request.
+/// Bare model ids (no `provider/` prefix) fall back to xAI.
+fn resolve_video_provider_model(
+    state: &AppState,
+    body: &Value,
+) -> Result<(String, Option<String>), Response> {
+    let model_str = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let Some(model_str) = model_str else {
+        // No model field — still allow through with default provider (upstream
+        // will reject if model is required).
+        return Ok((DEFAULT_VIDEO_PROVIDER.to_string(), None));
+    };
+
+    let snapshot = state.db.snapshot();
+    let resolved = get_model_info(model_str, &snapshot);
+
+    match resolved.route_kind {
+        ModelRouteKind::Combo => Err(json_error_response(
+            StatusCode::BAD_REQUEST,
+            "Combos are not supported for video generation",
+        )),
+        ModelRouteKind::Direct => {
+            let provider = match &resolved.provider {
+                Some(p) if video_provider_supported(p) => p.clone(),
+                // Bare model id (no explicit provider prefix) → default video
+                // provider. Prefix-less inference targets chat providers only.
+                Some(_) if !model_str.contains('/') => DEFAULT_VIDEO_PROVIDER.to_string(),
+                Some(p) => {
+                    return Err(json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Provider '{}' does not support video generation", p),
+                    ));
+                }
+                None if !model_str.contains('/') => DEFAULT_VIDEO_PROVIDER.to_string(),
+                None => {
+                    return Err(json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "Invalid model format",
+                    ));
+                }
+            };
+            let bare_model = if model_str.contains('/') {
+                Some(resolved.model)
+            } else {
+                Some(model_str.to_string())
+            };
+            Ok((provider, bare_model))
+        }
+    }
+}
+
+fn video_provider_supported(provider: &str) -> bool {
+    // Today only xAI exposes videoConfig. Keep this narrow so unsupported
+    // providers fail closed rather than forwarding to a nonexistent endpoint.
+    provider == "xai"
+}
+
+fn select_video_connection(
+    state: &AppState,
+    provider: &str,
+    headers: &HeaderMap,
+) -> Result<crate::types::ProviderConnection, Response> {
+    let snapshot = state.db.snapshot();
+
+    // Prefer the account that created the job when the client echoes the
+    // connection id returned on create.
+    let preferred = headers
+        .get("x-connection-id")
+        .or_else(|| headers.get("x-openproxy-connection-id"))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+
+    if let Some(preferred_id) = preferred {
+        if let Some(conn) = snapshot
+            .provider_connections
+            .iter()
+            .find(|c| c.id == preferred_id && c.provider == provider && c.is_active())
+            .filter(|c| connection_has_credentials(c))
+            .cloned()
+        {
+            return Ok(conn);
+        }
+    }
+
+    select_media_connection(&snapshot, provider, "").ok_or_else(|| {
+        json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("No credentials for provider: {}", provider),
+        )
+    })
 }

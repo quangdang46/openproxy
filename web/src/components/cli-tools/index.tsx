@@ -15,6 +15,7 @@ export { default as MitmToolCard } from "./MitmToolCard";
 export { default as MitmLinkCard } from "./MitmLinkCard";
 export { default as DeepSeekTuiToolCard } from "./DeepSeekTuiToolCard";
 export { default as JcodeToolCard } from "./JcodeToolCard";
+export { default as GrokBuildToolCard } from "./GrokBuildToolCard";
 export { default as EndpointPresetControl } from "./EndpointPresetControl";
 export { default as BaseUrlSelect } from "./BaseUrlSelect";
 export { default as ApiKeySelect } from "./ApiKeySelect";

@@ -88,9 +88,20 @@ impl RequestPlan {
 
         // 9router: modelTargetFormat || resolveTransport?.format || getTargetFormat
         let transport = resolve_transport(provider, source_format);
-        let target_format = model_target
+        let mut target_format = model_target
             .or_else(|| transport.as_ref().map(|t| t.format))
             .unwrap_or_else(|| registry::get_target_format_for_provider(provider));
+
+        // GitHub Copilot Claude models use the Anthropic-native /v1/messages
+        // shim (9router v0.5.35). Force Claude as target so chat translates
+        // OpenAI→Claude before dispatch; response path then Claude→client.
+        // Name-pattern check (not registry targetFormat) so live catalog
+        // claude-* variants are covered without static list lag.
+        if provider == "github"
+            && crate::core::executor::GithubExecutor::is_claude_model(&upstream_model_id)
+        {
+            target_format = Format::Claude;
+        }
 
         let stream = body.get("stream").and_then(Value::as_bool).unwrap_or(true);
 
