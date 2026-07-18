@@ -458,17 +458,10 @@ pub fn openai_to_kiro_request(
         }
     }
 
-    // Build final content with prefix
-    let mut final_content = current_message
-        .as_ref()
-        .and_then(|m| m.get("userInputMessage"))
-        .and_then(|m| m.get("content"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let mut prefix_parts: Vec<String> = Vec::new();
-    // Check for thinking
+    // Build system / volatile prefixes (9router openai-to-kiro + applyKiroSessionReplay).
+    // System-stable content goes into content_prefix (frozen on msg0); volatile
+    // current-time only goes into current_content_prefix (current turn only).
+    let mut system_prompt_parts: Vec<String> = Vec::new();
     let thinking_enabled = body.get("reasoning_effort").is_some()
         || body
             .get("thinking")
@@ -476,15 +469,13 @@ pub fn openai_to_kiro_request(
             .and_then(|v| v.as_str())
             == Some("enabled");
     if thinking_enabled {
-        prefix_parts.push("<thinking_mode>enabled</thinking_mode>".to_string());
+        system_prompt_parts.push("<thinking_mode>enabled</thinking_mode>".to_string());
     }
-    let timestamp = chrono::Utc::now().to_rfc3339();
-    prefix_parts.push(format!("[Context: Current time is {}]", timestamp));
 
     // Check for -agentic suffix
     let is_agentic = model.ends_with("-agentic");
     if is_agentic {
-        prefix_parts.push(
+        system_prompt_parts.push(
             "[Agentic mode enabled: Use chunked file writes for large operations.]".to_string(),
         );
     }
@@ -495,24 +486,92 @@ pub fn openai_to_kiro_request(
         model
     };
 
-    if !prefix_parts.is_empty() {
-        final_content = format!("{}\n\n{}", prefix_parts.join("\n\n"), final_content);
+    let system_prompt = system_prompt_parts.join("\n\n");
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let current_time_context = format!("[Context: Current time is {timestamp}]");
+    let content_prefix = [system_prompt.as_str(), current_time_context.as_str()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    // Resolve conversation-stable session identity (client header / body field,
+    // or ephemeral one-shot for Kiro when no client id is present).
+    let connection_id = crate::core::utils::session_manager::credentials_connection_id(credentials);
+    let raw_headers = crate::core::utils::session_manager::credentials_raw_headers(credentials);
+    let session_identity = crate::core::utils::session_manager::resolve_session_identity(
+        raw_headers.as_ref(),
+        // Body still has original OpenAI shape here (we replace *body later).
+        Some(body),
+        connection_id.as_deref(),
+        "kiro",
+    );
+    let conversation_id = session_identity.session_id.clone();
+    let continuation_id = crate::core::utils::session_manager::resolve_continuation_id(
+        &conversation_id,
+        connection_id.as_deref(),
+        "kiro",
+        session_identity.ephemeral,
+    );
+
+    let base_current = current_message.unwrap_or_else(|| {
+        serde_json::json!({
+            "userInputMessage": {
+                "content": "",
+                "modelId": upstream_model
+            }
+        })
+    });
+
+    let replay = crate::core::utils::kiro_session_replay::apply_kiro_session_replay(
+        Some(&conversation_id),
+        connection_id.as_deref(),
+        upstream_model,
+        &system_prompt,
+        &content_prefix,
+        &current_time_context,
+        &merged_history,
+        &base_current,
+    );
+
+    let replay_current = replay
+        .current_message
+        .get("userInputMessage")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({ "content": "" }));
+
+    let mut user_input_message = serde_json::json!({
+        "content": replay_current.get("content").and_then(|v| v.as_str()).unwrap_or(""),
+        "modelId": upstream_model,
+        "origin": "AI_EDITOR"
+    });
+    if let Some(ctx) = replay_current.get("userInputMessageContext") {
+        user_input_message["userInputMessageContext"] = ctx.clone();
+    }
+    if let Some(images) = replay_current.get("images") {
+        if images.as_array().is_some_and(|a| !a.is_empty()) {
+            user_input_message["images"] = images.clone();
+        }
     }
 
     let mut payload = serde_json::json!({
         "conversationState": {
             "chatTriggerType": "MANUAL",
-            "conversationId": "auto-generated",
+            "conversationId": conversation_id,
+            "agentContinuationId": continuation_id,
+            "agentTaskType": "vibe",
             "currentMessage": {
-                "userInputMessage": {
-                    "content": final_content,
-                    "modelId": upstream_model,
-                    "origin": "AI_EDITOR"
-                }
+                "userInputMessage": user_input_message
             },
-            "history": merged_history
-        }
+            "history": replay.history
+        },
+        "agentMode": "vibe"
     });
+
+    if !system_prompt.is_empty() {
+        payload["systemPrompt"] = Value::String(system_prompt);
+    }
 
     // Add profileArn if present
     if let Some(profile_arn) = credentials

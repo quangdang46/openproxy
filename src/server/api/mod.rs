@@ -193,6 +193,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/v1/v1/images/edits",
             post(media::images_edits).options(media::cors_options),
         )
+        // Legacy singular path retained for older clients.
         .route(
             "/v1/video/generations",
             post(media::video_generations).options(media::cors_options),
@@ -200,6 +201,39 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route(
             "/v1/v1/video/generations",
             post(media::video_generations).options(media::cors_options),
+        )
+        // xAI Grok Imagine async video jobs (POST create / GET poll).
+        .route(
+            "/v1/videos/generations",
+            post(media::video_generations).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/videos/generations",
+            post(media::video_generations).options(media::cors_options),
+        )
+        .route(
+            "/v1/videos/edits",
+            post(media::video_edits).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/videos/edits",
+            post(media::video_edits).options(media::cors_options),
+        )
+        .route(
+            "/v1/videos/extensions",
+            post(media::video_extensions).options(media::cors_options),
+        )
+        .route(
+            "/v1/v1/videos/extensions",
+            post(media::video_extensions).options(media::cors_options),
+        )
+        .route(
+            "/v1/videos/{id}",
+            get(media::video_get).options(media::cors_options_get),
+        )
+        .route(
+            "/v1/v1/videos/{id}",
+            get(media::video_get).options(media::cors_options_get),
         )
         .route(
             "/v1/audio/music",

@@ -119,10 +119,24 @@ impl GithubExecutor {
         "https://api.githubcopilot.com/responses".to_string()
     }
 
+    /// Copilot's Anthropic-native Messages shim — only endpoint that surfaces
+    /// prompt-cache token counts for Claude (9router v0.5.35).
+    fn messages_url(&self) -> String {
+        "https://api.githubcopilot.com/v1/messages".to_string()
+    }
+
+    /// Claude models route to `/v1/messages` (name-pattern, not registry field —
+    /// Copilot's live catalog exposes claude-* variants ahead of the static list).
+    /// Matches "claude", "sonnet", or "opus" per 9router sketch.
+    pub fn is_claude_model(model: &str) -> bool {
+        let lower = model.to_lowercase();
+        lower.contains("claude") || lower.contains("sonnet") || lower.contains("opus")
+    }
+
     /// Models that may require /responses (gpt/codex family). Gemini/Claude never escalate.
     fn supports_responses_endpoint(model: &str) -> bool {
         let lower = model.to_lowercase();
-        if lower.contains("gemini") || lower.contains("claude") {
+        if lower.contains("gemini") || Self::is_claude_model(model) {
             return false;
         }
         lower.contains("codex")
@@ -192,6 +206,8 @@ impl GithubExecutor {
             HeaderValue::from_static("electron-fetch"),
         );
         headers.insert("X-Initiator", HeaderValue::from_static("user"));
+        // Harmless no-op on /chat/completions and /responses; required by /v1/messages.
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
 
         if stream {
             headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
@@ -399,12 +415,85 @@ impl GithubExecutor {
         &self,
         request: GithubExecutionRequest,
     ) -> Result<GithubExecutorResponse, GithubExecutorError> {
+        let headers = self.build_headers(&request.credentials, request.stream);
+        let client = self.pool.get("github", request.proxy.as_ref())?;
+
+        // Claude models: Copilot's Anthropic-native /v1/messages shim (9router v0.5.35).
+        // Request body is already Claude-shaped when chat plan.target_format=Claude
+        // (OpenAI clients are translated upstream; Claude clients pass through).
+        if Self::is_claude_model(&request.model) {
+            let url = self.messages_url();
+            let mut body = request.body.clone();
+            // Defensive: if the body still looks OpenAI-shaped, translate here so
+            // cache_control injection from openai_to_claude still applies.
+            // Chat normally pre-translates (plan.target_format=Claude); this
+            // covers direct executor callers / passthrough edge cases.
+            let looks_openai = body.get("system").is_none()
+                && (body
+                    .get("messages")
+                    .and_then(|m| m.as_array())
+                    .map(|msgs| {
+                        msgs.iter().any(|m| {
+                            matches!(
+                                m.get("role").and_then(|r| r.as_str()),
+                                Some("system") | Some("tool") | Some("developer")
+                            ) || m.get("tool_calls").is_some()
+                        })
+                    })
+                    .unwrap_or(false)
+                    || body
+                        .get("tools")
+                        .and_then(|t| t.as_array())
+                        .map(|tools| {
+                            tools.iter().any(|t| {
+                                t.get("type").and_then(|x| x.as_str()) == Some("function")
+                                    && t.get("function").is_some()
+                            })
+                        })
+                        .unwrap_or(false));
+            if looks_openai {
+                crate::core::translator::request::openai_to_claude::openai_to_claude_request(
+                    &request.model,
+                    &mut body,
+                    request.stream,
+                    None,
+                );
+                // Internal bookkeeping — Anthropic rejects unknown fields.
+                if let Some(obj) = body.as_object_mut() {
+                    obj.remove("_toolNameMap");
+                }
+            }
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("model".into(), json!(request.model));
+                obj.insert("stream".into(), json!(request.stream));
+                // Ensure max_tokens is present (Anthropic requires it).
+                if obj.get("max_tokens").is_none() {
+                    obj.insert("max_tokens".into(), json!(4096));
+                }
+            }
+            tracing::debug!(
+                target: "openproxy::github",
+                "Using /v1/messages route for {}",
+                request.model
+            );
+            let response = client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&body)
+                .send()
+                .await?;
+            return Ok(GithubExecutorResponse {
+                response: UpstreamResponse::Reqwest(response),
+                url,
+                headers,
+                transformed_body: body,
+                transport: TransportKind::Reqwest,
+            });
+        }
+
         let chat_url = self.build_url();
         let mut body = self.transform_request(&request.body, &request.model, request.stream);
         Self::sanitize_messages(&mut body);
-
-        let headers = self.build_headers(&request.credentials, request.stream);
-        let client = self.pool.get("github", request.proxy.as_ref())?;
 
         // Known codex models go straight to /responses (9router knownCodexModels cache)
         let prefer_responses = Self::needs_responses_model(&request.model)
@@ -606,5 +695,30 @@ mod tests {
             "https://api.githubcopilot.com/responses",
             "https://api.githubcopilot.com/responses"
         );
+        assert_eq!(
+            "https://api.githubcopilot.com/v1/messages",
+            "https://api.githubcopilot.com/v1/messages"
+        );
+    }
+
+    #[test]
+    fn claude_model_detection() {
+        assert!(GithubExecutor::is_claude_model("claude-sonnet-4.5"));
+        assert!(GithubExecutor::is_claude_model("claude-opus-4.6"));
+        assert!(GithubExecutor::is_claude_model("claude-haiku-4.5"));
+        // Sketch: sonnet/opus alone also count (live catalog variants)
+        assert!(GithubExecutor::is_claude_model("sonnet-4"));
+        assert!(GithubExecutor::is_claude_model("opus-4.7"));
+        assert!(!GithubExecutor::is_claude_model("gpt-5.2"));
+        assert!(!GithubExecutor::is_claude_model("gemini-2.5-pro"));
+        assert!(!GithubExecutor::is_claude_model("gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn claude_never_escalates_to_responses() {
+        assert!(!GithubExecutor::supports_responses_endpoint(
+            "claude-sonnet-4.5"
+        ));
+        assert!(!GithubExecutor::supports_responses_endpoint("opus-4.6"));
     }
 }

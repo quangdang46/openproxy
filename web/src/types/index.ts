@@ -48,6 +48,7 @@ export interface Provider {
   searchConfig?: SearchConfig;
   fetchConfig?: FetchConfig;
   imageConfig?: ImageConfig;
+  videoConfig?: VideoConfig;
 }
 
 export type ServiceKind = "llm" | "tts" | "stt" | "embedding" | "image" | "imageToText" | "webSearch" | "webFetch" | "video" | "music";
@@ -145,6 +146,11 @@ export interface ImageConfig {
   authType: "apikey";
   authHeader: string;
   extraHeaders?: Record<string, string>;
+}
+
+/** Async video job config (xAI Grok Imagine shape: POST create / GET poll). */
+export interface VideoConfig {
+  baseUrl: string;
 }
 
 export interface MediaProviderKind {

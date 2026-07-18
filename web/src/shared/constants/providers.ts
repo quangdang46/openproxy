@@ -59,7 +59,7 @@ export const OAUTH_PROVIDERS: Record<string, Provider> = {
   kilocode: { id: "kilocode", alias: "kc", name: "Kilo Code", icon: "code", color: "#FF6B35", textIcon: "KC", website: "https://kilocode.ai", notice: { signupUrl: "https://kilocode.ai" }, priority: 40 },
   cline: { id: "cline", alias: "cl", name: "Cline", icon: "smart_toy", color: "#5B9BD5", textIcon: "CL", website: "https://cline.bot", notice: { signupUrl: "https://cline.bot" }, priority: 45 },
   // Dual auth (OAuth + API key) — also listed under APIKEY_PROVIDERS for key path.
-  xai: { id: "xai", alias: "xai", name: "xAI (Grok)", icon: "auto_awesome", color: "#1DA1F2", textIcon: "XA", website: "https://x.ai", notice: { apiKeyUrl: "https://console.x.ai", signupUrl: "https://accounts.x.ai" }, serviceKinds: ["llm", "imageToText", "webSearch"], searchViaChat: { defaultModel: "grok-4.20-reasoning", pricingUrl: "https://x.ai/api#pricing" }, authModes: ["oauth", "apikey"], priority: 35 },
+  xai: { id: "xai", alias: "xai", name: "xAI (Grok)", icon: "auto_awesome", color: "#1DA1F2", textIcon: "XA", website: "https://x.ai", notice: { apiKeyUrl: "https://console.x.ai", signupUrl: "https://accounts.x.ai" }, serviceKinds: ["llm", "imageToText", "webSearch", "image", "video"], searchViaChat: { defaultModel: "grok-4.20-reasoning", pricingUrl: "https://x.ai/api#pricing" }, imageConfig: { baseUrl: "https://api.x.ai/v1/images/generations", method: "POST", authType: "apikey", authHeader: "bearer" }, videoConfig: { baseUrl: "https://api.x.ai/v1/videos" }, authModes: ["oauth", "apikey"], priority: 35 },
   // Grok CLI / Grok Build device-code OAuth (cli-chat-proxy.grok.com) — distinct from xai + grok-web.
   "grok-cli": {
     id: "grok-cli",
@@ -189,7 +189,7 @@ export const MEDIA_PROVIDER_KINDS: MediaProviderKind[] = [
   { id: "stt",         label: "STT",            icon: "mic",               endpoint: { method: "POST", path: "/v1/audio/transcriptions" } },
   { id: "webSearch",   label: "Web Search",     icon: "travel_explore",    endpoint: { method: "POST", path: "/v1/search" } },
   { id: "webFetch",    label: "Web Fetch",      icon: "language",          endpoint: { method: "POST", path: "/v1/web/fetch" } },
-  { id: "video",       label: "Video",          icon: "movie",             endpoint: { method: "POST", path: "/v1/video/generations" } },
+  { id: "video",       label: "Video",          icon: "movie",             endpoint: { method: "POST", path: "/v1/videos/generations" } },
   { id: "music",       label: "Music",          icon: "music_note",        endpoint: { method: "POST", path: "/v1/audio/music" } },
 ];
 

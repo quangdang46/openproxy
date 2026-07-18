@@ -384,30 +384,93 @@ fn convert_stop_reason(reason: &str) -> &'static str {
     }
 }
 
-/// Registry-compatible wrapper: parses raw bytes, calls the typed
+/// Registry-compatible wrapper: parses raw SSE/JSON bytes, calls the typed
 /// `claude_to_openai_response`, and serialises results back to SSE lines.
 ///
-/// Signature matches `registry::ResponseTransformFn`.
+/// Buffers partial SSE frames across chunks (Anthropic events arrive as
+/// `event: …\ndata: …\n\n`). Signature matches `registry::ResponseTransformFn`.
 pub fn claude_to_openai_streaming(
     chunk: &[u8],
     state: &mut crate::core::translator::registry::ResponseTransformState,
 ) -> Vec<String> {
-    use crate::core::translator::registry::ResponseTransformState;
-    let val: Value = match serde_json::from_slice(chunk) {
-        Ok(v) => v,
-        Err(_) => return vec![],
-    };
-    let inner = &mut state.anthropic.claude_state;
-    let results = claude_to_openai_response(&val, inner);
-    results
-        .into_iter()
-        .map(|v| {
-            format!(
-                "data: {}\n\n",
-                serde_json::to_string(&v).unwrap_or_default()
-            )
-        })
-        .collect()
+    // Append into line buffer so partial frames spanning TCP chunks still parse.
+    state
+        .anthropic
+        .line_buffer
+        .push_str(&String::from_utf8_lossy(chunk));
+
+    // Fast path: entire chunk is a bare JSON event (no SSE framing).
+    // Only when buffer is exactly this chunk (nothing left over from prior).
+    if state.anthropic.line_buffer.len() <= chunk.len() {
+        if let Ok(val) = serde_json::from_slice::<Value>(chunk) {
+            // Non-streaming Claude Messages JSON body (type=message) — convert
+            // via the non-streaming helper so OpenAI clients get chat.completion.
+            if val.get("type").and_then(|t| t.as_str()) == Some("message")
+                && val.get("content").is_some()
+            {
+                state.anthropic.line_buffer.clear();
+                let mut body = val;
+                crate::core::translator::response::non_streaming::claude_to_openai_non_streaming(
+                    &mut body,
+                );
+                return vec![format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&body).unwrap_or_default()
+                )];
+            }
+            if val.get("type").is_some() {
+                state.anthropic.line_buffer.clear();
+                let inner = &mut state.anthropic.claude_state;
+                return claude_to_openai_response(&val, inner)
+                    .into_iter()
+                    .map(|v| {
+                        format!(
+                            "data: {}\n\n",
+                            serde_json::to_string(&v).unwrap_or_default()
+                        )
+                    })
+                    .collect();
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    // Drain complete SSE frames delimited by blank lines.
+    while let Some(frame_end) = state.anthropic.line_buffer.find("\n\n") {
+        let frame = state.anthropic.line_buffer[..frame_end].to_string();
+        state.anthropic.line_buffer.drain(..frame_end + 2);
+
+        let mut data_payload: Option<String> = None;
+        for line in frame.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with(':') {
+                continue;
+            }
+            if let Some(rest) = trimmed.strip_prefix("data:") {
+                let payload = rest.trim();
+                if payload == "[DONE]" {
+                    out.push("data: [DONE]\n\n".to_string());
+                    data_payload = None;
+                    break;
+                }
+                data_payload = Some(payload.to_string());
+            }
+            // event: lines are ignored — Claude event type lives in JSON `type`.
+        }
+
+        if let Some(payload) = data_payload {
+            if let Ok(val) = serde_json::from_str::<Value>(&payload) {
+                let inner = &mut state.anthropic.claude_state;
+                for v in claude_to_openai_response(&val, inner) {
+                    out.push(format!(
+                        "data: {}\n\n",
+                        serde_json::to_string(&v).unwrap_or_default()
+                    ));
+                }
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
