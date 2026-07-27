@@ -334,6 +334,19 @@ impl EvalRunnerBuilder {
 }
 
 /// An eval runner that drives actual API calls to providers.
+///
+/// # Panic safety
+///
+/// If the requester closure (or any code inside [`EvalRunner::run`]) panics,
+/// any connections or resources the requester holds may be **orphaned**
+/// (left open or leaked). This is because `EvalRunner` does not wrap the
+/// per-case iteration in [`std::panic::catch_unwind`]; a panic unwinds
+/// through the entire `run` call, bypassing any drop-based cleanup on the
+/// caller's side.
+///
+/// To prevent this, ensure your requester implementation is panic-free, or
+/// wrap it in `std::panic::catch_unwind` before passing it to
+/// [`EvalRunnerBuilder::build`].
 pub struct EvalRunner<F> {
     suite: EvalSuite,
     requester: F,

@@ -28,7 +28,6 @@ const OPTIONAL_FIELDS: &[&str] = &[
     "negative_prompt",
     "guidance",
     "seed",
-    "num_steps",
     "steps",
     "strength",
 ];
@@ -227,16 +226,15 @@ impl ImageAdapter for CloudflareAiAdapter {
         }
         add_optional_fields_json(&mut req, request.body);
 
-        // Image / mask passthrough. Skip URL fetch — adapter is invoked
-        // without a Client; resolve_image_input is used in parse path.
+        // Image / mask passthrough. Send EITHER image_b64 (base64 string)
+        // OR image (byte array), not both. Cloudflare AI accepts either
+        // format; prefer image_b64 as it avoids re-encoding to a byte
+        // list. Skip URL fetch — adapter is invoked without a Client;
+        // resolve_image_input is used in parse path.
         if let Some(image) = request.image() {
             if let Some(s) = image.as_str() {
                 if let Some(b64) = data_url_b64(s) {
                     req.insert("image_b64".into(), json!(b64));
-                    req.insert(
-                        "image".into(),
-                        Value::Array(b64_to_bytes(&b64).into_iter().map(|b| json!(b)).collect()),
-                    );
                 }
             }
         }

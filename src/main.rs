@@ -377,6 +377,7 @@ async fn main() -> anyhow::Result<()> {
     spawn_auto_backup(db.clone());
     // Prune old usage/request details on startup (keep 30 days).
     spawn_usage_retention_cleanup(db.clone());
+    openproxy::server::auth::spawn_jti_cleanup();
     let state = AppState::new(db)
         .init_oidc_from_env()
         .await

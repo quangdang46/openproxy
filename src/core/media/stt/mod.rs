@@ -196,6 +196,11 @@ async fn transcribe_deepgram(client: &Client, req: SttRequest<'_>) -> Result<Stt
     let mut url = reqwest::Url::parse(req.base_url)
         .map_err(|e| SttError::Validation(format!("deepgram url: {e}")))?;
     url.query_pairs_mut().append_pair("model", req.model);
+    // TODO(deepgram-smartfmt): `smart_format` and `punctuate` are hardcoded to
+    // `"true"` for parity with the upstream JS port. The `SttRequest` struct
+    // in this module does not yet carry per-request overrides. When adding them,
+    // thread the values through to `query_pairs_mut` here and in the active
+    // implementation at `src/server/api/stt.rs`.
     url.query_pairs_mut().append_pair("smart_format", "true");
     url.query_pairs_mut().append_pair("punctuate", "true");
     if let Some(lang) = req.language.filter(|s| !s.trim().is_empty()) {
@@ -243,9 +248,19 @@ async fn transcribe_assemblyai(
 ) -> Result<SttResult, SttError> {
     let auth = build_auth_headers(req.auth, req.token)?;
 
-    // 1. Upload.
+    // 1. Upload — derive upload endpoint from base_url by replacing the
+    //    last path segment (e.g. /v2/transcript → /v2/upload).
+    let upload_url = {
+        let mut u = reqwest::Url::parse(req.base_url)
+            .map_err(|e| SttError::Validation(format!("assemblyai base_url: {e}")))?;
+        u.path_segments_mut()
+            .map_err(|_| SttError::Validation("assemblyai base_url cannot be a base".into()))?
+            .pop()
+            .push("upload");
+        u
+    };
     let up = client
-        .post("https://api.assemblyai.com/v2/upload")
+        .post(upload_url)
         .headers(auth.clone())
         .header(CONTENT_TYPE, "application/octet-stream")
         .body(req.audio)

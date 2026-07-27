@@ -294,7 +294,23 @@ pub mod device_code {
         })
     }
 
-    /// Kiro AWS SSO OIDC flow - register client first, then standard device code flow
+    /// Kiro AWS SSO OIDC flow - register client first, then standard device code flow.
+    ///
+    /// The registration includes an `expires_at` set to
+    /// `KIRO_CLIENT_REGISTRATION_TTL_SECS` (3600s / 1 hour) from now.
+    /// After this TTL elapses the client credentials are invalid and a new
+    /// registration is required.
+    ///
+    /// Each call creates a **fresh** client registration.  Callers MUST
+    /// re-register (i.e. call this function again) when a token‑endpoint
+    /// response indicates `invalid_client` or `expired_client`.
+    ///
+    /// The device‑code polling path (`poll_for_token`) does **not**
+    /// automatically re‑register — the caller is responsible for catching
+    /// client‑expired errors and re‑invoking this function before retrying
+    /// the poll.
+    const KIRO_CLIENT_REGISTRATION_TTL_SECS: u64 = 3600;
+
     pub async fn kiro_register_client() -> Result<(String, String), OAuthError> {
         let client = reqwest::Client::new();
         let client_id = format!("openproxy-{}", uuid::Uuid::new_v4());
@@ -302,7 +318,7 @@ pub mod device_code {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let expires_at = now_secs + 3600;
+        let expires_at = now_secs + KIRO_CLIENT_REGISTRATION_TTL_SECS;
 
         let registration = serde_json::json!({
             "client_id": client_id,

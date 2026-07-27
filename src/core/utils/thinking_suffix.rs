@@ -537,13 +537,21 @@ pub fn apply_thinking_level(
 /// - When `suffix_level` is `Some`, always apply (model suffix is explicit override).
 /// - When `suffix_level` is `None`, leave body alone so `providerThinking` /
 ///   client fields are not double-applied or wiped.
+///
+/// When `stream` is `false`, the injection is skipped entirely — thinking/
+/// reasoning fields are only meaningful for streaming responses and some
+/// providers reject them on non-streaming requests.
 pub fn reapply_thinking_after_translate(
     target_format: Format,
     provider: &str,
     model: &str,
     body: &mut Value,
     suffix_level: Option<&str>,
+    stream: bool,
 ) {
+    if !stream {
+        return;
+    }
     if let Some(level) = suffix_level {
         apply_thinking_level(target_format, provider, model, body, level);
         return;
@@ -612,6 +620,7 @@ mod tests {
             &clean,
             &mut body,
             level.as_deref(),
+            true,
         );
         assert_eq!(body["reasoning_effort"], "high");
         assert!(body.get("thinking").is_none());
@@ -630,6 +639,7 @@ mod tests {
             &clean,
             &mut body,
             level.as_deref(),
+            true,
         );
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 24576);
@@ -646,6 +656,7 @@ mod tests {
             &clean,
             &mut body,
             level.as_deref(),
+            true,
         );
         assert_eq!(body["output_config"]["effort"], "medium");
         assert!(body.get("thinking").is_none());
@@ -685,8 +696,25 @@ mod tests {
             "claude-haiku-4.5",
             &mut body,
             None,
+            true,
         );
         assert_eq!(body["thinking"]["budget_tokens"], 10000);
+    }
+
+    #[test]
+    fn non_streaming_skips_thinking_injection() {
+        let mut body = json!({"messages": []});
+        reapply_thinking_after_translate(
+            Format::OpenAi,
+            "openai",
+            "gpt-5",
+            &mut body,
+            Some("high"),
+            false,
+        );
+        // Non-streaming: thinking must NOT be injected
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
     }
 
     #[test]
@@ -701,6 +729,7 @@ mod tests {
             "claude-haiku-4.5",
             &mut body,
             Some("low"),
+            true,
         );
         assert_eq!(body["thinking"]["budget_tokens"], 1024);
     }

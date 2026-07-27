@@ -1,5 +1,9 @@
-//! ComfyUI — local, no auth (placeholder; full graph workflow not
-//! implemented; matches the upstream JS shim).
+//! ComfyUI adapter — STUB.
+//!
+//! This adapter is a partial/placeholder implementation. It constructs a basic
+//! JSON prompt payload targeting `http://localhost:8188`, but does **not**
+//! implement ComfyUI's full graph-based workflow API (only a minimal
+//! prompt-echo shim matching the upstream JS fallback).
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};

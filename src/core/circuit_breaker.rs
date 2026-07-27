@@ -20,6 +20,20 @@
 ///    └─────────┘
 /// ```
 ///
+/// # Limitation: half-open state liveness
+///
+/// The half-open state does **not** have an independent timeout. After all probe
+/// slots (`half_open_max_probes`) are consumed via `allow_request()`, the
+/// circuit remains half-open indefinitely unless `record()` is called with a
+/// `Success` or `Failure` outcome. If a dispatched probe never produces a
+/// corresponding `record()` call (e.g., because of a dropped connection,
+/// a lost response, or a code path that bypasses `record()`), the circuit
+/// will reject all subsequent requests until manually reset via `reset()`.
+///
+/// A future enhancement should add a `half_open_timeout` that transitions the
+/// circuit back to Open when probes go unrecorded, and/or a mechanism to
+/// trigger automatic re-probing after a delay.
+///
 /// The breaker is thread-safe and uses `DashMap` for O(1) lookups per
 /// provider+endpoint key, with `Mutex`-guarded per-entry state to allow
 /// atomic transitions.

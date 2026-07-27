@@ -156,6 +156,18 @@ struct ToolHandler {
     handler: fn(state: &AppState, args: Value) -> Result<Value, String>,
 }
 
+/// Validate that a string value does not exceed 255 characters.
+/// Returns `Ok(())` if the value is `None` (optional field), or if the
+/// string length is ≤ 255. Returns an error message otherwise.
+fn validate_length(value: Option<&str>, field: &str) -> Result<(), String> {
+    if let Some(v) = value {
+        if v.len() > 255 {
+            return Err(format!("'{field}' exceeds maximum length of 255 characters (got {})", v.len()));
+        }
+    }
+    Ok(())
+}
+
 fn make_schema(properties: Value, required: Vec<&str>) -> Value {
     json!({
         "type": "object",
@@ -234,10 +246,10 @@ fn tool_table() -> Vec<ToolHandler> {
             "provider_create",
             "Create a new provider connection",
             json!({
-                "provider": { "type": "string", "description": "Provider type (e.g. openai, anthropic)" },
-                "name": { "type": "string", "description": "Display name" },
-                "api_key": { "type": "string", "description": "API key" },
-                "base_url": { "type": "string", "description": "Optional base URL override" }
+                "provider": { "type": "string", "description": "Provider type (e.g. openai, anthropic) — max 255 chars" },
+                "name": { "type": "string", "description": "Display name — max 255 chars" },
+                "api_key": { "type": "string", "description": "API key — max 255 chars" },
+                "base_url": { "type": "string", "description": "Optional base URL override — max 255 chars" }
             }),
             vec!["provider", "name", "api_key"],
             |state, args| {
@@ -245,15 +257,19 @@ fn tool_table() -> Vec<ToolHandler> {
                     .get("provider")
                     .and_then(Value::as_str)
                     .ok_or("Missing 'provider'")?;
+                validate_length(Some(provider), "provider")?;
                 let name = args
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or("Missing 'name'")?;
+                validate_length(Some(name), "name")?;
                 let api_key = args
                     .get("api_key")
                     .and_then(Value::as_str)
                     .ok_or("Missing 'api_key'")?;
+                validate_length(Some(api_key), "api_key")?;
                 let base_url = args.get("base_url").and_then(Value::as_str);
+                validate_length(base_url, "base_url")?;
 
                 let id = uuid::Uuid::new_v4().to_string();
                 let now = chrono::Utc::now().to_rfc3339();
@@ -356,7 +372,7 @@ fn tool_table() -> Vec<ToolHandler> {
             "key_create",
             "Create a new API key",
             json!({
-                "name": { "type": "string", "description": "Key display name" }
+                "name": { "type": "string", "description": "Key display name — max 255 chars" }
             }),
             vec!["name"],
             |state, args| {
@@ -364,6 +380,7 @@ fn tool_table() -> Vec<ToolHandler> {
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or("Missing 'name'")?;
+                validate_length(Some(name), "name")?;
                 let id = uuid::Uuid::new_v4().to_string();
                 let machine_id = crate::server::api::consistent_machine_id();
                 let key = crate::core::auth::generate_api_key_with_machine(&machine_id);
@@ -416,9 +433,9 @@ fn tool_table() -> Vec<ToolHandler> {
             "combo_create",
             "Create a new model combo",
             json!({
-                "name": { "type": "string", "description": "Combo name" },
+                "name": { "type": "string", "description": "Combo name — max 255 chars" },
                 "models": { "type": "array", "items": { "type": "string" }, "description": "List of model IDs" },
-                "kind": { "type": "string", "description": "Optional combo kind" }
+                "kind": { "type": "string", "description": "Optional combo kind — max 255 chars" }
             }),
             vec!["name", "models"],
             |state, args| {
@@ -426,6 +443,7 @@ fn tool_table() -> Vec<ToolHandler> {
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or("Missing 'name'")?;
+                validate_length(Some(name), "name")?;
                 let models = args
                     .get("models")
                     .and_then(Value::as_array)
@@ -435,6 +453,7 @@ fn tool_table() -> Vec<ToolHandler> {
                     .filter_map(|m| m.as_str().map(String::from))
                     .collect();
                 let kind = args.get("kind").and_then(Value::as_str).map(String::from);
+                validate_length(kind.as_deref(), "kind")?;
                 let id = uuid::Uuid::new_v4().to_string();
                 let now = chrono::Utc::now().to_rfc3339();
                 let combo = Combo {
@@ -467,9 +486,9 @@ fn tool_table() -> Vec<ToolHandler> {
             "pool_create",
             "Create a new proxy pool",
             json!({
-                "name": { "type": "string", "description": "Pool name" },
-                "proxy_url": { "type": "string", "description": "Proxy URL" },
-                "type": { "type": "string", "description": "Proxy type (http, cloudflare, vercel, deno)" }
+                "name": { "type": "string", "description": "Pool name — max 255 chars" },
+                "proxy_url": { "type": "string", "description": "Proxy URL — max 255 chars" },
+                "type": { "type": "string", "description": "Proxy type (http, cloudflare, vercel, deno) — max 255 chars" }
             }),
             vec!["name", "proxy_url"],
             |state, args| {
@@ -477,11 +496,14 @@ fn tool_table() -> Vec<ToolHandler> {
                     .get("name")
                     .and_then(Value::as_str)
                     .ok_or("Missing 'name'")?;
+                validate_length(Some(name), "name")?;
                 let proxy_url = args
                     .get("proxy_url")
                     .and_then(Value::as_str)
                     .ok_or("Missing 'proxy_url'")?;
+                validate_length(Some(proxy_url), "proxy_url")?;
                 let pool_type = args.get("type").and_then(Value::as_str).unwrap_or("http");
+                validate_length(Some(pool_type), "type")?;
                 let id = uuid::Uuid::new_v4().to_string();
                 let now = chrono::Utc::now().to_rfc3339();
                 let mut pool = ProxyPool::default();

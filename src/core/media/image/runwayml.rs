@@ -10,6 +10,10 @@ use super::base::{
     POLL_INTERVAL_MS, POLL_TIMEOUT_MS,
 };
 
+/// RunwayML API base URL.
+///
+/// Currently using the **development** endpoint.
+/// The production endpoint is `https://api.runwayml.com/v1`.
 const BASE_URL: &str = "https://api.dev.runwayml.com/v1";
 
 pub struct RunwaymlAdapter;

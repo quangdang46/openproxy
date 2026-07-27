@@ -1,14 +1,28 @@
 use axum::http::HeaderMap;
-use dashmap::DashSet;
+use dashmap::DashMap;
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use once_cell::sync::Lazy;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::core::auth::{parse_api_key, CLI_TOKEN_HEADER};
 use crate::db::Db;
 use crate::types::ApiKey;
+
+/// Periodically removes expired entries from [`REVOKED_JTIS`]. Dashboard JWT
+/// tokens have a max TTL of 7 days, so any revocation record older than that
+/// can never match a live token. Runs once at startup and then every hour.
+pub fn spawn_jti_cleanup() {
+    tokio::spawn(async move {
+        loop {
+            // Run once at startup as well, then every hour.
+            cleanup_expired_jtis();
+            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+        }
+    });
+}
 
 pub mod login_limiter;
 pub mod oidc;
@@ -39,10 +53,15 @@ static JWT_SECRET: Lazy<String> = Lazy::new(|| {
         })
 });
 
+/// The maximum TTL for a dashboard JWT token (7 days in seconds).
+/// Used by the periodic cleanup task to evict expired revocation entries.
+const JTI_CLEANUP_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
 /// Revoked JWT `jti` (JWT ID) values. Populated on logout; checked during
-/// every `require_dashboard_session` call. Entries are never evicted — the
-/// session TTL caps at 7d and the in-memory cost is negligible.
-static REVOKED_JTIS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+/// every `require_dashboard_session` call. Values are the unix timestamp of
+/// when the JTI was revoked. A periodic background task removes entries older
+/// than [`JTI_CLEANUP_TTL_SECS`].
+static REVOKED_JTIS: Lazy<DashMap<String, u64>> = Lazy::new(DashMap::new);
 
 /// Monotonically-increasing epoch used for bulk token invalidation. Each time
 /// we need to revoke *all* outstanding tokens (e.g. on password change) the
@@ -193,7 +212,7 @@ pub fn require_dashboard_session(
             return Err(DashboardAuthError::Invalid);
         }
         // Reject individually-revoked tokens (per-session logout).
-        if REVOKED_JTIS.contains(jti) {
+        if REVOKED_JTIS.contains_key(jti) {
             return Err(DashboardAuthError::Invalid);
         }
     }
@@ -203,8 +222,31 @@ pub fn require_dashboard_session(
 /// Revoke a dashboard session by its `jti` (JWT ID). The revoked token will
 /// be rejected by [`require_dashboard_session`] on subsequent requests.
 /// Idempotent: calling this multiple times with the same `jti` is a no-op.
+/// The revocation timestamp is recorded so that [`cleanup_expired_jtis`] can
+/// evict stale entries.
 pub fn revoke_jti(jti: &str) {
-    REVOKED_JTIS.insert(jti.to_string());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    REVOKED_JTIS.insert(jti.to_string(), now);
+}
+
+/// Remove entries from [`REVOKED_JTIS`] that are older than
+/// [`JTI_CLEANUP_TTL_SECS`]. Dashboard JWT tokens have a max TTL of 7 days,
+/// so any revocation record older than that can never match a live token and
+/// is safe to evict.
+///
+/// Called periodically by a background task spawned in [`spawn_jti_cleanup`]
+/// to prevent unbounded growth of the revoked-JTI set.
+pub fn cleanup_expired_jtis() {
+    let cutoff = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(JTI_CLEANUP_TTL_SECS);
+
+    REVOKED_JTIS.retain(|_jti, inserted_at| *inserted_at > cutoff);
 }
 
 fn extract_presented_key(headers: &HeaderMap) -> Option<PresentedKey> {

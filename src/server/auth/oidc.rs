@@ -12,9 +12,10 @@
 //!    `GET /api/auth/oidc/callback?code=…&state=…`.
 //! 3. Server verifies `state`, exchanges the code at the IdP's
 //!    `token_endpoint`, fetches the JWKS, and verifies the signed
-//!    `id_token` (RS256 by default, RS384/RS512 also accepted). On
-//!    success the server issues a dashboard session cookie and 302-
-//!    redirects to `/`.
+//!    `id_token` (RS256/RS384/RS512, ES256/ES384, and EdDSA —
+//!    HMAC is rejected because the symmetric key would have to be
+//!    shipped with the client). On success the server issues a
+//!    dashboard session cookie and 302-redirects to `/`.
 //!
 //! `OidcClient::discover` fetches the provider's
 //! `/.well-known/openid-configuration` document once at boot. The

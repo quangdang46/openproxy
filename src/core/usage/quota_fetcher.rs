@@ -1,4 +1,5 @@
-//! Live provider quota fetchers (GLM, MiniMax).
+//! Live provider quota fetchers (GLM, MiniMax, GitHub, Codex, Claude, Gemini CLI,
+//! Antigravity, Qoder, Kiro).
 //!
 //! Each provider exposes a small JSON API that reports remaining quota for the
 //! current billing window. These functions issue a one-shot GET and normalize
@@ -21,6 +22,39 @@
 //! ```
 //!
 //! Mirrors `open-sse/services/usage.js` from decolua/9router.
+//!
+//! # Concurrency
+//!
+//! Every public function in this module is a stateless one-shot HTTP call that
+//! accepts an `access_token` by reference and returns a `serde_json::Value`.
+//! **No internal synchronization is held** — multiple tasks may invoke any
+//! function concurrently without data races inside this module.
+//!
+//! ## Known refresh race
+//!
+//! These fetchers are called from **two concurrent paths**:
+//!
+//! 1. **Auto-ping background loop** (`quota_auto_ping::process_connection`):
+//!    refreshes the OAuth credentials via `dispatch_oauth_refresh` *before*
+//!    calling `fetch_oauth_quota`. The fresh token is used in the same
+//!    tick iteration.
+//!
+//! 2. **HTTP handler** (`usage::get_connection_usage`): reads a DB snapshot
+//!    and calls `fetch_oauth_quota` without an intervening credential
+//!    refresh.
+//!
+//! Because (1) updates the DB with a new token and (2) may have loaded its
+//! snapshot *before* the write landed, (2) can call a fetcher with a stale
+//! (possibly expired) token while a fresh token has already been written to
+//! the DB by (1).  This is the **quota fetcher concurrent refresh race**.
+//!
+//! The race is benign:
+//! - A stale-token request either succeeds or returns 401/403, which callers
+//!   translate to `{ "message": "invalid/expired token" }`.
+//! - The dashboard treats that message as "connected, but quota unavailable"
+//!   and degrades gracefully.
+//! - Credential refreshes are serialised per connection
+//!   ([`CredentialManager`]), so at most one refresh runs at a time.
 
 use serde_json::{json, Value};
 use std::time::Duration;

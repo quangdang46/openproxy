@@ -303,6 +303,9 @@ impl EmbeddingAdapter for GeminiAdapter {
         } else {
             Vec::new()
         };
+        // Gemini's embedContent / batchEmbedContents responses do not include
+        // usage (token) information, so we inject a 0-usage placeholder to
+        // stay compatible with the OpenAI response shape downstream.
         json!({
             "object": "list",
             "data": items,

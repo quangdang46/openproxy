@@ -27,7 +27,7 @@ pub struct RequestLog {
 
 /// Shared request logger for storing request records.
 pub struct RequestLogger {
-    logs: Mutex<Vec<RequestLog>>,
+    logs: Mutex<VecDeque<RequestLog>>,
     max_records: usize,
 }
 

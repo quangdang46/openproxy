@@ -77,13 +77,16 @@ impl PendingFlowStore {
 
     /// Retrieve a pending flow by its state parameter.
     /// Returns None if not found or if the flow has expired.
+    /// Expired flows are removed from the store as a side effect.
     pub fn get(&self, state: &str) -> Option<PendingOAuthFlow> {
-        let store = self.store.read().ok()?;
-        let flow = store.get(state)?;
-        if flow.is_expired() {
-            return None;
+        let mut store = self.store.write().ok()?;
+        if let Some(flow) = store.get(state) {
+            if !flow.is_expired() {
+                return Some(flow.clone());
+            }
+            store.remove(state);
         }
-        Some(flow.clone())
+        None
     }
 
     /// Remove and return a pending flow by its state parameter.

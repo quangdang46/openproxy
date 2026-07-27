@@ -201,6 +201,65 @@ impl ResponseCache {
     ///
     /// Provider-scoped TTL is used when the upstream response does not specify
     /// a `Cache-Control` header.
+    ///
+    /// # Eviction strategy
+    ///
+    /// Every call to `set` triggers proactive eviction when the entry count
+    /// exceeds `max_entries`. The strategy is deliberately cheap to keep the
+    /// hot insert path fast:
+    ///
+    /// 1. **Remove expired entries** — a linear `O(n)` scan via `retain`,
+    ///    freeing space without allocation.
+    /// 2. **Arbitrary eviction** — if still over the limit, `take(excess)`
+    ///    entries from the DashMap iterator and remove them. This is `O(1)`
+    ///    in the evicted count but **arbitrary**: it does not prefer the
+    ///    oldest or soonest-to-expire entry.
+    ///
+    /// ## Why not sort by age?
+    ///
+    /// Finding the oldest entries requires materialising a list of all live
+    /// entries, sorting by `created_at`, and removing the oldest. That is
+    /// `O(n log n)` on every `set` past the threshold — unacceptable for a
+    /// high-throughput cache on the hot path.
+    ///
+    /// ## Tradeoff
+    ///
+    /// Under sustained over-capacity pressure, arbitrary eviction may drop
+    /// long-TTL entries that still have useful life, degrading the hit rate.
+    /// Cache correctness (freshness) is never affected — expired entries are
+    /// never returned — but the hit rate can degrade slightly until load
+    /// subsides. The periodic `retain` on every over-capacity `set` removes
+    /// expired entries opportunistically, which mitigates pressure in the
+    /// common case where the bulk of entries are short-lived.
+    ///
+    /// ## Recommendation for a future improvement
+    ///
+    /// To eliminate the tradeoff without paying `O(n log n)` on the hot path,
+    /// move eviction off the critical path:
+    ///
+    /// - **Background eviction task** — spawn a periodic task (every
+    ///   `N` seconds or when `len > max_entries`) that runs in a separate
+    ///   thread/task. This task can afford an `O(n)` scan that collects
+    ///   `(created_at, key)` pairs, sorts by age once (`O(n log n)` for
+    ///   the batch), and evicts the oldest entries. The hot `set` path
+    ///   never sorts.
+    /// - **Approximate LRU via shard-local ordering** — DashMap already
+    ///   shards its internal `HashMap`s. Maintain a per-shard
+    ///   `BTreeMap<Instant, Vec<[u8; 32]>>` (or a `BinaryHeap` keyed on
+    ///   `created_at`). On eviction, pop the oldest entry from the
+    ///   shard with the most entries. Insertion/update is `O(log m)` per
+    ///   shard (where `m` is entries in that shard) rather than
+    ///   `O(n log n)` for the whole map.
+    /// - **Admission gate with ring buffer** — instead of evicting on
+    ///   `set`, maintain an upper bound admission gate. When at capacity,
+    ///   evict one entry from an approximation ring buffer (e.g. CLOCK
+    ///   algorithm or second-chance). The dashmap-dedup crate or a
+    ///   separate `Cache` wrapper can provide `O(1)` eviction with
+    ///   age/residency heuristics.
+    ///
+    /// Of these, the **background eviction task** is the simplest to
+    /// implement correctly and defers all sorting cost to a non-blocking
+    /// context.
     pub fn set(
         &self,
         body: &Value,
@@ -231,26 +290,35 @@ impl ResponseCache {
 
         // Proactive eviction when cache grows too large
         if self.inner.len() > self.max_entries {
-            let mut expired_keys = Vec::new();
-            for entry in self.inner.iter() {
-                if entry.value().created_at.elapsed() > entry.value().ttl {
-                    expired_keys.push(*entry.key());
-                }
-            }
-            for key in expired_keys {
-                self.inner.remove(&key);
-            }
-            // If still over limit, remove oldest entries
+            // First remove all expired entries (linear scan, no allocation).
+            self.inner.retain(|_key, entry| !entry.is_expired());
+
+            // If still over the limit, evict arbitrary entries to get back
+            // under it. This avoids an O(n log n) sort of all entries that
+            // would be needed to guarantee oldest-first eviction.
+            //
+            // LIMITATION: Under sustained over-capacity pressure, entries
+            // with long TTLs may be evicted before older entries that have
+            // already expired (those are cleaned lazily on subsequent get/set
+            // calls). Cache correctness (freshness) is unaffected — no
+            // expired entry is ever returned — only the hit rate may degrade
+            // slightly under sustained overflow, because a soon-to-expire
+            // entry could be dropped before it would have served a request.
+            // In practice this is acceptable: expired entries are removed
+            // opportunistically on every insert past the limit, and the
+            // cheaper strategy saves an O(n log n) sort per insertion.
+            // See the struct-level note on `ResponseCache` for a recommended
+            // improvement path.
             if self.inner.len() > self.max_entries {
-                let mut entries: Vec<([u8; 32], Instant)> = self
+                let excess = self.inner.len() - self.max_entries;
+                let to_remove: Vec<[u8; 32]> = self
                     .inner
                     .iter()
-                    .map(|e| (*e.key(), e.value().created_at))
+                    .take(excess)
+                    .map(|e| *e.key())
                     .collect();
-                entries.sort_by_key(|e| e.1);
-                let to_remove = entries.len().saturating_sub(self.max_entries);
-                for (key, _) in entries.into_iter().take(to_remove) {
-                    self.inner.remove(&key);
+                for key in &to_remove {
+                    self.inner.remove(key);
                 }
             }
         }

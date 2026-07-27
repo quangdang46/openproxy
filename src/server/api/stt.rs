@@ -226,6 +226,12 @@ struct SttRequest {
     prompt: Option<String>,
     response_format: Option<String>,
     temperature: Option<String>,
+    /// Deepgram-only: `smart_format` query parameter override.
+    /// `None` = use default (currently hardcoded to `true`, see TODO).
+    deepgram_smart_format: Option<String>,
+    /// Deepgram-only: `punctuate` query parameter override.
+    /// `None` = use default (currently hardcoded to `true`, see TODO).
+    deepgram_punctuate: Option<String>,
 }
 
 struct RequestError {
@@ -249,6 +255,8 @@ async fn parse_multipart_request(mp: &mut Multipart) -> Result<SttRequest, Reque
     let mut prompt: Option<String> = None;
     let mut response_format: Option<String> = None;
     let mut temperature: Option<String> = None;
+    let mut deepgram_smart_format: Option<String> = None;
+    let mut deepgram_punctuate: Option<String> = None;
 
     while let Some(field) = mp
         .next_field()
@@ -273,6 +281,12 @@ async fn parse_multipart_request(mp: &mut Multipart) -> Result<SttRequest, Reque
             "prompt" => prompt = Some(read_text_field(field).await?),
             "response_format" => response_format = Some(read_text_field(field).await?),
             "temperature" => temperature = Some(read_text_field(field).await?),
+            "deepgram_smart_format" => {
+                deepgram_smart_format = Some(read_text_field(field).await?);
+            }
+            "deepgram_punctuate" => {
+                deepgram_punctuate = Some(read_text_field(field).await?);
+            }
             _ => {
                 // Drop unknown fields silently to keep parity with upstream behavior.
                 let _ = field.bytes().await;
@@ -297,6 +311,8 @@ async fn parse_multipart_request(mp: &mut Multipart) -> Result<SttRequest, Reque
         prompt: trim_opt(prompt),
         response_format: trim_opt(response_format),
         temperature: trim_opt(temperature),
+        deepgram_smart_format: trim_opt(deepgram_smart_format),
+        deepgram_punctuate: trim_opt(deepgram_punctuate),
     })
 }
 
@@ -358,6 +374,16 @@ fn parse_json_request(bytes: &[u8]) -> Result<SttRequest, RequestError> {
         temperature: value
             .get("temperature")
             .map(|v| v.to_string())
+            .and_then(non_empty),
+        deepgram_smart_format: value
+            .get("deepgram_smart_format")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .and_then(non_empty),
+        deepgram_punctuate: value
+            .get("deepgram_punctuate")
+            .and_then(Value::as_str)
+            .map(str::to_string)
             .and_then(non_empty),
     })
 }
@@ -698,7 +724,13 @@ async fn transcribe_deepgram(
     req: &SttRequest,
     token: Option<&str>,
 ) -> DispatchResult {
-    let url = build_deepgram_url(cfg.base_url, model, req.language.as_deref());
+    let url = build_deepgram_url(
+        cfg.base_url,
+        model,
+        req.language.as_deref(),
+        req.deepgram_smart_format.as_deref(),
+        req.deepgram_punctuate.as_deref(),
+    );
     let mime = audio_mime_for(req);
 
     let mut request = client
@@ -737,15 +769,31 @@ async fn transcribe_deepgram(
     ok_json(json!({ "text": text }))
 }
 
-pub fn build_deepgram_url(base: &str, model: &str, language: Option<&str>) -> String {
+pub fn build_deepgram_url(
+    base: &str,
+    model: &str,
+    language: Option<&str>,
+    smart_format: Option<&str>,
+    punctuate: Option<&str>,
+) -> String {
     let mut url = url::Url::parse(base).unwrap_or_else(|_| {
         url::Url::parse("https://api.deepgram.com/v1/listen").expect("valid fallback URL")
     });
     {
         let mut q = url.query_pairs_mut();
         q.append_pair("model", model);
-        q.append_pair("smart_format", "true");
-        q.append_pair("punctuate", "true");
+        // TODO(deepgram-smartfmt): `smart_format` and `punctuate` default to
+        // `"true"` for backward compatibility. Once the upstream JS port wires
+        // these through, the fallback value should be derived from the
+        // provider-level config rather than hardcoded here.
+        q.append_pair(
+            "smart_format",
+            smart_format.unwrap_or("true"),
+        );
+        q.append_pair(
+            "punctuate",
+            punctuate.unwrap_or("true"),
+        );
         match language {
             Some(lang) if !lang.trim().is_empty() => {
                 q.append_pair("language", lang.trim());
@@ -1147,7 +1195,7 @@ mod tests {
 
     #[test]
     fn deepgram_url_uses_smart_format_and_detects_language_when_unset() {
-        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", None);
+        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", None, None, None);
         assert!(url.contains("model=nova-3"));
         assert!(url.contains("smart_format=true"));
         assert!(url.contains("punctuate=true"));
@@ -1158,9 +1206,29 @@ mod tests {
 
     #[test]
     fn deepgram_url_uses_explicit_language_when_set() {
-        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", Some("en"));
+        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", Some("en"), None, None);
         assert!(url.contains("&language=en") || url.contains("?language=en"));
         assert!(!url.contains("detect_language=true"));
+    }
+
+    #[test]
+    fn deepgram_url_smart_format_punctuate_can_be_overridden() {
+        let url = build_deepgram_url(
+            "https://api.deepgram.com/v1/listen",
+            "nova-3",
+            None,
+            Some("false"),
+            Some("false"),
+        );
+        assert!(url.contains("&smart_format=false"));
+        assert!(url.contains("&punctuate=false"));
+    }
+
+    #[test]
+    fn deepgram_url_defaults_smart_format_punctuate_to_true_when_none() {
+        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", None, None, None);
+        assert!(url.contains("&smart_format=true"));
+        assert!(url.contains("&punctuate=true"));
     }
 
     #[test]

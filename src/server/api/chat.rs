@@ -824,6 +824,7 @@ async fn execute_single_model(
         &dispatch_model,
         &mut body,
         plan.thinking_level.as_deref(),
+        plan.stream,
     );
 
     // 4. RTK tool-result compression (after translate — 9router parity)

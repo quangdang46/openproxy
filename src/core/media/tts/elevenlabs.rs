@@ -44,6 +44,7 @@ impl TtsAdapter for ElevenlabsAdapter {
         let body = json!({
             "text": request.text,
             "model_id": model_id,
+            // TODO(elevenlabs-voice): make stability/similarity_boost configurable via TtsRequest (e.g. extra params or a settings struct)
             "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
         });
 

@@ -282,6 +282,24 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
     }
 }
 
+/// Infer the target provider from a bare model name string, based on known
+/// model-family prefixes.  This is the last-resort fallback used when no
+/// explicit alias or combo maps the model — it avoids forcing every unknown
+/// model to "openai".
+///
+/// Known model-family prefix → provider mappings:
+///
+/// | Prefix(es)                        | Provider      |
+/// |-----------------------------------|---------------|
+/// | `claude-`                         | `anthropic`   |
+/// | `gemini-`                         | `gemini`      |
+/// | `gpt-`, `o1`, `o3`, `o4`         | `openai`      |
+/// | `deepseek-`                       | `openrouter`  |
+/// | `mistral-`, `open-mistral-`, …   | `mistral`     |
+/// | `command-`, `command-r`           | `cohere`      |
+/// | `grok-`                           | `xai`         |
+/// | `jamba-`                          | `ai21`        |
+/// | Everything else (llama, phi, …)   | `openai`      |
 fn infer_provider_from_model_name(model_name: &str) -> &'static str {
     let model_name = model_name.to_lowercase();
 
@@ -297,7 +315,24 @@ fn infer_provider_from_model_name(model_name: &str) -> &'static str {
         "openai"
     } else if model_name.starts_with("deepseek-") {
         "openrouter"
+    } else if model_name.starts_with("mistral-")
+        || model_name.starts_with("open-mistral-")
+        || model_name.starts_with("mistralai-")
+        || model_name.starts_with("codestral-")
+        || model_name.starts_with("ministral-")
+        || model_name.starts_with("mixtral-")
+    {
+        "mistral"
+    } else if model_name.starts_with("command-") || model_name.starts_with("command-r") {
+        "cohere"
+    } else if model_name.starts_with("grok-") {
+        "xai"
+    } else if model_name.starts_with("jamba-") {
+        "ai21"
     } else {
+        // Unknown model prefixes route to "openai" as the generic fallback.
+        // Common model families that land here: llama-*, codellama-*, phi-*,
+        // nemotron-*, dbrx-*, qwen-*, yi-*, gemma-*.
         "openai"
     }
 }

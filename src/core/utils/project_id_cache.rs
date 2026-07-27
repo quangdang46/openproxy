@@ -26,6 +26,19 @@ struct CachedProject {
 /// - `get` returns `None` when the entry is missing or stale.
 /// - `set` inserts or overwrites with the current time.
 /// - `invalidate` removes the entry unconditionally.
+///
+/// # Known limitation — unbounded growth
+///
+/// Entries whose TTL has expired are **not** automatically removed from the
+/// underlying `HashMap`. Only an explicit [`invalidate`](Self::invalidate)
+/// call evicts them.  If the set of connection IDs grows over the lifetime of
+/// the process (e.g. short-lived provider sessions, rotating tokens), the
+/// map will grow without bound.
+///
+/// Callers **must** ensure that [`invalidate`](Self::invalidate) is called
+/// on every connection tear-down or token refresh so that stale entries do
+/// not accumulate.  A future improvement could add periodic sweep logic or
+/// lazily purge expired entries inside [`get`](Self::get).
 pub struct ProjectIdCache {
     inner: Mutex<HashMap<String, CachedProject>>,
     ttl: Duration,

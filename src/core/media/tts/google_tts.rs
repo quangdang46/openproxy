@@ -89,6 +89,20 @@ impl TtsAdapter for GoogleTtsAdapter {
             request.model
         };
         let token = get_token(client).await?;
+        // Google's undocumented batchexecute endpoint rejects certain
+        // characters in the TTS payload. We replace them with a space as a
+        // workaround rather than fail the request entirely.
+        //
+        // WARNING: this substitution changes the semantic meaning of the
+        // input text. Examples of semantic loss include:
+        //   - `@` becomes     →   lost (email, mention)
+        //   - `-` / `_`       →   fused compound words / identifiers
+        //   - `+` / `*`       →   lost operators / emphasis
+        //   - `>` / `<`       →   lost comparison / angle brackets
+        //   - `, ` → `. `     →   pauses become full stops
+        // Callers should scope this to non-semantic strings (e.g. pure
+        // narration where the exact wording is secondary, or when the text
+        // contains no meaningful punctuation).
         let clean: String = request
             .text
             .chars()

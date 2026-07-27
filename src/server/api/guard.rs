@@ -17,9 +17,7 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::json;
 
-use crate::server::auth::{
-    extract_api_key, require_api_key, require_dashboard_session, AuthError, DashboardAuthError,
-};
+use crate::server::auth::{require_api_key, AuthError};
 use crate::server::state::AppState;
 
 /// Internal header stamped by the real-IP middleware with the verified TCP
@@ -128,32 +126,18 @@ pub async fn require_protected(
 
 /// **ADMIN** tier: requires a dashboard session or a management API key.
 ///
-/// First tries management API key (higher priority to match existing
-/// `require_dashboard_or_management_api_key` semantics), then falls back
-/// to dashboard session cookie.
+/// Delegates to [`super::require_dashboard_or_management_api_key`] so that
+/// management-key-only semantics are consistent across all admin-tier
+/// endpoints — only keys created via `/api/keys` (or `openproxy key add`)
+/// satisfy this gate.
 pub async fn require_admin(
     State(state): State<AppState>,
     request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    // First try: management API key.
-    if extract_api_key(request.headers()).is_some() {
-        return match require_api_key(request.headers(), &state.db) {
-            Ok(_) => Ok(next.run(request).await),
-            Err(e) => Err(auth_error_response(e)),
-        };
-    }
-
-    // Second try: dashboard session cookie.
-    match require_dashboard_session(request.headers(), &state.db) {
+    match super::require_dashboard_or_management_api_key(request.headers(), &state) {
         Ok(_) => Ok(next.run(request).await),
-        Err(e) => {
-            let status = match e {
-                DashboardAuthError::Missing => StatusCode::UNAUTHORIZED,
-                DashboardAuthError::Invalid => StatusCode::UNAUTHORIZED,
-            };
-            Err((status, Json(json!({ "error": e.message() }))).into_response())
-        }
+        Err(e) => Err(e),
     }
 }
 
