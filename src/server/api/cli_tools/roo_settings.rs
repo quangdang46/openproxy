@@ -1,3 +1,6 @@
+// TODO: dead code — this file is NOT imported by cli_tools.rs.
+// The inline handlers in cli_tools.rs duplicate these functions.
+// Keep only if extracting roo settings into its own module.
 use std::env;
 use std::path::{Path, PathBuf};
 

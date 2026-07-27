@@ -29,6 +29,7 @@ pub enum IFlowExecutorError {
     Hyper(hyper_util::client::legacy::Error),
     Request(reqwest::Error),
     InvalidHeader(reqwest::header::InvalidHeaderValue),
+    HmacKey(String),
 }
 
 impl From<reqwest::Error> for IFlowExecutorError {
@@ -101,18 +102,23 @@ impl IFlowExecutor {
         session_id: &str,
         timestamp: i64,
         api_key: &str,
-    ) -> String {
+    ) -> Result<String, IFlowExecutorError> {
         if api_key.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
         let payload = format!("{}:{}:{}", user_agent, session_id, timestamp);
-        let mut mac =
-            HmacSha256::new_from_slice(api_key.as_bytes()).expect("HMAC can take key of any size");
+        let mut mac = HmacSha256::new_from_slice(api_key.as_bytes()).map_err(|_| {
+            IFlowExecutorError::HmacKey("invalid HMAC key".to_string())
+        })?;
         mac.update(payload.as_bytes());
-        hex::encode(mac.finalize().into_bytes())
+        Ok(hex::encode(mac.finalize().into_bytes()))
     }
 
-    fn build_headers(&self, credentials: &ProviderConnection, stream: bool) -> (HeaderMap, String) {
+    fn build_headers(
+        &self,
+        credentials: &ProviderConnection,
+        stream: bool,
+    ) -> Result<(HeaderMap, String), IFlowExecutorError> {
         let session_id = format!("session-{}", uuid::Uuid::new_v4());
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -126,7 +132,7 @@ impl IFlowExecutor {
             .or(credentials.access_token.as_deref())
             .unwrap_or("");
 
-        let signature = Self::create_signature(user_agent, &session_id, timestamp, api_key);
+        let signature = Self::create_signature(user_agent, &session_id, timestamp, api_key)?;
 
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -153,7 +159,7 @@ impl IFlowExecutor {
             headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         }
 
-        (headers, session_id)
+        Ok((headers, session_id))
     }
 
     fn transform_request(body: &Value, stream: bool) -> Value {
@@ -173,7 +179,7 @@ impl IFlowExecutor {
         request: IFlowExecutionRequest,
     ) -> Result<IFlowExecutorResponse, IFlowExecutorError> {
         let url = self.build_url();
-        let (headers, _session_id) = self.build_headers(&request.credentials, request.stream);
+        let (headers, _session_id) = self.build_headers(&request.credentials, request.stream)?;
         let transformed_body = Self::transform_request(&request.body, request.stream);
 
         let client = self.pool.get("iflow", request.proxy.as_ref())?;

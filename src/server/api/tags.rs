@@ -1,6 +1,6 @@
 use axum::{
     http::StatusCode,
-    response::{IntoResponse, Response},
+    response::Response,
     routing::get,
     Router,
 };
@@ -16,7 +16,7 @@ pub fn routes() -> Router<AppState> {
 
 async fn get_tags() -> Response {
     let body = json!({
-        "models": [
+        "tags": [
             {
                 "name": "llama3.2",
                 "modified_at": "2025-12-26T00:00:00Z",
@@ -42,9 +42,7 @@ async fn get_tags() -> Response {
                 }
             }
         ]
-    })
-    .to_string();
+    });
 
-    let leaked = Box::leak(body.into_boxed_str());
-    with_cors_json(StatusCode::OK, json!({"tags": leaked}))
+    with_cors_json(StatusCode::OK, body)
 }

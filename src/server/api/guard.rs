@@ -64,9 +64,19 @@ pub const LOCALLY_ONLY_PATHS: &[&str] = &[
 
 // ─── Real-IP Middleware ───────────────────────────────────────────────
 
+/// Check the `TRUST_PROXY` env var — when set to `true`/`1`/`yes`,
+/// the server is behind a trusted reverse proxy and forwarding headers
+/// should be preserved rather than stripped.
+fn trust_proxy_enabled() -> bool {
+    matches!(
+        std::env::var("TRUST_PROXY").as_deref(),
+        Ok("true") | Ok("1") | Ok("yes")
+    )
+}
+
 /// Extracts the verified TCP peer IP from `axum`'s `ConnectInfo<SocketAddr>`,
 /// stamps it as `x-9r-real-ip`, and strips all client-supplied forwarding
-/// headers (`X-Forwarded-For`, `X-Real-IP`, …).
+/// headers (`X-Forwarded-For`, `X-Real-IP`, …) UNLESS `TRUST_PROXY` is enabled.
 ///
 /// Must be applied **after** `.with_state()` at the outermost layer of the
 /// service stack. Requires the application to be served with
@@ -76,9 +86,11 @@ pub const LOCALLY_ONLY_PATHS: &[&str] = &[
 /// only the verified peer IP via `x-9r-real-ip` — the spoofable headers
 /// are gone.
 pub async fn real_ip_middleware(mut request: Request, next: Next) -> Result<Response, Response> {
-    // 1. Strip all client-supplied forwarding headers.
-    for &name in SPOOFABLE_FORWARDING_HEADERS {
-        request.headers_mut().remove(name);
+    // 1. Strip client-supplied forwarding headers UNLESS behind a trusted proxy.
+    if !trust_proxy_enabled() {
+        for &name in SPOOFABLE_FORWARDING_HEADERS {
+            request.headers_mut().remove(name);
+        }
     }
 
     // 2. Stamp the verified TCP peer IP from the transport connection.
@@ -156,7 +168,7 @@ pub async fn require_local_only(request: Request, next: Next) -> Result<Response
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ci| ci.0.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)));
+        .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
 
     if !peer_ip.is_loopback() {
         return Err((

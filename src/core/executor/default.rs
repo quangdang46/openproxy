@@ -764,12 +764,42 @@ impl DefaultExecutor {
             ));
         }
 
-        if self.config.base_url.contains("{accountId}") {
-            let account_id =
-                compatible_value(credentials.provider_specific_data.get("accountId")).ok_or(
-                    ExecutorError::MissingProviderSpecificData(self.provider.clone(), "accountId"),
-                )?;
-            return Ok(self.config.base_url.replace("{accountId}", account_id));
+        if self.config.base_url.contains("{accountId}")
+            || self.config.base_url.contains("{project}")
+            || self.config.base_url.contains("{location}")
+        {
+            let mut url = self.config.base_url.clone();
+            if url.contains("{accountId}") {
+                let account_id =
+                    compatible_value(credentials.provider_specific_data.get("accountId")).ok_or(
+                        ExecutorError::MissingProviderSpecificData(
+                            self.provider.clone(),
+                            "accountId",
+                        ),
+                    )?;
+                url = url.replace("{accountId}", account_id);
+            }
+            if url.contains("{project}") {
+                let project =
+                    compatible_value(credentials.provider_specific_data.get("project")).ok_or(
+                        ExecutorError::MissingProviderSpecificData(
+                            self.provider.clone(),
+                            "project",
+                        ),
+                    )?;
+                url = url.replace("{project}", project);
+            }
+            if url.contains("{location}") {
+                let location =
+                    compatible_value(credentials.provider_specific_data.get("location")).ok_or(
+                        ExecutorError::MissingProviderSpecificData(
+                            self.provider.clone(),
+                            "location",
+                        ),
+                    )?;
+                url = url.replace("{location}", location);
+            }
+            return Ok(url);
         }
 
         if matches!(

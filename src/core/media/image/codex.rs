@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::Duration;
 use uuid::Uuid;
 
 use super::base::{now_secs, ImageAdapter, ImageRequest, ImageResponse, ParseContext};
@@ -133,12 +134,14 @@ fn find_blank_line(buf: &[u8]) -> Option<usize> {
 }
 
 /// Build an SSE response that pipes Codex progress events to the caller.
-/// Skipped in the minimal port: we currently only return the final image.
+/// Stream parsing is bounded by a 30-second timeout.
 /// `streamToClient = true` callers fall back to non-streaming behaviour.
 async fn build_sse_response(
     response: reqwest::Response,
 ) -> Result<axum::response::Response, String> {
-    let b64 = parse_codex_stream(response).await?;
+    let b64 = tokio::time::timeout(Duration::from_secs(30), parse_codex_stream(response))
+        .await
+        .map_err(|_| "codex stream parsing timed out after 30s".to_string())??;
     let body = match b64 {
         Some(b) => json!({"created": now_secs(), "data": [{"b64_json": b}]}),
         None => json!({

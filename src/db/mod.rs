@@ -241,6 +241,9 @@ impl Db {
         Arc::new(snapshot.model_aliases.clone())
     }
 
+    /// Full DB rewrite — serialises the entire `AppDb` and re-imports it
+    /// into SQLite. Prefer [`update_settings`] when only the settings have
+    /// changed to avoid unnecessary full-database I/O.
     pub async fn update<F>(&self, updater: F) -> anyhow::Result<Arc<AppDb>>
     where
         F: FnOnce(&mut AppDb),
@@ -256,6 +259,37 @@ impl Db {
             .await
             .map_err(|e| anyhow::anyhow!("spawn_blocking for update: {e}"))?
             .map_err(|e| anyhow::anyhow!("SQLite write failed: {e}"))?;
+        let next = Arc::new(next);
+        self.snapshot.store(next.clone());
+        Ok(next)
+    }
+
+    /// Targeted settings update — mutates only the `settings` row in SQLite
+    /// without rewriting the entire database (H19). Use this when only
+    /// server settings have changed (e.g. a dashboard config toggle).
+    pub async fn update_settings<F>(&self, updater: F) -> anyhow::Result<Arc<AppDb>>
+    where
+        F: FnOnce(&mut crate::types::Settings),
+    {
+        let _guard = self.write_lock.write().await;
+        let mut next = (*self.snapshot()).clone();
+        updater(&mut next.settings);
+        next.normalize();
+        // Persist only the settings row to SQLite.
+        let settings_str = serde_json::to_string(&next.settings)?;
+        let sq = self.sqlite.clone();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            sq.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO settings(id, data) VALUES(1, ?1) ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+                    rusqlite::params![settings_str],
+                )
+            })
+            .map_err(|e| anyhow::anyhow!("SQLite settings write failed: {e}"))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("spawn_blocking for update_settings: {e}"))??;
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
         Ok(next)

@@ -8,7 +8,9 @@ use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
-const DEFAULT_AZURE_ENDPOINT: &str = "https://api.openai.com";
+/// AZURE_ENDPOINT env var is required. Set it to your Azure OpenAI endpoint
+/// (e.g. "https://my-resource.openai.azure.com").
+const DEFAULT_AZURE_ENDPOINT: &str = "";
 const DEFAULT_API_VERSION: &str = "2024-10-01-preview";
 const DEFAULT_DEPLOYMENT: &str = "gpt-4";
 

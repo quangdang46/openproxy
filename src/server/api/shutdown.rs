@@ -17,7 +17,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn shutdown(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if std::env::var("NODE_ENV").ok().as_deref() == Some("production") {
+    if std::env::var("OPENPROXY_ENV").ok().as_deref() == Some("production") {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({

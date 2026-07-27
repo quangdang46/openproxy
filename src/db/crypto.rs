@@ -1,5 +1,28 @@
 //! AES-256-CBC encryption for ProviderConnection sensitive fields,
 //! plus SHA-256 checksum and schema version management.
+//!
+//! # Security note (H20)
+//!
+//! This module uses **AES-256-CBC with a key derived via raw SHA-256**.
+//! There is no:
+//! - Key derivation function (PBKDF2, bcrypt, Argon2, etc.) — the
+//!   `OPENPROXY_ENCRYPTION_KEY` is hashed once with SHA-256 to produce
+//!   the 256-bit AES key, making it fast to brute-force if the key is
+//!   low-entropy.
+//! - Authenticated encryption (no HMAC, no GCM) — ciphertexts produced
+//!   by CBC mode are malleable; an attacker who can write to disk can
+//!   corrupt or swap blocks without detection (the SHA-256 checksum
+//!   at the document level partially mitigates this for the full file,
+//!   but individual fields are unprotected).
+//! - Key rotation or versioning — changing `OPENPROXY_ENCRYPTION_KEY`
+//!   requires re-encrypting every credential manually.
+//!
+//! These choices match 9router's v0.5.x legacy format for backwards
+//! compatibility. The primary goal is to prevent accidental exposure
+//! of plaintext credentials in `db.json` or SQLite backups, NOT to
+//! provide a cryptographically robust secret store. For stronger
+//! protection, use platform-level encryption (macOS Keychain, Linux
+//! Secret Service, Windows DPAPI) or a dedicated KMS.
 
 use aes::cipher::{
     block_padding::Pkcs7, generic_array::GenericArray, BlockDecryptMut, BlockEncryptMut, KeyIvInit,

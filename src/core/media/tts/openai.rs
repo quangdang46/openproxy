@@ -5,6 +5,7 @@ use base64::Engine as _;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde_json::json;
+use std::time::Duration;
 
 use super::base::{upstream_error, TtsAdapter, TtsError, TtsRequest, TtsResult};
 
@@ -63,6 +64,7 @@ impl TtsAdapter for OpenaiAdapter {
             .post(format!("{base}/v1/audio/speech"))
             .headers(headers)
             .json(&body)
+            .timeout(Duration::from_secs(30))
             .send()
             .await?;
         if !res.status().is_success() {

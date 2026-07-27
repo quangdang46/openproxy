@@ -53,6 +53,12 @@ pub fn read_pid(data_dir: &Path) -> Option<u32> {
 
 /// True iff a process with this PID is currently alive. On Unix we use
 /// `kill(pid, 0)` which returns ESRCH if the process is gone.
+///
+/// **Limitation**: This is vulnerable to PID reuse — after a process exits,
+/// the kernel may recycle its PID to a new unrelated process. A subsequent
+/// `kill(pid, 0)` would incorrectly report the old process as alive. This
+/// is an inherent race on Unix that cannot be fully eliminated without
+/// pidfd-based checks (Linux 5.3+).
 pub fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {

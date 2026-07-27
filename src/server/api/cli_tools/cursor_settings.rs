@@ -1,3 +1,6 @@
+// TODO: dead code — this file is NOT imported by cli_tools.rs.
+// The Cursor settings are handled inline in cli_tools.rs.
+// Keep only if extracting Cursor settings into its own module.
 use std::env;
 use std::path::{Path, PathBuf};
 

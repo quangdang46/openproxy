@@ -39,7 +39,7 @@ pub struct ParsedApiKey {
 /// Compares two strings in constant time (no early-exit on mismatch).
 /// Both strings must be the same length; if lengths differ, returns false
 /// without leaking which byte differed.
-fn timing_safe_eq(a: &str, b: &str) -> bool {
+pub fn timing_safe_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }

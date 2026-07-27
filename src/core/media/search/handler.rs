@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use super::base::{SearchProvider, SearchRequest, SearchResultSet};
 
-const GLOBAL_TIMEOUT: Duration = Duration::from_secs(15);
+const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Error)]
 pub enum SearchHandlerError {

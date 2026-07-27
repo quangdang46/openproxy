@@ -294,13 +294,26 @@ fn auth_path() -> PathBuf {
 }
 
 fn vscode_settings_path() -> Option<PathBuf> {
-    Some(
-        home_dir()
-            .join(".config")
-            .join("Code")
-            .join("User")
-            .join("settings.json"),
-    )
+    let home = home_dir();
+    // macOS: ~/Library/Application Support/Code/User/settings.json
+    // Linux:  ~/.config/Code/User/settings.json
+    // Windows: %APPDATA%/Code/User/settings.json
+    if cfg!(target_os = "macos") {
+        Some(
+            home.join("Library")
+                .join("Application Support")
+                .join("Code")
+                .join("User")
+                .join("settings.json"),
+        )
+    } else {
+        Some(
+            home.join(".config")
+                .join("Code")
+                .join("User")
+                .join("settings.json"),
+        )
+    }
 }
 
 fn home_dir() -> PathBuf {

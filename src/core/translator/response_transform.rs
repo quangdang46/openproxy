@@ -1,8 +1,10 @@
 //! Response transformation for streaming SSE format conversion
 //!
-//! This module handles chunk-by-chunk format transformation for different provider formats.
-//! Each executor implements trait-based response transformation that converts provider-specific
-//! streaming formats to OpenAI SSE format.
+//! **NOTE**: This module is kept for reference only. The active translation
+//! pipeline is in the `registry` module (`src/core/translator/registry.rs`),
+//! which registers per-format streaming transforms via the `TranslationRegistry`.
+//! New streaming transforms should be added to `response/` as per-format modules
+//! and registered in `registry.rs` rather than adding them here.
 
 use bytes::Bytes;
 use serde::Deserialize;

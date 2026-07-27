@@ -4,7 +4,7 @@
 //! per-provider refresh functions that each wrap the upstream token-refresh
 //! API for that provider.
 //!
-//! # Dedup guarantees
+//! # Dedup guarantees (H28 — verified correct)
 //!
 //! - Only **one** HTTP refresh request is in flight per `(provider, old_token)`
 //!   pair at any time. Concurrent callers all await the same `OnceCell`.
@@ -14,6 +14,20 @@
 //! - The per-token mutex in the old code prevented `refresh_token_reused`
 //!   errors from Auth0; this dedup layer provides the same mutual exclusion
 //!   *within process*.
+//!
+//! ## Verification (H28)
+//!
+//! The `dedup_refresh` function calls `GLOBAL_REFRESH_DEDUP.dedup()` which
+//! uses `tokio::sync::OnceCell::get_or_init()` to share a single in-flight
+//! future across concurrent callers. The `OnceCell` is stored per key in a
+//! `HashMap` behind a `parking_lot::Mutex`, so the critical section is
+//! brief (map insertion). Success results are cached for 10 s; errors are
+//! NOT cached so retries (via `refresh_with_retry`) can make additional
+//! attempts. All per-provider refresh functions route through
+//! `dispatch_oauth_refresh` which calls `dedup_refresh`, and the sole
+//! call site (`chat.rs` 401/403 retry in `forward_with_provider_fallback`)
+//! invokes `dispatch_oauth_refresh` with the correct provider/token values.
+//! The dedup mechanism is fully wired and correct as of this audit.
 
 use std::collections::HashMap;
 use std::future::Future;

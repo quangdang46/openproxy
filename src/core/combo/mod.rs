@@ -150,6 +150,9 @@ pub struct ComboExecutionError {
     pub status: u16,
     pub message: String,
     pub earliest_retry_after: Option<DateTime<Utc>>,
+    /// Preserved upstream error body from the last failing member (H23).
+    /// When set, the error response should return this body verbatim.
+    pub upstream_body: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,6 +404,11 @@ pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -
         ErrorClassification::NoMatch => FallbackDecision {
             should_fallback: true,
             cooldown: TRANSIENT_COOLDOWN,
+            new_backoff_level: None,
+        },
+        ErrorClassification::Permanent => FallbackDecision {
+            should_fallback: false,
+            cooldown: Duration::ZERO,
             new_backoff_level: None,
         },
     }
@@ -670,6 +678,7 @@ where
                 "All combo members are disabled".into()
             },
             earliest_retry_after: None,
+            upstream_body: None,
         });
     }
 
@@ -699,6 +708,7 @@ where
                 status: 503,
                 message: "All combo providers are at max in-flight capacity".into(),
                 earliest_retry_after: None,
+                upstream_body: None,
             });
         }
 
@@ -716,9 +726,11 @@ where
     F: FnMut(&str) -> Fut,
     Fut: Future<Output = Result<T, ComboAttemptError>>,
 {
-    let mut last_error = None;
+    let mut last_error: Option<ComboAttemptError> = None;
     let mut first_error: Option<ComboAttemptError> = None;
     let mut earliest_retry_after = None;
+    // Track actual backoff level across consecutive failures (H21).
+    let mut consecutive_backoff_level: u32 = 0;
 
     for model in order {
         match handle_single_model(model).await {
@@ -729,7 +741,7 @@ where
                         status: error.status,
                         message: error.message.clone(),
                         retry_after: error.retry_after,
-                        upstream_body: None,
+                        upstream_body: error.upstream_body.clone(),
                     });
                 }
                 if let Some(retry_after) = error.retry_after {
@@ -739,12 +751,13 @@ where
                     };
                 }
 
-                let decision = check_fallback_error(error.status, &error.message, 0);
+                let decision = check_fallback_error(error.status, &error.message, consecutive_backoff_level);
                 if !decision.should_fallback {
                     return Err(ComboExecutionError {
                         status: error.status,
                         message: error.message,
                         earliest_retry_after,
+                        upstream_body: error.upstream_body.clone(),
                     });
                 }
 
@@ -759,6 +772,11 @@ where
                     tokio::time::sleep(decision.cooldown).await;
                 }
 
+                // Advance backoff level when the decision requested a new one (H21).
+                if let Some(new_level) = decision.new_backoff_level {
+                    consecutive_backoff_level = new_level;
+                }
+
                 last_error = Some(error);
             }
         }
@@ -767,8 +785,9 @@ where
     // 9router keeps the *first* failure status for the final response.
     let first_status = first_error.as_ref().map(|e| e.status);
     let message = last_error
-        .map(|e| e.message)
-        .or_else(|| first_error.map(|e| e.message))
+        .as_ref()
+        .map(|e| e.message.clone())
+        .or_else(|| first_error.as_ref().map(|e| e.message.clone()))
         .unwrap_or_else(|| "All combo models unavailable".into());
 
     let status = if message.to_lowercase().contains("no credentials") {
@@ -780,9 +799,16 @@ where
         }
     };
 
+    // Preserve upstream_body from the last error if available (H23).
+    let final_upstream_body = last_error
+        .as_ref()
+        .and_then(|e: &ComboAttemptError| e.upstream_body.clone())
+        .or_else(|| first_error.as_ref().and_then(|e| e.upstream_body.clone()));
+
     Err(ComboExecutionError {
         status,
         message,
         earliest_retry_after,
+        upstream_body: final_upstream_body,
     })
 }

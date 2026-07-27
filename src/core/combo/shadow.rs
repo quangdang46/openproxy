@@ -223,7 +223,9 @@ where
     let fallback_outcome: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
 
     // Spawn shadow dispatches in the background. They run concurrently
-    // with the primary.
+    // with the primary. Store JoinHandles so we can cancel them
+    // when the primary completes (H22).
+    let mut shadow_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(shadow_slice.len());
     for shadow_model in &shadow_slice {
         let model = shadow_model.clone();
         let sb = shadow_body.clone();
@@ -232,7 +234,7 @@ where
         let fallback_outcome = fallback_outcome.clone();
         let sl = shadow_timeout;
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let start = Instant::now();
             let result = tokio::time::timeout(sl, d(model.clone(), sb)).await;
             let elapsed = start.elapsed().as_millis() as u64;
@@ -273,10 +275,16 @@ where
                 }
             }
         });
+        shadow_handles.push(handle);
     }
 
     // Dispatch the primary request and await it.
     let primary_result = dispatch_primary(primary_model.to_string(), body.clone()).await;
+
+    // Cancel all outstanding shadow tasks now that the primary is done (H22).
+    for handle in &shadow_handles {
+        handle.abort();
+    }
 
     // Notify on_shadow_outcome with whatever shadow results have arrived
     // so far. This is fire-and-forget: the caller can record metrics.

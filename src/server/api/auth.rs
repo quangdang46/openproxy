@@ -1,3 +1,4 @@
+use rand::Rng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -19,6 +20,19 @@ use crate::server::auth::oidc::{
     code_challenge_from_verifier, generate_code_verifier, generate_state_token,
 };
 use crate::server::auth::{increment_token_epoch, jwt_secret, require_api_key, revoke_jti};
+/// Generates a cryptographically-random 16-character alphanumeric password.
+/// Used as the fallback default when no `INITIAL_PASSWORD` env var and no
+/// stored bcrypt hash exists.
+fn generate_default_password() -> String {
+    let charset: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::thread_rng();
+    (0..16).map(|_| {
+        let idx = rng.gen_range(0..charset.len());
+        charset[idx] as char
+    }).collect()
+}
+
 use crate::server::state::AppState;
 use crate::types::Settings;
 
@@ -103,8 +117,8 @@ pub async fn login(
         Some(hash) => verify(&provided_password, hash).unwrap_or(false),
         None => {
             let initial_password =
-                std::env::var("INITIAL_PASSWORD").unwrap_or_else(|_| "123456".to_string());
-            provided_password == initial_password
+                std::env::var("INITIAL_PASSWORD").unwrap_or_else(|_| generate_default_password());
+            crate::core::auth::timing_safe_eq(&provided_password, &initial_password)
         }
     };
 
@@ -1011,8 +1025,8 @@ pub(crate) fn verify_dashboard_password(password: Option<&str>, settings: &Setti
         return verify(password, hash).unwrap_or(false);
     }
     let initial_password =
-        std::env::var("INITIAL_PASSWORD").unwrap_or_else(|_| "123456".to_string());
-    password == initial_password
+        std::env::var("INITIAL_PASSWORD").unwrap_or_else(|_| generate_default_password());
+    crate::core::auth::timing_safe_eq(password, &initial_password)
 }
 
 fn is_tunnel_request(headers: &HeaderMap, settings: &Settings) -> bool {

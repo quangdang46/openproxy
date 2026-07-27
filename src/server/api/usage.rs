@@ -149,12 +149,11 @@ async fn stream_usage_stats(State(state): State<AppState>, headers: HeaderMap) -
         return response;
     }
 
-    let encoder = std::sync::Arc::new(tokio::sync::Mutex::new(()));
     let mut receiver = state.usage_live.subscribe();
     let stream_state = state.clone();
 
     let body = Body::from_stream(async_stream::stream! {
-        let _encode_guard = encoder.lock().await;
+        // No mutex lock — copy initial data, then stream without holding any lock.
         let period = UsagePeriod::Last7Days;
         let mut cached_stats = Some(build_dashboard_usage_stats(&stream_state, period).await);
         if let Some(initial) = &cached_stats {

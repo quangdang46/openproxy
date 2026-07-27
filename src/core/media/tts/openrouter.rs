@@ -25,7 +25,7 @@ impl TtsAdapter for OpenrouterAdapter {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| TtsError::MissingCredentials("openrouter".to_string()))?;
 
-        // Parse model: "provider/model/voice" or "voice".
+        // Parse model: "provider/model/voice" or "provider/model" or "voice".
         let mut tts_model = "openai/gpt-4o-mini-tts".to_string();
         let mut voice = "alloy".to_string();
         if request.model.contains('/') {
@@ -33,10 +33,13 @@ impl TtsAdapter for OpenrouterAdapter {
             let head = &request.model[..last];
             let tail = &request.model[last + 1..];
             if head.contains('/') {
+                // "provider/model/voice" — use provider/model as model, tail as voice
                 tts_model = head.to_string();
                 voice = tail.to_string();
             } else {
-                voice = request.model.to_string();
+                // "provider/model" — one slash: keep full string as model, last segment as voice
+                tts_model = request.model.to_string();
+                voice = tail.to_string();
             }
         } else if !request.model.is_empty() {
             voice = request.model.to_string();

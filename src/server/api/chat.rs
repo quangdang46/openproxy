@@ -468,6 +468,7 @@ async fn chat_completions_impl(
                         status: e.status,
                         message: e.message,
                         earliest_retry_after: None,
+                        upstream_body: None,
                     }),
                 }
             } else {
@@ -1841,7 +1842,7 @@ async fn forward_with_provider_fallback(
                     continue;
                 }
 
-                return Err(last_error.expect("set last error"));
+                return Err(last_error.unwrap_or_else(|| ComboAttemptError::new(502, "provider error after exhausting all connections")));
             }
             Err(error) => {
                 let message = format!("{:?}", error);
@@ -1851,6 +1852,7 @@ async fn forward_with_provider_fallback(
                     .await;
                 let current_backoff = connection.backoff_level.unwrap_or(0);
                 let decision = check_fallback_error(502, &message, current_backoff);
+                let error_for_return = ComboAttemptError::new(502, message.clone());
                 last_error = Some(error);
 
                 if decision.should_fallback {
@@ -1868,7 +1870,7 @@ async fn forward_with_provider_fallback(
                     continue;
                 }
 
-                return Err(last_error.expect("set last error"));
+                return Err(last_error.unwrap_or(error_for_return));
             }
         }
     }
@@ -3161,6 +3163,58 @@ fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
     })
 }
 
+/// Extract the error message AND raw body bytes from an upstream error response.
+/// This preserves the upstream body for verbatim passthrough (H23).
+async fn extract_upstream_error_with_body(response: UpstreamResponse) -> (String, Option<Vec<u8>>) {
+    let status = response.status();
+    let (body_bytes, _) = collect_upstream_response_bytes(response).await;
+    let text = String::from_utf8_lossy(&body_bytes).to_string();
+    let message = if let Ok(value) = serde_json::from_str::<Value>(&text) {
+        if let Some(msg) = value
+            .get("error")
+            .and_then(|error| error.get("message").or(Some(error)))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            msg.to_string()
+        } else if let Some(msg) = value
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            msg.to_string()
+        } else {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                status
+                    .canonical_reason()
+                    .unwrap_or("Upstream request failed")
+                    .to_string()
+            } else {
+                trimmed.to_string()
+            }
+        }
+    } else {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            status
+                .canonical_reason()
+                .unwrap_or("Upstream request failed")
+                .to_string()
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let raw_body = if body_bytes.is_empty() {
+        None
+    } else {
+        Some(body_bytes.to_vec())
+    };
+    (message, raw_body)
+}
+
 async fn extract_error_message(response: UpstreamResponse) -> String {
     let status = response.status();
     let text = match response {
@@ -3284,11 +3338,25 @@ fn combo_error_response(error: ComboExecutionError) -> Response {
         status: error.status,
         message: error.message,
         retry_after: error.earliest_retry_after,
-        upstream_body: None,
+        upstream_body: error.upstream_body,
     }))
 }
 
 fn attempt_error_response(error: ComboAttemptError) -> Response {
+    // H23: When upstream_body is available, return it verbatim instead
+    // of constructing a new error body.
+    if let Some(body_bytes) = error.upstream_body {
+        let status_code = StatusCode::from_u16(error.status).unwrap_or(StatusCode::BAD_GATEWAY);
+        let mut response = (status_code, Body::from(body_bytes)).into_response();
+        if let Some(retry_after) = error.retry_after {
+            let seconds = (retry_after - Utc::now()).num_seconds().max(1).to_string();
+            if let Ok(value) = seconds.parse() {
+                response.headers_mut().insert("retry-after", value);
+            }
+        }
+        return response;
+    }
+
     // Prefer a status that matches the error text when upstream lied about the code
     // (e.g. free-console proxies returning 401 for "model not supported").
     let status_code =

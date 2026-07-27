@@ -187,16 +187,33 @@ macro_rules! mcp_tool {
     };
 }
 
-/// Run a `Db::update` call synchronously from within a `block_in_place`
-/// context. The MCP tool handlers are synchronous but `Db::update` is now
-/// async; this helper uses the current tokio handle to block on it.
+/// Dedicated single-threaded tokio runtime for MCP handler DB operations.
+/// Avoids deadlock with the main async runtime (H25).
+fn mcp_blocking_runtime() -> &'static tokio::runtime::Runtime {
+    use std::sync::OnceLock;
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("MCP blocking runtime")
+    })
+}
+
+/// Run a `Db::update` call synchronously using a dedicated single-threaded
+/// runtime so it never deadlocks with the main async runtime (H25).
+///
+/// The MCP tool handlers are synchronous but `Db::update` is async; this
+/// helper runs it on a separate runtime instead of calling
+/// `Handle::current().block_on()` which can deadlock when all tokio
+/// worker threads are occupied.
 fn db_update_sync<F>(db: &Arc<Db>, updater: F) -> Result<(), String>
 where
     F: FnOnce(&mut crate::types::AppDb) + Send + 'static,
 {
-    let handle = tokio::runtime::Handle::current();
-    handle
-        .block_on(async { db.clone().update(updater).await })
+    let db = db.clone();
+    mcp_blocking_runtime()
+        .block_on(async { db.update(updater).await })
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -264,9 +281,9 @@ fn tool_table() -> Vec<ToolHandler> {
         ),
         mcp_tool!(
             "provider_delete",
-            "Delete a provider connection by ID or name",
+            "Delete a provider connection by ID",
             json!({
-                "id": { "type": "string", "description": "Provider ID or name" }
+                "id": { "type": "string", "description": "Provider ID" }
             }),
             vec!["id"],
             |state, args| {
@@ -276,9 +293,7 @@ fn tool_table() -> Vec<ToolHandler> {
                     .ok_or("Missing 'id'")?;
                 let id_str = id.to_string();
                 db_update_sync(&state.db, move |db| {
-                    db.provider_connections.retain(|c| {
-                        c.id != id_str && c.name.as_deref().map(|n| n != id_str).unwrap_or(true)
-                    });
+                    db.provider_connections.retain(|c| c.id != id_str);
                 })?;
                 Ok(json!({ "success": true }))
             }
@@ -660,6 +675,50 @@ fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value {
     };
 
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
+
+    // ── Auth check for admin (mutating) tools (H24) ─────────────────
+    // Admin tools require a valid API key passed via the `_api_key`
+    // argument. Read-only tools skip this check.
+    let admin_tools: &[&str] = &[
+        "provider_create",
+        "provider_delete",
+        "provider_test",
+        "key_create",
+        "key_delete",
+        "combo_create",
+        "pool_create",
+        "pool_delete",
+    ];
+    if admin_tools.contains(&name) {
+        let provided_key = args.get("_api_key").and_then(Value::as_str).unwrap_or("");
+        if provided_key.is_empty() {
+            return json!(JsonRpcErrorResponse {
+                jsonrpc: "2.0",
+                id,
+                error: JsonRpcError {
+                    code: MCP_TOOL_EXECUTION_ERROR,
+                    message: format!("Tool '{name}' requires authentication. Pass a valid API key via the '_api_key' argument."),
+                    data: None,
+                },
+            });
+        }
+        let snapshot = state.db.snapshot();
+        let is_valid = snapshot
+            .api_keys
+            .iter()
+            .any(|k| k.key == provided_key && k.is_active());
+        if !is_valid {
+            return json!(JsonRpcErrorResponse {
+                jsonrpc: "2.0",
+                id,
+                error: JsonRpcError {
+                    code: MCP_TOOL_EXECUTION_ERROR,
+                    message: "Invalid or inactive API key".to_string(),
+                    data: None,
+                },
+            });
+        }
+    }
 
     let registry = tool_table();
     let handler = match registry.into_iter().find(|t| t.def.name == name) {

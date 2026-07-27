@@ -220,10 +220,16 @@ pub enum ErrorClassification {
     Cooldown(Duration),
     /// No rule matched; caller should apply their own default.
     NoMatch,
+    /// Permanent error (400, 401, 403) — do not fall back to next combo member.
+    Permanent,
 }
 
 /// Run an upstream error through [`ERROR_RULES`] and return the matching
 /// classification. Text rules fire first; status rules are the fallback.
+///
+/// After all rules are checked, permanent HTTP status codes (400, 401, 403)
+/// that did *not* match any earlier rule are classified as [`Permanent`] so
+/// the caller does not burn through combo members on client errors.
 pub fn classify_error(message: Option<&str>, status: Option<u16>) -> ErrorClassification {
     let lowered = message.map(|m| m.to_lowercase());
     for rule in ERROR_RULES {
@@ -244,6 +250,12 @@ pub fn classify_error(message: Option<&str>, status: Option<u16>) -> ErrorClassi
         if let Some(d) = rule.cooldown {
             return ErrorClassification::Cooldown(d);
         }
+    }
+    // Permanent errors (400, 401, 403) that matched no rule at all
+    // should not trigger fallback — the error is client-side, not
+    // a transient provider issue.
+    if matches!(status, Some(400) | Some(401) | Some(403)) {
+        return ErrorClassification::Permanent;
     }
     ErrorClassification::NoMatch
 }

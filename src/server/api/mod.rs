@@ -1114,6 +1114,8 @@ struct UpdateProviderRequest {
     is_active: Option<bool>,
 }
 
+/// **Unused** — no corresponding route. Kept for future use.
+#[allow(dead_code)]
 async fn get_provider_api(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1138,6 +1140,8 @@ async fn get_provider_api(
     }
 }
 
+/// **Unused** — no corresponding route. Kept for future use.
+#[allow(dead_code)]
 async fn update_provider_api(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1208,6 +1212,8 @@ async fn update_provider_api(
     }
 }
 
+/// **Unused** — no corresponding route. Kept for future use.
+#[allow(dead_code)]
 async fn delete_provider_api(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1418,6 +1424,8 @@ struct UpdateComboRequest {
     kind: Option<String>,
 }
 
+/// **Unused** — no corresponding route. Kept for future use.
+#[allow(dead_code)]
 async fn update_combo_api(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1475,6 +1483,8 @@ async fn update_combo_api(
 }
 
 // DELETE /api/combos/{name} - Delete combo
+/// **Unused** — no corresponding route. Kept for future use.
+#[allow(dead_code)]
 async fn delete_combo_api(
     State(state): State<AppState>,
     headers: HeaderMap,

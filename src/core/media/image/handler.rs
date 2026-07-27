@@ -9,6 +9,7 @@
 use base64::Engine as _;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::Duration;
 use thiserror::Error;
 
 use super::base::{ImageAdapter, ImageRequest, ImageResponse, ParseContext};
@@ -94,6 +95,7 @@ pub async fn handle_image_generation(
         .post(&url)
         .headers(headers.clone())
         .json(&request_body)
+        .timeout(Duration::from_secs(30))
         .send()
         .await
         .map_err(|e| ImageHandlerError::Upstream(e.to_string()))?;

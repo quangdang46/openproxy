@@ -827,8 +827,12 @@ struct TtsVoiceQuery {
 /// GET /api/media-providers/tts/voices
 async fn get_tts_voices(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<TtsVoiceQuery>,
 ) -> axum::response::Response {
+    if let Err(e) = require_api_key(&headers, &state.db) {
+        return crate::server::api::auth_error_response(e);
+    }
     let provider = query.provider.as_deref().unwrap_or("edge-tts");
     match provider {
         "edge-tts" => get_edge_tts_voices_impl(query.lang.as_deref()).await,

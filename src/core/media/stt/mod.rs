@@ -1,3 +1,4 @@
+//! Orphaned — active implementation is in server/api/stt.rs.
 //! Speech-to-text (STT) handler.
 //!
 //! Port of `open-sse/handlers/sttCore.js`. Dispatches by upstream

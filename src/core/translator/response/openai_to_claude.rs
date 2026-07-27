@@ -433,6 +433,8 @@ pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) 
                     }));
                 }
             }
+            // Clean up the argument buffer to prevent memory leaks
+            state.remove(&key);
             results.push(json!({"type": "content_block_stop", "index": block_idx}));
         }
 

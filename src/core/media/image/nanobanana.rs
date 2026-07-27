@@ -61,7 +61,7 @@ impl ImageAdapter for NanobananaAdapter {
 
         let mut req = json!({
             "prompt": prompt,
-            "type": if is_edit { "IMAGETOIAMGE" } else { "TEXTTOIAMGE" },
+            "type": if is_edit { "IMAGE_TO_IMAGE" } else { "TEXT_TO_IMAGE" },
             "numImages": request.n(),
             "image_size": ratio,
             "callBackUrl": "https://localhost/callback",
