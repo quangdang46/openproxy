@@ -533,11 +533,16 @@ async fn fetch_codex_models_with_token(
     token: &str,
 ) -> Result<ProviderModelsResponse, RouteError> {
     let client = http_client()?;
+    // The /codex/models endpoint gates each entry by minimal_client_version
+    // against this value; codex CLI's own manifest already requires 0.144.0
+    // for its newest models (ported from 9router v0.5.45 fix(codex): current
+    // client_version + refresh-aware model sync).
     let request = client
-        .get("https://chatgpt.com/backend-api/codex/models?client_version=1.0.0")
+        .get("https://chatgpt.com/backend-api/codex/models?client_version=0.144.6")
         .header(CONTENT_TYPE, "application/json")
         .header(ACCEPT, "application/json")
-        .header(AUTHORIZATION, format!("Bearer {token}"));
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header("originator", "codex_cli_rs");
     let payload = fetch_json(request)
         .await
         .map_err(map_upstream_route_error)?;

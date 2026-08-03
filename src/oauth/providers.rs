@@ -332,7 +332,7 @@ pub fn cursor() -> OAuthProviderConfig {
         extra_params: &[
             ("api_endpoint", "https://api2.cursor.sh"),
             ("agent_endpoint", "https://agent.api5.cursor.sh"),
-            ("client_version", "3.1.0"),
+            ("client_version", "3.12.17"),
             ("client_type", "ide"),
         ],
         refresh_lead_ms: 24 * 60 * 60 * 1000,

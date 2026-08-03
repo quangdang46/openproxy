@@ -1242,7 +1242,11 @@ fn build_cursor_headers(
         "x-cursor-checksum",
         HeaderValue::from_str(&headers.checksum).map_err(CursorExecutorError::InvalidHeader)?,
     );
-    header_map.insert("x-cursor-client-version", HeaderValue::from_static("3.1.0"));
+    header_map.insert("x-cursor-client-version", HeaderValue::from_static("3.12.17"));
+    header_map.insert(
+        "x-cursor-client-commit",
+        HeaderValue::from_static("0fb762053c34788bb7760d5673f8a6d4c8589d50"),
+    );
     header_map.insert("x-cursor-client-type", HeaderValue::from_static("ide"));
     header_map.insert("x-cursor-client-os", HeaderValue::from_static(headers.os));
     header_map.insert(
