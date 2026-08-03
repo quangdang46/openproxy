@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use md5::{Digest, Md5};
@@ -20,6 +24,102 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 // ---------------------------------------------------------------------------
 
 const QODER_CHAT_URL_ENCODED: &str = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+
+// ─── PAT → job-token exchange (ported from 9router v0.5.45 qoder.js) ────────
+// PATs (pt-...) cannot sign COSY requests directly. Exchange them for a
+// short-lived job token (jt-...) via /api/v1/jobToken/exchange (plain JSON,
+// not COSY-signed), then resolve the userId from userinfo. Cached per-PAT
+// until near-expiry.
+const QODER_JOB_TOKEN_EXCHANGE_URL: &str = "https://openapi.qoder.sh/api/v1/jobToken/exchange";
+const QODER_USERINFO_URL: &str = "https://openapi.qoder.sh/api/v1/userinfo";
+const PAT_REFRESH_BUFFER_SECS: u64 = 5 * 60;
+
+static PAT_JOB_CACHE: Lazy<Mutex<HashMap<String, (String, String, u64)>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Resolve a PAT to `(job_token, user_id)`, using the per-PAT cache when fresh.
+async fn resolve_pat_credential(pat: &str) -> Result<(String, String), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some((job_token, user_id, expires_at)) =
+        PAT_JOB_CACHE.lock().map(|g| g.get(pat).cloned()).unwrap_or(None)
+    {
+        if expires_at.saturating_sub(now) > PAT_REFRESH_BUFFER_SECS {
+            return Ok((job_token, user_id));
+        }
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .post(QODER_JOB_TOKEN_EXCHANGE_URL)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("User-Agent", "qodercli/1.0.0")
+        .header("Cosy-Version", QODER_IDE_VERSION)
+        .header("Cosy-ClientType", QODER_CLIENT_TYPE)
+        .json(&serde_json::json!({ "personal_token": pat }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "qoder PAT exchange failed: {} {}",
+            response.status(),
+            response.text().await.unwrap_or_default().chars().take(200).collect::<String>()
+        ));
+    }
+    let data: Value = response.json().await.map_err(|e| e.to_string())?;
+    let job_token = data
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "qoder PAT exchange returned no job token".to_string())?
+        .to_string();
+
+    let mut expires_at = now + 24 * 60 * 60;
+    if let Some(exp) = data.get("expires_at").and_then(|v| v.as_str()) {
+        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(exp) {
+            expires_at = parsed.timestamp() as u64;
+        }
+    } else if let Some(exp_in) = data.get("expires_in").and_then(|v| v.as_u64()) {
+        if exp_in > 0 {
+            expires_at = now + exp_in;
+        }
+    }
+
+    // Resolve userId from userinfo (best-effort).
+    let user_id = match client
+        .get(QODER_USERINFO_URL)
+        .header("Authorization", format!("Bearer {job_token}"))
+        .header("Accept", "application/json")
+        .header("User-Agent", "qodercli/1.0.0")
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|info| {
+                info.get("id")
+                    .or_else(|| info.get("userId"))
+                    .or_else(|| info.get("user_id"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default(),
+        _ => String::new(),
+    };
+
+    if let Ok(mut cache) = PAT_JOB_CACHE.lock() {
+        cache.insert(pat.to_string(), (job_token.clone(), user_id.clone(), expires_at));
+    }
+    Ok((job_token, user_id))
+}
 
 const QODER_IDE_VERSION: &str = "1.0.0";
 const QODER_CLIENT_TYPE: &str = "5";
@@ -734,8 +834,41 @@ impl QoderExecutor {
 
     pub async fn execute_request(
         &self,
-        request: QoderExecutionRequest,
+        mut request: QoderExecutionRequest,
     ) -> Result<QoderExecutorResponse, QoderExecutorError> {
+        // PAT (pt-...) → exchange for a short-lived job token + resolve userId
+        // so downstream COSY signing + catalog fetch work. Device tokens
+        // (dt-...) and job tokens (jt-...) skip this and are used directly.
+        // Ported from 9router v0.5.45 fix(qoder): support PAT auth.
+        let raw_token = request
+            .credentials
+            .api_key
+            .as_deref()
+            .or(request.credentials.access_token.as_deref())
+            .unwrap_or("")
+            .to_string();
+        if raw_token.starts_with("pt-") {
+            match resolve_pat_credential(&raw_token).await {
+                Ok((job_token, user_id)) => {
+                    request.credentials.access_token = Some(job_token);
+                    request.credentials.api_key = None;
+                    request.credentials.provider_specific_data.insert(
+                        "userId".to_string(),
+                        Value::String(user_id),
+                    );
+                    request.credentials.provider_specific_data.insert(
+                        "authMethod".to_string(),
+                        Value::String("pat".to_string()),
+                    );
+                }
+                Err(e) => {
+                    return Err(QoderExecutorError::MissingCredentials(format!(
+                        "qoder PAT exchange failed: {e}"
+                    )));
+                }
+            }
+        }
+
         let psd = &request.credentials.provider_specific_data;
         let user_id = psd
             .get("userId")
