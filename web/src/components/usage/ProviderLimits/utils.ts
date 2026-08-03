@@ -375,6 +375,23 @@ export function parseQuotaData(provider: string, data: RawQuotaData | null | und
         }
         break;
 
+      case "kimi":
+      case "deepseek":
+        // Weekly/Ratelimit from /v1/usages; credit balance from /user/balance.
+        // Prefer remainingPercentage only (no absolute `remaining`).
+        if (data.quotas) {
+          Object.entries(data.quotas).forEach(([name, quota]: [string, QuotaEntry]) => {
+            normalizedQuotas.push({
+              name,
+              used: quota.used || 0,
+              total: quota.total || 0,
+              resetAt: quota.resetAt || null,
+              remainingPercentage: quota.remainingPercentage,
+            });
+          });
+        }
+        break;
+
       case "claude":
         if (data.message) {
           // Handle error message case

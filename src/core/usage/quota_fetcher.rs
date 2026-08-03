@@ -1847,6 +1847,428 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
     json!({ "quotas": Value::Object(quotas) })
 }
 
+// ---------------------------------------------------------------------------
+// Kimi / DeepSeek usage handlers (ported from 9router v0.5.45
+// open-sse/services/usage/kimi.js + deepseek.js)
+// ---------------------------------------------------------------------------
+
+const KIMI_USAGE_URL: &str = "https://api.kimi.com/coding/v1/usages";
+const DEEPSEEK_BALANCE_URL: &str = "https://api.deepseek.com/user/balance";
+
+fn to_finite_number(value: &Value, fallback: f64) -> f64 {
+    match value {
+        Value::Number(n) => n.as_f64().unwrap_or(fallback),
+        Value::String(s) => s.parse::<f64>().unwrap_or(fallback),
+        _ => fallback,
+    }
+}
+
+/// Kimi plan-name mapping (LEVEL_* → friendly tier name).
+fn kimi_plan_name(level: Option<&str>) -> String {
+    let key = level.unwrap_or("");
+    if key.is_empty() {
+        return "Kimi Coding".to_string();
+    }
+    match key {
+        "LEVEL_BASIC" => "Moderato".to_string(),
+        "LEVEL_INTERMEDIATE" => "Allegretto".to_string(),
+        "LEVEL_ADVANCED" => "Allegro".to_string(),
+        "LEVEL_STANDARD" => "Vivace".to_string(),
+        other => other.trim_start_matches("LEVEL_").to_lowercase(),
+    }
+}
+
+/// Best-effort human message from a Kimi error body.
+fn format_kimi_usage_error(status: u16, response_text: &str) -> String {
+    let parsed: Option<Value> = serde_json::from_str(response_text).ok();
+    let detail0 = parsed
+        .as_ref()
+        .and_then(|v| v.get("details").and_then(|d| d.as_array()))
+        .and_then(|arr| arr.first());
+    let debug = detail0
+        .and_then(|d| d.get("debug"))
+        .or_else(|| parsed.as_ref().and_then(|v| v.get("debug")));
+    let reason = debug
+        .and_then(|d| d.get("reason").and_then(|r| r.as_str()))
+        .unwrap_or("");
+    let localized = debug
+        .and_then(|d| d.get("localizedMessage").and_then(|m| m.get("message")))
+        .or_else(|| detail0.and_then(|d| d.get("localizedMessage").and_then(|m| m.get("message"))))
+        .or_else(|| parsed.as_ref().and_then(|v| v.get("message")))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if status == 401 {
+        return "Kimi authentication expired. Please re-authorize.".to_string();
+    }
+    if status == 403
+        && (reason == "REASON_FEATURE_NO_PERMISSION"
+            || localized.to_lowercase().contains("permission_denied")
+            || localized.to_lowercase().contains("subscribe"))
+    {
+        return if localized.is_empty() {
+            "Kimi connected, but this account has no permission to view usage. Subscribe to Kimi Code to access quota.".to_string()
+        } else {
+            localized.to_string()
+        };
+    }
+    let snippet: String = if localized.is_empty() {
+        response_text.chars().take(100).collect()
+    } else {
+        localized.chars().take(100).collect()
+    };
+    if snippet.is_empty() {
+        format!("Kimi Coding connected. API Error {status}")
+    } else {
+        format!("Kimi Coding connected. API Error {status}: {snippet}")
+    }
+}
+
+fn kimi_make_quota(used: f64, total: f64, remaining: Option<f64>, reset_at: Option<String>) -> Value {
+    let safe_total = total.max(0.0);
+    let safe_used = used.max(0.0);
+    let remaining_pct = if safe_total > 0.0 {
+        match remaining {
+            Some(rem) if rem.is_finite() => ((rem.max(0.0)) / safe_total * 100.0).clamp(0.0, 100.0),
+            _ => (((safe_total - safe_used).max(0.0)) / safe_total * 100.0).clamp(0.0, 100.0),
+        }
+    } else {
+        0.0
+    };
+    json!({
+        "used": safe_used,
+        "total": safe_total,
+        "remainingPercentage": remaining_pct,
+        "resetAt": reset_at,
+        "unlimited": false,
+    })
+}
+
+/// Kimi Coding usage over OAuth — GET /v1/usages with Bearer + X-Msh-* headers.
+pub async fn fetch_kimi_oauth_usage(
+    access_token: &str,
+    _psd: &std::collections::BTreeMap<String, Value>,
+) -> Value {
+    if access_token.trim().is_empty() {
+        return json!({ "message": "Kimi access token or API key not available." });
+    }
+    let client = http_client();
+    let msh = crate::core::config::app_constants::build_kimi_headers();
+    let mut request = client
+        .get(KIMI_USAGE_URL)
+        .header("Authorization", format!("Bearer {}", access_token.trim()))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json");
+    if let Some(obj) = msh.as_object() {
+        for (key, value) in obj {
+            if let Some(v) = value.as_str() {
+                request = request.header(key.as_str(), v);
+            }
+        }
+    }
+    let response = match request.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({ "message": format!("Kimi Coding connected. Unable to fetch usage: {e}") });
+        }
+    };
+    let status = response.status().as_u16();
+    let response_text = match response.text().await {
+        Ok(t) => t,
+        Err(_) => String::new(),
+    };
+    if status != 200 {
+        return json!({
+            "plan": "Kimi Coding",
+            "message": format_kimi_usage_error(status, &response_text),
+        });
+    }
+    let data: Value = match serde_json::from_str(&response_text) {
+        Ok(v) => v,
+        Err(_) => {
+            return json!({
+                "plan": "Kimi Coding",
+                "message": "Kimi Coding connected. Invalid JSON response from API.",
+            });
+        }
+    };
+
+    let mut quotas = serde_json::Map::new();
+    let usage_obj = data.get("usage").filter(|v| v.is_object());
+    let usage_limit = to_finite_number(
+        &usage_obj
+            .and_then(|u| u.get("limit"))
+            .unwrap_or(&Value::Null),
+        0.0,
+    );
+    let usage_used = to_finite_number(
+        &usage_obj
+            .and_then(|u| u.get("used"))
+            .unwrap_or(&Value::Null),
+        0.0,
+    );
+    let usage_remaining = usage_obj
+        .and_then(|u| u.get("remaining"))
+        .map(|v| to_finite_number(v, f64::NAN))
+        .filter(|v| v.is_finite());
+    let usage_reset = usage_obj
+        .and_then(|u| u.get("resetTime"))
+        .or_else(|| usage_obj.and_then(|u| u.get("reset_time")));
+    if usage_limit > 0.0 {
+        quotas.insert(
+            "Weekly".to_string(),
+            kimi_make_quota(
+                usage_used,
+                usage_limit,
+                usage_remaining,
+                parse_reset_time(&usage_reset.unwrap_or(&Value::Null)),
+            ),
+        );
+    }
+    if let Some(limits) = data.get("limits").and_then(|v| v.as_array()) {
+        for item in limits {
+            let detail = item.get("detail").filter(|v| v.is_object());
+            let limit = to_finite_number(
+                &detail
+                    .and_then(|d| d.get("limit"))
+                    .unwrap_or(&Value::Null),
+                0.0,
+            );
+            let remaining = to_finite_number(
+                &detail
+                    .and_then(|d| d.get("remaining"))
+                    .unwrap_or(&Value::Null),
+                f64::NAN,
+            );
+            let reset_time = detail
+                .and_then(|d| d.get("resetTime"))
+                .or_else(|| detail.and_then(|d| d.get("reset_at")));
+            if limit > 0.0 {
+                let rem = if remaining.is_finite() {
+                    remaining
+                } else {
+                    limit
+                };
+                quotas.insert(
+                    "Ratelimit".to_string(),
+                    kimi_make_quota(
+                        (limit - rem).max(0.0),
+                        limit,
+                        Some(rem),
+                        parse_reset_time(&reset_time.unwrap_or(&Value::Null)),
+                    ),
+                );
+            }
+        }
+    }
+    let membership_level = data
+        .get("user")
+        .and_then(|u| u.get("membership"))
+        .and_then(|m| m.get("level"))
+        .and_then(|v| v.as_str());
+    let plan_name = kimi_plan_name(membership_level);
+    if !quotas.is_empty() {
+        return json!({ "plan": plan_name, "quotas": Value::Object(quotas) });
+    }
+    json!({
+        "plan": plan_name,
+        "message": "Kimi Coding connected. Usage tracked per request.",
+    })
+}
+
+/// Kimi Coding usage — GET /v1/usages. Dual auth: apiKey → x-api-key header;
+/// accessToken → Bearer + X-Msh-* headers.
+pub async fn fetch_kimi_usage(api_key: &str) -> Value {
+    if api_key.trim().is_empty() {
+        return json!({ "message": "Kimi access token or API key not available." });
+    }
+    let client = http_client();
+    let response = client
+        .get(KIMI_USAGE_URL)
+        .header("x-api-key", api_key.trim())
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .send()
+        .await;
+    let response = match response {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Kimi Coding connected. Unable to fetch usage: {e}") }),
+    };
+    let status = response.status().as_u16();
+    let response_text = match response.text().await {
+        Ok(t) => t,
+        Err(_) => String::new(),
+    };
+
+    if status != 200 {
+        return json!({
+            "plan": "Kimi Coding",
+            "message": format_kimi_usage_error(status, &response_text),
+        });
+    }
+    let data: Value = match serde_json::from_str(&response_text) {
+        Ok(v) => v,
+        Err(_) => {
+            return json!({
+                "plan": "Kimi Coding",
+                "message": "Kimi Coding connected. Invalid JSON response from API.",
+            });
+        }
+    };
+
+    let mut quotas = serde_json::Map::new();
+    let usage_obj = data.get("usage").filter(|v| v.is_object());
+    let usage_limit = to_finite_number(&usage_obj.and_then(|u| u.get("limit")).unwrap_or(&Value::Null), 0.0);
+    let usage_used = to_finite_number(&usage_obj.and_then(|u| u.get("used")).unwrap_or(&Value::Null), 0.0);
+    let usage_remaining_raw = usage_obj
+        .and_then(|u| u.get("remaining"))
+        .or_else(|| usage_obj.and_then(|u| u.get("Remaining")));
+    let usage_remaining = usage_remaining_raw
+        .map(|v| to_finite_number(v, f64::NAN))
+        .filter(|v| v.is_finite());
+    let usage_reset = usage_obj
+        .and_then(|u| u.get("resetTime"))
+        .or_else(|| usage_obj.and_then(|u| u.get("reset_time")));
+
+    if usage_limit > 0.0 {
+        quotas.insert(
+            "Weekly".to_string(),
+            kimi_make_quota(usage_used, usage_limit, usage_remaining, parse_reset_time(&usage_reset.unwrap_or(&Value::Null))),
+        );
+    }
+
+    if let Some(limits) = data.get("limits").and_then(|v| v.as_array()) {
+        for item in limits {
+            let detail = item.get("detail").filter(|v| v.is_object());
+            let limit = to_finite_number(&detail.and_then(|d| d.get("limit")).unwrap_or(&Value::Null), 0.0);
+            let remaining = to_finite_number(&detail.and_then(|d| d.get("remaining")).unwrap_or(&Value::Null), f64::NAN);
+            let reset_time = detail
+                .and_then(|d| d.get("resetTime"))
+                .or_else(|| detail.and_then(|d| d.get("reset_at")));
+            if limit > 0.0 {
+                let rem = if remaining.is_finite() {
+                    remaining
+                } else {
+                    limit
+                };
+                quotas.insert(
+                    "Ratelimit".to_string(),
+                    kimi_make_quota(
+                        (limit - rem).max(0.0),
+                        limit,
+                        Some(rem),
+                        parse_reset_time(&reset_time.unwrap_or(&Value::Null)),
+                    ),
+                );
+            }
+        }
+    }
+
+    let membership_level = data
+        .get("user")
+        .and_then(|u| u.get("membership"))
+        .and_then(|m| m.get("level"))
+        .and_then(|v| v.as_str());
+    let plan_name = kimi_plan_name(membership_level);
+
+    if !quotas.is_empty() {
+        return json!({ "plan": plan_name, "quotas": Value::Object(quotas) });
+    }
+    json!({
+        "plan": plan_name,
+        "message": "Kimi Coding connected. Usage tracked per request.",
+    })
+}
+
+/// DeepSeek usage — GET https://api.deepseek.com/user/balance, Bearer apiKey.
+pub async fn fetch_deepseek_usage(api_key: &str) -> Value {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return json!({ "message": "DeepSeek API key not available. Add a key to view usage." });
+    }
+    let client = http_client();
+    let response = match client
+        .get(DEEPSEEK_BALANCE_URL)
+        .header("Authorization", format!("Bearer {key}"))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("DeepSeek error: {e}") }),
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({
+            "plan": "DeepSeek",
+            "message": "DeepSeek authentication failed. Check the API key.",
+        });
+    }
+    let response_text = match response.text().await {
+        Ok(t) => t,
+        Err(_) => String::new(),
+    };
+    if status != 200 {
+        let snippet: String = response_text.chars().take(120).collect();
+        return json!({
+            "plan": "DeepSeek",
+            "message": format!(
+                "DeepSeek balance API error ({status}){}",
+                if snippet.is_empty() { String::new() } else { format!(": {snippet}") }
+            ),
+        });
+    }
+    let data: Value = match serde_json::from_str(&response_text) {
+        Ok(v) => v,
+        Err(_) => return json!({ "message": "DeepSeek balance response was not JSON." }),
+    };
+
+    let balances: Vec<&Value> = data
+        .get("balance_infos")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().collect())
+        .unwrap_or_default();
+    if balances.is_empty() {
+        return json!({
+            "plan": "DeepSeek",
+            "message": "DeepSeek connected. No balance data returned.",
+        });
+    }
+
+    let is_available = data
+        .get("is_available")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut quotas = serde_json::Map::new();
+    for b in balances {
+        let currency = b
+            .get("currency")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_uppercase();
+        if currency.is_empty() {
+            continue;
+        }
+        let total = to_finite_number(&b.get("total_balance").unwrap_or(&Value::Null), 0.0).max(0.0);
+        quotas.insert(
+            format!("Balance ({currency})"),
+            json!({
+                "used": 0.0,
+                "total": total,
+                "remainingPercentage": if total > 0.0 { 100.0 } else { 0.0 },
+                "resetAt": Value::Null,
+                "unlimited": total > 0.0,
+            }),
+        );
+    }
+
+    json!({
+        "plan": if is_available { "DeepSeek" } else { "DeepSeek (Insufficient Balance)" },
+        "quotas": Value::Object(quotas),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

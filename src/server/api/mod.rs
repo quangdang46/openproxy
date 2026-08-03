@@ -753,16 +753,26 @@ const USAGE_SUPPORTED_PROVIDERS: &[&str] = &[
     "github",
     "github-copilot",
     "codex",
+    "kimi",
     "kimi-coding",
+    "deepseek",
     "ollama",
     "gemini-cli",
+    "grok-cli",
     "glm",
     "glm-cn",
     "minimax",
     "minimax-cn",
 ];
 
-const USAGE_APIKEY_PROVIDERS: &[&str] = &["glm", "glm-cn", "minimax", "minimax-cn"];
+const USAGE_APIKEY_PROVIDERS: &[&str] = &[
+    "glm",
+    "glm-cn",
+    "minimax",
+    "minimax-cn",
+    "kimi",
+    "deepseek",
+];
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

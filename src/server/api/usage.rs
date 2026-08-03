@@ -12,9 +12,10 @@ use tokio::time::{self, Duration};
 
 use crate::core::usage::quota_fetcher::{
     codex_account_id, consume_codex_rate_limit_reset_credit, fetch_antigravity_quota,
-    fetch_claude_quota, fetch_codex_quota, fetch_gemini_cli_quota, fetch_github_quota,
-    fetch_glm_quota, fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota,
-    get_codex_rate_limit_reset_credits,
+    fetch_claude_quota, fetch_codex_quota, fetch_deepseek_usage, fetch_gemini_cli_quota,
+    fetch_kimi_oauth_usage,
+    fetch_github_quota, fetch_glm_quota, fetch_kimi_usage, fetch_kiro_quota,
+    fetch_minimax_quota, fetch_qoder_quota, get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::oauth::token_refresh::refresh_codex_token;
@@ -28,7 +29,10 @@ fn require_usage_access(headers: &HeaderMap, state: &AppState) -> Result<(), Res
 }
 
 fn is_usage_apikey_provider(provider: &str) -> bool {
-    matches!(provider, "glm" | "glm-cn" | "minimax" | "minimax-cn")
+    matches!(
+        provider,
+        "glm" | "glm-cn" | "minimax" | "minimax-cn" | "kimi" | "deepseek"
+    )
 }
 
 /// Dispatch to the correct OAuth quota fetcher for `connection`. Returns
@@ -53,6 +57,8 @@ pub async fn fetch_oauth_quota(connection: &ProviderConnection) -> Value {
         "gemini-cli" => fetch_gemini_cli_quota(token, provider, psd).await,
         "antigravity" => fetch_antigravity_quota(token, provider).await,
         "qoder" => fetch_qoder_quota(token, provider).await,
+        // Kimi OAuth connections hit /v1/usages with Bearer + X-Msh-* headers.
+        "kimi" | "kimi-coding" => fetch_kimi_oauth_usage(token, psd).await,
         _ => serde_json::json!({}),
     }
 }
@@ -471,6 +477,8 @@ async fn get_connection_usage(
             let result = match provider.as_str() {
                 "glm" | "glm-cn" => fetch_glm_quota(api_key, &provider).await,
                 "minimax" | "minimax-cn" => fetch_minimax_quota(api_key, &provider).await,
+                "kimi" => fetch_kimi_usage(api_key).await,
+                "deepseek" => fetch_deepseek_usage(api_key).await,
                 _ => serde_json::json!({}),
             };
             if let Some(quotas) = result.get("quotas") {
