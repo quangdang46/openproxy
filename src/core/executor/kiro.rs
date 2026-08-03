@@ -184,8 +184,34 @@ impl KiroExecutor {
                 .filter(|u| !u.contains("amazonaws.com"))
                 .cloned()
                 .collect();
+            let amazon_owned = amazon.clone();
+            let others_owned = others.clone();
             if !amazon.is_empty() {
                 urls = amazon.into_iter().chain(others).collect();
+            }
+            // API-key accounts must try the q.* surface FIRST: the legacy
+            // codewhisperer.* GenerateAssistantResponse endpoint authenticates
+            // the key but rejects the same valid payload with
+            // REQUEST_BODY_INVALID (a terminal 400). Ported from 9router
+            // v0.5.45 fix(kiro): route API keys correctly.
+            if auth_method == "api_key" {
+                let q: Vec<String> = amazon_owned
+                    .iter()
+                    .filter(|u| u.contains("://q."))
+                    .cloned()
+                    .collect();
+                let remaining: Vec<String> = amazon_owned
+                    .iter()
+                    .filter(|u| !u.contains("://q."))
+                    .cloned()
+                    .collect();
+                if !q.is_empty() {
+                    urls = q.into_iter().chain(remaining).chain(others_owned).collect();
+                } else {
+                    urls = amazon_owned.into_iter().chain(others_owned).collect();
+                }
+            } else {
+                urls = amazon_owned.into_iter().chain(others_owned).collect();
             }
         }
         urls
@@ -236,7 +262,7 @@ impl KiroExecutor {
                     .map_err(KiroExecutorError::InvalidHeader)?,
             );
             headers.insert(
-                HeaderName::from_static("tokentype"),
+                HeaderName::from_static("TokenType"),
                 HeaderValue::from_static("API_KEY"),
             );
         } else {
@@ -251,7 +277,7 @@ impl KiroExecutor {
             );
             if is_external_idp {
                 headers.insert(
-                    HeaderName::from_static("tokentype"),
+                    HeaderName::from_static("TokenType"),
                     HeaderValue::from_static("EXTERNAL_IDP"),
                 );
             }
