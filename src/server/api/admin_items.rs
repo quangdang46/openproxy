@@ -1008,6 +1008,8 @@ mod tests {
             api_key: None,
             test_status: None,
             last_error: None,
+            email: None,
+            display_name: None,
             last_error_at: None,
             provider_specific_data: None,
             connection_proxy_enabled: Some(true),

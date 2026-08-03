@@ -14,8 +14,9 @@ use crate::core::usage::quota_fetcher::{
     codex_account_id, consume_codex_rate_limit_reset_credit, fetch_antigravity_quota,
     fetch_claude_quota, fetch_codex_quota, fetch_deepseek_usage, fetch_gemini_cli_quota,
     fetch_kimi_oauth_usage,
-    fetch_github_quota, fetch_glm_quota, fetch_kimi_usage, fetch_kiro_quota,
-    fetch_minimax_quota, fetch_qoder_quota, get_codex_rate_limit_reset_credits,
+    fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota, fetch_kimi_usage,
+    fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota,
+    get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::oauth::token_refresh::refresh_codex_token;
@@ -57,6 +58,7 @@ pub async fn fetch_oauth_quota(connection: &ProviderConnection) -> Value {
         "gemini-cli" => fetch_gemini_cli_quota(token, provider, psd).await,
         "antigravity" => fetch_antigravity_quota(token, provider).await,
         "qoder" => fetch_qoder_quota(token, provider).await,
+        "grok-cli" => fetch_grok_cli_quota(token).await,
         // Kimi OAuth connections hit /v1/usages with Bearer + X-Msh-* headers.
         "kimi" | "kimi-coding" => fetch_kimi_oauth_usage(token, psd).await,
         _ => serde_json::json!({}),

@@ -1848,6 +1848,133 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
 }
 
 // ---------------------------------------------------------------------------
+// Kimi / DeepSeek / SuperGrok usage handlers (ported from 9router v0.5.45
+// open-sse/services/usage/kimi.js + deepseek.js + grokCliQuotaFrame.js)
+// ---------------------------------------------------------------------------
+
+const GROK_CREDITS_URL: &str = "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig";
+// Empty gRPC-web request frame (flag 0 + length 0). Without it upstream
+// returns grpc-status 13 "Missing request message." with a 0-byte body.
+const GRPC_WEB_EMPTY_REQUEST_FRAME: &[u8] = &[0, 0, 0, 0, 0];
+
+/// Live SuperGrok weekly pool via gRPC-web GetGrokCreditsConfig.
+/// Fail-open: any network/auth/parse failure returns None.
+pub async fn fetch_grok_cli_credits_config(access_token: &str) -> Option<Value> {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    let client = http_client();
+    let response = client
+        .post(GROK_CREDITS_URL)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Content-Type", "application/grpc-web+proto")
+        .header("X-Grpc-Web", "1")
+        .header("Accept", "application/grpc-web+proto")
+        .body(GRPC_WEB_EMPTY_REQUEST_FRAME.to_vec())
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let bytes = response.bytes().await.ok()?;
+    let decoded =
+        crate::core::usage::grok_cli_quota_frame::decode_grok_credits_frame(&bytes)?;
+    // Round for bar display (fixed32 ratio * 100 can be 34.999… for 0.35).
+    let used = (decoded.percent_used.max(0.0).min(100.0)).round();
+    Some(json!({
+        "used": used,
+        "total": 100.0,
+        "remainingPercentage": 100.0 - used,
+        "resetAt": decoded.reset_at,
+        "unlimited": false,
+    }))
+}
+
+/// Grok CLI usage — REST billing first, then the gRPC-web weekly pool as a
+/// fallback when REST reports zero quotas (ported from 9router v0.5.45
+/// open-sse/services/usage/grok-cli.js getGrokCliUsage).
+pub async fn fetch_grok_cli_quota(access_token: &str) -> Value {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return json!({ "message": "Grok CLI access token not available." });
+    }
+    // REST billing (credits + user info). Best-effort.
+    let client = http_client();
+    let billing = client
+        .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits")
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .ok();
+    let user = client
+        .get("https://cli-chat-proxy.grok.com/v1/user?include=subscription")
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .ok();
+
+    let plan = match user {
+        Some(r) => r
+            .json::<Value>()
+            .await
+            .ok()
+            .and_then(|u| u.get("subscription").cloned())
+            .map(|sub| {
+                let name = sub
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Grok CLI");
+                name.to_string()
+            })
+            .unwrap_or_else(|| "Grok CLI".to_string()),
+        None => "Grok CLI".to_string(),
+    };
+
+    // Parse REST billing → quota rows.
+    let mut quotas = serde_json::Map::new();
+    let mut rest_has_quota = false;
+    if let Some(r) = billing {
+        if let Ok(data) = r.json::<Value>().await {
+            if let Some(caps) = data.get("caps").and_then(|v| v.as_object()) {
+                let total = to_finite_number(
+                    caps.get("total_cap").unwrap_or(&Value::Null),
+                    0.0,
+                );
+                let used = to_finite_number(
+                    caps.get("used").unwrap_or(&Value::Null),
+                    0.0,
+                );
+                if total > 0.0 {
+                    quotas.insert(
+                        "Credits".to_string(),
+                        build_quota_entry(used, total, None),
+                    );
+                    rest_has_quota = true;
+                }
+            }
+        }
+    }
+    if rest_has_quota {
+        return json!({ "plan": plan, "quotas": Value::Object(quotas) });
+    }
+
+    // Paid SuperGrok often returns cap=0 over REST but exposes the shared
+    // weekly pool on GetGrokCreditsConfig — try that before giving up.
+    if let Some(weekly) = fetch_grok_cli_credits_config(token).await {
+        let mut weekly_quotas = serde_json::Map::new();
+        weekly_quotas.insert("Weekly SuperGrok".to_string(), weekly);
+        return json!({ "plan": plan, "quotas": Value::Object(weekly_quotas) });
+    }
+
+    json!({
+        "plan": plan,
+        "message": "Grok CLI connected. Usage tracked per request.",
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Kimi / DeepSeek usage handlers (ported from 9router v0.5.45
 // open-sse/services/usage/kimi.js + deepseek.js)
 // ---------------------------------------------------------------------------
