@@ -147,7 +147,7 @@ export const APIKEY_PROVIDERS: Record<string, Provider> = {
   runwayml: { id: "runwayml", alias: "runway", name: "Runway ML", icon: "movie", color: "#000000", textIcon: "RW", website: "https://runwayml.com", notice: { apiKeyUrl: "https://dev.runwayml.com" }, serviceKinds: ["image", "video"], imageConfig: { baseUrl: "https://api.dev.runwayml.com/v1/organization", method: "GET", authType: "apikey", authHeader: "bearer", extraHeaders: { "X-Runway-Version": "2024-11-06" } } },
   "aws-polly": { id: "aws-polly", alias: "polly", name: "AWS Polly", icon: "record_voice_over", color: "#FF9900", textIcon: "PL", website: "https://aws.amazon.com/polly/", notice: { text: "Use AWS Secret Access Key as API key; set providerSpecificData.accessKeyId and optional region.", apiKeyUrl: "https://console.aws.amazon.com/iam/home#/security_credentials" }, serviceKinds: ["tts"], hasProviderSpecificData: true, ttsConfig: { baseUrl: "https://polly.{region}.amazonaws.com/v1/speech", authType: "apikey", authHeader: "aws-sigv4", format: "aws-polly", models: [{ id: "standard", name: "Standard" }, { id: "neural", name: "Neural" }, { id: "long-form", name: "Long-form" }, { id: "generative", name: "Generative" }] } },
   "jina-ai": { id: "jina-ai", alias: "jina", name: "Jina AI", icon: "blur_on", color: "#2563EB", textIcon: "JA", website: "https://jina.ai", notice: { text: "10M free tokens on signup (non-commercial), no credit card required.", apiKeyUrl: "https://jina.ai/?sui=apikey" }, serviceKinds: ["embedding"], embeddingConfig: { baseUrl: "https://api.jina.ai/v1/embeddings", authType: "apikey", authHeader: "bearer", models: [{ id: "jina-embeddings-v3", name: "Jina Embeddings v3", dimensions: 1024 }, { id: "jina-embeddings-v2-base-en", name: "Jina Embeddings v2 Base EN", dimensions: 768 }, { id: "jina-embeddings-v2-base-code", name: "Jina Embeddings v2 Base Code", dimensions: 768 }] } },
-  "jina-reader": { id: "jina-reader", alias: "jina", name: "Jina Reader", icon: "menu_book", color: "#000000", textIcon: "JR", website: "https://jina.ai/reader", notice: { apiKeyUrl: "https://jina.ai/?sui=apikey" }, serviceKinds: ["webFetch"], fetchConfig: { baseUrl: "https://r.jina.ai", method: "GET", authType: "apikey", authHeader: "bearer", costPerQuery: 0, freeMonthlyQuota: 1000000, formats: ["markdown", "text", "html"], maxCharacters: 200000, timeoutMs: 30000 } },
+  "jina-reader": { id: "jina-reader", alias: "jina", name: "Jina Reader", icon: "menu_book", color: "#000000", textIcon: "JR", website: "https://jina.ai/reader", notice: { apiKeyUrl: "https://jina.ai/?sui=apikey" }, serviceKinds: ["webFetch"], fetchConfig: { baseUrl: "https://r.jina.ai", method: "POST", authType: "apikey", authHeader: "bearer", costPerQuery: 0, freeMonthlyQuota: 1000000, formats: ["markdown", "text", "html"], maxCharacters: 200000, timeoutMs: 30000 } },
   agentrouter: { id: "agentrouter", alias: "ar", name: "AgentRouter", icon: "alt_route", color: "#6366F1", textIcon: "AR", website: "https://agentrouter.org", notice: { apiKeyUrl: "https://agentrouter.org" } },
   aimlapi: { id: "aimlapi", alias: "aiml", name: "AIML API", icon: "model_training", color: "#0EA5E9", textIcon: "AM", website: "https://aimlapi.com", notice: { apiKeyUrl: "https://aimlapi.com" } },
   modal: { id: "modal", alias: "modal", name: "Modal", icon: "cloud", color: "#22C55E", textIcon: "MD", website: "https://modal.com", notice: { apiKeyUrl: "https://modal.com" } },
@@ -171,7 +171,12 @@ export const APIKEY_PROVIDERS: Record<string, Provider> = {
   baseten: { id: "baseten", alias: "bt", name: "Baseten", icon: "hub", color: "#1D4ED8", textIcon: "BT", website: "https://baseten.co", notice: { apiKeyUrl: "https://app.baseten.co/settings/api-keys" } },
   publicai: { id: "publicai", alias: "pai", name: "PublicAI", icon: "public", color: "#10B981", textIcon: "PA", website: "https://publicai.co", notice: { apiKeyUrl: "https://publicai.co" } },
   "nous-research": { id: "nous-research", alias: "nous", name: "Nous Research", icon: "science", color: "#7C3AED", textIcon: "NR", website: "https://nousresearch.com", notice: { apiKeyUrl: "https://nousresearch.com" } },
-  glhf: { id: "glhf", alias: "glhf", name: "GLHF", icon: "sports_esports", color: "#EF4444", textIcon: "GH", website: "https://glhf.chat", notice: { apiKeyUrl: "https://glhf.chat" } },
+  "api-airforce": { id: "api-airforce", alias: "af", name: "API Airforce", icon: "air", color: "#6366F1", textIcon: "AF", website: "https://api.airforce", notice: { apiKeyUrl: "https://api.airforce" } },
+  "kilo-gateway": { id: "kilo-gateway", alias: "kgw", name: "Kilo Gateway", icon: "gateway", color: "#FF6B35", textIcon: "KG", website: "https://kilo.ai", notice: { apiKeyUrl: "https://kilo.ai" } },
+  bluesminds: { id: "bluesminds", alias: "bm", name: "Bluesminds", icon: "psychology", color: "#3B82F6", textIcon: "BM", website: "https://bluesminds.com", notice: { apiKeyUrl: "https://bluesminds.com" } },
+  poolside: { id: "poolside", alias: "poolside", name: "Poolside", icon: "pool", color: "#14B8A6", textIcon: "PO", website: "https://poolside.ai", notice: { apiKeyUrl: "https://poolside.ai" } },
+  tencent: { id: "tencent", alias: "hunyuan", name: "Tencent Hunyuan", icon: "cloud", color: "#06B6D4", textIcon: "TH", website: "https://cloud.tencent.com", notice: { apiKeyUrl: "https://console.cloud.tencent.com" } },
+  baidu: { id: "baidu", alias: "qianfan", name: "Baidu Qianfan", icon: "cloud", color: "#2563EB", textIcon: "BQ", website: "https://qianfan.cloud.baidu.com", notice: { apiKeyUrl: "https://console.bce.baidu.com" } },
 };
 
 // Web Cookie Providers (use browser session cookie instead of API key)
@@ -272,9 +277,12 @@ export const USAGE_SUPPORTED_PROVIDERS: string[] = [
   "kiro",
   "github",
   "codex",
+  "kimi",
   "kimi-coding",
+  "deepseek",
   "ollama",
   "gemini-cli",
+  "grok-cli",
   "glm",
   "glm-cn",
   "minimax",
@@ -287,4 +295,6 @@ export const USAGE_APIKEY_PROVIDERS: string[] = [
   "glm-cn",
   "minimax",
   "minimax-cn",
+  "kimi",
+  "deepseek",
 ];
