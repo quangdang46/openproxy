@@ -37,7 +37,10 @@ use crate::types::{ProviderConnection, ProviderNode};
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
 /// Default base URL for Antigravity's Cloud Code endpoint.
-pub const ANTIGRAVITY_BASE_URL: &str = "https://cloudcode-pa.googleapis.com";
+/// Chat traffic uses the daily host (bypasses prod 429); discovery
+/// (loadCodeAssist/onboardUser) stays on PROD — see oauth/antigravity.rs.
+/// Ported from 9router v0.5.45 (fix(gemini): daily-cloudcode host switch).
+pub const ANTIGRAVITY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 
 /// Antigravity caps maxOutputTokens at 16k regardless of what the caller
 /// asks for; matches the upstream JS implementation.

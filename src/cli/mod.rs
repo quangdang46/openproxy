@@ -1591,7 +1591,7 @@ async fn run_route(
         run_combo_route(pool, registry, combo_name, &prompt, stream, json).await
     } else {
         eprintln!("Error: must specify either --model or --combo");
-        eprintln!("Usage: openproxy route --model cc/claude-opus-4-7 --prompt 'hello'");
+        eprintln!("Usage: openproxy route --model cc/claude-opus-5 --prompt 'hello'");
         eprintln!("   or: openproxy route --combo default --prompt 'hello'");
         std::process::exit(1);
     }

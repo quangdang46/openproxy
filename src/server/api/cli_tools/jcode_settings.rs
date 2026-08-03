@@ -291,7 +291,7 @@ async fn write_jcode_config(body: &SaveJcodeSettingsRequest) -> AnyhowResult<()>
         format!("{}/v1", body.base_url)
     };
     let default_model = if body.models.is_empty() || body.models[0].is_empty() {
-        "cc/claude-opus-4-7".to_string()
+        "cc/claude-opus-5".to_string()
     } else {
         body.models[0].clone()
     };

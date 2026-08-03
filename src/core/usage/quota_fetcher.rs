@@ -1705,6 +1705,9 @@ pub async fn fetch_kiro_quota(
 }
 
 const ANTIGRAVITY_IMPORTANT_MODELS: &[&str] = &[
+    "gemini-3.6-flash-high",
+    "gemini-3.6-flash-medium",
+    "gemini-3.6-flash-low",
     "gemini-3-flash-agent",
     "gemini-3.5-flash-low",
     "gemini-3.5-flash-extra-low",
