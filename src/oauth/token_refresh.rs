@@ -690,17 +690,29 @@ pub async fn refresh_openai_token(refresh_token: &str) -> Result<RefreshResult, 
 }
 
 /// Refresh a Kimi Coding access token.
+/// Kimi OAuth merged into the dual-auth `kimi` provider (68566f5): endpoints
+/// moved to auth.kimi.com and requests carry the X-Msh-* device headers.
 pub async fn refresh_kimi_coding_token(refresh_token: &str) -> Result<RefreshResult, String> {
     let client = reqwest::Client::new();
-    let resp = client
-        .post("https://api.moonshot.cn/kimi-device/oauth/token")
+    let mut request = client
+        .post("https://auth.kimi.com/api/oauth/token")
         .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
         .header(ACCEPT, "application/json")
         .form(&[
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
-            ("client_id", "kimi-coding-openproxy"),
-        ])
+            ("client_id", "17e5f671-d194-4dfb-9706-5516cb48c098"),
+        ]);
+    // X-Msh-* device headers (buildKimiHeaders parity).
+    let msh = crate::core::config::app_constants::build_kimi_headers();
+    if let Some(obj) = msh.as_object() {
+        for (key, value) in obj {
+            if let Some(v) = value.as_str() {
+                request = request.header(key.as_str(), v);
+            }
+        }
+    }
+    let resp = request
         .send()
         .await
         .map_err(|e| format!("Kimi Coding refresh request failed: {e}"))?;
@@ -942,7 +954,7 @@ pub async fn dispatch_oauth_refresh(
             })
             .await
         }
-        "kimi-coding" => {
+        "kimi" | "kimi-coding" => {
             let rt = refresh_token.to_string();
             dedup_refresh(provider, refresh_token, move || {
                 let rt = rt.clone();

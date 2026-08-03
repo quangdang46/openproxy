@@ -170,18 +170,25 @@ pub fn iflow() -> OAuthProviderConfig {
     }
 }
 
-/// Kimi Coding — device-code flow.
+/// Kimi Coding — device-code flow (dual-auth provider merged in 68566f5).
 pub fn kimi_coding() -> OAuthProviderConfig {
     OAuthProviderConfig {
         id: "kimi-coding",
         client_id: "17e5f671-d194-4dfb-9706-5516cb48c098",
-        authorize_url: "https://api.moonshot.cn/kimi-device/oauth/device/code",
-        token_url: "https://api.moonshot.cn/kimi-device/oauth/token",
+        authorize_url: "https://auth.kimi.com/api/oauth/device_authorization",
+        token_url: "https://auth.kimi.com/api/oauth/token",
         scopes: &[],
         uses_pkce: false,
         extra_params: &[],
-        refresh_lead_ms: 0,
+        refresh_lead_ms: 300_000,
     }
+}
+
+/// Kimi — dual-auth alias of kimi-coding (68566f5 merge).
+pub fn kimi() -> OAuthProviderConfig {
+    let mut config = kimi_coding();
+    config.id = "kimi";
+    config
 }
 
 /// KiloCode — device-code flow (same URL for both endpoints).
@@ -444,6 +451,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "kiro" => Some(kiro()),
         "qwen" => Some(qwen()),
         "iflow" => Some(iflow()),
+        "kimi" => Some(kimi()),
         "kimi-coding" => Some(kimi_coding()),
         "kilocode" => Some(kilocode()),
         "cline" => Some(cline()),

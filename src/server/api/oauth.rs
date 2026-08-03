@@ -694,6 +694,7 @@ fn is_device_code_provider(provider: &str) -> bool {
         provider,
         "github"
             | "kiro"
+            | "kimi"
             | "kimi-coding"
             | "kilocode"
             | "codebuddy"
