@@ -420,7 +420,107 @@ async fn execute_media_provider(
         }
     };
 
+    // Record exact embedding tokens on success (ported from 9router v0.5.45
+    // fix(usage): record exact embedding tokens — only when the upstream usage
+    // is non-estimated and structurally consistent).
+    if route_kind == "embeddings" && response.status().is_success() {
+        let status = response.status();
+        let bytes = match response.bytes().await {
+            Ok(b) => b,
+            Err(_) => {
+                // Body consumption failed; return an empty error preserving
+                // the upstream status.
+                return proxy_upstream_response_raw(status).await;
+            }
+        };
+        if let Ok(parsed) = serde_json::from_slice::<Value>(&bytes) {
+            let usage = parsed.get("usage").filter(|v| v.is_object());
+            let estimated = usage
+                .and_then(|u| u.get("estimated"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let prompt_tokens = usage
+                .and_then(|u| u.get("prompt_tokens"))
+                .or_else(|| usage.and_then(|u| u.get("input_tokens")))
+                .and_then(|v| v.as_u64());
+            let completion_tokens = usage
+                .and_then(|u| u.get("completion_tokens"))
+                .or_else(|| usage.and_then(|u| u.get("output_tokens")))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let total_tokens = usage
+                .and_then(|u| u.get("total_tokens"))
+                .and_then(|v| v.as_u64());
+            if !estimated
+                && prompt_tokens.is_some_and(|p| p > 0)
+                && completion_tokens == 0
+                && total_tokens == prompt_tokens
+            {
+                let connection_id = connection.id.as_str();
+                let api_key = connection
+                    .api_key
+                    .as_deref()
+                    .map(String::from)
+                    .unwrap_or_else(|| connection.access_token.clone().unwrap_or_default());
+                let token_usage = crate::types::TokenUsage {
+                    prompt_tokens,
+                    input_tokens: None,
+                    completion_tokens: Some(0),
+                    output_tokens: None,
+                    total_tokens,
+                    reasoning_tokens: None,
+                    cached_tokens: None,
+                    cache_read_input_tokens: None,
+                    cache_creation_input_tokens: None,
+                    extra: Default::default(),
+                };
+                state.usage_tracker().track_request(
+                    provider,
+                    model,
+                    Some(&token_usage),
+                    Some(connection_id),
+                    Some(&api_key),
+                    Some(url.as_str()),
+                )
+                .await;
+            }
+        }
+        return rebuild_json_response(status, bytes.to_vec());
+    }
+
     proxy_upstream_response(response, headers).await
+}
+
+/// Fallback when the upstream body could not be consumed: return an empty
+/// JSON error preserving the status.
+async fn proxy_upstream_response_raw(status: axum::http::StatusCode) -> Response {
+    axum::response::Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::to_vec(&json!({ "error": { "message": "upstream read failed" } }))
+                .unwrap_or_default(),
+        ))
+        .unwrap_or_else(|_| {
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::BAD_GATEWAY)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        })
+}
+
+/// Rebuild an already-consumed response body into a new Response.
+fn rebuild_json_response(status: axum::http::StatusCode, bytes: Vec<u8>) -> Response {
+    axum::response::Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
+        .body(axum::body::Body::from(bytes))
+        .unwrap_or_else(|_| {
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::empty())
+                .unwrap()
+        })
 }
 
 fn select_media_connection(
