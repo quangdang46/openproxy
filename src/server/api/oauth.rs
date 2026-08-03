@@ -5108,6 +5108,19 @@ async fn kiro_api_key_import(
         })
         .or_else(|| Some(name.clone()));
 
+    // Validate the API key against the same Amazon Q surface used for
+    // inference (ported from 9router v0.5.45 fix(kiro): route API keys
+    // correctly). A bearer-only call to ListAvailableProfiles can return HTTP
+    // 200 with an empty list for an arbitrary key — the model catalog is the
+    // real proof the key can run inference.
+    if let Err(error) = validate_kiro_api_key(api_key, &region).await {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": format!("API key validation failed: {error}") })),
+        )
+            .into_response();
+    }
+
     let mut provider_specific_data = std::collections::BTreeMap::new();
     provider_specific_data.insert("region".to_string(), Value::String(region));
     provider_specific_data.insert(
@@ -5152,6 +5165,41 @@ async fn kiro_api_key_import(
         .into_response(),
         Err(error) => internal_error_response(error.to_string()),
     }
+}
+
+/// Validate a Kiro API key against the Amazon Q model catalog.
+/// GET https://q.{region}.amazonaws.com/ListAvailableModels?origin=AI_EDITOR
+/// with `TokenType: API_KEY` (mirrors KiroService.listAvailableApiKeyModels).
+async fn validate_kiro_api_key(api_key: &str, region: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let url = format!("https://q.{region}.amazonaws.com/ListAvailableModels?origin=AI_EDITOR");
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("TokenType", "API_KEY")
+        .header("Accept", "application/json")
+        .header("User-Agent", "AWS-SDK-JS/3.0.0 kiro-ide/1.0.0")
+        .header("X-Amz-User-Agent", "aws-sdk-js/3.0.0 kiro-ide/1.0.0")
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        let error = response.text().await.unwrap_or_default();
+        return Err(format!("Failed to list API-key models: {error}"));
+    }
+    let data: Value = response.json().await.map_err(|e| e.to_string())?;
+    let models = data
+        .get("models")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.len())
+        .unwrap_or(0);
+    if models == 0 {
+        return Err("API key returned no available models".to_string());
+    }
+    Ok(())
 }
 
 /// POST /api/oauth/kiro/import-cli-proxy
