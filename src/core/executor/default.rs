@@ -1249,28 +1249,67 @@ impl DefaultExecutor {
 
     /// Try to refresh OAuth credentials when the upstream returns 401/403.
     /// Returns `Some(updated_creds)` on success, `None` on failure.
+    /// Refresh credentials with retry, rotating the refresh_token between
+    /// attempts (ported from 9router v0.5.45 fix(refresh): rotate refresh_token
+    /// between retry attempts). Rotating-RT providers (xAI/grok-cli) issue a
+    /// new refresh_token on every refresh; without in-place rotation the 2nd/3rd
+    /// retry reuses the already-consumed RT → invalid_grant → auth_failed.
     async fn try_refresh_credentials(
         &self,
         credentials: &ProviderConnection,
     ) -> Option<ProviderConnection> {
-        let refresh_token = credentials.refresh_token.as_deref()?;
-        if refresh_token.is_empty() {
+        let mut working = credentials.clone();
+        if working.refresh_token.as_deref().unwrap_or("").is_empty() {
             return None;
         }
 
-        match dispatch_oauth_refresh(
-            &self.provider,
-            refresh_token,
-            &credentials.provider_specific_data,
-        )
-        .await
-        {
-            Ok(result) => {
-                let mut updated = credentials.clone();
-                updated.access_token = Some(result.access_token);
-                if let Some(new_refresh) = result.refresh_token {
-                    updated.refresh_token = Some(new_refresh);
+        let provider = self.provider.clone();
+        // Working copies of the rotated RT/AT, behind Arc<Mutex> so the Fn
+        // closure can rotate them between retry attempts without moving fields
+        // out of `working`; read back after the retry loop completes.
+        let refresh_holder = std::sync::Arc::new(std::sync::Mutex::new(
+            working.refresh_token.clone(),
+        ));
+        let access_holder =
+            std::sync::Arc::new(std::sync::Mutex::new(working.access_token.clone()));
+        let refresh_holder_inner = refresh_holder.clone();
+        let access_holder_inner = access_holder.clone();
+        let psd_for_attempt = working.provider_specific_data.clone();
+        let attempt = move || {
+            let provider = provider.clone();
+            let refresh_holder = refresh_holder_inner.clone();
+            let access_holder = access_holder_inner.clone();
+            let psd = psd_for_attempt.clone();
+            async move {
+                let refresh_token = refresh_holder
+                    .lock()
+                    .map(|g| g.clone().unwrap_or_default())
+                    .unwrap_or_default();
+                let prior_refresh = refresh_holder.lock().map(|g| g.clone()).unwrap_or_default();
+                let result = dispatch_oauth_refresh(&provider, &refresh_token, &psd).await?;
+                if let Some(new_refresh) = result.refresh_token.clone() {
+                    if Some(&new_refresh) != prior_refresh.as_ref() {
+                        if let Ok(mut guard) = refresh_holder.lock() {
+                            *guard = Some(new_refresh);
+                        }
+                        if let Ok(mut guard) = access_holder.lock() {
+                            *guard = Some(result.access_token.clone());
+                        }
+                    }
                 }
+                Ok(result)
+            }
+        };
+
+        match crate::oauth::token_refresh::refresh_with_retry(attempt).await {
+            Ok(result) => {
+                // The closure may have rotated credentials mid-loop; prefer the
+                // freshest values from the holders.
+                let rotated_access = access_holder.lock().ok().and_then(|g| g.clone());
+                let rotated_refresh = refresh_holder.lock().ok().and_then(|g| g.clone());
+                let mut updated = working;
+                updated.access_token = rotated_access.or(Some(result.access_token));
+                updated.refresh_token = result.refresh_token.clone().or(rotated_refresh);
                 if let Some(expires_in) = result.expires_in {
                     let expiry = chrono::Utc::now() + chrono::Duration::seconds(expires_in);
                     updated.expires_at = Some(expiry.to_rfc3339());

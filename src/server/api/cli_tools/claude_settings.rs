@@ -21,6 +21,7 @@ const RESET_ENV_KEYS: &[&str] = &[
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_MAX_CONTEXT_TOKENS",
     "API_TIMEOUT_MS",
 ];
 
@@ -36,6 +37,8 @@ pub fn routes() -> Router<AppState> {
 #[derive(Debug, Deserialize)]
 struct SaveClaudeSettingsRequest {
     env: Option<Map<String, Value>>,
+    #[serde(default)]
+    max_context_tokens: Option<String>,
 }
 
 pub(super) async fn get_claude_settings(
@@ -97,6 +100,21 @@ async fn save_claude_settings(
         )
             .into_response();
     };
+
+    // CLAUDE_CODE_MAX_CONTEXT_TOKENS — only set when a concrete value is
+    // chosen; "Default" removes the key so Claude Code falls back to the
+    // model's window (ported from 9router v0.5.45 claude-settings route).
+    match body.max_context_tokens {
+        Some(tokens) if !tokens.is_empty() => {
+            env_values.insert(
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS".to_string(),
+                Value::String(tokens),
+            );
+        }
+        _ => {
+            env_values.remove("CLAUDE_CODE_MAX_CONTEXT_TOKENS");
+        }
+    }
 
     normalize_claude_base_url(&mut env_values);
 

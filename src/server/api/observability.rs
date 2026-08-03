@@ -13,7 +13,7 @@
 
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Json;
@@ -99,7 +99,8 @@ async fn stream_logs(State(state): State<AppState>, headers: HeaderMap) -> Respo
     (
         [
             (axum::http::header::CONTENT_TYPE, "text/event-stream"),
-            (axum::http::header::CACHE_CONTROL, "no-cache"),
+            (axum::http::header::CACHE_CONTROL, "no-cache, no-transform"),
+            (HeaderName::from_static("x-accel-buffering"), "no"),
             (axum::http::header::CONNECTION, "keep-alive"),
         ],
         body,

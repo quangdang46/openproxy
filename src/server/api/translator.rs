@@ -337,8 +337,9 @@ async fn send_to_provider(State(state): State<AppState>, Json(body): Json<Value>
                 return (
                     [
                         (header::CONTENT_TYPE, "text/event-stream"),
-                        (header::CACHE_CONTROL, "no-cache"),
+                        (header::CACHE_CONTROL, "no-cache, no-transform"),
                         (header::CONNECTION, "keep-alive"),
+                        (header::HeaderName::from_static("x-accel-buffering"), "no"),
                     ],
                     Body::from_stream(body_stream),
                 )
@@ -433,8 +434,9 @@ async fn stream_console_logs(State(state): State<AppState>) -> Response {
     (
         [
             (header::CONTENT_TYPE, "text/event-stream"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CACHE_CONTROL, "no-cache, no-transform"),
             (header::CONNECTION, "keep-alive"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
         ],
         Body::from_stream(body_stream),
     )

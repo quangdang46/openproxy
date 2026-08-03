@@ -26,6 +26,16 @@ interface ApiKey {
   key: string;
 }
 
+// Context window presets. UI shows the round number; the value written is
+// nudged down 2K to stay safely under the upstream hard cap (v0.5.45 parity).
+const CONTEXT_OPTIONS = [
+  { label: "Default", value: "" },
+  { label: "200K", value: "198000" },
+  { label: "300K", value: "298000" },
+  { label: "500K", value: "498000" },
+  { label: "1M", value: "998000" },
+];
+
 interface ClaudeStatus {
   installed: boolean;
   error?: string;
@@ -81,11 +91,18 @@ export default function ClaudeToolCard({
   const [modalOpen, setModalOpen] = useState<boolean>(false);
   const [currentEditingAlias, setCurrentEditingAlias] = useState<string | null>(null);
   const [selectedApiKey, setSelectedApiKey] = useState<string>("");
+  const [maxContextTokens, setMaxContextTokens] = useState<string>("");
   const [modelAliases, setModelAliases] = useState<Record<string, string>>({});
   const [showManualConfigModal, setShowManualConfigModal] = useState<boolean>(false);
   const [customBaseUrl, setCustomBaseUrl] = useState<string>("");
   const [ccFilterNaming, setCcFilterNaming] = useState<boolean>(false);
   const hasInitializedModels = useRef<boolean>(false);
+
+  // Sync context-window selector with the saved env value (v0.5.45 parity).
+  useEffect(() => {
+    const v = claudeStatus?.settings?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS;
+    setMaxContextTokens(v || "");
+  }, [claudeStatus?.settings?.env?.CLAUDE_CODE_MAX_CONTEXT_TOKENS]);
 
   const getConfigStatus = (): "configured" | "not_configured" | "other" | null => {
     if (!claudeStatus?.installed) return null;
@@ -212,7 +229,7 @@ export default function ClaudeToolCard({
       const res = await fetch("/api/cli-tools/claude-settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ env }),
+        body: JSON.stringify({ env, maxContextTokens }),
       });
       const data = await res.json();
       if (res.ok) {
@@ -408,6 +425,24 @@ export default function ClaudeToolCard({
                     <button onClick={() => openModelSelector(model.alias)} disabled={!hasActiveProviders} className={`w-full sm:w-auto rounded border px-2 py-2 text-xs transition-colors sm:py-1.5 whitespace-nowrap sm:shrink-0 ${hasActiveProviders ? "bg-surface border-border text-text-main hover:border-primary cursor-pointer" : "opacity-50 cursor-not-allowed border-border"}`}>Select Model</button>
                   </div>
                 ))}
+
+                {/* Context Window */}
+                <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">
+                  <span className="text-xs font-semibold text-text-main sm:text-right sm:text-sm">Context window</span>
+                  <span className="material-symbols-outlined hidden text-text-muted text-[14px] sm:inline">arrow_forward</span>
+                  <select
+                    value={maxContextTokens}
+                    onChange={(e) => setMaxContextTokens(e.target.value)}
+                    className="w-full min-w-0 px-2 py-2 bg-surface rounded border border-border text-xs focus:outline-none focus:ring-1 focus:ring-primary/50 sm:py-1.5"
+                  >
+                    {CONTEXT_OPTIONS.map((opt) => (
+                      <option key={opt.label} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                  <Tooltip text="Sets CLAUDE_CODE_MAX_CONTEXT_TOKENS. Values are nudged 2K under the model window to stay safely below the upstream hard cap.">
+                    <span className="material-symbols-outlined text-text-muted text-[14px] cursor-help">info</span>
+                  </Tooltip>
+                </div>
 
                 {/* CC Filter Naming */}
                 <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-[8rem_auto_1fr_auto] sm:items-center sm:gap-2">

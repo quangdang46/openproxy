@@ -409,10 +409,17 @@ fn build_fetch_request(
         }
 
         "jina-reader" => {
-            let request_url = format!("https://r.jina.ai/{}", urlencoding(url));
-            let request_body = json!({});
+            // Jina's JSON POST API (ported from 9router v0.5.45 fix(jina-reader):
+            // recover after transient errors and use JSON POST API). The URL is
+            // sent in the JSON body instead of being embedded in the path.
+            let request_url = "https://r.jina.ai/".to_string();
+            let request_body = json!({ "url": url });
+            let mut h = headers.clone();
+            h.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
             if let Some(key) = api_key {
-                let mut h = HeaderMap::new();
                 h.insert(
                     header::AUTHORIZATION,
                     HeaderValue::from_str(&format!("Bearer {}", key)).map_err(|_| FetchError {
@@ -420,9 +427,8 @@ fn build_fetch_request(
                         message: "Invalid API key header".into(),
                     })?,
                 );
-                return Ok((request_url, request_body, h));
             }
-            Ok((request_url, request_body, headers))
+            Ok((request_url, request_body, h))
         }
 
         "tavily" => {
@@ -488,23 +494,6 @@ fn resolve_fetch_provider(alias: &str) -> String {
         "exa" => "exa".to_string(),
         other => other.to_string(),
     }
-}
-
-/// Simple percent-encoding for URL segments (Jina Reader path).
-fn urlencoding(input: &str) -> String {
-    let mut out = String::with_capacity(input.len() * 3);
-    for byte in input.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
-                out.push(byte as char)
-            }
-            _ => {
-                out.push('%');
-                out.push_str(&format!("{:02X}", byte));
-            }
-        }
-    }
-    out
 }
 
 /// Check whether an `IpAddr` is in a private-use or loopback range.
@@ -601,11 +590,17 @@ fn normalize_fetch_response(
         "jina-reader" => {
             // Jina returns plain text directly
             let text = body.as_str().unwrap_or_default().to_string();
-            // Try to extract title from first line (markdown heading)
+            // Try to extract title from a `Title:` metadata line first, then a
+            // markdown heading (ported from 9router v0.5.45 parseJinaTitle).
             let title = text
                 .lines()
                 .next()
-                .and_then(|line| line.strip_prefix("# ").map(str::to_string));
+                .and_then(|line| line.strip_prefix("Title:").map(str::trim).map(str::to_string))
+                .or_else(|| {
+                    text.lines()
+                        .next()
+                        .and_then(|line| line.strip_prefix("# ").map(str::to_string))
+                });
             (text, title)
         }
         "tavily" => {
