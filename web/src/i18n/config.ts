@@ -1,4 +1,4 @@
-export const LOCALES: readonly string[] = ["en", "vi", "zh-CN", "zh-TW", "ja", "pt-BR", "pt-PT", "ko", "es", "de", "fr", "he", "ar", "ru", "pl", "cs", "nl", "tr", "uk", "tl", "id", "th", "hi", "bn", "ur", "ro", "sv", "it", "el", "hu", "fi", "da", "no", "fa"];
+export const LOCALES: readonly string[] = ["en", "vi", "zh-CN", "zh-TW", "ja", "pt-BR", "pt-PT", "ko", "es", "de", "fr", "he", "ar", "ru", "pl", "cs", "nl", "tr", "uk", "tl", "id", "th", "km", "hi", "bn", "ur", "ro", "sv", "it", "el", "hu", "fi", "da", "no", "fa"];
 export const DEFAULT_LOCALE = "en";
 export const LOCALE_COOKIE = "locale";
 
@@ -26,6 +26,7 @@ export const LOCALE_NAMES: Record<string, string> = {
   "tl": "Tagalog",
   "id": "Indonesia",
   "th": "ไทย",
+  "km": "ភាសាខ្មែរ",
   "hi": "हिन्दी",
   "bn": "বাংলা",
   "ur": "اردو",
@@ -108,6 +109,9 @@ export function normalizeLocale(locale: string): string {
   }
   if (locale === "th") {
     return "th";
+  }
+  if (locale === "km") {
+    return "km";
   }
   if (locale === "hi") {
     return "hi";

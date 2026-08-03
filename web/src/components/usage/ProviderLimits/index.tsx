@@ -7,7 +7,7 @@ import Toggle from "@/shared/components/Toggle";
 import { parseQuotaData, calculatePercentage } from "./utils";
 import Card from "@/shared/components/Card";
 import { EditConnectionModal } from "@/shared/components";
-import { patchSettings } from "@/shared/utils/backendApi";
+import { updateSettings as patchSettings } from "@/shared/utils/backendApi";
 import { ConfirmModal } from "@/shared/components/Modal";
 import Tooltip from "@/shared/components/Tooltip";
 import { useNotificationStore } from "@/store/notificationStore";

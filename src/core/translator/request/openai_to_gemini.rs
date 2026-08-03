@@ -509,6 +509,25 @@ fn cleanup_required(obj: &mut Value) {
 fn add_placeholders(obj: &mut Value) {
     match obj {
         Value::Object(map) => {
+            // Empty schema {} (no type, no properties) after $ref removal — treat as
+            // object with placeholder. Mirrors the v0.5.45 upstream guard.
+            if map.is_empty() {
+                map.insert(
+                    "type".to_string(),
+                    Value::String("object".to_string()),
+                );
+                map.insert(
+                    "properties".to_string(),
+                    serde_json::json!({
+                        "reason": {
+                            "type": "string",
+                            "description": "Brief explanation of why you are calling this tool"
+                        }
+                    }),
+                );
+                map.insert("required".to_string(), serde_json::json!(["reason"]));
+                return;
+            }
             if map.get("type").and_then(Value::as_str) == Some("object") {
                 let props_empty = match map.get("properties") {
                     Some(Value::Object(p)) => p.is_empty(),

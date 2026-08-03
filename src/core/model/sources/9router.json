@@ -1,7 +1,7 @@
 {
   "source": "9router",
-  "ref": "v0.5.15",
-  "generatedAt": "2026-07-02T14:10:00.666Z",
+  "ref": "v0.5.45",
+  "generatedAt": "2026-08-03T13:33:08.755Z",
   "providerIdToAlias": {
     "alicode-intl": "alicode-intl",
     "alicode": "alicode",
@@ -15,6 +15,7 @@
     "chutes": "chutes",
     "claude": "cc",
     "cline": "cl",
+    "clinepass": "clinepass",
     "cloudflare-ai": "cloudflare-ai",
     "codebuddy-cn": "cbcn",
     "codex": "cx",
@@ -23,6 +24,7 @@
     "cursor": "cu",
     "deepgram": "deepgram",
     "deepseek": "deepseek",
+    "featherless": "featherless",
     "fireworks": "fireworks",
     "gemini-cli": "gc",
     "gemini": "gemini",
@@ -30,13 +32,13 @@
     "gitlab": "gitlab",
     "glm-cn": "glm-cn",
     "glm": "glm",
+    "grok-cli": "gcli",
     "grok-web": "grok-web",
     "groq": "groq",
     "hyperbolic": "hyperbolic",
     "iflow": "if",
     "kilocode": "kc",
     "kimchi": "kimchi",
-    "kimi-coding": "kmc",
     "kimi": "kimi",
     "kiro": "kr",
     "mimo-free": "mmf",
@@ -55,6 +57,7 @@
     "openrouter": "openrouter",
     "perplexity-web": "perplexity-web",
     "perplexity": "perplexity",
+    "perplexity-agent": "perplexity-agent",
     "qoder": "qd",
     "qwen": "qw",
     "siliconflow": "siliconflow",
@@ -66,14 +69,73 @@
     "volcengine-ark": "volcengine-ark",
     "xai": "xai",
     "xiaomi-mimo": "xiaomi-mimo",
-    "xiaomi-tokenplan": "xiaomi-tokenplan"
+    "xiaomi-tokenplan": "xiaomi-tokenplan",
+    "alims-intl": "alims-intl",
+    "codebuddy-intl": "cbai",
+    "zed": "zd",
+    "api-airforce": "af",
+    "baidu": "qianfan",
+    "bazaarlink": "bzl",
+    "bluesminds": "bm",
+    "kilo-gateway": "kgw",
+    "llm7": "llm7",
+    "sambanova": "samba",
+    "tencent": "hunyuan",
+    "morph": "morph",
+    "poolside": "poolside"
   },
   "providers": [
+    {
+      "id": "api-airforce",
+      "alias": "af",
+      "format": "openai",
+      "baseUrl": "https://api.airforce/v1/chat/completions",
+      "models": [
+        {
+          "id": "anthropic/claude-3.7-sonnet",
+          "name": "Claude 3.7 Sonnet (Free)",
+          "kind": "llm",
+          "contextLength": 200000
+        },
+        {
+          "id": "moonshot/kimi-k2.6",
+          "name": "Kimi K2.6 (Free)",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "google/gemini-2.5-flash",
+          "name": "Gemini 2.5 Flash (Free)",
+          "kind": "llm",
+          "contextLength": 1048576
+        }
+      ]
+    },
     {
       "id": "antigravity",
       "alias": "ag",
       "format": "antigravity",
       "models": [
+        {
+          "id": "gemini-3.6-flash-high",
+          "name": "Gemini 3.6 Flash (High)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.6-flash-medium",
+          "name": "Gemini 3.6 Flash (Medium)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.6-flash-low",
+          "name": "Gemini 3.6 Flash (Low)",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.5-flash-high",
+          "name": "Gemini 3.5 Flash (High)",
+          "kind": "llm"
+        },
         {
           "id": "gemini-3-flash-agent",
           "name": "Gemini 3.5 Flash (High)",
@@ -179,6 +241,49 @@
       "alias": "alicode-intl",
       "format": "openai",
       "baseUrl": "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "qwen3.5-plus",
+          "name": "Qwen3.5 Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm"
+        },
+        {
+          "id": "MiniMax-M2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-next",
+          "name": "Qwen3 Coder Next",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3-coder-plus",
+          "name": "Qwen3 Coder Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "alims-intl",
+      "alias": "alims-intl",
+      "format": "openai",
+      "baseUrl": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
       "models": [
         {
           "id": "qwen3.5-plus",
@@ -363,6 +468,98 @@
       ]
     },
     {
+      "id": "bluesminds",
+      "alias": "bm",
+      "format": "openai",
+      "baseUrl": "https://api.bluesminds.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-4.1",
+          "name": "GPT-4.1",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "gpt-4.1-mini",
+          "name": "GPT-4.1 Mini",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "gpt-4.1-nano",
+          "name": "GPT-4.1 Nano",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "claude-sonnet-4-5",
+          "name": "Claude Sonnet 4.5",
+          "kind": "llm",
+          "contextLength": 200000
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "name": "Claude Haiku 4.5",
+          "kind": "llm",
+          "contextLength": 200000
+        },
+        {
+          "id": "gemini-2.0-flash",
+          "name": "Gemini 2.0 Flash",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "gemini-2.0-flash-exp",
+          "name": "Gemini 2.0 Flash (Exp)",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "qwen-turbo",
+          "name": "Qwen Turbo",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "kimi-k2",
+          "name": "Kimi K2",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "kimi-k2-thinking",
+          "name": "Kimi K2 Thinking",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM 4.7",
+          "kind": "llm",
+          "contextLength": 204800
+        },
+        {
+          "id": "minimax-m2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm",
+          "contextLength": 204800
+        },
+        {
+          "id": "claude-opus-4-5",
+          "name": "Claude Opus 4.5 (VIP)",
+          "kind": "llm",
+          "contextLength": 200000
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "name": "Gemini 2.5 Pro (VIP)",
+          "kind": "llm",
+          "contextLength": 1048576
+        }
+      ]
+    },
+    {
       "id": "byteplus",
       "alias": "byteplus",
       "format": "openai",
@@ -401,6 +598,240 @@
         {
           "id": "gpt-oss-120b-250805",
           "name": "GPT-OSS-120B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "bazaarlink",
+      "alias": "bzl",
+      "format": "openai",
+      "baseUrl": "https://bazaarlink.ai/api/v1/chat/completions",
+      "models": [
+        {
+          "id": "auto:free",
+          "name": "Auto Free (Zero Cost)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.7",
+          "name": "Claude Opus 4.7",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "claude-sonnet-4.6",
+          "name": "Claude Sonnet 4.6",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "claude-haiku-4.5",
+          "name": "Claude Haiku 4.5",
+          "kind": "llm",
+          "contextLength": 200000
+        },
+        {
+          "id": "gpt-5.5",
+          "name": "GPT-5.5",
+          "kind": "llm",
+          "contextLength": 1050000
+        },
+        {
+          "id": "gpt-5.4",
+          "name": "GPT-5.4",
+          "kind": "llm",
+          "contextLength": 1050000
+        },
+        {
+          "id": "gpt-5.4-mini",
+          "name": "GPT-5.4 Mini",
+          "kind": "llm",
+          "contextLength": 400000
+        },
+        {
+          "id": "gpt-5.4-nano",
+          "name": "GPT-5.4 Nano",
+          "kind": "llm",
+          "contextLength": 400000
+        },
+        {
+          "id": "grok-4.3",
+          "name": "Grok 4.3",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "grok-4.20",
+          "name": "Grok 4.20",
+          "kind": "llm",
+          "contextLength": 2000000
+        },
+        {
+          "id": "gemini-3.1-pro-preview",
+          "name": "Gemini 3.1 Pro",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "gemini-3-flash-preview",
+          "name": "Gemini 3 Flash",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "gemini-3.1-flash-lite-preview",
+          "name": "Gemini 3.1 Flash Lite",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "glm-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm",
+          "contextLength": 204800
+        },
+        {
+          "id": "glm-5",
+          "name": "GLM 5",
+          "kind": "llm",
+          "contextLength": 204800
+        },
+        {
+          "id": "mimo-v2.5-pro",
+          "name": "MiMo-V2.5-Pro",
+          "kind": "llm",
+          "contextLength": 1050000
+        },
+        {
+          "id": "mimo-v2.5",
+          "name": "MiMo-V2.5",
+          "kind": "llm",
+          "contextLength": 1050000
+        },
+        {
+          "id": "minimax-m3",
+          "name": "MiniMax M3",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "minimax-m2.7",
+          "name": "MiniMax M2.7",
+          "kind": "llm",
+          "contextLength": 204800
+        },
+        {
+          "id": "minimax-m2.5",
+          "name": "MiniMax M2.5",
+          "kind": "llm",
+          "contextLength": 204800
+        },
+        {
+          "id": "qwen3.6-plus",
+          "name": "Qwen 3.6 Plus",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "nemotron-3-super-120b-a12b",
+          "name": "Nemotron 3 Super",
+          "kind": "llm",
+          "contextLength": 1000000
+        }
+      ]
+    },
+    {
+      "id": "codebuddy-intl",
+      "alias": "cbai",
+      "format": "openai",
+      "baseUrl": "https://www.codebuddy.ai/v2/chat/completions",
+      "models": [
+        {
+          "id": "glm-5.2",
+          "name": "GLM-5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5.1",
+          "name": "GLM-5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5.0",
+          "name": "GLM-5.0",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5.0-turbo",
+          "name": "GLM-5.0-Turbo",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5v-turbo",
+          "name": "GLM-5v-Turbo",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-4.7",
+          "name": "GLM-4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "minimax-m3",
+          "name": "MiniMax-M3",
+          "kind": "llm"
+        },
+        {
+          "id": "minimax-m2.7",
+          "name": "MiniMax-M2.7",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.7",
+          "name": "Kimi-K2.7-Code",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi-K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.5",
+          "name": "Kimi-K2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "hy3-preview",
+          "name": "Hy3 Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek-V4-Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek-V4-Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-v3-2-volc",
+          "name": "DeepSeek-V3.2",
           "kind": "llm"
         }
       ]
@@ -495,33 +926,18 @@
       "baseUrl": "https://api.anthropic.com/v1/messages",
       "models": [
         {
-          "id": "claude-opus-4-8",
-          "name": "Claude Opus 4.8",
+          "id": "claude-opus-5",
+          "name": "Claude Opus 5",
           "kind": "llm"
         },
         {
-          "id": "claude-opus-4-7",
-          "name": "Claude Opus 4.7",
+          "id": "claude-fable-5",
+          "name": "Claude Fable 5",
           "kind": "llm"
         },
         {
-          "id": "claude-opus-4-6",
-          "name": "Claude Opus 4.6",
-          "kind": "llm"
-        },
-        {
-          "id": "claude-sonnet-4-6",
-          "name": "Claude Sonnet 4.6",
-          "kind": "llm"
-        },
-        {
-          "id": "claude-opus-4-5-20251101",
-          "name": "Claude 4.5 Opus",
-          "kind": "llm"
-        },
-        {
-          "id": "claude-sonnet-4-5-20250929",
-          "name": "Claude 4.5 Sonnet",
+          "id": "claude-sonnet-5",
+          "name": "Claude Sonnet 5",
           "kind": "llm"
         },
         {
@@ -613,6 +1029,64 @@
         {
           "id": "kwaipilot/kat-coder-pro",
           "name": "KAT Coder Pro",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "clinepass",
+      "alias": "clinepass",
+      "format": "openai",
+      "baseUrl": "https://api.cline.bot/api/v1/chat/completions",
+      "models": [
+        {
+          "id": "cline-pass/glm-5.2",
+          "name": "GLM-5.2 (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/kimi-k2.7-code",
+          "name": "Kimi K2.7 Code (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/kimi-k2.6",
+          "name": "Kimi K2.6 (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/mimo-v2.5",
+          "name": "MiMo-V2.5 (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/mimo-v2.5-pro",
+          "name": "MiMo-V2.5-Pro (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/minimax-m3",
+          "name": "MiniMax M3 (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/qwen3.7-max",
+          "name": "Qwen3.7 Max (ClinePass)",
+          "kind": "llm"
+        },
+        {
+          "id": "cline-pass/qwen3.7-plus",
+          "name": "Qwen3.7 Plus (ClinePass)",
           "kind": "llm"
         }
       ]
@@ -932,6 +1406,36 @@
       "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
       "models": [
         {
+          "id": "gpt-5.6-sol",
+          "name": "GPT 5.6 Sol",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.6-sol-review",
+          "name": "GPT 5.6 Sol Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "name": "GPT 5.6 Terra",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.6-terra-review",
+          "name": "GPT 5.6 Terra Review",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "name": "GPT 5.6 Luna",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.6-luna-review",
+          "name": "GPT 5.6 Luna Review",
+          "kind": "llm"
+        },
+        {
           "id": "gpt-5.5",
           "name": "GPT 5.5",
           "kind": "llm"
@@ -959,56 +1463,6 @@
         {
           "id": "gpt-5.4-mini-review",
           "name": "GPT 5.4 Mini Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex",
-          "name": "GPT 5.3 Codex",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-review",
-          "name": "GPT 5.3 Codex Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-xhigh",
-          "name": "GPT 5.3 Codex (xHigh)",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-xhigh-review",
-          "name": "GPT 5.3 Codex (xHigh) Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-high",
-          "name": "GPT 5.3 Codex (High)",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-high-review",
-          "name": "GPT 5.3 Codex (High) Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-low",
-          "name": "GPT 5.3 Codex (Low)",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-low-review",
-          "name": "GPT 5.3 Codex (Low) Review",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-none",
-          "name": "GPT 5.3 Codex (None)",
-          "kind": "llm"
-        },
-        {
-          "id": "gpt-5.3-codex-none-review",
-          "name": "GPT 5.3 Codex (None) Review",
           "kind": "llm"
         },
         {
@@ -1233,6 +1687,49 @@
       ]
     },
     {
+      "id": "featherless",
+      "alias": "featherless",
+      "format": "openai",
+      "baseUrl": "https://api.featherless.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "deepseek-ai/DeepSeek-V4-Pro",
+          "name": "DeepSeek V4 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/DeepSeek-V4-Flash",
+          "name": "DeepSeek V4 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-5.2",
+          "name": "GLM 5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "zai-org/GLM-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.7-Code",
+          "name": "Kimi K2.7 Code",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/Kimi-K2.5",
+          "name": "Kimi K2.5",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
       "id": "fireworks",
       "alias": "fireworks",
       "format": "openai",
@@ -1304,11 +1801,56 @@
       ]
     },
     {
+      "id": "grok-cli",
+      "alias": "gcli",
+      "format": "openai-responses",
+      "baseUrl": "https://cli-chat-proxy.grok.com/v1/responses",
+      "models": [
+        {
+          "id": "grok-build",
+          "name": "Grok Build",
+          "kind": "llm",
+          "contextLength": 500000,
+          "maxOutputTokens": 64000
+        },
+        {
+          "id": "grok-4.5",
+          "name": "Grok 4.5",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.5-high",
+          "name": "Grok 4.5 (High)",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.5-medium",
+          "name": "Grok 4.5 (Medium)",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.5-low",
+          "name": "Grok 4.5 (Low)",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
       "id": "gemini",
       "alias": "gemini",
       "format": "gemini",
       "baseUrl": "https://generativelanguage.googleapis.com/v1beta/models",
       "models": [
+        {
+          "id": "gemini-3.6-flash",
+          "name": "Gemini 3.6 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "gemini-3.5-flash-lite",
+          "name": "Gemini 3.5 Flash Lite",
+          "kind": "llm"
+        },
         {
           "id": "gemini-3.1-pro-preview",
           "name": "Gemini 3.1 Pro Preview",
@@ -2217,6 +2759,26 @@
       ]
     },
     {
+      "id": "tencent",
+      "alias": "hunyuan",
+      "format": "openai",
+      "baseUrl": "https://api.hunyuan.cloud.tencent.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "hunyuan-turbos-latest",
+          "name": "Hunyuan TurboS Latest",
+          "kind": "llm",
+          "contextLength": 200000
+        },
+        {
+          "id": "hunyuan-t1-latest",
+          "name": "Hunyuan T1 Latest",
+          "kind": "llm",
+          "contextLength": 256000
+        }
+      ]
+    },
+    {
       "id": "hyperbolic",
       "alias": "hyperbolic",
       "format": "openai",
@@ -2396,6 +2958,50 @@
       ]
     },
     {
+      "id": "kilo-gateway",
+      "alias": "kgw",
+      "format": "openai",
+      "baseUrl": "https://api.kilo.ai/api/gateway/chat/completions",
+      "models": [
+        {
+          "id": "kilo-auto/free",
+          "name": "Kilo Auto Free",
+          "kind": "llm",
+          "contextLength": 256000
+        },
+        {
+          "id": "nvidia/nemotron-3-super-120b-a12b:free",
+          "name": "Nemotron 3 Super 120B (Free)",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+          "name": "Nemotron 3 Ultra 550B (Free)",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "kwaipilot/kat-coder-pro-v2.5:free",
+          "name": "Kat Coder Pro v2.5 (Free)",
+          "kind": "llm",
+          "contextLength": 256000
+        },
+        {
+          "id": "kilo-auto/frontier",
+          "name": "Kilo Auto Frontier",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "kilo-auto/balanced",
+          "name": "Kilo Auto Balanced",
+          "kind": "llm",
+          "contextLength": 1000000
+        }
+      ]
+    },
+    {
       "id": "kimchi",
       "alias": "kimchi",
       "format": "openai",
@@ -2450,33 +3056,35 @@
       "baseUrl": "https://api.kimi.com/coding/v1/messages",
       "models": [
         {
-          "id": "kimi-k2.6",
-          "name": "Kimi K2.6",
+          "id": "kimi-k3",
+          "name": "Kimi K3",
           "kind": "llm"
         },
         {
-          "id": "kimi-k2.5",
-          "name": "Kimi K2.5",
+          "id": "k3",
+          "name": "Kimi K3 (Code)",
           "kind": "llm"
         },
         {
-          "id": "kimi-k2.5-thinking",
-          "name": "Kimi K2.5 Thinking",
+          "id": "kimi-for-coding",
+          "name": "Kimi for Coding",
           "kind": "llm"
         },
         {
-          "id": "kimi-latest",
-          "name": "Kimi Latest",
+          "id": "kimi-for-coding-highspeed",
+          "name": "Kimi for Coding Highspeed",
           "kind": "llm"
-        }
-      ]
-    },
-    {
-      "id": "kimi-coding",
-      "alias": "kmc",
-      "format": "claude",
-      "baseUrl": "https://api.kimi.com/coding/v1/messages",
-      "models": [
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "name": "Kimi K2.7 Code",
+          "kind": "llm"
+        },
+        {
+          "id": "kimi-k2.7-code-highspeed",
+          "name": "Kimi K2.7 Code Highspeed",
+          "kind": "llm"
+        },
         {
           "id": "kimi-k2.6",
           "name": "Kimi K2.6",
@@ -2505,6 +3113,91 @@
       "format": "kiro",
       "baseUrl": "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
       "models": [
+        {
+          "id": "claude-opus-5",
+          "name": "Claude Opus 5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-5-thinking",
+          "name": "Claude Opus 5 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-5-agentic",
+          "name": "Claude Opus 5 (Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-5-thinking-agentic",
+          "name": "Claude Opus 5 (Thinking + Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.8",
+          "name": "Claude Opus 4.8",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.8-thinking",
+          "name": "Claude Opus 4.8 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.8-agentic",
+          "name": "Claude Opus 4.8 (Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.8-thinking-agentic",
+          "name": "Claude Opus 4.8 (Thinking + Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.7",
+          "name": "Claude Opus 4.7",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.7-thinking",
+          "name": "Claude Opus 4.7 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.7-agentic",
+          "name": "Claude Opus 4.7 (Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.7-thinking-agentic",
+          "name": "Claude Opus 4.7 (Thinking + Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.5",
+          "name": "Claude Opus 4.5",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.5-thinking",
+          "name": "Claude Opus 4.5 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.5-agentic",
+          "name": "Claude Opus 4.5 (Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-opus-4.5-thinking-agentic",
+          "name": "Claude Opus 4.5 (Thinking + Agentic)",
+          "kind": "llm"
+        },
+        {
+          "id": "claude-sonnet-5",
+          "name": "Claude Sonnet 5",
+          "kind": "llm"
+        },
         {
           "id": "claude-sonnet-4.5",
           "name": "Claude Sonnet 4.5",
@@ -2536,6 +3229,29 @@
           "kind": "llm"
         },
         {
+          "id": "gpt-5.6-sol",
+          "name": "GPT 5.6 Sol",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "gpt-5.6-terra",
+          "name": "GPT 5.6 Terra",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "name": "GPT 5.6 Luna",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "claude-sonnet-5-thinking",
+          "name": "Claude Sonnet 5 (Thinking)",
+          "kind": "llm"
+        },
+        {
           "id": "claude-sonnet-4.5-thinking",
           "name": "Claude Sonnet 4.5 (Thinking)",
           "kind": "llm"
@@ -2543,6 +3259,29 @@
         {
           "id": "claude-haiku-4.5-thinking",
           "name": "Claude Haiku 4.5 (Thinking)",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.6-sol-thinking",
+          "name": "GPT 5.6 Sol (Thinking)",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "gpt-5.6-terra-thinking",
+          "name": "GPT 5.6 Terra (Thinking)",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "gpt-5.6-luna-thinking",
+          "name": "GPT 5.6 Luna (Thinking)",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "claude-sonnet-5-agentic",
+          "name": "Claude Sonnet 5 (Agentic)",
           "kind": "llm"
         },
         {
@@ -2556,6 +3295,29 @@
           "kind": "llm"
         },
         {
+          "id": "gpt-5.6-sol-agentic",
+          "name": "GPT 5.6 Sol (Agentic)",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "gpt-5.6-terra-agentic",
+          "name": "GPT 5.6 Terra (Agentic)",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "gpt-5.6-luna-agentic",
+          "name": "GPT 5.6 Luna (Agentic)",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "claude-sonnet-5-thinking-agentic",
+          "name": "Claude Sonnet 5 (Thinking + Agentic)",
+          "kind": "llm"
+        },
+        {
           "id": "claude-sonnet-4.5-thinking-agentic",
           "name": "Claude Sonnet 4.5 (Thinking + Agentic)",
           "kind": "llm"
@@ -2564,6 +3326,62 @@
           "id": "claude-haiku-4.5-thinking-agentic",
           "name": "Claude Haiku 4.5 (Thinking + Agentic)",
           "kind": "llm"
+        },
+        {
+          "id": "gpt-5.6-sol-thinking-agentic",
+          "name": "GPT 5.6 Sol (Thinking + Agentic)",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "gpt-5.6-terra-thinking-agentic",
+          "name": "GPT 5.6 Terra (Thinking + Agentic)",
+          "kind": "llm",
+          "contextLength": 272000
+        },
+        {
+          "id": "gpt-5.6-luna-thinking-agentic",
+          "name": "GPT 5.6 Luna (Thinking + Agentic)",
+          "kind": "llm",
+          "contextLength": 272000
+        }
+      ]
+    },
+    {
+      "id": "llm7",
+      "alias": "llm7",
+      "format": "openai",
+      "baseUrl": "https://api.llm7.io/v1/chat/completions",
+      "models": [
+        {
+          "id": "gpt-5.5",
+          "name": "GPT-5.5 (LLM7)",
+          "kind": "llm",
+          "contextLength": 1050000
+        },
+        {
+          "id": "claude-opus-5",
+          "name": "Claude Opus 5 (LLM7)",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash (LLM7)",
+          "kind": "llm",
+          "contextLength": 1000000
+        },
+        {
+          "id": "grok-4.5",
+          "name": "Grok 4.5 (LLM7)",
+          "kind": "llm",
+          "contextLength": 500000
+        },
+        {
+          "id": "kimi-k3",
+          "name": "Kimi K3 (LLM7)",
+          "kind": "llm",
+          "contextLength": 1000000
         }
       ]
     },
@@ -2761,6 +3579,48 @@
       ]
     },
     {
+      "id": "morph",
+      "alias": "morph",
+      "format": "openai",
+      "baseUrl": "https://api.morphllm.com/v1/chat/completions",
+      "models": [
+        {
+          "id": "morph-v3-large",
+          "name": "Morph v3 Large",
+          "kind": "llm"
+        },
+        {
+          "id": "morph-v3-fast",
+          "name": "Morph v3 Fast",
+          "kind": "llm"
+        },
+        {
+          "id": "morph-qwen35-397b",
+          "name": "Qwen 3.5 397B (Morph)",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "morph-minimax27-230b",
+          "name": "MiniMax M2.7 (Morph)",
+          "kind": "llm",
+          "contextLength": 200704
+        },
+        {
+          "id": "morph-qwen36-27b",
+          "name": "Qwen 3.6 27B (Morph)",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "morph-dsv4flash",
+          "name": "DeepSeek V4 Flash (Morph)",
+          "kind": "llm",
+          "contextLength": 1048576
+        }
+      ]
+    },
+    {
       "id": "nanobanana",
       "alias": "nanobanana",
       "format": "openai",
@@ -2804,12 +3664,37 @@
       "models": [
         {
           "id": "minimaxai/minimax-m2.7",
-          "name": "Minimax M2.7",
+          "name": "MiniMax M2.7",
           "kind": "llm"
         },
         {
-          "id": "z-ai/glm4.7",
-          "name": "GLM 4.7",
+          "id": "minimaxai/minimax-m3",
+          "name": "MiniMax M3",
+          "kind": "llm"
+        },
+        {
+          "id": "z-ai/glm-5.2",
+          "name": "GLM 5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "deepseek-ai/deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "moonshotai/kimi-k2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm"
+        },
+        {
+          "id": "nvidia/nemotron-3-ultra-550b-a55b",
+          "name": "Nemotron 3 Ultra",
           "kind": "llm"
         },
         {
@@ -3411,6 +4296,69 @@
       ]
     },
     {
+      "id": "perplexity-agent",
+      "alias": "perplexity-agent",
+      "format": "openai-responses",
+      "baseUrl": "https://api.perplexity.ai/v1/responses",
+      "models": [
+        {
+          "id": "perplexity/sonar",
+          "name": "Perplexity Sonar",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-5.5",
+          "name": "GPT-5.5",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-5.4",
+          "name": "GPT-5.4",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/gpt-5.4-mini",
+          "name": "GPT-5.4 Mini",
+          "kind": "llm"
+        },
+        {
+          "id": "anthropic/claude-sonnet-4-6",
+          "name": "Claude Sonnet 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "anthropic/claude-opus-4-8",
+          "name": "Claude Opus 4.8",
+          "kind": "llm"
+        },
+        {
+          "id": "google/gemini-3.1-pro-preview",
+          "name": "Gemini 3.1 Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "xai/grok-4.20-reasoning",
+          "name": "Grok 4.20 Reasoning",
+          "kind": "llm"
+        },
+        {
+          "id": "perplexity/glm-5.2",
+          "name": "GLM 5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "perplexity/kimi-k2.7-code",
+          "name": "Kimi K2.7 Code",
+          "kind": "llm"
+        },
+        {
+          "id": "nvidia/nemotron-3-super-120b-a12b",
+          "name": "Nemotron 3 Super 120B",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
       "id": "perplexity-web",
       "alias": "perplexity-web",
       "format": "perplexity-web",
@@ -3455,15 +4403,143 @@
       ]
     },
     {
+      "id": "poolside",
+      "alias": "poolside",
+      "format": "openai",
+      "baseUrl": "https://inference.poolside.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "poolside/laguna-s-2.1",
+          "name": "Laguna S 2.1",
+          "kind": "llm"
+        },
+        {
+          "id": "poolside/laguna-xs-2.1",
+          "name": "Laguna XS 2.1",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
       "id": "qoder",
       "alias": "qd",
       "format": "openai",
       "baseUrl": "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation",
       "models": [
         {
-          "id": "qmodel_latest",
-          "name": "Qoder Qwen 3.7 Max",
+          "id": "ultimate",
+          "name": "Ultimate",
           "kind": "llm"
+        },
+        {
+          "id": "auto",
+          "name": "Auto",
+          "kind": "llm"
+        },
+        {
+          "id": "performance",
+          "name": "Performance",
+          "kind": "llm"
+        },
+        {
+          "id": "efficient",
+          "name": "Efficient",
+          "kind": "llm"
+        },
+        {
+          "id": "qmodel_preview",
+          "name": "Qwen3.8-Max-Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "qmodel_latest",
+          "name": "Qwen3.7-Max",
+          "kind": "llm"
+        },
+        {
+          "id": "qmodel",
+          "name": "Qwen3.7-Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "kmodel_latest",
+          "name": "Kimi-K3",
+          "kind": "llm"
+        },
+        {
+          "id": "kmodel",
+          "name": "Kimi-K2.7-Code",
+          "kind": "llm"
+        },
+        {
+          "id": "gm51model",
+          "name": "GLM-5.2",
+          "kind": "llm"
+        },
+        {
+          "id": "dmodel",
+          "name": "DeepSeek-V4-Pro",
+          "kind": "llm"
+        },
+        {
+          "id": "dfmodel",
+          "name": "DeepSeek-V4-Flash",
+          "kind": "llm"
+        },
+        {
+          "id": "mmodel",
+          "name": "MiniMax-M3",
+          "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "baidu",
+      "alias": "qianfan",
+      "format": "openai",
+      "baseUrl": "https://qianfan.baidubce.com/v2/chat/completions",
+      "models": [
+        {
+          "id": "deepseek-v4-pro",
+          "name": "DeepSeek V4 Pro",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "name": "DeepSeek V4 Flash",
+          "kind": "llm",
+          "contextLength": 1048576
+        },
+        {
+          "id": "glm-5.2",
+          "name": "GLM 5.2",
+          "kind": "llm",
+          "contextLength": 512000
+        },
+        {
+          "id": "glm-5.1",
+          "name": "GLM 5.1",
+          "kind": "llm",
+          "contextLength": 198000
+        },
+        {
+          "id": "kimi-k2.6",
+          "name": "Kimi K2.6",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "qwen3.5-397b-a17b",
+          "name": "Qwen 3.5 397B A17B",
+          "kind": "llm",
+          "contextLength": 262144
+        },
+        {
+          "id": "qwen3.5-27b",
+          "name": "Qwen 3.5 27B",
+          "kind": "llm",
+          "contextLength": 262144
         }
       ]
     },
@@ -3534,6 +4610,20 @@
           "id": "gen3a_turbo",
           "name": "Gen-3 Alpha Turbo",
           "kind": "llm"
+        }
+      ]
+    },
+    {
+      "id": "sambanova",
+      "alias": "samba",
+      "format": "openai",
+      "baseUrl": "https://api.sambanova.ai/v1/chat/completions",
+      "models": [
+        {
+          "id": "MiniMax-M2.7",
+          "name": "MiniMax M2.7",
+          "kind": "llm",
+          "contextLength": 196608
         }
       ]
     },
@@ -3973,6 +5063,11 @@
           "id": "grok-2-image-1212",
           "name": "Grok 2 Image",
           "kind": "llm"
+        },
+        {
+          "id": "grok-imagine-video",
+          "name": "Grok Imagine Video",
+          "kind": "llm"
         }
       ]
     },
@@ -4056,6 +5151,13 @@
           "kind": "llm"
         }
       ]
+    },
+    {
+      "id": "zed",
+      "alias": "zd",
+      "format": "openai",
+      "baseUrl": "https://cloud.zed.dev/completions",
+      "models": []
     }
   ]
 }

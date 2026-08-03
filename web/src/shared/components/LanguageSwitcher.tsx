@@ -45,6 +45,7 @@ const getLocaleInfo = (locale: string): LocaleInfo => {
     "tl": { name: "Tagalog", flag: "🇵🇭" },
     "id": { name: "Indonesia", flag: "🇮🇩" },
     "th": { name: "ไทย", flag: "🇹🇭" },
+    "km": { name: "ភាសាខ្មែរ", flag: "🇰🇭" },
     "hi": { name: "हिन्दी", flag: "🇮🇳" },
     "bn": { name: "বাংলা", flag: "🇧🇩" },
     "ur": { name: "اردو", flag: "🇵🇰" },

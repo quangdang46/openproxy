@@ -351,6 +351,12 @@ pub fn chat_to_openai_responses_request(
         result["top_p"] = t.clone();
     }
 
+    // Passthrough service_tier (ported from 9router v0.5.40 fix(translator):
+    // pass service_tier through OpenAI→Responses conversion).
+    if let Some(tier) = body.get("service_tier") {
+        result["service_tier"] = tier.clone();
+    }
+
     *body = result;
     let _ = stream;
     true

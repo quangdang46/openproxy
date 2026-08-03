@@ -22,6 +22,7 @@ export const LOCALE_FLAGS: Record<string, string> = {
   tl: "🇵🇭",
   id: "🇮🇩",
   th: "🇹🇭",
+  km: "🇰🇭",
   hi: "🇮🇳",
   bn: "🇧🇩",
   ur: "🇵🇰",
