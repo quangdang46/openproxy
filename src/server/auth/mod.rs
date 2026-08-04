@@ -327,9 +327,8 @@ pub fn require_api_key(headers: &HeaderMap, db: &Db) -> Result<ApiKey, AuthError
     let presented = extract_presented_key(headers).ok_or(AuthError::Missing)?;
     let snapshot = db.snapshot();
     let api_key = snapshot
-        .api_keys
-        .iter()
-        .find(|api_key| api_key.key == presented.key)
+        .api_key_map
+        .get(&presented.key)
         .cloned()
         .ok_or(AuthError::Invalid)?;
 

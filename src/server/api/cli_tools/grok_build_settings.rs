@@ -162,15 +162,15 @@ async fn read_config_toml() -> AnyhowResult<String> {
 }
 
 fn model_section_re() -> Regex {
-    // [model.openproxy] ... until next [section] header or EOF
-    Regex::new(&format!(
-        r"(?m)^\[model\.{MODEL_SLOT}\][ \t]*\r?\n(?:(?!\[)[^\r\n]*\r?\n?)*"
-    ))
-    .expect("valid model section regex")
+    // [model.openproxy] ... until next [section] header or EOF.
+    // No look-around (rust regex crate): match the header, then non-header
+    // lines are collected by section_body() instead.
+    Regex::new(&format!(r"(?m)^\[model\.{MODEL_SLOT}\][ \t]*\r?\n"))
+        .expect("valid model section regex")
 }
 
 fn models_section_re() -> Regex {
-    Regex::new(r"(?m)^\[models\][ \t]*\r?\n((?:(?!\[)[^\r\n]*\r?\n?)*)")
+    Regex::new(r"(?m)^\[models\][ \t]*\r?\n")
         .expect("valid models section regex")
 }
 
@@ -186,25 +186,33 @@ fn get_toml_field(body: &str, key: &str) -> Option<String> {
         .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
 }
 
+/// Body of a TOML section: everything from just after its header line until
+/// the next `[section]` header or EOF.
+fn section_body(toml: &str, header_end: usize) -> &str {
+    let rest = &toml[header_end..];
+    match rest.find("\n[") {
+        Some(idx) => &rest[..idx],
+        None => rest,
+    }
+}
+
 fn parse_model_section(toml: &str) -> Option<Value> {
     let re = model_section_re();
     let m = re.find(toml)?;
-    let body = Regex::new(r"(?m)^\[model\.[^\]]+\][ \t]*\r?\n")
-        .expect("header strip")
-        .replace(m.as_str(), "");
+    let body = section_body(toml, m.end());
     Some(json!({
-        "model": get_toml_field(&body, "model"),
-        "base_url": get_toml_field(&body, "base_url"),
-        "name": get_toml_field(&body, "name"),
-        "api_key": get_toml_field(&body, "api_key"),
-        "api_backend": get_toml_field(&body, "api_backend"),
+        "model": get_toml_field(body, "model"),
+        "base_url": get_toml_field(body, "base_url"),
+        "name": get_toml_field(body, "name"),
+        "api_key": get_toml_field(body, "api_key"),
+        "api_backend": get_toml_field(body, "api_backend"),
     }))
 }
 
 fn parse_models_default(toml: &str) -> Option<String> {
     let re = models_section_re();
-    let caps = re.captures(toml)?;
-    get_toml_field(caps.get(1).map(|m| m.as_str()).unwrap_or(""), "default")
+    let m = re.find(toml)?;
+    get_toml_field(section_body(toml, m.end()), "default")
 }
 
 fn build_model_section(model: &str, base_url: &str, api_key: &str) -> String {
@@ -221,8 +229,11 @@ fn build_model_section(model: &str, base_url: &str, api_key: &str) -> String {
 
 fn upsert_model_section(toml: &str, section: &str) -> String {
     let re = model_section_re();
-    if re.is_match(toml) {
-        return re.replace(toml, section).into_owned();
+    if let Some(m) = re.find(toml) {
+        let end = m.end();
+        let body = section_body(toml, end);
+        let replaced = format!("{section}{body}");
+        return format!("{}{replaced}", &toml[..m.start()]);
     }
     let needs_nl = !toml.is_empty() && !toml.ends_with('\n');
     format!(
@@ -238,18 +249,30 @@ fn upsert_model_section(toml: &str, section: &str) -> String {
 
 fn remove_model_section(toml: &str) -> String {
     let re = model_section_re();
-    let next = re.replace_all(toml, "").into_owned();
+    let mut next = toml.to_string();
+    while let Some(m) = re.find(&next) {
+        let end = section_end(&next, m.end());
+        next = format!("{}{}", &next[..m.start()], &next[end..]);
+    }
     Regex::new(r"\n{3,}")
         .expect("newline collapse")
         .replace_all(&next, "\n\n")
         .into_owned()
 }
 
+/// Index just past the end of the section body starting at `header_end`.
+fn section_end(toml: &str, header_end: usize) -> usize {
+    let rest = &toml[header_end..];
+    match rest.find("\n[") {
+        Some(idx) => header_end + idx,
+        None => toml.len(),
+    }
+}
+
 fn set_models_default(toml: &str, value: &str) -> String {
     let re = models_section_re();
-    if let Some(caps) = re.captures(toml) {
-        let full = caps.get(0).map(|m| m.as_str()).unwrap_or("");
-        let body = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+    if let Some(m) = re.find(toml) {
+        let body = section_body(toml, m.end());
         let default_re =
             Regex::new(r#"(?m)^[ \t]*default[ \t]*=[ \t]*"[^"]*""#).expect("default field");
         let new_body = if default_re.is_match(body) {
@@ -259,7 +282,7 @@ fn set_models_default(toml: &str, value: &str) -> String {
         } else {
             format!("default = \"{value}\"\n{body}")
         };
-        return toml.replacen(full, &format!("[models]\n{new_body}"), 1);
+        return format!("{}[models]\n{new_body}", &toml[..m.start()]);
     }
     let block = format!("[models]\ndefault = \"{value}\"\n\n");
     if toml.is_empty() {

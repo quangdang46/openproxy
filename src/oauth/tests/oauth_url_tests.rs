@@ -9,7 +9,7 @@ fn expected_auth_url_prefix(provider: &str) -> &'static str {
         "xai" => "https://auth.x.ai/oauth2/authorize",
         "github" => "https://github.com/login/device/code",
         "kiro" => "https://oidc.us-east-1.amazonaws.com",
-        "kimi-coding" => "https://api.moonshot.cn/kimi-device/oauth/device/code",
+        "kimi" | "kimi-coding" => "https://auth.kimi.com/api/oauth/device_authorization",
         "kilocode" => "https://api.kilo.ai/api/device-auth/codes",
         "codebuddy" => "https://copilot.tencent.com/v2/plugin/auth/state",
         _ => "unknown",

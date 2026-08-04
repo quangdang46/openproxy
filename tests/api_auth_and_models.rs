@@ -44,7 +44,7 @@ fn cli_token(machine_id: &str, key_id: &str) -> String {
     mac.update(machine_id.as_bytes());
     mac.update(key_id.as_bytes());
     let crc = hex::encode(mac.finalize().into_bytes());
-    format!("sk-{machine_id}-{key_id}-{}", &crc[..8])
+    format!("sk-{machine_id}-{key_id}-{}", &crc[..12])
 }
 
 fn connection(

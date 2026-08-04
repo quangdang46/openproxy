@@ -128,7 +128,7 @@ async fn oidc_client_discover_fetches_metadata() {
 async fn oidc_authorize_url_includes_required_params() {
     let server = MockServer::start().await;
     let client = client_for(&server);
-    let url = client.build_authorize_url("state-xyz", "nonce-abc", "challenge-123");
+    let url = client.build_authorize_url("state-xyz", "nonce-abc", "challenge-123").unwrap();
     assert!(url.contains("response_type=code"), "{url}");
     assert!(url.contains(&format!("client_id={CLIENT_ID}")), "{url}");
     assert!(url.contains("redirect_uri="), "{url}");

@@ -241,6 +241,15 @@ where
 
             match result {
                 Ok(Ok(response)) => {
+                    // Record the fallback value FIRST so the primary-failure
+                    // path can always observe a shadow success, then log the
+                    // outcome (lock order: fallback_outcome before outcomes).
+                    if fallback_enabled {
+                        let mut fb = fallback_outcome.lock();
+                        if fb.is_none() {
+                            *fb = Some(response);
+                        }
+                    }
                     let mut out = outcomes.lock();
                     out.push(ShadowOutcome {
                         model: model.clone(),
@@ -248,12 +257,6 @@ where
                         latency_ms: elapsed,
                         error: None,
                     });
-                    if fallback_enabled {
-                        let mut fb = fallback_outcome.lock();
-                        if fb.is_none() {
-                            *fb = Some(response);
-                        }
-                    }
                 }
                 Ok(Err(e)) => {
                     let mut out = outcomes.lock();
@@ -281,9 +284,14 @@ where
     // Dispatch the primary request and await it.
     let primary_result = dispatch_primary(primary_model.to_string(), body.clone()).await;
 
-    // Cancel all outstanding shadow tasks now that the primary is done (H22).
-    for handle in &shadow_handles {
-        handle.abort();
+    // Cancel outstanding shadow tasks now that the primary is done (H22).
+    // Skipped entirely when a fallback is enabled: the fallback path needs the
+    // shadow tasks to have run to completion (they hold the fallback value),
+    // and aborting them here races the spawn on a single-threaded runtime.
+    if !fallback_enabled {
+        for handle in &shadow_handles {
+            handle.abort();
+        }
     }
 
     // Notify on_shadow_outcome with whatever shadow results have arrived
@@ -302,17 +310,23 @@ where
         Ok(response) => Ok(response),
         Err(e) => {
             if fallback_enabled {
-                // Brief yield window so spawned shadow tasks can complete
-                // before we check the fallback. Use a short poll loop so we
-                // don't block the executor if the shadow already finished.
-                for _ in 0..5 {
-                    {
-                        let fb = fallback_outcome.lock();
-                        if fb.is_some() {
-                            break;
-                        }
+                // Await the in-flight shadow tasks (they hold the fallback
+                // value) up to the shadow timeout, then take the first
+                // successful outcome. `handle.abort()` above would race the
+                // spawn on a single-threaded runtime, so the JoinHandles are
+                // awaited here instead — the abort loop is a no-op for tasks
+                // that already finished.
+                let deadline = Instant::now() + Duration::from_millis(config.shadow_timeout_ms);
+                let mut handles = std::mem::take(&mut shadow_handles);
+                for handle in handles.drain(..) {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break;
                     }
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    let _ = tokio::time::timeout(remaining, handle).await;
+                    if fallback_outcome.lock().is_some() {
+                        break;
+                    }
                 }
                 let fb = fallback_outcome.lock().take();
                 match fb {
@@ -395,7 +409,10 @@ mod tests {
             None,
         )
         .await;
-        assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "shadow fallback should win: {result:?}"
+        );
         assert_eq!(result.unwrap()["from"], "shadow-1");
     }
 

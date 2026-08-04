@@ -105,7 +105,7 @@ fn generate_crc(machine_id: &str, key_id: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(key.as_bytes()).expect("HMAC key");
     mac.update(machine_id.as_bytes());
     mac.update(key_id.as_bytes());
-    hex::encode(mac.finalize().into_bytes())[..8].to_string()
+    hex::encode(mac.finalize().into_bytes())[..12].to_string()
 }
 
 #[cfg(test)]

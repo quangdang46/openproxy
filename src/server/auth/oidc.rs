@@ -57,6 +57,9 @@ pub enum OidcError {
 
     #[error("id_token nonce mismatch")]
     NonceMismatch,
+
+    #[error("URL parse error: {0}")]
+    UrlParse(#[from] url::ParseError),
 }
 
 /// Authenticated OIDC client. Construct via [`OidcClient::discover`].
@@ -133,10 +136,9 @@ impl OidcClient {
 
     /// Build the `authorization_endpoint` URL with all required PKCE
     /// parameters appended.
-    pub fn build_authorize_url(&self, state: &str, nonce: &str, code_challenge: &str) -> String {
+    pub fn build_authorize_url(&self, state: &str, nonce: &str, code_challenge: &str) -> Result<String, OidcError> {
         let scope = self.scopes.join(" ");
-        let mut url = url::Url::parse(&self.authorization_endpoint)
-            .expect("authorization_endpoint is a valid URL by construction");
+        let mut url = url::Url::parse(&self.authorization_endpoint)?;
         {
             let mut qp = url.query_pairs_mut();
             qp.append_pair("response_type", "code")
@@ -148,7 +150,7 @@ impl OidcClient {
                 .append_pair("code_challenge_method", "S256")
                 .append_pair("code_challenge", code_challenge);
         }
-        url.to_string()
+        Ok(url.to_string())
     }
 
     /// POST the authorization code to the token endpoint and return the
@@ -200,11 +202,16 @@ impl OidcClient {
         let kid = header.kid.clone();
         let alg = header.alg;
 
-        // Only RS-family is supported — OIDC core spec mandates RS256
-        // for ID tokens but allows ES/Ed; we don't accept HMAC because
-        // the symmetric key would have to be shipped with the client.
+        // Accepted algorithms — OIDC core spec mandates RS256 for ID
+        // tokens but allows ES/Ed. We reject HMAC because the symmetric
+        // key would have to be shipped with the client.
         match alg {
-            Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512 => {}
+            Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::ES256
+            | Algorithm::ES384
+            | Algorithm::EdDSA => {}
             other => {
                 return Err(OidcError::InvalidIdToken(format!(
                     "unsupported alg: {other:?}"
@@ -213,8 +220,14 @@ impl OidcClient {
         }
 
         let key = jwks_lookup(jwks, &kid)?;
-        let decoding_key = DecodingKey::from_rsa_components(&key.n, &key.e)
-            .map_err(|e| OidcError::InvalidIdToken(format!("rsa components: {e}")))?;
+        let decoding_key = match &key {
+            JwkKey::Rsa { n, e } => DecodingKey::from_rsa_components(n, e)
+                .map_err(|e| OidcError::InvalidIdToken(format!("rsa components: {e}")))?,
+            JwkKey::Ec { crv: _, x, y } => DecodingKey::from_ec_components(x, y)
+                .map_err(|e| OidcError::InvalidIdToken(format!("ec components: {e}")))?,
+            JwkKey::OctetKeyPair { x } => DecodingKey::from_ed_components(x)
+                .map_err(|e| OidcError::InvalidIdToken(format!("ed components: {e}")))?,
+        };
 
         let mut validation = Validation::new(alg);
         validation.set_issuer(&[self.issuer.as_str()]);
@@ -239,10 +252,9 @@ impl OidcClient {
     }
 }
 
-/// Look up a JWK in a JWKS document by `kid`. Returns the RSA `n` and
-/// `e` components as base64url strings ready for
-/// `DecodingKey::from_rsa_components`.
-fn jwks_lookup(jwks: &Value, kid: &Option<String>) -> Result<RsaJwk, OidcError> {
+/// Look up a JWK in a JWKS document by `kid` and return the key
+/// components in a type-aware wrapper.
+fn jwks_lookup(jwks: &Value, kid: &Option<String>) -> Result<JwkKey, OidcError> {
     let keys =
         jwks.get("keys")
             .and_then(|v| v.as_array())
@@ -253,39 +265,84 @@ fn jwks_lookup(jwks: &Value, kid: &Option<String>) -> Result<RsaJwk, OidcError> 
 
     let target_kid = kid.as_deref().unwrap_or("");
     for key in keys {
-        let kty = key.get("kty").and_then(|v| v.as_str()).unwrap_or_default();
-        if kty != "RSA" {
-            continue;
-        }
         let this_kid = key.get("kid").and_then(|v| v.as_str()).unwrap_or("");
         if this_kid != target_kid {
             continue;
         }
-        let n = key
-            .get("n")
-            .and_then(|v| v.as_str())
-            .ok_or(OidcError::JwksMissingField {
-                kid: target_kid.to_string(),
-                field: "n",
-            })?
-            .to_string();
-        let e = key
-            .get("e")
-            .and_then(|v| v.as_str())
-            .ok_or(OidcError::JwksMissingField {
-                kid: target_kid.to_string(),
-                field: "e",
-            })?
-            .to_string();
-        return Ok(RsaJwk { n, e });
+        let kty = key.get("kty").and_then(|v| v.as_str()).unwrap_or_default();
+        return match kty {
+            "RSA" => {
+                let n = key
+                    .get("n")
+                    .and_then(|v| v.as_str())
+                    .ok_or(OidcError::JwksMissingField {
+                        kid: target_kid.to_string(),
+                        field: "n",
+                    })?;
+                let e = key
+                    .get("e")
+                    .and_then(|v| v.as_str())
+                    .ok_or(OidcError::JwksMissingField {
+                        kid: target_kid.to_string(),
+                        field: "e",
+                    })?;
+                Ok(JwkKey::Rsa {
+                    n: n.to_string(),
+                    e: e.to_string(),
+                })
+            }
+            "EC" => {
+                let crv = key
+                    .get("crv")
+                    .and_then(|v| v.as_str())
+                    .ok_or(OidcError::JwksMissingField {
+                        kid: target_kid.to_string(),
+                        field: "crv",
+                    })?;
+                let x = key
+                    .get("x")
+                    .and_then(|v| v.as_str())
+                    .ok_or(OidcError::JwksMissingField {
+                        kid: target_kid.to_string(),
+                        field: "x",
+                    })?;
+                let y = key
+                    .get("y")
+                    .and_then(|v| v.as_str())
+                    .ok_or(OidcError::JwksMissingField {
+                        kid: target_kid.to_string(),
+                        field: "y",
+                    })?;
+                Ok(JwkKey::Ec {
+                    crv: crv.to_string(),
+                    x: x.to_string(),
+                    y: y.to_string(),
+                })
+            }
+            "OKP" => {
+                let x = key
+                    .get("x")
+                    .and_then(|v| v.as_str())
+                    .ok_or(OidcError::JwksMissingField {
+                        kid: target_kid.to_string(),
+                        field: "x",
+                    })?;
+                Ok(JwkKey::OctetKeyPair {
+                    x: x.to_string(),
+                })
+            }
+            other => Err(OidcError::UnsupportedKty(other.to_string())),
+        };
     }
 
     Err(OidcError::JwksNoMatchingKid(kid.clone()))
 }
 
-struct RsaJwk {
-    n: String,
-    e: String,
+/// Returned key data from a JWKS lookup, parameterized by key type.
+enum JwkKey {
+    Rsa { n: String, e: String },
+    Ec { crv: String, x: String, y: String },
+    OctetKeyPair { x: String },
 }
 
 /// Generate a 32-byte PKCE code verifier (base64url-no-pad encoded).
@@ -365,7 +422,7 @@ mod tests {
     #[test]
     fn authorize_url_contains_all_required_params() {
         let c = client();
-        let url = c.build_authorize_url("st", "no", "chal");
+        let url = c.build_authorize_url("st", "no", "chal").unwrap();
         assert!(url.contains("response_type=code"), "{url}");
         assert!(url.contains("client_id=test-client"), "{url}");
         assert!(url.contains("redirect_uri="), "{url}");

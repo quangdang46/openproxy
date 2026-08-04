@@ -3,7 +3,11 @@ use axum::response::{IntoResponse, Json, Response};
 use serde_json::Value;
 
 /// Shared CORS headers applied to all responses.
-pub const CORS_HEADERS: [(HeaderName, HeaderValue); 5] = [
+///
+/// Note: `Access-Control-Allow-Credentials` is intentionally omitted because
+/// we use `Access-Control-Allow-Origin: *`, and the CORS spec forbids combining
+/// a wildcard origin with credentials. See Fetch §3.2.
+pub const CORS_HEADERS: [(HeaderName, HeaderValue); 4] = [
     (
         HeaderName::from_static("access-control-allow-origin"),
         HeaderValue::from_static("*"),
@@ -21,10 +25,6 @@ pub const CORS_HEADERS: [(HeaderName, HeaderValue); 5] = [
     (
         HeaderName::from_static("access-control-max-age"),
         HeaderValue::from_static("86400"),
-    ),
-    (
-        HeaderName::from_static("access-control-allow-credentials"),
-        HeaderValue::from_static("true"),
     ),
 ];
 

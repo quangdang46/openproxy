@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
@@ -34,6 +34,10 @@ pub struct AppDb {
     pub combos: Vec<Combo>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub api_keys: Vec<ApiKey>,
+    /// Index of `api_keys` keyed by the raw `key` field for O(1) lookup.
+    /// Rebuilt automatically in `normalize()` — not serialized.
+    #[serde(default, skip)]
+    pub api_key_map: HashMap<String, ApiKey>,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub settings: Settings,
     #[serde(default, deserialize_with = "deserialize_null_default")]
@@ -51,6 +55,13 @@ impl AppDb {
                 api_key.is_active = Some(true);
             }
         }
+
+        // Rebuild the HashMap index for O(1) API key lookup.
+        self.api_key_map = self
+            .api_keys
+            .iter()
+            .map(|ak| (ak.key.clone(), ak.clone()))
+            .collect();
     }
 
     pub fn from_json_value(value: Value) -> Self {
@@ -69,6 +80,7 @@ impl AppDb {
             mitm_alias: extract_named_field(&mut fields, "mitmAlias"),
             combos: extract_named_field(&mut fields, "combos"),
             api_keys: extract_named_field(&mut fields, "apiKeys"),
+            api_key_map: HashMap::new(),
             settings: extract_named_field(&mut fields, "settings"),
             pricing: extract_named_field(&mut fields, "pricing"),
             extra: fields.into_iter().collect(),

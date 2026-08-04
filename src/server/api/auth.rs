@@ -245,7 +245,16 @@ pub async fn oidc_login(headers: HeaderMap, State(state): State<AppState>) -> Re
     let state_val = generate_state_token();
     let nonce = generate_state_token();
 
-    let auth_url = client.build_authorize_url(&state_val, &nonce, &code_challenge);
+    let auth_url = match client.build_authorize_url(&state_val, &nonce, &code_challenge) {
+        Ok(url) => url,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("OIDC URL error: {e}") })),
+            )
+                .into_response();
+        }
+    };
 
     let mut response = Redirect::to(&auth_url).into_response();
     let max_age = 600; // 10 minutes — long enough for the round-trip

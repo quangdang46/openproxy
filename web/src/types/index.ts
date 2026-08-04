@@ -44,6 +44,13 @@ export interface Provider {
    * may still live in APIKEY_PROVIDERS for catalog/list grouping.
    */
   authModes?: Array<"oauth" | "apikey" | "cookie">;
+  hasOAuth?: boolean;
+  oauth?: {
+    clientId?: string;
+    deviceCodeUrl?: string;
+    tokenUrl?: string;
+    refreshUrl?: string;
+  };
   authHint?: string;
   searchConfig?: SearchConfig;
   fetchConfig?: FetchConfig;
