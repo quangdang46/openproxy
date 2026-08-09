@@ -104,6 +104,101 @@ pub(super) async fn fetch_compatible_model_ids(connection: &ProviderConnection) 
     )
 }
 
+/// Generic dynamic-discovery fallback used by `/v1/models`.
+///
+/// For compatible providers this keeps the exact `fetch_compatible_model_ids`
+/// behavior. For built-in providers it runs the same discovery the dashboard
+/// uses (`fetch_provider_models_response`), so a provider whose static catalog
+/// entry is missing/empty is still exposed through `/v1/models` instead of
+/// silently disappearing. Providers without a discovery fetcher return
+/// immediately with no network traffic.
+pub(super) async fn fetch_discovered_model_ids(
+    state: &AppState,
+    connection: &ProviderConnection,
+) -> Vec<String> {
+    if is_openai_compatible_provider(&connection.provider)
+        || is_anthropic_compatible_provider(&connection.provider)
+    {
+        return fetch_compatible_model_ids(connection).await;
+    }
+
+    let models = fetch_provider_models_response(state, connection)
+        .await
+        .ok()
+        .map(|payload| payload.models)
+        .unwrap_or_default();
+
+    dedupe_model_ids(
+        models
+            .into_iter()
+            .map(|model| model.id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect(),
+    )
+}
+
+/// Whether the server has a models-listing fetcher for this provider.
+///
+/// Mirrors the match arms in `fetch_provider_models_response`. Used by
+/// `/v1/models` to decide whether a catalog-less connection can fall back to
+/// live discovery without issuing doomed network requests.
+pub(super) fn supports_models_discovery(provider: &str) -> bool {
+    is_openai_compatible_provider(provider)
+        || is_anthropic_compatible_provider(provider)
+        || matches!(
+            provider,
+            "kiro"
+                | "gemini-cli"
+                | "ollama-local"
+                | "claude"
+                | "anthropic"
+                | "gemini"
+                | "qwen"
+                | "codex"
+                | "antigravity"
+                | "github"
+                | "qoder"
+                | "openai"
+                | "openrouter"
+                | "opencode-zen"
+                | "alicode"
+                | "alicode-intl"
+                | "volcengine-ark"
+                | "byteplus"
+                | "deepseek"
+                | "groq"
+                | "xai"
+                | "mistral"
+                | "perplexity"
+                | "together"
+                | "fireworks"
+                | "cerebras"
+                | "cohere"
+                | "nebius"
+                | "siliconflow"
+                | "hyperbolic"
+                | "ollama"
+                | "nanobanana"
+                | "chutes"
+                | "nvidia"
+                | "assemblyai"
+                | "xiaomi-mimo"
+                | "xiaomi-tokenplan"
+                | "aimlapi"
+                | "modal"
+                | "reka"
+                | "kluster"
+                | "morph"
+                | "longcat"
+                | "scaleway"
+                | "sambanova"
+                | "nscale"
+                | "baseten"
+                | "nous-research"
+                | "glhf"
+        )
+}
+
 pub(super) async fn fetch_models_for_connection(
     state: &AppState,
     connection: &ProviderConnection,
@@ -225,6 +320,13 @@ async fn fetch_provider_models_response(
         }
         "openrouter" => {
             fetch_first_party_openai_style_models(connection, "https://openrouter.ai/api/v1/models")
+                .await
+        }
+        "opencode-zen" => {
+            // OpenCode Zen exposes an OpenAI-compatible models listing. Same
+            // endpoint the dashboard's modelsFetcher uses for the `opencode`
+            // free provider (https://opencode.ai/zen/v1/models).
+            fetch_first_party_openai_style_models(connection, "https://opencode.ai/zen/v1/models")
                 .await
         }
         "alicode" => {
@@ -1385,6 +1487,17 @@ mod tests {
             normalize_anthropic_models_base_url("https://example.com/v1/messages/"),
             "https://example.com/v1/models"
         );
+    }
+
+    #[test]
+    fn supports_models_discovery_covers_builtin_and_compatible_providers() {
+        assert!(supports_models_discovery("opencode-zen"));
+        assert!(supports_models_discovery("nvidia"));
+        assert!(supports_models_discovery("openrouter"));
+        assert!(supports_models_discovery("ollama-local"));
+        assert!(supports_models_discovery("openai-compatible-chat"));
+        assert!(supports_models_discovery("anthropic-compatible-chat"));
+        assert!(!supports_models_discovery("totally-unknown-provider"));
     }
 
     #[test]
