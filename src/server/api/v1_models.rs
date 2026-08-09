@@ -20,8 +20,6 @@ use crate::server::state::AppState;
 use crate::types::{AppDb, ModelAliasTarget, ProviderConnection};
 
 const LLM_KIND: &str = "llm";
-const OPENAI_COMPATIBLE_PREFIX: &str = "openai-compatible-";
-const ANTHROPIC_COMPATIBLE_PREFIX: &str = "anthropic-compatible-";
 
 static UPSTREAM_CONNECTION_RE: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"[-_][0-9a-f]{8,}$").expect("valid upstream connection regex"));
@@ -86,7 +84,7 @@ async fn list_models_for_kinds(
         }
     }
 
-    let data = build_models_list(&snapshot, kind_filter).await;
+    let data = build_models_list(&state, &snapshot, kind_filter).await;
 
     with_cors_response(
         Json(ModelListResponse {
@@ -97,7 +95,11 @@ async fn list_models_for_kinds(
     )
 }
 
-async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelCard> {
+async fn build_models_list(
+    state: &AppState,
+    snapshot: &AppDb,
+    kind_filter: &[&str],
+) -> Vec<ModelCard> {
     let catalog = provider_catalog();
     let alias_to_provider_id = catalog.alias_to_provider_id();
     let created = SystemTime::now()
@@ -208,12 +210,12 @@ async fn build_models_list(snapshot: &AppDb, kind_filter: &[&str]) -> Vec<ModelC
                     .collect::<Vec<_>>();
             }
 
-            if is_compatible_provider(provider_id)
-                && raw_model_ids.is_empty()
+            if raw_model_ids.is_empty()
                 && !UPSTREAM_CONNECTION_RE.is_match(provider_id)
+                && super::provider_models::supports_models_discovery(provider_id)
             {
                 raw_model_ids =
-                    super::provider_models::fetch_compatible_model_ids(connection).await;
+                    super::provider_models::fetch_discovered_model_ids(state, connection).await;
             }
 
             let prefixes = [output_alias.as_str(), static_alias, provider_id];
@@ -432,11 +434,6 @@ fn enabled_model_ids(connection: &ProviderConnection) -> (Vec<String>, bool) {
         .unwrap_or_default();
 
     (models, had_enabled_models)
-}
-
-fn is_compatible_provider(provider_id: &str) -> bool {
-    provider_id.starts_with(OPENAI_COMPATIBLE_PREFIX)
-        || provider_id.starts_with(ANTHROPIC_COMPATIBLE_PREFIX)
 }
 
 fn strip_provider_prefix(model_id: &str, prefixes: &[&str]) -> Option<String> {
@@ -685,8 +682,16 @@ pub async fn models_info(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::state::AppState;
     use crate::types::{CustomModel, ProviderConnection};
     use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    async fn test_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::load_from(dir.path()).await.unwrap();
+        AppState::new(Arc::new(db))
+    }
 
     #[tokio::test]
     async fn custom_models_appear_without_connections() {
@@ -703,7 +708,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
         assert!(models.iter().any(|m| m.id == "tr/MiniMax-M3"),
             "custom model with provider_alias 'tr' should appear in /v1/models even without connections");
     }
@@ -733,7 +738,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
         assert!(models.iter().any(|m| m.id == "tr/MiniMax-M3"),
             "custom model 'tr/MiniMax-M3' should appear even when it doesn't match any connection's prefix");
     }
@@ -763,7 +768,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
         let count = models.iter().filter(|m| m.id == "ocg/gpt-4o").count();
         assert_eq!(count, 1,
             "custom model 'ocg/gpt-4o' should appear exactly once even if matched by connection AND fallback");
@@ -792,7 +797,7 @@ mod tests {
             ..Default::default()
         };
 
-        let models = build_models_list(&snapshot, &[LLM_KIND]).await;
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
         assert!(
             models.iter().any(|m| m.id == "tr/MiniMax-M3"),
             "llm-type custom model should appear in LLM list"
@@ -800,6 +805,71 @@ mod tests {
         assert!(
             !models.iter().any(|m| m.id == "tr/flux-pro"),
             "image-type custom model should NOT appear in LLM list"
+        );
+    }
+
+    #[tokio::test]
+    async fn opencode_zen_models_appear_in_models_list() {
+        // Regression: opencode-zen was registered in the executor/CLI/alias
+        // maps but its provider entry + models were missing from the static
+        // catalog, so /v1/models exposed nothing for it.
+        let snapshot = AppDb {
+            provider_connections: vec![ProviderConnection {
+                id: "conn-zen".into(),
+                provider: "opencode-zen".into(),
+                auth_type: "apikey".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        assert!(
+            models.iter().any(|m| m.id == "opencode-zen/gpt-5.4"),
+            "catalog-registered opencode-zen model should appear in /v1/models"
+        );
+        assert!(
+            models.iter().any(|m| m.id == "opencode-zen/kimi-k2.6"),
+            "catalog-registered opencode-zen model should appear in /v1/models"
+        );
+    }
+
+    #[tokio::test]
+    async fn catalog_less_builtin_provider_falls_back_to_dynamic_discovery() {
+        // Generic path: a built-in provider with NO static catalog models but
+        // with a server-side discovery fetcher must still surface its models
+        // through /v1/models (same discovery the dashboard uses).
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/tags"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(json!({
+                "models": [
+                    { "id": "local-llama-3.1" },
+                    { "id": "local-qwen-2.5" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let snapshot = AppDb {
+            provider_connections: vec![ProviderConnection {
+                id: "conn-ollama-local".into(),
+                provider: "ollama-local".into(),
+                auth_type: "apikey".into(),
+                provider_specific_data: BTreeMap::from([("baseUrl".into(), json!(server.uri()))]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        assert!(
+            models.iter().any(|m| m.id == "ollama-local/local-llama-3.1"),
+            "dynamically discovered models of a catalog-less built-in provider should appear in /v1/models"
+        );
+        assert!(
+            models.iter().any(|m| m.id == "ollama-local/local-qwen-2.5"),
+            "dynamically discovered models of a catalog-less built-in provider should appear in /v1/models"
         );
     }
 }
