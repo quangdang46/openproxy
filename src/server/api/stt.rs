@@ -140,24 +140,24 @@ pub fn stt_config(provider: &str) -> Option<SttProviderConfig> {
 
 /// Resolve the effective STT config for a provider + connection.
 ///
-/// `selfhosted-stt` reads `provider_specific_data["baseUrl"]` (full
-/// transcriptions URL); the API key is not checked by local servers, so any
-/// non-empty value works. Never falls back to a cloud endpoint.
+/// Mirrors 9router `sttCore.js:176-182`: a per-connection
+/// `provider_specific_data["baseUrl"]` overrides the registry's fixed base
+/// URL (trailing slashes stripped) for ANY provider. It's opt-in — absent
+/// unless the connection sets it, so cloud providers are untouched.
+/// `selfhosted-stt` additionally never falls back to a cloud endpoint.
 fn resolve_stt_config(
     provider: &str,
     connection: &crate::types::ProviderConnection,
 ) -> Option<SttProviderConfig> {
     let mut cfg = stt_config(provider)?;
-    if provider == "selfhosted-stt" {
-        if let Some(base_url) = connection
-            .provider_specific_data
-            .get("baseUrl")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        {
-            cfg.base_url = base_url.to_string();
-        }
+    if let Some(base_url) = connection
+        .provider_specific_data
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        cfg.base_url = base_url.trim_end_matches('/').to_string();
     }
     Some(cfg)
 }
@@ -1402,5 +1402,46 @@ mod tests {
         let cfg = stt_config("selfhosted-stt").expect("selfhosted-stt in catalog");
         assert_eq!(cfg.base_url, SELFHOSTED_STT_DEFAULT_URL);
         assert_eq!(cfg.format, SttFormat::OpenaiCompatible);
+    }
+
+    #[test]
+    fn stt_openai_resolves_connection_base_url_override() {
+        use crate::types::ProviderConnection;
+        use std::collections::BTreeMap;
+
+        // Per-connection override applies to ANY provider (sttCore.js:176-182).
+        let mut psd = BTreeMap::new();
+        psd.insert(
+            "baseUrl".to_string(),
+            serde_json::Value::String(
+                "http://192.168.1.5:8080/v1/audio/transcriptions/".to_string(),
+            ),
+        );
+        let conn = ProviderConnection {
+            id: "openai-1".into(),
+            provider: "openai".into(),
+            auth_type: "apikey".into(),
+            provider_specific_data: psd,
+            ..Default::default()
+        };
+        let cfg = resolve_stt_config("openai", &conn).expect("openai config");
+        // Trailing slash stripped, override wins over the static default.
+        assert_eq!(
+            cfg.base_url,
+            "http://192.168.1.5:8080/v1/audio/transcriptions"
+        );
+
+        // Without an override, the static catalog URL is used.
+        let plain = ProviderConnection {
+            id: "openai-1".into(),
+            provider: "openai".into(),
+            auth_type: "apikey".into(),
+            ..Default::default()
+        };
+        let cfg = resolve_stt_config("openai", &plain).expect("openai config");
+        assert_eq!(
+            cfg.base_url,
+            "https://api.openai.com/v1/audio/transcriptions"
+        );
     }
 }
