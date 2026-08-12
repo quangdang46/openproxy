@@ -192,6 +192,43 @@ impl EmbeddingAdapter for OpenAiCompatNodeAdapter {
     }
 }
 
+// ─── Self-hosted Embedding (per-connection baseUrl, NO cloud fallback) ────
+// 9router `open-sse/handlers/embeddingProviders/selfhostedEmbedding.js` — must
+// refuse to fall back to api.openai.com (would leak input text + API key).
+
+pub struct SelfhostedEmbeddingAdapter;
+pub static SELFHOSTED_EMBEDDING: SelfhostedEmbeddingAdapter = SelfhostedEmbeddingAdapter;
+
+#[async_trait]
+impl EmbeddingAdapter for SelfhostedEmbeddingAdapter {
+    fn build_url(&self, request: &EmbeddingRequest<'_>) -> Result<String, String> {
+        let raw = request
+            .credentials
+            .provider_specific_data
+            .get("baseUrl")
+            .and_then(|v| v.as_str());
+        let raw = raw.map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| {
+            "Self-hosted Embedding needs an endpoint: set this connection's baseUrl \
+             to the OpenAI base URL of your server, e.g. http://host:8080/v1 (note \
+             the /v1 — \"/embeddings\" is appended to it). Refusing to fall back to \
+             api.openai.com, which would send your input and API key to OpenAI."
+                .to_string()
+        })?;
+        // JS order: strip a single trailing "/", then the "/embeddings" suffix.
+        let trimmed = raw.trim_end_matches('/');
+        let trimmed = trimmed.strip_suffix("/embeddings").unwrap_or(trimmed);
+        Ok(format!("{trimmed}/embeddings"))
+    }
+
+    fn build_headers(&self, request: &EmbeddingRequest<'_>) -> Result<HeaderMap, String> {
+        OPENAI.build_headers(request)
+    }
+
+    fn build_body(&self, request: &EmbeddingRequest<'_>) -> Result<Value, String> {
+        OPENAI.build_body(request)
+    }
+}
+
 // ─── Gemini embeddings (embedContent / batchEmbedContents) ───────────────
 
 pub struct GeminiAdapter;
@@ -421,5 +458,59 @@ mod tests {
         let url = VERCEL_AI_GATEWAY.build_url(&req).unwrap();
         assert_eq!(url, "https://ai-gateway.vercel.sh/v1/embeddings");
         assert!(!VERCEL_AI_GATEWAY.include_referer);
+    }
+
+    #[test]
+    fn selfhosted_embedding_requires_base_url() {
+        let body = json!({"input": "hi"});
+        let creds = ProviderConnection::default();
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "embedding",
+            credentials: &creds,
+        };
+        let err = SELFHOSTED_EMBEDDING.build_url(&req).unwrap_err();
+        assert!(
+            err.contains("Self-hosted Embedding needs an endpoint"),
+            "must refuse missing baseUrl, got: {err}"
+        );
+        // Refuses — it must NOT resolve to api.openai.com (the leak the
+        // adapter is written to prevent). The message mentions the fallback
+        // only to warn about it.
+        assert!(!err.starts_with("https://api.openai.com"));
+    }
+
+    #[test]
+    fn selfhosted_embedding_appends_embeddings() {
+        let body = json!({"input": "hi"});
+        for base in ["http://host:8080/v1", "http://host:8080/v1/embeddings"] {
+            let mut creds = ProviderConnection::default();
+            creds
+                .provider_specific_data
+                .insert("baseUrl".into(), json!(base));
+            let req = EmbeddingRequest {
+                body: &body,
+                model: "embedding",
+                credentials: &creds,
+            };
+            let url = SELFHOSTED_EMBEDDING.build_url(&req).unwrap();
+            assert_eq!(url, "http://host:8080/v1/embeddings", "for base {base}");
+        }
+    }
+
+    #[test]
+    fn selfhosted_embedding_blank_base_url_refuses() {
+        let body = json!({"input": "hi"});
+        let mut creds = ProviderConnection::default();
+        creds
+            .provider_specific_data
+            .insert("baseUrl".into(), json!("   "));
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "embedding",
+            credentials: &creds,
+        };
+        let err = SELFHOSTED_EMBEDDING.build_url(&req).unwrap_err();
+        assert!(err.contains("needs an endpoint"));
     }
 }
