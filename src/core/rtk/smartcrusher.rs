@@ -320,6 +320,12 @@ fn is_markdown_separator(line: &str) -> bool {
 
     // Check for pipe-delimited separator lines: |---|---|
     if trimmed.starts_with('|') && trimmed.ends_with('|') {
+        // Guard against short inputs like "|" or "||" where byte slicing
+        // 1..len-1 would underflow (begin > end). Earlier code panicked on
+        // single-pipe tool results passing through smartcrusher.
+        if trimmed.len() < 2 {
+            return false;
+        }
         let body = &trimmed[1..trimmed.len() - 1];
         return body
             .chars()
@@ -593,6 +599,17 @@ pub fn smartcrusher_impl(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Regression: a tool result consisting of a single "|" (or "||") used to
+    // panic `is_markdown_separator` with `begin > end (1 > 0) when slicing |`.
+    // `detect` must return None for these degenerate inputs instead of aborting
+    // the worker thread (which crashed the whole server on a real request).
+    #[test]
+    fn detect_single_pipe_does_not_panic() {
+        assert_eq!(SmartCrusher::detect("|"), None);
+        assert_eq!(SmartCrusher::detect("||"), None);
+        assert_eq!(SmartCrusher::detect("|"), None);
+    }
 
     // -----------------------------------------------------------------------
     // TabularType detection
