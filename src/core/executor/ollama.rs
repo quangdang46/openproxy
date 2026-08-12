@@ -148,10 +148,13 @@ impl OllamaExecutor {
     ///   1. `credentials.provider_specific_data.baseUrl` (e.g. when
     ///      operating against a remote/host-overridden Ollama instance).
     ///   2. The default `http://localhost:11434`.
+    ///
+    /// No `?stream=` query parameter — 9router's ollama-local.js returns
+    /// plain `${base}/api/chat`; streaming is driven by the body's `stream`.
     fn build_url(
         &self,
         _model: &str,
-        stream: bool,
+        _stream: bool,
         credentials: &crate::types::ProviderConnection,
     ) -> String {
         let base = credentials
@@ -163,7 +166,7 @@ impl OllamaExecutor {
             .map(str::to_string)
             .unwrap_or_else(|| "http://localhost:11434".to_string());
         let base = base.trim_end_matches('/');
-        format!("{base}/api/chat?stream={stream}")
+        format!("{base}/api/chat")
     }
 
     fn build_headers(&self) -> Result<HeaderMap, OllamaExecutorError> {
@@ -286,9 +289,25 @@ mod tests {
         let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
         let creds = crate::types::ProviderConnection::default();
         let url = executor.build_url("llama3", true, &creds);
-        assert!(url.contains("stream=true"));
+        assert_eq!(url, "http://localhost:11434/api/chat");
         let url_no_stream = executor.build_url("llama3", false, &creds);
-        assert!(url_no_stream.contains("stream=false"));
+        assert_eq!(url_no_stream, "http://localhost:11434/api/chat");
+    }
+
+    #[test]
+    fn test_build_url_has_no_stream_query() {
+        let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
+        let mut creds = crate::types::ProviderConnection::default();
+        creds.provider_specific_data.insert(
+            "baseUrl".to_string(),
+            serde_json::json!("http://ollama.example:11434/"),
+        );
+        let url = executor.build_url("llama3", true, &creds);
+        assert!(url.ends_with("/api/chat"));
+        assert!(
+            !url.contains("stream="),
+            "9router parity: no ?stream= query param, got: {url}"
+        );
     }
 
     #[test]
