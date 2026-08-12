@@ -326,6 +326,33 @@ pub fn codebuddy_cn() -> OAuthProviderConfig {
     }
 }
 
+/// CodeBuddy Intl — device-code flow (www.codebuddy.ai, platform=ide).
+/// Distinct from codebuddy-cn (copilot.tencent.com, platform=CLI). The
+/// state/token/refresh URLs differ only by host, but platform MUST be "ide".
+/// 9router parity: `open-sse/providers/registry/codebuddy-intl.js:64-72`.
+pub fn codebuddy_intl() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "codebuddy-intl",
+        client_id: "openproxy",
+        authorize_url: "https://www.codebuddy.ai/v2/plugin/auth/state",
+        token_url: "https://www.codebuddy.ai/v2/plugin/auth/token",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[
+            (
+                "refresh_url",
+                "https://www.codebuddy.ai/v2/plugin/auth/token/refresh",
+            ),
+            // OAuth user-agent differs from the transport User-Agent
+            // ("IDE/2.108.1 CodeBuddy/2.108.1") — keep distinct as in JS.
+            ("user_agent", "IDE/2.63.2 CodeBuddy/2.63.2"),
+            ("platform", "ide"),
+            ("poll_interval", "5000"),
+        ],
+        refresh_lead_ms: 4 * 60 * 60 * 1000,
+    }
+}
+
 /// Cursor IDE — import-token flow (reads from local SQLite DB).
 /// OAuth endpoints are empty; authentication happens via the cursor_import module.
 pub fn cursor() -> OAuthProviderConfig {
@@ -466,6 +493,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "cursor" => Some(cursor()),
         "antigravity" => Some(antigravity()),
         "codebuddy-cn" => Some(codebuddy_cn()),
+        "codebuddy-intl" => Some(codebuddy_intl()),
         _ => None,
     }
 }
