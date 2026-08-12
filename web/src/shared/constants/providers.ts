@@ -18,6 +18,7 @@ export const FREE_PROVIDERS: Record<string, Provider> = {
   qoder: { id: "qoder", alias: "qd", name: "Qoder AI", icon: "water_drop", color: "#EC4899", website: "https://qoder.com", notice: { apiKeyUrl: "https://qoder.com/account/integrations", signupUrl: "https://qoder.com" }, authModes: ["oauth", "apikey"], hasOAuth: true, authHint: "Personal Access Token (pt-...) from https://qoder.com/account/integrations", serviceKinds: ["llm"] },
   iflow: { id: "iflow", alias: "if", name: "iFlow AI", icon: "water_drop", color: "#6366F1", website: "https://iflow.cn", notice: { signupUrl: "https://iflow.cn" } },
   opencode: { id: "opencode", alias: "oc", name: "OpenCode Free", icon: "terminal", color: "#E87040", textIcon: "OC", noAuth: true, passthroughModels: true, modelsFetcher: { url: "https://opencode.ai/zen/v1/models", type: "opencode-free" } },
+  "opencode-zen": { id: "opencode-zen", alias: "opencode-zen", name: "OpenCode Zen", icon: "terminal", color: "#E87040", textIcon: "OC", noAuth: true, modelsFetcher: { url: "https://opencode.ai/zen/v1/models", type: "opencode-free" } },
 };
 
 // Free Tier Providers (has free access but may require account/API key)
