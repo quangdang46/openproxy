@@ -304,6 +304,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://www.codebuddy.ai/v2/chat/completions",
         ),
         (
+            "featherless",
+            "https://api.featherless.ai/v1/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -476,6 +480,24 @@ fn codebuddy_intl_url_and_headers() {
     assert_eq!(headers["x-ide-name"], "IDE");
     assert_eq!(headers["x-requested-with"], "XMLHttpRequest");
     assert_eq!(headers["x-codebuddy-request"], "1");
+}
+
+/// Guard: featherless must route through DefaultExecutor with the full
+/// v1 chat-completions endpoint. 9router parity:
+/// `open-sse/providers/registry/featherless.js` transport.baseUrl =
+/// `https://api.featherless.ai/v1/chat/completions`. The live key MUST be
+/// "featherless" (JS provider id), NOT "featherless-ai" (a dead
+/// PROVIDER_REGISTRY key that lacks /chat/completions).
+#[test]
+fn featherless_has_full_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("featherless", pool, None).expect("featherless executor");
+    assert_eq!(
+        executor
+            .build_url("deepseek-ai/DeepSeek-V4-Pro", false, &connection("featherless"))
+            .unwrap(),
+        "https://api.featherless.ai/v1/chat/completions"
+    );
 }
 
 #[test]

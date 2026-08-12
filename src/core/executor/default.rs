@@ -190,6 +190,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
                 .with_header("x-codebuddy-request", "1"),
         ),
         (
+            "featherless",
+            ProviderConfig::openai("https://api.featherless.ai/v1/chat/completions"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
