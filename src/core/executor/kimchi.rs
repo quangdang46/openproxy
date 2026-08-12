@@ -13,7 +13,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use hyper::http;
 use reqwest::header::{HeaderMap, HeaderValue};
-use reqwest::Body as ReqwestBody;
 use serde_json::Value;
 
 use crate::types::{ProviderConnection, ProviderNode};
@@ -47,17 +46,40 @@ impl KimchiExecutor {
 
     /// Check if a model name identifies an Anthropic-backed model.
     /// These models don't support `reasoning_effort` via the OpenAI-compatible API.
+    ///
+    /// Matches:
+    /// - kimchi's own Anthropic-backed models (kimchi-sonnet-*, kimchi-haiku-*).
+    ///   In 9router these are detected via cached model metadata (provider ===
+    ///   "anthropic"); Rust has no metadata cache, so we keep the prefix match.
+    /// - Any model id containing a claude/anthropic segment, mirroring the JS
+    ///   fallback regex `/(^|[-_/])(?:claude|anthropic)(?:[-_/]|$)/i`.
     fn is_anthropic_backed_model(model: &str) -> bool {
-        model.starts_with("kimchi-sonnet") || model.starts_with("kimchi-haiku")
+        if model.starts_with("kimchi-sonnet") || model.starts_with("kimchi-haiku") {
+            return true;
+        }
+        // 9router kimchi.js:92 regex fallback (case-insensitive): "claude" or
+        // "anthropic" as a whole segment delimited by start/end, '-', '_', or '/'.
+        model
+            .split(|c| c == '-' || c == '_' || c == '/')
+            .any(|seg| seg.eq_ignore_ascii_case("claude") || seg.eq_ignore_ascii_case("anthropic"))
     }
 
-    /// Transform the request body:
+    /// Transform the request body (9router kimchi.js `transformRequest` parity):
     ///
-    /// 1. Remove Anthropic-specific fields that leak into the OpenAI-compatible body:
-    ///    `anthropic_version`, `anthropic_beta`, `client_metadata`, `mcp_servers`,
-    ///    `stop_sequences`, `thinking`, `top_k`
-    /// 2. Remove `cache_control` from messages, content blocks, and tool definitions
-    /// 3. Suppress `reasoning_effort` for Anthropic-backed models (kimchi-sonnet, kimchi-haiku)
+    /// 1. Merge a top-level `system` into `messages` (prepend a system message
+    ///    or join with the existing one).
+    /// 2. Remove Anthropic-specific fields that leak into the OpenAI-compatible
+    ///    body: `anthropic_version`, `anthropic_beta`, `client_metadata`,
+    ///    `mcp_servers`, `stop_sequences`, `thinking`, `top_k`, then delete the
+    ///    now-hoisted top-level `system`.
+    /// 3. Suppress `reasoning_effort`, `reasoning`, and `thinking` for
+    ///    Anthropic-backed models (JS deletes all three).
+    /// 4. Strip `cache_control` from messages, content parts (`cache_control`
+    ///    AND `signature`), and tool definitions (`stripMessageArtifacts` /
+    ///    `stripToolArtifacts` parity).
+    /// 5. Strip echoed `reasoning_content` from assistant REQUEST messages when
+    ///    longer than the placeholder threshold (8 chars). The short placeholder
+    ///    (" ") injected by the pipeline is preserved.
     fn transform_request(
         &self,
         body: &Value,
@@ -67,7 +89,10 @@ impl KimchiExecutor {
     ) -> Value {
         let mut body = body.clone();
 
-        // 1. Remove Anthropic-specific top-level fields
+        // 1. Merge top-level system into messages (JS mergeTopLevelSystem).
+        merge_top_level_system(&mut body);
+
+        // 2. Remove Anthropic-specific top-level fields + the hoisted system.
         if let Some(obj) = body.as_object_mut() {
             obj.remove("anthropic_version");
             obj.remove("anthropic_beta");
@@ -76,16 +101,28 @@ impl KimchiExecutor {
             obj.remove("stop_sequences");
             obj.remove("thinking");
             obj.remove("top_k");
+            obj.remove("system");
         }
 
-        // 2. Remove cache_control from messages and their content blocks
-        if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
-            for msg in messages.iter_mut() {
-                remove_cache_control(msg);
+        // 3. Suppress reasoning fields for Anthropic-backed models
+        //    (JS deletes reasoning_effort + reasoning + thinking).
+        if Self::is_anthropic_backed_model(model) {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("reasoning_effort");
+                obj.remove("reasoning");
+                obj.remove("thinking");
             }
         }
 
-        // 3. Remove cache_control from tool definitions
+        // 4a. Strip message artifacts: message-level cache_control, and per
+        //     content part cache_control + signature.
+        if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+            for msg in messages.iter_mut() {
+                strip_message_artifacts(msg);
+            }
+        }
+
+        // 4b. Strip tool artifacts: tool-level cache_control.
         if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
             for tool in tools.iter_mut() {
                 if let Some(obj) = tool.as_object_mut() {
@@ -94,16 +131,111 @@ impl KimchiExecutor {
             }
         }
 
-        // 4. Suppress reasoning_effort for Anthropic-backed models
-        if Self::is_anthropic_backed_model(model) {
-            if let Some(obj) = body.as_object_mut() {
-                obj.remove("reasoning_effort");
+        // 5. Strip echoed reasoning_content from assistant REQUEST messages
+        //    (only real thinking blocks, length > 8; preserve the placeholder).
+        if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+            for msg in messages.iter_mut() {
+                if let Some(obj) = msg.as_object_mut() {
+                    if obj.get("role").and_then(Value::as_str) == Some("assistant") {
+                        if let Some(rc) = obj.get("reasoning_content").and_then(Value::as_str) {
+                            if rc.chars().count() > REASONING_PLACEHOLDER_MAX_LEN {
+                                obj.remove("reasoning_content");
+                            }
+                        }
+                    }
+                }
             }
         }
 
         body
     }
 }
+
+/// JS `systemToText` + `mergeTopLevelSystem` parity.
+///
+/// Flattens a top-level `system` (string or array of {text}) into a single
+/// string, then either prepends `{role:"system",content:text}` to `messages`
+/// or joins it with an existing system message (`text\n\n{existing}`, or
+/// `{type:"text",text}` unshifted onto an array-content system message).
+fn merge_top_level_system(body: &mut Value) {
+    let Some(obj) = body.as_object_mut() else { return };
+    if obj.get("system").is_none() {
+        return;
+    }
+    if !obj.get("messages").and_then(Value::as_array).is_some_and(|m| !m.is_empty()) {
+        return;
+    }
+    let text = system_to_text(obj.get("system").expect("system checked above")).trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+
+    let messages = obj
+        .get_mut("messages")
+        .and_then(Value::as_array_mut)
+        .expect("messages checked above");
+    let existing = messages.iter_mut().find(|m| {
+        m.get("role").and_then(Value::as_str) == Some("system")
+    });
+
+    match existing {
+        None => {
+            messages.insert(0, serde_json::json!({"role": "system", "content": text}));
+        }
+        Some(existing_msg) => {
+            if let Some(content) = existing_msg.get_mut("content") {
+                match content {
+                    Value::String(s) => {
+                        *s = format!("{text}\n\n{s}");
+                    }
+                    Value::Array(arr) => {
+                        arr.insert(0, serde_json::json!({"type": "text", "text": text}));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// JS `systemToText` parity: a string passes through; an array flattens
+/// string parts and `{text}` parts, joined with "\n".
+fn system_to_text(system: &Value) -> String {
+    match system {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| match part {
+                Value::String(s) => s.clone(),
+                Value::Object(m) => m.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                _ => String::new(),
+            })
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// JS `stripMessageArtifacts` parity: remove message-level `cache_control`,
+/// and from each content part remove `cache_control` + `signature`.
+fn strip_message_artifacts(value: &mut Value) {
+    let Some(obj) = value.as_object_mut() else { return };
+    obj.remove("cache_control");
+    if let Some(content) = obj.get_mut("content").and_then(Value::as_array_mut) {
+        for block in content.iter_mut() {
+            if let Some(block_obj) = block.as_object_mut() {
+                block_obj.remove("cache_control");
+                block_obj.remove("signature");
+            }
+        }
+    }
+}
+
+/// JS `REASONING_PLACEHOLDER_MAX_LEN` parity — only strip reasoning_content
+/// longer than this (real thinking blocks); the 1-char pipeline placeholder is
+/// preserved to avoid re-triggering upstream validation on the next turn.
+const REASONING_PLACEHOLDER_MAX_LEN: usize = 8;
 
 /// Recursively remove `cache_control` from a message value.
 ///
@@ -131,31 +263,6 @@ fn remove_cache_control(value: &mut Value) {
                     }
                 }
             }
-        }
-    }
-}
-
-/// Strip `reasoning_content` from assistant message content blocks
-/// in an OpenAI Chat Completions response body.
-///
-/// Handles both:
-/// - Non-streaming: `choices[].message.reasoning_content`
-/// - Streaming chunk: `choices[].delta.reasoning_content`
-fn remove_reasoning_content(body: &mut Value) {
-    let Some(choices) = body.get_mut("choices").and_then(Value::as_array_mut) else {
-        return;
-    };
-    for choice in choices.iter_mut() {
-        let Some(choice_obj) = choice.as_object_mut() else {
-            continue;
-        };
-        // Non-streaming: choices[].message.reasoning_content
-        if let Some(msg) = choice_obj.get_mut("message").and_then(Value::as_object_mut) {
-            msg.remove("reasoning_content");
-        }
-        // Streaming: choices[].delta.reasoning_content
-        if let Some(delta) = choice_obj.get_mut("delta").and_then(Value::as_object_mut) {
-            delta.remove("reasoning_content");
         }
     }
 }
@@ -247,40 +354,17 @@ impl ProviderExecutor for KimchiExecutor {
             .send()
             .await?;
 
-        // For non-streaming responses, strip reasoning_content from the body.
-        // Streaming reasoning_content filtering is handled at the translator /
-        // response_transform layer (SSE chunk transformation).
-        if !request.stream {
-            let status = response.status();
-            let resp_headers = response.headers().clone();
-            let body_bytes = response.bytes().await?;
-
-            // Parse, strip reasoning_content, and reconstruct
-            let mut body_value: Value = serde_json::from_slice(&body_bytes)?;
-            remove_reasoning_content(&mut body_value);
-            let modified_bytes = serde_json::to_vec(&body_value)?;
-
-            let mut http_resp = http::Response::new(ReqwestBody::from(modified_bytes));
-            *http_resp.status_mut() = status;
-            *http_resp.headers_mut() = resp_headers;
-            let reconstructed = reqwest::Response::from(http_resp);
-
-            Ok(ProviderExecutionResponse {
-                response: UpstreamResponse::Reqwest(reconstructed),
-                url,
-                headers,
-                transformed_body,
-                transport: TransportKind::Reqwest,
-            })
-        } else {
-            Ok(ProviderExecutionResponse {
-                response: UpstreamResponse::Reqwest(response),
-                url,
-                headers,
-                transformed_body,
-                transport: TransportKind::Reqwest,
-            })
-        }
+        // Pass the upstream response through unchanged for both streaming and
+        // non-streaming. 9router kimchi.js does NOT strip reasoning_content from
+        // responses — it only strips echoed reasoning_content from REQUEST
+        // assistant messages (done in transform_request above).
+        Ok(ProviderExecutionResponse {
+            response: UpstreamResponse::Reqwest(response),
+            url,
+            headers,
+            transformed_body,
+            transport: TransportKind::Reqwest,
+        })
     }
 }
 
@@ -425,89 +509,105 @@ mod tests {
 
     #[test]
     fn test_is_anthropic_backed_model() {
+        // kimchi's own Anthropic-backed models (metadata-backed in JS).
         assert!(KimchiExecutor::is_anthropic_backed_model(
             "kimchi-sonnet-4-20250514"
         ));
         assert!(KimchiExecutor::is_anthropic_backed_model(
             "kimchi-haiku-3-5-20250514"
         ));
+        // claude/anthropic segments (JS regex fallback) — claude-sonnet IS
+        // anthropic-backed per the JS regex, unlike the old prefix-only check.
+        assert!(KimchiExecutor::is_anthropic_backed_model(
+            "claude-sonnet-4-20250514"
+        ));
+        assert!(KimchiExecutor::is_anthropic_backed_model(
+            "anthropic/claude-3-5-sonnet"
+        ));
+        // Non-Anthropic models.
         assert!(!KimchiExecutor::is_anthropic_backed_model("gpt-4"));
         assert!(!KimchiExecutor::is_anthropic_backed_model(
-            "claude-sonnet-4-20250514"
+            "deepseek/deepseek-v4-pro"
         ));
     }
 
     #[test]
-    fn test_remove_reasoning_content_non_streaming() {
-        let mut body = json!({
-            "choices": [
+    fn test_transform_request_strips_request_reasoning_content_echo() {
+        let executor = KimchiExecutor::new(Arc::new(ClientPool::new()), None);
+        // Real thinking block (> 8 chars) must be stripped.
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "assistant", "reasoning_content": "aaaaaaaaa", "content": "ok"}
+            ]
+        });
+        let result =
+            executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
+        let msgs = result["messages"].as_array().unwrap();
+        assert_eq!(msgs[0].get("reasoning_content"), None);
+        assert_eq!(msgs[0]["content"], "ok");
+    }
+
+    #[test]
+    fn test_transform_request_preserves_short_reasoning_placeholder() {
+        let executor = KimchiExecutor::new(Arc::new(ClientPool::new()), None);
+        // A 4-char placeholder (<= 8) must be preserved — stripping it would
+        // re-trigger upstream validation on the next turn.
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "assistant", "reasoning_content": "    ", "content": "ok"}
+            ]
+        });
+        let result =
+            executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
+        let msgs = result["messages"].as_array().unwrap();
+        assert_eq!(msgs[0].get("reasoning_content").and_then(Value::as_str), Some("    "));
+    }
+
+    #[test]
+    fn test_transform_request_merges_top_level_system() {
+        let executor = KimchiExecutor::new(Arc::new(ClientPool::new()), None);
+        // Top-level system string is hoisted into a prepended system message.
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "system": "You are helpful."
+        });
+        let result =
+            executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
+        assert_eq!(result.get("system"), None, "top-level system must be removed");
+        let msgs = result["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "You are helpful.");
+        assert_eq!(msgs[1]["role"], "user");
+    }
+
+    #[test]
+    fn test_transform_request_strips_message_artifacts() {
+        let executor = KimchiExecutor::new(Arc::new(ClientPool::new()), None);
+        // cache_control + signature stripped from content parts.
+        let body = json!({
+            "model": "gpt-4",
+            "messages": [
                 {
-                    "message": {
-                        "role": "assistant",
-                        "content": "Hello!",
-                        "reasoning_content": "Let me think..."
-                    }
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Hello",
+                         "cache_control": {"type": "ephemeral"},
+                         "signature": "sig-123"}
+                    ],
+                    "cache_control": {"type": "ephemeral"}
                 }
             ]
         });
-        remove_reasoning_content(&mut body);
-        assert_eq!(body["choices"][0]["message"].get("reasoning_content"), None);
-        assert_eq!(body["choices"][0]["message"]["content"], "Hello!");
-    }
-
-    #[test]
-    fn test_remove_reasoning_content_streaming() {
-        let mut body = json!({
-            "choices": [
-                {
-                    "delta": {
-                        "content": "Hello",
-                        "reasoning_content": "Thinking..."
-                    }
-                }
-            ]
-        });
-        remove_reasoning_content(&mut body);
-        assert_eq!(body["choices"][0]["delta"].get("reasoning_content"), None);
-        assert_eq!(body["choices"][0]["delta"]["content"], "Hello");
-    }
-
-    #[test]
-    fn test_remove_reasoning_content_no_choices() {
-        let mut body = json!({"error": "test"});
-        remove_reasoning_content(&mut body);
-        assert_eq!(body["error"], "test");
-    }
-
-    #[test]
-    fn test_remove_reasoning_content_mixed_streaming_and_non_streaming() {
-        let mut body = json!({
-            "choices": [
-                {
-                    "message": {
-                        "role": "assistant",
-                        "content": "Final answer",
-                        "reasoning_content": "Step by step..."
-                    },
-                    "delta": {
-                        "content": "",
-                        "reasoning_content": "Thinking..."
-                    }
-                }
-            ]
-        });
-        remove_reasoning_content(&mut body);
-        assert_eq!(body["choices"][0]["message"].get("reasoning_content"), None);
-        assert_eq!(body["choices"][0]["delta"].get("reasoning_content"), None);
-        assert_eq!(body["choices"][0]["message"]["content"], "Final answer");
-    }
-
-    #[test]
-    fn test_remove_reasoning_content_empty_choices() {
-        let mut body = json!({"choices": []});
-        remove_reasoning_content(&mut body);
-        let choices = body["choices"].as_array().unwrap();
-        assert!(choices.is_empty());
+        let result =
+            executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
+        let msgs = result["messages"].as_array().unwrap();
+        assert_eq!(msgs[0].get("cache_control"), None);
+        let parts = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0].get("cache_control"), None);
+        assert_eq!(parts[0].get("signature"), None);
     }
 
     #[test]
