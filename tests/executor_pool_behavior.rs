@@ -320,6 +320,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://inference.poolside.ai/v1/chat/completions",
         ),
         (
+            "tencent",
+            "https://api.hunyuan.cloud.tencent.com/v1/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -562,6 +566,23 @@ fn poolside_inference_endpoint() {
             .build_url("poolside/laguna-s-2.1", false, &connection("poolside"))
             .unwrap(),
         "https://inference.poolside.ai/v1/chat/completions"
+    );
+}
+
+/// Guard: tencent (Hunyuan) must route through DefaultExecutor with the full
+/// v1 chat-completions endpoint. 9router parity:
+/// `open-sse/providers/registry/tencent.js` transport.baseUrl =
+/// `https://api.hunyuan.cloud.tencent.com/v1/chat/completions`. The live key
+/// MUST be "tencent" (JS provider id); "hunyuan" is only the alias.
+#[test]
+fn tencent_hunyuan_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("tencent", pool, None).expect("tencent executor");
+    assert_eq!(
+        executor
+            .build_url("hunyuan-turbos-latest", false, &connection("tencent"))
+            .unwrap(),
+        "https://api.hunyuan.cloud.tencent.com/v1/chat/completions"
     );
 }
 
