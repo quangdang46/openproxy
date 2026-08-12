@@ -130,3 +130,28 @@ static PROVIDER_CATALOG: Lazy<ProviderCatalog> = Lazy::new(|| {
 pub fn provider_catalog() -> &'static ProviderCatalog {
     &PROVIDER_CATALOG
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Guards against catalog regeneration silently dropping the opencode-zen
+    // registration (this happened once: merged in 0895cac, then lost when the
+    // catalog was regenerated, which broke the /dashboard/combos model picker).
+    #[test]
+    fn opencode_zen_registered_in_static_catalog() {
+        let catalog = provider_catalog();
+
+        let provider = catalog
+            .provider_info("opencode-zen")
+            .expect("opencode-zen should have a provider entry in provider_catalog.json");
+        assert_eq!(provider.alias, "opencode-zen");
+
+        let models = catalog
+            .models_for_alias("opencode-zen")
+            .expect("opencode-zen should have models in provider_catalog.json");
+        assert!(models.len() >= 40, "expected the zen model list, got {}", models.len());
+        assert!(models.iter().any(|m| m.id == "gpt-5.4"));
+        assert!(models.iter().any(|m| m.id == "kimi-k2.6"));
+    }
+}
