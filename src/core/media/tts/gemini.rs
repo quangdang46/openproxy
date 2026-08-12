@@ -12,9 +12,13 @@ use super::base::{upstream_error, TtsAdapter, TtsError, TtsRequest, TtsResult};
 pub struct GeminiAdapter;
 pub static ADAPTER: GeminiAdapter = GeminiAdapter;
 
-const DEFAULT_MODEL: &str = "gemini-2.5-flash-preview-tts";
+const DEFAULT_MODEL: &str = "gemini-3.1-flash-tts-preview";
 const DEFAULT_VOICE: &str = "Kore";
-const KNOWN_MODELS: &[&str] = &["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"];
+const KNOWN_MODELS: &[&str] = &[
+    "gemini-3.1-flash-tts-preview",
+    "gemini-2.5-flash-preview-tts",
+    "gemini-2.5-pro-preview-tts",
+];
 const SAMPLE_RATE: u32 = 24_000;
 const CHANNELS: u16 = 1;
 const BITS_PER_SAMPLE: u16 = 16;
@@ -141,5 +145,35 @@ impl TtsAdapter for GeminiAdapter {
             base64: base64::engine::general_purpose::STANDARD.encode(wav),
             format: "wav".to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_tts_default_is_3_1_flash() {
+        let (model, voice) = parse_model_voice("");
+        assert_eq!(model, "gemini-3.1-flash-tts-preview");
+        assert_eq!(voice, DEFAULT_VOICE);
+
+        let (model, voice) = parse_model_voice("gemini-3.1-flash-tts-preview/Kore");
+        assert_eq!(model, "gemini-3.1-flash-tts-preview");
+        assert_eq!(voice, "Kore");
+    }
+
+    #[test]
+    fn gemini_tts_known_models_keep_older_ids() {
+        // 2.5 models must still resolve after the 3.1 addition.
+        for id in ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"] {
+            let (model, voice) = parse_model_voice(&format!("{id}/Kore"));
+            assert_eq!(model, id);
+            assert_eq!(voice, "Kore");
+        }
+        // A bare voice maps to the default model (now 3.1).
+        let (model, voice) = parse_model_voice("Kore");
+        assert_eq!(model, DEFAULT_MODEL);
+        assert_eq!(voice, "Kore");
     }
 }
