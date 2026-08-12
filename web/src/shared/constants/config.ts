@@ -14,6 +14,8 @@ export const GITHUB_CONFIG = {
   repoUrl: "https://github.com/quangdang46/openproxy",
   docsUrl: "https://github.com/quangdang46/openproxy#readme",
   licenseUrl: "https://github.com/quangdang46/openproxy/blob/main/LICENSE",
+  // 9router DonateModal.js:14 fetches this verbatim — keep the upstream URL.
+  donateUrl: "https://9router.com/api/donate",
 } as const;
 
 // Updater configuration — binary install via install.sh (not npm)
