@@ -6,6 +6,7 @@ use crate::types::Settings;
 
 pub mod capture;
 pub mod cert;
+pub mod handlers;
 pub mod server;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
