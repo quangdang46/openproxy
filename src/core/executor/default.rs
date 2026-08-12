@@ -154,6 +154,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ),
         ),
         (
+            "alims-intl",
+            ProviderConfig::openai(
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+            ),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",

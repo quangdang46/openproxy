@@ -280,6 +280,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
         ),
         (
+            "alims-intl",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -316,6 +320,23 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "expected beta URL for {provider}"
         );
     }
+}
+
+/// Guard: alims-intl must be routable through DefaultExecutor with the full
+/// DashScope compatible-mode endpoint (no extra `/chat/completions` appended —
+/// the baseUrl already carries it). 9router parity: `open-sse/providers/registry/alims-intl.js`
+/// transport.baseUrl = `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`.
+#[test]
+fn alims_intl_has_full_endpoint_url() {
+    let pool = Arc::new(ClientPool::new());
+    let executor =
+        DefaultExecutor::new("alims-intl", pool, None).expect("alims-intl executor config");
+    assert_eq!(
+        executor
+            .build_url("qwen3.5-plus", false, &connection("alims-intl"))
+            .unwrap(),
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+    );
 }
 
 #[test]
