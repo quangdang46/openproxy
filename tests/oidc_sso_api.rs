@@ -441,3 +441,93 @@ async fn oidc_callback_sets_dashboard_cookie_on_valid_login() {
         "expected oidc_state cookie to be cleared in: {set_cookies:?}"
     );
 }
+
+#[tokio::test]
+async fn auth_status_returns_oidc_identity_chip_fields() {
+    let server = MockServer::start().await;
+    let (id_token, jwks) = {
+        let now = chrono::Utc::now().timestamp();
+        sign_jwt(
+            json!({
+                "sub": "oidc-user@example.com",
+                "iss": ISSUER,
+                "aud": CLIENT_ID,
+                "exp": now + 3600,
+                "iat": now,
+                "email": "oidc-user@example.com",
+                "name": "OIDC User",
+                "nonce": "fixed-nonce-for-test",
+            }),
+            Algorithm::RS256,
+        )
+    };
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "ignored",
+            "id_token": id_token,
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/jwks"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&jwks))
+        .mount(&server)
+        .await;
+
+    let client = Arc::new(client_for(&server));
+    let (app, _state) = boot_with_oidc(Some(client.clone())).await;
+
+    let cookies = format!(
+        "oidc_state=fixed-state-for-test; Path=/; HttpOnly; SameSite=Lax; \
+         oidc_nonce=fixed-nonce-for-test; Path=/; HttpOnly; SameSite=Lax; \
+         oidc_verifier=fixed-verifier-for-test; Path=/; HttpOnly; SameSite=Lax"
+    );
+    let mut query = HashMap::new();
+    query.insert("code".to_string(), "test-auth-code".to_string());
+    query.insert("state".to_string(), "fixed-state-for-test".to_string());
+    let qs = serde_urlencoded::to_string(&query).unwrap();
+
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/auth/oidc/callback?{qs}"))
+                .header(axum::http::header::COOKIE, cookies)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(login.status(), StatusCode::SEE_OTHER);
+    let auth_cookie = login
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|c| c.starts_with("auth_token="))
+        .expect("auth_token cookie");
+
+    // Now hit /api/auth/status with the dashboard session cookie.
+    let status_resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/auth/status")
+                .header(axum::http::header::COOKIE, auth_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(status_resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["authenticated"], true);
+    assert_eq!(json["loginMethod"], "OIDC");
+    assert_eq!(json["displayName"], "OIDC User");
+    assert_eq!(json["oidcName"], "OIDC User");
+    assert_eq!(json["oidcEmail"], "oidc-user@example.com");
+}
