@@ -194,6 +194,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.featherless.ai/v1/chat/completions"),
         ),
         (
+            "kilo-gateway",
+            ProviderConfig::openai("https://api.kilo.ai/api/gateway/chat/completions"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",

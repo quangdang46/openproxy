@@ -308,6 +308,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://api.featherless.ai/v1/chat/completions",
         ),
         (
+            "kilo-gateway",
+            "https://api.kilo.ai/api/gateway/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -497,6 +501,24 @@ fn featherless_has_full_endpoint() {
             .build_url("deepseek-ai/DeepSeek-V4-Pro", false, &connection("featherless"))
             .unwrap(),
         "https://api.featherless.ai/v1/chat/completions"
+    );
+}
+
+/// Guard: kilo-gateway must route through DefaultExecutor with the full
+/// /api/gateway/chat/completions endpoint. 9router parity:
+/// `open-sse/providers/registry/kilo-gateway.js` transport.baseUrl =
+/// `https://api.kilo.ai/api/gateway/chat/completions`. Do NOT confuse with
+/// kilocode (different /api/openrouter path). The `:free` suffix in model
+/// ids is literal — never stripped.
+#[test]
+fn kilo_gateway_full_gateway_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("kilo-gateway", pool, None).expect("kilo-gateway executor");
+    assert_eq!(
+        executor
+            .build_url("kilo-auto/free", false, &connection("kilo-gateway"))
+            .unwrap(),
+        "https://api.kilo.ai/api/gateway/chat/completions"
     );
 }
 
