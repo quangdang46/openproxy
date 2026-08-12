@@ -917,7 +917,11 @@ impl SearchProvider for SearxngProvider {
         true
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        let base = resolve_base_url("http://localhost:8080", request);
+        // 9router: default URL comes from SEARXNG_URL env (default
+        // http://localhost:8888/search).
+        let default = std::env::var("SEARXNG_URL")
+            .unwrap_or_else(|_| "http://localhost:8888/search".to_string());
+        let base = resolve_base_url(&default, request);
         let url = if base.ends_with("/search") {
             base
         } else {
@@ -1020,6 +1024,9 @@ mod tests {
     use crate::core::media::search::base::request_from_body;
     use serde_json::json;
 
+    /// Serializes tests that touch the SEARXNG_URL env var.
+    static SEARXNG_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn req(query: &str, max: u32) -> SearchRequest<'static> {
         SearchRequest {
             query: query.into(),
@@ -1085,10 +1092,38 @@ mod tests {
 
     #[test]
     fn searxng_no_auth_uses_localhost_default() {
+        // Env vars are process-global; serialize with the guard test below.
+        let _guard = SEARXNG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("SEARXNG_URL");
+        }
         let r = req("hi", 5);
         assert!(SEARXNG.no_auth());
         let url = SEARXNG.build_url(&r).unwrap();
-        assert!(url.starts_with("http://localhost:8080/search"));
+        assert!(url.starts_with("http://localhost:8888/search"));
+    }
+
+    #[test]
+    fn searxng_default_from_env() {
+        let _guard = SEARXNG_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Unset → 9router default localhost:8888/search.
+        unsafe {
+            std::env::remove_var("SEARXNG_URL");
+        }
+        let url = SEARXNG.build_url(&req("hi", 5)).unwrap();
+        assert!(
+            url.starts_with("http://localhost:8888/search?"),
+            "got: {url}"
+        );
+
+        // Set → env value used.
+        std::env::set_var("SEARXNG_URL", "https://x.example");
+        let url = SEARXNG.build_url(&req("hi", 5)).unwrap();
+        assert!(url.starts_with("https://x.example/search?"), "got: {url}");
+
+        unsafe {
+            std::env::remove_var("SEARXNG_URL");
+        }
     }
 
     #[test]
