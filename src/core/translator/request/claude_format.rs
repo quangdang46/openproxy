@@ -152,21 +152,52 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
     }
 
     // ── clamp max_tokens to model-aware ceiling ──
-    if let Some(max_tokens) = obj.get("max_tokens").and_then(Value::as_u64) {
+    let ceiling: u64 = {
         let model_lower = obj
             .get("model")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_lowercase();
-        let ceiling: u64 = if model_lower.contains("opus") {
-            200_000 // Opus: 200k context
+        if model_lower.contains("opus") {
+            128_000 // Opus: 128k max output (9router capabilities.js parity)
         } else if model_lower.contains("sonnet") {
             128_000
         } else {
             DEFAULT_MAX_TOKENS as u64 // 64_000 (haiku, unknown, non-Claude)
-        };
+        }
+    };
+    if let Some(max_tokens) = obj.get("max_tokens").and_then(Value::as_u64) {
         if max_tokens > ceiling {
             obj.insert("max_tokens".to_string(), json!(ceiling));
+        }
+    }
+
+    // ── thinking budget reconciliation (9router claude.js parity) ──
+    // If the thinking budget is not strictly below max_tokens, Claude 400s —
+    // raise max_tokens to budget + 1024 (capped at the ceiling) and shrink
+    // the budget to max(1024, max_tokens - 1024).
+    if obj
+        .get("thinking")
+        .and_then(|t| t.get("type"))
+        .and_then(Value::as_str)
+        == Some("enabled")
+    {
+        if let (Some(budget_tokens), Some(max_tokens)) = (
+            obj.get("thinking")
+                .and_then(|t| t.get("budget_tokens"))
+                .and_then(Value::as_u64),
+            obj.get("max_tokens").and_then(Value::as_u64),
+        ) {
+            if budget_tokens >= max_tokens {
+                let new_max = (budget_tokens + 1024).min(ceiling);
+                obj.insert("max_tokens".to_string(), json!(new_max));
+                if budget_tokens >= new_max {
+                    obj.get_mut("thinking")
+                        .and_then(Value::as_object_mut)
+                        .and_then(|t| t.get_mut("budget_tokens"))
+                        .map(|v| *v = json!(1024u64.max(new_max - 1024)));
+                }
+            }
         }
     }
 
@@ -658,6 +689,21 @@ mod tests {
         });
         prepare_claude_request(&mut body, "claude", None);
         assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+    }
+
+    #[test]
+    fn claude_format_reconciles_budget_after_clamp() {
+        let mut body = json!({
+            "model": "claude-sonnet-4.6",
+            "max_tokens": 128000,
+            "thinking": {"type": "enabled", "budget_tokens": 128000},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        prepare_claude_request(&mut body, "claude", None);
+        // budget + 1024 capped at the sonnet ceiling (128000)
+        assert_eq!(body["max_tokens"], 128000);
+        // budget shrunk to max_tokens - 1024
+        assert_eq!(body["thinking"]["budget_tokens"], 126976);
     }
 
     #[test]

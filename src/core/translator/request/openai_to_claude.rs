@@ -376,7 +376,38 @@ fn convert_openai_tool_choice(choice: &Value) -> Option<ClaudeToolChoice> {
     }
 }
 
-fn adjust_max_tokens(body: &serde_json::Map<String, Value>) -> u32 {
+/// Model-aware `max_tokens` output ceiling, mirroring 9router
+/// `capabilities.js` `maxOutput` (128000 for claude opus/sonnet >= 4.6,
+/// else 64000).
+fn model_output_ceiling(model: &str) -> u32 {
+    let lower = model.to_lowercase();
+    if lower.contains("claude")
+        && (lower.contains("opus") || lower.contains("sonnet"))
+        && version_at_least_4_6(&lower)
+    {
+        128000
+    } else {
+        64000
+    }
+}
+
+/// Whether the model string carries a version >= 4.6 (e.g. `-4.6`, `-4.8`,
+/// `-5`). `claude-3-5-sonnet` stays below the threshold.
+fn version_at_least_4_6(model: &str) -> bool {
+    let mut rest = model;
+    while let Some(pos) = rest.find(['-', '.']) {
+        rest = &rest[pos + 1..];
+        let major_end = rest.find(['-', '.']).unwrap_or(rest.len());
+        if let Ok(major) = rest[..major_end].parse::<u32>() {
+            if major >= 4 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn adjust_max_tokens(body: &serde_json::Map<String, Value>, ceiling: u32) -> u32 {
     let mut max_tokens = body
         .get("max_tokens")
         .and_then(|v| v.as_u64())
@@ -396,6 +427,11 @@ fn adjust_max_tokens(body: &serde_json::Map<String, Value>) -> u32 {
         }
     }
 
+    // 9router maxTokens.js parity: never exceed the model ceiling.
+    if max_tokens > ceiling {
+        max_tokens = ceiling;
+    }
+
     max_tokens
 }
 
@@ -409,7 +445,8 @@ pub fn openai_to_claude_request(
         return false;
     };
 
-    let max_tokens = adjust_max_tokens(body_obj);
+    let ceiling = model_output_ceiling(model);
+    let max_tokens = adjust_max_tokens(body_obj, ceiling);
 
     let mut result_messages: Vec<ClaudeMessage> = Vec::new();
     let mut system_parts: Vec<String> = Vec::new();
@@ -964,6 +1001,24 @@ mod tests {
             thinking.get("budget_tokens").unwrap().as_u64().unwrap(),
             24576 // 9router LEVEL_TO_BUDGET: high = 24576
         );
+    }
+
+    #[test]
+    fn adjust_max_tokens_clamps_to_model_ceiling() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "gpt-4",
+            "max_tokens": 200000,
+            "messages": [{"role": "user", "content": "Hello"}]
+        }"#,
+        )
+        .unwrap();
+
+        openai_to_claude_request("claude-opus-4.8", &mut body, false, None);
+
+        // 9router capabilities.js parity: claude-opus-4.8 maxOutput = 128000,
+        // so 200000 is clamped down to the model ceiling (not left at 200000).
+        assert_eq!(body.get("max_tokens").unwrap().as_u64().unwrap(), 128000);
     }
 
     #[test]
