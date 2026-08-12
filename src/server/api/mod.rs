@@ -366,7 +366,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
         )
         .route("/api/settings/require-login", get(get_require_login_api))
         .route("/api/db/export", get(export_db_api))
-        .route_layer(middleware::from_fn_with_state(state, guard::require_admin));
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            guard::require_admin,
+        ));
 
     // ── Remaining modules: complex/mixed auth managed per-handler ──
     let remaining = Router::new()
@@ -376,7 +379,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(mcp::routes())
         .merge(mcp_server::routes())
         .merge(auth::routes())
-        .merge(a2a::routes())
+        .merge(a2a::routes(state.clone()))
         .merge(provider_validate::routes());
 
     // ── Assemble ──
