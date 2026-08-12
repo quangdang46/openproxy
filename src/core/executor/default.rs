@@ -180,6 +180,16 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
                 .with_header("X-Title", "Cline"),
         ),
         (
+            "codebuddy-intl",
+            ProviderConfig::openai("https://www.codebuddy.ai/v2/chat/completions")
+                .with_header("User-Agent", "IDE/2.108.1 CodeBuddy/2.108.1")
+                .with_header("X-Product", "SaaS")
+                .with_header("X-IDE-Type", "IDE")
+                .with_header("X-IDE-Name", "IDE")
+                .with_header("x-requested-with", "XMLHttpRequest")
+                .with_header("x-codebuddy-request", "1"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",

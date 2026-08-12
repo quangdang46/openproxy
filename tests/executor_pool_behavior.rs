@@ -300,6 +300,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://api.cline.bot/api/v1/chat/completions",
         ),
         (
+            "codebuddy-intl",
+            "https://www.codebuddy.ai/v2/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -441,6 +445,37 @@ fn clinepass_url_and_headers() {
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert_eq!(headers["http-referer"], "https://cline.bot");
     assert_eq!(headers["x-title"], "Cline");
+}
+
+/// Guard: codebuddy-intl (.ai international domain, NOT the CN provider)
+/// must route through DefaultExecutor with the full endpoint URL and the
+/// exact 6 registry headers. 9router parity:
+/// `open-sse/providers/registry/codebuddy-intl.js` transport.baseUrl =
+/// `https://www.codebuddy.ai/v2/chat/completions` + User-Agent/X-Product/
+/// X-IDE-Type/X-IDE-Name/x-requested-with/x-codebuddy-request.
+/// Bearer auth (combined oauth+apikey). Do NOT point at copilot.tencent.com
+/// (that is codebuddy-cn).
+#[test]
+fn codebuddy_intl_url_and_headers() {
+    let pool = Arc::new(ClientPool::new());
+    let executor =
+        DefaultExecutor::new("codebuddy-intl", pool, None).expect("codebuddy-intl executor");
+    assert_eq!(
+        executor
+            .build_url("glm-5.2", false, &connection("codebuddy-intl"))
+            .unwrap(),
+        "https://www.codebuddy.ai/v2/chat/completions"
+    );
+    let headers = executor
+        .build_headers("glm-5.2", &connection("codebuddy-intl"), true)
+        .expect("headers");
+    assert_eq!(headers["authorization"], "Bearer sk-test");
+    assert_eq!(headers["user-agent"], "IDE/2.108.1 CodeBuddy/2.108.1");
+    assert_eq!(headers["x-product"], "SaaS");
+    assert_eq!(headers["x-ide-type"], "IDE");
+    assert_eq!(headers["x-ide-name"], "IDE");
+    assert_eq!(headers["x-requested-with"], "XMLHttpRequest");
+    assert_eq!(headers["x-codebuddy-request"], "1");
 }
 
 #[test]
