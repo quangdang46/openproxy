@@ -174,7 +174,7 @@ async fn validate_provider(
         }
 
         "blackbox" => {
-            match client.post("https://api.blackbox.ai/chat/completions")
+            match client.post("https://api.blackbox.ai/v1/chat/completions")
                 .header("Authorization", format!("Bearer {api_key}"))
                 .header("Content-Type", "application/json")
                 .json(&json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "test"}], "max_tokens": 10}))

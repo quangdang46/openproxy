@@ -223,6 +223,7 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
     let pool = Arc::new(ClientPool::new());
     let static_providers = [
         ("openai", "https://api.openai.com/v1/chat/completions"),
+        ("blackbox", "https://api.blackbox.ai/v1/chat/completions"),
         (
             "openrouter",
             "https://openrouter.ai/api/v1/chat/completions",
@@ -526,6 +527,19 @@ fn featherless_has_full_endpoint() {
             .unwrap(),
         "https://api.featherless.ai/v1/chat/completions"
     );
+}
+
+/// Guard: blackbox must hit /v1/chat/completions (NOT the old /api/... path).
+/// 9router registry/blackbox.js:26 transport.baseUrl.
+#[test]
+fn blackbox_v1_chat_completions_url() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("blackbox", pool, None).expect("blackbox executor");
+    let url = executor
+        .build_url("claude-fable-5", false, &connection("blackbox"))
+        .unwrap();
+    assert_eq!(url, "https://api.blackbox.ai/v1/chat/completions");
+    assert_ne!(url, "https://api.blackbox.ai/api/chat/completions");
 }
 
 /// Guard: kilo-gateway must route through DefaultExecutor with the full

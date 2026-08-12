@@ -256,7 +256,8 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "blackbox",
-            ProviderConfig::openai("https://api.blackbox.ai/api/chat/completions"),
+            // 9router registry/blackbox.js:26 — /v1/chat/completions.
+            ProviderConfig::openai("https://api.blackbox.ai/v1/chat/completions"),
         ),
         (
             "ollama-cloud",

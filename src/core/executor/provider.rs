@@ -773,7 +773,8 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             ),
             (
                 "blackbox",
-                ProviderExecutorConfig::openai("https://api.blackbox.ai/api/chat/completions"),
+                // 9router registry/blackbox.js:26 — /v1/chat/completions.
+                ProviderExecutorConfig::openai("https://api.blackbox.ai/v1/chat/completions"),
             ),
             (
                 "ai21",
