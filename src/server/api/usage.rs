@@ -29,10 +29,24 @@ fn require_usage_access(headers: &HeaderMap, state: &AppState) -> Result<(), Res
     super::require_dashboard_or_management_api_key(headers, state)
 }
 
+/// 9router `USAGE_APIKEY_PROVIDERS` parity (providers.js:163-165 — 12 registry
+/// entries with `features.usageApikey`). Providers without a live-quota fetcher
+/// fall back to a static message / per-request history (never 500).
 fn is_usage_apikey_provider(provider: &str) -> bool {
     matches!(
         provider,
-        "glm" | "glm-cn" | "minimax" | "minimax-cn" | "kimi" | "deepseek"
+        "glm"
+            | "glm-cn"
+            | "minimax"
+            | "minimax-cn"
+            | "kimi"
+            | "deepseek"
+            | "kiro"
+            | "ollama"
+            | "qoder"
+            | "vercel-ai-gateway"
+            | "codebuddy-cn"
+            | "codebuddy-intl"
     )
 }
 
@@ -467,8 +481,12 @@ async fn get_connection_usage(
     };
 
     let is_oauth = connection.auth_type == "oauth";
-    let is_apikey_eligible =
-        connection.auth_type == "apikey" && is_usage_apikey_provider(&connection.provider);
+    // 9router route.js:135-136: Kiro's headless api-key flow persists
+    // authType "api_key" (underscore) while generic apikey providers persist
+    // "apikey" — accept both spellings.
+    let is_apikey_eligible = (connection.auth_type == "apikey"
+        || connection.auth_type == "api_key")
+        && is_usage_apikey_provider(&connection.provider);
     if !is_oauth && !is_apikey_eligible {
         return Json(serde_json::json!({
             "message": "Usage not available for this connection"
@@ -512,11 +530,17 @@ async fn get_connection_usage(
             .filter(|s| !s.is_empty())
         {
             let provider = connection.provider.clone();
+            let psd = connection.provider_specific_data.clone();
             let result = match provider.as_str() {
                 "glm" | "glm-cn" => fetch_glm_quota(api_key, &provider).await,
                 "minimax" | "minimax-cn" => fetch_minimax_quota(api_key, &provider).await,
                 "kimi" => fetch_kimi_usage(api_key).await,
                 "deepseek" => fetch_deepseek_usage(api_key).await,
+                "qoder" => fetch_qoder_quota(api_key, &provider).await,
+                "kiro" => fetch_kiro_quota(api_key, &provider, &psd).await,
+                // ollama / vercel-ai-gateway / codebuddy-cn / codebuddy-intl have
+                // no live apikey quota fetcher yet (beads .117/.118) — fall back
+                // to `{}` + per-request history (never 500).
                 _ => serde_json::json!({}),
             };
             if let Some(quotas) = result.get("quotas") {
@@ -1736,5 +1760,54 @@ mod tests {
         assert!(!obj.contains_key("connection_id"));
         assert!(!obj.contains_key("api_key_masked"));
         assert!(!obj.contains_key("prompt_tokens"), "must be promptTokens");
+    }
+
+    #[test]
+    fn test_is_usage_apikey_provider_includes_all_12() {
+        for p in [
+            "glm",
+            "glm-cn",
+            "minimax",
+            "minimax-cn",
+            "kimi",
+            "deepseek",
+            "kiro",
+            "ollama",
+            "qoder",
+            "vercel-ai-gateway",
+            "codebuddy-cn",
+            "codebuddy-intl",
+        ] {
+            assert!(
+                is_usage_apikey_provider(p),
+                "expected {p} to be a usage apikey provider"
+            );
+        }
+        assert!(!is_usage_apikey_provider("openai"));
+        assert!(!is_usage_apikey_provider("claude"));
+    }
+
+    #[test]
+    fn test_apikey_eligible_accepts_api_key_underscore() {
+        use crate::types::ProviderConnection;
+        // Kiro headless flow persists auth_type "api_key" (underscore).
+        let conn = ProviderConnection {
+            auth_type: "api_key".into(),
+            provider: "kiro".into(),
+            ..Default::default()
+        };
+        let is_apikey_eligible = (conn.auth_type == "apikey" || conn.auth_type == "api_key")
+            && is_usage_apikey_provider(&conn.provider);
+        assert!(is_apikey_eligible, "api_key auth must be eligible for kiro");
+
+        // Non-whitelisted provider stays ineligible even with api_key auth.
+        let conn2 = ProviderConnection {
+            auth_type: "api_key".into(),
+            provider: "openai".into(),
+            ..Default::default()
+        };
+        let eligible2 = (conn2.auth_type == "apikey" || conn2.auth_type == "api_key")
+            && is_usage_apikey_provider(&conn2.provider);
+        assert!(!eligible2);
     }
 }
