@@ -840,7 +840,10 @@ async fn execute_single_model(
     );
 
     // 4. RTK tool-result compression (after translate — 9router parity)
-    compress_messages(&mut body, token_saver_enabled && snapshot.settings.rtk_enabled);
+    compress_messages(
+        &mut body,
+        token_saver_enabled && snapshot.settings.rtk_enabled,
+    );
 
     // 5. Headroom (after translate — 9router parity; format = final body shape)
     {
@@ -1860,7 +1863,9 @@ async fn forward_with_provider_fallback(
                     continue;
                 }
 
-                return Err(last_error.unwrap_or_else(|| ComboAttemptError::new(502, "provider error after exhausting all connections")));
+                return Err(last_error.unwrap_or_else(|| {
+                    ComboAttemptError::new(502, "provider error after exhausting all connections")
+                }));
             }
             Err(error) => {
                 let message = format!("{:?}", error);
@@ -3968,8 +3973,7 @@ mod tests {
         let off = HashMap::from([("x-9router-token-saver".to_string(), "off".to_string())]);
         assert!(!token_saver_gate(&off));
         // Case-insensitive: "OFF"/"Off".
-        let off_upper =
-            HashMap::from([("x-9router-token-saver".to_string(), "OFF".to_string())]);
+        let off_upper = HashMap::from([("x-9router-token-saver".to_string(), "OFF".to_string())]);
         assert!(!token_saver_gate(&off_upper));
         // Absent header → enabled.
         assert!(token_saver_gate(&HashMap::new()));
