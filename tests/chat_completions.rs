@@ -246,7 +246,7 @@ async fn chat_completions_injects_caveman_prompt_for_long_requests() {
     let messages = forwarded["messages"].as_array().expect("messages array");
     let system = messages[0]["content"].as_str().expect("system content");
     assert!(system.starts_with("Existing rules"));
-    assert!(system.contains(CompressionLevel::Ultra.prompt()));
+    assert!(system.contains(&CompressionLevel::Ultra.prompt()));
 }
 
 #[tokio::test]

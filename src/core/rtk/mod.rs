@@ -24,6 +24,17 @@ const MIN_TRIGGER_TOKENS: usize = 512;
 const MAX_TRIGGER_TOKENS: usize = 2048;
 const DEFAULT_CONTEXT_WINDOW: usize = 16_384;
 
+// 9router cavemanPrompts.js shared directives (verbatim) — appended to every
+// caveman level prompt.
+const CAVEMAN_SHARED_BOUNDARIES: &str = "Code blocks, file paths, commands, errors, URLs: keep exact. Security warnings, irreversible action confirmations, multi-step ordered sequences: write normal. Resume terse style after.";
+const CAVEMAN_SHARED_EXAMPLES: &str = "Not: \"Sure! I'd be happy to help you with that. The issue you're experiencing is likely caused by...\" Yes: \"Bug in auth middleware. Token expiry check use `<` not `<=`. Fix:\"";
+const CAVEMAN_SHARED_AUTO_CLARITY: &str = "Auto-Clarity: drop caveman for security warnings, irreversible actions, multi-step sequences where fragment ambiguity risks misread, or when user repeats a question. Resume after the clear part.";
+const CAVEMAN_SHARED_PERSISTENCE: &str = "ACTIVE EVERY RESPONSE. No revert after many turns. No filler drift. Still active if unsure.";
+const CAVEMAN_SHARED_NO_INVENTED_ABBREV: &str = "No invented abbreviations. Standard well-known tech acronyms (DB, API, HTTP, URL, JSON, ID, OS, CPU) OK. Names of code symbols, function names, API names, error strings: keep verbatim.";
+const CAVEMAN_SHARED_PRESERVE_LANGUAGE: &str = "Preserve the user's dominant language. User wrote Vietnamese, reply Vietnamese. User wrote English, reply English. Wenyan/classical-Chinese levels override this language-preservation rule. Code identifiers, error strings, file paths, commands: keep in their original form regardless of language.";
+const CAVEMAN_SHARED_NO_SELF_REFERENCE: &str = "No self-reference. Do not name or announce the style (no \"caveman mode\", no \"me caveman think\", no \"compressed mode active\"). Just respond.";
+const CAVEMAN_SHARED_NO_DECORATION: &str = "No decorative emoji. No narrating tool calls (\"I will now search\", \"I used X to find Y\"). No status phrases (\"Sure!\", \"Of course!\", \"I'd be happy to\"). No causal arrow shorthand (\"A -> B -> fails\"). State the thing, the action, the reason. Then next step.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompressionLevel {
     Lite,
@@ -46,52 +57,52 @@ impl CompressionLevel {
         }
     }
 
-    pub fn prompt(self) -> &'static str {
-        match self {
-            Self::Lite => concat!(
-                "Respond tersely. Keep grammar and full sentences but drop filler, hedging and ",
-                "pleasantries (just/really/basically/sure/of course/I'd be happy to). ",
-                "Pattern: state thing, action, reason. Then next step. ",
-                "Code blocks, file paths, commands, errors, URLs: keep exact. ",
-                "Security warnings, irreversible action confirmations, multi-step ordered ",
-                "sequences: write normal. Resume terse style after. ",
-                "Active every response until user asks for normal mode."
-            ),
-            Self::Full => concat!(
-                "Respond like terse caveman. All technical substance stay exact, only fluff die. ",
-                "Drop: articles (a/an/the), filler (just/really/basically/actually/simply), ",
-                "pleasantries, hedging. Fragments OK. Short synonyms (big not extensive, ",
-                "fix not implement solution for). ",
-                "Pattern: [thing] [action] [reason]. [next step]. ",
-                "Code blocks, file paths, commands, errors, URLs: keep exact. ",
-                "Security warnings, irreversible action confirmations, multi-step ordered ",
-                "sequences: write normal. Resume terse style after. ",
-                "Active every response until user asks for normal mode."
-            ),
-            Self::Ultra => concat!(
-                "Respond ultra-terse. Maximum compression. Telegraphic. ",
-                "Abbreviate (DB/auth/config/req/res/fn/impl), strip conjunctions, use arrows ",
-                "for causality (X -> Y). One word when one word enough. ",
-                "Pattern: [thing] -> [result]. [fix]. ",
-                "Code blocks, file paths, commands, errors, URLs: keep exact. ",
-                "Security warnings, irreversible action confirmations, multi-step ordered ",
-                "sequences: write normal. Resume terse style after. ",
-                "Active every response until user asks for normal mode."
-            ),
-            Self::WenyanLite => concat!(
-                "Respond semi-classical Chinese. Use concise wenyan phrasing where natural, ",
-                "but fall back to modern Chinese for complex technical terms. ",
-                "Keep technical substance exact."
-            ),
-            Self::Wenyan => concat!(
-                "Respond in Classical Chinese (wenyan). Use classical grammar and vocabulary. ",
-                "Keep technical terms, code, and file paths in original form."
-            ),
-            Self::WenyanUltra => concat!(
-                "Respond in ultra-terse Classical Chinese (wenyan). Maximum compression. ",
-                "Abbreviate. Use classical idioms. Technical terms stay exact."
-            ),
-        }
+    /// 9router cavemanPrompts.js shared directives — concatenated into every
+    /// level (verbatim from open-sse/rtk/cavemanPrompts.js).
+    pub fn prompt(self) -> String {
+        let shared = [
+            CAVEMAN_SHARED_EXAMPLES,
+            CAVEMAN_SHARED_BOUNDARIES,
+            CAVEMAN_SHARED_AUTO_CLARITY,
+            CAVEMAN_SHARED_PERSISTENCE,
+            CAVEMAN_SHARED_NO_INVENTED_ABBREV,
+            CAVEMAN_SHARED_PRESERVE_LANGUAGE,
+            CAVEMAN_SHARED_NO_SELF_REFERENCE,
+            CAVEMAN_SHARED_NO_DECORATION,
+        ]
+        .join(" ");
+        let level: &[&str] = match self {
+            Self::Lite => &[
+                "Respond tersely. Keep grammar and full sentences but drop filler, hedging and pleasantries (just/really/basically/sure/of course/I'd be happy to).",
+                "Pattern: state the thing, the action, the reason. Then next step.",
+            ],
+            Self::Full => &[
+                "Respond like terse caveman. All technical substance stay exact, only fluff die.",
+                "Drop: articles (a/an/the), filler (just/really/basically/actually/simply), pleasantries, hedging. Fragments OK. Short synonyms (big not extensive, fix not implement a solution for).",
+                "Pattern: [thing] [action] [reason]. [next step].",
+            ],
+            Self::Ultra => &[
+                "Respond ultra-terse. Maximum compression. Telegraphic.",
+                "Strip conjunctions. One word when one word enough.",
+                "Pattern: [thing] [action] [reason]. [next step].",
+            ],
+            Self::WenyanLite => &[
+                "Respond semi-classical. Drop filler/hedging but keep grammar structure, classical register.",
+                "Use classical Chinese sentence patterns where natural. Keep English for technical terms.",
+            ],
+            Self::Wenyan => &[
+                "Respond classical Chinese (文言文). Maximum classical terseness. 80-90% character reduction.",
+                "Classical sentence patterns, verbs precede objects, subjects often omitted, classical particles (之/乃/為/其).",
+                "Keep English for code, commands, function names, API names, error strings.",
+            ],
+            Self::WenyanUltra => &[
+                "Respond extreme classical compression (文言文 ultra). Maximum compression, ultra terse.",
+                "Same classical rules as wenyan-full but even more compressed. One classical particle per clause.",
+            ],
+        };
+        let mut parts: Vec<&str> = level.to_vec();
+        parts.push(&shared);
+        parts.join(" ")
     }
 
     pub fn parse_or_default(value: &str) -> Self {
@@ -181,14 +192,14 @@ pub fn inject_caveman_prompt(body: &mut Value, level: CompressionLevel) -> bool 
     };
 
     if fields.contains_key("system") {
-        return inject_claude_system(fields, prompt);
+        return inject_claude_system(fields, &prompt);
     }
 
     if is_gemini_shape(fields) {
-        return inject_gemini_system(fields, prompt);
+        return inject_gemini_system(fields, &prompt);
     }
 
-    inject_openai_shape(fields, prompt)
+    inject_openai_shape(fields, &prompt)
 }
 
 fn inject_openai_shape(fields: &mut Map<String, Value>, prompt: &str) -> bool {
@@ -818,7 +829,7 @@ mod tests {
             .as_str()
             .expect("system content");
         assert!(content.starts_with("Existing rules"));
-        assert!(content.contains(CompressionLevel::Full.prompt()));
+        assert!(content.contains(&CompressionLevel::Full.prompt()));
     }
 
     #[test]
@@ -849,7 +860,7 @@ mod tests {
         assert!(instructions["instructions"]
             .as_str()
             .expect("instructions")
-            .contains(CompressionLevel::Ultra.prompt()));
+            .contains(&CompressionLevel::Ultra.prompt()));
 
         let mut array_content = json!({
             "messages": [
@@ -1074,9 +1085,34 @@ mod tests {
         assert_ne!(ultra, wl);
         assert_ne!(wl, w);
         assert_ne!(w, wu);
-        assert!(wl.contains("wenyan"));
-        assert!(w.contains("Classical Chinese"));
-        assert!(wu.contains("ultra-terse"));
+        assert!(wl.contains("semi-classical"));
+        assert!(w.contains("文言文"));
+        assert!(wu.contains("ultra"));
+    }
+
+    #[test]
+    fn caveman_prompts_contain_shared_directives() {
+        // 9router cavemanPrompts.js — all 8 shared directives present in every level.
+        for level in [
+            CompressionLevel::Lite,
+            CompressionLevel::Full,
+            CompressionLevel::Ultra,
+            CompressionLevel::WenyanLite,
+            CompressionLevel::Wenyan,
+            CompressionLevel::WenyanUltra,
+        ] {
+            let p = level.prompt();
+            assert!(p.contains("keep exact"), "boundaries in {level:?}");
+            assert!(p.contains("No self-reference"), "no-self-ref in {level:?}");
+            assert!(p.contains("No decorative emoji"), "no-decoration in {level:?}");
+            assert!(p.contains("Preserve the user's dominant language"), "language in {level:?}");
+            assert!(p.contains("No invented abbreviations"), "abbrev in {level:?}");
+            assert!(p.contains("Auto-Clarity"), "auto-clarity in {level:?}");
+            assert!(p.contains("ACTIVE EVERY RESPONSE"), "persistence in {level:?}");
+        }
+        // Full contains the literal JS example.
+        let full = CompressionLevel::Full.prompt();
+        assert!(full.contains("Not: \"Sure! I'd be happy to help you with that."));
     }
 
     #[test]
