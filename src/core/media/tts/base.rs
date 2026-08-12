@@ -40,6 +40,9 @@ pub struct TtsRequest<'a> {
     pub credentials: &'a ProviderConnection,
     /// Optional language hint (Gemini honours this for prompt phrasing).
     pub language: Option<&'a str>,
+    /// Optional style/voice instruction string (xiaomi-mimo threads this as a
+    /// soft role:user instruction).
+    pub style: Option<&'a str>,
 }
 
 /// Result returned by an adapter: base64 audio + format string.

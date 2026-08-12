@@ -21,6 +21,7 @@ mod local_device;
 mod minimax;
 mod openai;
 mod openrouter;
+mod xiaomi_mimo;
 
 pub use base::{TtsAdapter, TtsRequest, TtsResult};
 pub use generic_formats::{synthesize_via_format, GenericFormat, GenericTtsRequest};
@@ -52,6 +53,7 @@ pub async fn dispatch(
             model,
             credentials,
             language: body.get("language").and_then(|v| v.as_str()),
+            style: body.get("style").and_then(|v| v.as_str()),
         };
         return Some(
             adapter
@@ -97,6 +99,7 @@ pub fn get_tts_adapter(provider: &str) -> Option<&'static dyn TtsAdapter> {
         "edge-tts" => Some(&edge_tts::ADAPTER),
         "local-device" => Some(&local_device::ADAPTER),
         "aws-polly" | "polly" => Some(&aws_polly::ADAPTER),
+        "xiaomi-mimo" => Some(&xiaomi_mimo::ADAPTER),
         _ => None,
     }
 }
@@ -192,6 +195,7 @@ mod tests {
             "deepgram",
             "nvidia",
             "huggingface",
+            "xiaomi-mimo",
         ] {
             assert!(is_tts_provider(p), "{p} should be a TTS provider");
         }
