@@ -172,7 +172,7 @@ fn default_generic_base_url(provider: &str) -> &'static str {
         "cartesia" => "https://api.cartesia.ai/tts/bytes",
         "playht" => "https://api.play.ht/api/v2/tts/stream",
         "coqui" => "http://localhost:5002/api/tts",
-        "tortoise" => "http://localhost:8000/tts",
+        "tortoise" => "http://localhost:5000/api/tts",
         "selfhosted-tts" => "http://localhost:8880",
         _ => "",
     }
@@ -242,6 +242,14 @@ mod tests {
         assert_eq!(split_model_voice("tts-1/alloy"), ("tts-1", "alloy"));
         assert_eq!(split_model_voice("solo"), ("solo", ""));
         assert_eq!(split_model_voice(""), ("", ""));
+    }
+
+    #[test]
+    fn tortoise_default_base_url_is_api_tts_on_5000() {
+        assert_eq!(
+            default_generic_base_url("tortoise"),
+            "http://localhost:5000/api/tts"
+        );
     }
 
     #[test]
