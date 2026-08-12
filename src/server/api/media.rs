@@ -474,15 +474,17 @@ async fn execute_media_provider(
                     cache_creation_input_tokens: None,
                     extra: Default::default(),
                 };
-                state.usage_tracker().track_request(
-                    provider,
-                    model,
-                    Some(&token_usage),
-                    Some(connection_id),
-                    Some(&api_key),
-                    Some(url.as_str()),
-                )
-                .await;
+                state
+                    .usage_tracker()
+                    .track_request(
+                        provider,
+                        model,
+                        Some(&token_usage),
+                        Some(connection_id),
+                        Some(&api_key),
+                        Some(url.as_str()),
+                    )
+                    .await;
             }
         }
         return rebuild_json_response(status, bytes.to_vec());
@@ -635,8 +637,7 @@ fn get_provider_base_url(provider: &str, connection: &crate::types::ProviderConn
         return base_url.to_string();
     }
 
-    crate::core::executor::get_provider_config(provider)
-        .map(|config| config.base_url)
+    crate::core::executor::provider_config_base_url(provider)
         .unwrap_or_else(|| format!("https://api.{}.com/v1", provider))
 }
 

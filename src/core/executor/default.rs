@@ -647,6 +647,17 @@ impl From<hyper_util::client::legacy::Error> for ExecutorError {
     }
 }
 
+/// Resolve a provider's upstream base URL from the live map
+/// (`PROVIDER_CONFIGS`). This is the single source of truth for chat and
+/// media; it replaces the deleted `provider.rs` PROVIDER_REGISTRY, which
+/// had silently drifted (e.g. wrong blackbox URL, wrong `featherless-ai`
+/// key). Returns `None` for unknown providers.
+pub fn provider_config_base_url(provider: &str) -> Option<String> {
+    PROVIDER_CONFIGS
+        .get(provider)
+        .map(|config| config.base_url.clone())
+}
+
 impl DefaultExecutor {
     pub fn new(
         provider: impl Into<String>,
@@ -846,33 +857,29 @@ impl DefaultExecutor {
         {
             let mut url = self.config.base_url.clone();
             if url.contains("{accountId}") {
-                let account_id =
-                    compatible_value(credentials.provider_specific_data.get("accountId")).ok_or(
-                        ExecutorError::MissingProviderSpecificData(
-                            self.provider.clone(),
-                            "accountId",
-                        ),
-                    )?;
+                let account_id = compatible_value(
+                    credentials.provider_specific_data.get("accountId"),
+                )
+                .ok_or(ExecutorError::MissingProviderSpecificData(
+                    self.provider.clone(),
+                    "accountId",
+                ))?;
                 url = url.replace("{accountId}", account_id);
             }
             if url.contains("{project}") {
-                let project =
-                    compatible_value(credentials.provider_specific_data.get("project")).ok_or(
-                        ExecutorError::MissingProviderSpecificData(
-                            self.provider.clone(),
-                            "project",
-                        ),
-                    )?;
+                let project = compatible_value(credentials.provider_specific_data.get("project"))
+                    .ok_or(ExecutorError::MissingProviderSpecificData(
+                    self.provider.clone(),
+                    "project",
+                ))?;
                 url = url.replace("{project}", project);
             }
             if url.contains("{location}") {
-                let location =
-                    compatible_value(credentials.provider_specific_data.get("location")).ok_or(
-                        ExecutorError::MissingProviderSpecificData(
-                            self.provider.clone(),
-                            "location",
-                        ),
-                    )?;
+                let location = compatible_value(credentials.provider_specific_data.get("location"))
+                    .ok_or(ExecutorError::MissingProviderSpecificData(
+                        self.provider.clone(),
+                        "location",
+                    ))?;
                 url = url.replace("{location}", location);
             }
             return Ok(url);
@@ -1343,9 +1350,8 @@ impl DefaultExecutor {
         // Working copies of the rotated RT/AT, behind Arc<Mutex> so the Fn
         // closure can rotate them between retry attempts without moving fields
         // out of `working`; read back after the retry loop completes.
-        let refresh_holder = std::sync::Arc::new(std::sync::Mutex::new(
-            working.refresh_token.clone(),
-        ));
+        let refresh_holder =
+            std::sync::Arc::new(std::sync::Mutex::new(working.refresh_token.clone()));
         let access_holder =
             std::sync::Arc::new(std::sync::Mutex::new(working.access_token.clone()));
         let refresh_holder_inner = refresh_holder.clone();

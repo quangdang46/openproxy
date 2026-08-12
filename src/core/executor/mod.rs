@@ -54,8 +54,8 @@ pub use cursor::{
     CursorExecutorResponse, SseEvent,
 };
 pub use default::{
-    DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError, ProviderConfig,
-    TransportKind, UpstreamResponse,
+    provider_config_base_url, DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError,
+    ProviderConfig, TransportKind, UpstreamResponse,
 };
 pub use gemini_cli::{
     GeminiCliExecutionRequest, GeminiCliExecutor, GeminiCliExecutorError, GeminiCliExecutorResponse,
@@ -91,10 +91,8 @@ pub use opencode_go::{
     OpenCodeGoExecutorResponse,
 };
 pub use provider::{
-    all_providers, get_api_key_providers, get_free_providers, get_oauth_providers,
-    get_provider_config, get_specialty_providers, is_supported_provider, LogEntry, LogLevel,
-    ProviderExecutionRequest, ProviderExecutionResponse, ProviderExecutor, ProviderExecutorConfig,
-    ProviderExecutorError, ProviderFormat, ProxyOptions, UnifiedExecutor,
+    LogEntry, LogLevel, ProviderExecutionRequest, ProviderExecutionResponse, ProviderExecutor,
+    ProviderExecutorConfig, ProviderExecutorError, ProviderFormat, ProxyOptions, UnifiedExecutor,
 };
 pub use qoder::{QoderExecutionRequest, QoderExecutor, QoderExecutorError, QoderExecutorResponse};
 pub use qwen::{QwenExecutionRequest, QwenExecutor, QwenExecutorError, QwenExecutorResponse};
