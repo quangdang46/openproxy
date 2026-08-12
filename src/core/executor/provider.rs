@@ -830,7 +830,7 @@ static PROVIDER_REGISTRY: once_cell::sync::Lazy<BTreeMap<&'static str, ProviderE
             ),
             (
                 "siliconflow",
-                ProviderExecutorConfig::openai("https://api.siliconflow.cn/v1"),
+                ProviderExecutorConfig::openai("https://api.siliconflow.com/v1"),
             ),
             (
                 "hyperbolic",

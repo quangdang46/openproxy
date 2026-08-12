@@ -247,7 +247,7 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
         ("nebius", "https://api.studio.nebius.ai/v1/chat/completions"),
         (
             "siliconflow",
-            "https://api.siliconflow.cn/v1/chat/completions",
+            "https://api.siliconflow.com/v1/chat/completions",
         ),
         (
             "hyperbolic",

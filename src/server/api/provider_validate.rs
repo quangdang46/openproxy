@@ -75,7 +75,7 @@ async fn validate_provider(
         "cerebras" => validate_bearer(&client, "https://api.cerebras.ai/v1/models", &api_key).await,
         "cohere" => validate_bearer(&client, "https://api.cohere.ai/v1/models", &api_key).await,
         "nebius" => validate_bearer(&client, "https://api.studio.nebius.ai/v1/models", &api_key).await,
-        "siliconflow" => validate_bearer(&client, "https://api.siliconflow.cn/v1/models", &api_key).await,
+        "siliconflow" => validate_bearer(&client, "https://api.siliconflow.com/v1/models", &api_key).await,
         "hyperbolic" => validate_bearer(&client, "https://api.hyperbolic.xyz/v1/models", &api_key).await,
         "chutes" => validate_bearer(&client, "https://llm.chutes.ai/v1/models", &api_key).await,
         "nvidia" => validate_bearer(&client, "https://integrate.api.nvidia.com/v1/models", &api_key).await,

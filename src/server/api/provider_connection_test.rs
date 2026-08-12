@@ -660,7 +660,7 @@ async fn test_api_key_connection(
                 state,
                 connection,
                 effective_proxy,
-                "https://api.siliconflow.cn/v1/models",
+                "https://api.siliconflow.com/v1/models",
                 "Invalid API key",
             )
             .await

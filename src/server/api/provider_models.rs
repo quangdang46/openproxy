@@ -408,7 +408,7 @@ async fn fetch_provider_models_response(
         "siliconflow" => {
             fetch_first_party_openai_style_models(
                 connection,
-                "https://api.siliconflow.cn/v1/models",
+                "https://api.siliconflow.com/v1/models",
             )
             .await
         }

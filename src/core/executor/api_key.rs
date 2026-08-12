@@ -293,7 +293,7 @@ static API_KEY_PROVIDERS: Lazy<BTreeMap<&'static str, (&'static str, &'static st
             ("cerebras", ("https://api.cerebras.ai/v1", "Authorization")),
             (
                 "siliconflow",
-                ("https://api.siliconflow.cn/v1", "Authorization"),
+                ("https://api.siliconflow.com/v1", "Authorization"),
             ),
             (
                 "hyperbolic",

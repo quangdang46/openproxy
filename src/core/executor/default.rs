@@ -105,7 +105,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "siliconflow",
-            ProviderConfig::openai("https://api.siliconflow.cn/v1/chat/completions"),
+            ProviderConfig::openai("https://api.siliconflow.com/v1/chat/completions"),
         ),
         (
             "hyperbolic",
