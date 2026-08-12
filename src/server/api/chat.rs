@@ -733,6 +733,18 @@ async fn execute_single_model(
 ) -> Result<Response, ComboAttemptError> {
     let snapshot = state.db.snapshot();
 
+    // 9router chatCore.js:229 — the `x-9router-token-saver` request header
+    // opts a single request out of RTK/headroom/caveman/ponytail when its
+    // value is the literal "off" (case-insensitive). Absent header (or any
+    // other value incl. "") keeps savers ON.
+    let token_saver_enabled = client_headers
+        .map(|h| {
+            h.get("x-9router-token-saver")
+                .map(|v| !v.eq_ignore_ascii_case("off"))
+                .unwrap_or(true)
+        })
+        .unwrap_or(true);
+
     let mut body = request_body.clone();
     if let Some(fields) = body.as_object_mut() {
         fields.insert("model".into(), Value::String(plan.model.clone()));
@@ -828,12 +840,12 @@ async fn execute_single_model(
     );
 
     // 4. RTK tool-result compression (after translate — 9router parity)
-    compress_messages(&mut body, snapshot.settings.rtk_enabled);
+    compress_messages(&mut body, token_saver_enabled && snapshot.settings.rtk_enabled);
 
     // 5. Headroom (after translate — 9router parity; format = final body shape)
     {
         let headroom_cfg = HeadroomConfig {
-            enabled: snapshot.settings.headroom_enabled,
+            enabled: token_saver_enabled && snapshot.settings.headroom_enabled,
             url: snapshot.settings.headroom_url.clone(),
             timeout_ms: snapshot.settings.headroom_timeout_ms,
             compress_user_messages: snapshot.settings.headroom_compress_user_messages,
@@ -858,8 +870,13 @@ async fn execute_single_model(
         }
     }
 
-    // 6. Caveman + Ponytail (after translate — 9router parity)
-    let _ = apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model);
+    // 6. Caveman + Ponytail (after translate — 9router parity; gated by the
+    //    per-request token-saver header like JS chatCore.js:252,258)
+    let _ = if token_saver_enabled {
+        apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model)
+    } else {
+        false
+    };
 
     // 7. Tool dedupe for Claude clients (after translate, before dispatch)
     if client_tool == Some(ClientTool::Claude) {
@@ -3932,5 +3949,34 @@ mod tests {
             .expect("plain proxied body should collect");
 
         assert_eq!(collected.to_bytes(), body);
+    }
+
+    /// 9router chatCore.js:229 — the x-9router-token-saver header opts out of
+    /// savers when its value is the literal "off" (case-insensitive); absent
+    /// header or any other value keeps savers ON.
+    fn token_saver_gate(headers: &std::collections::HashMap<String, String>) -> bool {
+        headers
+            .get("x-9router-token-saver")
+            .map(|v| !v.eq_ignore_ascii_case("off"))
+            .unwrap_or(true)
+    }
+
+    #[test]
+    fn token_saver_header_disables_rtk_and_caveman() {
+        use std::collections::HashMap;
+        // "off" → savers disabled.
+        let off = HashMap::from([("x-9router-token-saver".to_string(), "off".to_string())]);
+        assert!(!token_saver_gate(&off));
+        // Case-insensitive: "OFF"/"Off".
+        let off_upper =
+            HashMap::from([("x-9router-token-saver".to_string(), "OFF".to_string())]);
+        assert!(!token_saver_gate(&off_upper));
+        // Absent header → enabled.
+        assert!(token_saver_gate(&HashMap::new()));
+        // Empty value / other value → enabled (JS `!== "off"`).
+        let empty = HashMap::from([("x-9router-token-saver".to_string(), String::new())]);
+        assert!(token_saver_gate(&empty));
+        let yes = HashMap::from([("x-9router-token-saver".to_string(), "yes".to_string())]);
+        assert!(token_saver_gate(&yes));
     }
 }
