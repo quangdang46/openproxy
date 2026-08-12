@@ -1510,6 +1510,241 @@ fn vercel_ai_gateway_quota_rows(balance: f64, total_used: f64) -> Value {
     })
 }
 
+const CODEBUDDY_CN_URL: &str = "https://copilot.tencent.com/v2/billing/meter/get-user-resource";
+const CODEBUDDY_INTL_URL: &str = "https://www.codebuddy.ai/v2/billing/meter/get-user-resource";
+/// A refill pack is one whose DeductionEndTime is more than this far past the
+/// cycle end (9router REFILL_GAP_MS = 2 days).
+const CODEBUDDY_REFILL_GAP_MS: i64 = 2 * 24 * 60 * 60 * 1000;
+
+/// CodeBuddy CN/Intl usage (9router services/usage/codebuddy-cn.js:46-138).
+/// POST `{}` to the billing meter endpoint with the CodeBuddy headers, parse
+/// `data.Response.Data.Accounts`, and partition refill vs bonus packs.
+pub async fn fetch_codebuddy_quota(token: &str, provider: &str) -> Value {
+    if token.trim().is_empty() {
+        return json!({ "message": format!("CodeBuddy ({provider}) credential not available.") });
+    }
+    let url = if provider == "codebuddy-intl" {
+        CODEBUDDY_INTL_URL
+    } else {
+        CODEBUDDY_CN_URL
+    };
+    let client = http_client();
+    let response = match client
+        .post(url)
+        .bearer_auth(token.trim())
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("User-Agent", "CLI/2.108.1 CodeBuddy/2.108.1")
+        .header("X-Product", "SaaS")
+        .header("X-IDE-Type", "CLI")
+        .header("X-IDE-Name", "CLI")
+        .header("x-requested-with", "XMLHttpRequest")
+        .header("x-codebuddy-request", "1")
+        .body("{}")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({ "message": format!("CodeBuddy ({provider}) error: {e}") });
+        }
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({ "message": "CodeBuddy CN credential invalid or expired." });
+    }
+    if !(200..300).contains(&status) {
+        return json!({ "message": format!("CodeBuddy CN quota API error ({status}).") });
+    }
+    let json_body: Value = match response.json().await {
+        Ok(v) => v,
+        Err(_) => return json!({ "message": "CodeBuddy CN quota API error." }),
+    };
+    // json.code === 0 gate.
+    if json_body.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) != 0 {
+        let msg = json_body
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return json!({ "message": format!("CodeBuddy CN quota error: {msg}") });
+    }
+    let data = json_body
+        .pointer("/data/Response/Data")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let accounts: Vec<Value> = data
+        .get("Accounts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if accounts.is_empty() {
+        return json!({ "message": "CodeBuddy CN connected. No credit package found." });
+    }
+
+    codebuddy_quota_rows_from_accounts(accounts)
+}
+
+/// Partition CodeBuddy accounts into quota rows (refill vs bonus packs).
+/// Mirrors 9router codebuddy-cn.js: refills and bonuses are partitioned and
+/// each sorted by expiry; bonus packs are indexed independently (1-based).
+/// Pure fn so tests exercise the real partitioning logic.
+fn codebuddy_quota_rows_from_accounts(accounts: Vec<Value>) -> Value {
+    fn expiry_ms(acc: &Value) -> i64 {
+        acc.get("CycleEndTime")
+            .and_then(|v| v.as_str())
+            .and_then(|s| parse_codebuddy_time(Some(s)))
+            .unwrap_or(i64::MAX)
+    }
+
+    let mut refills: Vec<&Value> = accounts
+        .iter()
+        .filter(|a| {
+            a.as_object()
+                .map(|o| codebuddy_is_refill(o))
+                .unwrap_or(false)
+        })
+        .collect();
+    refills.sort_by_key(|a| expiry_ms(a));
+    let mut bonuses: Vec<&Value> = accounts
+        .iter()
+        .filter(|a| {
+            !a.as_object()
+                .map(|o| codebuddy_is_refill(o))
+                .unwrap_or(false)
+        })
+        .collect();
+    bonuses.sort_by_key(|a| expiry_ms(a));
+
+    let mut quotas = serde_json::Map::new();
+    // Refill packs first: cadence-labelled, Cycle* balance, recurring true.
+    let mut seen_refill: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for acc in &refills {
+        let obj = acc.as_object().cloned().unwrap_or_default();
+        let cadence = codebuddy_refill_cadence(&obj);
+        let count = seen_refill.entry(cadence.clone()).or_insert(0);
+        *count += 1;
+        let label = if *count > 1 {
+            format!("{cadence} {count}")
+        } else {
+            cadence
+        };
+        quotas.insert(label, codebuddy_quota_row(&obj, true));
+    }
+    // Bonus packs: lifetime Capacity balance, recurring false, 1-based index.
+    for (i, acc) in bonuses.iter().enumerate() {
+        let obj = acc.as_object().cloned().unwrap_or_default();
+        quotas.insert(
+            format!("Bonus Pack {}", i + 1),
+            codebuddy_bonus_row(&obj),
+        );
+    }
+
+    // Plan from the first refill (or first account), like JS basePkg.
+    let plan_source: Option<&Value> = refills
+        .first()
+        .map(|v| *v)
+        .or_else(|| accounts.first());
+    let mut plan = "CodeBuddy".to_string();
+    if let Some(src) = plan_source {
+        let base = codebuddy_base_package(
+            src.as_object().unwrap_or(&serde_json::Map::new()),
+        );
+        if let Some(name) = base.get("PackageName").and_then(|v| v.as_str()) {
+            if !name.is_empty() {
+                plan = name.to_string();
+            }
+        } else if let Some(name) = base.get("SubProductName").and_then(|v| v.as_str()) {
+            if !name.is_empty() {
+                plan = name.to_string();
+            }
+        }
+    }
+
+    json!({ "plan": plan, "quotas": Value::Object(quotas) })
+}
+
+/// Bonus pack quota row — lifetime Capacity balance (NOT Cycle fields).
+fn codebuddy_bonus_row(acc: &serde_json::Map<String, Value>) -> Value {
+    let used = codebuddy_num(acc, "CapacityUsedPrecise", "CapacityUsed");
+    let total = codebuddy_num(acc, "CapacitySizePrecise", "CapacitySize");
+    let reset_at = acc
+        .get("CycleEndTime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    json!({
+        "used": used, "total": total, "resetAt": reset_at,
+        "unlimited": false, "recurring": false
+    })
+}
+
+/// 9router isRefill: DeductionEndTime − cycleEnd > REFILL_GAP_MS.
+fn codebuddy_is_refill(acc: &serde_json::Map<String, Value>) -> bool {
+    let cycle_end = parse_codebuddy_time(acc.get("CycleEndTime").and_then(|v| v.as_str()));
+    let deduction_end = parse_codebuddy_time(acc.get("DeductionEndTime").and_then(|v| v.as_str()));
+    match (cycle_end, deduction_end) {
+        (Some(ce), Some(de)) => de - ce > CODEBUDDY_REFILL_GAP_MS,
+        _ => false,
+    }
+}
+
+/// 9router refillCadence: Monthly/Weekly/Daily by days between CycleStartTime
+/// and CycleEndTime (≤1.5d → Daily, ≤10d → Weekly, else Monthly).
+fn codebuddy_refill_cadence(acc: &serde_json::Map<String, Value>) -> String {
+    let start = parse_codebuddy_time(acc.get("CycleStartTime").and_then(|v| v.as_str()));
+    let end = parse_codebuddy_time(acc.get("CycleEndTime").and_then(|v| v.as_str()));
+    if let (Some(s), Some(e)) = (start, end) {
+        let days = (e - s) as f64 / 86_400_000.0;
+        if days <= 1.5 {
+            "Daily".to_string()
+        } else if days <= 10.0 {
+            "Weekly".to_string()
+        } else {
+            "Monthly".to_string()
+        }
+    } else {
+        "Monthly".to_string()
+    }
+}
+
+fn parse_codebuddy_time(s: Option<&str>) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s?)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+/// 9router num(): Number(precise ?? plain), non-finite → 0.
+fn codebuddy_num(acc: &serde_json::Map<String, Value>, precise: &str, plain: &str) -> f64 {
+    acc.get(precise)
+        .or_else(|| acc.get(plain))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|n| n.is_finite())
+        .unwrap_or(0.0)
+}
+
+fn codebuddy_quota_row(acc: &serde_json::Map<String, Value>, recurring: bool) -> Value {
+    let used = codebuddy_num(acc, "CycleCapacityUsedPrecise", "CycleCapacityUsed");
+    let total = codebuddy_num(acc, "CycleCapacitySizePrecise", "CycleCapacitySize");
+    let reset_at = acc
+        .get("CycleEndTime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    json!({
+        "used": used, "total": total, "resetAt": reset_at,
+        "unlimited": false, "recurring": recurring
+    })
+}
+
+fn codebuddy_base_package(acc: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    acc.get("BasePackage")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default()
+}
+
 pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
     if access_token.is_empty() {
         return json!({ "message": "Invalid or expired Claude token" });
@@ -2559,5 +2794,60 @@ mod tests {
         let msg = out["message"].as_str().unwrap();
         assert!(msg.contains("No credit allocation found"), "got: {msg}");
         assert!(out["quotas"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_codebuddy_refill_cadence() {
+        // Monthly: Jan 1 → Jan 31.
+        let m = serde_json::Map::from_iter([
+            ("CycleStartTime".into(), json!("2026-01-01T00:00:00Z")),
+            ("CycleEndTime".into(), json!("2026-01-31T00:00:00Z")),
+        ]);
+        assert_eq!(codebuddy_refill_cadence(&m), "Monthly");
+        // Daily: 1-day span.
+        let d = serde_json::Map::from_iter([
+            ("CycleStartTime".into(), json!("2026-01-01T00:00:00Z")),
+            ("CycleEndTime".into(), json!("2026-01-02T00:00:00Z")),
+        ]);
+        assert_eq!(codebuddy_refill_cadence(&d), "Daily");
+        // Weekly: 7-day span.
+        let w = serde_json::Map::from_iter([
+            ("CycleStartTime".into(), json!("2026-01-01T00:00:00Z")),
+            ("CycleEndTime".into(), json!("2026-01-08T00:00:00Z")),
+        ]);
+        assert_eq!(codebuddy_refill_cadence(&w), "Weekly");
+    }
+
+    #[test]
+    fn test_codebuddy_partitions_refill_vs_bonus() {
+        // Refill account: DeductionEndTime − CycleEndTime > 2 days.
+        let refill = json!({
+            "CycleStartTime": "2026-01-01T00:00:00Z",
+            "CycleEndTime": "2026-01-31T00:00:00Z",
+            "DeductionEndTime": "2026-02-05T00:00:00Z", // > 2 days past cycle end
+            "CycleCapacityUsedPrecise": "10",
+            "CycleCapacitySizePrecise": "100",
+            "BasePackage": {"PackageName": "Tencent Coding Plan"}
+        });
+        // Bonus account: DeductionEndTime == 0 (no refill signal).
+        let bonus = json!({
+            "CycleEndTime": "2026-01-31T00:00:00Z",
+            "DeductionEndTime": "0",
+            "CapacityUsedPrecise": "2",
+            "CapacitySizePrecise": "5"
+        });
+        let out = codebuddy_quota_rows_from_accounts(vec![refill, bonus]);
+        let quotas = out["quotas"].as_object().unwrap();
+        // Refill → "Monthly" recurring true.
+        let monthly = quotas.get("Monthly").expect("refill pack labeled Monthly");
+        assert_eq!(monthly["recurring"], true);
+        assert_eq!(monthly["used"], 10.0);
+        assert_eq!(monthly["total"], 100.0);
+        // Bonus → "Bonus Pack 1" recurring false.
+        let bonus_pack = quotas.get("Bonus Pack 1").expect("bonus pack present");
+        assert_eq!(bonus_pack["recurring"], false);
+        assert_eq!(bonus_pack["used"], 2.0);
+        // Plan from PackageName.
+        assert_eq!(out["plan"], "Tencent Coding Plan");
     }
 }
