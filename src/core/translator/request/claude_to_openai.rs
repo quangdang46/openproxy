@@ -473,6 +473,18 @@ pub fn claude_to_openai_request(
         result["thinking"] = thinking.clone();
     }
 
+    // reasoning_effort / reasoning passthrough (9router claude-to-openai.js:83-91):
+    //   reasoning_effort = body.reasoning_effort ?? body.reasoning?.effort
+    //   reasoning      = body.reasoning
+    if let Some(e) = body_obj.get("reasoning_effort") {
+        result["reasoning_effort"] = e.clone();
+    } else if let Some(e) = body_obj.get("reasoning").and_then(|r| r.get("effort")) {
+        result["reasoning_effort"] = e.clone();
+    }
+    if let Some(r) = body_obj.get("reasoning") {
+        result["reasoning"] = r.clone();
+    }
+
     *body = result;
     true
 }
@@ -1041,5 +1053,38 @@ mod tests {
                 .unwrap(),
             "get_weather"
         );
+    }
+
+    #[test]
+    fn test_reasoning_effort_passthrough() {
+        // reasoning_effort at top level is forwarded directly.
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "claude-3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "high"
+        }"#,
+        )
+        .unwrap();
+        claude_to_openai_request("gpt-4", &mut body, false, None);
+        assert_eq!(body.get("reasoning_effort").unwrap().as_str().unwrap(), "high");
+    }
+
+    #[test]
+    fn test_reasoning_effort_from_reasoning_object() {
+        // reasoning_effort falls back to reasoning.effort (JS claude-to-openai.js:83-91).
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "claude-3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning": {"effort": "medium", "summary": "auto"}
+        }"#,
+        )
+        .unwrap();
+        claude_to_openai_request("gpt-4", &mut body, false, None);
+        assert_eq!(body.get("reasoning_effort").unwrap().as_str().unwrap(), "medium");
+        // reasoning object is also forwarded verbatim.
+        assert!(body.get("reasoning").is_some());
+        assert_eq!(body["reasoning"]["effort"], "medium");
     }
 }
