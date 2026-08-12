@@ -26,7 +26,11 @@ const CLIENT_IDENTIFIER: &str = "grok-pager";
 const TOKEN_AUTH: &str = "xai-grok-cli";
 const COMPACTION_AT: &str = "400000";
 
-const EFFORT_LEVELS: &[&str] = &["low", "medium", "high"];
+/// 9router grok-cli.js EFFORT_LEVELS — xhigh included.
+const EFFORT_LEVELS: &[&str] = &["low", "medium", "high", "xhigh"];
+
+/// Max entries in the in-process turn store before evicting oldest.
+const TURN_STORE_MAX_SIZE: usize = 5000;
 
 const HOSTED_TOOL_TYPES: &[&str] = &[
     "web_search",
@@ -58,10 +62,14 @@ const RESPONSES_ALLOWLIST: &[&str] = &[
     "prompt_cache_key",
 ];
 
-fn turn_store() -> &'static Mutex<HashMap<String, u32>> {
-    static STORE: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
+fn turn_store() -> &'static Mutex<HashMap<String, (u32, std::time::Instant)>> {
+    static STORE: OnceLock<Mutex<HashMap<String, (u32, std::time::Instant)>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
 }
+
+/// TTL for a session's turn counter (9router uses a WeakMap keyed by request;
+/// Rust keeps a per-process monotonic counter and expires stale sessions).
+const TURN_STORE_TTL: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 /// Count user turns in a Responses `input` array (1-based min 1).
 pub fn count_grok_cli_user_turns(input: &Value) -> u32 {
@@ -83,15 +91,28 @@ pub fn count_grok_cli_user_turns(input: &Value) -> u32 {
 }
 
 /// Monotonic turn index per session (never decreases within process).
+///
+/// 9router increments per request (`prev + (requestKey ? 1 : 0)`) and keeps a
+/// WeakMap keyed by request object; Rust keys on the session id with a
+/// per-request increment + TTL + max-size eviction.
 pub fn resolve_grok_cli_turn_idx(session_id: Option<&str>, input: &Value) -> u32 {
     let from_input = count_grok_cli_user_turns(input);
     let Some(sid) = session_id.filter(|s| !s.is_empty()) else {
         return from_input;
     };
+    let now = std::time::Instant::now();
     let mut store = turn_store().lock().unwrap_or_else(|e| e.into_inner());
-    let prev = store.get(sid).copied().unwrap_or(0);
-    let turn = from_input.max(prev);
-    store.insert(sid.to_string(), turn);
+    // Expire stale sessions and bound the store size.
+    if store.len() >= TURN_STORE_MAX_SIZE {
+        store.retain(|_, (_, last)| now.duration_since(*last) < TURN_STORE_TTL);
+    }
+    let prev = store
+        .get(sid)
+        .filter(|(_, last)| now.duration_since(*last) < TURN_STORE_TTL)
+        .map(|(turn, _)| *turn)
+        .unwrap_or(0);
+    let turn = from_input.max(prev + 1);
+    store.insert(sid.to_string(), (turn, now));
     turn
 }
 
@@ -102,6 +123,26 @@ pub fn reset_grok_cli_turn_store() {
     }
 }
 
+/// 9router `supportsGrokCliReasoningEffort` — only grok-4.5-family models
+/// accept a `reasoning.effort` field.
+fn supports_grok_cli_reasoning_effort(model: &str) -> bool {
+    let mut re = regex::Regex::new(r"^grok-4\.5(?:$|-)").expect("effort regex must compile");
+    re.is_match(model)
+}
+
+/// Normalize effort like 9router `normalizeGrokCliEffort`: "max" → "xhigh",
+/// unknown → "high".
+fn normalize_effort(effort: &str) -> &'static str {
+    match effort {
+        "max" => "xhigh",
+        "low" => "low",
+        "medium" => "medium",
+        "high" => "high",
+        "xhigh" => "xhigh",
+        _ => "high",
+    }
+}
+
 pub fn resolve_effort_from_model(model_id: &str) -> Option<&'static str> {
     for level in EFFORT_LEVELS {
         if model_id.ends_with(&format!("-{level}")) {
@@ -109,6 +150,26 @@ pub fn resolve_effort_from_model(model_id: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Format a machine-id fingerprint into the UUID-ish shape 9router builds
+/// from `getConsistentMachineId` (16 hex chars):
+/// `[mid[0..8], mid[8..12], "5"+mid[13..16], "a"+mid[17..20], mid[0..12].pad(12,"0")].join("-")`.
+///
+/// The Rust machine id is 64 hex chars; we reuse the same slices so the
+/// shape is stable per machine.
+fn format_grok_cli_agent_id(mid: &str) -> String {
+    let m = if mid.len() < 20 {
+        // Pad so the slices below stay in bounds for short ids.
+        format!("{mid:0<20}")
+    } else {
+        mid.to_string()
+    };
+    let s = |i: usize, j: usize| m[i..j].to_string();
+    let p2 = format!("5{}", &m[13..16]);
+    let p3 = format!("a{}", &m[17..20]);
+    let p4 = format!("{:0<12}", &m[..12]);
+    format!("{}-{}-{}-{}-{}", s(0, 8), s(8, 12), p2, p3, p4)
 }
 
 fn is_server_id(id: &str) -> bool {
@@ -352,7 +413,9 @@ impl GrokCliExecutor {
             headers.insert("x-grok-agent-id", HeaderValue::from_str(aid)?);
         }
 
-        let email = psd_str(credentials, "email");
+        // psd email → top-level credentials.email (9router falls back to the
+        // connection's own email when provider-specific data lacks one).
+        let email = psd_str(credentials, "email").or_else(|| credentials.email.clone());
         let user_id = psd_str(credentials, "userId")
             .or_else(|| psd_str(credentials, "user_id"))
             .or_else(|| psd_str(credentials, "providerUserId"));
@@ -450,18 +513,34 @@ impl GrokCliExecutor {
         }
         body["model"] = json!(resolved);
 
-        let effort = body
-            .pointer("/reasoning/effort")
-            .and_then(Value::as_str)
-            .or_else(|| body.get("reasoning_effort").and_then(Value::as_str))
-            .or(model_effort)
-            .unwrap_or("high");
+        // 9router: normalize "max" → "xhigh", unknown → "high"; default is
+        // "high" (only for models that support reasoning effort).
+        let supports_effort = supports_grok_cli_reasoning_effort(
+            body.get("model").and_then(Value::as_str).unwrap_or(model),
+        );
         let mut reasoning = body.get("reasoning").cloned().unwrap_or_else(|| json!({}));
         if !reasoning.is_object() {
             reasoning = json!({});
         }
-        if reasoning.get("effort").is_none() {
-            reasoning["effort"] = json!(effort);
+        if !supports_effort {
+            // 9router supportsGrokCliReasoningEffort gating: non-grok-4.5
+            // models must not carry reasoning.effort.
+            reasoning.as_object_mut().map(|obj| obj.remove("effort"));
+        } else {
+            let effort = body
+                .pointer("/reasoning/effort")
+                .and_then(Value::as_str)
+                .map(normalize_effort)
+                .or_else(|| {
+                    body.get("reasoning_effort")
+                        .and_then(Value::as_str)
+                        .map(normalize_effort)
+                })
+                .or_else(|| model_effort.map(normalize_effort))
+                .unwrap_or("high");
+            if reasoning.get("effort").is_none() {
+                reasoning["effort"] = json!(effort);
+            }
         }
         if reasoning.get("summary").is_none() {
             reasoning["summary"] = json!("concise");
@@ -534,8 +613,20 @@ impl GrokCliExecutor {
             Some(&session_id),
             transformed.get("input").unwrap_or(&json!([])),
         );
+        // 9router: deviceId/agentId from psd wins; otherwise derive a stable
+        // machine-id fingerprint (`getConsistentMachineId("grok-cli-agent")`
+        // in JS, which is a sha256 of the machine identity). Rust's
+        // get_machine_id() returns a 64-char SHA-256 hex string.
         let agent_id = psd_str(&request.credentials, "deviceId")
-            .or_else(|| psd_str(&request.credentials, "agentId"));
+            .or_else(|| psd_str(&request.credentials, "agentId"))
+            .or_else(|| {
+                let mid = crate::core::auth::machine_id::get_machine_id();
+                if mid.is_empty() {
+                    None
+                } else {
+                    Some(format_grok_cli_agent_id(&mid))
+                }
+            });
         let model = transformed
             .get("model")
             .and_then(Value::as_str)
@@ -645,9 +736,96 @@ mod tests {
             {"type": "message", "role": "user", "content": "c"},
         ]);
         assert_eq!(resolve_grok_cli_turn_idx(Some("s1"), &input), 2);
-        // fewer users still keeps max
+        // per-request increment: fewer users still advances beyond prev
         let input2 = json!([{"type": "message", "role": "user", "content": "x"}]);
-        assert_eq!(resolve_grok_cli_turn_idx(Some("s1"), &input2), 2);
+        assert_eq!(resolve_grok_cli_turn_idx(Some("s1"), &input2), 3);
+        // fresh session starts at its own count
+        assert_eq!(resolve_grok_cli_turn_idx(Some("s2"), &input), 2);
+    }
+
+    #[test]
+    fn turn_idx_without_session_uses_input_count() {
+        reset_grok_cli_turn_store();
+        let input = json!([{"type": "message", "role": "user", "content": "x"}]);
+        assert_eq!(resolve_grok_cli_turn_idx(None, &input), 1);
+        assert_eq!(resolve_grok_cli_turn_idx(Some(""), &input), 1);
+    }
+
+    #[test]
+    fn effort_normalize_max_to_xhigh() {
+        assert_eq!(normalize_effort("max"), "xhigh");
+        assert_eq!(normalize_effort("low"), "low");
+        assert_eq!(normalize_effort("medium"), "medium");
+        assert_eq!(normalize_effort("high"), "high");
+        assert_eq!(normalize_effort("xhigh"), "xhigh");
+        assert_eq!(normalize_effort("bogus"), "high");
+        // resolve_effort_from_model now detects the xhigh suffix too
+        assert_eq!(resolve_effort_from_model("grok-4.5-xhigh"), Some("xhigh"));
+        assert_eq!(resolve_effort_from_model("grok-4.5-high"), Some("high"));
+        assert_eq!(resolve_effort_from_model("grok-4.5"), None);
+    }
+
+    #[test]
+    fn supports_effort_only_grok_45() {
+        assert!(supports_grok_cli_reasoning_effort("grok-4.5"));
+        assert!(supports_grok_cli_reasoning_effort("grok-4.5-high"));
+        assert!(supports_grok_cli_reasoning_effort("grok-4.5-xhigh"));
+        assert!(!supports_grok_cli_reasoning_effort("grok-4.6"));
+        assert!(!supports_grok_cli_reasoning_effort("grok-4"));
+        assert!(!supports_grok_cli_reasoning_effort("grok-4.6-xhigh"));
+
+        // guard test: transform of model "grok-4.6" yields no reasoning.effort
+        let body = json!({
+            "model": "grok-4.6",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+        });
+        let out = GrokCliExecutor::transform_request_body("grok-4.6", &body);
+        assert!(
+            out.pointer("/reasoning/effort").is_none(),
+            "grok-4.6 must not carry reasoning.effort: {out}"
+        );
+        // grok-4.5 keeps effort
+        let body = json!({
+            "model": "grok-4.5",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+        });
+        let out = GrokCliExecutor::transform_request_body("grok-4.5", &body);
+        assert_eq!(
+            out.pointer("/reasoning/effort").and_then(Value::as_str),
+            Some("high")
+        );
+    }
+
+    #[test]
+    fn effort_max_normalized_in_transform() {
+        let body = json!({
+            "model": "grok-4.5",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "reasoning_effort": "max",
+        });
+        let out = GrokCliExecutor::transform_request_body("grok-4.5", &body);
+        assert_eq!(
+            out.pointer("/reasoning/effort").and_then(Value::as_str),
+            Some("xhigh")
+        );
+        assert!(out.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn machine_id_fallback_formats_uuid_shape() {
+        // 64-char sha256 hex (what get_machine_id returns)
+        let mid = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let agent = format_grok_cli_agent_id(mid);
+        let parts: Vec<&str> = agent.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0], "01234567");
+        assert_eq!(parts[1], "89ab");
+        assert!(parts[2].starts_with('5'));
+        assert!(parts[3].starts_with('a'));
+        assert_eq!(parts[4].len(), 12);
+        // short ids still format without panicking
+        let agent = format_grok_cli_agent_id("abc");
+        assert_eq!(agent.split('-').count(), 5);
     }
 
     #[test]
