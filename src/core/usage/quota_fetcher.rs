@@ -2211,73 +2211,276 @@ pub async fn fetch_grok_cli_credits_config(access_token: &str) -> Option<Value> 
 /// Grok CLI usage — REST billing first, then the gRPC-web weekly pool as a
 /// fallback when REST reports zero quotas (ported from 9router v0.5.45
 /// open-sse/services/usage/grok-cli.js getGrokCliUsage).
+/// 9router grok-cli.js buildGrokCliHeaders (lines 54-70) — the 7 extra
+/// headers alongside Authorization Bearer.
+fn grok_cli_headers(token: &str, email: Option<&str>, user_id: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut h = vec![
+        ("Accept", "application/json".to_string()),
+        ("User-Agent", "grok-shell/0.2.99 (linux; x86_64)".to_string()),
+        ("x-xai-token-auth", "xai-grok-cli".to_string()),
+        ("x-grok-client-identifier", "grok-shell".to_string()),
+        ("x-grok-client-version", "0.2.99".to_string()),
+        ("x-grok-client-mode", "headless".to_string()),
+        ("Authorization", format!("Bearer {token}")),
+    ];
+    if let Some(e) = email {
+        h.push(("x-email", e.to_string()));
+    }
+    if let Some(uid) = user_id {
+        h.push(("x-userid", uid.to_string()));
+    }
+    h
+}
+
+/// 9router grok-cli.js planFromAccessToken (95-110): JWT tier → plan name.
+fn plan_from_access_token(access_token: &str) -> String {
+    use base64::Engine as _;
+    let payload = access_token.split('.').nth(1).unwrap_or("");
+    let decoded = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(_) => return String::new(),
+    };
+    let v: Value = serde_json::from_str(&decoded).unwrap_or(Value::Null);
+    let tier = v.get("tier").and_then(|t| t.as_i64()).unwrap_or(-1);
+    match tier {
+        0 => "Free".to_string(),
+        1 => "SuperGrok".to_string(),
+        2 => "X Basic".to_string(),
+        3 => "X Premium".to_string(),
+        4 => "X Premium Plus".to_string(),
+        5 => "SuperGrok Heavy".to_string(),
+        6 => "SuperGrok Lite".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// 9router grok-cli.js RESOLVE_PLAN (82-92): tier (Title Cased) or
+/// hasGrokCodeAccess / isUnifiedBillingUser; default "Grok Build".
+fn resolve_grok_cli_plan(user: &Value, config: &Value) -> String {
+    let tier = user
+        .get("subscriptionTier")
+        .or_else(|| user.get("subscription_tier"))
+        .or_else(|| user.get("subscription").and_then(|s| s.get("tier")))
+        .or_else(|| config.get("subscriptionTier"))
+        .or_else(|| config.get("subscription_tier"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            // Title Case: split on [_-]+ and uppercase each word start.
+            s.split(|c| c == '-' || c == '_')
+                .filter(|w| !w.is_empty())
+                .map(|w| {
+                    let mut chars = w.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+    if let Some(t) = tier {
+        if !t.eq_ignore_ascii_case("free")
+            && !t.eq_ignore_ascii_case("none")
+            && !t.eq_ignore_ascii_case("null")
+        {
+            return t;
+        }
+    }
+    if user.get("hasGrokCodeAccess").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return "Grok Code".to_string();
+    }
+    if config.get("isUnifiedBillingUser").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return "Grok Build".to_string();
+    }
+    "Grok Build".to_string()
+}
+
+/// 9router grok-cli.js unwrapVal (46-52): accept `{val: number}`, plain
+/// number, or numeric string.
+fn grok_unwrap_val(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        Value::Object(o) => o
+            .get("val")
+            .or_else(|| o.get("value"))
+            .and_then(grok_unwrap_val),
+        _ => None,
+    }
+}
+
+/// Build a "Monthly included" / "On-demand" / "Prepaid" / "Weekly" quota row
+/// without an absolute `remaining` (QuotaTable treats it as 0-100 pct).
+fn make_grok_quota(used: f64, total: f64, reset_at: Option<String>) -> Value {
+    let total_safe = total.max(0.0);
+    let used_safe = used.max(0.0).min(total_safe);
+    let pct = if total_safe > 0.0 {
+        ((total_safe - used_safe) / total_safe * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    json!({
+        "used": used_safe,
+        "total": total_safe,
+        "remainingPercentage": pct,
+        "resetAt": reset_at,
+        "unlimited": false,
+    })
+}
+
+/// 9router grok-cli.js parseGrokCliBilling (141-298) — Monthly included,
+/// On-demand (with exhausted synthetic row), Prepaid, Weekly SuperGrok.
+fn parse_grok_cli_billing(
+    data: &Value,
+    subscription_access: bool,
+) -> (serde_json::Map<String, Value>, Option<String>) {
+    let config = data.get("config").cloned().unwrap_or(Value::Null);
+    let period_end = parse_grok_period_end(data);
+
+    let mut quotas = serde_json::Map::new();
+
+    let monthly_limit = config.get("monthlyLimit").and_then(grok_unwrap_val).unwrap_or(0.0);
+    let included_used = config
+        .get("includedUsed")
+        .and_then(grok_unwrap_val)
+        .or_else(|| data.get("used").and_then(|v| v.as_f64()))
+        .unwrap_or(0.0);
+    if monthly_limit > 0.0 {
+        quotas.insert(
+            "Monthly included".to_string(),
+            make_grok_quota(included_used, monthly_limit, period_end.clone()),
+        );
+    }
+
+    let on_demand_cap = config.get("onDemandCap").and_then(grok_unwrap_val).unwrap_or(0.0);
+    let on_demand_used = config.get("onDemandUsed").and_then(grok_unwrap_val).unwrap_or(0.0);
+    if on_demand_cap > 0.0 {
+        quotas.insert(
+            "On-demand".to_string(),
+            make_grok_quota(on_demand_used.max(0.0), on_demand_cap, period_end.clone()),
+        );
+    } else if !subscription_access && on_demand_used.is_finite() {
+        // Exhausted free/promo → synthetic full row so the bar shows 0%.
+        quotas.insert(
+            "On-demand".to_string(),
+            json!({
+                "used": 1.0, "total": 1.0, "remainingPercentage": 0.0,
+                "resetAt": period_end.clone(), "unlimited": false
+            }),
+        );
+    }
+
+    let prepaid = config.get("prepaidBalance").and_then(grok_unwrap_val).unwrap_or(0.0);
+    if prepaid > 0.0 {
+        quotas.insert(
+            "Prepaid".to_string(),
+            json!({
+                "used": 0.0, "total": prepaid, "remainingPercentage": 100.0,
+                "resetAt": Value::Null, "unlimited": false
+            }),
+        );
+    }
+
+    let weekly_pct = config.get("creditUsagePercent").and_then(grok_unwrap_val);
+    if let Some(pct) = weekly_pct {
+        if pct >= 0.0 {
+            let used = pct.min(100.0);
+            quotas.insert(
+                "Weekly SuperGrok".to_string(),
+                json!({
+                    "used": used, "total": 100.0, "remainingPercentage": (100.0 - used).clamp(0.0, 100.0),
+                    "resetAt": period_end.clone(), "unlimited": false
+                }),
+            );
+        }
+    }
+
+    (quotas, period_end)
+}
+
+fn parse_grok_period_end(data: &Value) -> Option<String> {
+    data.get("billingPeriodEnd")
+        .or_else(|| data.get("billing_period_end"))
+        .or_else(|| data.get("periodEnd"))
+        .or_else(|| data.get("currentPeriod").and_then(|c| c.get("end")))
+        .or_else(|| data.get("resetAt"))
+        .or_else(|| data.get("resetsAt"))
+        .and_then(parse_reset_time)
+}
+
+/// 9router grok-cli.js getGrokCliUsage (349-424) — full Grok CLI quota.
 pub async fn fetch_grok_cli_quota(access_token: &str) -> Value {
     let token = access_token.trim();
     if token.is_empty() {
         return json!({ "message": "Grok CLI access token not available." });
     }
-    // REST billing (credits + user info). Best-effort.
     let client = http_client();
-    let billing = client
-        .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits")
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .ok();
-    let user = client
-        .get("https://cli-chat-proxy.grok.com/v1/user?include=subscription")
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .ok();
+    let headers = grok_cli_headers(token, None, None);
 
-    let plan = match user {
-        Some(r) => r
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|u| u.get("subscription").cloned())
-            .map(|sub| {
-                let name = sub
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Grok CLI");
-                name.to_string()
-            })
-            .unwrap_or_else(|| "Grok CLI".to_string()),
-        None => "Grok CLI".to_string(),
-    };
+    // Fetch billing + user in parallel (JS Promise.all).
+    let mut billing_req = client
+        .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+    let mut user_req = client
+        .get("https://cli-chat-proxy.grok.com/v1/user?include=subscription");
+    for (k, v) in &headers {
+        billing_req = billing_req.header(*k, v);
+        user_req = user_req.header(*k, v);
+    }
+    let billing = billing_req.send().await.ok();
+    let user = user_req.send().await.ok();
 
-    // Parse REST billing → quota rows.
-    let mut quotas = serde_json::Map::new();
-    let mut rest_has_quota = false;
-    if let Some(r) = billing {
-        if let Ok(data) = r.json::<Value>().await {
-            if let Some(caps) = data.get("caps").and_then(|v| v.as_object()) {
-                let total = to_finite_number(
-                    caps.get("total_cap").unwrap_or(&Value::Null),
-                    0.0,
-                );
-                let used = to_finite_number(
-                    caps.get("used").unwrap_or(&Value::Null),
-                    0.0,
-                );
-                if total > 0.0 {
-                    quotas.insert(
-                        "Credits".to_string(),
-                        build_quota_entry(used, total, None),
-                    );
-                    rest_has_quota = true;
-                }
-            }
+    // 401/403 on billing → auth expired.
+    if let Some(r) = &billing {
+        let status = r.status().as_u16();
+        if status == 401 || status == 403 {
+            return json!({ "message": "Grok CLI authentication expired. Please re-authorize." });
         }
     }
-    if rest_has_quota {
+
+    let user_val: Value = match user {
+        Some(r) => r.json::<Value>().await.unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+
+    let data: Value = match billing {
+        Some(r) => match r.json::<Value>().await {
+            Ok(v) => v,
+            Err(_) => {
+                return json!({ "message": "Grok CLI billing response was not JSON." });
+            }
+        },
+        None => Value::Null,
+    };
+
+    let tier = user_val
+        .get("subscriptionTier")
+        .or_else(|| user_val.get("subscription_tier"))
+        .or_else(|| user_val.get("subscription").and_then(|s| s.get("tier")))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let subscription_access = !tier.is_empty()
+        && !tier.eq_ignore_ascii_case("free")
+        && !tier.eq_ignore_ascii_case("none")
+        && !tier.eq_ignore_ascii_case("null");
+
+    let (mut quotas, _) = parse_grok_cli_billing(&data, subscription_access);
+
+    // plan from JWT tier first, then resolve_plan.
+    let jwt_plan = plan_from_access_token(token);
+    let plan = if !jwt_plan.is_empty() {
+        jwt_plan
+    } else {
+        resolve_grok_cli_plan(&user_val, data.get("config").unwrap_or(&Value::Null))
+    };
+
+    if !quotas.is_empty() {
         return json!({ "plan": plan, "quotas": Value::Object(quotas) });
     }
 
-    // Paid SuperGrok often returns cap=0 over REST but exposes the shared
-    // weekly pool on GetGrokCreditsConfig — try that before giving up.
+    // No REST quotas → try the gRPC weekly fallback (JS 394-404).
     if let Some(weekly) = fetch_grok_cli_credits_config(token).await {
         let mut weekly_quotas = serde_json::Map::new();
         weekly_quotas.insert("Weekly SuperGrok".to_string(), weekly);
@@ -2286,7 +2489,12 @@ pub async fn fetch_grok_cli_quota(access_token: &str) -> Value {
 
     json!({
         "plan": plan,
-        "message": "Grok CLI connected. Usage tracked per request.",
+        "quotas": {},
+        "message": if subscription_access {
+            "Subscription access is active; Grok does not expose a numeric included quota."
+        } else {
+            "Grok Build connected, but no credit allotment was returned. Free promo may be exhausted."
+        },
     })
 }
 
@@ -2785,6 +2993,55 @@ mod tests {
         let pct = remaining["remainingPercentage"].as_f64().unwrap();
         assert!((pct - 1910.0).abs() < 1e-6, "expected ~1910, got {pct}");
         assert_eq!(remaining["unlimited"], false);
+    }
+
+    #[test]
+    fn test_grok_cli_plan_from_jwt_tier() {
+        // A fake JWT payload {tier: 4} → X Premium Plus.
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"tier":4}"#);
+        let jwt = format!("header.{payload}.sig");
+        assert_eq!(plan_from_access_token(&jwt), "X Premium Plus");
+
+        let p0 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"tier":0}"#);
+        assert_eq!(plan_from_access_token(&format!("h.{p0}.s")), "Free");
+
+        // Missing tier → "".
+        assert_eq!(plan_from_access_token("not-a-jwt"), "");
+    }
+
+    #[test]
+    fn test_grok_cli_parse_billing_on_demand_exhausted() {
+        // onDemandCap 0 + no subscription access → synthetic 1/1 0% row.
+        let data = json!({
+            "config": {"onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0}},
+            "billingPeriodEnd": "2026-01-31T00:00:00Z"
+        });
+        let (quotas, _) = parse_grok_cli_billing(&data, false);
+        let od = quotas.get("On-demand").expect("on-demand row");
+        assert_eq!(od["used"], 1.0);
+        assert_eq!(od["total"], 1.0);
+        assert_eq!(od["remainingPercentage"], 0.0);
+    }
+
+    #[test]
+    fn test_grok_cli_parse_billing_monthly_prepaid() {
+        let data = json!({
+            "config": {
+                "monthlyLimit": {"val": 500}, "includedUsed": {"val": 50},
+                "prepaidBalance": {"val": 10}
+            },
+            "billingPeriodEnd": "2026-01-31T00:00:00Z"
+        });
+        let (quotas, _) = parse_grok_cli_billing(&data, true);
+        let monthly = quotas.get("Monthly included").expect("monthly row");
+        assert_eq!(monthly["total"], 500.0);
+        assert_eq!(monthly["used"], 50.0);
+        let prepaid = quotas.get("Prepaid").expect("prepaid row");
+        assert_eq!(prepaid["used"], 0.0);
+        assert_eq!(prepaid["total"], 10.0);
+        assert_eq!(prepaid["remainingPercentage"], 100.0);
     }
 
     #[test]
