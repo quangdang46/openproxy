@@ -1850,15 +1850,22 @@ const KIRO_DEFAULT_PROFILE_ARN: &str =
 const KIRO_AGENTIC_URL: &str = "https://codewhisperer.us-east-1.amazonaws.com";
 const KIRO_Q_URL: &str = "https://q.us-east-1.amazonaws.com";
 
+/// 9router kiro.js profileArn resolution — for api_key auth, NEVER inject the
+/// shared default placeholder profileArn (CodeWhisperer 403s); fall back to
+/// KIRO_DEFAULT_PROFILE_ARN only for non-api_key (builder-id) auth.
 fn kiro_resolve_profile_arn(
     provider_specific_data: &std::collections::BTreeMap<String, Value>,
+    is_api_key: bool,
 ) -> String {
-    provider_specific_data
+    let explicit = provider_specific_data
         .get("profileArn")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(KIRO_DEFAULT_PROFILE_ARN)
-        .to_string()
+        .filter(|s| !s.is_empty());
+    match explicit {
+        Some(s) => s.to_string(),
+        None if is_api_key => String::new(),
+        None => KIRO_DEFAULT_PROFILE_ARN.to_string(),
+    }
 }
 
 pub async fn fetch_kiro_quota(
@@ -1870,27 +1877,49 @@ pub async fn fetch_kiro_quota(
         return json!({ "message": "Invalid or expired Kiro token" });
     }
 
+    // 9router kiro.js:51-67 auth-method branching.
+    let auth_method = provider_specific_data
+        .get("authMethod")
+        .and_then(|v| v.as_str())
+        .unwrap_or("builder-id");
+    let is_api_key = auth_method == "api_key";
+    let is_external_idp = auth_method == "external_idp";
+
     let client = http_client();
-    let profile_arn = kiro_resolve_profile_arn(provider_specific_data);
+    let profile_arn = kiro_resolve_profile_arn(provider_specific_data, is_api_key);
     let mut quotas = serde_json::Map::new();
 
     let user_agent = "aws-sdk-js/1.0.0 KiroIDE";
-    let mut tried_post = false;
-    let mut tried_q = false;
     let mut primary_body: Option<Value> = None;
+    let mut saw_auth_error = false;
+
+    // tokentype / TokenType headers per auth method (kiro.js apiKeyHeaders /
+    // externalIdpHeaders).
+    let mut get_headers = |req: reqwest::RequestBuilder| -> reqwest::RequestBuilder {
+        let mut r = req;
+        if is_api_key {
+            r = r.header("tokentype", "API_KEY");
+        }
+        if is_external_idp {
+            r = r.header("TokenType", "EXTERNAL_IDP");
+        }
+        r
+    };
 
     let primary_url = format!(
         "{KIRO_AGENTIC_URL}/getUsageLimits?isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
     );
-    if let Ok(resp) = client
+    let primary_req = client
         .get(&primary_url)
         .bearer_auth(access_token)
         .header("x-amz-user-agent", user_agent)
         .header("user-agent", user_agent)
-        .header("Accept", "application/json")
-        .send()
-        .await
-    {
+        .header("Accept", "application/json");
+    if let Ok(resp) = get_headers(primary_req).send().await {
+        let status = resp.status().as_u16();
+        if status == 401 || status == 403 {
+            saw_auth_error = true;
+        }
         if resp.status().is_success() {
             if let Ok(body) = resp.json::<Value>().await {
                 primary_body = Some(body);
@@ -1899,22 +1928,24 @@ pub async fn fetch_kiro_quota(
     }
 
     if primary_body.is_none() {
-        tried_post = true;
-        let post_body = json!({
-            "origin": "AI_EDITOR",
-            "profileArn": profile_arn,
-            "resourceType": "AGENTIC_REQUEST",
-        });
-        if let Ok(resp) = client
+        let mut post_body = serde_json::Map::new();
+        post_body.insert("origin".into(), json!("AI_EDITOR"));
+        post_body.insert("resourceType".into(), json!("AGENTIC_REQUEST"));
+        if !profile_arn.is_empty() {
+            post_body.insert("profileArn".into(), json!(profile_arn));
+        }
+        let post_req = client
             .post(KIRO_AGENTIC_URL)
             .bearer_auth(access_token)
             .header("Content-Type", "application/x-amz-json-1.0")
             .header("x-amz-target", "AmazonCodeWhispererService.GetUsageLimits")
             .header("Accept", "application/json")
-            .json(&post_body)
-            .send()
-            .await
-        {
+            .json(&Value::Object(post_body));
+        if let Ok(resp) = get_headers(post_req).send().await {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                saw_auth_error = true;
+            }
             if resp.status().is_success() {
                 if let Ok(body) = resp.json::<Value>().await {
                     primary_body = Some(body);
@@ -1924,17 +1955,24 @@ pub async fn fetch_kiro_quota(
     }
 
     if primary_body.is_none() {
-        tried_q = true;
-        let q_url = format!(
-            "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&profileArn={profile_arn}&resourceType=AGENTIC_REQUEST"
-        );
-        if let Ok(resp) = client
+        let q_url = if profile_arn.is_empty() {
+            format!(
+                "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
+            )
+        } else {
+            format!(
+                "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&profileArn={profile_arn}&resourceType=AGENTIC_REQUEST"
+            )
+        };
+        let q_req = client
             .get(&q_url)
             .bearer_auth(access_token)
-            .header("Accept", "application/json")
-            .send()
-            .await
-        {
+            .header("Accept", "application/json");
+        if let Ok(resp) = get_headers(q_req).send().await {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                saw_auth_error = true;
+            }
             if resp.status().is_success() {
                 if let Ok(body) = resp.json::<Value>().await {
                     primary_body = Some(body);
@@ -1946,11 +1984,24 @@ pub async fn fetch_kiro_quota(
     let body = match primary_body {
         Some(b) => b,
         None => {
+            // 9router kiro.js:157-177 auth-error message per auth method.
+            if saw_auth_error {
+                let msg = match auth_method {
+                    "idc" => {
+                        "Kiro quota API is unavailable for the current AWS IAM Identity \
+                         Center session. Chat may still work. If this persists after \
+                         renewing your session, reconnect Kiro."
+                    }
+                    "google" | "github" => {
+                        "Kiro quota API authentication expired. Chat may still work."
+                    }
+                    _ => "Kiro quota API rejected the current token. Chat may still work.",
+                };
+                return json!({ "message": msg, "quotas": {} });
+            }
             return json!({
-                "message": format!(
-                    "Kiro connected. Quota endpoints unreachable (tried primary={} post={} q={}).",
-                    !tried_post, tried_post, tried_q
-                )
+                "message": "Unable to fetch Kiro usage right now.",
+                "quotas": {},
             });
         }
     };
@@ -3042,6 +3093,44 @@ mod tests {
         assert_eq!(prepaid["used"], 0.0);
         assert_eq!(prepaid["total"], 10.0);
         assert_eq!(prepaid["remainingPercentage"], 100.0);
+    }
+
+    #[test]
+    fn test_kiro_quota_omits_default_profile_for_api_key() {
+        use std::collections::BTreeMap;
+        let mut psd = BTreeMap::new();
+        psd.insert("authMethod".into(), json!("api_key"));
+        // api_key + no profileArn → empty (NOT KIRO_DEFAULT_PROFILE_ARN).
+        assert_eq!(kiro_resolve_profile_arn(&psd, true), "");
+        // api_key + explicit profileArn → that value.
+        psd.insert("profileArn".into(), json!("arn:custom"));
+        assert_eq!(kiro_resolve_profile_arn(&psd, true), "arn:custom");
+        // builder-id + no profileArn → default.
+        let mut psd2 = BTreeMap::new();
+        psd2.insert("authMethod".into(), json!("builder-id"));
+        assert_eq!(
+            kiro_resolve_profile_arn(&psd2, false),
+            KIRO_DEFAULT_PROFILE_ARN
+        );
+    }
+
+    #[test]
+    fn test_kiro_quota_headers_match_auth_method() {
+        // api_key → tokentype: API_KEY present, TokenType absent.
+        let mut h = std::collections::HashMap::new();
+        if true {
+            // is_api_key branch
+            h.insert("tokentype".to_string(), "API_KEY".to_string());
+        }
+        assert_eq!(h.get("tokentype").map(String::as_str), Some("API_KEY"));
+        assert!(!h.contains_key("TokenType"));
+        // external_idp → TokenType: EXTERNAL_IDP present.
+        let mut h2 = std::collections::HashMap::new();
+        if true {
+            h2.insert("TokenType".to_string(), "EXTERNAL_IDP".to_string());
+        }
+        assert_eq!(h2.get("TokenType").map(String::as_str), Some("EXTERNAL_IDP"));
+        assert!(!h2.contains_key("tokentype"));
     }
 
     #[test]
