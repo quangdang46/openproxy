@@ -840,7 +840,10 @@ async fn execute_single_model(
     );
 
     // 4. RTK tool-result compression (after translate — 9router parity)
-    compress_messages(&mut body, token_saver_enabled && snapshot.settings.rtk_enabled);
+    compress_messages(
+        &mut body,
+        token_saver_enabled && snapshot.settings.rtk_enabled,
+    );
 
     // 5. Headroom (after translate — 9router parity; format = final body shape)
     {
@@ -1860,7 +1863,9 @@ async fn forward_with_provider_fallback(
                     continue;
                 }
 
-                return Err(last_error.unwrap_or_else(|| ComboAttemptError::new(502, "provider error after exhausting all connections")));
+                return Err(last_error.unwrap_or_else(|| {
+                    ComboAttemptError::new(502, "provider error after exhausting all connections")
+                }));
             }
             Err(error) => {
                 let message = format!("{:?}", error);
@@ -2692,6 +2697,9 @@ async fn proxy_response_with_pending_tracking(
     let transformer = normalize_for_dashboard
         .then(|| transformer_for_provider(&provider))
         .flatten();
+    // Qoder wraps every SSE chunk in a {statusCodeValue, body} envelope that
+    // must be unwrapped before downstream consumers see it (9router wrapQoderSSE).
+    let qoder_sse_unwrap = provider == "qoder";
     let body = match response {
         UpstreamResponse::Reqwest(response) => {
             let state = state.clone();
@@ -2731,7 +2739,11 @@ async fn proxy_response_with_pending_tracking(
                             return;
                         }
                         Ok(Ok(Some(chunk))) => {
-                            if let Some(transformer) = transformer.as_mut() {
+                            if qoder_sse_unwrap {
+                                for line in qoder_unwrap_sse_chunk(&chunk, &mut pending_text) {
+                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
+                                }
+                            } else if let Some(transformer) = transformer.as_mut() {
                                 for line in transform_dashboard_sse_chunk(&chunk, transformer.as_mut(), &mut pending_text) {
                                     if let Some(frame) = sse_frame_for_dashboard(&line) {
                                         yield Ok::<Bytes, std::io::Error>(frame);
@@ -3031,6 +3043,30 @@ fn extract_dashboard_assistant_text_from_bytes(body: &[u8]) -> Option<String> {
     } else {
         Some(thinking_parts.join("\n"))
     }
+}
+
+/// Split raw upstream bytes into complete SSE lines and unwrap Qoder's
+/// `{statusCodeValue, body}` envelope on each `data:` line (9router
+/// wrapQoderSSE). Non-`data:` lines (keepalives) are dropped; the terminal
+/// `[DONE]` frame passes through.
+fn qoder_unwrap_sse_chunk(chunk: &Bytes, pending_text: &mut String) -> Vec<String> {
+    pending_text.push_str(&String::from_utf8_lossy(chunk));
+    let mut out = Vec::new();
+    while let Some(newline_index) = pending_text.find('\n') {
+        let mut line = pending_text[..newline_index].to_string();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        pending_text.drain(..=newline_index);
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(frame) = crate::core::executor::qoder::QoderExecutor::wrap_qoder_sse_line(&line)
+        {
+            out.push(frame);
+        }
+    }
+    out
 }
 
 fn transform_dashboard_sse_chunk(
@@ -3968,8 +4004,7 @@ mod tests {
         let off = HashMap::from([("x-9router-token-saver".to_string(), "off".to_string())]);
         assert!(!token_saver_gate(&off));
         // Case-insensitive: "OFF"/"Off".
-        let off_upper =
-            HashMap::from([("x-9router-token-saver".to_string(), "OFF".to_string())]);
+        let off_upper = HashMap::from([("x-9router-token-saver".to_string(), "OFF".to_string())]);
         assert!(!token_saver_gate(&off_upper));
         // Absent header → enabled.
         assert!(token_saver_gate(&HashMap::new()));

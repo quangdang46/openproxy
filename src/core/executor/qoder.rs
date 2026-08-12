@@ -25,6 +25,12 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const QODER_CHAT_URL_ENCODED: &str = "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
 
+/// jt- tokens route to api2 (9router QODER_CHAT_BASE_ALT + QODER_CHAT_SIG_PATH).
+const QODER_CHAT_URL_ALT: &str = "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+
+/// Live model catalog (9router getQoderModelConfig).
+const QODER_MODEL_LIST_URL: &str = "https://api3.qoder.sh/algo/api/v2/model/list";
+
 // ─── PAT → job-token exchange (ported from 9router v0.5.45 qoder.js) ────────
 // PATs (pt-...) cannot sign COSY requests directly. Exchange them for a
 // short-lived job token (jt-...) via /api/v1/jobToken/exchange (plain JSON,
@@ -43,8 +49,10 @@ async fn resolve_pat_credential(pat: &str) -> Result<(String, String), String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    if let Some((job_token, user_id, expires_at)) =
-        PAT_JOB_CACHE.lock().map(|g| g.get(pat).cloned()).unwrap_or(None)
+    if let Some((job_token, user_id, expires_at)) = PAT_JOB_CACHE
+        .lock()
+        .map(|g| g.get(pat).cloned())
+        .unwrap_or(None)
     {
         if expires_at.saturating_sub(now) > PAT_REFRESH_BUFFER_SECS {
             return Ok((job_token, user_id));
@@ -70,7 +78,13 @@ async fn resolve_pat_credential(pat: &str) -> Result<(String, String), String> {
         return Err(format!(
             "qoder PAT exchange failed: {} {}",
             response.status(),
-            response.text().await.unwrap_or_default().chars().take(200).collect::<String>()
+            response
+                .text()
+                .await
+                .unwrap_or_default()
+                .chars()
+                .take(200)
+                .collect::<String>()
         ));
     }
     let data: Value = response.json().await.map_err(|e| e.to_string())?;
@@ -116,7 +130,10 @@ async fn resolve_pat_credential(pat: &str) -> Result<(String, String), String> {
     };
 
     if let Ok(mut cache) = PAT_JOB_CACHE.lock() {
-        cache.insert(pat.to_string(), (job_token.clone(), user_id.clone(), expires_at));
+        cache.insert(
+            pat.to_string(),
+            (job_token.clone(), user_id.clone(), expires_at),
+        );
     }
     Ok((job_token, user_id))
 }
@@ -500,8 +517,19 @@ impl QoderExecutor {
     // URL & headers
     // -----------------------------------------------------------------------
 
-    fn build_url(&self) -> String {
-        QODER_CHAT_URL_ENCODED.to_string()
+    /// 9router qoder.js buildUrl: `jt-` tokens (that are not `pt-`) route to
+    /// api2.qoder.sh; everything else uses api3.
+    fn build_url(&self, credentials: &ProviderConnection) -> String {
+        let raw = credentials
+            .api_key
+            .as_deref()
+            .or(credentials.access_token.as_deref())
+            .unwrap_or("");
+        if !raw.starts_with("pt-") && raw.starts_with("jt-") {
+            QODER_CHAT_URL_ALT.to_string()
+        } else {
+            QODER_CHAT_URL_ENCODED.to_string()
+        }
     }
 
     fn build_headers(
@@ -509,6 +537,8 @@ impl QoderExecutor {
         encoded_body: &[u8],
         request_url: &str,
         creds: &QoderCreds,
+        qoder_key: &str,
+        model_source: &str,
     ) -> Result<HeaderMap, QoderExecutorError> {
         let cosy = Self::build_cosy_headers(encoded_body, request_url, creds)?;
 
@@ -518,6 +548,17 @@ impl QoderExecutor {
         headers.insert("Cache-Control", HeaderValue::from_static("no-cache"));
         // gzip triggers signature validation on Qoder's CDN; force identity.
         headers.insert("Accept-Encoding", HeaderValue::from_static("identity"));
+
+        // 9router: X-Model-Key / X-Model-Source (modelSource from
+        // payload.model_config.source || "system").
+        headers.insert(
+            "X-Model-Key",
+            HeaderValue::from_str(qoder_key).unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+        headers.insert(
+            "X-Model-Source",
+            HeaderValue::from_str(model_source).unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
 
         headers.insert(
             "Authorization",
@@ -713,12 +754,119 @@ impl QoderExecutor {
         hex::encode(hasher.finalize())[..16].to_string()
     }
 
+    /// Fetch the live model catalog and resolve the entry for `qoder_key`
+    /// (9router getQoderModelConfig). Returns `(is_reasoning, max_output_tokens,
+    /// source)`. Hard error when the model is unknown after a forced refresh —
+    /// silently downgrading the upstream model would be wrong. A network/
+    /// HTTP failure on the catalog (no catalog access) falls back to defaults
+    /// so the chat path does not break.
+    async fn fetch_model_config(
+        &self,
+        qoder_key: &str,
+        creds: &QoderCreds,
+    ) -> Result<(bool, u64, String), QoderExecutorError> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(20))
+            .build()
+            .map_err(|e| QoderExecutorError::MissingCredentials(e.to_string()))?;
+        // The model-list GET is signed with an empty body against the
+        // model-list URL (9router signs the catalog request the same way).
+        let cosy = Self::build_cosy_headers(b"", QODER_MODEL_LIST_URL, creds)?;
+        let mut headers = HeaderMap::new();
+        for (name, value) in [
+            ("Authorization", &cosy.authorization),
+            ("Cosy-Key", &cosy.cosy_key),
+            ("Cosy-User", &cosy.cosy_user),
+            ("Cosy-Date", &cosy.cosy_date),
+            ("Cosy-Version", &cosy.cosy_version),
+            ("Cosy-Machineid", &cosy.cosy_machineid),
+            ("Cosy-Machinetoken", &cosy.cosy_machinetoken),
+            ("Cosy-Machinetype", &cosy.cosy_machinetype),
+            ("Cosy-Machineos", &cosy.cosy_machineos),
+            ("Cosy-Clienttype", &cosy.cosy_clienttype),
+            ("Cosy-Clientip", &cosy.cosy_clientip),
+            ("Cosy-Bodyhash", &cosy.cosy_bodyhash),
+            ("Cosy-Bodylength", &cosy.cosy_bodylength),
+            ("Cosy-Sigpath", &cosy.cosy_sigpath),
+            ("Cosy-Data-Policy", &cosy.cosy_data_policy),
+            ("Cosy-Organization-Id", &cosy.cosy_organization_id),
+            ("Cosy-Organization-Tags", &cosy.cosy_organization_tags),
+            ("Login-Version", &cosy.login_version),
+            ("X-Request-Id", &cosy.x_request_id),
+        ] {
+            headers.insert(
+                name,
+                HeaderValue::from_str(value).unwrap_or_else(|_| HeaderValue::from_static("")),
+            );
+        }
+
+        let response = client
+            .get(QODER_MODEL_LIST_URL)
+            .headers(headers)
+            .send()
+            .await;
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(target: "openproxy::executor", "qoder model/list fetch failed: {e}");
+                return Ok((false, 32768, "system".to_string()));
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(
+                target: "openproxy::executor",
+                "qoder model/list returned HTTP {}",
+                response.status().as_u16()
+            );
+            return Ok((false, 32768, "system".to_string()));
+        }
+        let catalog: Value = response.json().await.map_err(|e| {
+            QoderExecutorError::MissingCredentials(format!("qoder model/list JSON error: {e}"))
+        })?;
+        // Catalog shape: { data: [...] } or { models: [...] } — find the entry
+        // whose key/model matches.
+        let entries = catalog
+            .get("data")
+            .or_else(|| catalog.get("models"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let entry = entries.iter().find(|e| {
+            e.get("key").and_then(Value::as_str) == Some(qoder_key)
+                || e.get("model").and_then(Value::as_str) == Some(qoder_key)
+        });
+        let Some(entry) = entry else {
+            return Err(QoderExecutorError::MissingCredentials(format!(
+                "qoder: model_config for \"{qoder_key}\" not yet known"
+            )));
+        };
+        let is_reasoning = entry
+            .get("is_reasoning")
+            .or_else(|| entry.get("reasoning"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let max_output_tokens = entry
+            .get("max_output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(32768);
+        let source = entry
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("system")
+            .to_string();
+        Ok((is_reasoning, max_output_tokens, source))
+    }
+
     /// Map the OpenAI-style request body into the exact shape Qoder expects.
+    /// `is_reasoning`/`source` come from the live model config (9router embeds
+    /// `model_config` and `chat_context.extra.modelConfig.is_reasoning`).
     fn transform_request(
         &self,
         body: &Value,
         model: &str,
         credentials: &ProviderConnection,
+        is_reasoning: bool,
+        model_source: &str,
     ) -> Result<Value, QoderExecutorError> {
         // Strip "qoder/" prefix if present
         let qoder_key = model.strip_prefix("qoder/").unwrap_or(model);
@@ -775,6 +923,13 @@ impl QoderExecutor {
 
         let tools = body.get("tools").cloned().unwrap_or(Value::Array(vec![]));
 
+        // 9router: embed model_config + chat_context.extra.modelConfig.is_reasoning.
+        let model_config = serde_json::json!({
+            "key": qoder_key,
+            "is_reasoning": is_reasoning,
+            "source": model_source,
+        });
+
         Ok(serde_json::json!({
             "request_id": Uuid::new_v4().to_string(),
             "request_set_id": record_id,
@@ -799,6 +954,7 @@ impl QoderExecutor {
             "parameters": {
                 "max_tokens": max_tokens
             },
+            "model_config": model_config,
             "chat_context": {
                 "chatPrompt": "",
                 "imageUrls": null,
@@ -806,7 +962,7 @@ impl QoderExecutor {
                     "context": [],
                     "modelConfig": {
                         "key": qoder_key,
-                        "is_reasoning": false
+                        "is_reasoning": is_reasoning
                     },
                     "originalContent": last_user
                 },
@@ -852,14 +1008,14 @@ impl QoderExecutor {
                 Ok((job_token, user_id)) => {
                     request.credentials.access_token = Some(job_token);
                     request.credentials.api_key = None;
-                    request.credentials.provider_specific_data.insert(
-                        "userId".to_string(),
-                        Value::String(user_id),
-                    );
-                    request.credentials.provider_specific_data.insert(
-                        "authMethod".to_string(),
-                        Value::String("pat".to_string()),
-                    );
+                    request
+                        .credentials
+                        .provider_specific_data
+                        .insert("userId".to_string(), Value::String(user_id));
+                    request
+                        .credentials
+                        .provider_specific_data
+                        .insert("authMethod".to_string(), Value::String("pat".to_string()));
                 }
                 Err(e) => {
                     return Err(QoderExecutorError::MissingCredentials(format!(
@@ -907,11 +1063,33 @@ impl QoderExecutor {
             machine_id,
         };
 
-        let url = self.build_url();
+        let url = self.build_url(&request.credentials);
+
+        // 9router buildUrl: jt- tokens route to api2.
+        let qoder_key = request
+            .model
+            .strip_prefix("qoder/")
+            .unwrap_or(&request.model)
+            .to_string();
+
+        // Live model config → is_reasoning + source (9router getQoderModelConfig).
+        let (is_reasoning, _, model_source) =
+            match self.fetch_model_config(&qoder_key, &creds).await {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    // Unknown model after refresh is a hard error (JS throws).
+                    return Err(e);
+                }
+            };
 
         // Transform the OpenAI-compatible body into Qoder's format
-        let transformed_body =
-            self.transform_request(&request.body, &request.model, &request.credentials)?;
+        let transformed_body = self.transform_request(
+            &request.body,
+            &request.model,
+            &request.credentials,
+            is_reasoning,
+            &model_source,
+        )?;
 
         // Encode body with Qoder's WAF-bypass scheme
         let plain_body = serde_json::to_vec(&transformed_body)?;
@@ -919,7 +1097,7 @@ impl QoderExecutor {
         let encoded_body = encoded_body_str.as_bytes();
 
         // Build COSY-signed headers from the *encoded* body
-        let headers = self.build_headers(encoded_body, &url, &creds)?;
+        let headers = self.build_headers(encoded_body, &url, &creds, &qoder_key, &model_source)?;
 
         let client = self.pool.get("qoder", request.proxy.as_ref())?;
         let response = client
@@ -936,6 +1114,57 @@ impl QoderExecutor {
             transformed_body,
             transport: TransportKind::Reqwest,
         })
+    }
+
+    /// Unwrap Qoder's `{statusCodeValue, body}` SSE envelope into OpenAI-style
+    /// chunks (9router wrapQoderSSE). Pure per-line function — returns
+    /// `Some(frame)` to emit or `None` for lines that should be dropped
+    /// (keepalives / terminal frames).
+    ///
+    /// - non-200 status → error chunk `\n[qoder error {status}: {truncated}]\n\n`
+    ///   (truncated to 200 chars) followed by `data: [DONE]`
+    /// - inner `[DONE]` → `data: [DONE]`
+    /// - else → `data: {inner}\n\n` with embedded newlines stripped so the
+    ///   SSE frame stays one event.
+    pub fn wrap_qoder_sse_line(line: &str) -> Option<String> {
+        let line = line.trim_end();
+        if !line.starts_with("data:") {
+            return None;
+        }
+        let payload = line.trim_start_matches("data:").trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            return Some(format!("data: {payload}\n\n"));
+        }
+        let envelope: Value = serde_json::from_str(payload).ok()?;
+        let status = envelope.get("statusCodeValue").and_then(Value::as_u64);
+        let inner = envelope
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        match status {
+            Some(s) if s != 200 => {
+                let msg: String = inner
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let mut out = String::new();
+                out.push_str(&format!("\n[qoder error {s}: {msg}]\n\n"));
+                out.push_str("data: [DONE]\n\n");
+                Some(out)
+            }
+            _ => {
+                if inner == "[DONE]" {
+                    return Some("data: [DONE]\n\n".to_string());
+                }
+                let stripped = inner.replace('\n', "").replace('\r', "");
+                Some(format!("data: {stripped}\n\n"))
+            }
+        }
     }
 }
 
@@ -1142,5 +1371,66 @@ mod tests {
         let h1 = QoderExecutor::stable_hash(b"prefix", &["a"]);
         let h2 = QoderExecutor::stable_hash(b"prefix", &["b"]);
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_build_url_jt_token_uses_api2() {
+        let executor = QoderExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+        let mut creds = ProviderConnection::default();
+        creds.api_key = Some("jt-abc".to_string());
+        let url = executor.build_url(&creds);
+        assert!(
+            url.starts_with("https://api2.qoder.sh"),
+            "jt- token must route to api2, got: {url}"
+        );
+
+        creds.api_key = Some("dt-abc".to_string());
+        let url = executor.build_url(&creds);
+        assert!(
+            url.starts_with("https://api3.qoder.sh"),
+            "non-jt token must use api3, got: {url}"
+        );
+
+        // pt- tokens never use api2 even though they start with 't-'.
+        creds.api_key = Some("pt-abc".to_string());
+        let url = executor.build_url(&creds);
+        assert!(url.starts_with("https://api3.qoder.sh"), "got: {url}");
+
+        // access_token fallback
+        creds.api_key = None;
+        creds.access_token = Some("jt-tok".to_string());
+        let url = executor.build_url(&creds);
+        assert!(url.starts_with("https://api2.qoder.sh"), "got: {url}");
+    }
+
+    #[test]
+    fn test_wrap_qoder_sse_unwraps_envelope() {
+        // Guard test: input envelope → unwrapped OpenAI chunk.
+        let line = r#"data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"}"#;
+        let out = QoderExecutor::wrap_qoder_sse_line(line).unwrap();
+        assert_eq!(
+            out,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+        );
+
+        // Inner [DONE] → [DONE] frame.
+        let line = r#"data: {"statusCodeValue":200,"body":"[DONE]"}"#;
+        let out = QoderExecutor::wrap_qoder_sse_line(line).unwrap();
+        assert_eq!(out, "data: [DONE]\n\n");
+
+        // Non-200 → error chunk + [DONE].
+        let line = r#"data: {"statusCodeValue":500,"body":"{\"error\":\"boom\"}"}"#;
+        let out = QoderExecutor::wrap_qoder_sse_line(line).unwrap();
+        assert!(out.contains("[qoder error 500"), "got: {out}");
+        assert!(out.ends_with("data: [DONE]\n\n"), "got: {out}");
+
+        // Embedded newlines in the inner body are stripped so the frame stays
+        // one SSE event.
+        let line = r#"data: {"statusCodeValue":200,"body":"line1\nline2"}"#;
+        let out = QoderExecutor::wrap_qoder_sse_line(line).unwrap();
+        assert!(
+            !out.contains('\n') || out == "data: line1line2\n\n",
+            "got: {out:?}"
+        );
     }
 }
