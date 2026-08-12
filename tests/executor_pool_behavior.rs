@@ -1951,7 +1951,10 @@ fn media_base_url_resolves_from_live_map() {
             "https://api.kilo.ai/api/gateway/chat/completions",
         ),
         ("venice", "https://api.venice.ai/api/v1/chat/completions"),
-        ("featherless", "https://api.featherless.ai/v1/chat/completions"),
+        (
+            "featherless",
+            "https://api.featherless.ai/v1/chat/completions",
+        ),
     ] {
         assert_eq!(
             provider_config_base_url(provider).as_deref(),
