@@ -55,6 +55,8 @@ pub fn get_embedding_adapter(provider: &str) -> Option<&'static dyn EmbeddingAda
         "github" => Some(&base::GITHUB),
         "nvidia" => Some(&base::NVIDIA),
         "jina-ai" => Some(&base::JINA_AI),
+        "vercel-ai-gateway" => Some(&base::VERCEL_AI_GATEWAY),
+        "selfhosted-embedding" => Some(&base::SELFHOSTED_EMBEDDING),
         "gemini" | "google_ai_studio" => Some(&base::GEMINI),
         _ if provider.starts_with("openai-compatible-")
             || provider.starts_with("custom-embedding-") =>

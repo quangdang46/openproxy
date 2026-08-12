@@ -187,9 +187,12 @@ pub async fn login(
 }
 
 /// GET /api/auth/status — Check if the browser has a dashboard session and
-/// return login-page metadata (auth mode, OIDC readiness, password state).
+/// return login-page metadata (auth mode, OIDC readiness, password state)
+/// plus the session identity (displayName/loginMethod/oidcName/oidcEmail)
+/// when logged in — 9router Header.js:192-216 parity for the OIDC chip.
 pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> Response {
-    let logged_in = crate::server::auth::require_dashboard_session(&headers, &state.db).is_ok();
+    let session = crate::server::auth::require_dashboard_session(&headers, &state.db).ok();
+    let logged_in = session.is_some();
     let snapshot = state.db.snapshot();
     let settings = &snapshot.settings;
     let has_password = settings_password_hash(settings).is_some();
@@ -197,7 +200,22 @@ pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> R
     let auth_mode = resolve_auth_mode(settings);
     let oidc_login_label = resolve_oidc_login_label(settings);
 
-    Json(json!({
+    // When require_login is off, require_dashboard_session returns empty
+    // claims — but a present auth_token cookie may still carry OIDC identity
+    // (JS always reads the session cookie to derive the chip). Prefer the
+    // decoded token identity so the chip works in both modes.
+    let claims = decode_dashboard_token(&headers).ok().or(session);
+    let oidc_name = claims.as_ref().and_then(|c| c.name.clone());
+    let oidc_email = claims.as_ref().and_then(|c| c.email.clone());
+    // A session with OIDC identity claims is an OIDC session (JS loginMethod).
+    let login_method = if oidc_name.is_some() || oidc_email.is_some() {
+        "OIDC"
+    } else {
+        "Password"
+    };
+    let display_name = oidc_name.clone().or_else(|| oidc_email.clone()).unwrap_or_default();
+
+    let mut body = json!({
         "authenticated": logged_in,
         "requireLogin": settings.require_login,
         "hasPassword": has_password,
@@ -205,8 +223,34 @@ pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> R
         "oidcConfigured": oidc_configured,
         "oidcLoginLabel": oidc_login_label,
         "oidcEnabled": settings.oidc_enabled,
-    }))
-    .into_response()
+    });
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("displayName".into(), json!(display_name));
+        obj.insert("loginMethod".into(), json!(login_method));
+        obj.insert("oidcName".into(), json!(oidc_name));
+        obj.insert("oidcEmail".into(), json!(oidc_email));
+    }
+    Json(body).into_response()
+}
+
+/// Decode the dashboard session cookie (auth_token) into its claims without
+/// requiring `require_login`. Used by `auth_status` to surface the OIDC
+/// identity chip even when login is optional.
+fn decode_dashboard_token(
+    headers: &HeaderMap,
+) -> Result<crate::server::auth::DashboardClaims, String> {
+    use jsonwebtoken::{decode, DecodingKey, Validation};
+    let token = crate::server::auth::extract_auth_token(headers).ok_or("missing cookie")?;
+    let decoded = decode::<crate::server::auth::DashboardClaims>(
+        &token,
+        &DecodingKey::from_secret(crate::server::auth::jwt_secret().as_bytes()),
+        &Validation::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    if !decoded.claims.authenticated {
+        return Err("not authenticated".into());
+    }
+    Ok(decoded.claims)
 }
 
 /// GET /api/auth/oidc/login

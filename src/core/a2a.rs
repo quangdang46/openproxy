@@ -332,10 +332,55 @@ pub async fn dispatch_task(
         })
 }
 
+/// Build a redacted JSON view of a provider connection: all credential and
+/// token fields are stripped so the A2A skill response never leaks secrets.
+fn redacted_provider_connections(connections: &[crate::types::ProviderConnection]) -> Value {
+    let redacted: Vec<Value> = connections
+        .iter()
+        .map(|conn| {
+            let mut value = serde_json::to_value(conn).unwrap_or_else(|_| json!({}));
+            if let Some(obj) = value.as_object_mut() {
+                // ProviderConnection serializes camelCase (see types/mod.rs).
+                for field in [
+                    "accessToken",
+                    "refreshToken",
+                    "idToken",
+                    "apiKey",
+                    "password",
+                    "clientSecret",
+                ] {
+                    obj.remove(field);
+                }
+                // providerSpecificData may carry secrets under arbitrary keys.
+                if let Some(psd) = obj
+                    .get_mut("providerSpecificData")
+                    .and_then(|v| v.as_object_mut())
+                {
+                    for field in [
+                        "accessToken",
+                        "refreshToken",
+                        "idToken",
+                        "apiKey",
+                        "cookie",
+                        "password",
+                        "clientSecret",
+                        "client_secret",
+                    ] {
+                        psd.remove(field);
+                    }
+                }
+            }
+            value
+        })
+        .collect();
+    Value::Array(redacted)
+}
+
 fn handle_provider_skill(text: &str, state: &crate::server::state::AppState) -> Vec<TaskPart> {
     let snap = state.db.snapshot();
-    let providers_json = serde_json::to_string_pretty(&snap.provider_connections)
-        .unwrap_or_else(|_| "[]".to_string());
+    let providers_json =
+        serde_json::to_string_pretty(&redacted_provider_connections(&snap.provider_connections))
+            .unwrap_or_else(|_| "[]".to_string());
     vec![
         TaskPart {
             r#type: "text".to_string(),
@@ -404,4 +449,72 @@ fn handle_generic_task(text: &str, state: &crate::server::state::AppState) -> Ve
         )),
         metadata: None,
     }]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redacted_provider_connections;
+    use crate::types::ProviderConnection;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+
+    fn connection_with_secrets() -> ProviderConnection {
+        let mut psd = BTreeMap::new();
+        psd.insert(
+            "clientSecret".to_string(),
+            Value::String("super-secret-psd".to_string()),
+        );
+        psd.insert(
+            "apiKey".to_string(),
+            Value::String("sk-psd-key".to_string()),
+        );
+        ProviderConnection {
+            id: "conn-1".to_string(),
+            provider: "openai".to_string(),
+            auth_type: "apikey".to_string(),
+            api_key: Some("sk-abcdef1234567890".to_string()),
+            access_token: Some("access-token-xyz".to_string()),
+            refresh_token: Some("refresh-token-xyz".to_string()),
+            id_token: Some("id-token-xyz".to_string()),
+            provider_specific_data: psd,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn redaction_strips_all_token_and_key_fields() {
+        let redacted = redacted_provider_connections(&[connection_with_secrets()]);
+        let conn = &redacted[0];
+        assert!(conn.get("apiKey").is_none());
+        assert!(conn.get("accessToken").is_none());
+        assert!(conn.get("refreshToken").is_none());
+        assert!(conn.get("idToken").is_none());
+        let psd = conn.get("providerSpecificData").unwrap();
+        assert!(psd.get("clientSecret").is_none());
+        assert!(psd.get("apiKey").is_none());
+        // Non-secret fields survive.
+        assert_eq!(conn["provider"], "openai");
+        assert_eq!(conn["id"], "conn-1");
+    }
+
+    #[test]
+    fn redaction_serializes_to_json_without_secrets() {
+        let redacted = redacted_provider_connections(&[connection_with_secrets()]);
+        let text = serde_json::to_string(&redacted).unwrap();
+        assert!(!text.contains("sk-abcdef1234567890"));
+        assert!(!text.contains("access-token-xyz"));
+        assert!(!text.contains("refresh-token-xyz"));
+        assert!(!text.contains("id-token-xyz"));
+        assert!(!text.contains("super-secret-psd"));
+        assert!(!text.contains("sk-psd-key"));
+    }
+
+    #[test]
+    fn redaction_keeps_metadata_fields() {
+        let redacted = redacted_provider_connections(&[connection_with_secrets()]);
+        let text = serde_json::to_string(&redacted).unwrap();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed[0]["provider"], "openai");
+        assert_eq!(parsed[0]["authType"], "apikey");
+    }
 }

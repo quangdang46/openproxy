@@ -1,0 +1,10 @@
+---
+import Layout from '@/layouts/Layout.astro';
+import PxpipeClient from '@/components/PxpipePageClient';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+---
+<Layout>
+  <DashboardLayout client:only="react">
+    <PxpipeClient client:only="react" />
+  </DashboardLayout>
+</Layout>

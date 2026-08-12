@@ -2,6 +2,9 @@
 //!
 //! Converts OpenAI Chat Completions to Kiro/AWS CodeWhisperer format.
 
+use crate::core::translator::concerns::kiro_conversation::{
+    canonicalize_kiro_conversation, normalize_kiro_tool_specs,
+};
 use serde_json::Value;
 
 fn extract_text_content(content: &Value) -> String {
@@ -42,16 +45,12 @@ pub fn openai_to_kiro_request(
     let mut pending_images: Vec<Value> = Vec::new();
     let mut current_role: Option<String> = None;
 
-    let tools_array = tools.as_array().cloned().unwrap_or_default();
-
     let flush_pending = |history: &mut Vec<Value>,
                          pending_user_content: &mut Vec<String>,
                          pending_assistant_content: &mut Vec<String>,
                          pending_tool_results: &mut Vec<Value>,
                          pending_images: &mut Vec<Value>,
-                         current_role: &Option<String>,
-                         tools_arr: &[Value],
-                         history_len: usize| {
+                         current_role: &Option<String>| {
         match current_role.as_deref() {
             Some("user") => {
                 let content = pending_user_content.join("\n\n").trim().to_string();
@@ -75,42 +74,6 @@ pub fn openai_to_kiro_request(
                     user_msg["userInputMessage"]["userInputMessageContext"] = serde_json::json!({
                         "toolResults": pending_tool_results.clone()
                     });
-                }
-
-                if !tools_arr.is_empty() && history_len == 0 {
-                    if user_msg["userInputMessage"]["userInputMessageContext"].is_null() {
-                        user_msg["userInputMessage"]["userInputMessageContext"] =
-                            serde_json::json!({});
-                    }
-                    let converted_tools: Vec<Value> = tools_arr.iter().map(|t| {
-                        let name = t.get("function").and_then(|f| f.get("name")).or_else(|| t.get("name")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let mut description = t.get("function").and_then(|f| f.get("description")).or_else(|| t.get("description")).and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        if description.trim().is_empty() {
-                            description = format!("Tool: {}", name);
-                        }
-                        let schema = t.get("function").and_then(|f| f.get("parameters"))
-                            .or_else(|| t.get("parameters"))
-                            .or_else(|| t.get("input_schema"))
-                            .cloned().unwrap_or(Value::Object(serde_json::Map::new()));
-                        let normalized_schema = if schema.as_object().is_none_or(|o| o.is_empty()) {
-                            serde_json::json!({"type": "object", "properties": {}, "required": []})
-                        } else {
-                            let mut s = schema.clone();
-                            if s.get("required").is_none() {
-                                s["required"] = serde_json::json!([]);
-                            }
-                            s
-                        };
-                        serde_json::json!({
-                            "toolSpecification": {
-                                "name": name,
-                                "description": description,
-                                "inputSchema": {"json": normalized_schema}
-                            }
-                        })
-                    }).collect();
-                    user_msg["userInputMessage"]["userInputMessageContext"]["tools"] =
-                        Value::Array(converted_tools);
                 }
 
                 history.push(user_msg);
@@ -152,8 +115,6 @@ pub fn openai_to_kiro_request(
                 &mut pending_tool_results,
                 &mut pending_images,
                 &current_role,
-                &tools_array,
-                hist_len,
             );
         }
         current_role = Some(role.clone());
@@ -228,9 +189,11 @@ pub fn openai_to_kiro_request(
                                 };
                             if let Some(tool_use_id) = c.get("tool_use_id").and_then(|v| v.as_str())
                             {
+                                // 9router openai-to-kiro.js:148 — status reflects is_error.
+                                let is_err = c.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                                 pending_tool_results.push(serde_json::json!({
                                     "toolUseId": tool_use_id,
-                                    "status": "success",
+                                    "status": if is_err { "error" } else { "success" },
                                     "content": [{"text": tool_text}]
                                 }));
                             }
@@ -244,9 +207,15 @@ pub fn openai_to_kiro_request(
             if msg.get("role").and_then(|v| v.as_str()) == Some("tool") {
                 let tool_content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 if let Some(tool_call_id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    // 9router openai-to-kiro.js:160 — is_error OR status === "error".
+                    let is_err = msg
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        || msg.get("status").and_then(Value::as_str) == Some("error");
                     pending_tool_results.push(serde_json::json!({
                         "toolUseId": tool_call_id,
-                        "status": "success",
+                        "status": if is_err { "error" } else { "success" },
                         "content": [{"text": tool_content}]
                     }));
                 }
@@ -295,8 +264,6 @@ pub fn openai_to_kiro_request(
                     &mut pending_tool_results,
                     &mut pending_images,
                     &current_role,
-                    &tools_array,
-                    hist_len,
                 );
 
                 if let Some(last) = history.last_mut() {
@@ -371,8 +338,6 @@ pub fn openai_to_kiro_request(
             &mut pending_tool_results,
             &mut pending_images,
             &current_role,
-            &tools_array,
-            hist_len,
         );
     }
 
@@ -384,14 +349,6 @@ pub fn openai_to_kiro_request(
             break;
         }
     }
-
-    // Grab tools from first history item
-    let first_history_tools = history
-        .first()
-        .and_then(|h| h.get("userInputMessage"))
-        .and_then(|m| m.get("userInputMessageContext"))
-        .and_then(|c| c.get("tools"))
-        .cloned();
 
     // Clean up history
     for item in &mut history {
@@ -442,19 +399,6 @@ pub fn openai_to_kiro_request(
             }
         } else {
             merged_history.push(item.clone());
-        }
-    }
-
-    // Merge tools into currentMessage
-    if let (Some(tools), Some(ref mut cm)) = (first_history_tools, &mut current_message) {
-        if cm["userInputMessage"]["userInputMessageContext"]
-            .get("tools")
-            .is_none()
-        {
-            if cm["userInputMessage"]["userInputMessageContext"].is_null() {
-                cm["userInputMessage"]["userInputMessageContext"] = serde_json::json!({});
-            }
-            cm["userInputMessage"]["userInputMessageContext"]["tools"] = tools;
         }
     }
 
@@ -535,8 +479,20 @@ pub fn openai_to_kiro_request(
         &base_current,
     );
 
-    let replay_current = replay
-        .current_message
+    // Canonicalize the replayed conversation into the strict Kiro wire shape:
+    // alternating user/assistant turns, adjacent tool-use/tool-result pairs with
+    // reserved ids, and tool specs only on the final (current) user message.
+    // Port of 9router `canonicalizeKiroConversation` (kiroConversation.js).
+    let (specs, name_map) = normalize_kiro_tool_specs(&tools);
+    let (canonical_history, canonical_current, _repairs, _valid) = canonicalize_kiro_conversation(
+        &replay.history,
+        &replay.current_message,
+        upstream_model,
+        &specs,
+        &name_map,
+    );
+
+    let replay_current = canonical_current
         .get("userInputMessage")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({ "content": "" }));
@@ -564,7 +520,7 @@ pub fn openai_to_kiro_request(
             "currentMessage": {
                 "userInputMessage": user_input_message
             },
-            "history": replay.history
+            "history": canonical_history
         },
         "agentMode": "vibe"
     });
@@ -610,4 +566,71 @@ pub fn openai_to_kiro_request(
     *body = payload;
     let _ = stream;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn current_message_content(body: &Value) -> String {
+        body["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
+    }
+
+    #[test]
+    fn tool_msg_is_error_maps_to_error_text() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t1",
+                         "is_error": true, "content": "boom"}
+                    ]
+                }
+            ]
+        });
+        openai_to_kiro_request("kiro-model", &mut body, false, None);
+        let content = current_message_content(&body);
+        assert!(content.contains("[Tool result (error): boom]"));
+    }
+
+    #[test]
+    fn tool_msg_status_error_maps_to_error_text() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "t2",
+                    "content": "err",
+                    "status": "error"
+                }
+            ]
+        });
+        openai_to_kiro_request("kiro-model", &mut body, false, None);
+        let content = current_message_content(&body);
+        assert!(content.contains("[Tool result (error): err]"));
+    }
+
+    #[test]
+    fn tool_msg_success_maps_to_success_text() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "t3",
+                    "content": "ok"
+                }
+            ]
+        });
+        openai_to_kiro_request("kiro-model", &mut body, false, None);
+        let content = current_message_content(&body);
+        assert!(content.contains("[Tool result: ok]"));
+    }
 }

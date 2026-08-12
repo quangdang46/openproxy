@@ -75,7 +75,7 @@ async fn validate_provider(
         "cerebras" => validate_bearer(&client, "https://api.cerebras.ai/v1/models", &api_key).await,
         "cohere" => validate_bearer(&client, "https://api.cohere.ai/v1/models", &api_key).await,
         "nebius" => validate_bearer(&client, "https://api.studio.nebius.ai/v1/models", &api_key).await,
-        "siliconflow" => validate_bearer(&client, "https://api.siliconflow.cn/v1/models", &api_key).await,
+        "siliconflow" => validate_bearer(&client, "https://api.siliconflow.com/v1/models", &api_key).await,
         "hyperbolic" => validate_bearer(&client, "https://api.hyperbolic.xyz/v1/models", &api_key).await,
         "chutes" => validate_bearer(&client, "https://llm.chutes.ai/v1/models", &api_key).await,
         "nvidia" => validate_bearer(&client, "https://integrate.api.nvidia.com/v1/models", &api_key).await,
@@ -174,7 +174,7 @@ async fn validate_provider(
         }
 
         "blackbox" => {
-            match client.post("https://api.blackbox.ai/chat/completions")
+            match client.post("https://api.blackbox.ai/v1/chat/completions")
                 .header("Authorization", format!("Bearer {api_key}"))
                 .header("Content-Type", "application/json")
                 .json(&json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "test"}], "max_tokens": 10}))

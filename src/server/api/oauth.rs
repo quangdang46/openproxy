@@ -59,7 +59,6 @@ const XAI_TOKEN_URL_DEFAULT: &str = "https://auth.x.ai/oauth2/token";
 const XAI_AUTHORIZE_URL_DEFAULT: &str = "https://auth.x.ai/oauth2/authorize";
 const GEMINI_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-const GEMINI_CLIENT_SECRET: &str = "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";
 const GEMINI_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const GEMINI_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GEMINI_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";
@@ -68,7 +67,6 @@ const GEMINI_LOAD_CODE_ASSIST_ENDPOINT: &str =
 const GEMINI_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile";
 const ANTIGRAVITY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const ANTIGRAVITY_CLIENT_SECRET: &str = "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";
 const ANTIGRAVITY_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const ANTIGRAVITY_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";
@@ -83,7 +81,6 @@ const ANTIGRAVITY_LOAD_CODE_ASSIST_API_CLIENT: &str =
 const ANTIGRAVITY_LOAD_CODE_ASSIST_CLIENT_METADATA: &str =
     "{\"ideType\":\"IDE_UNSPECIFIED\",\"platform\":\"PLATFORM_UNSPECIFIED\",\"pluginType\":\"GEMINI\"}";
 const IFLOW_CLIENT_ID: &str = "10009311001";
-const IFLOW_CLIENT_SECRET: &str = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW";
 const IFLOW_AUTHORIZE_URL: &str = "https://iflow.cn/oauth";
 const IFLOW_TOKEN_URL: &str = "https://iflow.cn/oauth/token";
 const IFLOW_USER_INFO_URL: &str = "https://iflow.cn/api/oauth/getUserInfo";
@@ -699,6 +696,7 @@ fn is_device_code_provider(provider: &str) -> bool {
             | "kilocode"
             | "codebuddy"
             | "codebuddy-cn"
+            | "codebuddy-intl"
             | "qoder"
             | "grok-cli"
             | "qwen"
@@ -3563,7 +3561,7 @@ async fn exchange_gemini_compat(
 ) -> Result<ProviderConnection, String> {
     let tokens = exchange_google_token(
         GEMINI_CLIENT_ID,
-        GEMINI_CLIENT_SECRET,
+        crate::oauth::secret::gemini_cli_client_secret(),
         gemini_token_url(),
         code,
         redirect_uri,
@@ -3637,7 +3635,7 @@ async fn exchange_antigravity_compat(
 ) -> Result<ProviderConnection, String> {
     let tokens = exchange_google_token(
         ANTIGRAVITY_CLIENT_ID,
-        ANTIGRAVITY_CLIENT_SECRET,
+        crate::oauth::secret::antigravity_client_secret(),
         antigravity_token_url(),
         code,
         redirect_uri,
@@ -3890,7 +3888,10 @@ async fn exchange_iflow_compat(
     code: &str,
     redirect_uri: &str,
 ) -> Result<ProviderConnection, String> {
-    let basic_auth = STANDARD.encode(format!("{IFLOW_CLIENT_ID}:{IFLOW_CLIENT_SECRET}"));
+    let basic_auth = STANDARD.encode(format!(
+        "{IFLOW_CLIENT_ID}:{}",
+        crate::oauth::secret::iflow_client_secret()
+    ));
     let response = reqwest::Client::new()
         .post(iflow_token_url())
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -3901,7 +3902,7 @@ async fn exchange_iflow_compat(
             ("code", code),
             ("redirect_uri", redirect_uri),
             ("client_id", IFLOW_CLIENT_ID),
-            ("client_secret", IFLOW_CLIENT_SECRET),
+            ("client_secret", crate::oauth::secret::iflow_client_secret()),
         ])
         .send()
         .await

@@ -223,9 +223,14 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
     let pool = Arc::new(ClientPool::new());
     let static_providers = [
         ("openai", "https://api.openai.com/v1/chat/completions"),
+        ("blackbox", "https://api.blackbox.ai/v1/chat/completions"),
         (
             "openrouter",
             "https://openrouter.ai/api/v1/chat/completions",
+        ),
+        (
+            "api-airforce",
+            "https://api.airforce/v1/chat/completions",
         ),
         ("deepseek", "https://api.deepseek.com/chat/completions"),
         ("groq", "https://api.groq.com/openai/v1/chat/completions"),
@@ -242,7 +247,7 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
         ("nebius", "https://api.studio.nebius.ai/v1/chat/completions"),
         (
             "siliconflow",
-            "https://api.siliconflow.cn/v1/chat/completions",
+            "https://api.siliconflow.com/v1/chat/completions",
         ),
         (
             "hyperbolic",
@@ -278,6 +283,58 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
         (
             "alicode-intl",
             "https://coding-intl.dashscope.aliyuncs.com/v1/chat/completions",
+        ),
+        (
+            "alims-intl",
+            "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+        ),
+        (
+            "baidu",
+            "https://qianfan.baidubce.com/v2/chat/completions",
+        ),
+        (
+            "bluesminds",
+            "https://api.bluesminds.com/v1/chat/completions",
+        ),
+        (
+            "clinepass",
+            "https://api.cline.bot/api/v1/chat/completions",
+        ),
+        (
+            "codebuddy-intl",
+            "https://www.codebuddy.ai/v2/chat/completions",
+        ),
+        (
+            "featherless",
+            "https://api.featherless.ai/v1/chat/completions",
+        ),
+        (
+            "kilo-gateway",
+            "https://api.kilo.ai/api/gateway/chat/completions",
+        ),
+        (
+            "perplexity-agent",
+            "https://api.perplexity.ai/v1/responses",
+        ),
+        (
+            "poolside",
+            "https://inference.poolside.ai/v1/chat/completions",
+        ),
+        (
+            "tencent",
+            "https://api.hunyuan.cloud.tencent.com/v1/chat/completions",
+        ),
+        (
+            "tokenrouter",
+            "https://api.tokenrouter.com/v1/chat/completions",
+        ),
+        (
+            "venice",
+            "https://api.venice.ai/api/v1/chat/completions",
+        ),
+        (
+            "zed",
+            "https://cloud.zed.dev/completions",
         ),
         (
             "volcengine-ark",
@@ -316,6 +373,295 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "expected beta URL for {provider}"
         );
     }
+}
+
+/// Guard: alims-intl must be routable through DefaultExecutor with the full
+/// DashScope compatible-mode endpoint (no extra `/chat/completions` appended —
+/// the baseUrl already carries it). 9router parity: `open-sse/providers/registry/alims-intl.js`
+/// transport.baseUrl = `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions`.
+#[test]
+fn alims_intl_has_full_endpoint_url() {
+    let pool = Arc::new(ClientPool::new());
+    let executor =
+        DefaultExecutor::new("alims-intl", pool, None).expect("alims-intl executor config");
+    assert_eq!(
+        executor
+            .build_url("qwen3.5-plus", false, &connection("alims-intl"))
+            .unwrap(),
+        "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
+    );
+}
+
+/// Guard: api-airforce must route through DefaultExecutor with the full
+/// endpoint URL and the exact registry headers. 9router parity:
+/// `open-sse/providers/registry/api-airforce.js` transport.baseUrl =
+/// `https://api.airforce/v1/chat/completions` + headers
+/// HTTP-Referer/X-Title. Header names are case-sensitive in the upstream
+/// registry; HeaderMap lookups here are lowercase (HeaderMap normalizes).
+#[test]
+fn api_airforce_headers_and_url() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("api-airforce", pool, None)
+        .expect("api-airforce executor config");
+    assert_eq!(
+        executor
+            .build_url("anthropic/claude-3.7-sonnet", false, &connection("api-airforce"))
+            .unwrap(),
+        "https://api.airforce/v1/chat/completions"
+    );
+    let headers = executor
+        .build_headers(
+            "anthropic/claude-3.7-sonnet",
+            &connection("api-airforce"),
+            true,
+        )
+        .expect("headers");
+    assert_eq!(headers["authorization"], "Bearer sk-test");
+    assert_eq!(headers["http-referer"], "https://endpoint-proxy.local");
+    assert_eq!(headers["x-title"], "Endpoint Proxy");
+}
+
+/// Guard: baidu (Qianfan) must route through DefaultExecutor with the full
+/// v2 chat-completions endpoint. 9router parity: `open-sse/providers/registry/baidu.js`
+/// transport.baseUrl = `https://qianfan.baidubce.com/v2/chat/completions`.
+/// The live key MUST stay "baidu" (the JS provider id + catalog entry id) —
+/// renaming to "qianfan" would break model resolution and keep HTTP 500.
+#[test]
+fn baidu_has_v2_chat_completions_url() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("baidu", pool, None).expect("baidu executor config");
+    assert_eq!(
+        executor
+            .build_url("deepseek-v4-pro", false, &connection("baidu"))
+            .unwrap(),
+        "https://qianfan.baidubce.com/v2/chat/completions"
+    );
+}
+
+/// Guard: bluesminds must route through DefaultExecutor with the full
+/// v1 chat-completions endpoint. 9router parity: `open-sse/providers/registry/bluesminds.js`
+/// transport.baseUrl = `https://api.bluesminds.com/v1/chat/completions`,
+/// no transport headers, apikey auth. Note hidden:true is UI-only (no Rust
+/// impact); do NOT treat claude-*/gemini-* model ids as anthropic-compatible.
+#[test]
+fn bluesminds_uses_v1_chat_completions() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("bluesminds", pool, None).expect("bluesminds executor");
+    assert_eq!(
+        executor
+            .build_url("gpt-4.1", false, &connection("bluesminds"))
+            .unwrap(),
+        "https://api.bluesminds.com/v1/chat/completions"
+    );
+}
+
+/// Guard: clinepass must route through DefaultExecutor with the full
+/// endpoint URL and the exact registry headers. 9router parity:
+/// `open-sse/providers/registry/clinepass.js` transport.baseUrl =
+/// `https://api.cline.bot/api/v1/chat/completions` + headers
+/// HTTP-Referer/X-Title (Cline). clinepass stays on the Bearer auth branch
+/// (combined oauth+apikey prefers access_token over api_key) — do NOT move
+/// it to the x-api-key branch list.
+#[test]
+fn clinepass_url_and_headers() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("clinepass", pool, None).expect("clinepass executor");
+    assert_eq!(
+        executor
+            .build_url("cline-pass/glm-5.2", false, &connection("clinepass"))
+            .unwrap(),
+        "https://api.cline.bot/api/v1/chat/completions"
+    );
+    let headers = executor
+        .build_headers("cline-pass/glm-5.2", &connection("clinepass"), true)
+        .expect("headers");
+    assert_eq!(headers["authorization"], "Bearer sk-test");
+    assert_eq!(headers["http-referer"], "https://cline.bot");
+    assert_eq!(headers["x-title"], "Cline");
+}
+
+/// Guard: codebuddy-intl (.ai international domain, NOT the CN provider)
+/// must route through DefaultExecutor with the full endpoint URL and the
+/// exact 6 registry headers. 9router parity:
+/// `open-sse/providers/registry/codebuddy-intl.js` transport.baseUrl =
+/// `https://www.codebuddy.ai/v2/chat/completions` + User-Agent/X-Product/
+/// X-IDE-Type/X-IDE-Name/x-requested-with/x-codebuddy-request.
+/// Bearer auth (combined oauth+apikey). Do NOT point at copilot.tencent.com
+/// (that is codebuddy-cn).
+#[test]
+fn codebuddy_intl_url_and_headers() {
+    let pool = Arc::new(ClientPool::new());
+    let executor =
+        DefaultExecutor::new("codebuddy-intl", pool, None).expect("codebuddy-intl executor");
+    assert_eq!(
+        executor
+            .build_url("glm-5.2", false, &connection("codebuddy-intl"))
+            .unwrap(),
+        "https://www.codebuddy.ai/v2/chat/completions"
+    );
+    let headers = executor
+        .build_headers("glm-5.2", &connection("codebuddy-intl"), true)
+        .expect("headers");
+    assert_eq!(headers["authorization"], "Bearer sk-test");
+    assert_eq!(headers["user-agent"], "IDE/2.108.1 CodeBuddy/2.108.1");
+    assert_eq!(headers["x-product"], "SaaS");
+    assert_eq!(headers["x-ide-type"], "IDE");
+    assert_eq!(headers["x-ide-name"], "IDE");
+    assert_eq!(headers["x-requested-with"], "XMLHttpRequest");
+    assert_eq!(headers["x-codebuddy-request"], "1");
+}
+
+/// Guard: featherless must route through DefaultExecutor with the full
+/// v1 chat-completions endpoint. 9router parity:
+/// `open-sse/providers/registry/featherless.js` transport.baseUrl =
+/// `https://api.featherless.ai/v1/chat/completions`. The live key MUST be
+/// "featherless" (JS provider id), NOT "featherless-ai" (a dead
+/// PROVIDER_REGISTRY key that lacks /chat/completions).
+#[test]
+fn featherless_has_full_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("featherless", pool, None).expect("featherless executor");
+    assert_eq!(
+        executor
+            .build_url("deepseek-ai/DeepSeek-V4-Pro", false, &connection("featherless"))
+            .unwrap(),
+        "https://api.featherless.ai/v1/chat/completions"
+    );
+}
+
+/// Guard: blackbox must hit /v1/chat/completions (NOT the old /api/... path).
+/// 9router registry/blackbox.js:26 transport.baseUrl.
+#[test]
+fn blackbox_v1_chat_completions_url() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("blackbox", pool, None).expect("blackbox executor");
+    let url = executor
+        .build_url("claude-fable-5", false, &connection("blackbox"))
+        .unwrap();
+    assert_eq!(url, "https://api.blackbox.ai/v1/chat/completions");
+    assert_ne!(url, "https://api.blackbox.ai/api/chat/completions");
+}
+
+/// Guard: kilo-gateway must route through DefaultExecutor with the full
+/// /api/gateway/chat/completions endpoint. 9router parity:
+/// `open-sse/providers/registry/kilo-gateway.js` transport.baseUrl =
+/// `https://api.kilo.ai/api/gateway/chat/completions`. Do NOT confuse with
+/// kilocode (different /api/openrouter path). The `:free` suffix in model
+/// ids is literal — never stripped.
+#[test]
+fn kilo_gateway_full_gateway_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("kilo-gateway", pool, None).expect("kilo-gateway executor");
+    assert_eq!(
+        executor
+            .build_url("kilo-auto/free", false, &connection("kilo-gateway"))
+            .unwrap(),
+        "https://api.kilo.ai/api/gateway/chat/completions"
+    );
+}
+
+/// Guard: perplexity-agent must route to the OpenAI Responses API endpoint
+/// (`/v1/responses`), NOT `/chat/completions`. 9router parity:
+/// `open-sse/providers/registry/perplexity-agent.js` transport.baseUrl =
+/// `https://api.perplexity.ai/v1/responses` with format "openai-responses"
+/// (translator already routes this provider to Format::OpenAiResponses).
+/// Standard Bearer auth — do NOT add to any x-api-key special-case.
+#[test]
+fn perplexity_agent_responses_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor =
+        DefaultExecutor::new("perplexity-agent", pool, None).expect("perplexity-agent executor");
+    assert_eq!(
+        executor
+            .build_url("perplexity/sonar", false, &connection("perplexity-agent"))
+            .unwrap(),
+        "https://api.perplexity.ai/v1/responses"
+    );
+}
+
+/// Guard: poolside must route through DefaultExecutor with the full
+/// inference endpoint. 9router parity: `open-sse/providers/registry/poolside.js`
+/// transport.baseUrl = `https://inference.poolside.ai/v1/chat/completions`
+/// (freeTier apikey, no transport headers).
+#[test]
+fn poolside_inference_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("poolside", pool, None).expect("poolside executor");
+    assert_eq!(
+        executor
+            .build_url("poolside/laguna-s-2.1", false, &connection("poolside"))
+            .unwrap(),
+        "https://inference.poolside.ai/v1/chat/completions"
+    );
+}
+
+/// Guard: tencent (Hunyuan) must route through DefaultExecutor with the full
+/// v1 chat-completions endpoint. 9router parity:
+/// `open-sse/providers/registry/tencent.js` transport.baseUrl =
+/// `https://api.hunyuan.cloud.tencent.com/v1/chat/completions`. The live key
+/// MUST be "tencent" (JS provider id); "hunyuan" is only the alias.
+#[test]
+fn tencent_hunyuan_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("tencent", pool, None).expect("tencent executor");
+    assert_eq!(
+        executor
+            .build_url("hunyuan-turbos-latest", false, &connection("tencent"))
+            .unwrap(),
+        "https://api.hunyuan.cloud.tencent.com/v1/chat/completions"
+    );
+}
+
+/// Guard: tokenrouter must route through DefaultExecutor with the chat
+/// endpoint (NOT embedding/image). 9router parity:
+/// `open-sse/providers/registry/tokenrouter.js` transport.baseUrl =
+/// `https://api.tokenrouter.com/v1/chat/completions`. The 120-model list and
+/// embedding/image baseUrls belong to the catalog/media layers — the chat
+/// ProviderConfig must carry ONLY the chat endpoint.
+#[test]
+fn tokenrouter_chat_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("tokenrouter", pool, None).expect("tokenrouter executor");
+    assert_eq!(
+        executor
+            .build_url("openai/gpt-5.5", false, &connection("tokenrouter"))
+            .unwrap(),
+        "https://api.tokenrouter.com/v1/chat/completions"
+    );
+}
+
+/// Guard: venice must route through DefaultExecutor with the /api/v1 chat
+/// endpoint (double path, NOT /v1). 9router parity:
+/// `open-sse/providers/registry/venice.js` transport.baseUrl =
+/// `https://api.venice.ai/api/v1/chat/completions`. Chat must NOT route
+/// through the imageConfig base.
+#[test]
+fn venice_api_v1_chat_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("venice", pool, None).expect("venice executor");
+    assert_eq!(
+        executor
+            .build_url("venice-uncensored-1-2", false, &connection("venice"))
+            .unwrap(),
+        "https://api.venice.ai/api/v1/chat/completions"
+    );
+}
+
+/// Guard: zed must clear UnsupportedProvider and route to the cloud endpoint.
+/// 9router parity: `open-sse/providers/registry/zed.js` transport.baseUrl =
+/// `https://cloud.zed.dev/completions`. NOTE: this is the minimal chat-path
+/// fix — zed's real auth header ("<user_id> <access_token>", no Bearer) and
+/// NDJSON wire protocol are a separate executor task (parity A3).
+#[test]
+fn zed_cloud_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("zed", pool, None).expect("zed executor config");
+    assert_eq!(
+        executor
+            .build_url("anthropic/claude-sonnet-4-6", false, &connection("zed"))
+            .unwrap(),
+        "https://cloud.zed.dev/completions"
+    );
 }
 
 #[test]

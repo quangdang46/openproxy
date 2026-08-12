@@ -483,6 +483,24 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub headroom_kompress: bool,
+    /// PXPIPE token-saver settings (9router settingsRepo.js defaults).
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub pxpipe_enabled: bool,
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub pxpipe_auto_install: bool,
+    #[serde(
+        default = "default_pxpipe_min_chars",
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub pxpipe_min_chars: u32,
+    #[serde(
+        default = "default_pxpipe_timeout_ms",
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub pxpipe_timeout_ms: u32,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub payload_rules: PayloadRulesConfig,
     #[serde(default, deserialize_with = "deserialize_null_default")]
@@ -572,6 +590,10 @@ impl Default for Settings {
             headroom_compress_user_messages: false,
             headroom_code_aware: false,
             headroom_kompress: true,
+            pxpipe_enabled: false,
+            pxpipe_auto_install: true,
+            pxpipe_min_chars: default_pxpipe_min_chars(),
+            pxpipe_timeout_ms: default_pxpipe_timeout_ms(),
             payload_rules: PayloadRulesConfig::default(),
             system_prompt: SystemPromptConfig::default(),
             password: None,
@@ -931,6 +953,14 @@ fn default_headroom_url() -> String {
 
 fn default_headroom_timeout_ms() -> u64 {
     3000
+}
+
+fn default_pxpipe_min_chars() -> u32 {
+    25_000
+}
+
+fn default_pxpipe_timeout_ms() -> u32 {
+    15_000
 }
 
 fn default_true() -> bool {

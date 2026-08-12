@@ -15,6 +15,9 @@ pub const DETECT_WINDOW: usize = 1024;
 /// Per-hunk line cap for git diff compaction
 pub const GIT_DIFF_HUNK_MAX_LINES: usize = 100;
 
+/// git-log max output lines before truncation (9router GIT_LOG_MAX_LINES).
+pub const GIT_LOG_MAX_LINES: usize = 200;
+
 /// Context lines kept around changed regions in git diff
 pub const GIT_DIFF_CONTEXT_KEEP: usize = 3;
 
@@ -80,6 +83,7 @@ pub const READ_NUMBERED_MIN_HIT_RATIO: f64 = 0.7;
 /// Filter name identifiers (Rust parity + JS extras)
 pub const FILTER_GIT_DIFF: &str = "git-diff";
 pub const FILTER_GIT_STATUS: &str = "git-status";
+pub const FILTER_GIT_LOG: &str = "git-log";
 pub const FILTER_GREP: &str = "grep";
 pub const FILTER_FIND: &str = "find";
 pub const FILTER_LS: &str = "ls";

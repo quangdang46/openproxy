@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::{routing, Json, Router};
 use bytes::Bytes;
-use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -15,11 +15,11 @@ use crate::core::usage::quota_fetcher::{
     fetch_claude_quota, fetch_codex_quota, fetch_deepseek_usage, fetch_gemini_cli_quota,
     fetch_kimi_oauth_usage,
     fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota, fetch_kimi_usage,
-    fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota,
-    get_codex_rate_limit_reset_credits,
+    fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota, fetch_vercel_ai_gateway_quota,
+    fetch_codebuddy_quota, get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
-use crate::oauth::token_refresh::refresh_codex_token;
+use crate::oauth::token_refresh::{dispatch_oauth_refresh, refresh_codex_token};
 use crate::server::state::AppState;
 use crate::server::usage_live::UsageEvent;
 use crate::server::usage_stream::{build_usage_stats, UsagePeriod, UsageStatsPayload};
@@ -29,10 +29,24 @@ fn require_usage_access(headers: &HeaderMap, state: &AppState) -> Result<(), Res
     super::require_dashboard_or_management_api_key(headers, state)
 }
 
+/// 9router `USAGE_APIKEY_PROVIDERS` parity (providers.js:163-165 — 12 registry
+/// entries with `features.usageApikey`). Providers without a live-quota fetcher
+/// fall back to a static message / per-request history (never 500).
 fn is_usage_apikey_provider(provider: &str) -> bool {
     matches!(
         provider,
-        "glm" | "glm-cn" | "minimax" | "minimax-cn" | "kimi" | "deepseek"
+        "glm"
+            | "glm-cn"
+            | "minimax"
+            | "minimax-cn"
+            | "kimi"
+            | "deepseek"
+            | "kiro"
+            | "ollama"
+            | "qoder"
+            | "vercel-ai-gateway"
+            | "codebuddy-cn"
+            | "codebuddy-intl"
     )
 }
 
@@ -304,11 +318,21 @@ async fn get_usage_history(State(state): State<AppState>, headers: HeaderMap) ->
         history: Vec<UsageEntryDto>,
     }
 
+    /// 9router usageRepo.js getUsageHistory parity — returns camelCase rows
+    /// with connectionId, apiKeyMasked, endpoint, status, tokens in addition
+    /// to the token/cost summary. The dashboard UsageHistory component reads
+    /// these columns.
     #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct UsageEntryDto {
         timestamp: Option<String>,
         provider: Option<String>,
         model: String,
+        connection_id: Option<String>,
+        api_key_masked: Option<String>,
+        endpoint: Option<String>,
+        status: Option<String>,
+        tokens: Option<Value>,
         prompt_tokens: u64,
         completion_tokens: u64,
         cost: f64,
@@ -321,6 +345,13 @@ async fn get_usage_history(State(state): State<AppState>, headers: HeaderMap) ->
             timestamp: e.timestamp.clone(),
             provider: e.provider.clone(),
             model: e.model.clone(),
+            connection_id: e.connection_id.clone(),
+            api_key_masked: mask_api_key(e.api_key.as_deref()),
+            endpoint: e.endpoint.clone(),
+            status: e.status.clone(),
+            tokens: e.tokens.as_ref().map(|t| {
+                serde_json::to_value(t).unwrap_or(Value::Null)
+            }),
             prompt_tokens: e
                 .tokens
                 .as_ref()
@@ -340,6 +371,25 @@ async fn get_usage_history(State(state): State<AppState>, headers: HeaderMap) ->
         history,
     })
     .into_response()
+}
+
+/// 9router usageRepo.js `maskApiKey` parity:
+/// - null/non-string → null
+/// - length <= 8 → first char + "***"
+/// - otherwise → first 8 chars + "***"
+fn mask_api_key(api_key: Option<&str>) -> Option<String> {
+    let key = api_key?;
+    if key.is_empty() {
+        return None;
+    }
+    if key.chars().count() <= 8 {
+        let mut masked = String::new();
+        masked.push(key.chars().next().unwrap_or(' '));
+        masked.push_str("***");
+        Some(masked)
+    } else {
+        Some(format!("{}***", &key[..8]))
+    }
 }
 
 async fn get_usage_daily(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -431,8 +481,12 @@ async fn get_connection_usage(
     };
 
     let is_oauth = connection.auth_type == "oauth";
-    let is_apikey_eligible =
-        connection.auth_type == "apikey" && is_usage_apikey_provider(&connection.provider);
+    // 9router route.js:135-136: Kiro's headless api-key flow persists
+    // authType "api_key" (underscore) while generic apikey providers persist
+    // "apikey" — accept both spellings.
+    let is_apikey_eligible = (connection.auth_type == "apikey"
+        || connection.auth_type == "api_key")
+        && is_usage_apikey_provider(&connection.provider);
     if !is_oauth && !is_apikey_eligible {
         return Json(serde_json::json!({
             "message": "Usage not available for this connection"
@@ -476,11 +530,20 @@ async fn get_connection_usage(
             .filter(|s| !s.is_empty())
         {
             let provider = connection.provider.clone();
+            let psd = connection.provider_specific_data.clone();
             let result = match provider.as_str() {
                 "glm" | "glm-cn" => fetch_glm_quota(api_key, &provider).await,
                 "minimax" | "minimax-cn" => fetch_minimax_quota(api_key, &provider).await,
                 "kimi" => fetch_kimi_usage(api_key).await,
                 "deepseek" => fetch_deepseek_usage(api_key).await,
+                "qoder" => fetch_qoder_quota(api_key, &provider).await,
+                "kiro" => fetch_kiro_quota(api_key, &provider, &psd).await,
+                "vercel-ai-gateway" => fetch_vercel_ai_gateway_quota(api_key).await,
+                "codebuddy-cn" | "codebuddy-intl" => {
+                    fetch_codebuddy_quota(api_key, &provider).await
+                }
+                // ollama has no live apikey quota fetcher yet — fall back to
+                // `{}` + per-request history (never 500).
                 _ => serde_json::json!({}),
             };
             if let Some(quotas) = result.get("quotas") {
@@ -495,7 +558,9 @@ async fn get_connection_usage(
     let mut live_plan: Option<Value> = None;
     let mut live_reset_credits: Option<Value> = None;
     if is_oauth {
-        let result = fetch_oauth_quota(connection).await;
+        // 9router route.js:158-183 — refresh credentials before the quota
+        // call and force-retry once on an auth-expired message.
+        let result = fetch_oauth_quota_with_refresh(connection).await;
         if let Some(quotas) = result.get("quotas") {
             live_quotas = quotas.clone();
         }
@@ -557,6 +622,85 @@ fn is_auth_expired_message(message: &str) -> bool {
     ]
     .iter()
     .any(|p| lower.contains(p))
+}
+
+/// Refresh an OAuth connection's tokens via the provider's refresh flow and
+/// return a cloned connection with the refreshed credentials. 9router
+/// `refreshAndUpdateCredentials` parity (route.js:23-117). Returns the
+/// original connection untouched on refresh failure (JS keeps the stale
+/// accessToken when one exists).
+async fn refresh_oauth_connection(
+    connection: &ProviderConnection,
+    force: bool,
+) -> Result<ProviderConnection, String> {
+    let Some(refresh_token) = connection
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(connection.clone());
+    };
+
+    // JS executor.needsRefresh(credentials): refresh when expired or missing.
+    let needs_refresh = force
+        || match connection.expires_at.as_deref() {
+            Some(expires_at) => crate::oauth::token_refresh::needs_refresh_with_lead(
+                &Some(expires_at.to_string()),
+                // Refresh a bit early (2 min) to avoid a doomed fetch.
+                120_000,
+            ),
+            None => connection.access_token.as_deref().is_none_or(|t| t.trim().is_empty()),
+        };
+    if !needs_refresh {
+        return Ok(connection.clone());
+    }
+
+    let provider = connection.provider.clone();
+    let psd = connection.provider_specific_data.clone();
+    let result = dispatch_oauth_refresh(&provider, refresh_token, &psd).await?;
+
+    let mut updated = connection.clone();
+    updated.access_token = Some(result.access_token);
+    if let Some(new_refresh) = result.refresh_token {
+        updated.refresh_token = Some(new_refresh);
+    }
+    if let Some(expires_in) = result.expires_in {
+        let expiry = Utc::now() + ChronoDuration::seconds(expires_in);
+        updated.expires_at = Some(expiry.to_rfc3339());
+    }
+    Ok(updated)
+}
+
+/// Fetch the OAuth quota, refreshing credentials first if stale/expired and
+/// force-retrying once when the quota response reports an auth-expired
+/// message. 9router route.js:158-183 parity.
+async fn fetch_oauth_quota_with_refresh(connection: &ProviderConnection) -> Value {
+    // 1. Refresh before the fetch when needed.
+    let connection = match refresh_oauth_connection(connection, false).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("usage oauth refresh failed for {}: {}", connection.provider, e);
+            // Keep the stored token (JS returns stale accessToken on failure).
+            connection.clone()
+        }
+    };
+
+    // 2. First fetch.
+    let result = fetch_oauth_quota(&connection).await;
+
+    // 3. Force-retry once if the quota response signals auth-expired.
+    let msg = result.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    if is_auth_expired_message(msg) && connection.refresh_token.is_some() {
+        if let Ok(retried_conn) = refresh_oauth_connection(&connection, true).await {
+            let retry = fetch_oauth_quota(&retried_conn).await;
+            if retry.get("message").and_then(|v| v.as_str()).is_none_or(|m| !is_auth_expired_message(m)) {
+                return retry;
+            }
+        }
+    }
+
+    result
 }
 
 fn is_auth_expired_consume_result(
@@ -1285,13 +1429,37 @@ fn format_usage_log(
     entry: &crate::types::UsageEntry,
     connections: &[crate::types::ProviderConnection],
 ) -> String {
-    let timestamp = entry.timestamp.as_deref().unwrap_or("-");
+    // 9router usageRepo.js formatLogDate parity: local-time
+    // DD-MM-YYYY HH:MM:SS (day-first, zero-padded), falling back to the raw
+    // string when the timestamp doesn't parse as RFC3339.
+    let timestamp = entry
+        .timestamp
+        .as_deref()
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|dt| {
+            let local = dt.with_timezone(&Local);
+            format!(
+                "{:02}-{:02}-{} {:02}:{:02}:{:02}",
+                local.day(),
+                local.month(),
+                local.year(),
+                local.hour(),
+                local.minute(),
+                local.second()
+            )
+        })
+        .unwrap_or_else(|| entry.timestamp.clone().unwrap_or_else(|| "-".to_string()));
     let model = if entry.model.is_empty() {
-        "-"
+        "-".to_string()
     } else {
-        entry.model.as_str()
+        entry.model.clone()
     };
-    let provider = entry.provider.as_deref().unwrap_or("-");
+    // JS r.provider?.toUpperCase() — "-" when absent.
+    let provider = entry
+        .provider
+        .as_deref()
+        .map(|p| p.to_uppercase())
+        .unwrap_or_else(|| "-".to_string());
     let account = entry
         .connection_id
         .as_deref()
@@ -1320,12 +1488,11 @@ fn format_usage_log(
         .and_then(|tokens| tokens.completion_tokens.or(tokens.output_tokens))
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let status = match entry.status.as_deref() {
-        Some("success") => "OK".to_string(),
-        Some(value) if value.eq_ignore_ascii_case("ok") => "OK".to_string(),
-        Some(value) => value.to_string(),
-        None => "OK".to_string(),
-    };
+    // JS r.status || "-" verbatim — do NOT map success/None to "OK".
+    let status = entry
+        .status
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
 
     format!("{timestamp} | {model} | {provider} | {account} | {sent} | {received} | {status}")
 }
@@ -1636,5 +1803,184 @@ mod tests {
     fn test_build_usage_chart_daily_bucket_count_matches_requested_period() {
         let buckets = build_usage_chart(&UsageDb::default(), "30d");
         assert_eq!(buckets.len(), 30);
+    }
+
+    #[test]
+    fn test_mask_api_key_short_and_long() {
+        // <= 8 chars → first char + "***"
+        assert_eq!(mask_api_key(Some("sk-test")), Some("s***".to_string()));
+        // > 8 chars → first 8 + "***"
+        assert_eq!(
+            mask_api_key(Some("0123456789abcdef")),
+            Some("01234567***".to_string())
+        );
+        // None / empty → None
+        assert_eq!(mask_api_key(None), None);
+        assert_eq!(mask_api_key(Some("")), None);
+    }
+
+    #[test]
+    fn test_usage_history_dto_serializes_camelcase_fields() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Dto {
+            timestamp: Option<String>,
+            provider: Option<String>,
+            model: String,
+            connection_id: Option<String>,
+            api_key_masked: Option<String>,
+            endpoint: Option<String>,
+            status: Option<String>,
+            tokens: Option<Value>,
+            prompt_tokens: u64,
+            completion_tokens: u64,
+            cost: f64,
+        }
+        let dto = Dto {
+            timestamp: Some("2026-01-01T00:00:00Z".into()),
+            provider: Some("openai".into()),
+            model: "gpt-4".into(),
+            connection_id: Some("c1".into()),
+            api_key_masked: Some("01234567***".into()),
+            endpoint: Some("/v1/chat/completions".into()),
+            status: Some("ok".into()),
+            tokens: Some(serde_json::json!({"prompt_tokens": 10, "completion_tokens": 20})),
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            cost: 0.5,
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        let obj = json.as_object().unwrap();
+        // camelCase keys (9router usageRepo.js getUsageHistory parity).
+        assert_eq!(obj.get("connectionId").and_then(|v| v.as_str()), Some("c1"));
+        assert_eq!(
+            obj.get("apiKeyMasked").and_then(|v| v.as_str()),
+            Some("01234567***")
+        );
+        assert_eq!(
+            obj.get("endpoint").and_then(|v| v.as_str()),
+            Some("/v1/chat/completions")
+        );
+        assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("ok"));
+        assert!(obj.contains_key("tokens"));
+        // No snake_case leakage.
+        assert!(!obj.contains_key("connection_id"));
+        assert!(!obj.contains_key("api_key_masked"));
+        assert!(!obj.contains_key("prompt_tokens"), "must be promptTokens");
+    }
+
+    #[test]
+    fn test_is_usage_apikey_provider_includes_all_12() {
+        for p in [
+            "glm",
+            "glm-cn",
+            "minimax",
+            "minimax-cn",
+            "kimi",
+            "deepseek",
+            "kiro",
+            "ollama",
+            "qoder",
+            "vercel-ai-gateway",
+            "codebuddy-cn",
+            "codebuddy-intl",
+        ] {
+            assert!(
+                is_usage_apikey_provider(p),
+                "expected {p} to be a usage apikey provider"
+            );
+        }
+        assert!(!is_usage_apikey_provider("openai"));
+        assert!(!is_usage_apikey_provider("claude"));
+    }
+
+    #[test]
+    fn test_apikey_eligible_accepts_api_key_underscore() {
+        use crate::types::ProviderConnection;
+        // Kiro headless flow persists auth_type "api_key" (underscore).
+        let conn = ProviderConnection {
+            auth_type: "api_key".into(),
+            provider: "kiro".into(),
+            ..Default::default()
+        };
+        let is_apikey_eligible = (conn.auth_type == "apikey" || conn.auth_type == "api_key")
+            && is_usage_apikey_provider(&conn.provider);
+        assert!(is_apikey_eligible, "api_key auth must be eligible for kiro");
+
+        // Non-whitelisted provider stays ineligible even with api_key auth.
+        let conn2 = ProviderConnection {
+            auth_type: "api_key".into(),
+            provider: "openai".into(),
+            ..Default::default()
+        };
+        let eligible2 = (conn2.auth_type == "apikey" || conn2.auth_type == "api_key")
+            && is_usage_apikey_provider(&conn2.provider);
+        assert!(!eligible2);
+    }
+
+    #[test]
+    fn test_format_usage_log_local_timestamp() {
+        use crate::types::UsageEntry;
+        let entry = UsageEntry {
+            timestamp: Some("2026-08-12T03:04:05Z".into()),
+            provider: Some("glm".into()),
+            model: "glm-4.7".into(),
+            connection_id: Some("abc123".into()),
+            status: Some("success".into()),
+            ..Default::default()
+        };
+        let line = format_usage_log(&entry, &[]);
+        // JS formatLogDate parity: local DD-MM-YYYY HH:MM:SS (day-first).
+        let re = regex::Regex::new(r"^\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2} \| ").unwrap();
+        assert!(re.is_match(&line), "timestamp must be local DD-MM-YYYY HH:MM:SS, got: {line}");
+        // Provider uppercased (JS r.provider?.toUpperCase()).
+        assert!(line.contains("| GLM |"), "provider must be uppercased: {line}");
+        // Status verbatim (not mapped to OK).
+        assert!(line.contains("| success"), "status must be raw: {line}");
+    }
+
+    #[test]
+    fn test_format_usage_log_unparseable_timestamp_falls_back_raw() {
+        use crate::types::UsageEntry;
+        let entry = UsageEntry {
+            timestamp: Some("not-a-timestamp".into()),
+            provider: Some("openai".into()),
+            model: "gpt-4".into(),
+            ..Default::default()
+        };
+        let line = format_usage_log(&entry, &[]);
+        assert!(line.starts_with("not-a-timestamp | "), "raw fallback expected: {line}");
+        assert!(line.contains("| OPENAI |"), "provider uppercased: {line}");
+        // Missing status → "-".
+        assert!(line.ends_with("| -"));
+    }
+
+    #[test]
+    fn test_is_auth_expired_message_matches_js_patterns() {
+        // 9router AUTH_EXPIRED_PATTERNS = [expired, authentication,
+        // unauthorized, 401, re-authorize].
+        assert!(is_auth_expired_message("Grok CLI authentication expired. Please re-authorize."));
+        assert!(is_auth_expired_message("401 Unauthorized"));
+        assert!(is_auth_expired_message("Token expired"));
+        assert!(is_auth_expired_message("authentication failed"));
+        assert!(!is_auth_expired_message("Kimi Coding connected. Usage tracked per request."));
+        assert!(!is_auth_expired_message("ok"));
+    }
+
+    #[test]
+    fn test_refresh_oauth_connection_no_refresh_token_is_noop() {
+        use crate::types::ProviderConnection;
+        // No refresh_token → returns the connection unchanged (JS keeps stale
+        // accessToken; never 401s when no refresh is possible).
+        let conn = ProviderConnection {
+            auth_type: "oauth".into(),
+            provider: "claude".into(),
+            access_token: Some("stale-token".into()),
+            refresh_token: None,
+            ..Default::default()
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let out = rt.block_on(refresh_oauth_connection(&conn, false)).unwrap();
+        assert_eq!(out.access_token.as_deref(), Some("stale-token"));
     }
 }

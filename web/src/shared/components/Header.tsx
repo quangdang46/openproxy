@@ -4,6 +4,7 @@ import { useMemo, useState, useEffect } from "react";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import HeaderMenu from "@/shared/components/HeaderMenu";
 import ThemeToggle from "@/shared/components/ThemeToggle";
+import DonateModal from "@/shared/components/DonateModal";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS } from "@/shared/constants/providers";
 import { translate } from "@/i18n/runtime";
@@ -180,11 +181,29 @@ const getPageInfo = (pathname: string): PageInfo => {
 export default function Header({ onMenuClick, showMenuButton = true }: HeaderProps) {
   const [pathname, setPathname] = useState("");
   const [mounted, setMounted] = useState(false);
+  const [donateOpen, setDonateOpen] = useState(false);
+  const [displayName, setDisplayName] = useState("");
+  const [loginMethod, setLoginMethod] = useState("");
 
   useEffect(() => {
     setMounted(true);
     setPathname(window.location.pathname);
   }, []);
+
+  // 9router Header.js:192-216 — load auth status (cache:no-store) to surface
+  // the OIDC identity chip.
+  useEffect(() => {
+    if (!mounted) return;
+    fetch("/api/auth/status", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : {}))
+      .then((data) => {
+        setDisplayName(
+          data?.displayName || data?.oidcName || data?.oidcEmail || ""
+        );
+        setLoginMethod(data?.loginMethod || "");
+      })
+      .catch(() => {});
+  }, [mounted]);
 
   // const router = useRouter();
 
@@ -283,9 +302,30 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
       {/* Right actions */}
       <div className="flex items-center gap-1 shrink-0">
         <HeaderSearchInput />
+        {displayName && loginMethod === "OIDC" && (
+          <div className="hidden sm:flex items-center max-w-[220px] px-3 py-1.5 rounded-full border border-border bg-surface/70 text-xs text-text-muted truncate">
+            <span className="material-symbols-outlined text-primary mr-1.5 text-[16px]">
+              person
+            </span>
+            <span className="truncate">{displayName}</span>
+            <span className="ml-2 shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
+              OIDC
+            </span>
+          </div>
+        )}
+        <button
+          type="button"
+          onClick={() => setDonateOpen(true)}
+          className="flex items-center gap-1.5 px-3 h-8 rounded-lg border border-pink-500/30 bg-pink-500/10 text-pink-600 dark:text-pink-400 hover:bg-pink-500/20 transition-colors text-sm font-medium"
+          aria-label="Donate"
+        >
+          <span className="material-symbols-outlined text-[20px]">volunteer_activism</span>
+          <span className="hidden sm:inline">Donate</span>
+        </button>
         <ThemeToggle />
         <HeaderMenu onLogout={handleLogout} />
       </div>
+      <DonateModal isOpen={donateOpen} onClose={() => setDonateOpen(false)} />
     </header>
   );
 }

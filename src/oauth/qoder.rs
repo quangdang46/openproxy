@@ -25,7 +25,6 @@ const QODER_AUTH_URL: &str = "https://qoder.com/oauth/authorize";
 const QODER_TOKEN_URL: &str = "https://api.qoder.com/oauth/token";
 const QODER_DEVICE_TOKEN_POLL_URL: &str = "https://api.qoder.com/deviceToken/poll";
 const QODER_CLIENT_ID: &str = "10009311001";
-const QODER_CLIENT_SECRET: &str = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW";
 const POLL_TIMEOUT_SECS: u64 = 15;
 const POLL_INTERVAL_SECS: u64 = 3;
 const REAUTH_AFTER_DAYS: u64 = 30;

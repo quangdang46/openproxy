@@ -1432,6 +1432,319 @@ pub async fn fetch_qoder_quota(access_token: &str, _provider: &str) -> Value {
     json!({ "quotas": Value::Object(quotas) })
 }
 
+/// Vercel AI Gateway credit usage (9router services/usage/misc.js getVercelAiGatewayUsage).
+/// GET https://ai-gateway.vercel.sh/v1/credits with Bearer auth; returns
+/// { balance, total_used } as USD decimal strings. Plan rows mirror JS
+/// exactly (MONTHLY_CREDIT = 5; remainingPercentage may exceed 100).
+pub async fn fetch_vercel_ai_gateway_quota(api_key: &str) -> Value {
+    if api_key.trim().is_empty() {
+        return json!({ "message": "Vercel AI Gateway API key not available." });
+    }
+    let client = http_client();
+    let response = match client
+        .get("https://ai-gateway.vercel.sh/v1/credits")
+        .bearer_auth(api_key.trim())
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({ "message": format!("Vercel AI Gateway error: {e}") });
+        }
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({ "message": "Vercel AI Gateway API key invalid or expired." });
+    }
+    if !(200..300).contains(&status) {
+        let text = response.text().await.unwrap_or_default();
+        let trimmed: String = text.chars().take(200).collect();
+        let suffix = if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!(": {trimmed}")
+        };
+        return json!({ "message": format!("Vercel AI Gateway credits API error ({status}){suffix}") });
+    }
+    let data: Value = response.json().await.unwrap_or_else(|_| json!({}));
+    let balance = data
+        .get("balance")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let total_used = data
+        .get("total_used")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    vercel_ai_gateway_quota_rows(balance, total_used)
+}
+
+/// Build the Vercel AI Gateway quota rows from the parsed balance/total_used
+/// (USD decimals). Pure fn for testability. 9router misc.js:213-249 parity.
+fn vercel_ai_gateway_quota_rows(balance: f64, total_used: f64) -> Value {
+    const MONTHLY_CREDIT: f64 = 5.0;
+    let remaining_pct = (balance / MONTHLY_CREDIT) * 100.0;
+
+    if balance <= 0.0 && total_used <= 0.0 {
+        return json!({
+            "plan": "Pay-as-you-go",
+            "message": "Vercel AI Gateway connected. No credit allocation found (BYOK or unfunded account).",
+            "quotas": {}
+        });
+    }
+
+    json!({
+        "plan": "Pay-as-you-go",
+        "quotas": {
+            "Used (USD)": json!({
+                "used": total_used, "total": 0.0, "remaining": 0.0,
+                "remainingPercentage": 100.0, "unlimited": true
+            }),
+            "Remaining (USD)": json!({
+                "used": balance, "total": MONTHLY_CREDIT, "remaining": balance,
+                "remainingPercentage": remaining_pct, "unlimited": false
+            })
+        }
+    })
+}
+
+const CODEBUDDY_CN_URL: &str = "https://copilot.tencent.com/v2/billing/meter/get-user-resource";
+const CODEBUDDY_INTL_URL: &str = "https://www.codebuddy.ai/v2/billing/meter/get-user-resource";
+/// A refill pack is one whose DeductionEndTime is more than this far past the
+/// cycle end (9router REFILL_GAP_MS = 2 days).
+const CODEBUDDY_REFILL_GAP_MS: i64 = 2 * 24 * 60 * 60 * 1000;
+
+/// CodeBuddy CN/Intl usage (9router services/usage/codebuddy-cn.js:46-138).
+/// POST `{}` to the billing meter endpoint with the CodeBuddy headers, parse
+/// `data.Response.Data.Accounts`, and partition refill vs bonus packs.
+pub async fn fetch_codebuddy_quota(token: &str, provider: &str) -> Value {
+    if token.trim().is_empty() {
+        return json!({ "message": format!("CodeBuddy ({provider}) credential not available.") });
+    }
+    let url = if provider == "codebuddy-intl" {
+        CODEBUDDY_INTL_URL
+    } else {
+        CODEBUDDY_CN_URL
+    };
+    let client = http_client();
+    let response = match client
+        .post(url)
+        .bearer_auth(token.trim())
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .header("User-Agent", "CLI/2.108.1 CodeBuddy/2.108.1")
+        .header("X-Product", "SaaS")
+        .header("X-IDE-Type", "CLI")
+        .header("X-IDE-Name", "CLI")
+        .header("x-requested-with", "XMLHttpRequest")
+        .header("x-codebuddy-request", "1")
+        .body("{}")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({ "message": format!("CodeBuddy ({provider}) error: {e}") });
+        }
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({ "message": "CodeBuddy CN credential invalid or expired." });
+    }
+    if !(200..300).contains(&status) {
+        return json!({ "message": format!("CodeBuddy CN quota API error ({status}).") });
+    }
+    let json_body: Value = match response.json().await {
+        Ok(v) => v,
+        Err(_) => return json!({ "message": "CodeBuddy CN quota API error." }),
+    };
+    // json.code === 0 gate.
+    if json_body.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) != 0 {
+        let msg = json_body
+            .get("msg")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        return json!({ "message": format!("CodeBuddy CN quota error: {msg}") });
+    }
+    let data = json_body
+        .pointer("/data/Response/Data")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let accounts: Vec<Value> = data
+        .get("Accounts")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if accounts.is_empty() {
+        return json!({ "message": "CodeBuddy CN connected. No credit package found." });
+    }
+
+    codebuddy_quota_rows_from_accounts(accounts)
+}
+
+/// Partition CodeBuddy accounts into quota rows (refill vs bonus packs).
+/// Mirrors 9router codebuddy-cn.js: refills and bonuses are partitioned and
+/// each sorted by expiry; bonus packs are indexed independently (1-based).
+/// Pure fn so tests exercise the real partitioning logic.
+fn codebuddy_quota_rows_from_accounts(accounts: Vec<Value>) -> Value {
+    fn expiry_ms(acc: &Value) -> i64 {
+        acc.get("CycleEndTime")
+            .and_then(|v| v.as_str())
+            .and_then(|s| parse_codebuddy_time(Some(s)))
+            .unwrap_or(i64::MAX)
+    }
+
+    let mut refills: Vec<&Value> = accounts
+        .iter()
+        .filter(|a| {
+            a.as_object()
+                .map(|o| codebuddy_is_refill(o))
+                .unwrap_or(false)
+        })
+        .collect();
+    refills.sort_by_key(|a| expiry_ms(a));
+    let mut bonuses: Vec<&Value> = accounts
+        .iter()
+        .filter(|a| {
+            !a.as_object()
+                .map(|o| codebuddy_is_refill(o))
+                .unwrap_or(false)
+        })
+        .collect();
+    bonuses.sort_by_key(|a| expiry_ms(a));
+
+    let mut quotas = serde_json::Map::new();
+    // Refill packs first: cadence-labelled, Cycle* balance, recurring true.
+    let mut seen_refill: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for acc in &refills {
+        let obj = acc.as_object().cloned().unwrap_or_default();
+        let cadence = codebuddy_refill_cadence(&obj);
+        let count = seen_refill.entry(cadence.clone()).or_insert(0);
+        *count += 1;
+        let label = if *count > 1 {
+            format!("{cadence} {count}")
+        } else {
+            cadence
+        };
+        quotas.insert(label, codebuddy_quota_row(&obj, true));
+    }
+    // Bonus packs: lifetime Capacity balance, recurring false, 1-based index.
+    for (i, acc) in bonuses.iter().enumerate() {
+        let obj = acc.as_object().cloned().unwrap_or_default();
+        quotas.insert(
+            format!("Bonus Pack {}", i + 1),
+            codebuddy_bonus_row(&obj),
+        );
+    }
+
+    // Plan from the first refill (or first account), like JS basePkg.
+    let plan_source: Option<&Value> = refills
+        .first()
+        .map(|v| *v)
+        .or_else(|| accounts.first());
+    let mut plan = "CodeBuddy".to_string();
+    if let Some(src) = plan_source {
+        let base = codebuddy_base_package(
+            src.as_object().unwrap_or(&serde_json::Map::new()),
+        );
+        if let Some(name) = base.get("PackageName").and_then(|v| v.as_str()) {
+            if !name.is_empty() {
+                plan = name.to_string();
+            }
+        } else if let Some(name) = base.get("SubProductName").and_then(|v| v.as_str()) {
+            if !name.is_empty() {
+                plan = name.to_string();
+            }
+        }
+    }
+
+    json!({ "plan": plan, "quotas": Value::Object(quotas) })
+}
+
+/// Bonus pack quota row — lifetime Capacity balance (NOT Cycle fields).
+fn codebuddy_bonus_row(acc: &serde_json::Map<String, Value>) -> Value {
+    let used = codebuddy_num(acc, "CapacityUsedPrecise", "CapacityUsed");
+    let total = codebuddy_num(acc, "CapacitySizePrecise", "CapacitySize");
+    let reset_at = acc
+        .get("CycleEndTime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    json!({
+        "used": used, "total": total, "resetAt": reset_at,
+        "unlimited": false, "recurring": false
+    })
+}
+
+/// 9router isRefill: DeductionEndTime − cycleEnd > REFILL_GAP_MS.
+fn codebuddy_is_refill(acc: &serde_json::Map<String, Value>) -> bool {
+    let cycle_end = parse_codebuddy_time(acc.get("CycleEndTime").and_then(|v| v.as_str()));
+    let deduction_end = parse_codebuddy_time(acc.get("DeductionEndTime").and_then(|v| v.as_str()));
+    match (cycle_end, deduction_end) {
+        (Some(ce), Some(de)) => de - ce > CODEBUDDY_REFILL_GAP_MS,
+        _ => false,
+    }
+}
+
+/// 9router refillCadence: Monthly/Weekly/Daily by days between CycleStartTime
+/// and CycleEndTime (≤1.5d → Daily, ≤10d → Weekly, else Monthly).
+fn codebuddy_refill_cadence(acc: &serde_json::Map<String, Value>) -> String {
+    let start = parse_codebuddy_time(acc.get("CycleStartTime").and_then(|v| v.as_str()));
+    let end = parse_codebuddy_time(acc.get("CycleEndTime").and_then(|v| v.as_str()));
+    if let (Some(s), Some(e)) = (start, end) {
+        let days = (e - s) as f64 / 86_400_000.0;
+        if days <= 1.5 {
+            "Daily".to_string()
+        } else if days <= 10.0 {
+            "Weekly".to_string()
+        } else {
+            "Monthly".to_string()
+        }
+    } else {
+        "Monthly".to_string()
+    }
+}
+
+fn parse_codebuddy_time(s: Option<&str>) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(s?)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
+}
+
+/// 9router num(): Number(precise ?? plain), non-finite → 0.
+fn codebuddy_num(acc: &serde_json::Map<String, Value>, precise: &str, plain: &str) -> f64 {
+    acc.get(precise)
+        .or_else(|| acc.get(plain))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|n| n.is_finite())
+        .unwrap_or(0.0)
+}
+
+fn codebuddy_quota_row(acc: &serde_json::Map<String, Value>, recurring: bool) -> Value {
+    let used = codebuddy_num(acc, "CycleCapacityUsedPrecise", "CycleCapacityUsed");
+    let total = codebuddy_num(acc, "CycleCapacitySizePrecise", "CycleCapacitySize");
+    let reset_at = acc
+        .get("CycleEndTime")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    json!({
+        "used": used, "total": total, "resetAt": reset_at,
+        "unlimited": false, "recurring": recurring
+    })
+}
+
+fn codebuddy_base_package(acc: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+    acc.get("BasePackage")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default()
+}
+
 pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
     if access_token.is_empty() {
         return json!({ "message": "Invalid or expired Claude token" });
@@ -1537,15 +1850,22 @@ const KIRO_DEFAULT_PROFILE_ARN: &str =
 const KIRO_AGENTIC_URL: &str = "https://codewhisperer.us-east-1.amazonaws.com";
 const KIRO_Q_URL: &str = "https://q.us-east-1.amazonaws.com";
 
+/// 9router kiro.js profileArn resolution — for api_key auth, NEVER inject the
+/// shared default placeholder profileArn (CodeWhisperer 403s); fall back to
+/// KIRO_DEFAULT_PROFILE_ARN only for non-api_key (builder-id) auth.
 fn kiro_resolve_profile_arn(
     provider_specific_data: &std::collections::BTreeMap<String, Value>,
+    is_api_key: bool,
 ) -> String {
-    provider_specific_data
+    let explicit = provider_specific_data
         .get("profileArn")
         .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .unwrap_or(KIRO_DEFAULT_PROFILE_ARN)
-        .to_string()
+        .filter(|s| !s.is_empty());
+    match explicit {
+        Some(s) => s.to_string(),
+        None if is_api_key => String::new(),
+        None => KIRO_DEFAULT_PROFILE_ARN.to_string(),
+    }
 }
 
 pub async fn fetch_kiro_quota(
@@ -1557,27 +1877,49 @@ pub async fn fetch_kiro_quota(
         return json!({ "message": "Invalid or expired Kiro token" });
     }
 
+    // 9router kiro.js:51-67 auth-method branching.
+    let auth_method = provider_specific_data
+        .get("authMethod")
+        .and_then(|v| v.as_str())
+        .unwrap_or("builder-id");
+    let is_api_key = auth_method == "api_key";
+    let is_external_idp = auth_method == "external_idp";
+
     let client = http_client();
-    let profile_arn = kiro_resolve_profile_arn(provider_specific_data);
+    let profile_arn = kiro_resolve_profile_arn(provider_specific_data, is_api_key);
     let mut quotas = serde_json::Map::new();
 
     let user_agent = "aws-sdk-js/1.0.0 KiroIDE";
-    let mut tried_post = false;
-    let mut tried_q = false;
     let mut primary_body: Option<Value> = None;
+    let mut saw_auth_error = false;
+
+    // tokentype / TokenType headers per auth method (kiro.js apiKeyHeaders /
+    // externalIdpHeaders).
+    let mut get_headers = |req: reqwest::RequestBuilder| -> reqwest::RequestBuilder {
+        let mut r = req;
+        if is_api_key {
+            r = r.header("tokentype", "API_KEY");
+        }
+        if is_external_idp {
+            r = r.header("TokenType", "EXTERNAL_IDP");
+        }
+        r
+    };
 
     let primary_url = format!(
         "{KIRO_AGENTIC_URL}/getUsageLimits?isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
     );
-    if let Ok(resp) = client
+    let primary_req = client
         .get(&primary_url)
         .bearer_auth(access_token)
         .header("x-amz-user-agent", user_agent)
         .header("user-agent", user_agent)
-        .header("Accept", "application/json")
-        .send()
-        .await
-    {
+        .header("Accept", "application/json");
+    if let Ok(resp) = get_headers(primary_req).send().await {
+        let status = resp.status().as_u16();
+        if status == 401 || status == 403 {
+            saw_auth_error = true;
+        }
         if resp.status().is_success() {
             if let Ok(body) = resp.json::<Value>().await {
                 primary_body = Some(body);
@@ -1586,22 +1928,24 @@ pub async fn fetch_kiro_quota(
     }
 
     if primary_body.is_none() {
-        tried_post = true;
-        let post_body = json!({
-            "origin": "AI_EDITOR",
-            "profileArn": profile_arn,
-            "resourceType": "AGENTIC_REQUEST",
-        });
-        if let Ok(resp) = client
+        let mut post_body = serde_json::Map::new();
+        post_body.insert("origin".into(), json!("AI_EDITOR"));
+        post_body.insert("resourceType".into(), json!("AGENTIC_REQUEST"));
+        if !profile_arn.is_empty() {
+            post_body.insert("profileArn".into(), json!(profile_arn));
+        }
+        let post_req = client
             .post(KIRO_AGENTIC_URL)
             .bearer_auth(access_token)
             .header("Content-Type", "application/x-amz-json-1.0")
             .header("x-amz-target", "AmazonCodeWhispererService.GetUsageLimits")
             .header("Accept", "application/json")
-            .json(&post_body)
-            .send()
-            .await
-        {
+            .json(&Value::Object(post_body));
+        if let Ok(resp) = get_headers(post_req).send().await {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                saw_auth_error = true;
+            }
             if resp.status().is_success() {
                 if let Ok(body) = resp.json::<Value>().await {
                     primary_body = Some(body);
@@ -1611,17 +1955,24 @@ pub async fn fetch_kiro_quota(
     }
 
     if primary_body.is_none() {
-        tried_q = true;
-        let q_url = format!(
-            "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&profileArn={profile_arn}&resourceType=AGENTIC_REQUEST"
-        );
-        if let Ok(resp) = client
+        let q_url = if profile_arn.is_empty() {
+            format!(
+                "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
+            )
+        } else {
+            format!(
+                "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&profileArn={profile_arn}&resourceType=AGENTIC_REQUEST"
+            )
+        };
+        let q_req = client
             .get(&q_url)
             .bearer_auth(access_token)
-            .header("Accept", "application/json")
-            .send()
-            .await
-        {
+            .header("Accept", "application/json");
+        if let Ok(resp) = get_headers(q_req).send().await {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                saw_auth_error = true;
+            }
             if resp.status().is_success() {
                 if let Ok(body) = resp.json::<Value>().await {
                     primary_body = Some(body);
@@ -1633,11 +1984,24 @@ pub async fn fetch_kiro_quota(
     let body = match primary_body {
         Some(b) => b,
         None => {
+            // 9router kiro.js:157-177 auth-error message per auth method.
+            if saw_auth_error {
+                let msg = match auth_method {
+                    "idc" => {
+                        "Kiro quota API is unavailable for the current AWS IAM Identity \
+                         Center session. Chat may still work. If this persists after \
+                         renewing your session, reconnect Kiro."
+                    }
+                    "google" | "github" => {
+                        "Kiro quota API authentication expired. Chat may still work."
+                    }
+                    _ => "Kiro quota API rejected the current token. Chat may still work.",
+                };
+                return json!({ "message": msg, "quotas": {} });
+            }
             return json!({
-                "message": format!(
-                    "Kiro connected. Quota endpoints unreachable (tried primary={} post={} q={}).",
-                    !tried_post, tried_post, tried_q
-                )
+                "message": "Unable to fetch Kiro usage right now.",
+                "quotas": {},
             });
         }
     };
@@ -1898,73 +2262,276 @@ pub async fn fetch_grok_cli_credits_config(access_token: &str) -> Option<Value> 
 /// Grok CLI usage — REST billing first, then the gRPC-web weekly pool as a
 /// fallback when REST reports zero quotas (ported from 9router v0.5.45
 /// open-sse/services/usage/grok-cli.js getGrokCliUsage).
+/// 9router grok-cli.js buildGrokCliHeaders (lines 54-70) — the 7 extra
+/// headers alongside Authorization Bearer.
+fn grok_cli_headers(token: &str, email: Option<&str>, user_id: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut h = vec![
+        ("Accept", "application/json".to_string()),
+        ("User-Agent", "grok-shell/0.2.99 (linux; x86_64)".to_string()),
+        ("x-xai-token-auth", "xai-grok-cli".to_string()),
+        ("x-grok-client-identifier", "grok-shell".to_string()),
+        ("x-grok-client-version", "0.2.99".to_string()),
+        ("x-grok-client-mode", "headless".to_string()),
+        ("Authorization", format!("Bearer {token}")),
+    ];
+    if let Some(e) = email {
+        h.push(("x-email", e.to_string()));
+    }
+    if let Some(uid) = user_id {
+        h.push(("x-userid", uid.to_string()));
+    }
+    h
+}
+
+/// 9router grok-cli.js planFromAccessToken (95-110): JWT tier → plan name.
+fn plan_from_access_token(access_token: &str) -> String {
+    use base64::Engine as _;
+    let payload = access_token.split('.').nth(1).unwrap_or("");
+    let decoded = match base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload) {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(_) => return String::new(),
+    };
+    let v: Value = serde_json::from_str(&decoded).unwrap_or(Value::Null);
+    let tier = v.get("tier").and_then(|t| t.as_i64()).unwrap_or(-1);
+    match tier {
+        0 => "Free".to_string(),
+        1 => "SuperGrok".to_string(),
+        2 => "X Basic".to_string(),
+        3 => "X Premium".to_string(),
+        4 => "X Premium Plus".to_string(),
+        5 => "SuperGrok Heavy".to_string(),
+        6 => "SuperGrok Lite".to_string(),
+        _ => String::new(),
+    }
+}
+
+/// 9router grok-cli.js RESOLVE_PLAN (82-92): tier (Title Cased) or
+/// hasGrokCodeAccess / isUnifiedBillingUser; default "Grok Build".
+fn resolve_grok_cli_plan(user: &Value, config: &Value) -> String {
+    let tier = user
+        .get("subscriptionTier")
+        .or_else(|| user.get("subscription_tier"))
+        .or_else(|| user.get("subscription").and_then(|s| s.get("tier")))
+        .or_else(|| config.get("subscriptionTier"))
+        .or_else(|| config.get("subscription_tier"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            // Title Case: split on [_-]+ and uppercase each word start.
+            s.split(|c| c == '-' || c == '_')
+                .filter(|w| !w.is_empty())
+                .map(|w| {
+                    let mut chars = w.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+    if let Some(t) = tier {
+        if !t.eq_ignore_ascii_case("free")
+            && !t.eq_ignore_ascii_case("none")
+            && !t.eq_ignore_ascii_case("null")
+        {
+            return t;
+        }
+    }
+    if user.get("hasGrokCodeAccess").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return "Grok Code".to_string();
+    }
+    if config.get("isUnifiedBillingUser").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return "Grok Build".to_string();
+    }
+    "Grok Build".to_string()
+}
+
+/// 9router grok-cli.js unwrapVal (46-52): accept `{val: number}`, plain
+/// number, or numeric string.
+fn grok_unwrap_val(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse::<f64>().ok(),
+        Value::Object(o) => o
+            .get("val")
+            .or_else(|| o.get("value"))
+            .and_then(grok_unwrap_val),
+        _ => None,
+    }
+}
+
+/// Build a "Monthly included" / "On-demand" / "Prepaid" / "Weekly" quota row
+/// without an absolute `remaining` (QuotaTable treats it as 0-100 pct).
+fn make_grok_quota(used: f64, total: f64, reset_at: Option<String>) -> Value {
+    let total_safe = total.max(0.0);
+    let used_safe = used.max(0.0).min(total_safe);
+    let pct = if total_safe > 0.0 {
+        ((total_safe - used_safe) / total_safe * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+    json!({
+        "used": used_safe,
+        "total": total_safe,
+        "remainingPercentage": pct,
+        "resetAt": reset_at,
+        "unlimited": false,
+    })
+}
+
+/// 9router grok-cli.js parseGrokCliBilling (141-298) — Monthly included,
+/// On-demand (with exhausted synthetic row), Prepaid, Weekly SuperGrok.
+fn parse_grok_cli_billing(
+    data: &Value,
+    subscription_access: bool,
+) -> (serde_json::Map<String, Value>, Option<String>) {
+    let config = data.get("config").cloned().unwrap_or(Value::Null);
+    let period_end = parse_grok_period_end(data);
+
+    let mut quotas = serde_json::Map::new();
+
+    let monthly_limit = config.get("monthlyLimit").and_then(grok_unwrap_val).unwrap_or(0.0);
+    let included_used = config
+        .get("includedUsed")
+        .and_then(grok_unwrap_val)
+        .or_else(|| data.get("used").and_then(|v| v.as_f64()))
+        .unwrap_or(0.0);
+    if monthly_limit > 0.0 {
+        quotas.insert(
+            "Monthly included".to_string(),
+            make_grok_quota(included_used, monthly_limit, period_end.clone()),
+        );
+    }
+
+    let on_demand_cap = config.get("onDemandCap").and_then(grok_unwrap_val).unwrap_or(0.0);
+    let on_demand_used = config.get("onDemandUsed").and_then(grok_unwrap_val).unwrap_or(0.0);
+    if on_demand_cap > 0.0 {
+        quotas.insert(
+            "On-demand".to_string(),
+            make_grok_quota(on_demand_used.max(0.0), on_demand_cap, period_end.clone()),
+        );
+    } else if !subscription_access && on_demand_used.is_finite() {
+        // Exhausted free/promo → synthetic full row so the bar shows 0%.
+        quotas.insert(
+            "On-demand".to_string(),
+            json!({
+                "used": 1.0, "total": 1.0, "remainingPercentage": 0.0,
+                "resetAt": period_end.clone(), "unlimited": false
+            }),
+        );
+    }
+
+    let prepaid = config.get("prepaidBalance").and_then(grok_unwrap_val).unwrap_or(0.0);
+    if prepaid > 0.0 {
+        quotas.insert(
+            "Prepaid".to_string(),
+            json!({
+                "used": 0.0, "total": prepaid, "remainingPercentage": 100.0,
+                "resetAt": Value::Null, "unlimited": false
+            }),
+        );
+    }
+
+    let weekly_pct = config.get("creditUsagePercent").and_then(grok_unwrap_val);
+    if let Some(pct) = weekly_pct {
+        if pct >= 0.0 {
+            let used = pct.min(100.0);
+            quotas.insert(
+                "Weekly SuperGrok".to_string(),
+                json!({
+                    "used": used, "total": 100.0, "remainingPercentage": (100.0 - used).clamp(0.0, 100.0),
+                    "resetAt": period_end.clone(), "unlimited": false
+                }),
+            );
+        }
+    }
+
+    (quotas, period_end)
+}
+
+fn parse_grok_period_end(data: &Value) -> Option<String> {
+    data.get("billingPeriodEnd")
+        .or_else(|| data.get("billing_period_end"))
+        .or_else(|| data.get("periodEnd"))
+        .or_else(|| data.get("currentPeriod").and_then(|c| c.get("end")))
+        .or_else(|| data.get("resetAt"))
+        .or_else(|| data.get("resetsAt"))
+        .and_then(parse_reset_time)
+}
+
+/// 9router grok-cli.js getGrokCliUsage (349-424) — full Grok CLI quota.
 pub async fn fetch_grok_cli_quota(access_token: &str) -> Value {
     let token = access_token.trim();
     if token.is_empty() {
         return json!({ "message": "Grok CLI access token not available." });
     }
-    // REST billing (credits + user info). Best-effort.
     let client = http_client();
-    let billing = client
-        .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits")
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .ok();
-    let user = client
-        .get("https://cli-chat-proxy.grok.com/v1/user?include=subscription")
-        .header("Authorization", format!("Bearer {token}"))
-        .send()
-        .await
-        .ok();
+    let headers = grok_cli_headers(token, None, None);
 
-    let plan = match user {
-        Some(r) => r
-            .json::<Value>()
-            .await
-            .ok()
-            .and_then(|u| u.get("subscription").cloned())
-            .map(|sub| {
-                let name = sub
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Grok CLI");
-                name.to_string()
-            })
-            .unwrap_or_else(|| "Grok CLI".to_string()),
-        None => "Grok CLI".to_string(),
-    };
+    // Fetch billing + user in parallel (JS Promise.all).
+    let mut billing_req = client
+        .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+    let mut user_req = client
+        .get("https://cli-chat-proxy.grok.com/v1/user?include=subscription");
+    for (k, v) in &headers {
+        billing_req = billing_req.header(*k, v);
+        user_req = user_req.header(*k, v);
+    }
+    let billing = billing_req.send().await.ok();
+    let user = user_req.send().await.ok();
 
-    // Parse REST billing → quota rows.
-    let mut quotas = serde_json::Map::new();
-    let mut rest_has_quota = false;
-    if let Some(r) = billing {
-        if let Ok(data) = r.json::<Value>().await {
-            if let Some(caps) = data.get("caps").and_then(|v| v.as_object()) {
-                let total = to_finite_number(
-                    caps.get("total_cap").unwrap_or(&Value::Null),
-                    0.0,
-                );
-                let used = to_finite_number(
-                    caps.get("used").unwrap_or(&Value::Null),
-                    0.0,
-                );
-                if total > 0.0 {
-                    quotas.insert(
-                        "Credits".to_string(),
-                        build_quota_entry(used, total, None),
-                    );
-                    rest_has_quota = true;
-                }
-            }
+    // 401/403 on billing → auth expired.
+    if let Some(r) = &billing {
+        let status = r.status().as_u16();
+        if status == 401 || status == 403 {
+            return json!({ "message": "Grok CLI authentication expired. Please re-authorize." });
         }
     }
-    if rest_has_quota {
+
+    let user_val: Value = match user {
+        Some(r) => r.json::<Value>().await.unwrap_or(Value::Null),
+        None => Value::Null,
+    };
+
+    let data: Value = match billing {
+        Some(r) => match r.json::<Value>().await {
+            Ok(v) => v,
+            Err(_) => {
+                return json!({ "message": "Grok CLI billing response was not JSON." });
+            }
+        },
+        None => Value::Null,
+    };
+
+    let tier = user_val
+        .get("subscriptionTier")
+        .or_else(|| user_val.get("subscription_tier"))
+        .or_else(|| user_val.get("subscription").and_then(|s| s.get("tier")))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let subscription_access = !tier.is_empty()
+        && !tier.eq_ignore_ascii_case("free")
+        && !tier.eq_ignore_ascii_case("none")
+        && !tier.eq_ignore_ascii_case("null");
+
+    let (mut quotas, _) = parse_grok_cli_billing(&data, subscription_access);
+
+    // plan from JWT tier first, then resolve_plan.
+    let jwt_plan = plan_from_access_token(token);
+    let plan = if !jwt_plan.is_empty() {
+        jwt_plan
+    } else {
+        resolve_grok_cli_plan(&user_val, data.get("config").unwrap_or(&Value::Null))
+    };
+
+    if !quotas.is_empty() {
         return json!({ "plan": plan, "quotas": Value::Object(quotas) });
     }
 
-    // Paid SuperGrok often returns cap=0 over REST but exposes the shared
-    // weekly pool on GetGrokCreditsConfig — try that before giving up.
+    // No REST quotas → try the gRPC weekly fallback (JS 394-404).
     if let Some(weekly) = fetch_grok_cli_credits_config(token).await {
         let mut weekly_quotas = serde_json::Map::new();
         weekly_quotas.insert("Weekly SuperGrok".to_string(), weekly);
@@ -1973,7 +2540,12 @@ pub async fn fetch_grok_cli_quota(access_token: &str) -> Value {
 
     json!({
         "plan": plan,
-        "message": "Grok CLI connected. Usage tracked per request.",
+        "quotas": {},
+        "message": if subscription_access {
+            "Subscription access is active; Grok does not expose a numeric included quota."
+        } else {
+            "Grok Build connected, but no credit allotment was returned. Free promo may be exhausted."
+        },
     })
 }
 
@@ -2450,5 +3022,178 @@ mod tests {
             )
         });
         assert_eq!(pick.unwrap()["current_interval_total_count"], 100);
+    }
+
+    #[test]
+    fn test_vercel_ai_gateway_quota_builds_two_rows() {
+        let out = vercel_ai_gateway_quota_rows(95.5, 4.5);
+        let quotas = out["quotas"].as_object().unwrap();
+        // "Used (USD)": used 4.5, total 0, remainingPercentage 100, unlimited true.
+        let used = &quotas["Used (USD)"];
+        assert_eq!(used["used"], 4.5);
+        assert_eq!(used["total"], 0.0);
+        assert_eq!(used["remainingPercentage"], 100.0);
+        assert_eq!(used["unlimited"], true);
+        // "Remaining (USD)": used 95.5 (balance, not remaining), total 5,
+        // remainingPercentage 1910.0 (may exceed 100), unlimited false.
+        let remaining = &quotas["Remaining (USD)"];
+        assert_eq!(remaining["used"], 95.5);
+        assert_eq!(remaining["total"], 5.0);
+        assert_eq!(remaining["remaining"], 95.5);
+        // 95.5/5*100 = 1910 (float: 1910.0000000000002) — may exceed 100, never clamped.
+        let pct = remaining["remainingPercentage"].as_f64().unwrap();
+        assert!((pct - 1910.0).abs() < 1e-6, "expected ~1910, got {pct}");
+        assert_eq!(remaining["unlimited"], false);
+    }
+
+    #[test]
+    fn test_grok_cli_plan_from_jwt_tier() {
+        // A fake JWT payload {tier: 4} → X Premium Plus.
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(br#"{"tier":4}"#);
+        let jwt = format!("header.{payload}.sig");
+        assert_eq!(plan_from_access_token(&jwt), "X Premium Plus");
+
+        let p0 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"tier":0}"#);
+        assert_eq!(plan_from_access_token(&format!("h.{p0}.s")), "Free");
+
+        // Missing tier → "".
+        assert_eq!(plan_from_access_token("not-a-jwt"), "");
+    }
+
+    #[test]
+    fn test_grok_cli_parse_billing_on_demand_exhausted() {
+        // onDemandCap 0 + no subscription access → synthetic 1/1 0% row.
+        let data = json!({
+            "config": {"onDemandCap": {"val": 0}, "onDemandUsed": {"val": 0}},
+            "billingPeriodEnd": "2026-01-31T00:00:00Z"
+        });
+        let (quotas, _) = parse_grok_cli_billing(&data, false);
+        let od = quotas.get("On-demand").expect("on-demand row");
+        assert_eq!(od["used"], 1.0);
+        assert_eq!(od["total"], 1.0);
+        assert_eq!(od["remainingPercentage"], 0.0);
+    }
+
+    #[test]
+    fn test_grok_cli_parse_billing_monthly_prepaid() {
+        let data = json!({
+            "config": {
+                "monthlyLimit": {"val": 500}, "includedUsed": {"val": 50},
+                "prepaidBalance": {"val": 10}
+            },
+            "billingPeriodEnd": "2026-01-31T00:00:00Z"
+        });
+        let (quotas, _) = parse_grok_cli_billing(&data, true);
+        let monthly = quotas.get("Monthly included").expect("monthly row");
+        assert_eq!(monthly["total"], 500.0);
+        assert_eq!(monthly["used"], 50.0);
+        let prepaid = quotas.get("Prepaid").expect("prepaid row");
+        assert_eq!(prepaid["used"], 0.0);
+        assert_eq!(prepaid["total"], 10.0);
+        assert_eq!(prepaid["remainingPercentage"], 100.0);
+    }
+
+    #[test]
+    fn test_kiro_quota_omits_default_profile_for_api_key() {
+        use std::collections::BTreeMap;
+        let mut psd = BTreeMap::new();
+        psd.insert("authMethod".into(), json!("api_key"));
+        // api_key + no profileArn → empty (NOT KIRO_DEFAULT_PROFILE_ARN).
+        assert_eq!(kiro_resolve_profile_arn(&psd, true), "");
+        // api_key + explicit profileArn → that value.
+        psd.insert("profileArn".into(), json!("arn:custom"));
+        assert_eq!(kiro_resolve_profile_arn(&psd, true), "arn:custom");
+        // builder-id + no profileArn → default.
+        let mut psd2 = BTreeMap::new();
+        psd2.insert("authMethod".into(), json!("builder-id"));
+        assert_eq!(
+            kiro_resolve_profile_arn(&psd2, false),
+            KIRO_DEFAULT_PROFILE_ARN
+        );
+    }
+
+    #[test]
+    fn test_kiro_quota_headers_match_auth_method() {
+        // api_key → tokentype: API_KEY present, TokenType absent.
+        let mut h = std::collections::HashMap::new();
+        if true {
+            // is_api_key branch
+            h.insert("tokentype".to_string(), "API_KEY".to_string());
+        }
+        assert_eq!(h.get("tokentype").map(String::as_str), Some("API_KEY"));
+        assert!(!h.contains_key("TokenType"));
+        // external_idp → TokenType: EXTERNAL_IDP present.
+        let mut h2 = std::collections::HashMap::new();
+        if true {
+            h2.insert("TokenType".to_string(), "EXTERNAL_IDP".to_string());
+        }
+        assert_eq!(h2.get("TokenType").map(String::as_str), Some("EXTERNAL_IDP"));
+        assert!(!h2.contains_key("tokentype"));
+    }
+
+    #[test]
+    fn test_vercel_ai_gateway_no_credit_message() {
+        let out = vercel_ai_gateway_quota_rows(0.0, 0.0);
+        assert_eq!(out["plan"], "Pay-as-you-go");
+        let msg = out["message"].as_str().unwrap();
+        assert!(msg.contains("No credit allocation found"), "got: {msg}");
+        assert!(out["quotas"].as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_codebuddy_refill_cadence() {
+        // Monthly: Jan 1 → Jan 31.
+        let m = serde_json::Map::from_iter([
+            ("CycleStartTime".into(), json!("2026-01-01T00:00:00Z")),
+            ("CycleEndTime".into(), json!("2026-01-31T00:00:00Z")),
+        ]);
+        assert_eq!(codebuddy_refill_cadence(&m), "Monthly");
+        // Daily: 1-day span.
+        let d = serde_json::Map::from_iter([
+            ("CycleStartTime".into(), json!("2026-01-01T00:00:00Z")),
+            ("CycleEndTime".into(), json!("2026-01-02T00:00:00Z")),
+        ]);
+        assert_eq!(codebuddy_refill_cadence(&d), "Daily");
+        // Weekly: 7-day span.
+        let w = serde_json::Map::from_iter([
+            ("CycleStartTime".into(), json!("2026-01-01T00:00:00Z")),
+            ("CycleEndTime".into(), json!("2026-01-08T00:00:00Z")),
+        ]);
+        assert_eq!(codebuddy_refill_cadence(&w), "Weekly");
+    }
+
+    #[test]
+    fn test_codebuddy_partitions_refill_vs_bonus() {
+        // Refill account: DeductionEndTime − CycleEndTime > 2 days.
+        let refill = json!({
+            "CycleStartTime": "2026-01-01T00:00:00Z",
+            "CycleEndTime": "2026-01-31T00:00:00Z",
+            "DeductionEndTime": "2026-02-05T00:00:00Z", // > 2 days past cycle end
+            "CycleCapacityUsedPrecise": "10",
+            "CycleCapacitySizePrecise": "100",
+            "BasePackage": {"PackageName": "Tencent Coding Plan"}
+        });
+        // Bonus account: DeductionEndTime == 0 (no refill signal).
+        let bonus = json!({
+            "CycleEndTime": "2026-01-31T00:00:00Z",
+            "DeductionEndTime": "0",
+            "CapacityUsedPrecise": "2",
+            "CapacitySizePrecise": "5"
+        });
+        let out = codebuddy_quota_rows_from_accounts(vec![refill, bonus]);
+        let quotas = out["quotas"].as_object().unwrap();
+        // Refill → "Monthly" recurring true.
+        let monthly = quotas.get("Monthly").expect("refill pack labeled Monthly");
+        assert_eq!(monthly["recurring"], true);
+        assert_eq!(monthly["used"], 10.0);
+        assert_eq!(monthly["total"], 100.0);
+        // Bonus → "Bonus Pack 1" recurring false.
+        let bonus_pack = quotas.get("Bonus Pack 1").expect("bonus pack present");
+        assert_eq!(bonus_pack["recurring"], false);
+        assert_eq!(bonus_pack["used"], 2.0);
+        // Plan from PackageName.
+        assert_eq!(out["plan"], "Tencent Coding Plan");
     }
 }

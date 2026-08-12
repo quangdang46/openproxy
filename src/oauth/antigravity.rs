@@ -21,7 +21,6 @@ use tokio::net::TcpListener;
 
 const ANTIGRAVITY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const ANTIGRAVITY_CLIENT_SECRET: &str = "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";
 const ANTIGRAVITY_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const ANTIGRAVITY_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";
@@ -122,7 +121,10 @@ async fn exchange_code_for_token(code: &str, redirect_uri: &str) -> Result<Value
     let params = [
         ("grant_type", "authorization_code"),
         ("client_id", ANTIGRAVITY_CLIENT_ID),
-        ("client_secret", ANTIGRAVITY_CLIENT_SECRET),
+        (
+            "client_secret",
+            crate::oauth::secret::antigravity_client_secret(),
+        ),
         ("code", code),
         ("redirect_uri", redirect_uri),
     ];
@@ -319,7 +321,10 @@ pub async fn refresh_antigravity(refresh_token: &str) -> Result<TokenResponse, S
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
         ("client_id", ANTIGRAVITY_CLIENT_ID),
-        ("client_secret", ANTIGRAVITY_CLIENT_SECRET),
+        (
+            "client_secret",
+            crate::oauth::secret::antigravity_client_secret(),
+        ),
     ];
 
     let response = client

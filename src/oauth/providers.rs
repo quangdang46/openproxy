@@ -4,7 +4,39 @@
 //! authorize / token URLs, scopes, PKCE usage, extra query parameters,
 //! and a refresh lead time.
 
+use once_cell::sync::Lazy;
 use url::form_urlencoded;
+
+/// iflow extra params — client_secret resolved from env at first access.
+/// The Vec is leaked once so its slice is 'static.
+static IFLOW_EXTRA_PARAMS: Lazy<&'static [(&'static str, &'static str)]> = Lazy::new(|| {
+    Box::leak(
+        vec![
+            ("client_secret", crate::oauth::secret::iflow_client_secret()),
+            ("userinfo_url", "https://iflow.cn/api/oauth/getUserInfo"),
+        ]
+        .into_boxed_slice(),
+    )
+});
+
+/// Antigravity extra params — client_secret resolved from env at first access.
+static ANTIGRAVITY_EXTRA_PARAMS: Lazy<&'static [(&'static str, &'static str)]> = Lazy::new(|| {
+    Box::leak(
+        vec![
+            (
+                "client_secret",
+                crate::oauth::secret::antigravity_client_secret(),
+            ),
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            (
+                "user_info_url",
+                "https://www.googleapis.com/oauth2/v1/userinfo",
+            ),
+        ]
+        .into_boxed_slice(),
+    )
+});
 
 /// Static OAuth provider configuration.
 #[derive(Debug, Clone, Copy)]
@@ -162,10 +194,7 @@ pub fn iflow() -> OAuthProviderConfig {
         token_url: "https://iflow.cn/oauth/token",
         scopes: &[],
         uses_pkce: false,
-        extra_params: &[
-            ("client_secret", "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"),
-            ("userinfo_url", "https://iflow.cn/api/oauth/getUserInfo"),
-        ],
+        extra_params: &IFLOW_EXTRA_PARAMS,
         refresh_lead_ms: 4 * 60 * 60 * 1000,
     }
 }
@@ -326,6 +355,33 @@ pub fn codebuddy_cn() -> OAuthProviderConfig {
     }
 }
 
+/// CodeBuddy Intl — device-code flow (www.codebuddy.ai, platform=ide).
+/// Distinct from codebuddy-cn (copilot.tencent.com, platform=CLI). The
+/// state/token/refresh URLs differ only by host, but platform MUST be "ide".
+/// 9router parity: `open-sse/providers/registry/codebuddy-intl.js:64-72`.
+pub fn codebuddy_intl() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "codebuddy-intl",
+        client_id: "openproxy",
+        authorize_url: "https://www.codebuddy.ai/v2/plugin/auth/state",
+        token_url: "https://www.codebuddy.ai/v2/plugin/auth/token",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[
+            (
+                "refresh_url",
+                "https://www.codebuddy.ai/v2/plugin/auth/token/refresh",
+            ),
+            // OAuth user-agent differs from the transport User-Agent
+            // ("IDE/2.108.1 CodeBuddy/2.108.1") — keep distinct as in JS.
+            ("user_agent", "IDE/2.63.2 CodeBuddy/2.63.2"),
+            ("platform", "ide"),
+            ("poll_interval", "5000"),
+        ],
+        refresh_lead_ms: 4 * 60 * 60 * 1000,
+    }
+}
+
 /// Cursor IDE — import-token flow (reads from local SQLite DB).
 /// OAuth endpoints are empty; authentication happens via the cursor_import module.
 pub fn cursor() -> OAuthProviderConfig {
@@ -361,15 +417,7 @@ pub fn antigravity() -> OAuthProviderConfig {
             "https://www.googleapis.com/auth/experimentsandconfigs",
         ],
         uses_pkce: false,
-        extra_params: &[
-            ("client_secret", "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"),
-            ("access_type", "offline"),
-            ("prompt", "consent"),
-            (
-                "user_info_url",
-                "https://www.googleapis.com/oauth2/v1/userinfo",
-            ),
-        ],
+        extra_params: &ANTIGRAVITY_EXTRA_PARAMS,
         refresh_lead_ms: 5 * 60 * 1000,
     }
 }
@@ -466,6 +514,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "cursor" => Some(cursor()),
         "antigravity" => Some(antigravity()),
         "codebuddy-cn" => Some(codebuddy_cn()),
+        "codebuddy-intl" => Some(codebuddy_intl()),
         _ => None,
     }
 }

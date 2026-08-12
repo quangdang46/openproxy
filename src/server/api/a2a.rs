@@ -9,10 +9,9 @@
 //!   * `GET  /api/a2a/tasks/{id}`            — Get task status + result
 //!   * `POST /api/a2a/tasks/{id}/cancel`     — Cancel a running task
 
-use std::sync::Arc;
-
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::{
     routing::{get, post},
@@ -21,16 +20,27 @@ use axum::{
 use serde_json::json;
 
 use crate::core::a2a;
+use crate::server::api::guard;
 use crate::server::state::AppState;
 
 /// Build the sub-router mounted at these paths.
-pub fn routes() -> Router<AppState> {
-    Router::new()
+///
+/// Discovery endpoints (`/.well-known/agent.json`, `/api/a2a/agent-card`) stay
+/// public. Task endpoints are admin-gated: they can surface provider state
+/// (and previously leaked full credentials) so they must not be reachable
+/// without a dashboard session or management API key.
+pub fn routes(state: AppState) -> Router<AppState> {
+    let public = Router::new()
         .route("/.well-known/agent.json", get(agent_card_well_known))
-        .route("/api/a2a/agent-card", get(agent_card_api))
+        .route("/api/a2a/agent-card", get(agent_card_api));
+
+    let protected = Router::new()
         .route("/api/a2a/tasks/send", post(tasks_send))
         .route("/api/a2a/tasks/{id}", get(tasks_get))
         .route("/api/a2a/tasks/{id}/cancel", post(tasks_cancel))
+        .route_layer(middleware::from_fn_with_state(state, guard::require_admin));
+
+    public.merge(protected)
 }
 
 /// Serve the A2A Agent Card at the well-known location.

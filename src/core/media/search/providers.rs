@@ -826,7 +826,7 @@ impl SearchProvider for YouComProvider {
         }
         Ok(format!(
             "{}?{}",
-            resolve_base_url("https://api.you.com/search", request),
+            resolve_base_url("https://ydc-index.io/v1/search", request),
             serde_urlencoded::to_string(&qp).unwrap_or_default()
         ))
     }
@@ -1120,5 +1120,24 @@ mod tests {
         let set = BRAVE.normalize(&body, &r);
         assert_eq!(set.total_results, Some(42));
         assert_eq!(set.results.len(), 1);
+    }
+
+    #[test]
+    fn youcom_url_uses_ydc_index() {
+        // 9router registry/youcom.js:20 baseUrl — NOT api.you.com.
+        let mut r = req("test", 5);
+        r.token = Some("tok".into());
+        let url = YOUCOM.build_url(&r).unwrap();
+        assert!(
+            url.starts_with("https://ydc-index.io/v1/search?"),
+            "youcom must hit ydc-index.io, got: {url}"
+        );
+        assert!(url.contains("query=test"));
+        // X-API-Key header (JS authHeader x-api-key).
+        let headers = YOUCOM.build_headers(&r).unwrap();
+        assert_eq!(
+            headers.get("X-API-Key").and_then(|v| v.to_str().ok()),
+            Some("tok")
+        );
     }
 }

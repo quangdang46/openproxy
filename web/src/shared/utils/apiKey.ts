@@ -1,6 +1,10 @@
 import crypto from "crypto";
 
-const API_KEY_SECRET = process.env.API_KEY_SECRET || "endpoint-proxy-api-key-secret";
+// NOTE: the backend resolves the HMAC secret at runtime (env `API_KEY_SECRET`,
+// or a random per-install secret persisted at $DATA_DIR/api_key_secret). This
+// module is currently unused by the dashboard and must never fall back to a
+// hardcoded value — keys generated with a different secret won't validate.
+const API_KEY_SECRET = process.env.API_KEY_SECRET || "";
 
 /**
  * Generate 6-char random keyId

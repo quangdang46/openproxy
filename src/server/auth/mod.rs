@@ -152,6 +152,12 @@ pub struct DashboardClaims {
     /// [`REVOKED_JTIS`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
+    /// OIDC identity claims (embedded by the OIDC callback) — used by
+    /// `/api/auth/status` to render the header identity chip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 impl AuthError {
@@ -192,6 +198,8 @@ pub fn require_dashboard_session(
             authenticated: true,
             exp: usize::MAX,
             jti: None,
+            name: None,
+            email: None,
         });
     }
 

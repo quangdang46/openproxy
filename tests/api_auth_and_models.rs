@@ -40,7 +40,10 @@ fn active_key_with_machine_id(key: &str, machine_id: &str) -> ApiKey {
 fn cli_token(machine_id: &str, key_id: &str) -> String {
     type HmacSha256 = Hmac<Sha256>;
 
-    let mut mac = HmacSha256::new_from_slice(b"endpoint-proxy-api-key-secret").unwrap();
+    // Must match the server's resolved HMAC secret (env or per-install
+    // persisted secret), never a hardcoded default.
+    let secret = openproxy::core::auth::api_key_secret();
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
     mac.update(machine_id.as_bytes());
     mac.update(key_id.as_bytes());
     let crc = hex::encode(mac.finalize().into_bytes());

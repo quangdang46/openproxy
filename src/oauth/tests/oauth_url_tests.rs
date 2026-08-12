@@ -12,6 +12,7 @@ fn expected_auth_url_prefix(provider: &str) -> &'static str {
         "kimi" | "kimi-coding" => "https://auth.kimi.com/api/oauth/device_authorization",
         "kilocode" => "https://api.kilo.ai/api/device-auth/codes",
         "codebuddy" => "https://copilot.tencent.com/v2/plugin/auth/state",
+        "codebuddy-intl" => "https://www.codebuddy.ai/v2/plugin/auth/state",
         _ => "unknown",
     }
 }
@@ -229,6 +230,23 @@ fn test_codebuddy_device_config() {
     assert_scopes_match(&cfg, expected_scopes("codebuddy"));
     assert!(!cfg.uses_pkce);
     assert_eq!(cfg.authorize_url, expected_auth_url_prefix("codebuddy"));
+}
+
+#[test]
+fn test_codebuddy_intl_device_config() {
+    // 9router registry/codebuddy-intl.js:64-72 — www.codebuddy.ai, platform ide.
+    let cfg = providers::codebuddy_intl();
+    assert!(!cfg.uses_pkce);
+    assert_eq!(cfg.authorize_url, "https://www.codebuddy.ai/v2/plugin/auth/state");
+    assert_eq!(cfg.token_url, "https://www.codebuddy.ai/v2/plugin/auth/token");
+    // platform must be "ide" (NOT "CLI" — that's codebuddy-cn).
+    assert!(cfg.extra_params.iter().any(|(k, v)| *k == "platform" && *v == "ide"));
+    // OAuth user-agent is IDE/2.63.2 (distinct from the transport UA).
+    assert!(cfg
+        .extra_params
+        .iter()
+        .any(|(k, v)| *k == "user_agent" && *v == "IDE/2.63.2 CodeBuddy/2.63.2"));
+    assert_eq!(cfg.authorize_url, expected_auth_url_prefix("codebuddy-intl"));
 }
 
 // ─── PKCE verifier length tests ───────────────────────────────────────────

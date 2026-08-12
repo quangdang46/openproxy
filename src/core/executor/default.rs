@@ -34,6 +34,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
                 .with_header("X-Title", "Endpoint Proxy"),
         ),
         (
+            "api-airforce",
+            ProviderConfig::openai("https://api.airforce/v1/chat/completions")
+                .with_header("HTTP-Referer", "https://endpoint-proxy.local")
+                .with_header("X-Title", "Endpoint Proxy"),
+        ),
+        (
             "anthropic",
             ProviderConfig::anthropic("https://api.anthropic.com/v1/messages"),
         ),
@@ -99,7 +105,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "siliconflow",
-            ProviderConfig::openai("https://api.siliconflow.cn/v1/chat/completions"),
+            ProviderConfig::openai("https://api.siliconflow.com/v1/chat/completions"),
         ),
         (
             "hyperbolic",
@@ -154,6 +160,75 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ),
         ),
         (
+            "alims-intl",
+            ProviderConfig::openai(
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
+            ),
+        ),
+        (
+            "baidu",
+            ProviderConfig::openai("https://qianfan.baidubce.com/v2/chat/completions"),
+        ),
+        (
+            "bluesminds",
+            ProviderConfig::openai("https://api.bluesminds.com/v1/chat/completions"),
+        ),
+        (
+            "clinepass",
+            ProviderConfig::openai("https://api.cline.bot/api/v1/chat/completions")
+                .with_header("HTTP-Referer", "https://cline.bot")
+                .with_header("X-Title", "Cline"),
+        ),
+        (
+            "codebuddy-intl",
+            ProviderConfig::openai("https://www.codebuddy.ai/v2/chat/completions")
+                .with_header("User-Agent", "IDE/2.108.1 CodeBuddy/2.108.1")
+                .with_header("X-Product", "SaaS")
+                .with_header("X-IDE-Type", "IDE")
+                .with_header("X-IDE-Name", "IDE")
+                .with_header("x-requested-with", "XMLHttpRequest")
+                .with_header("x-codebuddy-request", "1"),
+        ),
+        (
+            "featherless",
+            ProviderConfig::openai("https://api.featherless.ai/v1/chat/completions"),
+        ),
+        (
+            "kilo-gateway",
+            ProviderConfig::openai("https://api.kilo.ai/api/gateway/chat/completions"),
+        ),
+        (
+            "perplexity-agent",
+            // OpenAI Responses API — do NOT normalize to /chat/completions.
+            ProviderConfig::openai("https://api.perplexity.ai/v1/responses"),
+        ),
+        (
+            "poolside",
+            ProviderConfig::openai("https://inference.poolside.ai/v1/chat/completions"),
+        ),
+        (
+            "tencent",
+            ProviderConfig::openai("https://api.hunyuan.cloud.tencent.com/v1/chat/completions"),
+        ),
+        (
+            "tokenrouter",
+            // Chat endpoint only — embedding/image baseUrls belong to the media layer.
+            ProviderConfig::openai("https://api.tokenrouter.com/v1/chat/completions"),
+        ),
+        (
+            "venice",
+            // /api/v1 (double path) — do NOT "fix" to /v1.
+            ProviderConfig::openai("https://api.venice.ai/api/v1/chat/completions"),
+        ),
+        (
+            "zed",
+            // MINIMAL chat-path fix: zed's non-standard auth header
+            // ("Authorization: <user_id> <access_token>", no Bearer) and NDJSON
+            // wire protocol are a separate executor task (parity A3). This entry
+            // clears UnsupportedProvider so a pre-obtained token can route.
+            ProviderConfig::openai("https://cloud.zed.dev/completions"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
@@ -181,7 +256,8 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "blackbox",
-            ProviderConfig::openai("https://api.blackbox.ai/api/chat/completions"),
+            // 9router registry/blackbox.js:26 — /v1/chat/completions.
+            ProviderConfig::openai("https://api.blackbox.ai/v1/chat/completions"),
         ),
         (
             "ollama-cloud",

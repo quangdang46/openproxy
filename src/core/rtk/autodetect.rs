@@ -3,12 +3,15 @@ use regex::Regex;
 
 use crate::core::rtk::constants::*;
 use crate::core::rtk::filters::{
-    build_output_impl, dedup_log_impl, find_impl, git_diff_impl, git_status_impl, grep_impl,
-    json_summary_impl, ls_impl, read_numbered_impl, search_list_impl, smart_truncate_impl,
-    test_runner_impl, tree_impl, READ_NUMBERED_LINE_RE, SEARCH_LIST_HEADER_RE,
+    build_output_impl, dedup_log_impl, find_impl, git_diff_impl, git_log_impl, git_status_impl,
+    grep_impl, json_summary_impl, ls_impl, read_numbered_impl, search_list_impl,
+    smart_truncate_impl, test_runner_impl, tree_impl, READ_NUMBERED_LINE_RE, SEARCH_LIST_HEADER_RE,
 };
 use crate::core::rtk::smartcrusher::SmartCrusher;
 
+// git-log detector — checked FIRST (9router autodetect.js:21,32 RE_GIT_LOG).
+static RE_GIT_LOG: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?m)^[*|/\\ ]*commit [0-9a-f]{7,40}$").unwrap());
 static RE_GIT_DIFF: Lazy<Regex> = Lazy::new(|| Regex::new(r"diff --git").unwrap());
 static RE_GIT_DIFF_HUNK: Lazy<Regex> = Lazy::new(|| Regex::new(r"@@ ").unwrap());
 static RE_GIT_STATUS: Lazy<Regex> = Lazy::new(|| {
@@ -53,6 +56,14 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
     } else {
         text
     };
+
+    // git-log FIRST (9router autodetect.js checks RE_GIT_LOG before git-diff).
+    if RE_GIT_LOG.is_match(head) {
+        return Some(DetectedFilter {
+            filter_fn: git_log_impl,
+            filter_name: FILTER_GIT_LOG,
+        });
+    }
 
     if RE_GIT_DIFF.is_match(head) || RE_GIT_DIFF_HUNK.is_match(head) {
         return Some(DetectedFilter {
@@ -282,6 +293,14 @@ mod tests {
         let result = auto_detect_filter(input);
         assert!(result.is_some());
         assert_eq!(result.unwrap().filter_name, FILTER_GIT_STATUS);
+    }
+
+    #[test]
+    fn test_detects_git_log() {
+        let input = "commit 0123456789abcdef\nAuthor: Alice\nDate: Mon Jan 1\n\n    Fix bug\n";
+        let result = auto_detect_filter(input);
+        assert!(result.is_some(), "git-log must be detected");
+        assert_eq!(result.unwrap().filter_name, FILTER_GIT_LOG);
     }
 
     #[test]

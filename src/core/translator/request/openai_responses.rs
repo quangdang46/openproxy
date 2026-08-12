@@ -187,7 +187,24 @@ pub fn openai_responses_to_chat_request(
     obj.remove("include");
     obj.remove("prompt_cache_key");
     obj.remove("store");
+
+    // responses→chat: map reasoning.effort → reasoning_effort, then drop
+    // reasoning + client_metadata (9router openai-responses.js:243-247).
+    if let Some(r) = obj.get("reasoning") {
+        if let Some(e) = r.get("effort").and_then(Value::as_str) {
+            obj.insert("reasoning_effort".into(), Value::String(e.to_string()));
+        }
+    }
     obj.remove("reasoning");
+    obj.remove("client_metadata");
+
+    // responses→chat: max_output_tokens → max_tokens when absent.
+    if obj.get("max_tokens").is_none() {
+        if let Some(v) = obj.get("max_output_tokens").cloned() {
+            obj.insert("max_tokens".into(), v);
+        }
+    }
+    obj.remove("max_output_tokens");
 
     *body = result;
     let _ = stream;
@@ -357,7 +374,79 @@ pub fn chat_to_openai_responses_request(
         result["service_tier"] = tier.clone();
     }
 
+    // reasoning / reasoning_effort → result.reasoning (9router openai-responses.js:417-423).
+    // body.reasoning is copied first, then reasoning_effort OVERWRITES it with
+    // { effort, summary: "auto" } — reasoning_effort wins (JS order).
+    if let Some(r) = body.get("reasoning") {
+        result["reasoning"] = r.clone();
+    }
+    if let Some(e) = body.get("reasoning_effort") {
+        result["reasoning"] = serde_json::json!({ "effort": e, "summary": "auto" });
+    }
+
     *body = result;
     let _ = stream;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_chat_to_responses_maps_reasoning_effort() {
+        // reasoning_effort → result.reasoning = { effort, summary: "auto" }
+        let mut body: Value = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "reasoning_effort": "high"
+        });
+        chat_to_openai_responses_request("gpt-4", &mut body, false, None);
+        let reasoning = body.get("reasoning").unwrap();
+        assert_eq!(reasoning["effort"], "high");
+        assert_eq!(reasoning["summary"], "auto");
+    }
+
+    #[test]
+    fn test_chat_to_responses_reasoning_effort_wins_over_reasoning() {
+        // JS order: body.reasoning set first, then reasoning_effort OVERWRITES.
+        let mut body: Value = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "reasoning": {"effort": "low", "summary": "auto"},
+            "reasoning_effort": "high"
+        });
+        chat_to_openai_responses_request("gpt-4", &mut body, false, None);
+        let reasoning = body.get("reasoning").unwrap();
+        assert_eq!(reasoning["effort"], "high", "reasoning_effort must win");
+        assert_eq!(reasoning["summary"], "auto");
+    }
+
+    #[test]
+    fn test_responses_to_chat_maps_reasoning_effort_and_strips_client_metadata() {
+        let mut body: Value = serde_json::json!({
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Hi"}]}],
+            "model": "gpt-4",
+            "reasoning": {"effort": "medium", "summary": "auto"},
+            "client_metadata": {"x": 1}
+        });
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        // reasoning.effort → reasoning_effort, reasoning removed.
+        assert_eq!(body.get("reasoning_effort").unwrap().as_str().unwrap(), "medium");
+        assert!(body.get("reasoning").is_none());
+        // client_metadata removed.
+        assert!(body.get("client_metadata").is_none());
+    }
+
+    #[test]
+    fn test_responses_to_chat_maps_max_output_tokens_to_max_tokens() {
+        let mut body: Value = serde_json::json!({
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Hi"}]}],
+            "model": "gpt-4",
+            "max_output_tokens": 4096
+        });
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        assert_eq!(body.get("max_tokens").unwrap().as_i64().unwrap(), 4096);
+        assert!(body.get("max_output_tokens").is_none());
+    }
 }
