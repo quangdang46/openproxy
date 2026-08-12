@@ -228,9 +228,11 @@ pub fn openai_to_kiro_request(
                                 };
                             if let Some(tool_use_id) = c.get("tool_use_id").and_then(|v| v.as_str())
                             {
+                                // 9router openai-to-kiro.js:148 — status reflects is_error.
+                                let is_err = c.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                                 pending_tool_results.push(serde_json::json!({
                                     "toolUseId": tool_use_id,
-                                    "status": "success",
+                                    "status": if is_err { "error" } else { "success" },
                                     "content": [{"text": tool_text}]
                                 }));
                             }
@@ -244,9 +246,15 @@ pub fn openai_to_kiro_request(
             if msg.get("role").and_then(|v| v.as_str()) == Some("tool") {
                 let tool_content = msg.get("content").and_then(|v| v.as_str()).unwrap_or("");
                 if let Some(tool_call_id) = msg.get("tool_call_id").and_then(|v| v.as_str()) {
+                    // 9router openai-to-kiro.js:160 — is_error OR status === "error".
+                    let is_err = msg
+                        .get("is_error")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                        || msg.get("status").and_then(Value::as_str) == Some("error");
                     pending_tool_results.push(serde_json::json!({
                         "toolUseId": tool_call_id,
-                        "status": "success",
+                        "status": if is_err { "error" } else { "success" },
                         "content": [{"text": tool_content}]
                     }));
                 }
@@ -610,4 +618,73 @@ pub fn openai_to_kiro_request(
     *body = payload;
     let _ = stream;
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn tool_results(body: &Value) -> Vec<Value> {
+        body["conversationState"]["currentMessage"]["userInputMessage"]
+            ["userInputMessageContext"]["toolResults"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn tool_msg_is_error_maps_to_error() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t1",
+                         "is_error": true, "content": "boom"}
+                    ]
+                }
+            ]
+        });
+        openai_to_kiro_request("kiro-model", &mut body, false, None);
+        let results = tool_results(&body);
+        assert_eq!(results[0]["status"], "error");
+        assert_eq!(results[0]["toolUseId"], "t1");
+    }
+
+    #[test]
+    fn tool_msg_status_error_maps_to_error() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "t2",
+                    "content": "err",
+                    "status": "error"
+                }
+            ]
+        });
+        openai_to_kiro_request("kiro-model", &mut body, false, None);
+        let results = tool_results(&body);
+        assert_eq!(results[0]["status"], "error");
+    }
+
+    #[test]
+    fn tool_msg_success_maps_to_success() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [
+                {
+                    "role": "tool",
+                    "tool_call_id": "t3",
+                    "content": "ok"
+                }
+            ]
+        });
+        openai_to_kiro_request("kiro-model", &mut body, false, None);
+        let results = tool_results(&body);
+        assert_eq!(results[0]["status"], "success");
+    }
 }
