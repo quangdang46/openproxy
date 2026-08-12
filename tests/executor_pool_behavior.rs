@@ -292,6 +292,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://qianfan.baidubce.com/v2/chat/completions",
         ),
         (
+            "bluesminds",
+            "https://api.bluesminds.com/v1/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -390,6 +394,23 @@ fn baidu_has_v2_chat_completions_url() {
             .build_url("deepseek-v4-pro", false, &connection("baidu"))
             .unwrap(),
         "https://qianfan.baidubce.com/v2/chat/completions"
+    );
+}
+
+/// Guard: bluesminds must route through DefaultExecutor with the full
+/// v1 chat-completions endpoint. 9router parity: `open-sse/providers/registry/bluesminds.js`
+/// transport.baseUrl = `https://api.bluesminds.com/v1/chat/completions`,
+/// no transport headers, apikey auth. Note hidden:true is UI-only (no Rust
+/// impact); do NOT treat claude-*/gemini-* model ids as anthropic-compatible.
+#[test]
+fn bluesminds_uses_v1_chat_completions() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("bluesminds", pool, None).expect("bluesminds executor");
+    assert_eq!(
+        executor
+            .build_url("gpt-4.1", false, &connection("bluesminds"))
+            .unwrap(),
+        "https://api.bluesminds.com/v1/chat/completions"
     );
 }
 
