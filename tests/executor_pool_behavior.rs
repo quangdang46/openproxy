@@ -328,6 +328,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://api.tokenrouter.com/v1/chat/completions",
         ),
         (
+            "venice",
+            "https://api.venice.ai/api/v1/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -605,6 +609,23 @@ fn tokenrouter_chat_endpoint() {
             .build_url("openai/gpt-5.5", false, &connection("tokenrouter"))
             .unwrap(),
         "https://api.tokenrouter.com/v1/chat/completions"
+    );
+}
+
+/// Guard: venice must route through DefaultExecutor with the /api/v1 chat
+/// endpoint (double path, NOT /v1). 9router parity:
+/// `open-sse/providers/registry/venice.js` transport.baseUrl =
+/// `https://api.venice.ai/api/v1/chat/completions`. Chat must NOT route
+/// through the imageConfig base.
+#[test]
+fn venice_api_v1_chat_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("venice", pool, None).expect("venice executor");
+    assert_eq!(
+        executor
+            .build_url("venice-uncensored-1-2", false, &connection("venice"))
+            .unwrap(),
+        "https://api.venice.ai/api/v1/chat/completions"
     );
 }
 

@@ -216,6 +216,11 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.tokenrouter.com/v1/chat/completions"),
         ),
         (
+            "venice",
+            // /api/v1 (double path) — do NOT "fix" to /v1.
+            ProviderConfig::openai("https://api.venice.ai/api/v1/chat/completions"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
