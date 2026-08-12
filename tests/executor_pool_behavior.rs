@@ -296,6 +296,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://api.bluesminds.com/v1/chat/completions",
         ),
         (
+            "clinepass",
+            "https://api.cline.bot/api/v1/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -412,6 +416,31 @@ fn bluesminds_uses_v1_chat_completions() {
             .unwrap(),
         "https://api.bluesminds.com/v1/chat/completions"
     );
+}
+
+/// Guard: clinepass must route through DefaultExecutor with the full
+/// endpoint URL and the exact registry headers. 9router parity:
+/// `open-sse/providers/registry/clinepass.js` transport.baseUrl =
+/// `https://api.cline.bot/api/v1/chat/completions` + headers
+/// HTTP-Referer/X-Title (Cline). clinepass stays on the Bearer auth branch
+/// (combined oauth+apikey prefers access_token over api_key) — do NOT move
+/// it to the x-api-key branch list.
+#[test]
+fn clinepass_url_and_headers() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("clinepass", pool, None).expect("clinepass executor");
+    assert_eq!(
+        executor
+            .build_url("cline-pass/glm-5.2", false, &connection("clinepass"))
+            .unwrap(),
+        "https://api.cline.bot/api/v1/chat/completions"
+    );
+    let headers = executor
+        .build_headers("cline-pass/glm-5.2", &connection("clinepass"), true)
+        .expect("headers");
+    assert_eq!(headers["authorization"], "Bearer sk-test");
+    assert_eq!(headers["http-referer"], "https://cline.bot");
+    assert_eq!(headers["x-title"], "Cline");
 }
 
 #[test]

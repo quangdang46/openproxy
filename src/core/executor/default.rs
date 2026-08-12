@@ -174,6 +174,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.bluesminds.com/v1/chat/completions"),
         ),
         (
+            "clinepass",
+            ProviderConfig::openai("https://api.cline.bot/api/v1/chat/completions")
+                .with_header("HTTP-Referer", "https://cline.bot")
+                .with_header("X-Title", "Cline"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
