@@ -107,6 +107,125 @@ impl GitStatusFilter {
     }
 }
 
+/// git-log filter (9router `open-sse/rtk/filters/gitLog.js`).
+/// Keeps commit headers, Author/Date, the first indented subject, the
+/// "N files changed" stat line, and a diff-omitted marker; drops body
+/// padding, decoration, and embedded diff bodies. Caps at GIT_LOG_MAX_LINES.
+pub struct GitLogFilter;
+impl GitLogFilter {
+    pub fn apply(&self, text: &str) -> String {
+        safe_apply(git_log_impl, text, FILTER_GIT_LOG)
+    }
+}
+
+pub fn git_log_impl(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    let lines: Vec<&str> = input.lines().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut skipped = 0usize;
+    let mut in_commit = false;
+    let mut subject_seen = false;
+
+    let mut push_line = |l: String, out: &mut Vec<String>, skipped: &mut usize| {
+        if out.len() < GIT_LOG_MAX_LINES {
+            out.push(l);
+        } else {
+            *skipped += 1;
+        }
+    };
+
+    let commit_re =
+        regex::Regex::new(r"(?i)^commit [0-9a-f]{7,40}$|^[*|/\\ ]+commit [0-9a-f]{7,40}")
+            .unwrap();
+    let author_re = regex::Regex::new(r"(?i)^[*|/\\ ]*(Author|Date):").unwrap();
+    let subject_re = regex::Regex::new(r"^[*|/\\ ]*    \S").unwrap();
+    let stat_re = regex::Regex::new(r"^\d+ file\w* changed").unwrap();
+    let graph_sha_re = regex::Regex::new(r"(?i)^[*|/\\ ]+([0-9a-f]{7,40}\s+.+)").unwrap();
+    let oneline_re = regex::Regex::new(r"(?i)^[0-9a-f]{7,40}\s+").unwrap();
+    let pure_graph_re = regex::Regex::new(r"^[*|/\\ ]+$").unwrap();
+
+    for raw in lines {
+        let line = raw.trim_end();
+        let trimmed = line.trim();
+
+        // commit <sha> header — starts a new commit entry.
+        if commit_re.is_match(trimmed) {
+            in_commit = true;
+            subject_seen = false;
+            push_line(line.to_string(), &mut out, &mut skipped);
+            continue;
+        }
+
+        if in_commit {
+            // Author / Date — keep verbatim.
+            if author_re.is_match(trimmed) {
+                push_line(trimmed.to_string(), &mut out, &mut skipped);
+                continue;
+            }
+            // Blank line — skip.
+            if trimmed.is_empty() {
+                continue;
+            }
+            // First indented subject → "  Subject: ..."
+            if !subject_seen && subject_re.is_match(line) {
+                push_line(format!("  Subject: {trimmed}"), &mut out, &mut skipped);
+                subject_seen = true;
+                continue;
+            }
+            // Stat summary: "N file(s) changed, ..."
+            if stat_re.is_match(trimmed) {
+                push_line(format!("  {trimmed}"), &mut out, &mut skipped);
+                continue;
+            }
+            // Embedded diff header — one-line marker.
+            if trimmed.starts_with("diff --git ") {
+                push_line("  ... diff body omitted".to_string(), &mut out, &mut skipped);
+                continue;
+            }
+            // Everything else in commit body — drop.
+            continue;
+        }
+
+        // Not in a commit block (--oneline / --graph modes).
+
+        // Graph decoration + sha + subject.
+        if let Some(caps) = graph_sha_re.captures(trimmed) {
+            push_line(caps[1].to_string(), &mut out, &mut skipped);
+            continue;
+        }
+
+        // Plain oneline: "<sha7> <subject>".
+        if oneline_re.is_match(trimmed) {
+            push_line(trimmed.to_string(), &mut out, &mut skipped);
+            continue;
+        }
+
+        // Pure graph decoration (no sha) — drop.
+        if pure_graph_re.is_match(trimmed) && trimmed.contains(['*', '|', '/', '\\']) {
+            continue;
+        }
+
+        // Catch-all pass-through.
+        push_line(trimmed.to_string(), &mut out, &mut skipped);
+    }
+
+    if skipped > 0 {
+        out.push(format!("... ({skipped} more lines)"));
+    }
+
+    let result = out.join("\n");
+    // Never return empty for non-empty input; never grow the input.
+    if result.is_empty() && !input.is_empty() {
+        return input.to_string();
+    }
+    if result.len() > input.len() {
+        return input.to_string();
+    }
+    result
+}
+
 pub fn git_status_impl(input: &str) -> String {
     let lines: Vec<&str> = input.lines().collect();
     if lines.is_empty() || (lines.len() == 1 && lines[0].trim().is_empty()) {
@@ -1289,6 +1408,32 @@ mod tests {
     fn test_git_status_clean() {
         let result = git_status_impl("");
         assert_eq!(result, "Clean working tree");
+    }
+
+    #[test]
+    fn test_git_log_keeps_headers_drops_diff_body() {
+        let input = "commit 0123456789abcdef\nAuthor: Alice <a@x>\nDate: Mon Jan 1 00:00:00 2026 +0000\n\n    Fix the bug\n    with a second line\n\n2 files changed, 10 insertions(+), 3 deletions(-)\ndiff --git a/src/main.rs b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let result = git_log_impl(input);
+        assert!(result.contains("commit 0123456789abcdef"));
+        assert!(result.contains("Author: Alice <a@x>"));
+        assert!(result.contains("Subject: Fix the bug"));
+        assert!(result.contains("2 files changed"));
+        // Diff body collapsed to a marker; the actual diff lines dropped.
+        assert!(result.contains("diff body omitted"));
+        assert!(!result.contains("+old"));
+        assert!(!result.contains("+new"));
+    }
+
+    #[test]
+    fn test_git_log_never_grows_input() {
+        let input = "commit 0123456789abcdef\n    Subject only\n";
+        let result = git_log_impl(input);
+        assert!(result.len() <= input.len(), "git-log must never grow input");
+    }
+
+    #[test]
+    fn test_git_log_empty_input_returns_empty() {
+        assert_eq!(git_log_impl(""), "");
     }
 
     #[test]
