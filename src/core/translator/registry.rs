@@ -477,13 +477,19 @@ impl TranslationRegistry {
 
         apply_normalization_hooks(body);
 
-        // Target-format post-hooks (9router translator/index.js)
+        // Target-format post-hooks (9router translator/index.js:124-128).
+        // preserveCacheControl follows the provider quirk (alicode / alicode-intl
+        // / alims-intl carry quirks.preserveCacheControl:true).
         if (target == Format::OpenAi
             || target == Format::OpenAiResponses
             || target == Format::Codex)
             && target == Format::OpenAi
         {
-            filter_to_openai_format(body, false);
+            let provider = credentials
+                .and_then(|c| c.get("provider").and_then(Value::as_str))
+                .unwrap_or("");
+            let preserve = matches!(provider, "alicode" | "alicode-intl" | "alims-intl");
+            filter_to_openai_format(body, preserve);
         }
         if target == Format::Claude {
             let api_key = credentials.and_then(|c| {
@@ -686,9 +692,21 @@ pub fn filter_to_openai_format(body: &mut Value, preserve_cache_control: bool) {
                         }
                     }
                     filtered.push(cleaned);
-                } else if block_type == "tool_use" || block_type == "tool_result" {
-                    // Keep tool blocks as-is (they'll be handled separately)
-                    filtered.push(block);
+                } else if block_type == "tool_use" {
+                    // 9router formats/openai.js:44-45 — tool_use blocks are skipped.
+                    continue;
+                } else if block_type == "tool_result" {
+                    // 9router formats/openai.js:46-49 — tool_result kept but passed
+                    // through stripBlock (signature always stripped, cache_control
+                    // unless preserveCacheControl).
+                    let mut cleaned = block;
+                    if let Some(obj) = cleaned.as_object_mut() {
+                        obj.remove("signature");
+                        if !preserve_cache_control {
+                            obj.remove("cache_control");
+                        }
+                    }
+                    filtered.push(cleaned);
                 }
             }
 
@@ -1139,5 +1157,71 @@ mod parity_tests {
         assert!(body.get("thinking").is_none());
         // reasoning_effort survives
         assert_eq!(body["reasoning_effort"], "high");
+    }
+
+    #[test]
+    fn preserves_cache_control_when_true() {
+        let mut body = json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "x",
+                         "cache_control": {"type": "ephemeral"},
+                         "signature": "foo"}
+                    ]
+                }
+            ]
+        });
+        filter_to_openai_format(&mut body, true);
+        let part = &body["messages"][0]["content"][0];
+        // cache_control preserved (alicode quirk), signature always stripped.
+        assert!(part.get("cache_control").is_some());
+        assert!(part.get("signature").is_none());
+    }
+
+    #[test]
+    fn strips_tool_result_cache_control_when_false() {
+        let mut body = json!({
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "t1",
+                         "content": "ok", "cache_control": {"type": "ephemeral"},
+                         "signature": "sig"}
+                    ]
+                }
+            ]
+        });
+        filter_to_openai_format(&mut body, false);
+        let part = &body["messages"][0]["content"][0];
+        assert!(part.get("cache_control").is_none());
+        assert!(part.get("signature").is_none());
+        assert_eq!(part["tool_use_id"], "t1");
+    }
+
+    #[test]
+    fn drops_tool_use_blocks() {
+        let mut body = json!({
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "tu1", "name": "f", "input": {}},
+                        {"type": "text", "text": "done"}
+                    ]
+                }
+            ]
+        });
+        filter_to_openai_format(&mut body, true);
+        // Message survives (has a text block); tool_use is dropped.
+        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert!(
+            !content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")),
+            "tool_use blocks must be dropped"
+        );
+        assert!(content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("text")));
     }
 }
