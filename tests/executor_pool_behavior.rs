@@ -288,6 +288,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
         ),
         (
+            "baidu",
+            "https://qianfan.baidubce.com/v2/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -370,6 +374,23 @@ fn api_airforce_headers_and_url() {
     assert_eq!(headers["authorization"], "Bearer sk-test");
     assert_eq!(headers["http-referer"], "https://endpoint-proxy.local");
     assert_eq!(headers["x-title"], "Endpoint Proxy");
+}
+
+/// Guard: baidu (Qianfan) must route through DefaultExecutor with the full
+/// v2 chat-completions endpoint. 9router parity: `open-sse/providers/registry/baidu.js`
+/// transport.baseUrl = `https://qianfan.baidubce.com/v2/chat/completions`.
+/// The live key MUST stay "baidu" (the JS provider id + catalog entry id) —
+/// renaming to "qianfan" would break model resolution and keep HTTP 500.
+#[test]
+fn baidu_has_v2_chat_completions_url() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("baidu", pool, None).expect("baidu executor config");
+    assert_eq!(
+        executor
+            .build_url("deepseek-v4-pro", false, &connection("baidu"))
+            .unwrap(),
+        "https://qianfan.baidubce.com/v2/chat/completions"
+    );
 }
 
 #[test]

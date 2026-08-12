@@ -166,6 +166,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ),
         ),
         (
+            "baidu",
+            ProviderConfig::openai("https://qianfan.baidubce.com/v2/chat/completions"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
