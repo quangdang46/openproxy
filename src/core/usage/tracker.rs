@@ -69,6 +69,13 @@ impl UsageTracker {
         let _ = self
             .db
             .update_usage(move |db| {
+                // 9router usageRepo.js saveRequestUsage dedupe — skip inserting
+                // a row identical (timestamp/provider/model/connectionId/apiKey/
+                // promptTokens/completionTokens) to one already present.
+                // Skip exact-duplicate rows (9router usageRepo.js dedupe).
+                if db.history.iter().any(|e| same_usage_row(e, &entry)) {
+                    return;
+                }
                 db.history.push(entry);
                 if db.total_requests_lifetime < db.history.len() as u64 {
                     db.total_requests_lifetime = db.history.len() as u64;
@@ -194,5 +201,77 @@ impl UsageTracker {
             total_cost,
             days,
         }
+    }
+}
+
+/// 9router usageRepo.js saveRequestUsage dedupe predicate: two rows are
+/// "identical" when timestamp/provider/model/connectionId/apiKey and the
+/// prompt/completion token counts all match.
+fn same_usage_row(a: &UsageEntry, b: &UsageEntry) -> bool {
+    fn tokens_of(e: &UsageEntry) -> (u64, u64) {
+        let t = e.tokens.as_ref();
+        (
+            t.and_then(|t| t.prompt_tokens.or(t.input_tokens)).unwrap_or(0),
+            t.and_then(|t| t.completion_tokens.or(t.output_tokens)).unwrap_or(0),
+        )
+    }
+    let (pa, ca) = tokens_of(a);
+    let (pb, cb) = tokens_of(b);
+    a.timestamp == b.timestamp
+        && a.provider == b.provider
+        && a.model == b.model
+        && a.connection_id == b.connection_id
+        && a.api_key == b.api_key
+        && pa == pb
+        && ca == cb
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::TokenUsage;
+
+    fn entry(ts: &str, model: &str, prompt: u64, completion: u64) -> UsageEntry {
+        UsageEntry {
+            timestamp: Some(ts.to_string()),
+            provider: Some("openai".into()),
+            model: model.to_string(),
+            connection_id: Some("c1".into()),
+            api_key: Some("k".into()),
+            tokens: Some(TokenUsage {
+                prompt_tokens: Some(prompt),
+                input_tokens: None,
+                completion_tokens: Some(completion),
+                output_tokens: None,
+                total_tokens: None,
+                reasoning_tokens: None,
+                cached_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                extra: Default::default(),
+            }),
+            cost: None,
+            status: None,
+            endpoint: None,
+            extra: Default::default(),
+        }
+    }
+
+    #[test]
+    fn same_usage_row_matches_identical_rows() {
+        let a = entry("2026-01-01T00:00:00Z", "gpt-4", 10, 20);
+        let b = entry("2026-01-01T00:00:00Z", "gpt-4", 10, 20);
+        assert!(same_usage_row(&a, &b));
+    }
+
+    #[test]
+    fn same_usage_row_diffs_on_timestamp_or_model() {
+        let a = entry("2026-01-01T00:00:00Z", "gpt-4", 10, 20);
+        let b = entry("2026-01-01T00:00:01Z", "gpt-4", 10, 20);
+        assert!(!same_usage_row(&a, &b), "timestamp differs");
+        let c = entry("2026-01-01T00:00:00Z", "gpt-4o", 10, 20);
+        assert!(!same_usage_row(&a, &c), "model differs");
+        let d = entry("2026-01-01T00:00:00Z", "gpt-4", 11, 20);
+        assert!(!same_usage_row(&a, &d), "prompt tokens differ");
     }
 }
