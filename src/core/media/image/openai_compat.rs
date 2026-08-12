@@ -57,6 +57,16 @@ pub static XAI: OpenAiCompatAdapter = OpenAiCompatAdapter {
     body_fields: &["model", "prompt", "n", "response_format"],
 };
 
+/// Vercel AI Gateway image adapter. 9router parity:
+/// `open-sse/providers/registry/vercel-ai-gateway.js:33` imageConfig.baseUrl =
+/// `https://ai-gateway.vercel.sh/v1/images/generations`.
+pub static VERCEL_AI_GATEWAY: OpenAiCompatAdapter = OpenAiCompatAdapter {
+    provider_id: "vercel-ai-gateway",
+    endpoint: "https://ai-gateway.vercel.sh/v1/images/generations",
+    include_referer: false,
+    body_fields: &[],
+};
+
 #[async_trait]
 impl ImageAdapter for OpenAiCompatAdapter {
     fn build_url(&self, _: &ImageRequest<'_>) -> Result<String, String> {
@@ -213,5 +223,18 @@ mod tests {
         assert!(!XAI.include_referer);
         // get_image_adapter returns Some for xai.
         let _ = adapter;
+    }
+
+    #[test]
+    fn vercel_gateway_image_registered() {
+        // get_image_adapter returns Some for vercel-ai-gateway.
+        let adapter = super::super::get_image_adapter("vercel-ai-gateway").expect("vercel adapter");
+        let _ = adapter;
+        assert_eq!(
+            VERCEL_AI_GATEWAY.endpoint,
+            "https://ai-gateway.vercel.sh/v1/images/generations"
+        );
+        assert!(!VERCEL_AI_GATEWAY.include_referer);
+        assert!(VERCEL_AI_GATEWAY.body_fields.is_empty());
     }
 }

@@ -107,6 +107,11 @@ pub static JINA_AI: OpenAiCompatAdapter = OpenAiCompatAdapter {
     endpoint: "https://api.jina.ai/v1/embeddings",
     include_referer: false,
 };
+pub static VERCEL_AI_GATEWAY: OpenAiCompatAdapter = OpenAiCompatAdapter {
+    provider_id: "vercel-ai-gateway",
+    endpoint: "https://ai-gateway.vercel.sh/v1/embeddings",
+    include_referer: false,
+};
 
 #[async_trait]
 impl EmbeddingAdapter for OpenAiCompatAdapter {
@@ -402,5 +407,19 @@ mod tests {
         };
         let v = OPENAI.build_body(&req).unwrap();
         assert_eq!(v["dimensions"], 256);
+    }
+
+    #[test]
+    fn vercel_gateway_embedding_registered() {
+        let body = json!({"input": "hi"});
+        let creds = ProviderConnection::default();
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "text-embedding-3-small",
+            credentials: &creds,
+        };
+        let url = VERCEL_AI_GATEWAY.build_url(&req).unwrap();
+        assert_eq!(url, "https://ai-gateway.vercel.sh/v1/embeddings");
+        assert!(!VERCEL_AI_GATEWAY.include_referer);
     }
 }

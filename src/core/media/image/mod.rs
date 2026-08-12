@@ -71,6 +71,7 @@ pub fn get_image_adapter(provider: &str) -> Option<&'static dyn ImageAdapter> {
         "openrouter" => Some(&openai_compat::OPENROUTER),
         "recraft" => Some(&openai_compat::RECRAFT),
         "xai" => Some(&openai_compat::XAI),
+        "vercel-ai-gateway" => Some(&openai_compat::VERCEL_AI_GATEWAY),
         "gemini" => Some(&gemini::ADAPTER),
         "codex" => Some(&codex::ADAPTER),
         "sdwebui" => Some(&sdwebui::ADAPTER),
