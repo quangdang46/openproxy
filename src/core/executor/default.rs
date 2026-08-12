@@ -211,6 +211,11 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.hunyuan.cloud.tencent.com/v1/chat/completions"),
         ),
         (
+            "tokenrouter",
+            // Chat endpoint only — embedding/image baseUrls belong to the media layer.
+            ProviderConfig::openai("https://api.tokenrouter.com/v1/chat/completions"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",

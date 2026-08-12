@@ -324,6 +324,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://api.hunyuan.cloud.tencent.com/v1/chat/completions",
         ),
         (
+            "tokenrouter",
+            "https://api.tokenrouter.com/v1/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -583,6 +587,24 @@ fn tencent_hunyuan_endpoint() {
             .build_url("hunyuan-turbos-latest", false, &connection("tencent"))
             .unwrap(),
         "https://api.hunyuan.cloud.tencent.com/v1/chat/completions"
+    );
+}
+
+/// Guard: tokenrouter must route through DefaultExecutor with the chat
+/// endpoint (NOT embedding/image). 9router parity:
+/// `open-sse/providers/registry/tokenrouter.js` transport.baseUrl =
+/// `https://api.tokenrouter.com/v1/chat/completions`. The 120-model list and
+/// embedding/image baseUrls belong to the catalog/media layers — the chat
+/// ProviderConfig must carry ONLY the chat endpoint.
+#[test]
+fn tokenrouter_chat_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("tokenrouter", pool, None).expect("tokenrouter executor");
+    assert_eq!(
+        executor
+            .build_url("openai/gpt-5.5", false, &connection("tokenrouter"))
+            .unwrap(),
+        "https://api.tokenrouter.com/v1/chat/completions"
     );
 }
 
