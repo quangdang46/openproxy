@@ -11,6 +11,23 @@ use super::base::{upstream_error, TtsAdapter, TtsError, TtsRequest, TtsResult};
 pub struct OpenrouterAdapter;
 pub static ADAPTER: OpenrouterAdapter = OpenrouterAdapter;
 
+fn build_headers(api_key: &str) -> Result<HeaderMap, TtsError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|e| TtsError::Parse(e.to_string()))?,
+    );
+    // Must match JS registry openrouter.js ttsConfig.headers (endpoint-proxy.local).
+    headers.insert(
+        "HTTP-Referer",
+        HeaderValue::from_static("https://endpoint-proxy.local"),
+    );
+    headers.insert("X-Title", HeaderValue::from_static("Endpoint Proxy"));
+    Ok(headers)
+}
+
 #[async_trait]
 impl TtsAdapter for OpenrouterAdapter {
     async fn synthesize(
@@ -45,18 +62,7 @@ impl TtsAdapter for OpenrouterAdapter {
             voice = request.model.to_string();
         }
 
-        let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {api_key}"))
-                .map_err(|e| TtsError::Parse(e.to_string()))?,
-        );
-        headers.insert(
-            "HTTP-Referer",
-            HeaderValue::from_static("https://openproxy.local"),
-        );
-        headers.insert("X-Title", HeaderValue::from_static("OpenProxy"));
+        let headers = build_headers(api_key)?;
 
         let body = json!({
             "model": tts_model,
@@ -109,5 +115,31 @@ impl TtsAdapter for OpenrouterAdapter {
             base64: chunks.concat(),
             format: "wav".to_string(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn openrouter_tts_referer_matches_registry() {
+        let headers = build_headers("test-key").unwrap();
+        assert_eq!(
+            headers.get("HTTP-Referer").unwrap(),
+            "https://endpoint-proxy.local"
+        );
+        assert_eq!(headers.get("X-Title").unwrap(), "Endpoint Proxy");
+        // Content-Type / Authorization stay unchanged.
+        assert_eq!(
+            headers.get(CONTENT_TYPE).unwrap(),
+            "application/json",
+            "Content-Type must stay unchanged"
+        );
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap(),
+            "Bearer test-key",
+            "Authorization must stay unchanged"
+        );
     }
 }
