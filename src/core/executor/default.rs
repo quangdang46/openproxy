@@ -34,6 +34,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
                 .with_header("X-Title", "Endpoint Proxy"),
         ),
         (
+            "api-airforce",
+            ProviderConfig::openai("https://api.airforce/v1/chat/completions")
+                .with_header("HTTP-Referer", "https://endpoint-proxy.local")
+                .with_header("X-Title", "Endpoint Proxy"),
+        ),
+        (
             "anthropic",
             ProviderConfig::anthropic("https://api.anthropic.com/v1/messages"),
         ),

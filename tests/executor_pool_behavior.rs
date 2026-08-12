@@ -227,6 +227,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "openrouter",
             "https://openrouter.ai/api/v1/chat/completions",
         ),
+        (
+            "api-airforce",
+            "https://api.airforce/v1/chat/completions",
+        ),
         ("deepseek", "https://api.deepseek.com/chat/completions"),
         ("groq", "https://api.groq.com/openai/v1/chat/completions"),
         ("xai", "https://api.x.ai/v1/chat/completions"),
@@ -337,6 +341,35 @@ fn alims_intl_has_full_endpoint_url() {
             .unwrap(),
         "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"
     );
+}
+
+/// Guard: api-airforce must route through DefaultExecutor with the full
+/// endpoint URL and the exact registry headers. 9router parity:
+/// `open-sse/providers/registry/api-airforce.js` transport.baseUrl =
+/// `https://api.airforce/v1/chat/completions` + headers
+/// HTTP-Referer/X-Title. Header names are case-sensitive in the upstream
+/// registry; HeaderMap lookups here are lowercase (HeaderMap normalizes).
+#[test]
+fn api_airforce_headers_and_url() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("api-airforce", pool, None)
+        .expect("api-airforce executor config");
+    assert_eq!(
+        executor
+            .build_url("anthropic/claude-3.7-sonnet", false, &connection("api-airforce"))
+            .unwrap(),
+        "https://api.airforce/v1/chat/completions"
+    );
+    let headers = executor
+        .build_headers(
+            "anthropic/claude-3.7-sonnet",
+            &connection("api-airforce"),
+            true,
+        )
+        .expect("headers");
+    assert_eq!(headers["authorization"], "Bearer sk-test");
+    assert_eq!(headers["http-referer"], "https://endpoint-proxy.local");
+    assert_eq!(headers["x-title"], "Endpoint Proxy");
 }
 
 #[test]
