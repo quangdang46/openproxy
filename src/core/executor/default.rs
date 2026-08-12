@@ -143,7 +143,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "opencode-go",
-            ProviderConfig::openai("https://opencode.ai/zen/v1"),
+            ProviderConfig::openai("https://opencode.ai/zen/go/v1"),
         ),
         (
             "glm-cn",
@@ -846,33 +846,29 @@ impl DefaultExecutor {
         {
             let mut url = self.config.base_url.clone();
             if url.contains("{accountId}") {
-                let account_id =
-                    compatible_value(credentials.provider_specific_data.get("accountId")).ok_or(
-                        ExecutorError::MissingProviderSpecificData(
-                            self.provider.clone(),
-                            "accountId",
-                        ),
-                    )?;
+                let account_id = compatible_value(
+                    credentials.provider_specific_data.get("accountId"),
+                )
+                .ok_or(ExecutorError::MissingProviderSpecificData(
+                    self.provider.clone(),
+                    "accountId",
+                ))?;
                 url = url.replace("{accountId}", account_id);
             }
             if url.contains("{project}") {
-                let project =
-                    compatible_value(credentials.provider_specific_data.get("project")).ok_or(
-                        ExecutorError::MissingProviderSpecificData(
-                            self.provider.clone(),
-                            "project",
-                        ),
-                    )?;
+                let project = compatible_value(credentials.provider_specific_data.get("project"))
+                    .ok_or(ExecutorError::MissingProviderSpecificData(
+                    self.provider.clone(),
+                    "project",
+                ))?;
                 url = url.replace("{project}", project);
             }
             if url.contains("{location}") {
-                let location =
-                    compatible_value(credentials.provider_specific_data.get("location")).ok_or(
-                        ExecutorError::MissingProviderSpecificData(
-                            self.provider.clone(),
-                            "location",
-                        ),
-                    )?;
+                let location = compatible_value(credentials.provider_specific_data.get("location"))
+                    .ok_or(ExecutorError::MissingProviderSpecificData(
+                        self.provider.clone(),
+                        "location",
+                    ))?;
                 url = url.replace("{location}", location);
             }
             return Ok(url);
@@ -1343,9 +1339,8 @@ impl DefaultExecutor {
         // Working copies of the rotated RT/AT, behind Arc<Mutex> so the Fn
         // closure can rotate them between retry attempts without moving fields
         // out of `working`; read back after the retry loop completes.
-        let refresh_holder = std::sync::Arc::new(std::sync::Mutex::new(
-            working.refresh_token.clone(),
-        ));
+        let refresh_holder =
+            std::sync::Arc::new(std::sync::Mutex::new(working.refresh_token.clone()));
         let access_holder =
             std::sync::Arc::new(std::sync::Mutex::new(working.access_token.clone()));
         let refresh_holder_inner = refresh_holder.clone();
@@ -1427,8 +1422,18 @@ fn non_empty_option(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+/// 9router open-sse/executors/opencode-go.js MESSAGES_FORMAT_MODELS — these
+/// route to `${BASE}/messages` with `x-api-key` + `anthropic-version` headers.
 fn opencode_go_uses_claude_format(model: &str) -> bool {
-    matches!(model, "minimax-m2.5" | "minimax-m2.7")
+    matches!(
+        model,
+        "minimax-m3"
+            | "minimax-m2.7"
+            | "minimax-m2.5"
+            | "qwen3.7-max"
+            | "qwen3.7-plus"
+            | "qwen3.6-plus"
+    )
 }
 
 /// Convert OpenAI-format tools to Claude format.
@@ -1552,5 +1557,34 @@ fn strip_fireworks_unsupported_tools(body: &mut Value) {
                 tool_obj.remove("strict");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opencode_go_claude_format_models() {
+        // 9router opencode-go.js MESSAGES_FORMAT_MODELS — all six must use
+        // the claude (/messages) format, not /chat/completions.
+        for model in [
+            "minimax-m3",
+            "minimax-m2.7",
+            "minimax-m2.5",
+            "qwen3.7-max",
+            "qwen3.7-plus",
+            "qwen3.6-plus",
+        ] {
+            assert!(
+                opencode_go_uses_claude_format(model),
+                "{model} should use claude format"
+            );
+        }
+
+        // Non-members keep the openai format.
+        assert!(!opencode_go_uses_claude_format("qwen3.6"));
+        assert!(!opencode_go_uses_claude_format("minimax-m1"));
+        assert!(!opencode_go_uses_claude_format("gpt-4o"));
     }
 }
