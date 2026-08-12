@@ -6,7 +6,8 @@ use thiserror::Error;
 
 use super::base::{SearchProvider, SearchRequest, SearchResultSet};
 
-const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);
+/// 9router search.js: global timeout is 15s (was 30s in Rust).
+const GLOBAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Error)]
 pub enum SearchHandlerError {
@@ -41,10 +42,16 @@ pub async fn handle_search(
         .build_headers(request)
         .map_err(SearchHandlerError::Validation)?;
 
+    // 9router: per-provider timeoutMs (default 10000) wins over the 15s
+    // global timeout when set.
+    let effective_timeout = provider
+        .timeout_ms()
+        .map(Duration::from_millis)
+        .unwrap_or(GLOBAL_TIMEOUT);
     let mut builder = client
         .request(provider.method(), &url)
         .headers(headers)
-        .timeout(GLOBAL_TIMEOUT);
+        .timeout(effective_timeout);
     if let Some(body) = provider.build_body(request) {
         builder = builder.json(&body);
     }
@@ -78,5 +85,26 @@ mod tests {
         let res = request_from_body(&body, None);
         assert!(res.is_err()); // request_from_body rejects empty query
         let _ = provider;
+    }
+
+    #[test]
+    fn timeout_precedence_global_15s_and_provider_10s() {
+        // Global default: 15s.
+        assert_eq!(GLOBAL_TIMEOUT, Duration::from_secs(15));
+
+        // Providers with an explicit timeoutMs override it.
+        let searxng = get_search_provider("searxng").unwrap();
+        assert_eq!(searxng.timeout_ms(), Some(10_000));
+        let youcom = get_search_provider("youcom").unwrap();
+        assert_eq!(youcom.timeout_ms(), Some(10_000));
+
+        // Providers without one fall back to the 15s global.
+        let serper = get_search_provider("serper").unwrap();
+        assert_eq!(serper.timeout_ms(), None);
+        let effective = serper
+            .timeout_ms()
+            .map(Duration::from_millis)
+            .unwrap_or(GLOBAL_TIMEOUT);
+        assert_eq!(effective, Duration::from_secs(15));
     }
 }
