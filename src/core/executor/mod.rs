@@ -20,7 +20,7 @@ mod opencode;
 mod opencode_go;
 mod project_id_cache;
 mod provider;
-mod qoder;
+pub mod qoder;
 mod qwen;
 mod strip_unsupported;
 mod vertex;
