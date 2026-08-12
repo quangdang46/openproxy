@@ -4,7 +4,39 @@
 //! authorize / token URLs, scopes, PKCE usage, extra query parameters,
 //! and a refresh lead time.
 
+use once_cell::sync::Lazy;
 use url::form_urlencoded;
+
+/// iflow extra params — client_secret resolved from env at first access.
+/// The Vec is leaked once so its slice is 'static.
+static IFLOW_EXTRA_PARAMS: Lazy<&'static [(&'static str, &'static str)]> = Lazy::new(|| {
+    Box::leak(
+        vec![
+            ("client_secret", crate::oauth::secret::iflow_client_secret()),
+            ("userinfo_url", "https://iflow.cn/api/oauth/getUserInfo"),
+        ]
+        .into_boxed_slice(),
+    )
+});
+
+/// Antigravity extra params — client_secret resolved from env at first access.
+static ANTIGRAVITY_EXTRA_PARAMS: Lazy<&'static [(&'static str, &'static str)]> = Lazy::new(|| {
+    Box::leak(
+        vec![
+            (
+                "client_secret",
+                crate::oauth::secret::antigravity_client_secret(),
+            ),
+            ("access_type", "offline"),
+            ("prompt", "consent"),
+            (
+                "user_info_url",
+                "https://www.googleapis.com/oauth2/v1/userinfo",
+            ),
+        ]
+        .into_boxed_slice(),
+    )
+});
 
 /// Static OAuth provider configuration.
 #[derive(Debug, Clone, Copy)]
@@ -162,10 +194,7 @@ pub fn iflow() -> OAuthProviderConfig {
         token_url: "https://iflow.cn/oauth/token",
         scopes: &[],
         uses_pkce: false,
-        extra_params: &[
-            ("client_secret", "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"),
-            ("userinfo_url", "https://iflow.cn/api/oauth/getUserInfo"),
-        ],
+        extra_params: &IFLOW_EXTRA_PARAMS,
         refresh_lead_ms: 4 * 60 * 60 * 1000,
     }
 }
@@ -388,15 +417,7 @@ pub fn antigravity() -> OAuthProviderConfig {
             "https://www.googleapis.com/auth/experimentsandconfigs",
         ],
         uses_pkce: false,
-        extra_params: &[
-            ("client_secret", "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"),
-            ("access_type", "offline"),
-            ("prompt", "consent"),
-            (
-                "user_info_url",
-                "https://www.googleapis.com/oauth2/v1/userinfo",
-            ),
-        ],
+        extra_params: &ANTIGRAVITY_EXTRA_PARAMS,
         refresh_lead_ms: 5 * 60 * 1000,
     }
 }

@@ -182,15 +182,12 @@ const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 
 const GEMINI_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-const GEMINI_CLIENT_SECRET: &str = "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";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
 const ANTIGRAVITY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const ANTIGRAVITY_CLIENT_SECRET: &str = "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";
 
 const IFLOW_CLIENT_ID: &str = "10009311001";
-const IFLOW_CLIENT_SECRET: &str = "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW";
 const IFLOW_TOKEN_URL: &str = "https://iflow.cn/oauth/token";
 
 const QWEN_CLIENT_ID: &str = "f0304373b74a44d2b584a3fb70ca9e56";
@@ -459,7 +456,11 @@ pub async fn refresh_iflow_token(refresh_token: &str) -> Result<RefreshResult, S
     let client = reqwest::Client::new();
     let basic = base64::Engine::encode(
         &base64::engine::general_purpose::STANDARD,
-        format!("{}:{}", IFLOW_CLIENT_ID, IFLOW_CLIENT_SECRET),
+        format!(
+            "{}:{}",
+            IFLOW_CLIENT_ID,
+            crate::oauth::secret::iflow_client_secret()
+        ),
     );
     let resp = client
         .post(IFLOW_TOKEN_URL)
@@ -921,7 +922,7 @@ pub async fn dispatch_oauth_refresh(
         "gemini-cli" => {
             let rt = refresh_token.to_string();
             let cid = GEMINI_CLIENT_ID.to_string();
-            let csec = GEMINI_CLIENT_SECRET.to_string();
+            let csec = crate::oauth::secret::gemini_cli_client_secret().to_string();
             dedup_refresh(provider, refresh_token, move || {
                 let (rt, cid, csec) = (rt.clone(), cid.clone(), csec.clone());
                 async move { refresh_google_token(&rt, &cid, &csec).await }
@@ -931,7 +932,7 @@ pub async fn dispatch_oauth_refresh(
         "antigravity" => {
             let rt = refresh_token.to_string();
             let cid = ANTIGRAVITY_CLIENT_ID.to_string();
-            let csec = ANTIGRAVITY_CLIENT_SECRET.to_string();
+            let csec = crate::oauth::secret::antigravity_client_secret().to_string();
             dedup_refresh(provider, refresh_token, move || {
                 let (rt, cid, csec) = (rt.clone(), cid.clone(), csec.clone());
                 async move { refresh_google_token(&rt, &cid, &csec).await }
