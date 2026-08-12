@@ -30,6 +30,7 @@ mod provider_models;
 pub mod provider_nodes;
 mod provider_validate;
 pub mod providers;
+pub mod pxpipe;
 pub mod quota_auto_ping;
 pub mod settings_payload_rules;
 pub mod shutdown;
@@ -380,7 +381,8 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(mcp_server::routes())
         .merge(auth::routes())
         .merge(a2a::routes(state.clone()))
-        .merge(provider_validate::routes());
+        .merge(provider_validate::routes())
+        .merge(pxpipe::routes());
 
     // ── Assemble ──
     public.merge(protected).merge(admin).merge(remaining)
@@ -2106,6 +2108,10 @@ struct UpdateSettingsRequest {
     headroom_kompress: Option<bool>,
     ponytail_enabled: Option<bool>,
     ponytail_level: Option<String>,
+    pxpipe_enabled: Option<bool>,
+    pxpipe_auto_install: Option<bool>,
+    pxpipe_min_chars: Option<u32>,
+    pxpipe_timeout_ms: Option<u32>,
     /// Stored in settings.extra so provider-detail UI can PATCH it.
     claude_auto_ping: Option<Value>,
     /// Stored in settings.extra so provider-detail UI can PATCH it.
@@ -2306,6 +2312,18 @@ async fn update_settings_api(
             }
             if let Some(v) = req.ponytail_level {
                 db.settings.ponytail_level = v;
+            }
+            if let Some(v) = req.pxpipe_enabled {
+                db.settings.pxpipe_enabled = v;
+            }
+            if let Some(v) = req.pxpipe_auto_install {
+                db.settings.pxpipe_auto_install = v;
+            }
+            if let Some(v) = req.pxpipe_min_chars {
+                db.settings.pxpipe_min_chars = v;
+            }
+            if let Some(v) = req.pxpipe_timeout_ms {
+                db.settings.pxpipe_timeout_ms = v;
             }
             // Persist auto-ping + thinking maps into settings.extra (camelCase
             // keys match the web UI PATCH body).
@@ -2565,6 +2583,18 @@ fn merge_settings(target: &mut crate::types::Settings, source: &crate::types::Se
     }
     if source.ponytail_enabled != target.ponytail_enabled {
         target.ponytail_enabled = source.ponytail_enabled;
+    }
+    if source.pxpipe_enabled != target.pxpipe_enabled {
+        target.pxpipe_enabled = source.pxpipe_enabled;
+    }
+    if source.pxpipe_auto_install != target.pxpipe_auto_install {
+        target.pxpipe_auto_install = source.pxpipe_auto_install;
+    }
+    if source.pxpipe_min_chars != target.pxpipe_min_chars {
+        target.pxpipe_min_chars = source.pxpipe_min_chars;
+    }
+    if source.pxpipe_timeout_ms != target.pxpipe_timeout_ms {
+        target.pxpipe_timeout_ms = source.pxpipe_timeout_ms;
     }
     if source.ponytail_level != target.ponytail_level {
         target.ponytail_level = source.ponytail_level.clone();
