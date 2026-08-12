@@ -1,888 +1,1849 @@
-# Parity Implementation Report — openproxy → 9router v0.5.50
+# Implementation Guide: openproxy → 9router v0.5.50
 
-> **Version:** 2026-08-12 · **Full subagent research included**
-> **Reference:** `.tmp/9router` = `decolua/9router` v0.5.50 (2026-08-05)
-> **Port:** `openproxy` v0.2.0 (Rust) — claims "v0.5.30 full parity", gap window = v0.5.30 → v0.5.50
+> Condensed per-dimension companion to [`docs/parity-9router-FULL.md`](parity-9router-FULL.md) — the FULL report has verbatim JS and cross-check reasoning.
 
-This report is the **implementation-ready** companion to `parity-report.md`. Every gap is specified to the level of **exact URLs, headers, auth schemes, model lists, field mappings, and step-by-step Rust changes** — verified by cross-checking agents against both codebases. Follow it exactly; a single wrong detail breaks the port.
+## PART A — PROVIDERS (P0) (17 specs)
 
-- 151 findings audited (9 dimensions, 160 subagents, 5,498 tool calls)
-- **146 CONFIRMED**, 5 REFUTED
-- Each section: **JS source of truth** (verbatim) → **Rust current state** → **Implementation steps** → **Guard test** → **Risks**
+### `P0-A1a` — Add alims-intl provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/alims-intl.js:3-31. id="alims-intl", priority=11, alias="alims-intl". transport.baseUrl="https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", headers={}, quirks={preserveCacheControl:true}. models=[{id:"qwen3.5-plus",name:"Qwen3.5 Plus"},{id:"kimi-k2.5",name:"Kimi K2.5"},{id:"glm-5",name:"GLM 5"},{id:"MiniMax-M2.5",name:"MiniMax M2.5"},{id:"qwen3-coder-next",name:"Qwen3 Coder Next"},{id:"qwen3-coder-plus",name:"Qwen3 Coder Plus"},{id:"glm-4.7",name:"GLM 4.7"}]
+- **Rust now:** N/A. src/core/executor/default.rs:24-409 PROVIDER_CONFIGS has no "alims-intl" key; DefaultExecutor::new (default.rs:585-595) returns ExecutorError::UnsupportedProvider -> chat.rs:1635-1645 returns HTTP 500. Verified no other file contains the string.
+- **Fix:** In src/core/executor/default.rs, inside the BTreeMap::from([...]) in PROVIDER_CONFIGS, add exactly one entry (place near the alicode-intl entry at default.rs:151-155): ("alims-intl", ProviderConfig::openai("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions"),). Do NOT add any headers (JS headers={}). Do NOT add to any anthropic/claude-compatible list in default.rs:615-627, 700-718, 805-813, 867-915. The full endpoint URL is already present so build_url (default.rs:812) returns it unchanged. Do NOT add clinepass headers block: the default.rs:947 match on "clinepass" is the existing header hook, leave it.
+- **Test:** `In tests/executor_pool_behavior.rs add #[test] fn alims_intl_has_full_endpoint_url(): build DefaultExecutor::new("alims-intl", pool, None) (must not return Err) then assert build_url("qwen3.5-plus", false, &connection("alims-intl")) == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions" (the full endpoint, no /chat/completions appended).`
+- **⚠️ Risks:** preserveCacheControl:true is a translator/request quirk (JS translator request uses it to keep cache_control). If you add the provider only to the executor, chat works but the translator must not strip cache_control for this provider — check translator/registry request_transform routing (Format::OpenAi) does not need provider-specific handling since JS preserveCacheControl only affects alicode/cache-control injection; do not reintroduce a cache_control strip for this id. The baseUrl is the FULL endpoint (…/chat/completions already present) so is_already_endpoint (default.rs:606-612) must match on "/chat/completions" — it does. Do not append an extra /chat/completions.
+- **Verified:** ✅ CONFIRMED
 
----
+### `P0-A1b` — Add api-airforce provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/api-airforce.js:1-36. id="api-airforce", alias="af", aliases=["airforce"], uiAlias="af", category="freeTier", authType="apikey", authModes=["apikey"]. transport.baseUrl="https://api.airforce/v1/chat/completions", validateUrl="https://api.airforce/v1/models", headers={"HTTP-Referer":"https://endpoint-proxy.local","X-Title":"Endpoint Proxy"}. models=[{id:"anthropic/claude-3.7-sonnet",name:"Claude 3.7 Sonnet (Free)",contextLength:200000},{id:"moonshot/kimi-k2.6",name:"Kimi K2.6 (Free)",contextLength:262144},{id:"google/gemini-2.5-flash",name:"Gemini 2.5 Flash (Free)",contextLength:1048576}]
+- **Rust now:** N/A. No "api-airforce" string anywhere in src/. DefaultExecutor::new returns UnsupportedProvider (default.rs:585-595) -> HTTP 500.
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("api-airforce", ProviderConfig::openai("https://api.airforce/v1/chat/completions").with_header("HTTP-Referer", "https://endpoint-proxy.local").with_header("X-Title", "Endpoint Proxy"),). These are the exact same two headers already used by openrouter (default.rs:33-34), but you must add them explicitly — PROVIDER_CONFIGS entries do not inherit openrouter's. The baseUrl is the full endpoint; build_url returns it as-is. category freeTier has no Rust code impact (category is not stored in ProviderConfig).
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn api_airforce_headers_and_url(): assert build_url == "https://api.airforce/v1/chat/completions" and build_headers contains HTTP-Referer: https://endpoint-proxy.local and X-Title: Endpoint Proxy (exact case).`
+- **⚠️ Risks:** Header names are case-sensitive in the HeaderMap lookup; verify with HeaderMap::get("HTTP-Referer") / "X-Title" exactly as written in JS. The baseUrl host is "api.airforce" (no TLD suffix beyond .force) — copy verbatim, do not "fix" it to .ai or .com.
+- **Verified:** ✅ CONFIRMED
 
-## PHẦN A — PRIORITY 0: Providers không với tới được (VỠ REQUEST)
+### `P0-A1c` — Add baidu provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/baidu.js:1-33. id="baidu", alias="qianfan", aliases=["qianfan","ernie","baidu-qianfan"], uiAlias="qianfan", category="apikey", authType="apikey". transport.baseUrl="https://qianfan.baidubce.com/v2/chat/completions", validateUrl="https://qianfan.baidubce.com/v2/models". models=[{id:"deepseek-v4-pro",name:"DeepSeek V4 Pro",contextLength:1048576},{id:"deepseek-v4-flash",name:"DeepSeek V4 Flash",contextLength:1048576},{id:"glm-5.2",name:"GLM 5.2",contextLength:512000},{id:"glm-5.1",name:"GLM 5.1",contextLength:198000},{id:"kimi-k2.6",name:"Kimi K2.6",contextLength:262144},{id:"qwen3.5-397b-a17b",name:"Qwen 3.5 397B A17B",contextLength:262144},{id:"qwen3.5-27b",name:"Qwen 3.5 27B",contextLength:262144}]
+- **Rust now:** Wrong key. src/core/executor/provider.rs:1297-1299 has ("qianfan", ProviderExecutorConfig::openai("https://qianfan.baidubce.com/v2")) — but this is inside the DEAD PROVIDER_REGISTRY (only media.rs:638 get_provider_config reads it) and the URL lacks /chat/completions. The live chat path default.rs PROVIDER_CONFIGS has NO "baidu" key (verified) -> HTTP 500. Also provider_catalog.json has a "baidu" provider entry (id=baidu, alias=qianfan).
+- **Fix:** 1) In default.rs PROVIDER_CONFIGS add: ("baidu", ProviderConfig::openai("https://qianfan.baidubce.com/v2/chat/completions"),). Full endpoint -> build_url returns unchanged. 2) IMPORTANT do NOT rename the live key to "qianfan": the model resolution path get_model_info (src/core/model/mod.rs:211) resolves "baidu" provider id (via alias map) and passes it to DefaultExecutor; the JS id is "baidu" and provider_catalog.json provider entry id is "baidu". 3) (optional, same PR) update the dead provider.rs:1297-1299 qianfan entry's URL to include /chat/completions to match JS, but it is dead code and not required for chat.
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn baidu_has_v2_chat_completions_url(): DefaultExecutor::new("baidu",...).build_url == "https://qianfan.baidubce.com/v2/chat/completions".`
+- **⚠️ Risks:** JS validateUrl /v2/models differs from baseUrl /v2/chat/completions. The Rust ProviderConfig has no validateUrl concept; do not confuse the two. If a developer "fixes" the key to qianfan, connections created with provider id baidu (what the dashboard/alias map uses) will still 500. Keep the key exactly "baidu".
+- **Verified:** ✅ CONFIRMED
 
-### A1. 17 providers enabled thiếu trong chat path `default.rs` (P0) [missing]
+### `P0-A1d` — Add bluesminds provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/bluesminds.js:1-38. id="bluesminds", alias="bm", aliases=["blue-sminds"], uiAlias="bm", hidden:true, category="apikey", authType="apikey", authModes=["apikey"]. transport.baseUrl="https://api.bluesminds.com/v1/chat/completions", validateUrl="https://api.bluesminds.com/v1/models". models=[14 models; the ones with distinct ids you must not drop: gpt-4.1, gpt-4.1-mini, gpt-4.1-nano, claude-sonnet-4-5, claude-haiku-4-5, gemini-2.0-flash, gemini-2.0-flash-exp, qwen-turbo, kimi-k2, kimi-k2-thinking, glm-4.7, minimax-m2.5, claude-opus-4-5, gemini-2.5-pro]
+- **Rust now:** N/A. No "bluesminds" string in src/. HTTP 500 via UnsupportedProvider.
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("bluesminds", ProviderConfig::openai("https://api.bluesminds.com/v1/chat/completions"),). No headers (JS headers not present). Full endpoint -> build_url unchanged.
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn bluesminds_uses_v1_chat_completions(): build_url == "https://api.bluesminds.com/v1/chat/completions".`
+- **⚠️ Risks:** hidden:true is a dashboard/UI flag, no Rust executor impact. Model ids contain "claude-*"/"gemini-*"/"gpt-*" prefixes — these route through the OpenAI translator (default target Format::OpenAi), which is correct since transport has no format override. Do not mark it anthropic-compatible because some model names start with claude.
+- **Verified:** ✅ CONFIRMED
 
-**Root cause:** `src/server/api/chat.rs:1635` → `DefaultExecutor::new` chỉ đọc `default.rs PROVIDER_CONFIGS` (96 keys). 17 providers của 9router v0.5.50 **không có entry** → `Err(UnsupportedProvider)` → HTTP 500. `provider.rs PROVIDER_REGISTRY` chứa vài provider này nhưng là **dead code** (chỉ `media.rs` đọc, `UnifiedExecutor` không được gọi).
+### `P0-A1e` — Add clinepass provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/clinepass.js:1-57. id="clinepass", priority=85, alias="clinepass", category="oauth", authModes=["oauth","apikey"], hasOAuth:true. transport.baseUrl="https://api.cline.bot/api/v1/chat/completions", headers={"HTTP-Referer":"https://cline.bot","X-Title":"Cline"}, auth={combined:true,header:"Authorization",scheme:"bearer",hooks:["clineHeaders"]}. models=[{id:"cline-pass/glm-5.2",...},{id:"cline-pass/kimi-k2.7-code",...},{id:"cline-pass/kimi-k2.6",...},{id:"cline-pass/deepseek-v4-pro",...},{id:"cline-pass/deepseek-v4-flash",...},{id:"cline-pass/mimo-v2.5",...},{id:"cline-pass/mimo-v2.5-pro",...},{id:"cline-pass/minimax-m3",...},{id:"cline-pass/qwen3.7-max",...},{id:"cline-pass/qwen3.7-plus",...}]
+- **Rust now:** No config entry. default.rs:947 has `if self.provider == "cline" || self.provider == "clinepass" { // Cline often needs workos: prefix handled elsewhere; keep Bearer }` — an empty comment block (no behavior). default.rs:24-409 has NO "clinepass" config key -> DefaultExecutor::new returns UnsupportedProvider -> HTTP 500. Verified via string search: clinepass appears only at default.rs:947.
+- **Fix:** 1) In default.rs PROVIDER_CONFIGS add: ("clinepass", ProviderConfig::openai("https://api.cline.bot/api/v1/chat/completions").with_header("HTTP-Referer", "https://cline.bot").with_header("X-Title", "Cline"),). Exact same headers as the existing "cline" entry at default.rs:133-137. 2) The empty hook at default.rs:947 can be removed or left; it is a no-op. 3) OAuth is handled separately by src/oauth/providers.rs get_config (out of this task's scope, but note clinepass OAuth must be added there for full parity — see parity-report A3; the executor part is this entry).
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn clinepass_url_and_headers(): build_url == "https://api.cline.bot/api/v1/chat/completions", build_headers has HTTP-Referer: https://cline.bot and X-Title: Cline, Authorization: Bearer <api_key>.`
+- **⚠️ Risks:** clinepass auth is combined oauth+apikey in JS. In Rust, build_headers (default.rs:915-938) uses access_token.or(api_key) for Bearer, which already prefers the OAuth access token over api_key — matches combined. Do not add clinepass to the x-api-key branch list at default.rs:923-938 (it must stay Bearer). The cline header hook comment is intentionally empty in JS (hooks:["clineHeaders"] overlays workos prefix only when cline's own header cache sets it) — do NOT invent header logic here.
+- **Verified:** ✅ CONFIRMED
 
-**Source of truth — từng provider (verbatim từ registry JS):**
+### `P0-A1f` — Add codebuddy-intl provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/codebuddy-intl.js:4-77. id="codebuddy-intl", alias="cbai", uiAlias="cbai", priority=90, category="oauth", authModes=["oauth","apikey"], hasOAuth:true. transport.baseUrl="https://www.codebuddy.ai/v2/chat/completions", forceStream:true, thinkingFormat="openai", headers={"User-Agent":"IDE/2.108.1 CodeBuddy/2.108.1","X-Product":"SaaS","X-IDE-Type":"IDE","X-IDE-Name":"IDE","x-requested-with":"XMLHttpRequest","x-codebuddy-request":"1"}, auth={combined:true,header:"Authorization",scheme:"bearer"}. usage.url="https://www.codebuddy.ai/v2/billing/meter/get-user-resource". models=[glm-5.2,glm-5.1,glm-5.0,glm-5.0-turbo,glm-5v-turbo,glm-4.7,minimax-m3,minimax-m2.7,kimi-k2.7,kimi-k2.6,kimi-k2.5,hy3-preview,deepseek-v4-pro,deepseek-v4-flash,deepseek-v3-2-volc]
+- **Rust now:** N/A. No "codebuddy-intl" in src/ (only codebuddy at default.rs:125-127 and codebuddy-cn at default.rs:397-399). HTTP 500 via UnsupportedProvider. Note: the JS entry is a NEW distinct provider (.ai international domain), not the CN provider (copilot.tencent.com).
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("codebuddy-intl", ProviderConfig::openai("https://www.codebuddy.ai/v2/chat/completions").with_header("User-Agent", "IDE/2.108.1 CodeBuddy/2.108.1").with_header("X-Product", "SaaS").with_header("X-IDE-Type", "IDE").with_header("X-IDE-Name", "IDE").with_header("x-requested-with", "XMLHttpRequest").with_header("x-codebuddy-request", "1"),). NOTE: HeaderValue::from_str rejects some chars but all these are valid ASCII tokens/values. X-Product value "SaaS" and User-Agent value are fine. Do NOT add "x-api-key"; auth is Bearer (access_token.or(api_key) already correct). forceStream is a stream flag, not a URL/header — Rust's DefaultExecutor always streams SSE when client requests stream; no change needed for the executor (the force-stream path is in chat.rs/response handling and out of scope). OAuth device-code flow (src/oauth) is a separate task (parity A3).
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn codebuddy_intl_url_and_headers(): build_url == "https://www.codebuddy.ai/v2/chat/completions"; build_headers contains User-Agent=IDE/2.108.1 CodeBuddy/2.108.1, X-Product=SaaS, X-IDE-Type=IDE, X-IDE-Name=IDE, x-requested-with=XMLHttpRequest, x-codebuddy-request=1.`
+- **⚠️ Risks:** Do NOT point codebuddy-intl at copilot.tencent.com (that's codebuddy-cn). Keep the User-Agent string byte-identical including the space and versions. Header name case: JS uses "x-requested-with" and "x-codebuddy-request" lowercase — reqwest lowercases header names automatically; use lowercase names in with_header to match exactly. X-Product="SaaS" (all caps S then aa) — copy exactly.
+- **Verified:** ✅ CONFIRMED
 
-| Provider | alias | category | baseUrl (transport) | auth | models |
-|---|---|---|---|---|---|
-| `alims-intl` | alims-intl | apikey | `https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions` | — | qwen3.5-plus, kimi-k2.5, glm-5, MiniMax-M2.5, qwen3-coder-next, qwen3-coder-plus, glm-4.7 |
-| `api-airforce` | af | freeTier | `https://api.airforce/v1/chat/completions` (+ headers `HTTP-Referer: https://endpoint-proxy.local`, `X-Title: Endpoint Proxy`) | apikey | claude-3.7-sonnet, kimi-k2.6, gemini-2.5-flash |
-| `baidu` | qianfan | apikey | `https://qianfan.baidubce.com/v2/chat/completions` | apikey | deepseek-v4-pro, deepseek-v4-flash, glm-5.2, glm-5.1, kimi-k2.6, qwen3.5-397b-a17b, qwen3.5-27b |
-| `bluesminds` | bm | apikey | `https://api.bluesminds.com/v1/chat/completions` | apikey | 14 models (gpt-4.1*, claude-sonnet-4-5, gemini-2.x, kimi-k2*, glm-4.7, minimax-m2.5...) |
-| `clinepass` | clinepass | oauth | `https://api.cline.bot/api/v1/chat/completions` (+ headers `HTTP-Referer: https://cline.bot`, `X-Title: Cline`; auth `combined:true, header:Authorization, scheme:bearer, hooks:[clineHeaders]`) | oauth | 10 models `cline-pass/*` |
-| `codebuddy-intl` | cbai | oauth | `https://www.codebuddy.ai/v2/chat/completions` (**forceStream:true**, thinkingFormat:openai, headers `User-Agent: IDE/2.108.1 CodeBuddy/2.108.1`, `X-Product: SaaS`, `X-...`; auth combined bearer) | oauth | 15 models (glm-5.2..., minimax-m3, kimi-k2.7...) |
-| `featherless` | featherless | apikey | `https://api.featherless.ai/v1/chat/completions` | apikey | 7 models `*/DeepSeek-V4*`, `zai-org/GLM-*`, `moonshotai/Kimi-*` |
-| `kilo-gateway` | kgw | freeTier | `https://api.kilo.ai/api/gateway/chat/completions` | apikey | kilo-auto/free, nemotron-3-super:free, nemotron-3-ultra:free, kat-coder:free, kilo-auto/frontier, kilo-auto/balanced |
-| `perplexity-agent` | perplexity-agent | apikey | `https://api.perplexity.ai/v1/responses` (**format: openai-responses**) | apikey | 11 models `perplexity/sonar`, openai/gpt-5.5..., anthropic/claude-*, google/gemini-* |
-| `poolside` | poolside | freeTier | `https://inference.poolside.ai/v1/chat/completions` | apikey | poolside/laguna-s-2.1, poolside/laguna-xs-2.1 |
-| `selfhosted-embedding` | selfhosted-embedding | apikey | baseUrl **per-connection** (`providerSpecificData.baseUrl`, `/embeddings` appended; **không bao giờ fallback api.openai.com**) | apikey | embedding |
-| `selfhosted-stt` | selfhosted-stt | apikey | baseUrl **per-connection** (e.g. `http://host:8080/v1/audio/transcriptions`) | apikey | whisper-1 |
-| `selfhosted-tts` | selfhosted-tts | apikey | baseUrl **per-connection** (`/v1/audio/speech` appended, e.g. `http://host:8080`) | apikey | kokoro |
-| `tencent` | hunyuan | apikey | `https://api.hunyuan.cloud.tencent.com/v1/chat/completions` | apikey | hunyuan-turbos-latest, hunyuan-t1-latest |
-| `tokenrouter` | tokenrouter | apikey | `https://api.tokenrouter.com/v1/chat/completions` (**thinkingFormat: tokenrouter**) | apikey | **120 models** (xem danh sách đầy đủ dưới) |
-| `venice` | venice | apikey | `https://api.venice.ai/api/v1/chat/completions` (**thinkingFormat: openai**) | apikey | 15 models (venice-uncensored-1-2, zai-org-glm-5, qwen3-*, deepseek-v4-pro, embeddings...) |
-| `zed` | zd | oauth | `https://cloud.zed.dev/completions` (NDJSON/SSE, auth `<user_id> <access_token>` + `x-zed-cloud-token`) | oauth | (xem executor zed) |
+### `P0-A1g` — Add featherless provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/featherless.js:1-34. id="featherless", priority=65, alias="featherless", aliases=["fl"], uiAlias="fl", category="apikey", authType="apikey". transport.baseUrl="https://api.featherless.ai/v1/chat/completions", validateUrl="https://api.featherless.ai/v1/models". models=[{id:"deepseek-ai/DeepSeek-V4-Pro",name:"DeepSeek V4 Pro"},{id:"deepseek-ai/DeepSeek-V4-Flash",name:"DeepSeek V4 Flash"},{id:"zai-org/GLM-5.2",name:"GLM 5.2"},{id:"zai-org/GLM-5.1",name:"GLM 5.1"},{id:"moonshotai/Kimi-K2.7-Code",name:"Kimi K2.7 Code"},{id:"moonshotai/Kimi-K2.6",name:"Kimi K2.6"},{id:"moonshotai/Kimi-K2.5",name:"Kimi K2.5"}]
+- **Rust now:** Wrong key. src/core/executor/provider.rs:1332-1334 (DEAD PROVIDER_REGISTRY) has ("featherless-ai", ProviderExecutorConfig::openai("https://api.featherless.ai/v1")) — key "featherless-ai" (wrong id) and base lacks /chat/completions. Live default.rs PROVIDER_CONFIGS has NO featherless key -> HTTP 500.
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("featherless", ProviderConfig::openai("https://api.featherless.ai/v1/chat/completions"),). No headers. Note: the JS registry id is "featherless" (NOT "featherless-ai"). If the connection/dashboard stores provider id "featherless-ai" somewhere, it would still 500 — but the JS catalog (open-sse/providers/registry/featherless.js:2) and web provider id are "featherless". Keep key exactly "featherless". Optionally also alias the dead key later, but that's dead code.
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn featherless_has_full_endpoint(): build_url == "https://api.featherless.ai/v1/chat/completions".`
+- **⚠️ Risks:** DeepSeek/GLM/Kimi model ids (deepseek-ai/DeepSeek-V4-Pro etc.) pass through the OpenAI translator; fine. The key mismatch featherless vs featherless-ai is the subtle trap — verify the connection's provider field value by checking how the catalog alias map resolves it (provider_catalog.json has no featherless provider entry, so resolution comes from provider model alias lists).
+- **Verified:** ✅ CONFIRMED
 
-**tokenrouter 120 models (đầy đủ):**
+### `P0-A1h` — Add kilo-gateway provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/kilo-gateway.js:1-34. id="kilo-gateway", alias="kgw", aliases=["kilo-gateway","kilogateway"], uiAlias="kgw", category="freeTier", authType="apikey", authModes=["apikey"]. transport.baseUrl="https://api.kilo.ai/api/gateway/chat/completions", validateUrl="https://api.kilo.ai/api/gateway/models". models=[{id:"kilo-auto/free",name:"Kilo Auto Free",contextLength:256000},{id:"nvidia/nemotron-3-super-120b-a12b:free",name:"Nemotron 3 Super 120B (Free)",contextLength:262144},{id:"nvidia/nemotron-3-ultra-550b-a55b:free",name:"Nemotron 3 Ultra 550B (Free)",contextLength:1000000},{id:"kwaipilot/kat-coder-pro-v2.5:free",name:"Kat Coder Pro v2.5 (Free)",contextLength:256000},{id:"kilo-auto/frontier",name:"Kilo Auto Frontier",contextLength:1000000},{id:"kilo-auto/balanced",name:"Kilo Auto Balanced",contextLength:1000000}]
+- **Rust now:** Wrong location. src/core/executor/provider.rs:1277-1279 (DEAD PROVIDER_REGISTRY) has ("kilo-gateway", ProviderExecutorConfig::openai("https://api.kilo.ai/api/gateway")) — base lacks /chat/completions, and the key lives in the dead map. Live default.rs PROVIDER_CONFIGS has NO kilo-gateway key -> HTTP 500. Verified only provider.rs:1277 references kilo-gateway.
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("kilo-gateway", ProviderConfig::openai("https://api.kilo.ai/api/gateway/chat/completions"),). No headers. This is the fix for "dead code in PROVIDER_REGISTRY" — the entry must move to the LIVE map. Leave or delete the dead provider.rs:1277-1279 entry (it is inert for chat; media.rs:638 reads it for media base URL resolution).
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn kilo_gateway_full_gateway_endpoint(): build_url == "https://api.kilo.ai/api/gateway/chat/completions".`
+- **⚠️ Risks:** Do not confuse with "kilocode" (default.rs:128-131 uses https://api.kilo.ai/api/openrouter/chat/completions) — different endpoint. kilo-gateway path is /api/gateway/chat/completions. Note the :free suffix in model ids is a literal part of the model string, must not be stripped.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A1i` — Add perplexity-agent provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/perplexity-agent.js:1-49. id="perplexity-agent", priority=181, alias="perplexity-agent", aliases=["pplx-agent","pplx-responses"], uiAlias="pa", category="apikey", authType="apikey". transport.baseUrl="https://api.perplexity.ai/v1/responses", validateUrl="https://api.perplexity.ai/v1/models", format="openai-responses". models=[{id:"perplexity/sonar",...},{id:"openai/gpt-5.5",...},{id:"openai/gpt-5.4",...},{id:"openai/gpt-5.4-mini",...},{id:"anthropic/claude-sonnet-4-6",...},{id:"anthropic/claude-opus-4-8",...},{id:"google/gemini-3.1-pro-preview",...},{id:"xai/grok-4.20-reasoning",...},{id:"perplexity/glm-5.2",...},{id:"perplexity/kimi-k2.7-code",...},{id:"nvidia/nemotron-3-super-120b-a12b",...}]. serviceKinds=["llm","webSearch"]. searchViaChat={defaultModel:"perplexity/sonar",endpoint:"https://api.perplexity.ai/v1/responses"}. modelsFetcher={url:"https://api.perplexity.ai/v1/models",type:"openai"}. passthroughModels:true
+- **Rust now:** N/A for the executor config. NOTE: src/core/translator/registry.rs:355 already maps "perplexity-agent" => Format::OpenAiResponses (present), so the translator format is ready. But default.rs PROVIDER_CONFIGS has NO "perplexity-agent" key -> DefaultExecutor::new returns UnsupportedProvider -> HTTP 500.
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("perplexity-agent", ProviderConfig::openai("https://api.perplexity.ai/v1/responses"),). CRITICAL: the endpoint is /v1/responses (OpenAI Responses API), NOT /chat/completions. The Rust DefaultExecutor POSTs the JSON body to this URL unchanged (send_one default.rs:1202-1232). The translator registry already routes perplexity-agent to OpenAiResponses format (translator/registry.rs:355), and openai_responses translation lives in src/core/translator/request/openai_responses.rs — so the request/response translation already matches. build_url (default.rs:812) returns config.base_url unchanged; is_already_endpoint (default.rs:612) matches "/responses" so a runtime_transport override pointing here also stays as-is. No headers (JS headers absent).
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn perplexity_agent_responses_endpoint(): build_url == "https://api.perplexity.ai/v1/responses" (must NOT be /chat/completions).`
+- **⚠️ Risks:** The subtle trap: a developer might "normalize" the URL to /chat/completions. The Responses API will reject it. Keep /v1/responses exactly. Also do not add perplexity-agent to any x-api-key/Bearer special-case in default.rs:923-938 — it must stay standard Bearer (api_key/access_token). translator/registry.rs:355 already lists it under OpenAiResponses; confirm your change does not add a conflicting mapping.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A1j` — Add poolside provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/poolside.js:1-30. id="poolside", priority=60, alias="poolside", aliases=["ps"], uiAlias="ps", category="freeTier", authType="apikey", authModes=["apikey"]. transport.baseUrl="https://inference.poolside.ai/v1/chat/completions", validateUrl="https://inference.poolside.ai/v1/models". models=[{id:"poolside/laguna-s-2.1",name:"Laguna S 2.1"},{id:"poolside/laguna-xs-2.1",name:"Laguna XS 2.1"}]
+- **Rust now:** N/A. No "poolside" string in src/ (verified; parity-report section I claims poolside models already match JS but the executor key is absent). HTTP 500 via UnsupportedProvider.
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("poolside", ProviderConfig::openai("https://inference.poolside.ai/v1/chat/completions"),). No headers. Full endpoint -> build_url unchanged. The two model ids poolside/laguna-s-2.1 and poolside/laguna-xs-2.1 pass through OpenAI format.
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn poolside_inference_endpoint(): build_url == "https://inference.poolside.ai/v1/chat/completions".`
+- **⚠️ Risks:** None beyond exact URL. freeTier has no executor impact. Ensure the provider key is exactly "poolside" (alias ps is separate).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A1k` — Add tencent (hunyuan) provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/tencent.js:1-27. id="tencent", alias="hunyuan", aliases=["hunyuan","tencent-hunyuan"], uiAlias="hunyuan", category="apikey", authType="apikey", authModes=["apikey"]. transport.baseUrl="https://api.hunyuan.cloud.tencent.com/v1/chat/completions", validateUrl="https://api.hunyuan.cloud.tencent.com/v1/models". models=[{id:"hunyuan-turbos-latest",name:"Hunyuan TurboS Latest",contextLength:200000},{id:"hunyuan-t1-latest",name:"Hunyuan T1 Latest",contextLength:256000}]
+- **Rust now:** N/A. No "tencent" or "hunyuan" key in default.rs PROVIDER_CONFIGS (the only tencent strings in src are codebuddy/copilot.tencent.com at default.rs:126 and provider.rs:874 — a different provider). HTTP 500 via UnsupportedProvider. provider_catalog.json already has a tencent provider entry (id=tencent, alias=hunyuan).
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("tencent", ProviderConfig::openai("https://api.hunyuan.cloud.tencent.com/v1/chat/completions"),). No headers. Full endpoint -> build_url unchanged. IMPORTANT: the key must be "tencent" (the JS id), NOT "hunyuan" (hunyuan is only the alias).
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn tencent_hunyuan_endpoint(): DefaultExecutor::new("tencent",...) succeeds and build_url == "https://api.hunyuan.cloud.tencent.com/v1/chat/completions".`
+- **⚠️ Risks:** Alias trap: JS id is "tencent", alias "hunyuan". The catalog providerIdToAlias maps tencent->hunyuan, and model resolution can hand either to the executor. Add ONLY the "tencent" key. If connections store provider="hunyuan", that would still 500 — check get_model_info/alias_to_provider_id (catalog.rs:97) maps the alias back to id "tencent". Do not add a second "hunyuan" key unless the resolution path proves it's needed; verify with a test.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P0-A1l` — Add tokenrouter provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/tokenrouter.js:1-162. id="tokenrouter", alias="tokenrouter", aliases=["tr"], uiAlias="tokenrouter", category="apikey". thinkingConfig={options:["low","medium","high","xhigh","max"],defaultMode:"high"}. transport.baseUrl="https://api.tokenrouter.com/v1/chat/completions", validateUrl="https://api.tokenrouter.com/v1/models", thinkingFormat="tokenrouter". embeddingConfig={baseUrl:"https://api.tokenrouter.com/v1/embeddings",authType:"apikey",authHeader:"bearer"}. imageConfig={baseUrl:"https://api.tokenrouter.com/v1/images/generations"}. modelsFetcher={url:"https://api.tokenrouter.com/v1/models",type:"openai"}. passthroughModels:true. models=[120 entries including MiniMax-Hailuo-2.3(kind video), MiniMax-M3, anthropic/claude-*, bytedance-seed/seedream-*(kind image), deepseek/deepseek-*, ex/gpt-5.4, google/gemini-*, kling-*(kind video), minimax/minimax-*, moonshotai/kimi-*, nvidia/nemotron-*, openai/gpt-*, qwen/qwen*, x-ai/grok-*, xiaomi/mimo-*, z-ai/glm-*, and kinds video/image/audio] serviceKinds=["llm","embedding","image"]
+- **Rust now:** N/A. No "tokenrouter" in src/. HTTP 500 via UnsupportedProvider.
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("tokenrouter", ProviderConfig::openai("https://api.tokenrouter.com/v1/chat/completions"),). No headers. Full endpoint -> build_url unchanged. thinkingFormat="tokenrouter" and thinkingConfig have no executor impact (they are translator/UI knobs; the DefaultExecutor does not special-case tokenrouter). The embedding/image endpoints belong to the media layer (separate task, parity D1); the chat executor entry is all that's needed here.
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn tokenrouter_chat_endpoint(): build_url == "https://api.tokenrouter.com/v1/chat/completions".`
+- **⚠️ Risks:** Do NOT add the embedding/image base URLs to the chat ProviderConfig — build_url would use them for chat. The chat endpoint is the ONLY one that belongs in default.rs for this provider. The 120-entry model list is for catalog/UI; do not embed into default.rs.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A1m` — Add venice provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/venice.js:1-56. id="venice", priority=115, alias="venice", aliases=["vn"], uiAlias="venice", category="apikey". transport.baseUrl="https://api.venice.ai/api/v1/chat/completions", validateUrl="https://api.venice.ai/api/v1/models", thinkingFormat="openai". models=[venice-uncensored-1-2, zai-org-glm-5, qwen3-235b-a22b-instruct-2507, qwen3-coder-480b-a35b-instruct-turbo, qwen3-vl-235b-a22b, deepseek-v4-pro, llama-3.3-70b, hermes-3-llama-3.1-405b, mistral-small-3-2-24b-instruct, text-embedding-3-large(kind embedding), text-embedding-bge-m3(kind embedding), text-embedding-qwen3-8b(kind embedding), venice-sd35(params [n,size],kind image), flux-2-pro(params [n,size],kind image), gpt-image-2(params [n,size,quality],kind image)]. serviceKinds=["llm","embedding","image"]. embeddingConfig={baseUrl:"https://api.venice.ai/api/v1/embeddings",authType:"apikey",authHeader:"bearer"}. imageConfig={baseUrl:"https://api.venice.ai/api/v1/images/generations"}. modelsFetcher={url:"https://api.venice.ai/api/v1/models",type:"openai"}. passthroughModels:true
+- **Rust now:** Wrong location. src/core/executor/provider.rs:1324-1326 (DEAD PROVIDER_REGISTRY) has ("venice", ProviderExecutorConfig::openai("https://api.venice.ai/api/v1")) — base lacks /chat/completions, key is in the dead map. Live default.rs PROVIDER_CONFIGS has NO venice key -> HTTP 500. provider_catalog.json has a venice provider entry (id=venice, alias=venice, serviceKinds llm/embedding/image).
+- **Fix:** In default.rs PROVIDER_CONFIGS add: ("venice", ProviderConfig::openai("https://api.venice.ai/api/v1/chat/completions"),). No headers. Note the /api/v1 path segment (double /api). Full endpoint -> build_url unchanged. The dead provider.rs:1324-1326 entry may stay (inert) or be updated; chat uses default.rs. The embedding/image endpoints belong to the media layer (separate task).
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn venice_api_v1_chat_endpoint(): build_url == "https://api.venice.ai/api/v1/chat/completions" (note /api/v1, not /v1).`
+- **⚠️ Risks:** The path is /api/v1/chat/completions (double path). A common mistake is writing https://api.venice.ai/v1/chat/completions. Copy verbatim. Do not route chat through the imageConfig base (…/images/generations).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A1n` — Add zed provider to PROVIDER_CONFIGS (default.rs)
+- **JS:** File .tmp/9router/open-sse/providers/registry/zed.js:1-71. id="zed", priority=10, alias="zd", uiAlias="zd", hidden:true, category="oauth", authType="oauth", hasOAuth:true. transport.baseUrl="https://cloud.zed.dev/completions", format="openai", forceStream:true, headers={"content-type":"application/json"}, auth={combined:true,header:"Authorization",scheme:"<user_id> <access_token>"}, usage.url="https://cloud.zed.dev/client/users/me", modelsUrl="https://cloud.zed.dev/models". models=[], passthroughModels:true. oauth={authorizeUrl:"https://zed.dev/native_app_signin",platform:"zed",rsaKeyExchange:true} (RSA keypair native-app signin; auth header is "Authorization: <user_id> <access_token>" plus a duplicate x-zed-cloud-token header; no clientId/clientSecret/tokenUrl/refreshUrl)
+- **Rust now:** N/A for the executor. No "zed" key in default.rs PROVIDER_CONFIGS (string "zed" only appears in provider_catalog.json provider entry id=zed alias=zd). HTTP 500 via UnsupportedProvider. The non-standard auth ("<user_id> <access_token>") and x-zed-cloud-token header, plus RSA OAuth, are NOT ported (parity A3/C1 — separate oauth task). provider_catalog.json has zed entry (id=zed, alias=zd, serviceKinds llm).
+- **Fix:** MINIMAL chat-path fix: in default.rs PROVIDER_CONFIGS add: ("zed", ProviderConfig::openai("https://cloud.zed.dev/completions"),). This gets past UnsupportedProvider so a connection with a pre-obtained token can chat (the token must already be in access_token). NOTE: This is INCOMPLETE parity — the JS executor builds "Authorization: <user_id> <access_token>" (two space-separated values, no Bearer) plus x-zed-cloud-token. The Rust DefaultExecutor only sends "Bearer <token>". Full zed executor parity (custom auth header) is a separate task (parity A3: open-sse/executors/zed.js NDJSON/SSE + zed_account.rs build_authorization_header). If the scope is strictly the 17-provider chat reachability fix, adding the bare config gets the provider routed; document that the auth header shape is a follow-up. Do NOT add "content-type":"application/json" as a default_header (it's already set by build_headers default.rs:822; a duplicate insert would be a no-op but is pointless).
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn zed_cloud_endpoint(): DefaultExecutor::new("zed",...) succeeds and build_url == "https://cloud.zed.dev/completions". (Separate future test for the "<user_id> <access_token>" header once the zed executor lands.)`
+- **⚠️ Risks:** zed forceStream: true and NDJSON wire protocol mean a naive openai translation may mis-parse the stream. The 9router zed executor does NDJSON/SSE translation. If you only add the config entry, streaming responses will be forwarded as raw SSE and clients expecting the OpenAI SSE shape may break. Note this explicitly as a follow-up; the minimum viable fix (this task) is reachability. Do not invent a Bearer+user_id combined header in DefaultExecutor without the JS zed executor to port.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A2a` — Add selfhosted-stt provider routing (media STT)
+- **JS:** File .tmp/9router/open-sse/providers/registry/selfhosted-stt.js:18-48. id="selfhosted-stt", priority=50, hasFree:true, alias="selfhosted-stt", category="apikey", authType="apikey". auth.apiKey.text="Set providerSpecificData.baseUrl to the full transcriptions URL, e.g. http://host:8080/v1/audio/transcriptions. The API key is not checked by local servers; any value works.". models=[{id:"whisper-1",name:"Whisper (self-hosted)",params:["language","response_format","temperature","prompt"],kind:"stt"}]. serviceKinds=["stt"]. sttConfig={baseUrl:"http://localhost:8080/v1/audio/transcriptions",authType:"apikey",authHeader:"bearer",format:"openai"}. Header comment (lines 9-17): sttCore dispatches on format; anything not one of the five named cloud shapes falls through to transcribeOpenAICompatible, which POSTs the standard multipart body (file, model, and optional language / prompt / response_format / temperature).
+- **Rust now:** No "selfhosted" string in src/. src/core/media/stt/mod.rs:44-48 dispatches format strings; SttFormat::OpenaiCompat exists (stt/mod.rs:44) and transcribe_openai_compat (stt/mod.rs:487). The file header at stt/mod.rs:1 says 'Orphaned — active implementation is in server/api/stt.rs'. server/api/stt.rs routing must be checked: it lacks a selfhosted-stt branch, so a selfhosted-stt request would fall through and fail.
+- **Fix:** 1) In src/server/api/stt.rs, add a branch that recognizes provider id "selfhosted-stt". 2) Read the per-connection baseUrl from connection.provider_specific_data["baseUrl"]; if absent, use the sttConfig default "http://localhost:8080/v1/audio/transcriptions". 3) Dispatch to the OpenAI-compatible multipart POST builder (already present as transcribe_openai_compat / SttFormat::OpenaiCompat in stt/mod.rs:487-578). 4) The auth header is "bearer" (Bearer <api_key>); local servers ignore it, any non-empty key works — do not require a real key, but require the field to be present (authType apikey means a credentials record exists). 5) The four params (language, response_format, temperature, prompt) are the multipart fields to forward.
+- **Test:** `Add a unit test in stt.rs (or stt/mod.rs test module): #[test] fn selfhosted_stt_uses_provider_specific_base_url(): given a connection with provider_specific_data["baseUrl"]="http://192.168.1.5:8080/v1/audio/transcriptions" and model "whisper-1", assert the built URL equals that value; and without the override, assert the default "http://localhost:8080/v1/audio/transcriptions" is used.`
+- **⚠️ Risks:** Do NOT fall back to api.openai.com — the JS adapter's whole point (comment at selfhosted-stt.js:1-17) is that the baseUrl comes from the connection. Security risk (parity-report A2): routing this through the generic openai-compatible node would send audio + key to OpenAI. Also ensure the 'format: openai' branch (SttFormat::OpenaiCompat) does not require a non-empty API key — local servers accept any value.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P0-A2b` — Add selfhosted-tts provider routing (media TTS)
+- **JS:** File .tmp/9router/open-sse/providers/registry/selfhosted-tts.js:12-44. id="selfhosted-tts", priority=50, hasFree:true, alias="selfhosted-tts", category="apikey", authType="apikey". auth.apiKey.text="Set providerSpecificData.baseUrl to the server root, e.g. http://host:8080 — /v1/audio/speech is appended. The API key is not checked by local servers; any value works.". models=[{id:"kokoro",name:"Kokoro (self-hosted)",params:["voice","response_format","speed"],kind:"tts"}]. serviceKinds=["tts"]. ttsConfig={baseUrl:"http://localhost:8880",defaultModel:"kokoro",authType:"apikey",format:"openai-speech"}. Comment (lines 3-11): every other self-hostable TTS provider carries a FIXED localhost baseUrl and authType "none", and the dispatcher reads ttsConfig.baseUrl from the registry entry rather than the connection; authType "apikey" is what makes the per-connection providerSpecificData.baseUrl override possible. Voice selected as "<model>/<voice>" (same convention as OpenAI TTS adapter).
+- **Rust now:** No "selfhosted" in src/. src/core/media/tts/mod.rs:88-118 has no selfhosted-tts branch. The TTS dispatcher reads ttsConfig.baseUrl from the registry entry (fixed localhost), so there is no per-connection override path.
+- **Fix:** 1) In src/core/media/tts/mod.rs (or server/api/tts.rs), add a provider branch for "selfhosted-tts". 2) Read connection.provider_specific_data["baseUrl"] for the server root; if absent use default "http://localhost:8880". 3) Append "/v1/audio/speech" to the root (JS: '/v1/audio/speech is appended'). 4) Use format "openai-speech" — the OpenAI TTS request shape (input text, model, voice, response_format, speed). 5) Voice is "<model>/<voice>" — split on '/' to get model=kokoro and voice; the params voice/response_format/speed map to the openai-speech body. 6) authType apikey: require a credentials record but do not validate the key value.
+- **Test:** `In tts/mod.rs test module: #[test] fn selfhosted_tts_appends_speech_path(): connection with baseUrl="http://192.168.1.5:8080" produces URL "http://192.168.1.5:8080/v1/audio/speech"; default produces "http://localhost:8880/v1/audio/speech".`
+- **⚠️ Risks:** The trailing /v1/audio/speech append must not double-append if the user's baseUrl already ends in /v1/audio/speech (JS comment in selfhosted-embedding.js:44-49 notes the analogous tolerance for /embeddings). Trim trailing '/'. Do not send the API key as a required real credential (local servers ignore it).
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P0-A2c` — Add selfhosted-embedding provider routing (media embeddings) — MUST refuse cloud fallback
+- **JS:** File .tmp/9router/open-sse/providers/registry/selfhosted-embedding.js:30-73. id="selfhosted-embedding", priority=50, hasFree:true, alias="selfhosted-embedding", category="apikey", authType="apikey". auth.apiKey.text="Set providerSpecificData.baseUrl to the OpenAI base URL, e.g. http://host:8080/v1 — /embeddings is appended. The API key is not checked by local servers; any value works.". models=[{id:"embedding",name:"Self-hosted embedding model",kind:"embedding"}]. serviceKinds=["embedding"]. embeddingConfig={baseUrl:"http://localhost:8080/v1/embeddings",authType:"apikey",authHeader:"bearer"}. Critical comment lines 43-49: 'the adapter appends "/embeddings" to whatever it is given, so a bare http://host:8080 resolves to http://host:8080/embeddings and misses the OpenAI route entirely. Give it the OpenAI base, the same value an OpenAI client would use. A trailing /embeddings is tolerated.' Also comments 62-72: embeddingConfig.baseUrl is read by the UI but NOT by the request path — openaiCompatNode resolves the URL purely from creds.providerSpecificData.baseUrl (falling back to api.openai.com).
+- **Rust now:** No "selfhosted" in src/. src/core/media/embeddings/mod.rs:46-66 and src/core/embeddings/base.rs:172 (per parity-report A2) currently fall back to api.openai.com when no baseUrl is present — the exact data-leak the JS adapter refuses to do.
+- **Fix:** 1) In src/core/media/embeddings/mod.rs add a provider branch "selfhosted-embedding". 2) Read connection.provider_specific_data["baseUrl"]; it is the OpenAI base (e.g. http://host:8080/v1). Append "/embeddings" to it. If the baseUrl already ends with "/embeddings" (or "/v1/embeddings"), do not double-append (tolerate trailing /embeddings per JS comment). 3) If baseUrl is MISSING: return an error (MissingBaseUrlError / 400) — the JS adapter's whole design is to REFUSE the api.openai.com fallback. Do NOT fall back to https://api.openai.com/v1. 4) authHeader "bearer" (Bearer <api_key>); key value ignored by local servers but field must exist. 5) The single model id "embedding" passes through.
+- **Test:** `In embeddings/mod.rs test module: #[test] fn selfhosted_embedding_no_cloud_fallback(): connection WITHOUT baseUrl returns an Err (or 400) — assert it does NOT build https://api.openai.com/...; #[test] fn selfhosted_embedding_appends_embeddings(): baseUrl "http://host:8080/v1" -> "http://host:8080/v1/embeddings"; baseUrl "http://host:8080/v1/embeddings" -> unchanged (no double append).`
+- **⚠️ Risks:** SECURITY: this is the highest-risk task. If the branch is missing or falls through to the generic openai-compatible node (embeddings/base.rs:172), text + API key are silently sent to OpenAI. The JS author (selfhosted-embedding.js:5-24) explicitly documents that a node created as openai-compatible is invisible on the Embedding page — so route by provider id "selfhosted-embedding", not by node type. Double-append of /embeddings is a functional bug to guard against.
+- **Verified:** ✅ CONFIRMED
+
+## PART B — EXECUTORS (22 specs)
+
+### `P0-A1` — kimchi: stripReasoningContent direction is inverted — JS strips reasoning_content from REQUEST, Rust strips from RESPONSE; anthropic-backing detection regex; missing mergeTopLevelSystem/system/thinking/stripMessageArtifacts
+- **JS:** JS open-sse/executors/kimchi.js:79-87 — `export function stripReasoningContent(body) { if (!Array.isArray(body?.messages)) return; for (const msg of body.messages) { if (msg && msg.role === "assistant" && typeof msg.reasoning_content === "string" && msg.reasoning_content.length > REASONING_PLACEHOLDER_MAX_LEN) { delete msg.reasoning_content; } } }` with `REASONING_PLACEHOLDER_MAX_LEN = 8` (line 77). Runs on the REQUEST in transformRequest (line 118). JS also: `isAnthropicBackedKimchiModel` (lines 89-93) = `meta?.provider === "anthropic" || meta?.upstreamProvider === "anthropic"` OR regex `/(^|[-_/])(?:claude|anthropic)(?:[-_/]|$)/i.test(String(model || ""))`. JS transformRequest (100-120) additionally: `mergeTopLevelSystem(transformed)` (29-45: hoists body.system string/array into messages, prepending `{role:"system",content:text}` or joining to existing), `delete transformed.system`, drops `reasoning_effort`,`reasoning`,`thinking` for anthropic-backed (110-114), `stripMessageArtifacts` (47-59: delete msg.cache_control + strip `cache_control` and `signature` from each content part), `stripToolArtifacts` (61-68: delete cache_control from each tool).
+- **Rust now:** src/core/executor/kimchi.rs — (a) strips top-level fields 71-79 ✓ but does NOT delete top-level `system` nor merge it. (b) `remove_reasoning_content` (144-161) strips reasoning_content from the RESPONSE body (non-streaming 250-266, plus streaming handled elsewhere) — the OPPOSITE direction; JS never touches responses. (c) `is_anthropic_backed_model` (50-52) only checks prefix `kimchi-sonnet`/`kimchi-haiku`; test at 434-437 even asserts `claude-sonnet-4-20250514` is NOT anthropic-backed (JS would match it via regex). (d) drops only `reasoning_effort` (98-102); JS drops `reasoning_effort` AND `reasoning` AND `thinking`. (e) no signature strip from content parts.
+- **Fix:** In src/core/executor/kimchi.rs: (1) Replace `remove_reasoning_content`/`remove_reasoning_content` response stripping (lines 144-161 and the non-streaming branch 250-266) — do NOT strip reasoning_content from responses at all; revert to returning the raw response bytes. (2) Change `is_anthropic_backed_model` to a regex mirroring JS: `/(^|[-_/])(?:claude|anthropic)(?:[-_/]|$)/i` applied to the model (case-insensitive); drop the prefix-only check. (3) In `transform_request`, for anthropic-backed models also `obj.remove("reasoning")` and `obj.remove("thinking")`. (4) After step 1, add: delete top-level `system`; if `body.system` is a string or array of {text}, flatten with `join("\n")` and either prepend `{role:"system",content:text}` to messages or prepend `text + "\n\n" + existing` for a string-content system message / unshift `{type:"text",text}` for array content. (5) Add request-side strips: for each message `obj.remove("cache_control")`, and for each content part remove `cache_control` and `signature`; for each tool remove `cache_control`. (6) For each assistant message whose `reasoning_content` is a string longer than 8 chars, remove it.
+- **Test:** `test_transform_request_strips_request_reasoning_content_echo: build body with assistant message `{"role":"assistant","reasoning_content":"aaaaaaaaa","content":"ok"}` → assert result has no reasoning_content; and a 4-char placeholder `"    "` is PRESERVED (len <= 8).`
+- **⚠️ Risks:** The JS threshold (len > 8) preserves the 1-char placeholder injected by DefaultExecutor.transformRequest's injectReasoningContent; stripping the placeholder would re-trigger upstream validation errors on the next turn — preserve ≤8-char values exactly. Removing response-side stripping changes visible output: do not remove reasoning_content from upstream responses (JS passes them through).
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P0-A1` — temperature drop for Claude — missing STRIP_RULES entry (all providers) + GitHub rules
+- **JS:** paramSupport.js:8-24 — the STRIP_RULES array (a param is removed ONLY when present !== undefined):
+```js
+const STRIP_RULES = [
+  { match: /claude/i, drop: ["temperature"] },
+  { provider: "github", match: /gpt-5\.4/i, drop: ["temperature"] },
+  { provider: "github", match: (m) => /claude/i.test(m) && !/claude.*(opus|sonnet).*4\.6/i.test(m), drop: ["thinking", "reasoning_effort"] },
+  ...
+];
 ```
-MiniMax-Hailuo-2.3, MiniMax-M3, anthropic/claude-fable-5, anthropic/claude-haiku-4.5,
-anthropic/claude-opus-4.5/4.6/4.7/4.7-fast/4.8/4.8-fast/5/5-fast, anthropic/claude-sonnet-4/4.5/4.6/5,
-bytedance-seed/seedream-4.5/5.0-lite/5.0-pro, claude-haiku-4-5, claude-opus-4-8-m-aws,
-deepseek/deepseek-v3.2/v4-flash/v4-flash-0731/v4-pro, ex/gpt-5.4, google/gemini-2.5-flash-image,
-google/gemini-3-flash-preview/3-pro-image-preview/3.1-flash-image-preview/3.1-flash-lite-image/3.1-pro-preview/3.5-flash/3.5-flash-lite/3.6-flash,
-google/gemini-embedding-2, google/gemma-4-26b-a4b-it, happyhorse-1.0-t2v, kling-3.0-turbo/v2-6/v3/v3-omni,
-microsoft/mai-image-2.5, minimax/minimax-m2-her/m2.1/m2.1-highspeed/m2.5/m2.7/m2.7-highspeed,
-miromind/mirothinker-1-7-deepresearch(-mini), mistralai/devstral-2512/medium-3-5/small-2603/voxtral-small-24b-2507,
-moonshotai/kimi-k2.5/k2.6/k2.7-code/k3/k3-free, nvidia/nemotron-3-nano-omni:free/nemotron-3-super-120b-a12b,
-openai/gpt-4o-mini/5/5-image/5-image-mini/5-mini/5.2/5.4/5.4-image-2/5.4-mini/5.4-nano/5.4-pro/5.5/5.5-pro/5.6-luna/5.6-sol/5.6-terra/gpt-audio/gpt-audio-mini/gpt-oss-120b,
-qwen/qwen3-coder-next/3.5-122b-a10b/3.5-35b-a3b/3.5-397b-a17b/3.5-9b/3.5-flash/3.5-plus-02-15/3.6-plus/3.7-max/3.7-plus/3.8-max,
-qwen3.5-omni-plus, qwen3.6-flash, sakana/fugu-ultra, seed-2-0-*, stepfun/step-3.5-flash/3.7-flash,
-tencent/hy3-preview, x-ai/grok-4.1-fast/4.20-beta/4.3/4.5/grok-build-0.1, xiaomi/mimo-v2-flash/omni/pro/2.5/2.5-pro, z-ai/glm-4.5-air/4.6/4.6v/4.7/5/5-turbo/5.1/5.2
+Call sites: executors/default.js:78 `stripUnsupportedParams(this.provider, model, transformed);` and executors/github.js:109 `stripUnsupportedParams("github", model, transformed);`. The /claude/i temperature rule has NO provider field, so it applies to EVERY provider (incl. github) whenever the model id matches /claude/i.
+- **Rust now:** src/core/executor/strip_unsupported.rs:15-34 should_strip() only strips (a) max_completion_tokens for anthropic-compatible providers, (b) reasoning_effort for gemini/vertex, (c) max_tokens for gemini. No temperature rule, no github rules. Called ONLY from src/core/executor/default.rs:1008. src/core/executor/github.rs transform_request (lines 374-411) does its own inline strips (supports_temperature only for gpt-5.4 at line 232) and never calls strip_unsupported_params.
+- **Fix:** In src/core/executor/strip_unsupported.rs, extend should_strip(provider, model, field) with these rules (in order, after the existing three):
+1. `if field == "temperature" && model.to_lowercase().contains("claude") { return true; }`  (mirrors JS `{ match: /claude/i, drop: ["temperature"] }` — applies to all providers)
+2. `if field == "temperature" && provider == "github" && model.to_lowercase().contains("gpt-5.4") { return true; }`
+3. `let m = model.to_lowercase(); let is_claude_except_46 = m.contains("claude") && !(m.contains("claude") && (m.contains("opus") || m.contains("sonnet")) && m.contains("4.6")); if provider == "github" && (field == "thinking" || field == "reasoning_effort") && is_claude_except_46 { return true; }`
+Then in src/core/executor/github.rs transform_request (after the existing inline strips at lines 385-409), add: `super::strip_unsupported::strip_unsupported_params("github", model, &mut transformed);` — idempotent because already-stripped fields are gone. NOTE: strip_unsupported_params only iterates top-level body keys and `extra_body` (strip_unsupported.rs:46-67); that matches JS which iterates body object keys. The 4.6 exception matters: a `claude-opus-4.6`/`claude-sonnet-4.6` model on github must KEEP thinking+reasoning_effort (Rust github.rs supports_reasoning_effort at line 241 already mirrors this — keep it).
+- **Test:** `In strip_unsupported.rs tests, add `strips_temperature_for_claude_models` — body with `{"temperature":0.7,"messages":[]}`, call strip_unsupported_params("openai", "claude-sonnet-4.5", &mut body), assert body.get("temperature").is_none(). Add `keeps_temperature_for_non_claude` — provider "openai" model "gpt-4o", assert temperature stays. Add `strips_thinking_and_effort_for_github_claude_except_46` — provider "github" model "claude-sonnet-4.5" strips reasoning_effort; provider "github" model "claude-sonnet-4.6" keeps reasoning_effort.`
+- **⚠️ Risks:** JS drops temperature even when it is the JSON number 0 (typeof check: `body[key] !== undefined` — 0 is !== undefined so it IS deleted; do NOT gate on truthiness). The github 4.6 regex exception is `claude.*(opus|sonnet).*4.6` — a model like `claude-opus-4.6` OR `claude-sonnet-4.6`; do not over-match other 4.6 models. The Rust github.rs inline `supports_thinking` (line 236) strips thinking for ALL claude — that diverges from JS (which keeps it for 4.6); align it to the regex exception too.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A1` — STT: per-connection baseUrl override missing (selfhosted-stt)
+- **JS:** sttCore.js:176-182:
+  // Per-connection endpoint override. Registry entries carry a fixed baseUrl,
+  // which is right for a named cloud service but useless for a self-hosted one
+  // whose address only the operator knows. Opt-in: absent unless the connection
+  // sets it, so cloud providers are untouched.
+  const overrideUrl = credentials?.providerSpecificData?.baseUrl;
+  if (overrideUrl) cfg = { ...cfg, baseUrl: String(overrideUrl).replace(/\/+$/, "") };
+Registry selfhosted-stt.js:40-46:
+  sttConfig: {
+    baseUrl: "http://localhost:8080/v1/audio/transcriptions",
+    authType: "apikey", authHeader: "bearer", format: "openai"
+  }
+- **Rust now:** src/server/api/stt.rs: stt_config() returns static SttProviderConfig with fixed base_url (e.g. line 87 `base_url: "https://api.openai.com/v1/audio/transcriptions"`); transcribe_openai (line 692) does `client.post(cfg.base_url)` with NO read of connection.provider_specific_data["baseUrl"]. The cfg is `&'static SttProviderConfig` — the connection override is never applied.
+- **Fix:** 1) In src/server/api/stt.rs, change the per-provider fixed base_url into an overridable resolved value inside dispatch_with_fallback / transcribe. Before calling transcribe, resolve: `let base = connection.provider_specific_data.get("baseUrl").and_then(Value::as_str).map(|s| s.trim_end_matches('/').to_string()).unwrap_or_else(|| cfg.base_url.to_string());` 2) Thread an owned `String base_url` into each transcribe_* fn (or add a `base_url: String` field to a per-call struct). 3) Use that resolved base_url everywhere cfg.base_url is used: transcribe_openai (line 692 `client.post(cfg.base_url)`), deepgram build_deepgram_url, assemblyai upload/submit/poll (lines 864, 898), huggingface-asr (line 1008 `format!("{}/{}", ...)`), gemini (line ~1076). 4) Keep auth from connection as today. No static-catalog change needed.
+- **Test:** `fn stt_openai_resolves_connection_base_url_override() — build an SttRequest, assert the resolved URL is `{providerSpecificData.baseUrl}` with trailing slash stripped, not the static default; assert a connection without baseUrl still uses the static default.`
+- **⚠️ Risks:** JS trims trailing slashes on the override (`.replace(/\/+$/, "")`) but keeps the static default as-is (deepgram default ends `/v1/listen`). Override is opt-in only — a connection WITHOUT baseUrl must still hit the static default. Only apply to the selected connection, never cross-account.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P0-A1` — PXPIPE dashboard page + /api/pxpipe/* endpoints missing entirely
+- **JS:** 9router route .tmp/9router/src/app/(dashboard)/dashboard/pxpipe/page.js:3-5 = `import PxpipeClient from "./PxpipeClient"; export default function PxpipePage() { return <PxpipeClient />; }`. PxpipeClient.js:72-81 = `Promise.all([fetch("/api/pxpipe/status", { headers: { "Cache-Control": "no-store" } }), fetch("/api/pxpipe/stats"), fetch("/api/pxpipe/logs?limit=50")])` then `fetch("/api/pxpipe/health", { method: "POST" })`. /api/pxpipe/status GET body = `{ installed, installing, version, path, running, loadedAt, uptimeMs, npmAvailable, mode: "library", enabled: !!settings.pxpipeEnabled, autoInstall: !!settings.pxpipeAutoInstall, minChars: settings.pxpipeMinChars, timeoutMs: settings.pxpipeTimeoutMs }` (settingsRepo.js:53-56 defaults `pxpipeEnabled:false, pxpipeAutoInstall:true, pxpipeMinChars:25000, pxpipeTimeoutMs:15000`). /api/pxpipe/health POST (GET mirrors) = `{ healthy, checks:[{id:'installed',label:'PXPIPE installed',ok,detail},{id:'module',label:'Transform module loads',ok,detail},{id:'transform',label:'Test request transforms',ok,detail}], error }`. /api/pxpipe/stats = `{ windows:{all,today,yesterday,last7d,last30d}, timeline:[{date,tokensSavedEst,compressed,requests}], recent:[ev] }`; window totals `{requests,compressed,bypassed,errors,tokensBeforeEst,tokensAfterEst,tokensSavedEst,savedPct,imagesGenerated,compressionTimeMs,avgCompressionMs}`; recent ev `{ts,provider,model,applied,reason,tokensBeforeEst,tokensAfterEst,tokensSavedEst,savedPct,durationMs,imageCount,detail}`. /api/pxpipe/logs?limit=50 = `{ installLog, events }`. REASON_LABELS (PxpipeClient.js:36-49): applied='Prompt exceeded threshold', below_threshold='Below size threshold', not_profitable='Compression not profitable', below_min_chars='Below minimum chars', below_min_tokens='Below minimum tokens', unsupported_model='Model not in allowlist', unsupported_format='Non-Claude request format', timeout='Compression timed out', transform_error='Transform error', passthrough='Passthrough', disabled='Disabled', not_installed='Not installed'. UI: 6 SummaryCards Status/Version/Uptime/Requests/Compressed/Bypassed, 5 tabs Today/Yesterday/7 days/30 days/All time, AreaChart stroke #10b981 with linearGradient gradPxpipe stopColor #10b981 (PxpipeClient.js:186-195), History table with Status badge colors success/danger/warning, PXPIPE Logs card showing logs.installLog in <pre>.
+- **Rust now:** N/A. No pxpipe string exists anywhere in web/src or src (grep for pxpipe returns nothing). No /dashboard/pxpipe page, no Token Saver PXPIPE controls, no settings keys pxpipeEnabled/pxpipeAutoInstall/pxpipeMinChars/pxpipeTimeoutMs.
+- **Fix:** 1) Rust settings struct (src/types.rs settings): add 4 fields with the exact JS defaults - pxpipe_enabled: bool = false, pxpipe_auto_install: bool = true, pxpipe_min_chars: u32 = 25000, pxpipe_timeout_ms: u32 = 15000. Wire into settings load/save and PATCH /api/settings. 2) Add routes in src/server/api: GET /api/pxpipe/status returning {installed:false, installing:false, version:null, path:null, running:false, loadedAt:null, uptimeMs:0, npmAvailable:false, mode:"library", enabled, autoInstall, minChars, timeoutMs}; GET /api/pxpipe/stats returning {windows:{all:empty,today:empty,yesterday:empty,last7d:empty,last30d:empty},timeline:[],recent:[]} with the exact window field names; GET /api/pxpipe/logs returning {installLog:null,events:[]}; POST+GET /api/pxpipe/health returning {healthy:false,checks:[],error:"pxpipe not installed"}. Persist pxpipe events to data dir events.jsonl so a future real integration can feed stats. 3) Frontend: web/src/pages/dashboard/pxpipe/index.astro + PxpipePageClient.tsx port of PxpipeClient.js (6 summary cards, window tabs, chart, history table, logs card). 4) Sidebar: add { href: '/dashboard/pxpipe', label: 'PXPIPE', icon: 'image' } exactly as JS has it commented out (JS Sidebar.js:28 has it commented - mirror that: leave commented unless backend integration exists).
+- **Test:** `cargo test pxpipe_settings_defaults_and_roundtrip - assert Settings::default().pxpipe_enabled==false, pxpipe_auto_install==true, pxpipe_min_chars==25000, pxpipe_timeout_ms==15000, and PATCH /api/settings with {"pxpipeMinChars":12345} round-trips. Plus test_pxpipe_routes_defined asserting routes() builds (mirrors test_usage_routes_defined in usage.rs:1539).`
+- **⚠️ Risks:** JS setting keys are camelCase in the API (pxpipeMinChars) - Rust must serde rename_all camelCase on the settings PATCH. pxpipe stats window keys must be exactly 'all'/'today'/'yesterday'/'last7d'/'last30d'. The JS status fields enabled/autoInstall/minChars/timeoutMs come from settings, NOT from the service - a naive port that omits them breaks the Token Saver pxpipe card too. Mode string must be 'library' not 'library-mode'.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A1` — Capacity adapter: entirely missing in Rust (settings, augment, strip, strategy)
+- **JS:** open-sse/services/capacityAdapter.js:13-15: `const CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput"]; const HARD_CAPS = new Set(CAPABILITY_KEYS); const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free";`
+:19-41 `normalizeCapEntry` (accepts array-form or `{enabled, roundRobin, models}`; enabled defaults true; empty-enabled pool falls back to `models: [DEFAULT_FALLBACK_MODEL]` via `getCapacityAdapterConfig`).
+:44-58 `getCapacityAdapterModels(settings)`: flatten enabled pools in CAPABILITY_KEYS order, dedup via Set.
+:61-64 `getCapacityAdapterStrategy(cap, settings)`: `enabled && roundRobin ? "round-robin" : "fallback"`.
+:68-76 `getActiveAdapterStrategy(requiredCapabilities, settings)`: iterate `HARD_CAPS` in `requiredCapabilities`, return strategy of first enabled non-empty pool, else "fallback".
+:78-100 `modelSatisfies(modelStr, requiredHard)` uses `getCapabilitiesForModel(provider, model)` and `augmentModelsWithCapacityAdapter(models, requiredCapabilities, settings)`: if any original model satisfies the hard caps return models unchanged; else prepend pool models that satisfy and aren't already in models.
+:102-156 `stripHistoryForContext(body, contextWindow)`: messages|input|contents key; split system/developer msgs; keep trailing user turn (after last assistant/model); budget = `(contextWindow || 200000) * 0.8 * 4` chars; keep first HEAD_KEEP=6 older messages verbatim; drop from end of head until budget fits; return `{...body, [key]: [...systemMsgs, ...head, ...tail]}`.
+:160-173 `withCapacityAdapterStripping(handleSingleModel, adapterModels)`: wraps so adapter-model calls first `stripHistoryForContext(body, getCapabilitiesForModel(provider, model).contextWindow)`.
+
+Wire-in src/sse/handlers/chat.js:96-152: combo path `augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings)`; `adapterAdded = augmentedModels.filter(m => !comboModels.includes(m))` passed to `withCapacityAdapterStripping(handleSingleModel, adapterAdded)`; comboStrategy from `getActiveAdapterStrategy(requiredCapabilities, settings)` for solo-augmented path.
+
+Default settings src/lib/db/repos/settingsRepo.js:20-26: `capacityAdapter: { vision: { enabled: true, roundRobin: false, models: [] }, pdf: { enabled: false, roundRobin: false, models: [] }, audioInput: { enabled: true, roundRobin: false, models: [] }, videoInput: { enabled: false, roundRobin: false, models: [] } }`.
+- **Rust now:** N/A. src/core/combo/mod.rs:189 `HARD_CAPS = ["vision", "pdf"]` only (missing audioInput/videoInput). `detect_required_capabilities` (line 193) and `scan_content_for_capabilities` (line 256) only add vision/pdf. `model_has_capability` (line 302) only handles vision/pdf. No capacity-adapter settings field in `Settings` (src/types/mod.rs:430-535 has rtk/headroom/caveman but no capacity_adapter). `UpdateSettingsRequest` (src/server/api/mod.rs:2065) has no capacity_adapter. No `strip_history_for_context` or adapter-augmentation anywhere.
+- **Fix:** 1. In src/types/mod.rs add to `Settings` struct: `#[serde(default, deserialize_with = "deserialize_null_default")] pub capacity_adapter: serde_json::Value,` (default `json!({})` in Default impl) — it is read-only at runtime, the dashboard PATCHes it via `extra`? No — add an explicit field to `UpdateSettingsRequest` in src/server/api/mod.rs: `capacity_adapter: Option<serde_json::Value>` and in `update_settings_api` body add `if let Some(v) = req.capacity_adapter { db.settings.capacity_adapter = v; }` (mirror the rtk_enabled pattern at line 2206).
+2. New module src/core/combo/capacity_adapter.rs porting capacityAdapter.js:
+   - `pub const CAPABILITY_KEYS: [&str; 4] = ["vision", "pdf", "audioInput", "videoInput"];`
+   - `pub const DEFAULT_FALLBACK_MODEL: &str = "oc/mimo-v2.5-free";`
+   - `fn normalize_cap_entry(entry: &Value) -> CapEntry { enabled, roundRobin, models: Vec<String> }` — accept array-form `[{model}]`/`["model"]` (enabled=true, roundRobin=false, models=model or string), object-form with `enabled !== false`, `roundRobin: !!roundRobin`, `models` array filter Boolean; else disabled.
+   - `fn get_capacity_adapter_config(cap, settings) -> CapEntry` — `enabled && models.is_empty()` → models=`[DEFAULT_FALLBACK_MODEL]`.
+   - `pub fn get_capacity_adapter_models(settings) -> Vec<String>` — CAPABILITY_KEYS order, dedup HashSet.
+   - `pub fn get_capacity_adapter_strategy(cap, settings) -> &'static str` — `enabled && roundRobin ? "round-robin" : "fallback"`.
+   - `pub fn get_active_adapter_strategy(required: &HashSet<String>, settings) -> &'static str` — first hard cap in required with enabled non-empty pool; else "fallback".
+   - `fn model_satisfies(model_str, required_hard) -> bool` — split at first '/'; look up capabilities (see step 4).
+   - `pub fn augment_models_with_capacity_adapter(models: &[String], required: &HashSet<String>, settings) -> Vec<String>` — if hard empty or models empty or `models.iter().any(model_satisfies)` return models; else prepend pool models satisfying hard and not already present.
+   - `pub fn strip_history_for_context(body: &mut Value, context_window: Option<u64>) -> bool` — port blockLength (string→len, array→sum text len or 50), budget chars `(context_window || 200000)*0.8*4`, head KEEP 6. Return true if body mutated.
+   - `pub fn with_capacity_adapter_stripping` — not needed as separate wrapper; instead in the dispatch loop, before handle_single_model, check if model is in adapterAdded set and if so call strip_history_for_context with the model's contextWindow.
+3. Wire into the combo dispatch in src/server/api/chat.rs: after `detect_required_capabilities` compute `augmented` via `augment_models_with_capacity_adapter(&combo_members, &required, &settings.capacity_adapter)`; compute `adapter_added`; pass augmented member list to the combo executor (instead of raw members); inside the handle_single_model closure for a model in adapter_added, call strip_history_for_context with the model's context window before forwarding. Set combo strategy to `get_active_adapter_strategy(&required, &settings.capacity_adapter)` when a solo model was augmented.
+4. Capabilities for oc/mimo-v2.5-free: `DEFAULT_FALLBACK_MODEL` provider is `oc`, model `mimo-v2.5-free`. In `model_has_capability` (src/core/combo/mod.rs:302) extend to audioInput/videoInput, and add a provider-prefix map for `oc` → mimo-v2.5-free supports vision+audioInput+videoInput (it is a multimodal free model; verify against 9router capabilities.js entry for mimo-v2.5-free). If exact caps are uncertain, mark only vision true and let pools carry models.
+- **Test:** ``capacity_adapter_augments_only_when_original_lacks_cap`: settings `{vision:{enabled:true,roundRobin:false,models:["oc/mimo-v2.5-free"]}}`; augment `["openai/gpt-4"]` with required `{vision}` → returns `["oc/mimo-v2.5-free", "openai/gpt-4"]`; augment `["anthropic/claude"]` with required `{vision}` → unchanged. Also `capacity_adapter_strip_history_keeps_system_and_tail`: body with system + 8 user/assistant turns + trailing user with image, context_window 200000 → messages reduced but system + trailing user retained.`
+- **⚠️ Risks:** JS DEFAULT_FALLBACK_MODEL `oc/mimo-v2.5-free` must be exact. roundRobin strategy on the solo-augmented path must come from the FIRST satisfying cap, not the first enabled. Dedup in getCapacityAdapterModels must be order-preserving. stripHistoryForContext must ONLY run for adapter-added models (never for combo members) or it will strip normal combos. 80% headroom factor and CHARS_PER_TOKEN=4 must be preserved exactly. Empty enabled pool must fall back to the mimo model, never a no-op.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A1` — git-log RTK filter is missing entirely in Rust (G2b)
+- **JS:** open-sse/rtk/filters/gitLog.js:1-99 — full filter with `gitLog.filterName = "git-log"`. Key logic:
+```js
+import { GIT_LOG_MAX_LINES } from "../constants.js";
+// GIT_LOG_MAX_LINES = 200 (open-sse/rtk/constants.js:7)
+export function gitLog(text, maxLines = GIT_LOG_MAX_LINES) {
+  if (!text) return "";
+  const lines = input.split("\n"); ...
+  // commit header: /^commit [0-9a-f]{7,40}$/i OR /^[*|/\\ ]+commit [0-9a-f]{7,40}/i
+  // inCommit: /^[*|/\\ ]*(Author|Date):/i kept verbatim
+  //           blank "" skipped
+  //           first indented subject (!subjectSeen && /^[*|/\\ ]*    \S/.test(line)) -> "  Subject: " + trimmed
+  //           /^\d+ file\w* changed/ -> "  " + trimmed
+  //           /^diff --git / -> "  ... diff body omitted"
+  //           everything else dropped
+  // not inCommit: graphMatch /^[*|/\\ ]+([0-9a-f]{7,40}\s+.+)/i -> push graphMatch[1]
+  //               plain oneline /^[0-9a-f]{7,40}\s+/ -> push trimmed
+  //               pure graph /^[*|/\\ ]+$/ && /[*|/\\]/ -> skip
+  //               catch-all pushLine(trimmed)
+  // pushLine caps at maxLines; overflow -> skipped++
+  if (skipped > 0) out.push(`... (${skipped} more lines)`);
+  const result = out.join("\n");
+  if (!result && input) return input;         // never return empty
+  if (result.length > input.length) return input; // never grow
+  return result;
+}
 ```
+Detection in open-sse/rtk/autodetect.js:21,32: `const RE_GIT_LOG = /^[*|/\\ ]*commit [0-9a-f]{7,40}$/m;` checked FIRST — `if (RE_GIT_LOG.test(head)) return gitLog;`
+- **Rust now:** src/core/rtk/filters/mod.rs has NO git_log_impl; src/core/rtk/constants.rs has NO GIT_LOG_MAX_LINES; autodetect.rs:50-196 has NO git-log branch. grep for 'git_log|git-log' in src/ returns 0 matches. The JS `gitLog.filterName="git-log"` and constants `FILTERS.GIT_LOG: "git-log"` (constants.js:50) also missing from FILTER_* set.
+- **Fix:** 1) src/core/rtk/constants.rs: add `/// gitLog line cap
+pub const GIT_LOG_MAX_LINES: usize = 200;` and `pub const FILTER_GIT_LOG: &str = "git-log";`
+2) src/core/rtk/filters/mod.rs: add `pub struct GitLogFilter; impl GitLogFilter { pub fn apply(&self, text: &str) -> String { safe_apply(git_log_impl, text, FILTER_GIT_LOG) } }` and `pub fn git_log_impl(input: &str) -> String` implementing the JS exactly: split lines; regex commit-header `^(commit [0-9a-f]{7,40})$` (case-insensitive) or `^[*|/\\ ]+commit [0-9a-f]{7,40}`; within commit keep `^[*|/\\ ]*(Author|Date):` trimmed verbatim, skip blank, first `^[*|/\\ ]*    \S` (non-whitespace after 4 spaces) → `  Subject: {trimmed}`, `^\d+ file\w* changed` → `  {trimmed}`, `^diff --git ` → `  ... diff body omitted`, else drop; outside commit: `^[*|/\\ ]+([0-9a-f]{7,40}\s+.+)` → capture group 1, `^[0-9a-f]{7,40}\s+` → trimmed, pure graph `^[*|/\\ ]+$` with a graph char → skip, else push trimmed. Cap at GIT_LOG_MAX_LINES via pushLine-equivalent; if skipped>0 append `... (N more lines)`. If result empty and input non-empty → return input; if result.len() > input.len() → return input.
+3) src/core/rtk/apply_filter.rs: add `pub fn git_log(text: &str) -> String { use crate::core::rtk::filters::GitLogFilter; GitLogFilter.apply(text) }`
+4) src/core/rtk/autodetect.rs: import git_log_impl + FILTER_GIT_LOG; add `static RE_GIT_LOG: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^[*|/\\ ]*commit [0-9a-f]{7,40}$").unwrap());` and insert as the FIRST check (before RE_GIT_DIFF): `if RE_GIT_LOG.is_match(head) { return Some(DetectedFilter { filter_fn: git_log_impl, filter_name: FILTER_GIT_LOG }); }`
+- **Test:** `cargo test test_git_log_full_and_oneline in src/core/rtk/filters/mod.rs: assert git_log_impl on a `commit abc1234\nAuthor: X\nDate: Y\n\n    subject line\n\n 5 files changed` block contains `commit abc1234`, `Author: X`, `  Subject: subject line`, does NOT contain the diff body; assert oneline mode `abc1234 subject` passes through; assert >200 lines appends `... (N more lines)`. Add autodetect test `test_detects_git_log` asserting auto_detect_filter("commit abc1234\nAuthor: X") == FILTER_GIT_LOG.`
+- **⚠️ Risks:** RE_GIT_LOG must be checked before RE_GIT_DIFF in autodetect (JS order git-log → git-diff). The commit-header regex anchors with $ on a trimmed line — use (?m) so ^/$ are line anchors. `pushLine(trimmed)` for Author/Date pushes the TRIMMED line (graph prefix stripped by regex match but JS pushes `trimmed` not `line`). Case-insensitive /i on the commit regex. Never return empty and never grow input — JS both guard against output.length >= bytesIn in compressText (rtk/index.js:138) AND gitLog itself returns input. Must preserve the `  Subject: ` 2-space prefix exactly.
+- **Verified:** 🟡 PLAUSIBLE
 
-**Implementation steps (Rust):**
-1. Trong `src/core/executor/default.rs`, thêm 17 entry vào `PROVIDER_CONFIGS` với baseUrl chính xác ở bảng trên. Ví dụ:
-   ```rust
-   ("alims-intl", ProviderConfig::openai("https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions")),
-   ("api-airforce", ProviderConfig::openai("https://api.airforce/v1/chat/completions")),
-   ("baidu", ProviderConfig::openai("https://qianfan.baidubce.com/v2/chat/completions")),
-   ("bluesminds", ProviderConfig::openai("https://api.bluesminds.com/v1/chat/completions")),
-   ("clinepass", ProviderConfig::openai("https://api.cline.bot/api/v1/chat/completions")),
-   ("codebuddy-intl", ProviderConfig::openai("https://www.codebuddy.ai/v2/chat/completions")),
-   ("featherless", ProviderConfig::openai("https://api.featherless.ai/v1/chat/completions")),
-   ("kilo-gateway", ProviderConfig::openai("https://api.kilo.ai/api/gateway/chat/completions")),
-   ("perplexity-agent", /* format openai-responses */),
-   ("poolside", ProviderConfig::openai("https://inference.poolside.ai/v1/chat/completions")),
-   ("tencent", ProviderConfig::openai("https://api.hunyuan.cloud.tencent.com/v1/chat/completions")),
-   ("tokenrouter", ProviderConfig::openai("https://api.tokenrouter.com/v1/chat/completions")),
-   ("venice", ProviderConfig::openai("https://api.venice.ai/api/v1/chat/completions")),
-   ("zed", /* NDJSON executor — xem A3 */),
-   ```
-2. Chuyển config của kilo-gateway/venice/featherless-ai/trae/devin-cli/windsurf/opencode-zen từ `PROVIDER_REGISTRY` (provider.rs) sang `PROVIDER_CONFIGS`.
-3. `perplexity-agent` cần `format: openai-responses` → đảm bảo DefaultExecutor hỗ trợ transport `format`.
-4. `tokenrouter`/`venice` cần `thinkingFormat` (`tokenrouter` / `openai`) → map vào thinking config.
-5. Cập nhật `src/core/model/catalog.rs` (providers + providerModels + providerIdToAlias) cho 17 provider + model lists.
-6. `selfhosted-*`: baseUrl **per-connection** — thêm cơ chế đọc `providerSpecificData.baseUrl` (xem A2).
+### `P0-B1` — kiro: no integrity gate / repair loop, no EventStream→OpenAI binary transform, no region-aware URL ordering, no 401/403/404 fallback
+- **JS:** JS open-sse/executors/kiro.js — execute() (338-342) calls `super.execute(args)` then `this.attachIntegrityGate(result, args)` (344-409): emits `: kiro-validation\n\n` heartbeat every KIRO_REPAIR_HEARTBEAT_MS=10_000, runs `runIntegrityRecovery` (411-479) with repair instructions (41-45), bounded buffer KIRO_REPAIR_BUFFER_MAX_BYTES=8MiB, retries once with `appendRepairInstruction` when kind is ellipsis/short_final/invalid_tool, error SSE codes `kiro_*` (188-194: `data: {"error":{message,type:"upstream_error",code,...}}\n\ndata: [DONE]\n\n`). `readIntegrityAttempt`/`transformEventStreamToSSE` (517-1114) fully parses AWS EventStream binary (prelude CRC 899, headers 1140-1224, event types 743-876: assistantResponseEvent strips `<thinking>`/`</thinking>` 759-784, reasoningContentEvent→`reasoning_content` 785-792, codeEvent 793-796, toolUseEvent buffers input fragments and emits split `tool_calls` deltas with `arguments:""` then `arguments:JSON.stringify(input)` 712-742, messageStopEvent/metadataEvent merge stop reasons 824-840, contextUsageEvent→usage fallback 1032-1043). `getOrderedBaseUrls` (274-303): regionalizes `u.replace(/([a-z]+)\.[a-z0-9-]+\.amazonaws\.com/, `$1.${region}.amazonaws.com`)` from `credentials?.providerSpecificData?.region` (default us-east-1). `shouldRetry` (312-316): `super.shouldRetry(...) || (hasFallback && KIRO_ENDPOINT_FALLBACK_STATUSES.has(status))` where KIRO_ENDPOINT_FALLBACK_STATUSES = Set([401,403,404]) (kiroConstants.js:28).
+- **Rust now:** src/core/executor/kiro.rs — build_url (159-218) orders q-first for api_key but does NOT regionalize amazonaws.com hosts (no `region` psd substitution). `execute_request` (288-370) loops URLs but on an Ok non-200 status returns the FIRST response immediately — no 401/403/404 fallback, no shouldRetry. No integrity gate, no heartbeat, no repair loop. `EventStreamDecoder::decode_chunk` (568-658) decodes binary frames but returns only raw `data:` SSE strings; the actual OpenAI chunk assembly lives in src/core/translator/response/kiro_to_openai.rs which handles assistantResponseEvent/reasoningContentEvent/toolUseEvent/messageStopEvent as pre-decoded JSON and does NOT implement tool-input buffering (appendToolInput/parsedToolInput/emitTools), `<thinking>` tag stripping, codeEvent, meteringEvent/metricsEvent, contextUsageEvent usage fallback, stop-reason merging, or the `chatcmpl-${Date.now()}` chunk id shape with `choices[0].delta.role:"assistant"` on first chunk.
+- **Fix:** In src/core/executor/kiro.rs: (1) In `build_url`, apply JS regionalization: when `is_cw_surface`, read `region` from psd (default "us-east-1"); for every base URL containing `amazonaws.com` and region != "us-east-1", replace the host's region segment via regex `([a-z]+)\.[a-z0-9-]+\.amazonaws\.com` → `$1.{region}.amazonaws.com` (apply to both q and codewhisperer hosts). (2) In `execute_request`, on a non-success status do not return immediately: for status in {401,403,404} and there are remaining URLs, continue to next URL (mirror JS shouldRetry + fallback). (3) Build the integrity gate (biggest item): wrap the response in a streaming transform that (a) parses the binary EventStream frames via a new `crc32` table + header decoder per JS 1140-1224, (b) assembles OpenAI chat.completion.chunk SSE with id `chatcmpl-{timestamp_ms}`, `created`, model, first chunk `delta:{role:"assistant"}`, (c) buffers toolUseEvent inputs per id and emits two tool_calls deltas (first `{id,name,type:"function",function:{name,arguments:""}}`, second `{arguments:JSON.stringify(input)}`), (d) strips `<thinking>`/`</thinking>` from assistantResponseEvent content, (e) merges stop reasons via severity ordering, (f) emits `: kiro-validation\n\n` heartbeat every 10s and `: kiro-upstream\n\n` after validated frames with no new chunk, (g) on terminal failure emits `data: {"error":{message,type:"upstream_error",code:"kiro_..."}}\n\ndata: [DONE]\n\n`. (4) Add a bounded one-retry repair loop when the first attempt's disposition is retryable_protocol_failure/ellipsis/short_final: append instruction text `Retry the previous response because its Kiro tool_call wrapper was malformed...` etc. and re-execute once.
+- **Test:** `test_eventstream_tool_use_emits_two_deltas: feed a crafted binary EventStream frame with a toolUseEvent carrying `{toolUseId,name,input:{x:1}}` → assert output SSE contains a chunk with `tool_calls[0].function.arguments == ""` and a later chunk with `tool_calls[0].function.arguments == "{\"x\":1}"`. Also `test_build_url_regionalizes_q_host` for region "eu-west-1".`
+- **⚠️ Risks:** This is the largest port; the JS binary decoder tolerates malformed SSE lines silently, and the buffer bounds (8MiB repair / 24MiB message / 128KiB headers) prevent memory blowup — replicate them. JS errors are returned untransformed so chatCore can read the body and trigger account fallback — keep non-EventStream HTTP error responses raw. Do not strip thinking tags on `reasoningContentEvent` (only on assistantResponseEvent content).
+- **Verified:** ✅ CONFIRMED
 
-**Guard test:** `default_executor_covers_all_9router_providers` — assert `PROVIDER_CONFIGS` có key cho cả 17 provider; gọi `DefaultExecutor::new("tokenrouter")` không trả `UnsupportedProvider`.
+### `P0-C1` — grok-web executor is a stub: Rust sends raw body; missing MODEL_MAP grokPayload, NDJSON parse, message flattening, browser headers, reasoning_content mapping
+- **JS:** JS open-sse/executors/grok-web.js — GROK_CHAT_API = `https://grok.com/rest/app-chat/conversations/new` (line 6, registry). MODEL_MAP (9-24) maps e.g. `"grok-4.2": { grokModel: "grok-420", modelMode: "MODEL_MODE_GROK_420", isThinking: false }`, `"grok-4.1-fast": { grokModel: "grok-4-1-thinking-1129", modelMode: "MODEL_MODE_FAST", isThinking: false }`. grokPayload (247-259): `{ temporary: true, modelName: grokModel, modelMode, message, fileAttachments: [], imageAttachments: [], disableSearch: false, enableImageGeneration: false, returnImageBytes: false, returnRawGrokInXaiRequest: false, enableImageStreaming: false, imageGenerationCount: 0, forceConcise: false, toolOverrides: {}, enableSideBySide: true, sendFinalMetadata: true, isReasoning: false, disableTextFollowUps: false, disableMemory: true, forceSideBySide: false, isAsyncChat: false, disableSelfHarmShortCircuit: false, deviceEnvInfo: { darkModeEnabled: false, devicePixelRatio: 2, screenWidth: 2056, screenHeight: 1329, viewportWidth: 2056, viewportHeight: 1083 } }`. Headers (263-283): `Accept: "*/*"`, `Accept-Encoding`, `Accept-Language`, Baggage sentry string, Origin `https://grok.com`, Referer `https://grok.com/`, `Sec-Ch-Ua`, `Sec-Fetch-*`, `User-Agent` (Chrome 136 macOS), `x-statsig-id: generateStatsigId()` (34-38), `x-xai-request-id: crypto.randomUUID()`, `traceparent: 00-{traceId}-{spanId}-00`. Cookie: `sso=${token}` after stripping `sso=` prefix (286-290). Response: NDJSON lines parsed (74-101); `extractContent` (103-133) yields `{delta: resp.token}` or `{fullMessage: mr.message}` or `{thinking: mr.message}` (thinking only for isThinking models when a modelResponse follows); streamed as OpenAI SSE chunks (135-188): first chunk `delta:{role:"assistant"}`, thinking → `delta.reasoning_content`, content → `delta.content`, final `finish_reason:"stop"` + `data: [DONE]`. Non-streaming (190-219): `msg.reasoning_content = thinkingParts.join("\n")`, usage `prompt_tokens = completion_tokens = ceil(fullContent.length/4)`. Errors: HTTP 401/403 → "Grok auth failed — SSO cookie may be expired...", 429 → "Grok rate limited...", type "upstream_error", code `HTTP_${status}`.
+- **Rust now:** src/core/executor/grok_web.rs — build_url (144-146) `https://grok.com/app-chat/conversations/new` (wrong: missing `/rest`; registry JS is `https://grok.com/rest/app-chat/conversations/new`). build_headers (148-163) only sets Content-Type application/json, Accept application/json, and `sso={access_token}` cookie — no grokPayload, no message flattening (parseOpenAIMessages 46-72), no browser headers, no statsig/traceparent. transform_request (165-168) returns body.clone() unchanged. No NDJSON reading, no reasoning_content, no usage estimation, no error-code mapping.
+- **Fix:** Rewrite src/core/executor/grok_web.rs GrokWebExecutor: (1) URL → `https://grok.com/rest/app-chat/conversations/new`. (2) Add MODEL_MAP with the 13 entries from JS lines 9-24 (grok-3, grok-3-mini, grok-3-thinking, grok-4, grok-4-mini, grok-4-thinking, grok-4-heavy, grok-4.1-mini, grok-4.1-fast, grok-4.1-expert, grok-4.1-thinking, grok-4.2, grok-4.20, grok-4.20-beta) with exact grokModel/modelMode/isThinking. (3) Add parse_openai_messages: flatten messages to `role: text`, prepend `role: ` to all but last user message, join `\n\n`. (4) Build the grokPayload verbatim (all fields above). (5) Headers per JS 263-283; generate x-statsig-id as `btoa` of the random TypeErrors, x-xai-request-id UUID, traceparent `00-{16-byte-hex}-{8-byte-hex}-00`; Cookie `sso=`+token after stripping `sso=` prefix. (6) POST, parse NDJSON, map to OpenAI SSE chunks: first chunk `{role:"assistant"}`, `modelResponse`/`token`/thinking handling per isThinking, final finish_reason "stop" + `data: [DONE]`. (7) Non-streaming: reason/content joined, usage `ceil(len/4)` each. (8) Map 401/403 → 502-style body "Grok auth failed — SSO cookie may be expired..." code HTTP_401; 429 message per JS; keep HTTP status.
+- **Test:** `test_grok_web_payload_shape: feed body `{"messages":[{"role":"system","content":"S"},{"role":"user","content":"U"}]}` model "grok-4.2" → assert transformed body has `modelName == "grok-420"`, `modelMode == "MODEL_MODE_GROK_420"`, `message == "S: S\n\nU"` (system gets role-prefix) and `temporary == true`.`
+- **⚠️ Risks:** System messages in grok-web DO get role-prefixed (unlike perplexity-web which hoists them) — preserve that. `extractContent` only emits thinking for isThinkingModel; a non-thinking model must never emit reasoning_content. The statsig-id must be a valid base64 string (btoa); randomString uses only a-z for length 10 and a-z0-9 for length 5.
+- **Verified:** ✅ CONFIRMED
 
-**Risks:** sai 1 URL là 404; `perplexity-agent` dùng Responses API không phải chat-completions; selfhosted-* phải đọc per-connection baseUrl chứ không hardcode; `tokenrouter` 120 models phải thêm đủ vào catalog.
+### `P0-C2` — perplexity-web executor is a stub: missing pplxBody/version 2.18, MODEL_MAP+THINKING_MAP, session cache (backend_uuid), markdown block parsing, cleanResponse, reasoning_content
+- **JS:** JS open-sse/executors/perplexity-web.js — PPLX_SSE_ENDPOINT = `https://www.perplexity.ai/rest/sse/perplexity_ask` (registry), PPLX_API_VERSION = "2.18", UA Chrome 130 Linux (6-8). MODEL_MAP (10-18): `"pplx-auto": ["concise","pplx_pro"]`, `"pplx-gpt": ["copilot","gpt54"]`, etc.; THINKING_MAP (20-24): `"pplx-gpt": "gpt54_thinking"`. buildPplxRequestBody (160-182): `{ query_str: query, params: { query_str, search_focus: "internet", mode, model_preference: modelPref, sources: ["web"], attachments: [], frontend_uuid: randomUUID(), frontend_context_uuid: randomUUID(), version: "2.18", language: "en-US", timezone: Intl...timeZone, search_recency_filter: null, is_incognito: true, use_schematized_api: true, last_backend_uuid: followUpUuid } }`. Headers (435-449): Content-Type application/json, Accept text/event-stream, Origin `https://www.perplexity.ai`, Referer `https://www.perplexity.ai/`, User-Agent, `X-App-ApiClient: default`, `X-App-ApiVersion: 2.18`; auth: `Authorization: Bearer {accessToken}` else `Cookie: __Secure-next-auth.session-token={apiKey}`. SSE parse (92-136): blank line flushes `data:` lines; `event: end_of_stream` returns. extractContent (211-292): plan_block steps → `{thinking: "Searching: "+q}` / `{thinking: "Reading: "+u}` (first 3 urls), plan goals → thinking; markdown_block chunks: `progress === "DONE"` sets fullAnswer else emits deltas; fallback `event.text`; `event.final || status==="COMPLETED"` stops. cleanResponse (77-90) strips `\[\d+\]`, `<grok:...>`, `<?xml...>`, `</?response...>`, collapses multi-space/`\n{3,}`. Session cache (34-75): FNV-1a `sessionKey`, SESSION_MAX_AGE_MS=3600_000, 200 entries; sessionStore on completion with backend_uuid; follow-up request uses `last_backend_uuid`. buildQuery (195-209): instructions + `You have built-in web search...`, history, currentMsg; JSON truncated to last 96000 chars. Non-streaming (357-389): msg.reasoning_content = thinkingParts.join("\n"), usage `prompt_tokens=ceil(currentMsg.length/4)`, `completion_tokens=ceil(fullAnswer.length/4)`.
+- **Rust now:** src/core/executor/grok_web.rs PerplexityWebExecutor (170-368) — build_url `https://perplexity.ai/rest/sse/perplexity_ask` (missing `www.`); headers only Content-Type/Accept + cookie from access_token (316-321); transform_request (335-367) merely copies the body and adds a `session_cache_key` FNV hash of `role: content` lines — none of the pplxBody shape, MODEL_MAP, SSE block parsing, cleanResponse, backend_uuid session cache, thinking, or usage estimation.
+- **Fix:** Rewrite PerplexityWebExecutor in src/core/executor/grok_web.rs: (1) URL `https://www.perplexity.ai/rest/sse/perplexity_ask`. (2) Add MODEL_MAP (7 entries) and THINKING_MAP (3 entries) with exact wire names (pplx-auto→["concise","pplx_pro"], pplx-sonar→["copilot","experimental"], pplx-gpt→["copilot","gpt54"], pplx-gemini→["copilot","gemini31pro_high"], pplx-sonnet→["copilot","claude46sonnet"], pplx-opus→["copilot","claude46opus"], pplx-nemotron→["copilot","nv_nemotron_3_super"]; thinking: pplx-gpt→gpt54_thinking, pplx-sonnet→claude46sonnetthinking, pplx-opus→claude46opusthinking). Thinking request if `body.thinking === true || (reasoning_effort present && != "none")`. (3) Build pplxBody exactly per buildPplxRequestBody (include timezone — use a UTC default if no IANA lookup). (4) Headers per JS incl. X-App-ApiClient/X-App-ApiVersion; auth split: accessToken → Bearer, else apiKey → `Cookie: __Secure-next-auth.session-token={apiKey}`. (5) Implement SSE reader (blank-line flush, end_of_stream), plan/markdown block extraction with seenThinking dedup, markdown DONE vs incremental deltas, event.text fallback, final/COMPLETED stop. (6) cleanResponse on content deltas (strip=for non-streaming). (7) Session cache: FNV-1a of `role:content` joined by \n with the JS hash offset, 1h TTL, 200-entry LRU-evict; on completion store `backend_uuid`; on follow-up set `last_backend_uuid`. (8) buildQuery instruction/query/history + 96000 trailing truncation. (9) Emit `reasoning_content` + usage per JS.
+- **Test:** `test_pplx_session_key_fnv1a: assert sessionKey([{role:"user",content:"x"}]) equals the JS FNV-1a result (compute expected from JS constants 0x811c9dc5/0x01000193). Also `test_pplx_clean_response_strips_tags`.`
+- **⚠️ Risks:** The FNV-1a JS hash operates on UTF-16 code units (`charCodeAt`); Rust must hash each char's u16 value, not UTF-8 bytes — an exact-match test is essential. Do not emit `reasoning_content` for the auto/sonar models (only THINKING_MAP models).
+- **Verified:** ✅ CONFIRMED
 
-### A2. Selfhosted STT / TTS / Embedding (v0.5.50 headline feature) — thiếu hoàn toàn (P0) [missing]
+### `P0-D1` — codebuddy-cn: missing system-prompt neutralizer (AGENT_PATTERN + NEUTRAL_PROMPT) and reasoning_effort none/off deletion
+- **JS:** JS open-sse/executors/codebuddy-cn.js — NEUTRAL_PROMPT = "You are a helpful AI assistant that helps with software engineering tasks." (28). AGENT_PATTERN (29) = `/you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>/i`. For each system message, `text = flatten(message.content)`; if `text.length > 2000 || AGENT_PATTERN.test(text)`, replace content with NEUTRAL_PROMPT preserving the original shape: string content → `{ ...message, content: NEUTRAL_PROMPT }`, array content → `{ ...message, content: [{ type: "text", text: NEUTRAL_PROMPT }] }` (36-48). reasoning handling (54-61): `const eff = transformed.reasoning_effort; if (eff === "none" || eff === "off") { delete transformed.reasoning_effort; } else if (eff) { transformed.reasoning_summary = "auto"; }` — the else-if branch is only for a truthy, non-none effort.
+- **Rust now:** src/core/executor/codebuddy_cn.rs — transform_request (93-111) only sets `body["stream"]=true` and `if body.get("reasoning_effort").is_some() { body["reasoning_summary"]="auto" }`. No neutralizer; and reasoning_summary is set even when effort is "none"/"off" (JS would delete the effort and NOT set summary).
+- **Fix:** In src/core/executor/codebuddy_cn.rs transform_request: (1) After forcing stream, iterate `messages`; for each role=="system", flatten content (string or array of {text}) to text; if `text.len() > 2000 || AGENT_PATTERN.is_match(text)`, replace content preserving shape — string → String(NEUTRAL_PROMPT), array → `[{type:"text",text:NEUTRAL_PROMPT}]`. (2) Port the regex verbatim (Rust regex crate `regex`; note JS `.+` and `.{0,30}` need `(?s)` where `.` must cross newlines — JS `i` flag, add `(?is)` for the multi-line patterns like `<agent-identity>`). (3) Reasoning: read `eff = body.get("reasoning_effort").and_then(as_str)`; if eff=="none" || eff=="off" → `body.remove("reasoning_effort")` (do not set summary); else if eff non-empty → `body["reasoning_summary"] = "auto"`. (4) Do NOT add the missing AGENT_PATTERN alternates to anything else.
+- **Test:** `test_neutralize_claude_code_system_prompt: system content "You are Claude Code, Anthropic's official CLI..." (len<2000) → replaced with NEUTRAL_PROMPT; and `test_reasoning_effort_none_deleted_no_summary` for eff="none".`
+- **⚠️ Risks:** JS matches the regex against the flattened string but only for `role === "system"` messages; `flatten` returns "" for non-string/non-array content and empty text skips. The regex must stay case-insensitive and multi-line (`(?is)`), else the `<agent-identity>` / `cc_entrypoint` alternates won't match across newlines. Preserve the shape rule: array system content must be replaced with `[{type:"text",text:...}]`, never a bare string.
+- **Verified:** ✅ CONFIRMED
 
-**Source of truth — registry JS:**
-- **`selfhosted-stt`** (`selfhosted-stt.js:19-55`): `sttConfig.baseUrl` mặc định `http://localhost:8080/v1/audio/transcriptions`, **overwrite bằng `providerSpecificData.baseUrl`** (full transcriptions URL), format openai, model `whisper-1`.
-- **`selfhosted-tts`** (`selfhosted-tts.js:13-40`): `ttsConfig.baseUrl` mặc định `http://localhost:8880`, **`/v1/audio/speech` được append** vào baseUrl, format openai-speech, model `kokoro`.
-- **`selfhosted-embedding`** (`selfhosted-embedding.js:31-66`): adapter riêng `selfhostedEmbedding.js` — baseUrl per-connection (appends `/embeddings`), **chủ động REFUSE cloud fallback** (nếu thiếu baseUrl → lỗi, KHÔNG về api.openai.com).
+### `P0-E1` — grok-cli: missing consistent machine-id x-grok-agent-id derivation, xhigh effort level, supportsGrokCliReasoningEffort gating, per-turn increment in resolveGrokCliTurnIdx
+- **JS:** JS open-sse/executors/grok-cli.js — execute() (528-549): `if (!this._agentId && !args.credentials?.providerSpecificData?.deviceId) { const mid = await getConsistentMachineId("grok-cli-agent"); this._agentId = [mid.slice(0,8), mid.slice(8,12), "5"+mid.slice(13,16), "a"+mid.slice(17,20), mid.slice(0,12).padEnd(12,"0")].join("-"); } else if (deviceId) { this._agentId = deviceId; }` then buildHeaders sends `headers["x-grok-agent-id"] = this._agentId` (384). EFFORT_LEVELS (54) = `["low","medium","high","xhigh"]`; `normalizeGrokCliEffort` (124-129): `effort === "max" → "xhigh"`, if in EFFORT_LEVELS return, else "high". supportsGrokCliReasoningEffort (grokCli.js config): `/^grok-4\.5(?:$|-)/.test(String(model||""))` — effort only set when true, else `delete body.reasoning.effort` (484-490). resolveGrokCliTurnIdx (89-112): monotonic per session, retries reuse requestKey (turn stored in WeakMap, `prev + (requestKey ? 1 : 0)`), TTL via MEMORY_CONFIG.sessionTtlMs, store max 5000. `x-grok-conv-id` = same as session id (380). buildHeaders identity (391-397): `x-email` from psd.email||credentials.email, `x-userid` from psd.userId||userId||providerUserId.
+- **Rust now:** src/core/executor/grok_cli.rs — no machine-id derivation: `agent_id = psd_str(deviceId).or(psd_str(agentId))` (537-538) and only inserted if non-empty (351-353); no getConsistentMachineId fallback, no UUID-ish reformatting. EFFORT_LEVELS (29) = `["low","medium","high"]` — xhigh missing, `resolve_effort_from_model` can't detect `-xhigh`, no max→xhigh mapping. No supportsGrokCliReasoningEffort gating: transform_request_body always sets `reasoning["effort"]` (463-465). resolve_grok_cli_turn_idx (86-96) = max(from_input, prev) with no per-request increment (requestKey absent) and no TTL. Email/userId psd key lookup (355-364) reads `email`/`userId`/`user_id`/`providerUserId` ✓ but misses top-level `credentials.email` fallback.
+- **Fix:** In src/core/executor/grok_cli.rs: (1) Add a machine-id fallback: when psd deviceId/agentId absent, derive a stable id (mirror `getConsistentMachineId` — see existing machine-id util in the crate, e.g. crate::core::utils) and format per JS `[a,b,format!("5{}",&mid[13..16]),format!("a{}",&mid[17..20]), format!("{:0<12}",&mid[..12])].join("-")`. (2) EFFORT_LEVELS → add "xhigh"; normalize effort: "max"→"xhigh", unknown→"high". (3) Add `supports_grok_cli_reasoning_effort(model)` = model matches `^grok-4\.5(?:$|-)`; in transform_request_body set `reasoning.effort` only when the model supports it, else `reasoning.as_object_mut().remove("effort")`. (4) Turn index: add per-request monotonic increment — store prev, new turn = max(from_input, prev + 1) when this is a fresh request (no requestKey re-use concept in Rust; add a caller-supplied retry flag if available) with a TTL (reuse an existing session-TTL constant, defaulting ~24h) and a max store size (5000) evicting oldest. (5) x-email fallback to `credentials.email` when psd missing.
+- **Test:** `test_effort_normalize_max_to_xhigh + test_supports_effort_only_grok_45 (assert transform of model "grok-4.6" yields no reasoning.effort key).`
+- **⚠️ Risks:** JS strips the effort suffix from the model BEFORE reasoning (resolvedModel replaces `-{effort}$`), and the turn idx must never decrease across retries — the WeakMap requestKey semantics means a retried identical body reuses the same turn; if Rust cannot distinguish retries, prefer not incrementing on re-calls with identical input rather than always +1, to avoid out-of-order turn indices.
+- **Verified:** ✅ CONFIRMED
 
-**Rust current:** không có chữ `selfhosted` trong `src/`. `stt/mod.rs:84-124` chỉ biết openai/groq/deepgram/assemblyai/huggingface/gemini → STT trả 400. `embeddings/mod.rs:46-66`, `tts/mod.rs:88-118` không có.
+### `P0-F1` — mimo-free: wrong bootstrap payload shape, wrong system-marker text, wrong headers (X-Mimo-Source, x-session-affinity), different fingerprint derivation
+- **JS:** JS open-sse/executors/mimo-free.js — MIMO_SYSTEM_MARKER (24-25) = `"You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks."`. BOOTSTRAP_URL = `https://api.xiaomimimo.com/api/free-ai/bootstrap` (7), CHAT_URL = registry `https://api.xiaomimimo.com/api/free-ai/openai/chat`. bootstrapJwt (79-105): POST with body `{ client: generateFingerprint() }` (90), UA random from USER_AGENTS (Chrome 131, 16-20); reads `data.jwt`, caches with `jwtExpiresAt = parseJwtExp(jwt)` (exp claim → *1000, fallback +3000s, 300_000ms buffer). generateFingerprint (32-42): `sha256(hostname|platform|arch|cpu|username)`. generateSessionId (44-50): `ses_` + 24 chars of `[a-z0-9]`. buildHeaders (117-125): `{ "Content-Type": "application/json", "X-Mimo-Source": "mimocode-cli-free", "User-Agent": random, "x-session-affinity": this.sessionId, "Accept": stream ? "text/event-stream" : "application/json" }`. transformRequest (127-129) = injectSystemMarker (64-72): idempotent — if ANY system message's string content already contains the marker, no-op; else prepend `{role:"system",content:MIMO_SYSTEM_MARKER}`. execute (131-159): `headers["Authorization"] = Bearer jwt`; on 401/403 resetJwtCache + re-bootstrap + retry once.
+- **Rust now:** src/core/executor/mimo_free.rs — bootstrap payload (259-261) `{"device_fingerprint": fingerprint}` (WRONG — JS sends `{client: ...}`); MIMO_CODE_SYSTEM_MESSAGE (47-59) is a long multi-rule prompt, NOT the exact JS marker; inject check (364-373) only inspects the FIRST message and checks content contains "MiMoCode" (JS scans all system messages for the exact substring MIMO_SYSTEM_MARKER); headers use `X-Session-Id` (405) not `X-Mimo-Source`/`x-session-affinity`; fingerprint (236-245) = sha256(api_key||id) not the machine seed; UA list (39-43) has Chrome 129/130/131 not the exact JS Chrome 131 strings; session id `ses_`+uuidv4 (227-229) vs 24-char lowercase alnum.
+- **Fix:** In src/core/executor/mimo_free.rs: (1) Replace MIMO_CODE_SYSTEM_MESSAGE with the exact `MIMO_SYSTEM_MARKER` string; expose a pub const. (2) bootstrap_jwt: send `{"client": fingerprint}`; derive fingerprint as sha256 of `hostname|platform|arch|cpu|username` (use std::env::consts + hostname via `gethostname`-style helper or `std::env::var("COMPUTERNAME")`/`hostname` crate — pick one; CPU model may be empty on Windows, that is fine, keep the seed format stable). (3) Parse JWT `exp` (base64url payload) → expires_at; cache with 300s expiry buffer, fallback TTL 3000s. (4) inject: scan ALL messages where role=="system" and content is string containing MIMO_SYSTEM_MARKER; if none, prepend. (5) Headers: replace `X-Session-Id` with `x-session-affinity` (value `ses_` + 24 lowercase alnum chars) and add `X-Mimo-Source: mimocode-cli-free`; UA from the exact 3 JS strings (Chrome/131.0.0.0 x3). (6) Keep the 401/403 re-bootstrap retry-once flow.
+- **Test:** `test_marker_exact_string: assert MIMO_SYSTEM_MARKER == "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks." and `test_inject_marker_scans_all_system_messages` (marker present on a later system message → no injection).`
+- **⚠️ Risks:** The marker must match byte-for-byte — upstream 403 "Illegal access" unless the EXACT substring appears. Fingerprint seed must be stable across restarts (same machine → same JWT cache hit). Do not confuse the chat endpoint (`/api/free-ai/openai/chat`) with the bootstrap endpoint. Rust header casing is normalized by reqwest; wire values are what matters.
+- **Verified:** ✅ CONFIRMED
 
-**⚠️ Rủi ro bảo mật nghiêm trọng:** nếu route selfhosted-embedding qua node openai-compatible generic, `embeddings/base.rs:172` (`OPENAI_COMPAT_NODE`) sẽ **âm thầm fallback về api.openai.com** — gửi text + API key sang OpenAI. Đúng lỗi JS adapter viết để chặn.
+### `P0-G1` — qoder: jt- tokens must route to api2.qoder.sh (buildUrl missing), X-Model-Key/X-Model-Source headers missing, {statusCodeValue,body} SSE envelope not unwrapped, live model_config missing
+- **JS:** JS open-sse/executors/qoder.js — buildUrl (348-356): `const raw = credentials?.apiKey || credentials?.accessToken; if (typeof raw === "string" && !raw.startsWith("pt-") && (raw.startsWith("jt-") || (credentials?.accessToken || "").startsWith("jt-"))) { return `${QODER_CHAT_BASE_ALT}/algo${QODER_CHAT_SIG_PATH}?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`; } return QODER_CHAT_URL_ENCODED;` where QODER_CHAT_BASE_ALT = `https://api2.qoder.sh`, QODER_CHAT_SIG_PATH = `/api/v2/service/pro/sse/agent_chat_generation`, QODER_CHAT_URL_ENCODED = `https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`. Headers (442-451): `{ "Content-Type": "application/json", Accept: "text/event-stream", "Cache-Control": "no-cache", "X-Model-Key": qoderKey, "X-Model-Source": modelSource, "Accept-Encoding": "identity", ...cosyHeaders }` where `modelSource = (payload.model_config && payload.model_config.source) || "system"` (441). buildQoderRequestBody (130-216) fetches `getQoderModelConfig(credentials, qoderKey, ...)` live from `/algo/api/v2/model/list`, throws hard error if unknown, and payload includes `model_config: modelConfig` and `chat_context.extra.modelConfig = { key: qoderKey, is_reasoning: isReasoning }`. wrapQoderSSE (233-341): each upstream line `data: {"statusCodeValue":200,"body":"{...inner openai chunk...}"}` is unwrapped and re-emitted as `data: <inner>\n\n`; non-200 statusCodeValue → error chunk `\n[qoder error {statusVal}: {truncated msg 200}]` + [DONE]; on terminal frame, cancel reader + close (keepalive). Errors pass through unchanged (470-473).
+- **Rust now:** src/core/executor/qoder.rs — build_url (503-505) always returns api3 QODER_CHAT_URL_ENCODED; no jt- api2 routing. build_headers (507-616) sets Content-Type/Accept/Cache-Control/Accept-Encoding/COSY set but NOT X-Model-Key/X-Model-Source. transform_request (717-829) hardcodes `is_reasoning: false` (809) and does NOT include a `model_config` field or live model-list fetch (no network catalog). execute_request returns the raw upstream response (925-938) — the `{statusCodeValue, body}` envelope is never unwrapped, so downstream SSE consumers would see the Qoder envelope instead of OpenAI chunks.
+- **Fix:** In src/core/executor/qoder.rs: (1) build_url(credentials): if the token is a string not starting with `pt-` AND starts with `jt-`, return `https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1`; else api3 URL. (2) In build_headers, accept the qoder_key and model_source and insert `X-Model-Key` / `X-Model-Source` headers. (3) Add a live model-config fetch: GET `https://api3.qoder.sh/algo/api/v2/model/list` (with COSY or bearer auth) before signing, resolve the qoderKey entry, derive `is_reasoning` and `max_output_tokens`; if unknown after one forced refresh, return a 400 error "qoder: model_config for \"{key}\" not yet known...". Include `model_config` in the payload and `chat_context.extra.modelConfig.is_reasoning` from the fetched entry (not hardcoded false). (4) Wrap the upstream response: read SSE lines; for each `data:` line JSON.parse to `{statusCodeValue, body}`; if statusCodeValue != 200 emit error chunk + [DONE]; if inner == "[DONE]" emit SSE_DONE; else strip `\r?\n` from inner and emit `data: {inner}\n\n`; close+stop at terminal frame.
+- **Test:** `test_build_url_jt_token_uses_api2: build_url with api_key "jt-abc" → starts_with("https://api2.qoder.sh"), with "dt-abc" → api3. `test_wrap_qoder_sse_unwraps_envelope`: input `data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"}\n\n` → output `data: {"choices":[{"delta":{"content":"hi"}}]}\n\n`.`
+- **⚠️ Risks:** JS strips embedded newlines in the inner body so the SSE frame stays one event — replicate. The `pt-` check must come first (PATs never use api2). model_config fetch errors must be hard errors (wrong block silently downgrades the upstream model) but must not break when the credential has no catalog access — match JS: one forced-refresh attempt then hard error.
+- **Verified:** ✅ CONFIRMED
 
-**Implementation steps:**
-1. `media/stt/mod.rs`: thêm `selfhosted-stt` → `stt_config()` trả openai format + đọc `providerSpecificData.baseUrl`.
-2. `media/tts/mod.rs`: thêm `selfhosted-tts` → `tts_config()` openai-speech format, append `/v1/audio/speech` vào baseUrl.
-3. `media/embeddings/mod.rs`: thêm adapter `selfhosted_embedding` — đọc per-connection baseUrl, **không fallback**; thiếu baseUrl → `MissingBaseUrlError` 400.
-4. Thêm 3 provider vào catalog + `default.rs`/dispatch.
+### `P0-H1` — azure: wrong env var names + reversed precedence (env vs psd), missing OPENAI_API_KEY fallback, wrong default endpoint
+- **JS:** JS open-sse/executors/azure.js — buildUrl (8-24): `const azureEndpoint = credentials?.providerSpecificData?.azureEndpoint || process.env.AZURE_ENDPOINT || "https://api.openai.com"; const apiVersion = credentials?.providerSpecificData?.apiVersion || process.env.AZURE_API_VERSION || "2024-10-01-preview"; const deployment = credentials?.providerSpecificData?.deployment || model || process.env.AZURE_DEPLOYMENT || "gpt-4";` then `return `${endpoint}/openai/deployments/${deployment}/chat/completions?api-version=${apiVersion}`;` (endpoint trailing-slash stripped). buildHeaders (26-52): `apiKey = credentials?.apiKey || credentials?.accessToken || process.env.OPENAI_API_KEY;` → `headers["api-key"] = apiKey`; `organization = credentials?.providerSpecificData?.organization || process.env.AZURE_ORGANIZATION;` → `headers["OpenAI-Organization"] = organization`; `if (stream) headers["Accept"] = "text/event-stream";`. transformRequest returns body unchanged. Precedence is psd → env → default for URL/version/deployment.
+- **Rust now:** src/core/executor/azure.rs — build_url (94-143) reads env vars `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_DEPLOYMENT` with env FIRST, then psd, then default — reversed precedence (connection psd is ignored when env is set) and WRONG env names. Default endpoint = "" (13) instead of "https://api.openai.com". build_headers (145-177) reads only psd api_key/access_token (no `OPENAI_API_KEY` env) and `organization` only from psd (no `AZURE_ORGANIZATION` env). Deployment fallback: Rust uses model when non-empty else "gpt-4" (130-136) — JS precedence is psd.deployment → model → env.AZURE_DEPLOYMENT → "gpt-4" (env between model and default).
+- **Fix:** In src/core/executor/azure.rs: (1) build_url precedence per JS: psd `azureEndpoint` → env `AZURE_ENDPOINT` → "https://api.openai.com"; psd `apiVersion` → env `AZURE_API_VERSION` → "2024-10-01-preview"; psd `deployment` → model (if non-empty) → env `AZURE_DEPLOYMENT` → "gpt-4". (2) build_headers: api_key = psd api_key → access_token → env `OPENAI_API_KEY`; insert `api-key`. organization = psd `organization` → env `AZURE_ORGANIZATION` → insert `OpenAI-Organization` when present. (3) Keep transform_request = identity.
+- **Test:** `test_build_url_prefers_psd_over_env: set AZURE_ENDPOINT=env via std::env::set_var, psd azureEndpoint="https://mine.openai.azure.com" → url starts with "https://mine.openai.azure.com"; and without psd → uses env; without both → "https://api.openai.com".`
+- **⚠️ Risks:** If the legacy `AZURE_OPENAI_*` names are used elsewhere in the crate, migrate them; do not keep both precedence orders. The deployment key "gpt-4" default must only apply when model is empty (JS falls back to model first).
+- **Verified:** ✅ CONFIRMED
 
-**Guard test:** `selfhosted_embedding_no_openai_fallback` — adapter không baseUrl → lỗi (không phải api.openai.com). `selfhosted_tts_appends_speech_path`.
+### `P0-I1` — ollama-local: Rust appends ?stream= to /api/chat; JS does NOT
+- **JS:** JS open-sse/executors/ollama-local.js (entire file): `export class OllamaLocalExecutor extends DefaultExecutor { constructor() { super("ollama-local"); } buildUrl(model, stream, urlIndex = 0, credentials = null) { return `${resolveOllamaLocalHost(credentials)}/api/chat`; } }` and `resolveOllamaLocalHost` (config/providers.js:9-13): `const raw = credentials?.providerSpecificData?.baseUrl?.trim(); return (raw || OLLAMA_LOCAL_DEFAULT_HOST).replace(/\/$/, "");` with OLLAMA_LOCAL_DEFAULT_HOST = "http://localhost:11434". Note: NO `?stream=` query parameter; stream is controlled purely by the body. Also the JS executor is DefaultExecutor-derived (inherits openai transform/headers incl. `stream` in body), not a bespoke image-extraction executor.
+- **Rust now:** src/core/executor/ollama.rs — build_url (151-167) returns `{base}/api/chat?stream={stream}` — ADDS the query param JS does not send. The Ollama /api/chat endpoint ignores query params for stream selection (it reads the body's `stream` field), so this is harmless upstream today but is a wire-format divergence and could break proxies that key off the URL. Also Rust's executor is bespoke (extracts images into `images`), whereas JS inherits DefaultExecutor's transform.
+- **Fix:** In src/core/executor/ollama.rs build_url: drop the `?stream=` suffix — return `format!("{base}/api/chat")`. Keep the base resolution (psd `baseUrl` trimmed, default "http://localhost:11434") and the trailing-slash strip. Ensure the body still carries `stream` (Rust passes the request body through, which contains `stream` for chat requests).
+- **Test:** `test_build_url_has_no_stream_query: `OllamaExecutor::build_url("llama3", true, &creds)` → assert url ends_with("/api/chat") and does NOT contain "stream=".`
+- **⚠️ Risks:** Do not rely on `?stream=` for the stream decision anywhere else in Rust — if any caller inspects the URL query, switch it to read the body. If future work ports the image extraction, keep it as the JS DefaultExecutor chain (injectReasoningContent + stripUnsupportedParams) rather than a bespoke executor.
+- **Verified:** ✅ CONFIRMED
 
-**Risks:** tuyệt đối không fallback cloud cho selfhosted; baseUrl phải per-connection.
+### `P0-J1` — opencode-go claude routing: Rust claude-format model list is missing 4 of 6 JS models
+- **JS:** JS open-sse/executors/opencode-go.js — MESSAGES_FORMAT_MODELS = new Set(["minimax-m3", "minimax-m2.7", "minimax-m2.5", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"]) (7-14). buildUrl: model in set → `${BASE}/messages` else `${BASE}/chat/completions` where BASE = "https://opencode.ai/zen/go/v1". buildHeaders: for those models `headers["x-api-key"] = key; headers["anthropic-version"] = ANTHROPIC_API_VERSION` ("2023-06-01"), else `Authorization: Bearer`. transformRequest runs `injectReasoningContent({ provider, model, body })`.
+- **Rust now:** src/core/executor/default.rs — opencode_go_uses_claude_format (1354-1356): `matches!(model, "minimax-m2.5" | "minimax-m2.7")` — only 2 of 6 models. Missing minimax-m3, qwen3.7-max, qwen3.7-plus, qwen3.6-plus (these currently get routed to `/chat/completions` with Bearer auth → upstream rejects).
+- **Fix:** In src/core/executor/default.rs, change `opencode_go_uses_claude_format` to return true for all six: `matches!(model, "minimax-m3" | "minimax-m2.7" | "minimax-m2.5" | "qwen3.7-max" | "qwen3.7-plus" | "qwen3.6-plus")`. The base URL in default.rs is `https://opencode.ai/zen/go/v1` (line 139-140) and build_url appends `messages`/`chat/completions` — verify default.rs provider entry's base_url is `https://opencode.ai/zen/go/v1` (it is registered as `ProviderConfig::openai("https://opencode.ai/zen/v1")` at default.rs:139-140 — append the `/go` segment so the claude path becomes `.../zen/go/v1/messages`).
+- **Test:** `test_opencode_go_claude_format_models: assert opencode_go_uses_claude_format("qwen3.7-max") == true, ("qwen3.6-plus") == true, ("minimax-m3") == true.`
+- **⚠️ Risks:** The dedicated `src/core/executor/opencode_go.rs` also has its own CLAUDE_FORMAT_MODELS (lines 31-38, 6 models — that one is correct). The bug is only in default.rs's `opencode_go_uses_claude_format` used when opencode-go falls through the default path. Also confirm which base URL the default path uses — if it lacks `/go`, requests to `.../zen/v1/messages` will 404.
+- **Verified:** 🟡 PLAUSIBLE
 
-### A3. OAuth codebuddy-intl + zed (P0) [missing]
+### `P0-K1` — cursor: no HTTP/2 AgentService path (isAgentTextRequest routing, agent.v1.AgentService/Run, request-context handshake, msg_ response id)
+- **JS:** JS open-sse/executors/cursor.js — execute (666-725): `if (isAgentTextRequest(body)) { try { return await this.executeAgent({model, body, stream, credentials, signal}); } ... }` where isAgentTextRequest (73-84) is true when all messages have string or text-only-part content and no `tool_calls`/`role:"tool"`. executeAgent (482-664): URL `https://agent.api5.cursor.sh/agent.v1.AgentService/Run` (agentEndpoint from PROVIDER_OAUTH.cursor, registry cursor.js:49); opens an HTTP/2 duplex stream (openAgentHttp2Stream 388-480, `http2.connect`), writes `buildAgentRunFrame(messages, model)` (98-137: field 1 userMessage {text, uuid}, field 7 history, field 8 system, field 9 requestedModel {name, bool:7}); response id `chatcmpl-msg_${Date.now()}` (534); reads Connect-RPC frames (decodeAgentFrames 144-158 with gzip decompress), decodes agent.v1.AgentServerMessage: field 1 interaction_update → field 1 text delta; field 1 update field 14 (reasoning) → `finished=true; onEvent({type:"done"})` — reasoning kept upstream-only (558-567); field 2 ExecServerMessage field 10 requestContext → `session.write(createRequestContextResponse())` (160-167: field 10 execClientMessage wrapping empty field 1), other exec fields → error "Cursor AgentService requested an unsupported IDE tool" (571-583). Streaming emits chatChunkSse `{delta:{content}}` / `{reasoning_content}`; error frame type "api_error" + [DONE] (638-644); done → `{delta:{},finishReason:"stop"}` + [DONE].
+- **Rust now:** src/core/executor/cursor.rs — no AgentService path at all. CursorExecutor::execute (1492-1593) always builds the legacy ChatService protobuf (`build_chat_request_wrapper` → `api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools`), no isAgentTextRequest routing, no HTTP/2 client, no request-context handshake, no `chatcmpl-msg_` id. There is a CURSOR_AGENTN_ENDPOINT const (23-24) but it is only used for the ChatService path via cursorHost override — not AgentService.
+- **Fix:** In src/core/executor/cursor.rs: (1) Add `is_agent_text_request(body)`: all messages satisfy (no tool_calls, role != "tool") AND (content is string OR content array where every part.type == "text"). (2) Add an agent path used when that predicate is true: URL `https://agent.api5.cursor.sh/agent.v1.AgentService/Run` (const; use the same host as the JS registry). (3) Add HTTP/2 connect support (add `h2`/`h2c` client or a reqwest/h2 duplex stream — the crate has a hyper client pool; add a tokio-h2-based duplex or use `h2::client` handshake on a TLS stream), with 60s hang timeout, `:method POST`, `:path /agent.v1.AgentService/Run`. (4) Build the AgentRun frame: protobuf field 1 `UserMessageAction` {field 1 string userText, field 2 uuid}, field 7 conversation history (each entry field 1 `ConversationHistoryMessage` with field 1 user / field 2 assistant each wrapping field 1 {field 1 text}), field 8 system text, field 9 `{field 1 model, field 7 bool true}`; wrap in `agent.v1.AgentClientMessage.run_request` field 1, then Connect-RPC frame. (5) Decode frames: 1-byte flags + 4-byte BE length + payload, gunzip when flag&0x01; parse agent.v1.AgentServerMessage: field 1 → interaction_update field 1 → text delta; field 1 update field 14 → finish (reasoning upstream-only); field 2 ExecServerMessage field 10 → write request-context response (field 2 execClientMessage wrapping field 1 empty); other exec fields → error. (6) Response id `chatcmpl-msg_{timestamp_ms}` for the agent path; stream emits `{delta:{role:"assistant"}}`-style chunks (first chunk role, then content/reasoning_content), final `finishReason:"stop"` + `data: [DONE]`. (7) Route: text-only requests → agent path; tool-call/history conversations keep legacy ChatService.
+- **Test:** `test_is_agent_text_request: assert true for all-string messages, false when a message has tool_calls or role "tool". `test_build_agent_run_frame_has_request_context_fields` asserting the encoded bytes contain a field-9 requestedModel varint true.`
+- **⚠️ Risks:** The HTTP/2 requirement is critical — the JS comment says undici/HTTP1 fails with HTTPParserError on the h2 preface. Reasoning (field 14) must NOT be forwarded to clients (Claude Code discards unsigned thinking). The empty request-context response is mandatory or the upstream stalls. Agent errors are surfaced as `connection_error` type with status 500 (JS 671-678).
+- **Verified:** ✅ CONFIRMED
 
-**Source of truth:**
-- **`codebuddy-intl`** (`src/lib/oauth/providers/codebuddy-intl.js:1-58`): device_code flow www.codebuddy.ai, stateUrl/tokenUrl `/v2/plugin/*`, `platform:ide`, headers `User-Agent: IDE/2.63.2 CodeBuddy/2.63.2`, `X-Product: SaaS`. Executor `open-sse/executors/codebuddy-intl.js:1-45`: forceStream + rewrite messages với system preamble + reasoning_summary.
-- **`zed`** (`src/lib/oauth/providers/zed.js:1-62` + `open-sse/shared/zedAuth.js`): **RSA keypair native-app signin**, `zed.dev/native_app_signin`, không tokenUrl, decrypt RSA-encrypted access token từ local callback, resolve organizationId. Executor `open-sse/executors/zed.js`: NDJSON/SSE tại `cloud.zed.dev/completions`, auth header `Authorization: <user_id> <access_token>` + `x-zed-cloud-token`.
+### `P1-L1` — windsurf executor missing entirely: gRPC-web GetChatMessage protobuf + CompletionChunk decode + MODEL_ALIAS_MAP
+- **JS:** JS open-sse/executors/windsurf.js — WS_BASE_URL = "https://server.codeium.com", WS_SERVICE = "exa.language_server_pb.LanguageServerService", WS_METHOD_CHAT = "GetChatMessage", WS_CHAT_URL = `${WS_BASE_URL}/${WS_SERVICE}/${WS_METHOD_CHAT}` (15-18); WS_IDE_NAME "windsurf", WS_IDE_VERSION "3.14.0", WS_EXT_VERSION "3.14.0", WS_LOCALE "en-US". MODEL_ALIAS_MAP (26-119) maps ~70 catalog names to wire names (e.g. "gpt-5.5"→"gpt-5-5-medium", "claude-opus-4.7-high"→"claude-opus-4-7-high", "deepseek-v4"→"deepseek-v4", "glm-5.1"→"glm-5-1"). buildGetChatMessageRequest (190-205): field 1 metadata {apiKey, "windsurf", "3.14.0", "3.14.0", sessionId(uuid), "en-US"}, field 2 cascade_id uuid, field 3 model_or_alias, repeated field 4 ChatMessage {role, content, toolCallId}. Headers (382-392): `Content-Type: application/grpc-web+proto`, `Accept: application/grpc-web+proto`, `Authorization: Bearer {token}`, `User-Agent: windsurf/3.14.0`, `X-Grpc-Web: 1`. Body framed as gRPC-web: `[0x00][4-byte BE len][payload]` (grpcWebFrame 209-216). Response decode (decodeCompletionChunk 311-348): field 1 ContentChunk{field1 text} → content, field 3 DoneChunk{UsageStats p/c} → usage, field 4 ErrorChunk{field1 msg} → error. SSE output (435-580): first chunk `{role:"assistant",content:""}`, content chunks, trailer-frame grpc-status parsing, finish chunk + `data: [DONE]`, optional usage from DoneChunk.
+- **Rust now:** N/A — no windsurf executor. In src/core/executor/provider.rs the "windsurf" registry entry (1377-1378) is `ProviderExecutorConfig::openai("https://server.self-serve.windsurf.com")` and windsurf requests fall through to DefaultExecutor (src/server/api/chat.rs has no windsurf arm), which POSTs JSON to the wrong URL in the wrong format.
+- **Fix:** Add a new module src/core/executor/windsurf.rs and dispatch arm in src/server/api/chat.rs for provider "windsurf"/"ws": (1) URL `https://server.codeium.com/exa.language_server_pb.LanguageServerService/GetChatMessage`. (2) Protobuf encoder (varint, tag = (field<<3)|2, length-delimited). (3) Build request: field 1 metadata {1 apiKey, 2 "windsurf", 3 "3.14.0", 4 "3.14.0", 5 uuid, 6 "en-US"}; field 2 uuid cascade; field 3 model alias; repeated field 4 {role,content[,toolCallId]}. (4) MODEL_ALIAS_MAP port (all ~70 entries, `resolve_ws_model_id` returns map[model] ?? model). (5) Headers per JS (incl. X-Grpc-Web: 1). (6) Frame request body with `[0x00][BE u32 len][payload]`. (7) Decode CompletionChunk frames (field 1 → content text, field 3 → done usage {1 prompt,2 completion}, field 4 → error msg), parse gRPC-web trailer frame (flag 0x80, `grpc-status:`/`grpc-message:` with decodeURIComponent). (8) Emit OpenAI SSE: first `{role:"assistant",content:""}`, content chunks, finish `{finish_reason:"stop"}` + usage when nonzero + `data: [DONE]`.
+- **Test:** `test_ws_model_alias: resolve_ws_model_id("gpt-5.5") == "gpt-5-5-medium", ("claude-opus-4.7-high") == "claude-opus-4-7-high", ("unknown-model") == "unknown-model".`
+- **⚠️ Risks:** The auth token goes BOTH in the protobuf metadata field 1 AND the Bearer header — omitting either breaks auth. The gRPC-web framing length is big-endian. decodeURIComponent on grpc-message — Rust must percent-decode. ToolCallChunk (field 2) is intentionally unhandled (skip).
+- **Verified:** ✅ CONFIRMED
 
-**Rust current:** `src/oauth/providers.rs:451-472` `get_config()` không có `codebuddy-intl`/`zed`. `oauth.rs:4217` trả `unknown_provider`. Không executor nào.
+### `P1-L2` — trae executor missing entirely: chat_sessions create + /events SSE plan_item aggregation, Cloud-IDE-JWT auth
+- **JS:** JS open-sse/executors/trae.js — base = `https://core-normal.trae.ai/api/remote/v1` (50, trailing slash stripped). Headers (53-66): `Authorization: Cloud-IDE-JWT {token}`, `Content-Type: application/json`, `X-Trae-Client-Type: web`, `X-Preferenced-Language: psd.appLanguage || "en"`, `x-user-region: psd.userRegion || "US"`, `Referer: https://solo.trae.ai/`, `User-Agent` Chrome 149 macOS, `Accept` text/event-stream|application/json. Flow (7-13): POST `{base}/chat_sessions` → `{code:0, data:{chat_session_id, message_id}}`; GET `{base}/chat_sessions/{id}/events?reply_to_message_id={message_id}` → SSE; `plan_item` events carry `{id, thought}` (cumulative per plan-item id, longest wins — renderNewText 201-211: order array, `if (t.length >= thoughts[pid].length) thoughts[pid]=t; full=order.map(...).join(""); piece=full.slice(sent)`). createSession body (105-120): `{ mode, environment_id: "default", initial_message: { chat_session_id: "", content: [], query, model_name, agent_type: "solo_agent_remote", model_selection_strategy, common_params: JSON.stringify({...}) }, env: "remote", auto_create_project: false, origin: "web" }`. commonParams (79-100): language "en-us", quality "stable", app_version psd.appVersion||"1.0.0.1229", web_id, user_identity||"Free", is_freshman "0", scope||"marscode-us", tenant||"marscode", region||"US-East", aiRegion, solo_chat_mode. resolveMode (69-76): "work"/"auto-work"/"solo-work" → mode work/strategy auto/empty model; "auto"/empty → mode code/strategy auto; else code/manual/modelName=model. Events: `error`→errorEvent; `token_usage`→usage {prompt_tokens,completion_tokens,total_tokens}; `plan_item`→renderNewText; `done`→stop. Streaming emits first chunk `{role:"assistant"}`, content pieces, finish `{finish_reason:"stop"}` + usage chunk + `data: [DONE]`. Non-streaming: same aggregation, message content = join of thoughts.
+- **Rust now:** N/A — no trae executor. In src/core/executor/provider.rs "trae" (1087-1089) = `ProviderExecutorConfig::openai("https://core-normal.trae.ai/api/remote/v1")`; trae requests fall to DefaultExecutor, which POSTs a plain chat.completions JSON to the chat_sessions base URL — completely wrong protocol.
+- **Fix:** Add src/core/executor/trae.rs + dispatch in src/server/api/chat.rs for provider "trae": (1) Headers per JS. (2) flattenQuery: system → `[System]\n{content}`, assistant → `[Assistant]\n{content}`, user → content; join `\n\n`; return `JSON.stringify([{type:"text",data:{content}}])`. (3) resolveMode per JS. (4) POST `{base}/chat_sessions` with the createSession body; on non-ok or code!=0 → 502 error. (5) GET events with reply_to_message_id; SSE parse `event:`/`data:`; `plan_item` aggregation per renderNewText (order + longest-thought). (6) Emit OpenAI SSE with `chatcmpl-trae-{timestamp}` id, first `{role:"assistant"}`, content pieces, finish stop + usage + `data: [DONE]`; `error` event → error chunk; 300s stream timeout (TRAE_STREAM_TIMEOUT_MS env). (7) Non-streaming → chat.completion JSON with joined thoughts and usage.
+- **Test:** `test_trae_render_new_text_cumulative: with two plan_items id A "hi" and id B " there" → piece1 "hi", piece2 " there", and a shorter re-send of A does not shrink (longest wins).`
+- **⚠️ Risks:** The `plan_item` thought is cumulative per id — emitting a shorter later value must be ignored. `token_usage` fields default to 0 (JS `usage.prompt_tokens || 0`). Auth header is `Cloud-IDE-JWT ` prefix (space), not Bearer. STREAM_TIMEOUT_MS default 300000.
+- **Verified:** 🟡 PLAUSIBLE
 
-**Implementation steps:**
-1. Port codebuddy-intl OAuth device-code (`.ai` domain) vào `src/oauth/providers.rs`.
-2. Port Zed RSA keypair flow (`zedAuth.js`) — sinh keypair, build native_app_signin URL, decrypt token, resolve org.
-3. Thêm `CodeBuddyIntlExecutor` (force-stream + message rewrite + reasoning_summary) và `ZedHostedExecutor` (NDJSON/SSE + auth header) vào `executor/`.
+### `P1-M1` — antigravity: missing top-level request envelope fields (project/model/userAgent/requestType/requestId), wrong MAX_ANTIGRAVITY_OUTPUT_TOKENS cap, decoy-tool cloaking diverges (JS transformRequest does NOT cloak)
+- **JS:** JS open-sse/executors/antigravity.js — transformRequest returns (268-276): `{ ...body, project: projectId, model: body.model || model, userAgent: "antigravity", requestType: "agent", requestId: buildIdeRequestId({ body, request: transformedRequest, credentials, model, requestType: "agent" }), request: transformedRequest }` where buildIdeRequestId (99-110): `agent/${uuidFromSeed("antigravity:conversation:"+sessionId)}/${Date.now()}/${uuidFromSeed("antigravity:trajectory:"+sessionId+":"+model+":"+requestType)}/${Math.max(1, contentCount*2-1)}` and uuidFromSeed (91-97) = SHA-256(seed) first 16 bytes, set bits (version 5 / variant RFC 4122), hyphenated. MAX_ANTIGRAVITY_OUTPUT_TOKENS = 64000 (line 21; caps generationConfig.maxOutputTokens at 64000, 249-251). Image models (144-188): request `{ contents, generationConfig: { temperature: 1.0, topP: 0.95, topK: 40, maxOutputTokens: 8192, imageConfig: { aspectRatio } }, sessionId, no tools/systemInstruction/safetySettings }`, requestType "image_gen", model = cleanModel (suffix `-{N}x{M}` stripped). Tool merge (221-243): single functionDeclarations group, `sanitizeFunctionName` per decl, `cleanJSONSchemaForAntigravity` on parameters, no _ide suffixing, no decoy injection, NO cloakTools call in transformRequest (cloakTools static at 419-512 exists but is NOT wired into transformRequest). buildUrl (117-124): `forceNonStream = isImageModel(model); action = (stream && !forceNonStream) ? "streamGenerateContent?alt=sse" : "generateContent"; return `${baseUrl}/v1internal:${action}``. HTTP 429/5xx retry with computeRetryDelay (386-411): Retry-After header/body `reset after Xh Ym Zs`, cap MAX_RETRY_AFTER_MS=10000, backoff `1000 * 2^attempt` capped at 15000 (transient) / 10000 (429).
+- **Rust now:** src/core/executor/antigravity.rs — transform_request (437-713) mutates body.request only; it does NOT add top-level `project`, `model`, `userAgent`, `requestType`, or `requestId` (no buildIdeRequestId/uuidFromSeed). It inserts `projectId` INTO request (820-822) which JS does NOT do at this layer. MAX_ANTIGRAVITY_OUTPUT_TOKENS = 16_384 (47) vs JS 64000. cloak_tools (356-432) suffixes ALL tool names with `_ide` AND injects AG_DEFAULT_TOOLS decoys — JS transformRequest does neither (this will corrupt tool names upstream). image path (857-879) adds candidateCount/safetySettings but not `imageConfig`/temperature/topP/topK/maxOutputTokens 8192, and uses requestType/model absent. build_url matches (streamGenerateContent?alt=sse / generateContent).
+- **Fix:** In src/core/executor/antigravity.rs transform_request: (1) Set MAX_ANTIGRAVITY_OUTPUT_TOKENS = 64_000 (both the const and the cap at the generationConfig write). (2) Add the top-level envelope: after building the transformed request, produce `{...body, project: <resolved projectId>, model: body.model||model, userAgent: "antigravity", requestType: "agent", requestId: <build_ide_request_id>, request: transformed}`. Implement build_ide_request_id: if body.requestId matches `^agent/[^/]+/\d+/[^/]+/\d+$` keep it; else `agent/{conv_uuid}/{now_ms}/{traj_uuid}/{step}` with uuidFromSeed (sha256 → 16 bytes → set version/variant bits → hyphenated) and step = max(1, contentCount*2 - 1). (3) REMOVE the cloak_tools call (and the _ide suffixing + decoy injection) from transform_request so tool names are only sanitize_function_name + clean_json_schema — matching JS. (4) Image path: for is_image_model, build contents from text parts, generationConfig `{temperature:1.0, topP:0.95, topK:40, maxOutputTokens:8192, imageConfig:{aspectRatio}}`, sessionId, requestType "image_gen", cleanModel (strip `-{N}x{M}`), and set top-level model to cleanModel; remove candidateCount/safetySettings injection if not needed to match JS (JS sends none).
+- **Test:** `test_transform_request_sets_envelope: assert body has project/model/userAgent=="antigravity"/requestType/requestId and requestId matches the agent/ pattern; and `test_max_output_tokens_cap_64000`.`
+- **⚠️ Risks:** Removing the cloak/suffix behavior is a behavioral change — verify no Rust test asserts the `_ide` suffix (antigravity.rs tests at 1104-1127 assert `a_ide` presence and WILL need updating to the JS behavior of bare sanitized names + NO decoys). The uuidFromSeed version/variant bit-setting is required for a valid UUID. step uses request.contents length (JS `Array.isArray(request?.contents) ? request.contents.length : 1`).
+- **Verified:** 🟡 PLAUSIBLE
 
-**Guard test:** `zed_oauth_flow_returns_native_app_signin_url`, `codebuddy_intl_device_code_starts`.
+### `P1-N1` — codex: CODEX_DEFAULT_INSTRUCTIONS text differs, include reasoning.encrypted_content not injected, no SSE peek retry (Rust consumes full body, breaking streaming), no prefetchImages, no usage_limit_reached parse
+- **JS:** JS open-sse/executors/codex.js — CODEX_DEFAULT_INSTRUCTIONS (config/codexInstructions.js) is a long multi-section prompt starting `You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user's computer.` (18 instructions). transformRequest (393-489): `convertSystemToDeveloperRole` (49-56), stripStoredItemReferences, normalizeCodexTools (72-115: `type==="namespace"` collects names, `type==="custom"` passthrough, hosted tools keep), `body.stream = true` (415), `body.store = false` (423), `prompt_cache_key = sessionId` when missing (426-428), `body.model = getModelUpstreamId("cx", ...)` (431), effort suffix strip (none/minimal/low/medium/high/xhigh, 435-444), reasoning `{effort: normalizeReasoningEffort(body.model, reasoning_effort||modelEffort||'low'), summary:"auto"}` (446-453), `if (effort && effort !== 'none') body.include = ["reasoning.encrypted_content"]` (457-459), then deletes temperature/top_p/frequency_penalty/presence_penalty/logprobs/top_logprobs/n/max_tokens/max_completion_tokens/max_output_tokens/user/prompt_cache_retention/metadata/stream_options/safety_identifier/previous_response_id (462-478), `service_tier === "fast" → "priority"`, else delete if not "priority" (480-481), then allowlist filter (RESPONSES_API_ALLOWLIST 42-46: model,input,instructions,tools,tool_choice,stream,store,reasoning,service_tier,include,prompt_cache_key,client_metadata,text). execute/_peekSseTransientError (258-362): peek 256KiB of the SSE body for `server_is_overloaded`/`service_unavailable_error` (retry), `selected model is at capacity`/`model_at_capacity` (account fallback → 503 with CODEX_MODEL_CAPACITY_MESSAGE), and user-output patterns; if no match, re-assemble a replacement stream (prefix chunks + rest) so streaming is not broken. prefetchImages (241-256): fetch remote image_url → base64 data URI, 15s timeout, `{type:"input_image", image_url, detail}`. parseError (365-387): 429 `usage_limit_reached` → `resetsAtMs` from resets_at / resets_in_seconds. buildHeaders (202-220): `session_id`, `originator: codex_cli_rs`, `ChatGPT-Account-ID: workspaceId||chatgptAccountId||accountId`.
+- **Rust now:** src/core/executor/codex.rs — DEFAULT_CODEX_INSTRUCTIONS (212-213) is a one-liner "You are a highly capable coding agent..." — NOT the JS prompt. transform_request_body (232-307) builds a fresh body but: sets reasoning always (does NOT gate include on effort — it only copies body include if present, 299-301, so `reasoning.encrypted_content` is never injected), no prefetchImages, no prompt_cache_key injection (only copies if present, 302-304). execute (417-499) reads the ENTIRE body (`resp.bytes().await?` 464) and scans the first 4096 bytes for the two retry strings, then reconstructs — this consumes the whole response, breaking SSE streaming, and lacks account-fallback patterns and stream re-assembly. build_headers (161-209) has session_id/originator/chatgpt-account-id ✓ but missing the `User-Agent: codex_cli_rs/0.136.0` from the registry headers (provider.rs codex config may carry it). No usage_limit_reached parseError, no service_tier mapping.
+- **Fix:** In src/core/executor/codex.rs: (1) Replace DEFAULT_CODEX_INSTRUCTIONS with the full JS text (copy verbatim from .tmp/9router/open-sse/config/codexInstructions.js). (2) In transform_request_body: compute effort; if effort != "none" set `include = ["reasoning.encrypted_content"]` (overwrite, per JS). (3) Add prefetch_images: for each input item content part of type `image_url`, if url starts with "data:" → `{type:"input_image",image_url:url,detail}`; else fetch the URL (15s timeout) and inline base64 data URI. (4) Fix execute to NOT consume the full body: stream-peek at most 256KiB; if a retry pattern matched before any user-output pattern → retry (backoff per JS retry config for 503); if account-fallback pattern matched → return 503 error with the capacity message; otherwise re-assemble the response body from peeked prefix chunks + the remaining upstream stream so SSE flows. (5) parse_error: 429 body with `error.type==="usage_limit_reached"` → compute resetsAtMs from `resets_at` (seconds) or `resets_in_seconds`. (6) service_tier mapping fast→priority, delete otherwise.
+- **Test:** `test_codex_instructions_matches_js: assert DEFAULT_CODEX_INSTRUCTIONS starts_with("You are Codex, based on GPT-5"). `test_codex_include_reasoning_when_effort` — effort high → include == ["reasoning.encrypted_content"].`
+- **⚠️ Risks:** The full-body consumption is the most dangerous existing behavior (streaming broken) — replace it, do not layer the peek on top. The account-fallback error must be HTTP 503 with the EXACT message "Selected model is at capacity. Please try a different model." for downstream fallback matching. Keep responseFormat/allowlist semantics.
+- **Verified:** ✅ CONFIRMED
 
-**Risks:** Zed là RSA unique — generic OAuth path không cover được; codebuddy-intl phải dùng đúng `www.codebuddy.ai` domain (khác CN).
+### `P1-O1` — opencode-go (default.rs path): also verify provider base URL includes /go segment
+- **JS:** JS open-sse/executors/opencode-go.js BASE = "https://opencode.ai/zen/go/v1" (16); registry baseUrl `https://opencode.ai/zen/go/v1/chat/completions` (registry/opencode-go.js:22). Claude-format models use `{BASE}/messages` = `https://opencode.ai/zen/go/v1/messages`.
+- **Rust now:** src/core/executor/default.rs registers "opencode-go" as `ProviderConfig::openai("https://opencode.ai/zen/v1")` (139-140) — MISSING the `/go` segment. build_url (754-765) appends `messages` or `chat/completions` to that base, yielding `https://opencode.ai/zen/v1/messages` instead of `https://opencode.ai/zen/go/v1/messages` (404). The dedicated src/core/executor/opencode_go.rs uses OPENCODE_GO_BASE = "https://opencode.ai/zen/go/v1" (26) which is correct — the bug is only in default.rs's registry entry.
+- **Fix:** In src/core/executor/default.rs PROVIDER_CONFIGS, change the "opencode-go" entry from `ProviderConfig::openai("https://opencode.ai/zen/v1")` to `ProviderConfig::openai("https://opencode.ai/zen/go/v1")`. If chat.rs routes opencode-go through the dedicated executor (it does — chat.rs:1325-1354), this only matters for fallback/default paths, but fix it regardless for consistency.
+- **Test:** `test_default_opencode_go_base_url: build_url for opencode-go with a non-claude model returns "https://opencode.ai/zen/go/v1/chat/completions".`
+- **⚠️ Risks:** Check provider.rs's opencode-go registry entry too (provider.rs:1491 lists opencode-go as api-key provider; its base URL may also lack /go). Do not double-append the path when a runtime_transport already carries the full endpoint.
+- **Verified:** ✅ CONFIRMED
 
-### A4. Image-generation adapters xai + vercel-ai-gateway (P0) [missing]
+## PART C — TRANSLATORS (10 specs)
 
-**Source of truth:** `imageProviders/index.js:16-35` ADAPTERS có `xai: createOpenAIAdapter('xai')` (baseUrl `https://api.x.ai/v1/images/generations`, model grok-2-image-1212) và vercel-ai-gateway (`https://ai-gateway.vercel.sh/v1/images/generations`).
+### `P0-A10` — reasoning_effort → reasoning/effort mapping missing (openai_responses + claude_to_openai)
+- **JS:** openai-responses.js:417-423 chat→responses:
+```js
+if (body.temperature !== undefined) result.temperature = body.temperature;
+if (body.max_tokens !== undefined) result.max_tokens = body.max_tokens;
+if (body.top_p !== undefined) result.top_p = body.top_p;
+if (body.reasoning !== undefined) result.reasoning = body.reasoning;
+if (body.reasoning_effort !== undefined) result.reasoning = { effort: body.reasoning_effort, summary: "auto" };
+```
+(Note: body.reasoning set first, then reasoning_effort OVERWRITES result.reasoning with {effort, summary:"auto"} — so reasoning_effort wins.)
+openai-responses.js:243-247 responses→chat cleanup:
+```js
+if (typeof result.reasoning?.effort === "string") {
+  result.reasoning_effort = result.reasoning.effort;
+}
+delete result.reasoning;
+delete result.client_metadata;
+```
+claude-to-openai.js:83-91:
+```js
+if (body.reasoning_effort !== undefined) {
+  result.reasoning_effort = body.reasoning_effort;
+} else if (body.reasoning?.effort !== undefined) {
+  result.reasoning_effort = body.reasoning.effort;
+}
+if (body.reasoning !== undefined) {
+  result.reasoning = body.reasoning;
+}
+```
+- **Rust now:** src/core/translator/request/openai_responses.rs chat→responses: passes through temperature/max_tokens/max_completion_tokens/top_p/service_tier (341-358) but NO reasoning_effort→reasoning mapping and no reasoning passthrough. responses→chat (openai_responses_to_chat_request): only `obj.remove("reasoning")` (line 190); does not map reasoning.effort→reasoning_effort, does not remove client_metadata, does not map max_output_tokens→max_tokens. src/core/translator/request/claude_to_openai.rs: after tool_choice (line 469) and thinking (472-474), there is NO reasoning_effort / reasoning passthrough at all.
+- **Fix:** openai_responses.rs chat_to_openai_responses_request: after the service_tier passthrough (line 358), add: `if let Some(r) = body.get("reasoning") { result["reasoning"] = r.clone(); } if let Some(e) = body.get("reasoning_effort") { result["reasoning"] = serde_json::json!({"effort": e, "summary": "auto"}); }` (reasoning_effort overwrites reasoning per JS order).
+openai_responses.rs openai_responses_to_chat_request: in the obj cleanup block (184-190), change `obj.remove("reasoning")` to: `if let Some(r) = obj.get("reasoning") { if let Some(e) = r.get("effort").and_then(Value::as_str) { obj.insert("reasoning_effort".into(), Value::String(e.to_string())); } } obj.remove("reasoning"); obj.remove("client_metadata");` — and after result["messages"]/obj construction also handle max_output_tokens: `if let Some(v) = obj.get("max_output_tokens").cloned() { if obj.get("max_tokens").is_none() { obj.insert("max_tokens".into(), v); } obj.remove("max_output_tokens"); }`.
+claude_to_openai.rs claude_to_openai_request: after the thinking block (line 472-474) add: `if let Some(e) = body_obj.get("reasoning_effort") { result["reasoning_effort"] = e.clone(); } else if let Some(e) = body_obj.get("reasoning").and_then(|r| r.get("effort")) { result["reasoning_effort"] = e.clone(); } if let Some(r) = body_obj.get("reasoning") { result["reasoning"] = r.clone(); }`.
+- **Test:** `In openai_responses.rs add `reasoning_effort_maps_to_reasoning_object` — chat body {reasoning_effort:high} → result.reasoning == {"effort":"high","summary":"auto"} AND result.reasoning_effort absent? (JS deletes nothing here — both fields can coexist; assert result.reasoning.effort == "high"). Add `responses_to_chat_maps_reasoning_effort_and_drops_metadata` — input body {reasoning:{effort:"medium"},client_metadata:{},max_output_tokens:100} → result.reasoning_effort=="medium", no client_metadata, max_tokens==100, no max_output_tokens. In claude_to_openai.rs add `passes_reasoning_effort_through` — body {reasoning_effort:"low"} → result.reasoning_effort=="low"; body {reasoning:{effort:"medium"}} → result.reasoning_effort=="medium" and result.reasoning.effort=="medium".`
+- **⚠️ Risks:** JS order in chat→responses is reasoning THEN reasoning_effort-overwrite — reasoning_effort must win. In responses→chat, reasoning.effort is read as a STRING only (`typeof === "string"`) — if effort is a non-string, no mapping and reasoning is still deleted. max_output_tokens→max_tokens maps only when max_tokens is undefined, then max_output_tokens is always removed.
+- **Verified:** ✅ CONFIRMED
 
-**Rust current:** `image/mod.rs:67-85` `get_image_adapter()` thiếu cả 2.
+### `P0-A11` — reasoning_details[] array not decoded in openai→claude response streaming (MiniMax reasoning_split=true)
+- **JS:** open-sse/translator/concerns/reasoning.js:15-24 extractReasoningText(delta):
+```js
+if (typeof delta.reasoning_content === "string" && delta.reasoning_content) return delta.reasoning_content;
+if (typeof delta.reasoning === "string" && delta.reasoning) return delta.reasoning;
+const details = delta.reasoning_details;
+if (Array.isArray(details)) {
+  return details.map((d) => (typeof d === "string" ? d : d?.text || d?.content || "")).join("");
+}
+return "";
+```
+Called from response/openai-to-claude.js:139 `const reasoningContent = extractReasoningText(delta);` — reasoning_details elements may be strings or {text}|{content}; joined with EMPTY string "" (not newline).
+- **Rust now:** src/core/translator/response/openai_to_claude.rs:263-270 reads only `delta.reasoning_content` (string) then `delta.reasoning` (string). reasoning_details array is never consulted — MiniMax reasoning_split=true streams reasoning as `delta.reasoning_details` and would be silently dropped.
+- **Fix:** In src/core/translator/response/openai_to_claude.rs, add a helper `fn extract_reasoning_text(delta: &Value) -> String` that returns: (1) delta.reasoning_content as String if non-empty string; (2) delta.reasoning as String if non-empty string; (3) otherwise if delta.reasoning_details is an array, `details.iter().map(|d| if let Some(s)=d.as_str() { s.to_string() } else { d.get("text").and_then(Value::as_str).or_else(|| d.get("content").and_then(Value::as_str)).unwrap_or("").to_string() }).collect::<String>()`; else "". Replace the current reasoning extraction block (263-270) to use this helper and only open the thinking block when the result is non-empty (currently gated on `!reasoning.is_empty()`).
+- **Test:** `Add `reasoning_details_array_decoded` — a chunk with choices[0].delta = {reasoning_details:[{"text":"a"},{"content":"b"},"c"]} → the stream emits one thinking_delta with thinking "abc" (join with empty string, no separator). Add `reasoning_content_takes_priority` — delta {reasoning_content:"x", reasoning_details:[{text:"y"}]} → thinking "x" only.`
+- **⚠️ Risks:** Join is "" (empty) for reasoning_details — do NOT join with "\n". Element shape is string | {text} | {content}; elements with neither contribute "". Keep priority order reasoning_content > reasoning > reasoning_details. This same reasoning_details shape also flows into the request-side buildReasoningInputItem (P0-A8) where the join is "\n" — the two joins are intentionally different.
+- **Verified:** ✅ CONFIRMED
 
-**Implementation steps:** thêm `"xai"` và `"vercel-ai-gateway"` vào `get_image_adapter()` dùng openai-compatible adapter với đúng baseUrl.
+### `P0-A12` — max_tokens ceiling divergence in openai→claude (model ceiling + budget reconciliation)
+- **JS:** request/openai-to-claude.js:18-27: `const modelCeiling = getCapabilitiesForModel(null, model).maxOutput || undefined; const result = { model, max_tokens: adjustMaxTokens(body, modelCeiling), stream };`
+formats/maxTokens.js:12-33 adjustMaxTokens(body, ceiling = DEFAULT_MAX_TOKENS): maxTokens = body.max_tokens || 64000; tools present && maxTokens < 32000 → 32000; thinking.budget_tokens && maxTokens <= budget_tokens → budget_tokens + 1024; `if (maxTokens > ceiling) maxTokens = ceiling;`
+formats/claude.js:201-217 prepareClaudeRequest: `const ceiling = getCapabilitiesForModel(provider, body.model).maxOutput || DEFAULT_MAX_TOKENS; if (body.max_tokens > ceiling) body.max_tokens = ceiling;` then budget reconciliation: `if (body.thinking?.type === "enabled" && body.thinking.budget_tokens && body.thinking.budget_tokens >= body.max_tokens) { body.max_tokens = Math.min(body.thinking.budget_tokens + 1024, ceiling); if (body.thinking.budget_tokens >= body.max_tokens) { body.thinking.budget_tokens = Math.max(1024, body.max_tokens - 1024); } }`
+Model ceilings (capabilities.js:79-89): claude-opus-4.6/4.7/4.8/5 and claude-sonnet-4.6/5 → maxOutput 128000.
+- **Rust now:** src/core/translator/request/openai_to_claude.rs adjust_max_tokens (379-400): has the tools-32000 bump and the budget_tokens+1024 bump but NO ceiling clamp (signature takes no ceiling param). src/core/translator/request/claude_format.rs prepare_claude_request (154-171): clamps max_tokens to 200000 for ANY model containing "opus", 128000 for "sonnet", else 64000 — but the opus ceiling is 200000 while JS capabilities say 128000 — and there is NO thinking budget reconciliation after the clamp (if budget_tokens >= max_tokens the request 400s).
+- **Fix:** 1. In openai_to_claude.rs: change adjust_max_tokens to `fn adjust_max_tokens(body, ceiling: u32) -> u32` and after the budget bump add `if max_tokens > ceiling { max_tokens = ceiling; }`; call it with a model ceiling — add a `fn model_output_ceiling(model: &str) -> u32` helper returning 128000 when the lowercased model contains "claude" and ("opus" or "sonnet") and a version >= 4.6 (match capabilities.js opus-4.6/4.7/4.8/5 + sonnet-4.6/5), else 64000. Keep the DEFAULT_MAX_TOKENS/DEFAULT_MIN_TOKENS consts at 64000/32000.
+2. In claude_format.rs prepare_claude_request: change the opus ceiling from 200_000 to 128_000 (JS parity; sonnet already 128_000, others 64_000).
+3. In claude_format.rs, AFTER the clamp, add the JS budget reconciliation: if body.thinking.type=="enabled" && budget_tokens is a number && budget_tokens >= max_tokens → set max_tokens = min(budget_tokens+1024, ceiling); then if budget_tokens >= max_tokens → set budget_tokens = max(1024, max_tokens-1024).
+- **Test:** `In openai_to_claude.rs add `adjust_max_tokens_clamps_to_model_ceiling` — body {max_tokens:200000}, model "claude-opus-4.8" → result.max_tokens == 128000 (not 200000). Add `claude_format_reconciles_budget_after_clamp` in claude_format.rs — body {max_tokens:128000, thinking:{type:enabled,budget_tokens:128000}} model claude-sonnet-4.6 → after prepare_claude_request, max_tokens == 128000 (budget+1024 capped at ceiling) and budget_tokens == 126976 (128000-1024).`
+- **⚠️ Risks:** The 128000 ceiling for opus is a behavior CHANGE (was 200000) — match JS capabilities exactly. The reconciliation only runs when thinking.type == "enabled" AND budget_tokens is truthy AND budget >= max_tokens; budget shrink floor is 1024. If budget+1024 already exceeds ceiling, max_tokens stays at ceiling and the budget is shrunk to max(1024, max_tokens-1024) — both steps are required, in this order.
+- **Verified:** 🟡 PLAUSIBLE
 
-**Guard test:** `image_adapter_covers_xai_and_vercel`.
+### `P0-A13` — MiniMax reasoning placeholder (reasoningInject scope:all) + bare-function tool shape
+- **JS:** providers/registry/minimax.js:23-28 and minimax-cn.js:23-28: `quirks: { dropOutputConfig: true }, reasoningInject: { scope: "all" }`.
+utils/reasoningContentInjector.js:6 `const PLACEHOLDER = " ";`, providerRuleFor reads `PROVIDERS[provider]?.reasoningInject` (line 9), shouldInject (29-35): role assistant, no non-empty reasoning_content, scope "all" → true; applyRule injects `reasoning_content: " "` on every matching assistant message.
+request/openai-to-claude.js:159-177: `const toolData = tool.function ?? tool; const originalName = toolData.name;` — a bare `{ name, description, parameters }` tool (no parent `type` and no `function` wrapper) must still yield `toolData.name`, because Anthropic-compatible gateways (notably MiniMax M3 at api.minimaxi.com) reject payloads where this falls through with `toolData.name === undefined` (upstream code 2013 "invalid tool type"). The JS also adds `cache_control: {type:"ephemeral", ttl:"1h"}` to the LAST tool declaration (openai-to-claude.js:181).
+- **Rust now:** src/core/utils/reasoning_content_injector.rs rule_for (23-36): only deepseek provider (Scope::All) and kimi-/deepseek- model prefixes — NO minimax/minimax-cn rule, so MiniMax assistant messages never get the placeholder. src/core/translator/request/openai_to_claude.rs tool loop (602-661): `let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or("function");` then `let func = tool.get("function"); let original_name = func.and_then(|f| f.get("name"))...` — for a bare `{name,description,parameters}` tool (no type), tool_type defaults to "function", func is None → original_name is "" → a nameless tool is sent (MiniMax M3 2013).
+- **Fix:** 1. reasoning_content_injector.rs: add to rule_for: `if provider == "minimax" || provider == "minimax-cn" { return Some(Scope::All); }` (before the model-prefix fallbacks).
+2. openai_to_claude.rs: in the tool loop, change `let func = tool.get("function");` to `let func = tool.get("function").filter(|f| f.get("name").and_then(Value::as_str).map(|n| !n.is_empty()).unwrap_or(false)).or(Some(tool));` — so a bare `{name,...}` tool (or `{function:{name}}`) resolves original_name correctly, and the loop should only push a tool when original_name is non-empty (skip otherwise). Verify the resulting ClaudeTool pushes the original (unprefixed) name and last-tool cache_control already set at lines 664-668.
+- **Test:** `In reasoning_content_injector.rs add `minimax_injects_on_all_assistant_messages` — provider "minimax", model "MiniMax-M3", body messages [{role:assistant,content:x}] → reasoning_content == " "; provider "minimax" with existing reasoning_content untouched. In openai_to_claude.rs add `bare_function_tool_keeps_name` — body tools [{name:"echo",description:"d",parameters:{}}] → result.tools[0].name == "echo" (not empty).`
+- **⚠️ Risks:** MiniMax M2.x cannot disable thinking (thinkingCanDisable:false) — the placeholder is separate from thinking enablement, keep the two decoupled. The bare-function branch must not break the normal `{type:"function",function:{name}}` shape (already handled). Do not add cache_control to the placeholder injection — it is a message-level field, unrelated to tools.
+- **Verified:** 🟡 PLAUSIBLE
 
-### A5–A10. Sai URL/endpoint (P0) [wrong-url]
+### `P0-A6` — Remove dead PROVIDER_REGISTRY from provider.rs (or wire it up) + migrate kilo-gateway/venice/featherless to live map
+- **JS:** The live chat path (src/app/api/v1/* -> open-sse/handlers/chat.js -> open-sse/executors/default.js) reads open-sse/providers/registry/* which is the single source of truth with 115 enabled entries. There is no second provider table in JS.
+- **Rust now:** src/core/executor/provider.rs:682-1423 defines static PROVIDER_REGISTRY (a separate ProviderExecutorConfig map, ~140 keys) plus helper fns get_provider_config (1425), is_supported_provider (1429), all_providers (1433), get_oauth_providers (1437), get_api_key_providers (1441), get_free_providers (1613), get_specialty_providers (1626). Verified runtime consumers: ONLY src/server/api/media.rs:638 uses get_provider_config (to resolve a media baseUrl). get_oauth_providers/get_api_key_providers/get_free_providers/get_specialty_providers/all_providers/is_supported_provider/UnifiedExecutor::for_provider have NO runtime callers (grep across src found only re-export in executor/mod.rs and the definition itself). The chat path uses default.rs PROVIDER_CONFIGS exclusively (chat.rs:1635). This is dead code that silently diverges from the live map (e.g. blackbox URL wrong here too, featherless-ai key wrong).
+- **Fix:** Recommended: delete PROVIDER_REGISTRY (provider.rs:682-1423), get_provider_config (1425-1427), is_supported_provider (1429-1431), all_providers (1433-1435), get_oauth_providers (1437-1439), get_api_key_providers (1441-1611), get_free_providers (1613-1624), get_specialty_providers (1626-1649), and UnifiedExecutor::for_provider (321-324). Then: 1) In src/server/api/media.rs:638, change get_provider_config(provider) to read the live map — expose a helper from default.rs (e.g. pub fn provider_config_base_url(provider:&str)->Option<String> reading PROVIDER_CONFIGS) or inline a match. 2) Update executor/mod.rs:93-98 re-exports to drop the deleted symbols (keep LogEntry/LogLevel/ProviderExecutionRequest/ProviderExecutionResponse/ProviderExecutor/ProviderExecutorError/ProxyOptions). 3) If any tests import the deleted fns, update them. 4) The kilo-gateway/venice/featherless entries currently living ONLY in the dead registry are covered by tasks P0-A1h/A1m/A1g — after this deletion they exist only in the live map, which is correct.
+- **Test:** `A compile-level guard: add a test asserting the two maps do not diverge — tests/executor_pool_behavior.rs: #[test] fn live_map_has_no_duplicate_dead_keys(): assert every provider key in default.rs PROVIDER_CONFIGS that also existed in the old registry resolves a baseUrl through the media helper; simpler: keep the deletion itself as the guard (cargo build fails if any consumer references a deleted symbol). Optionally add #[test] fn all_enabled_providers_reachable(): for each of the 17 (alims-intl, api-airforce, baidu, bluesminds, clinepass, codebuddy-intl, featherless, kilo-gateway, perplexity-agent, poolside, selfhosted-embedding, selfhosted-stt, selfhosted-tts, tencent, tokenrouter, venice, zed) plus blackbox/siliconflow, assert DefaultExecutor::new(provider,...) returns Ok.`
+- **⚠️ Risks:** media.rs:638 is the ONLY live consumer — after deletion it MUST be rewired or media baseUrl resolution falls back to format!("https://api.{}.com/v1", provider) (media.rs:640) which is wrong for kilo-gateway/venice/featherless. If you choose to keep the registry instead of deleting, then tasks P0-A1h/A1m/A1g (adding to the live map) would create TWO sources of truth that can drift again — the deletion is the durable fix. Check tests/ project_setup.rs references src/core/executor/mod.rs only for existence, not symbols.
+- **Verified:** ✅ CONFIRMED
 
-| # | Gap | JS (đúng) | Rust (sai) | Fix |
-|---|---|---|---|---|
-| A5 | **youcom search** | `searchConfig.baseUrl = https://ydc-index.io/v1/search` (GET + X-API-Key) | `search/providers.rs:829` hardcode `https://api.you.com/search` | đổi thành `https://ydc-index.io/v1/search`, param giữ nguyên |
-| A6 | **tortoise TTS** | `http://localhost:5000/api/tts` | `tts/mod.rs:153` `http://localhost:8000/tts` | đổi port 5000 + thêm `/api` |
-| A7 | **blackbox** | `https://api.blackbox.ai/v1/chat/completions` | `default.rs:183-184` + `provider.rs:775-776` `https://api.blackbox.ai/api/chat/completions` | đổi `/api/` → `/v1/` |
-| A8 | **SiliconFlow** | `https://api.siliconflow.com/v1` | `default.rs:101-102` + `api_key.rs:296` `.cn` | đổi `.cn` → `.com` |
-| A9 | **iflow** | `https://apis.iflow.cn` | mintlify docs host | đổi host |
-| A10 | **baidu/qianfan** | id `baidu`, base `https://qianfan.baidubce.com/v2/chat/completions` | `provider.rs:1298-1299` chỉ `qianfan` thiếu `/chat/completions`; `default.rs` không có | thêm `baidu` + đúng URL |
+### `P0-A6` — max_thinking_length + additionalModelRequestFields not emitted by Rust Kiro translators
+- **JS:** kiroConstants.js:354-357 buildThinkingSystemPrefix: `const safeBudget = Math.max(1, Math.min(32000, Number(budget) || KIRO_THINKING_BUDGET_DEFAULT)); return `<thinking_mode>enabled</thinking_mode>
+<max_thinking_length>${safeBudget}</max_thinking_length>`;`
+Both kiro translators push this prefix into systemPrompt ONLY when `thinkingBudget !== null && !usesNativeGptEffort` (openai-to-kiro.js:347-349, claude-to-kiro.js:250-252). budget comes from resolveKiroThinkingBudget(body, credentials?.rawHeaders, model) (kiroConstants.js:147-172): mode budget → budget; mode level → effortToBudget(level) (thinking.js:9-17 LEVEL_TO_BUDGET low=1024, medium=8192, high=24576, xhigh=32768, max=128000) ?? 16000; anthropic-beta header contains "interleaved-thinking" → 16000; body/system contains `<thinking_mode>enabled|interleaved</thinking_mode>` → 16000; model contains "thinking" or "-reason" → 16000; else null.
+additionalModelRequestFields via buildKiroAdditionalModelRequestFieldsForModel(body, model) (kiroConstants.js:248-252 + 202-237): for Claude models with resolveKiroEffortPath(model)=="output_config" (major>4, or 4 with minor>5) → `{ thinking: { type: "adaptive", display: "summarized" }, output_config: { effort } }`; for GPT-5.6 models (path "reasoning") → `{ reasoning: { effort } }`; else undefined. Tests assert: reasoning_effort low → systemPrompt contains `<max_thinking_length>1024</max_thinking_length>` AND additionalModelRequestFields == {thinking:{type:adaptive,display:summarized},output_config:{effort:low}} for claude-sonnet-4.6 (tests/unit/openai-to-kiro.test.js:289-302); GPT-5.6 reasoning.effort high → additionalModelRequestFields {reasoning:{effort:high}} with NO legacy prompt tags (lines 323-338); unsupported efforts (auto/minimal/ultra) → NO additionalModelRequestFields but legacy `<thinking_mode>enabled</thinking_mode>` + `<max_thinking_length>` fallback (lines 370-384); none/off/disabled → neither (386-400).
+- **Rust now:** src/core/translator/request/claude_to_kiro.rs:457-459 and openai_to_kiro.rs:471-473 push ONLY `"<thinking_mode>enabled</thinking_mode>"` — no `<max_thinking_length>` line, no budget resolution, no effortToBudget mapping. `build_thinking_system_prefix` exists in src/core/config/kiro_constants.rs:119-126 but is never called by the translators. Neither translator emits `additionalModelRequestFields`. The thinking detection uses `reasoning_effort.is_some() || thinking.type=="enabled"` (claude_to_kiro.rs:451-456 / openai_to_kiro.rs:465-470) — e.g. reasoning_effort "none" still emits the prefix (JS resolveKiroThinkingBudget returns null for none).
+- **Fix:** 1. Add to kiro_constants.rs a `resolve_kiro_thinking_budget(body: &Value, headers: Option<&dyn HeaderLookup>, model: &str) -> Option<u32>` mirroring JS: check body.output_config.effort, body.thinking (disabled→None, enabled/adaptive+budget_tokens→budget), body.reasoning_effort / body.reasoning.effort (none/off/disabled→None; auto→16000 default via KIRO_THINKING_BUDGET_DEFAULT; low→1024, medium→8192, high→24576, xhigh→32768, max→128000, minimal→512), then anthropic-beta header contains "interleaved-thinking"→Some(16000), then contains_thinking_mode_tag→Some(16000), then model contains "thinking"/"-reason"→Some(16000), else None. HeaderLookup trait already exists (kiro_constants.rs:191-224).
+2. Add `resolve_kiro_effort_path(model) -> Option<&'static str>` ("reasoning" for gpt/5/6 tokens, "output_config" for claude >4.5, else None) and `build_kiro_additional_model_request_fields_for_model(body, model) -> Option<Value>` per the JS rules, incl. effort extraction (xhigh/max→high for claude, max→xhigh for gpt) and `uses_kiro_native_gpt_effort`.
+3. In BOTH claude_to_kiro.rs and openai_to_kiro.rs, replace the `<thinking_mode>` push with: `let thinking_budget = resolve_kiro_thinking_budget(body, raw_headers_ref, &upstream_model); let uses_native = uses_kiro_native_gpt_effort(...); if let Some(b) = thinking_budget { if !uses_native { system_prompt_parts.push(build_thinking_system_prefix(Some(b))); } }` (pass the raw headers you already compute at claude_to_kiro.rs:488 / openai_to_kiro.rs:502 as the HeaderLookup impl for serde_json::Value). Also gate the old `thinking_enabled` block on the resolved budget being non-None so reasoning_effort "none" no longer enables it.
+4. After building system_prompt, add: `if let Some(amrf) = build_kiro_additional_model_request_fields_for_model(body, upstream_model) { payload["additionalModelRequestFields"] = amrf; }` (only when resolve_kiro_effort_path returns Some; effort must be non-null).
+- **Test:** `In openai_to_kiro.rs tests add `reasoning_effort_low_emits_max_thinking_length_1024` — body {reasoning_effort:low}, model "claude-sonnet-4.6" → payload.systemPrompt contains "<max_thinking_length>1024</max_thinking_length>" and payload.additionalModelRequestFields == {"thinking":{"type":"adaptive","display":"summarized"},"output_config":{"effort":"low"}}. Add `reasoning_effort_none_emits_nothing` — body {reasoning_effort:none} → systemPrompt has NO "<thinking_mode>" and NO "<max_thinking_length>" and no additionalModelRequestFields. Add `gpt56_reasoning_effort_maps_to_reasoning_fields` — model "gpt-5.6-sol", body {reasoning:{effort:high}} → additionalModelRequestFields == {"reasoning":{"effort":"high"}} and no "<thinking_mode>" in systemPrompt.`
+- **⚠️ Risks:** Preserve the JS bug-for-bug behavior that unsupported effort strings (auto/minimal/ultra) fall back to the LEGACY prompt tag (budget = KIRO_THINKING_BUDGET_DEFAULT 16000) while SUPPORTED Claude/GPT models get native fields instead of tags. `build_thinking_system_prefix` clamps to 1..32000 — a max-level budget 128000 for a claude-budget model must still go through the clamp. GPT-5.6 effort "max" → wire "xhigh" (kiroConstants.js:187-200 extractKiroGptEffortLevel).
+- **Verified:** ✅ CONFIRMED
 
-**Guard test:** mỗi URL → `assert_eq!(config.base_url, "<đúng>")`.
+### `P0-A7` — Catalog/model metadata parity for the 17 providers (provider_catalog.json)
+- **JS:** JS registry files define per-provider models with contextLength (baidu.js, bluesminds.js, kilo-gateway.js, alims-intl.js, api-airforce.js, tencent.js) and kinds (tokenrouter.js, venice.js). Example baidu.js:24-32 contextLength 1048576/1048576/512000/198000/262144/262144/262144.
+- **Rust now:** src/core/model/provider_catalog.json: 17 provider ids present in 'providers'[] (verified): alims-intl, api-airforce, baidu, bluesminds, codebuddy-intl, kilo-gateway, poolside, tencent, venice, zed have a 'providers' entry; clinepass, featherless, perplexity-agent, selfhosted-embedding, selfhosted-stt, selfhosted-tts, tokenrouter DO NOT (verified). providerIdToAlias in the catalog is EMPTY for these (verified: alias list shows no baidu/venice/zed/tencent mapping; the baidu/tencent/zed/venice providers entries carry their own 'alias' field: baidu->qianfan, tencent->hunyuan, zed->zd, venice->venice). providerModels (90 entries) — need to verify per-alias model lists exist for the 17.
+- **Fix:** 1) For each of the 7 providers missing a 'providers'[] entry (clinepass, featherless, perplexity-agent, selfhosted-embedding, selfhosted-stt, selfhosted-tts, tokenrouter), add a ProviderCatalogProvider entry {id, alias, serviceKinds, ttsModels:[], embeddingModels:[], hasSearch:false, hasFetch:false} mirroring JS (clinepass serviceKinds llm; featherless llm; perplexity-agent llm+webSearch with hasSearch:true; tokenrouter llm+embedding+image with embeddingModels filled; selfhosted-* embedding/stt/tts respectively). 2) Populate providerModels[] entries (alias-keyed) for the 17 with the model lists from their JS registry files, carrying contextLength into context_window (catalog.rs:29 context_window: Option<u32>) and kind (llm/embedding/stt/tts/image/video/audio) into the catalog kind field (catalog.rs:19 kind: String). 3) Add providerIdToAlias mappings (venice->venice, tencent->hunyuan, baidu->qianfan, zed->zd, alims-intl->alims-intl, etc.) matching each JS alias field. 4) Keep provider_catalog.json schema valid (catalog.rs:6-12 deserializes it at startup — a malformed file panics the Lazy init, catalog.rs:107).
+- **Test:** `catalog.rs test module: #[test] fn catalog_has_all_17_providers(): for each of the 17 ids assert provider_catalog().provider_info(id).is_some(); #[test] fn catalog_model_kinds_match_registry(): assert venice embeddingModels == ["text-embedding-3-large","text-embedding-bge-m3","text-embedding-qwen3-8b"] and baidu alias resolves to qianfan.`
+- **⚠️ Risks:** provider_catalog.json is loaded via include_str! at compile time (catalog.rs:106) — a JSON syntax error breaks the entire binary build/startup, not just this feature. The ProviderCatalogFile struct (catalog.rs:7-12) is NOT #[serde(default)] on most fields, so missing fields fail deserialization. Kind values must match the catalog's existing vocabulary (look at existing entries before adding). Model ids with '/' (e.g. poolside/laguna-s-2.1) are fine as catalog ids (catalog.rs:18 id: String).
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P0-A7` — inferenceConfig always-emit + maxTokens constant divergence in Kiro translators
+- **JS:** openai-to-kiro.js:309 `const maxTokens = 32000;` and 416-421:
+```js
+if (maxTokens || temperature !== undefined || topP !== undefined) {
+  payload.inferenceConfig = {};
+  if (maxTokens) payload.inferenceConfig.maxTokens = maxTokens;
+  if (temperature !== undefined) payload.inferenceConfig.temperature = temperature;
+  if (topP !== undefined) payload.inferenceConfig.topP = topP;
+}
+```
+→ openai→kiro ALWAYS emits `inferenceConfig: { maxTokens: 32000, ... }` (constant, ignores body.max_tokens).
+claude-to-kiro.js:222 `const maxTokens = body.max_tokens || 32000;` and 323-328 same shape → claude→kiro ALWAYS emits `inferenceConfig: { maxTokens: <body.max_tokens||32000>, ... }`.
+- **Rust now:** claude_to_kiro.rs:571-590: reads client max_tokens (max_completion_tokens fallback, 32000 default) but only creates inferenceConfig `if temperature.is_some() || top_p.is_some()` — omits inferenceConfig entirely when neither present, and always includes maxTokens inside. openai_to_kiro.rs:585-605: same gating; reads client max_tokens (JS hardcodes 32000 for openai→kiro — Rust uses the client value, a deliberate divergence noted in its comment).
+- **Fix:** claude_to_kiro.rs: replace the `if temperature.is_some() || top_p.is_some()` gate with JS parity: `payload["inferenceConfig"] = serde_json::json!({});` unconditionally, then `if let Some(t) = temperature { config["temperature"] = t; }`, `if let Some(t) = top_p { config["topP"] = t; }`, and keep maxTokens = `body.max_tokens.or(max_completion_tokens).filter(>0).unwrap_or(32000)`.
+openai_to_kiro.rs: same unconditional inferenceConfig; set `maxTokens` to the literal 32000 (match JS constant, NOT body.max_tokens): remove the client_max_tokens read at lines 587-593 and use `32000u64`. Only emit `payload["inferenceConfig"]` — JS writes maxTokens first (32000) then temperature/topP.
+- **Test:** `In openai_to_kiro.rs add `inference_config_always_emitted_max_tokens_32000` — body {messages:[{role:user,content:hi}]}, no temperature/top_p → payload.inferenceConfig == {"maxTokens":32000}. In claude_to_kiro.rs add `inference_config_uses_client_max_tokens` — body {max_tokens:8192, messages:[...]}, no temp → inferenceConfig.maxTokens == 8192; body without max_tokens → 32000.`
+- **⚠️ Risks:** This intentionally reverts the Rust comment at openai_to_kiro.rs:585-586 ('9router bug fixed') — the parity mandate takes the JS constant 32000 for openai→kiro. Kiro upstream may 400 if maxTokens exceeds its cap, but parity wins per the audit. Do NOT emit `temperature`/`topP` as null — JS only sets them when !== undefined.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A8` — reasoning continuity lost in Responses↔chat (reasoning/encrypted_content buffering)
+- **JS:** openai-responses.js responses→chat (openaiResponsesToOpenAIRequest): buffers reasoning text across input items — `let pendingReasoning = ""; let pendingReasoningEncrypted = "";` (lines 33-34); extractReasoningText(item) (42-52): joins `item.summary[].text` then falls back to `item.content[].text`; on REASONING items (149-160): `if (txt) pendingReasoning = pendingReasoning ? `${pendingReasoning}
+${txt}` : txt; if (typeof item.encrypted_content === "string" && item.encrypted_content) pendingReasoningEncrypted = item.encrypted_content; continue;`; attachPendingReasoning (54-59) sets `msg.reasoning_content` and `msg.encrypted_content` on the NEXT assistant message or function_call item (94, 109); non-assistant messages clear both (95-98).
+chat→responses (openaiToOpenAIResponsesRequest): buildReasoningInputItem(msg) (266-296) — before each assistant message (332-335): `const reasoningItem = buildReasoningInputItem(msg); if (reasoningItem) result.input.push(reasoningItem);`; item = `{ type: "reasoning", summary: [{type:"summary_text", text}], encrypted_content }` (only if either text or encrypted present); summaryText priority = msg.reasoning_content (trim) > msg.reasoning > msg.reasoning_details.map(d => typeof d?.text === "string" ? d.text : typeof d?.content === "string" ? d.content : "").filter(Boolean).join("\n"). encrypted = msg.encrypted_content || msg.reasoning_encrypted_content || msg.reasoning?.encrypted_content.
+- **Rust now:** src/core/translator/request/openai_responses.rs:152 `Some("reasoning") => {}` — reasoning items silently dropped, no reasoning_content/encrypted_content attach to assistant messages. chat_to_openai_responses_request (197-363) has NO buildReasoningInputItem — assistant messages are emitted without a preceding reasoning item; encrypted_content/reasoning_content/reasoning_details on chat-format assistant messages are dropped.
+- **Fix:** In openai_responses.rs responses→chat: add `let mut pending_reasoning = String::new(); let mut pending_reasoning_encrypted = String::new();` before the item loop. On `Some("reasoning")`: extract `txt` = join of item.summary[].text (or item.content[].text); if non-empty append to pending_reasoning with "\n" separator; if `item.encrypted_content` is a non-empty string set pending_reasoning_encrypted; `continue`. In the `Some("message")` and `Some("function_call")` arms, before pushing the assistant message: if role=="assistant" && !pending_reasoning.is_empty() set msg.reasoning_content; if !pending_reasoning_encrypted.is_empty() set msg.encrypted_content; then clear both. For non-assistant roles clear both (JS 95-98).
+In chat_to_openai_responses_request: before pushing each assistant message item, call a new `build_reasoning_input_item(msg) -> Option<Value>` port (priority reasoning_content trim > reasoning > reasoning_details array; encrypted_content || reasoning_encrypted_content || reasoning.encrypted_content; emits {type:"reasoning", summary:[{type:"summary_text", text}], encrypted_content}) and push it into result.input immediately before the message item when Some.
+- **Test:** `Add `responses_reasoning_item_buffers_onto_next_assistant` — input [reasoning item with summary[{text:"hmm"}], message role assistant content []], run openai_responses_to_chat_request → the assistant message has reasoning_content "hmm". Add `chat_assistant_reemits_reasoning_item` — chat body messages [{role:assistant, content:[], reasoning_content:"hmm", encrypted_content:"blob"}] → result.input[0] is {type:"reasoning", summary:[{type:"summary_text",text:"hmm"}], encrypted_content:"blob"} and input[1] is the assistant message.`
+- **⚠️ Risks:** The encrypted_content blob is a store=false continuity token — must round-trip byte-for-byte; do not JSON-escape it. summary text joins with "\n", reasoning_details joins with "\n" (extract in chat→responses) but reasoning_details in the streamed delta (response side) joins with "" — keep the two separators distinct. Only attach to assistant-role messages; user/system/function_call_output items clear the pending buffers.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A9` — client_metadata not stripped for cerebras/mistral (dropClientMetadata quirk)
+- **JS:** executors/default.js:74-78:
+```js
+// quirk: some openai-compatible providers reject Anthropic's client_metadata field
+if (this.config.quirks?.dropClientMetadata) {
+  delete transformed.client_metadata;
+}
+stripUnsupportedParams(this.provider, model, transformed);
+```
+Providers with the quirk: providers/registry/cerebras.js:20 and mistral.js:20 both `quirks: { dropClientMetadata: true }`.
+- **Rust now:** src/core/executor/default.rs transform_request (984-1011) has no client_metadata removal for cerebras/mistral. (kimchi.rs:74 removes client_metadata, but that is the separate Kimi path; opencode_go.rs:14 lists it in a strip list — neither covers cerebras/mistral via default executor.)
+- **Fix:** In src/core/executor/default.rs transform_request, before the strip_unsupported_params call at line 1008, add: `if self.provider == "cerebras" || self.provider == "mistral" { if let Some(obj) = body.as_object_mut() { obj.remove("client_metadata"); } }`. Top-level removal only — matches JS `delete transformed.client_metadata`.
+- **Test:** `In default.rs tests add `drops_client_metadata_for_cerebras` — body {client_metadata:{ideType:9},messages:[]}, DefaultExecutor::for_provider("cerebras") (or construct via the same path used by transform_request), call transform_request → body has no client_metadata. Add `keeps_client_metadata_for_openai` — provider "openai", assert client_metadata survives.`
+- **⚠️ Risks:** client_metadata arrives from Anthropic-spec clients (Claude Code sends it as a JSON object with ideType/platform/pluginType). Only cerebras and mistral get the drop — do not generalize. The drop happens in the executor, AFTER translation, on the final upstream body (matching JS transformRequest ordering).
+- **Verified:** ✅ CONFIRMED
+
+## PART D — FEATURES v0.5.35-50 (12 specs)
+
+### `P0-B2` — clientDetector: missing codex-tui / codex_cli_rs / "codex desktop" / originator header detection
+- **JS:** open-sse/utils/clientDetector.js:43-44: `if (ua.includes("codex-tui") || ua.includes("codex-cli") || ua.includes("codex_cli_rs") || ua.includes("codex desktop") || originator.startsWith("codex_")) return "codex";`
+:24 `const originator = (headers["originator"] || "").toLowerCase();`
+Note: `X-Initiator` in JS (line 24) is checked with a mixed-case key `headers["X-Initiator"]` on a lower-cased object — this is a JS quirk (never matches); Rust lowercases all headers so `x-initiator` is fine.
+JS detection order (line 20-50): body.userAgent==="antigravity" → github-copilot (githubcopilotchat | openai-intent=conversation-panel | initiator=user) → claude (claude-cli|claude-code|x-app=cli) → gemini-cli → codex (codex-tui|codex-cli|codex_cli_rs|codex desktop|originator startsWith codex_) → deepseek-tui → null.
+- **Rust now:** src/core/utils/client_detector.rs:75 only `if ua.contains("codex-cli")`. Missing codex-tui, codex_cli_rs, "codex desktop", and the `originator` header entirely (function reads user-agent, x-app, openai-intent, x-initiator — no originator). So Codex Desktop (UA "Codex Desktop") and the current Rust CLI (codex-tui) are NOT detected as Codex → `is_native_passthrough(Some(Codex), "codex")` never fires → codex requests are translated instead of passed through losslessly. Also affects stream flags (codex is forceStream so less impact) but passthrough is the main loss.
+- **Fix:** In src/core/utils/client_detector.rs `detect_client_tool`:
+1. Add `let originator = headers.get("originator").map(|s| s.to_lowercase()).unwrap_or_default();` after the initiator line (line 53).
+2. Replace the codex branch (line 75) with:
+```rust
+if ua.contains("codex-tui")
+    || ua.contains("codex-cli")
+    || ua.contains("codex_cli_rs")
+    || ua.contains("codex desktop")
+    || originator.starts_with("codex_")
+{
+    return Some(ClientTool::Codex);
+}
+```
+3. Keep the order identical to JS: body.userAgent → github-copilot → claude → gemini-cli → codex → deepseek-tui. The existing Rust order already matches. (gemini-cli branch line 71 is before codex; deepseek-tui after — correct.)
+4. No change to `is_native_passthrough` — Codex already maps to ["codex"] at line 92.
+- **Test:** ``detects_codex_tui_and_desktop`: headers user-agent="codex-tui/0.5.0" → Codex; user-agent="codex_cli_rs/0.2.0" → Codex; user-agent="Codex Desktop" (case-insensitive) → Codex; headers originator="codex_work_desktop" → Codex; user-agent="codex-cli" → Codex. Add to existing tests in client_detector.rs.`
+- **⚠️ Risks:** Order matters: github-copilot check (openai-intent=conversation-panel | initiator=user) fires BEFORE codex — a Codex Desktop request with initiator header could be mis-detected as copilot. Preserve JS order exactly. originator must be lowercased before starts_with (JS lowercases the whole value). The JS `X-Initiator` mixed-case lookup is a bug — do NOT replicate it; lowercase `x-initiator` is correct.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-C3` — X-9Router-Token-Saver header (per-request opt-out of RTK/headroom/caveman/ponytail) missing in Rust
+- **JS:** open-sse/config/runtimeConfig.js:68: `export const TOKEN_SAVER_HEADER = "x-9router-token-saver";`
+open-sse/handlers/chatCore.js:229: `const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";`
+Then every saver gates on it:
+- :232 `compressMessages(translatedBody, tokenSaverEnabled && rtkEnabled)`
+- :238 `compressWithHeadroom(translatedBody, { enabled: tokenSaverEnabled && headroomEnabled, ... })`
+- :246-261 caveman and ponytail both gated on `tokenSaverEnabled && ...`
+A client sending `x-9router-token-saver: off` disables ALL token savers for that request.
+- **Rust now:** src/server/api/chat.rs:831 `compress_messages(&mut body, snapshot.settings.rtk_enabled)` — no header gate. :835-854 headroom enabled = `snapshot.settings.headroom_enabled` — no header gate. :862 `apply_request_preprocessing` (caveman+ponytail) — no header gate. The header is never read. So a client cannot opt out of token savers per-request; compressed tool results may break sensitive tooling that needs raw output.
+- **Fix:** 1. Add const in src/core/config/runtime_config.rs: `pub const TOKEN_SAVER_HEADER: &str = "x-9router-token-saver";`
+2. In src/server/api/chat.rs, where headers_map is built (line 314), read the header: `let token_saver = headers_map.get("x-9router-token-saver").map(|s| s.to_lowercase() != "off").unwrap_or(true);` (headers_map keys are already lowercased at line 318).
+3. Thread `token_saver` into the code that runs compress_messages / headroom / apply_request_preprocessing (they're in execute_single_model / forward_with_provider_fallback scope; pass it as a param or compute it in the same function that has headers). Change line 831 to `compress_messages(&mut body, token_saver && snapshot.settings.rtk_enabled)`; line 835 `enabled: token_saver && snapshot.settings.headroom_enabled`; line 862 `apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model)` stays but gate internally by passing a token_saver flag, or gate the call with `if token_saver { apply_request_preprocessing(...) }`.
+4. Verify header name is exactly `x-9router-token-saver` (lowercase) and the OFF sentinel is the exact string "off" (case-insensitive). Any other value (including absent) = enabled.
+- **Test:** ``token_saver_header_off_disables_savers`: construct headers_map with `x-9router-token-saver: off`, body with tool messages, settings rtk_enabled=true → compress_messages returns None (no mutation). And `token_saver_header_absent_enables`: no header → compressed. Guard via a small pure helper `fn token_saver_enabled(headers: &HashMap<String,String>) -> bool` with unit test.`
+- **⚠️ Risks:** The gate is `!== "off"` — a value of "0", "false", "" all mean ENABLED. Only exact case-insensitive "off" disables. Header must be read from the raw client request headers, not the translated body. If thread through closures, make sure combo members each get the same value.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-D4` — GitHub 402 monthly-reset account lock (githubMonthlyResetMs) missing in Rust error path
+- **JS:** src/sse/services/auth.js:11-18:
+```js
+const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
+function githubMonthlyResetMs(status, errorText, provider) {
+  if (resolveProviderId(provider) !== "github" || Number(status) !== 402) return null;
+  if (!String(errorText || "").toLowerCase().includes(GITHUB_MONTHLY_USAGE_LIMIT)) return null;
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+}
+```
+:226-254 `markAccountUnavailable`: if githubMonthlyResetMs returns a value → `shouldFallback=true; cooldownMs = githubResetAtMs - Date.now(); newBackoffLevel = 0;` AND crucially `buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs)` — model is null for github so it writes `modelLock___all` (account-level lock) instead of a per-model lock. The cooldown is NOT capped by MAX_RATE_LIMIT_COOLDOWN_MS (unlike the resetsAtMs branch at :234-237 which caps).
+- **Rust now:** src/server/api/chat.rs:1750 `let decision = check_fallback_error(status, &message, current_backoff);` then :1831-1844 `if decision.should_fallback { mark_connection_unavailable(state, &connection.id, model, status, &message, cooldown, ...); excluded.insert(...); }`. src/core/config/error_config.rs:190 has a `402 => ErrorRule { cooldown: LONG_MS, backoff: false }` — a plain 402 anywhere gets a fixed LONG cooldown (typically minutes), NOT until next UTC month. There is NO github-message sniffing, NO first-of-next-month timestamp, NO account-level (modelLock___all) lock for github 402. So a GitHub premium-limit 402 locks the account for only ~minutes and per-model, then the same 402 repeats — the monthly exhaustion is not honored until reset.
+- **Fix:** 1. Add const in src/core/config/error_config.rs or a new helper in src/core/account_fallback/mod.rs:
+```rust
+pub const GITHUB_MONTHLY_USAGE_LIMIT: &str = "you've reached your additional usage limit for your plan";
+
+/// First instant of next UTC month (Date.UTC(y, m+1, 1) parity).
+pub fn github_monthly_reset_ms(status: u16, error_text: &str, provider: &str) -> Option<i64> {
+    if provider != "github" || status != 402 { return None; }
+    if !error_text.to_lowercase().contains(GITHUB_MONTHLY_USAGE_LIMIT) { return None; }
+    let now = chrono::Utc::now();
+    let next = chrono::NaiveDate::from_ymd_opt(
+        if now.month() == 12 { now.year() + 1 } else { now.year() },
+        if now.month() == 12 { 1 } else { now.month() + 1 },
+        1,
+    )?;
+    Some(next.and_hms_opt(0, 0, 0)?.and_utc().timestamp_millis())
+}
+```
+2. In src/server/api/chat.rs error branch (around line 1750): compute `let github_reset = github_monthly_reset_ms(status.as_u16(), &message, &plan.provider);` BEFORE `check_fallback_error`. If `Some(reset_ms)`:
+   - `let cooldown = Duration::from_millis((reset_ms - Utc::now().timestamp_millis()).max(0) as u64);` (NOT capped by MAX_RATE_LIMIT_COOLDOWN_MS)
+   - call `mark_connection_unavailable` with `model = ""` (so build_model_lock_update writes `modelLock___all` — verify build_model_lock_update at chat.rs:2283 writes `modelLock_{model}` and that model="" yields `modelLock_`+"" ... instead pass a distinct sentinel or add an account-level path; the JS uses model=null → `modelLock___all`). Check `build_model_lock_update` signature: it builds `format!("modelLock_{model}")`. Add handling so an empty/None model maps to `MODEL_LOCK_ALL` ("modelLock___all", account_fallback/mod.rs:340).
+   - set backoff_level to 0 (newBackoffLevel=0), should_fallback=true, excluded.insert(connection.id), continue loop.
+3. Keep the existing 402→LONG cooldown rule for non-github providers (that path is unchanged).
+- **Test:** ``github_monthly_reset_ms_only_fires_on_github_402`: github+402+text containing "You've reached your additional usage limit for your plan" (case-insensitive) → Some(next-month-UTC-midnight); github+429+same text → None; codex+402+same text → None; github+402+different text → None. And `mark_github_lock_uses_account_level_key`: with model=None the lock key is `modelLock___all`.`
+- **⚠️ Risks:** The sentinel text is exact and case-insensitive via `.toLowerCase().includes(...)`. Month rollover at December → January next year. The lock must be ACCOUNT-level (modelLock___all), not per-model, else other models keep hitting the same exhausted account. Do NOT cap the cooldown — JS deliberately skips MAX_RATE_LIMIT_COOLDOWN_MS here (a monthly reset can exceed 30min). Keep JS typo semantics: the message string is "you've reached" (no space after reached).
+- **Verified:** ✅ CONFIRMED
+
+### `P1-E5` — IntelliJ JBR h2c upgrade handling on the HTTP server missing in Rust
+- **JS:** custom-server.js:69-113 — Next custom server wraps `http.createServer` and overrides `server.emit` to handle `upgrade` events with `req.headers.upgrade.toLowerCase() === "h2c"` (JetBrains Runtime 25 sends h2c upgrades):
+- Validate `content-length` is a safe non-negative integer else `socket.destroy()`.
+- Buffer `[head]`, read remaining body bytes via `socket.on("data")` until `received >= contentLength`.
+- Replay: build a new `http.IncomingMessage(socket)` with `{ method, url, headers, complete: true }`, push the buffered bytes subarray(0, contentLength), then `replay.push(null)`; create `http.ServerResponse`, `shouldKeepAlive=false`, `res.assignSocket(socket)`, `res.once("finish", () => socket.end())`; dispatch to the wrapped HTTP/1.1 handler in a microtask.
+- Finally `delete req.headers.upgrade; delete req.headers["http2-settings"]; req.headers.connection = "close"; return true;`
+Comment :69 `// JBR 25 sends h2c upgrades that the HTTP/1.1 server would otherwise close.`
+- **Rust now:** N/A. openproxy uses axum/hyper (src/main.rs). No h2c→HTTP/1.1 downgrade. IntelliJ/JetBrains IDE (JetBrains AI Assistant / JBR25-based clients) sending an h2c `Upgrade: h2c` preamble gets the connection closed → the IDE's LLM client fails against the openproxy endpoint. This is a transport-level gap, not application logic.
+- **Fix:** Note: This is a big transport change. Minimum viable port (recommended):
+1. In src/main.rs where the axum listener accepts connections (or a hyper layer), detect an inbound request with header `upgrade: h2c` (case-insensitive) and `Connection: upgrade`.
+2. For such requests, do NOT respond 101. Instead, read the request body fully (Content-Length or chunked), then feed the reconstructed HTTP/1.1 request (method, path, headers minus `upgrade`/`http2-settings`, `connection: close`, body bytes) into the normal axum request pipeline.
+3. Respond without keep-alive (Connection: close) so the client falls back to plain HTTP/1.1 on the next request.
+
+Because hyper/axum may not expose raw `upgrade` interception through the standard tower Service, the robust path is a hyper 1.x `hyper::upgrade::on`-free low-level server loop in main.rs that peeks at the first request's headers before the axum service. If that is infeasible in the current hyper version, document the gap and instead make the server tolerant: if the h2c preamble is received, drain the body and return the normal route response with Connection: close. The JS implementation is the reference for exact byte handling (validate content-length, replay with connection: close).
+
+Provide a feature flag or cfg so this does not affect normal HTTP/1.1 traffic.
+- **Test:** `Integration-style test: open a raw TCP connection, send `GET /v1/models HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\nHTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA\r\n\r\n` with Content-Length body, assert the server returns a valid HTTP/1.1 response (not a 101, not a closed socket) with `Connection: close`. If a full integration harness is not available, unit-test the header matcher: `fn is_h2c_upgrade(headers: &HeaderMap) -> bool` returns true only for `upgrade: h2c` (case-insensitive).`
+- **⚠️ Risks:** Must not treat normal `Upgrade: websocket` as h2c (JS checks exact string 'h2c'). Must validate content-length to avoid a malicious length causing a hang. Replayed request must have `connection: close` so the client reconnects on HTTP/1.1 (this is the whole point — JBR falls back). If hyper handles the upgrade before the app sees it, the interception must happen at the hyper server builder level, not in a tower middleware. Do NOT attempt to implement HTTP/2; only downgrade h2c to HTTP/1.1.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P1-F6` — forceStream SSE→JSON: cached tokens folded into prompt_tokens + prompt_tokens_details missing in Rust aggregation
+- **JS:** open-sse/handlers/chatCore/sseToJsonHandler.js:210-245 (Responses-API path):
+```js
+const inTokensForLog = (usage.input_tokens || 0) + (usage.cache_read_input_tokens || usage.cached_tokens || 0) + (usage.cache_creation_input_tokens || 0);
+// client-format:
+const cacheRead = usage.cache_read_input_tokens || usage.cached_tokens || 0;
+const cacheCreate = usage.cache_creation_input_tokens || 0;
+const inTokens = (usage.input_tokens || 0) + cacheRead + cacheCreate;
+const cacheDetails = (cacheRead > 0 || cacheCreate > 0)
+  ? { prompt_tokens_details: {
+        ...(cacheRead > 0 ? { cached_tokens: cacheRead } : {}),
+        ...(cacheCreate > 0 ? { cache_creation_tokens: cacheCreate } : {}) } }
+  : {};
+```
+Comment :232-236: input_tokens EXCLUDES cached tokens on cache-capable upstreams; folding cache counters in and keeping them in prompt_tokens_details lets clients tell a cache hit from a small prompt.
+
+Also chatCore.js:103 `const providerRequiresStreaming = PROVIDERS[provider]?.forceStream === true;` — when the client did not request streaming and the provider forces streaming, the SSE is collected and collapsed to chat.completion JSON (handleForcedSSEToJson).
+- **Rust now:** src/core/media/responses/stream_to_json.rs:305-310 builds `usage` verbatim from the last upstream `usage` object (`usage.unwrap_or_else(|| json!({prompt_tokens:0,...}))`). It does NOT fold cache_read_input_tokens/cached_tokens/cache_creation_input_tokens into prompt_tokens, and does NOT add `prompt_tokens_details.{cached_tokens, cache_creation_tokens}`. So a Codex/Grok-CLI forceStream client that asked for JSON gets a response whose prompt_tokens under-reports (measured 2012 vs real 5344 in the JS comment) and no cache breakdown. The Rust `extract_token_usage_from_bytes` (chat.rs:3131) DOES read cached_tokens/cache_read_input_tokens for the DB but the client-facing JSON usage never gets them folded.
+- **Fix:** In src/core/media/responses/stream_to_json.rs, `convert_chat_completion_stream` final usage assembly (line ~305):
+1. After picking the last `usage` object, compute:
+   - `cache_read = usage.cache_read_input_tokens ?? usage.cached_tokens ?? 0`
+   - `cache_create = usage.cache_creation_input_tokens ?? 0`
+   - `in_tokens = usage.input_tokens ?? usage.prompt_tokens ?? 0 + cache_read + cache_create`
+   - `out_tokens = usage.output_tokens ?? usage.completion_tokens ?? 0`
+2. Build `usage` with `prompt_tokens: in_tokens` (NOT input_tokens), `completion_tokens: out_tokens`, `total_tokens: in_tokens + out_tokens`, and add `prompt_tokens_details: { cached_tokens: cache_read, cache_creation_tokens: cache_create }` ONLY when cache_read>0 or cache_create>0 (include each key only when >0, matching JS spread).
+3. Also port the same folding into the Responses-API→chat.completion path (the `convert_responses_stream` output at stream_to_json.rs ~493 where `prompt_tokens: input_tokens` is built).
+4. If the usage came from a provider that already includes cache in prompt_tokens (OpenAI chat.completion usage has prompt_tokens cache-inclusive and no cache_read field), the fold is a no-op — safe.
+
+Check that the chat.completion JSON that reaches `proxy_sse_to_json_response` (chat.rs:2365) flows through this same stream_to_json and will now carry the folded numbers to the client.
+- **Test:** ``force_stream_json_folds_cache_read_into_prompt_tokens`: input SSE frame with `usage: {"input_tokens": 10, "cache_read_input_tokens": 5, "cache_creation_input_tokens": 2, "output_tokens": 3}` → result usage `prompt_tokens == 17`, `completion_tokens == 3`, `prompt_tokens_details.cached_tokens == 5`, `prompt_tokens_details.cache_creation_tokens == 2`. And a non-cached usage stays unchanged (no prompt_tokens_details key when all zero).`
+- **⚠️ Risks:** Do not double-count when the upstream usage already has prompt_tokens set (OpenAI chat.completion): only fold cache into input_tokens, and if usage has prompt_tokens already (cache-inclusive), leave it. JS uses `input_tokens || 0` + cache for the Responses path. The prompt_tokens_details keys must be omitted (not null/0) when cache is zero. total_tokens must be recomputed as in+out after folding.
+- **Verified:**  REFUTED
+
+### `P1-G7` — Headroom savings report: byte-size snapshot + phantom-savings warning (isHeadroomPhantomSavings) missing in Rust
+- **JS:** open-sse/rtk/headroom.js:26-40 `captureSizeSnapshot(body)` → `{ bodyBytes, messageBytes, toolSchemaBytes, toolHistoryBytes }` (toolHistory filters messages with role tool/function/tool_calls/content tool_use/tool_result).
+:339-351:
+```js
+export function formatHeadroomLog(stats) {
+  const before = stats.tokens_before || 0;
+  const after = stats.tokens_after || 0;
+  const delta = stats.tokens_saved || 0;
+  const pct = before > 0 ? ((delta / before) * 100).toFixed(1) : "0";
+  return `reported token delta=${delta} before=${before}${after ? ` after=${after}` : ""} (${pct}%)`.trim();
+}
+export function formatHeadroomSizeLog(diagnostics) {
+  const effective = before.bodyBytes > 0 ? (((before.bodyBytes - after.bodyBytes) / before.bodyBytes) * 100).toFixed(1) : "0.0";
+  return `body=${before.bodyBytes}B→${after.bodyBytes}B messages=${before.messageBytes}B→${after.messageBytes}B tools=${before.toolSchemaBytes||0}B→${after.toolSchemaBytes||0}B toolHistory=${before.toolHistoryBytes||0}B→${after.toolHistoryBytes||0}B effective=${effective}%`;
+}
+export function isHeadroomPhantomSavings(stats, diagnostics, minShrinkRatio = 0.05) {
+  if (!stats?.tokens_saved || stats.tokens_saved <= 0) return false;
+  const before = diagnostics?.before?.bodyBytes || 0;
+  const after = diagnostics?.after?.bodyBytes || 0;
+  if (before <= 0 || after <= 0) return false;
+  return after >= before * (1 - minShrinkRatio);
+}
+```
+chatCore.js:243-245: `if (isHeadroomPhantomSavings(headroomStats, headroomDiagnostics)) log?.warn?.("HEADROOM", \`reported token delta, but outbound JSON shrank <5%; provider may bill near-original payload | ${formatHeadroomSizeLog(headroomDiagnostics)}\`);`
+chatCore.js:246: else if skipped → `log?.warn?.("HEADROOM", \`skipped: ${headroomDiagnostics.reason || "compression unavailable"}${headroomDiagnostics.endpoint ? ` (${headroomDiagnostics.endpoint})` : ""}\`)`
+- **Rust now:** src/core/rtk/headroom.rs:197-227 `format_headroom_log` produces a DIFFERENT format string: `"saved {} tokens / {} ({:.1}%){}"` with a ` [phantom]` tag when tokens_saved==0. It does NOT do the byte-size captureSizeSnapshot, does NOT produce formatHeadroomSizeLog, and there is NO is_headroom_phantom_savings (after >= before*0.95 check). chat.rs:853-858 only logs `stats.format_headroom_log()` and drops the skipped/phantom warnings entirely. So the operator cannot tell a real compression win from a phantom (proxy reports tokens saved but body barely shrank). The existing estimate_phantom_savings (headroom.rs:26) is a DIFFERENT pre-flight estimate, not the post-hoc phantom verification.
+- **Fix:** 1. In src/core/rtk/headroom.rs add a `SizeSnapshot { body_bytes, message_bytes, tool_schema_bytes, tool_history_bytes }` struct + `fn capture_size_snapshot(body: &Value) -> SizeSnapshot` (jsonBytes = serde_json::to_string length; toolHistory filter: role tool/function OR tool_calls non-empty OR any content part type tool_use/tool_result).
+2. Capture `before` before compression and `after` after in `compress_with_headroom` (body is mutated in place so capture before mutating at the top and after writes) and attach to the returned stats or a diagnostics struct (mirror the JS `diagnostics.before/after`).
+3. Add `fn format_headroom_size_log(diag) -> Option<String>` producing EXACTLY `body={b}B→{a}B messages={mb}B→{ma}B tools={tb}B→{ta}B toolHistory={hb}B→{ha}B effective={e}%` (effective = ((before-after)/before*100).toFixed(1), guard before.bodyBytes>0 else "0.0").
+4. Add `fn is_headroom_phantom_savings(stats, diag, min_shrink_ratio: f64) -> bool` with JS logic (tokens_saved>0 AND before.bodyBytes>0 AND after.bodyBytes>0 AND after >= before*(1-min_shrink_ratio); default 0.05).
+5. In chat.rs:853-858, after a successful compress, if `is_headroom_phantom_savings` → warn with the size log; else debug with format_headroom_log. When skipped (compress returned None), emit the `skipped: {reason}` warn when headroom_enabled (mirror chatCore.js:246).
+- **Test:** ``headroom_phantom_savings_detects_no_real_shrink`: stats tokens_saved=100, diagnostics before.body_bytes=1000, after.body_bytes=990 → is_headroom_phantom_savings == true (990 >= 950). after=500 → false. tokens_saved=0 → false. And `headroom_size_log_format_matches_js`: format string equals `body=1000B→990B messages=...` prefix with `effective=1.0%`.`
+- **⚠️ Risks:** Keep the JS log-string exactness — the report is read by humans/dashboards. The JS `formatHeadroomLog` uses `tokens_before||0`; Rust's format is different and should be brought in line OR both kept but the size report is the added value. captureSizeSnapshot must run BEFORE any mutation of body. The `[phantom]` tag in the current Rust format_headroom_log is a pre-flight artifact; the real phantom check is after>=before*0.95.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-H8` — Adaptive thinking: claude-adaptive format emits output_config.effort + thinking:{type:adaptive} — verify Rust parity
+- **JS:** open-sse/translator/concerns/thinkingUnified.js:238-249:
+```js
+case "claude-adaptive": {
+  if (none && canDisable) { body.thinking = { type: "disabled" }; break; }
+  // ... Annot: requires an explicit thinking:{type:"adaptive"} on Opus 4.6/4.7/4.8 and Sonnet 4.6 ...
+  body.thinking = { type: "adaptive" };
+  const level = toLevel(eff);
+  body.output_config = { effort: level === "xhigh" ? "high" : level };
+  break;
+}
+```
+:61-70 extractThinking: `thinking.type==="disabled"→none; type==="adaptive"||"enabled" → budget>0 ? {mode:budget,budget} : {mode:auto}`.
+:52-59 `output_config.effort` has priority: "none"/"off"→none; "auto"→auto; else level.
+Providers with thinkingFormat "claude-adaptive" in capabilities.js (e.g. claude-opus-5, claude-opus-4.6/4.7/4.8, sonnet 4.6 — lines 75-82).
+- **Rust now:** src/core/utils/thinking_suffix.rs `reapply_thinking_after_translate` (called at chat.rs:821) exists, but I could not confirm it emits the claude-adaptive dual-field shape. Grep of src/core for `output_config` (searching). The Rust thinking code is ported from an older 9router and likely uses the older `thinking:{type:"enabled", budget_tokens}` shape rather than the v0.5.50 `thinking:{type:"adaptive"} + output_config:{effort}`. Need to verify: grep `output_config` and `type": "adaptive` in src/core/translator and src/core/utils.
+- **Fix:** 1. Verify current Rust behavior: `grep -rn "output_config\|adaptive" src/core/translator src/core/utils/thinking* src/core/translator/concerns 2>/dev/null`. If `output_config` is absent, port the claude-adaptive case:
+   - In the thinking-applier (src/core/utils/thinking_suffix.rs or wherever applyFormat lives) add a `ClaudeAdaptive` branch: if mode none && canDisable → `body["thinking"] = json!({"type": "disabled"})`; else `body["thinking"] = json!({"type": "adaptive"})` AND `body["output_config"] = json!({"effort": if level == "xhigh" {"high"} else {level}})`.
+   - level mapping: toLevel(eff) must map auto/level/budget → a level; xhigh→"high" else the level string.
+2. Ensure `extract_thinking` (the Rust equivalent of extractThinking) handles `output_config.effort` with priority over body.thinking, mapping "none"/"off"→none, "auto"→auto, else level. And `thinking.type === "adaptive"` → budget>0? budget mode : auto mode.
+3. Confirm the thinkingFormat "claude-adaptive" is assigned to the right models in the Rust capability model (provider model catalog) — check src/core/config/provider_models or the models config for claude-opus-5/4.6/4.7/4.8/sonnet-4.6.
+- **Test:** ``claude_adaptive_emits_dual_fields`: apply thinking cfg {mode:level, level:"high"} for a claude-adaptive model → body.thinking.type == "adaptive" AND body.output_config.effort == "high". `claude_adaptive_xhigh_maps_to_high`: level xhigh → effort "high". `claude_adaptive_disabled_when_can_disable`: mode none → thinking.type == "disabled" and NO output_config. `extract_output_config_effort_priority`: body with output_config.effort="auto" and thinking.type="enabled" → mode auto (effort wins).`
+- **⚠️ Risks:** The exact double-write matters: sending output_config.effort ALONE does not enable thinking on Opus 4.6/4.7/4.8/Sonnet 4.6 — Anthropic requires the explicit thinking:{type:adaptive}. Do not drop either field. xhigh must map to "high" (not "xhigh"). The disabled case must NOT emit output_config (Anthropic rejects output_config alongside thinking:disabled). Verify the model→thinkingFormat mapping covers the v0.5.50 models (claude-opus-5, claude-opus-5-thinking, claude-opus-5-agentic, claude-opus-5-thinking-agentic, claude-opus-4.6, 4.7, 4.8, claude-sonnet-4.6).
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P1-I9` — Grok Build settings: subagent models (general-purpose/explore/plan) + context_window + GET subagentMappings missing in Rust
+- **JS:** src/lib/grokBuildConfig.js:3 `export const GROK_SUBAGENT_TYPES = ["general-purpose", "explore", "plan"];`
+:1 `GROK_MAIN_MODEL_SLOT = "9router"`, :2 `GROK_BUILTIN_DEFAULT = "grok-build"`, :5 `UNSET_SENTINEL = "__9router_unset__"`, :6 `MODELS_SECTION = "models"`, :7 `SUBAGENT_MODELS_SECTION = "subagents.models"`.
+:18 `const modelSlot = (type) => \`${GROK_MAIN_MODEL_SLOT}-${type}\`;` → "9router-general-purpose" etc.
+:78-92 parseModelSection: `model`, `base_url`, `name`, `api_key`, `api_backend`, `context_window` (positive finite number only, else null), `raw`.
+:171-188 parseGrokBuildConfig: `subagentModels[type] = mapping === modelSlot(type) ? parseModelSection(toml, mapping) : null; subagentMappings[type] = mapping;` returns `{ model, default, subagentModels, subagentMappings }`.
+:194-232 applyGrokBuildConfig with subagentModels: for each type, if `selected?.model` → `rememberPreviousSubagent`, `upsertModelSection({ slot, model: selected.model, baseUrl, apiKey, contextWindow: selected.contextWindow, name: "9Router "+type })`, `setSectionField(subagents.models, type, slot)`; else → restorePreviousSubagent + removeModelSection.
+:234-243 resetGrokBuildConfig: restore each subagent + remove `model.9router-{type}` + remove `model.9router` + restore default.
+
+route.js:48-55 normalizeContextWindow: explicit number>0 → floor; else `getCapabilitiesForModel(provider, modelId).contextWindow`.
+:57-71 normalizeSubagentModels: value===undefined → undefined (leave untouched); non-object → {}; per type `model = typeof entry === "string" ? entry.trim() : entry?.model?.trim()`; blank → skip; else `{model, contextWindow: normalizeContextWindow(entry?.contextWindow, model)}`.
+:101 POST destructures `{ baseUrl, apiKey, model, contextWindow, subagentModels }`; :108 `normalizedBaseUrl = baseUrl.endsWith("/v1") ? baseUrl : baseUrl + "/v1"`; :111 `apiKey: apiKey || "sk_9router"`; :122 modelSlot: "9router".
+GET response includes `settings.subagentModels`, `settings.subagentMappings`, `has9Router` (= `Boolean(settings?.model?.base_url)`).
+- **Rust now:** src/server/api/cli_tools/grok_build_settings.rs uses MODEL_SLOT="openproxy" and only handles the main model section: build_model_section (line 218) has NO context_window, NO subagent support. parse_model_section (line 199) has no context_window. SaveGrokBuildSettingsRequest (line 36) has NO subagentModels and NO contextWindow. GET returns `{model, default}` only — no subagentModels/subagentMappings, and `hasOpenProxy` instead of JS `has9Router`. So per-type subagent overrides ([model.9router-general-purpose] etc.) and context_window are entirely unsupported.
+- **Fix:** Decide branding first: Rust uses "openproxy" slot (MODEL_SLOT="openproxy") whereas JS uses "9router". Keep the existing Rust branding but add the features:
+1. src/server/api/cli_tools/grok_build_settings.rs:
+   - Add `const SUBAGENT_TYPES: [&str; 3] = ["general-purpose", "explore", "plan"];` and `const SUBAGENT_MODELS_SECTION: &str = "subagents.models";` and `const UNSET_SENTINEL: &str = "__9router_unset__";` (keep the exact sentinel string even though brand differs — it round-trips with JS-written configs).
+   - SaveGrokBuildSettingsRequest: add `#[serde(default, rename_all="camelCase")] subagent_models: Option<Value>` and `context_window: Option<f64>`.
+   - `fn model_slot(type) = format!("{MODEL_SLOT}-{type}")`.
+   - build_model_section: add optional context_window line `context_window = {floor}` when finite>0.
+   - New `fn upsert_subagent_model_section(toml, slot, model, base_url, api_key, context_window, name)` and `fn set_subagents_models_field(toml, type, value)` + `fn delete_subagents_models_field(toml, type)` and `fn remember_prev_subagent(toml, type)` / `fn restore_prev_subagent(toml, type)` porting grokBuildConfig.js lines 147-169 (markers `# openproxy-prev-subagent-{type} = "..."` — keep JS marker format but with openproxy prefix, or exactly `# 9router-prev-subagent-{type}` to interop with JS-created configs; RECOMMEND keeping the exact JS marker `# 9router-prev-subagent-...` so a config written by Rust can be reset by JS and vice-versa).
+   - In save_grok_build_settings: normalize subagentModels per JS route.js normalizeSubagentModels; when Some(non-empty object), for each SUBAGENT_TYPES type apply remember+upsert+set; when None, leave untouched; for a type with no model, restorePreviousSubagent + removeModelSection.
+   - GET: parse subagentModels (per-type parseModelSection when `subagents.models.{type} == model.slot`) + subagentMappings; return `settings.subagentModels`, `settings.subagentMappings`, and keep hasOpenProxy (or add has9Router alias).
+   - reset_grok_config: also restore each subagent + remove `model.{slot}-{type}` sections.
+2. Normalize context_window: explicit finite>0 → floor; else look up model context window from the model registry.
+- **Test:** ``grok_build_save_writes_subagent_sections`: toml with subagentModels {general-purpose: {model:"anthropic/claude", contextWindow: 200000}} → written toml contains `[model.openproxy-general-purpose]`, `model = "anthropic/claude"`, `context_window = 200000`, and `[subagents.models]` with `general-purpose = "openproxy-general-purpose"`. `grok_build_parse_reads_subagent_mappings`: GET parse of that toml → subagentModels["general-purpose"].model == "anthropic/claude", subagentMappings["general-purpose"] == "openproxy-general-purpose", and subagentModels for a type not set == null. `grok_build_reset_removes_subagents`: reset removes all three subagent sections and restores prev default.`
+- **⚠️ Risks:** The marker comments and sentinel string are load-bearing for interop with JS-written configs — match `# 9router-prev-subagent-` exactly OR document the branding divergence. `subagentModels === undefined` must leave existing subagent config untouched (JS backwards-compat). `context_window` uses Math.floor of a positive finite number. Blank subagent model means "inherit main model" (skip that type). resetGrokBuildConfig must remove ALL three subagent sections and the main section, then restore previous default (not just set to grok-build).
+- **Verified:** ✅ CONFIRMED
+
+### `P1-J10` — xai video CLI: multipart body passthrough + raw byte forwarding + account rotation on auth/quota errors missing in Rust media.rs
+- **JS:** src/sse/handlers/videoGeneration.js:23-27 `CREATE_ROTATION_STATUSES = new Set([401, 403, 429])` (rotate to next account ONLY on errors upstream rejects before job creation); 5xx returned to caller.
+:45-61 readForwardableBody: JSON parsed for model-prefix resolution but RAW bytes forwarded; multipart/other content types forwarded as exact bytes (`Buffer.from(await request.arrayBuffer())`) — parsing/re-encoding FormData would change the multipart boundary.
+:63-80 resolveVideoProvider: bare model id without '/' → DEFAULT_VIDEO_PROVIDER="xai"; combos rejected.
+:94-175 handleVideoCreate: loop over accounts, `checkAndRefreshToken`, handleVideoProxyCore with `onCredentialsRefreshed` persisting new tokens, on failure `markAccountUnavailable` then rotate if shouldFallback && status in CREATE_ROTATION_STATUSES; on success `clearAccountError` + `withConnectionHeader` sets `x-9router-connection-id`.
+:182-223 handleVideoGet: pin creating account via `x-connection-id`; no rotation.
+
+open-sse/handlers/videoCore.js:97 `method = requestId ? "GET" : "POST"`; :101-107 `doFetch(token)` forwards rawBody byte-for-byte (JSON or multipart) with Content-Type and Idempotency-Key; :120-146 401/403 → refresh ONCE → retry ONCE; :148-153 error text sanitized (Bearer tokens redacted) and truncated to 2000 chars; :156-165 success passes upstream JSON (request_id/status/video.url) verbatim with Content-Type + CORS.
+:14 VIDEO_ACTIONS = new Set(["generations","edits","extensions"]).
+open-sse/providers/registry/xai.js:35 video model `grok-imagine-video`, params ["duration","aspect_ratio","resolution"], kind "video"; :41 videoConfig.baseUrl "https://api.x.ai/v1/videos".
+- **Rust now:** src/server/api/media.rs handles xai video but: JSON-only — video_create_handler takes `Json(body)` (line 901) so multipart uploads (video files) are re-encoded or rejected (JS explicitly preserves exact bytes). No account rotation on 401/403/429 — select_video_connection picks one account and on failure returns the error (media.rs:919, and video_get_handler at 998). No refresh-on-401/403 retry (JS refreshes once and retries). The response DOES set `x-openproxy-connection-id` (line 987/1053) — JS sets `x-9router-connection-id`; client-side header name differs. SanitizeSecrets (Bearer redaction) — verify media.rs; if missing, upstream error bodies leak tokens. VIDEO_FETCH_TIMEOUT_MS=120000 default and Idempotency-Key forwarding (media.rs:934) ARE present.
+- **Fix:** 1. src/server/api/media.rs video_create_handler: replace `Json(mut body)` extraction with raw-body handling: read `Bytes` via axum `body: Bytes`, sniff Content-Type; if JSON, parse for model-resolution but keep the raw bytes for forwarding (re-serialize only when the model prefix was stripped); if multipart/other, forward the exact bytes (do not parse).
+2. Add account rotation: on upstream 401/403/429, mark the connection unavailable (reuse mark_connection_unavailable pattern) and try the next account up to N attempts (JS loops indefinitely over available accounts); on other statuses return the error. Before dispatch, run token refresh for oauth connections (checkAndRefreshToken equivalent — see chat.rs:1782 refresh path) and persist new tokens via onCredentialsRefreshed equivalent.
+3. Error sanitization: apply `sanitize_secrets` (redact `Bearer <token>` regex `Bearer\s+[A-Za-z0-9._~+/=-]{8,}` and exact secret values) to error text before returning to the client, truncate to 2000 chars. If a helper already exists in media.rs reuse it; else port from videoCore.js:21-31.
+4. GET poll: keep the pin via `x-connection-id` (already implemented), but also accept the JS-emitted header `x-9router-connection-id` as an alias, and emit BOTH `x-9router-connection-id` and `x-openproxy-connection-id` on responses for interop.
+5. Keep VIDEO_FETCH_TIMEOUT_MS and Idempotency-Key forwarding as-is (already present).
+- **Test:** ``video_creation_rotates_on_401`: two xai connections, upstream returns 401 for the first → second account is tried; if both fail → error returned. `video_creation_does_not_rotate_on_500`: 500 returned directly (job may exist). `video_multipart_body_forwarded_byte_for_byte`: POST with Content-Type multipart/form-data boundary X → upstream receives identical bytes. `video_error_redacts_bearer`: upstream error body containing "Bearer sk-abc..." → client error text contains "Bearer [redacted]".`
+- **⚠️ Risks:** Creation POSTs are BILLABLE — never auto-retry on network error (only re-send after a 401/403 refresh which upstream rejects before job creation, and only rotate on 401/403/429). Multipart must not be re-encoded (boundary changes break uploads). The response connection-id header name differs between JS (`x-9router-connection-id`) and Rust (`x-openproxy-connection-id`) — support both for interop with JS-era clients. Bare model ids fall back to xai; combos rejected with 400.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-K11` — Default key auto-provision on first-ever visit ("Default Key") missing in Rust
+- **JS:** src/app/(dashboard)/dashboard/endpoint/EndpointPageClient.js:265-277:
+```js
+let existing = await fetchKeys();
+// Auto-provision a default key for first-time users so the endpoint works out of the box.
+if (existing.length === 0) {
+  try {
+    const createRes = await fetch("/api/keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Default Key" }),
+    });
+    if (createRes.ok) existing = await fetchKeys();
+  } catch { /* fall through to empty render */ }
+}
+```
+POST /api/keys (src/app/api/keys/route.js:22-41): `{ name }` required; `machineId = await getConsistentMachineId()`; `createApiKey(name, machineId)` → 201 `{ key, name, id, machineId }`.
+apiKeysRepo.js:28-46 createApiKey: `key: generateApiKeyWithMachine(machineId).key` where generateApiKeyWithMachine (src/shared/utils/apiKey.js:44-48) = `sk-${machineId}-${keyId}-${crc8}` with keyId=6 lowercase alnum chars, crc=HMAC-SHA256(API_KEY_SECRET||"endpoint-proxy-api-key-secret", machineId+keyId).hex.slice(0,8).
+- **Rust now:** src/server/api/mod.rs:1550 create_key_api EXISTS and matches (name required, machine_id via consistent_machine_id, generate_api_key_with_machine). BUT the auto-provision is CLIENT-SIDE (the dashboard JS POSTs to /api/keys when the list is empty). The Rust frontend is a different dashboard; the question is whether the Rust-served dashboard (or a server-side bootstrap) auto-creates a "Default Key" when the keys table is empty. Grep of src/server/api and src/server/dashboard for a first-run key bootstrap returned nothing. So a fresh install has requireApiKey=true (default) and NO key → /v1/chat returns 401 "Missing API key" until the user manually creates a key — the out-of-the-box experience is broken vs JS.
+- **Fix:** Choose server-side bootstrap (robust, mirrors the intent):
+1. In src/main.rs (or the DB init in src/types/mod.rs / db init), after the DB is loaded and BEFORE the HTTP server starts, check `if snapshot.api_keys.is_empty() && snapshot.settings.require_api_key { create a key named "Default Key" }`.
+2. Reuse `create_key_api`-style logic: `let machine_id = consistent_machine_id(); let key = crate::core::auth::generate_api_key_with_machine(&machine_id); let id = Uuid::new_v4().to_string(); let now = chrono::Utc::now().to_rfc3339();` and insert `ApiKey { id, name: "Default Key".into(), key, machine_id: Some(machine_id), is_active: Some(true), created_at: Some(now), extra: BTreeMap::new() }`.
+3. Guard: only when the api_keys table is empty (respect existing keys), and only when require_api_key is true (don't create a key nobody asked for when auth is off — JS creates it unconditionally on first dashboard visit; matching JS would create even with requireApiKey off. To be safe, create unconditionally on empty to match JS behavior).
+4. Optionally surface the generated key on first dashboard load so the user can copy it (JS relies on the client POST; a server bootstrap should log the key at startup or expose it via GET /api/keys which the dashboard already calls).
+- **Test:** ``default_key_provisioned_when_empty`: fresh DB with empty api_keys → after bootstrap, api_keys.len()==1, name=="Default Key", is_active==true, key starts with "sk-". `existing_keys_not_duplicated`: DB with one pre-existing key → bootstrap leaves len==1. `key_format_matches_js`: generate_api_key_with_machine output matches `^sk-[0-9a-f]{16}-[a-z0-9]{6}-[a-f0-9]{8}$` (verify machine_id length and keyId alphabet/length against src/shared/utils/apiKey.js).`
+- **⚠️ Risks:** Key generation must match the JS format exactly (machineId 16 hex chars, keyId 6 lowercase alnum, crc8 HMAC-SHA256 with default secret "endpoint-proxy-api-key-secret" when API_KEY_SECRET unset) so existing JS-written keys validate. Only provision on truly-empty key table to avoid duplicate "Default Key" entries. If API_KEY_SECRET changes after keys were created, validateApiKey still works (it compares raw key string in DB, not HMAC).
+- **Verified:**  REFUTED
+
+### `P1-L12` — Exa MCP toggle (tool dedupe): ALREADY PORTED — verify only
+- **JS:** open-sse/utils/toolDeduper.js:6-22 DEDUP_RULES:
+```js
+{ triggers: ["mcp__exa__web_search_exa", "mcp__exa__web_fetch_exa"], strip: ["WebSearch", "WebFetch", "mcp__workspace__web_fetch"] },
+{ triggers: ["mcp__tavily__tavily_search", "mcp__tavily__tavily_extract"], strip: ["WebSearch", "WebFetch", "mcp__workspace__web_fetch"] },
+{ triggers: [/^mcp__browsermcp__/], strip: [/^mcp__Claude_in_Chrome__/] },
+```
+chatCore.js:188-195: only runs when `clientTool === "claude"` and `Array.isArray(translatedBody.tools)`.
+:27-33 getToolName = `t?.name || t?.function?.name`; matches uses exact string OR regex.
+- **Rust now:** src/core/utils/tool_deduper.rs FULLY PORTS all three rules including the exa/tavily/browsermcp triggers and regex strips (lines 36-63). src/server/api/chat.rs:865-874 runs it only for `client_tool == Some(ClientTool::Claude)` — matching the JS guard. Tests at tool_deduper.rs:132-171 cover exa and browsermcp. NO GAP. The only divergence: JS dedupes `translatedBody.tools` after translate (chatCore.js:190), Rust dedupes `body["tools"]` after translate (chat.rs:867) — same position.
+- **Fix:** None — already implemented. For completeness add the missing test `exa_mcp_strips_web_fetch_too` if not present, asserting `mcp__workspace__web_fetch` is also stripped when exa triggers present (existing test at line 132 asserts WebSearch stripped; verify mcp__workspace__web_fetch is in the stripped set).
+- **Test:** ``exa_mcp_strips_workspace_web_fetch`: tools [WebSearch, WebFetch, mcp__workspace__web_fetch, mcp__exa__web_search_exa] → stripped contains WebSearch, WebFetch, mcp__workspace__web_fetch (all three), kept only exa.`
+- **⚠️ Risks:** The dedupe runs AFTER translation on the provider-format tools array — make sure the tools key exists at that point. Only Claude clients trigger it (JS guard). Regex strips match against the full tool name.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-M13` — Ollama quota fetcher: real /api/usage + /api/me live quotas missing (Rust returns static message)
+- **JS:** open-sse/services/usage/misc.js:37-113 getOllamaUsage(apiKey, providerSpecificData, proxyOptions):
+- GET `https://ollama.com/api/usage` with `Authorization: Bearer ${apiKey}`, `Accept: application/json`.
+- 401/403 → `{ message: "Ollama Cloud API key invalid or expired." }`; !ok → `{ message: "Ollama Cloud usage API error ({status})." }`; non-JSON → `{ message: "Ollama Cloud usage response was not JSON." }`.
+- POST `https://ollama.com/api/me` (fail-open) with same headers + `Content-Length: 0` → plan label `me.Plan` (capitalize first letter, rest lowercase; fallback "Ollama Cloud").
+- `data.limits.session.usage` / `data.limits.weekly.usage` are 0..1 ratios. ratioQuota: `used = round(ratio*100)`, `{ used, total: 100, remainingPercentage: 100-used, resetAt: null, unlimited: false }`.
+- quotas keys: "Session (5h)" and "Weekly (7d)". No reset timestamp exposed.
+- Neither session nor weekly present → `{ plan, message: "Ollama Cloud connected. No usage limits reported.", quotas: {} }`.
+- catch → `{ message: "Ollama Cloud error: {msg}" }`.
+usage.js USAGE_HANDLERS: `ollama: (c) => getOllamaUsage(c.apiKey, c.providerSpecificData, c.proxyOptions)`.
+- **Rust now:** src/server/api/usage.rs:72 `"ollama" => "Ollama Cloud uses a free tier with light usage limits (resets every 5h & 7d). ..."` — static message, no live fetch. ollama is NOT in `is_usage_apikey_provider` (usage.rs:33-36: glm/glm-cn/minimax/minimax-cn/kimi/deepseek only), so an ollama apikey connection hits the `"Usage not available for this connection"` early return (usage.rs:436-440) or the static message path. NO GET /api/usage, NO /api/me plan, NO Session/Weekly quota bars.
+- **Fix:** 1. src/core/usage/quota_fetcher.rs add:
+```rust
+pub async fn fetch_ollama_quota(api_key: &str) -> Value {
+    if api_key.trim().is_empty() {
+        return json!({ "message": "Ollama Cloud API key not available." });
+    }
+    let client = http_client();
+    let usage_resp = match client.get("https://ollama.com/api/usage")
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Accept", "application/json")
+        .send().await {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Ollama Cloud error: {e}") }),
+    };
+    if usage_resp.status().as_u16() == 401 || usage_resp.status().as_u16() == 403 {
+        return json!({ "message": "Ollama Cloud API key invalid or expired." });
+    }
+    if !usage_resp.status().is_success() {
+        return json!({ "message": format!("Ollama Cloud usage API error ({}).", usage_resp.status().as_u16()) });
+    }
+    let data: Value = match usage_resp.json().await {
+        Ok(v) => v,
+        Err(_) => return json!({ "message": "Ollama Cloud usage response was not JSON." }),
+    };
+    // plan from /api/me (fail-open)
+    let plan = http_client().post("https://ollama.com/api/me")
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .header("Accept", "application/json")
+        .header("Content-Length", "0")
+        .send().await.ok()
+        .and_then(|r| r.json::<Value>().await.ok())
+        .and_then(|me| me.get("Plan").and_then(|v| v.as_str()).map(|s| { let mut c = s.chars(); match c.next() { Some(f) => f.to_uppercase().collect::<String>() + &s[1..].to_lowercase(), None => String::new() } }))
+        .unwrap_or_else(|| "Ollama Cloud".to_string());
+    // ... build quotas
+    let limits = data.get("limits").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+    fn ratio_quota(usage: Option<f64>) -> Option<Value> {
+        let ratio = usage.unwrap_or(0.0).clamp(0.0, 1.0);
+        let used = (ratio * 100.0).round() as i64;
+        Some(json!({ "used": used, "total": 100, "remainingPercentage": 100 - used, "resetAt": Value::Null, "unlimited": false }))
+    }
+    let mut quotas = serde_json::Map::new();
+    if let Some(s) = limits.get("session") {
+        let u = s.get("usage").and_then(|v| v.as_f64());
+        if u.is_some() { quotas.insert("Session (5h)".into(), ratio_quota(u).unwrap()); }
+    }
+    if let Some(w) = limits.get("weekly") {
+        let u = w.get("usage").and_then(|v| v.as_f64());
+        if u.is_some() { quotas.insert("Weekly (7d)".into(), ratio_quota(u).unwrap()); }
+    }
+    if quotas.is_empty() {
+        return json!({ "plan": plan, "message": "Ollama Cloud connected. No usage limits reported.", "quotas": {} });
+    }
+    json!({ "plan": plan, "quotas": Value::Object(quotas) })
+}
+```
+Note `hasSession`/`hasWeekly` semantics: JS treats `sessionRaw !== undefined && !== null && !Number.isNaN(Number(...))` as present — an explicit null usage field means NOT present. Port: `s.get("usage").and_then(|v| v.as_f64())` returns None for null/non-number, matching.
+2. src/server/api/usage.rs: add "ollama" to `is_usage_apikey_provider` (line 33) so apikey ollama connections reach the live-fetch branch, and add `"ollama" => fetch_ollama_quota(api_key).await,` to the match at line 480.
+3. Keep the static fallback message for when the fetcher returns a message (the existing `usage_message_for_provider` at line 72 is the fallback — fine).
+- **Test:** ``ollama_quota_builds_session_and_weekly_bars`: mock fetch of usage JSON `{"limits":{"session":{"usage":0.5},"weekly":{"usage":1.0}}}` → quotas has "Session (5h)" used=50/remaining=50 and "Weekly (7d)" used=100/remaining=0. `ollama_quota_missing_limits`: `{"limits":{}}` → message "Ollama Cloud connected. No usage limits reported." with empty quotas. `ollama_quota_ratio_clamped`: usage 1.5 → used=100; -0.2 → used=0. `ollama_quota_401_message`: 401 → "Ollama Cloud API key invalid or expired.".`
+- **⚠️ Risks:** The ratio is 0..1 (1.0=limit reached); used=round(ratio*100), NOT ratio directly. Plan capitalization: first char upper, rest lower. Session/Weekly keys are exactly "Session (5h)" and "Weekly (7d)". The /api/me POST must be fail-open (null on any error → "Ollama Cloud" fallback) and needs Content-Length: 0. resetAt is always null for ollama (no reset timestamp exposed). Do NOT set a top-level `remaining` — the QuotaTable reads remainingPercentage only (misc.js:83 comment).
+- **Verified:** ✅ CONFIRMED
+
+## PART E — MEDIA (27 specs)
+
+### `P0-B3a` — xAI image adapter must use bodyFields whitelist (drops quality/style/size)
+- **JS:** registry/xai.js:38:
+  imageConfig: { baseUrl: "https://api.x.ai/v1/images/generations", bodyFields: ["model","prompt","n","response_format"] },
+imageProviders/openai.js:23-29:
+  // bodyFields whitelist (e.g. xAI accepts only model/prompt/n/response_format)
+  if (Array.isArray(cfg.bodyFields)) {
+    const req = {};
+    for (const f of cfg.bodyFields) if (full[f] !== undefined) req[f] = full[f];
+    return req;
+  }
+- **Rust now:** src/core/media/image/openai_compat.rs: OpenAiCompatAdapter has fields {provider_id, endpoint, include_referer} only — no body_fields. build_body (lines 79-100) always emits {model, prompt, n, size} plus optional quality/style/response_format. mod.rs get_image_adapter does NOT map "xai" at all (match arms: openai/minimax/openrouter/recraft/gemini/codex/sdwebui/comfyui/huggingface/nanobanana/fal-ai/stability-ai/black-forest-labs/runwayml/cloudflare-ai) — so "xai" falls through to the generic forwarder (default.rs URL https://api.x.ai/v1/chat/completions), which is the wrong endpoint for images.
+- **Fix:** 1) In src/core/media/image/mod.rs get_image_adapter add: `"xai" => Some(&openai_compat::XAI)`. 2) In openai_compat.rs add `pub static XAI: OpenAiCompatAdapter = OpenAiCompatAdapter { provider_id: "xai", endpoint: "https://api.x.ai/v1/images/generations", include_referer: false }`. 3) Add a `body_fields: &'static [&'static str]` field to OpenAiCompatAdapter (empty slice for openai/minimax/openrouter/recraft). 4) In build_body: build `full = {model, prompt, n, size, [quality], [style], [response_format]}` then if `!self.body_fields.is_empty()` emit only the keys present in body_fields (JS checks `full[f] !== undefined` — so size is dropped for xai). 5) Initialize body_fields on all 4 existing statics to `&[]`.
+- **Test:** `fn xai_body_drops_disallowed_fields() — XAI.build_body with prompt/n/size/quality/style: result has model/prompt/n/response_format keys, and NO size/quality/style. fn xai_image_adapter_registered() — get_image_adapter("xai").is_some() and its endpoint is https://api.x.ai/v1/images/generations.`
+- **⚠️ Risks:** JS drops `size` for xai even though body has it — must not forward size. The default.rs chat URL for xai must NOT be used for images once the adapter is registered (dispatch short-circuits before the generic forwarder). bodyFields applies only when present — for the other 4 providers (empty whitelist) keep the current full body.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-B3b` — vercel-ai-gateway missing from embeddings + image adapter registries
+- **JS:** embeddingProviders/index.js:7-11 OPENAI_COMPAT_PROVIDERS includes "vercel-ai-gateway". embeddingProviders/openai.js:11 embedUrl derives from PROVIDER_MEDIA[id].embeddingConfig.baseUrl.
+registry/vercel-ai-gateway.js:32-33:
+  embeddingConfig: { baseUrl: "https://ai-gateway.vercel.sh/v1/embeddings" },
+  imageConfig: { baseUrl: "https://ai-gateway.vercel.sh/v1/images/generations" },
+imageProviders/index.js:21: "vercel-ai-gateway": createOpenAIAdapter("vercel-ai-gateway"),
+- **Rust now:** src/core/media/embeddings/mod.rs get_embedding_adapter: no "vercel-ai-gateway" arm → None → falls through to generic forwarder using default.rs URL `https://ai-gateway.vercel.sh/v1/chat/completions` + /embeddings appended, giving wrong endpoint https://ai-gateway.vercel.sh/v1/chat/completions/embeddings. src/core/media/image/mod.rs get_image_adapter: no "vercel-ai-gateway" arm → falls through similarly.
+- **Fix:** embeddings: 1) base.rs add `pub static VERCEL_AI_GATEWAY: OpenAiCompatAdapter = OpenAiCompatAdapter { provider_id: "vercel-ai-gateway", endpoint: "https://ai-gateway.vercel.sh/v1/embeddings", include_referer: false }`. 2) mod.rs add `"vercel-ai-gateway" => Some(&base::VERCEL_AI_GATEWAY)`. image: 3) openai_compat.rs add `pub static VERCEL_AI_GATEWAY: OpenAiCompatAdapter = ... endpoint: "https://ai-gateway.vercel.sh/v1/images/generations", include_referer: false, body_fields: &[]`. 4) image/mod.rs add `"vercel-ai-gateway" => Some(&openai_compat::VERCEL_AI_GATEWAY)`.
+- **Test:** `fn vercel_gateway_embedding_registered() — get_embedding_adapter("vercel-ai-gateway").is_some(), build_url == "https://ai-gateway.vercel.sh/v1/embeddings". fn vercel_gateway_image_registered() — get_image_adapter("vercel-ai-gateway").is_some(), build_url == "https://ai-gateway.vercel.sh/v1/images/generations".`
+- **⚠️ Risks:** Do not use the chat-completions base URL for embeddings/images. The adapter uses POST /v1/embeddings (no chat fallthrough).
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P0-C4` — xiaomi-mimo TTS adapter missing entirely in Rust
+- **JS:** ttsProviders/xiaomi-mimo.js (full adapter):
+  DEFAULT_MODEL="mimo-v2.5-tts"; DEFAULT_VOICE="mimo_default";
+  messages = [{ role: "assistant", content: text }]; if instructions.length messages.unshift({ role: "user", content: instructions.join(" ") }) where instructions = [`Speak in ${language}.`] if language, plus style if present.
+  POST https://api.xiaomimimo.com/v1/chat/completions  headers {"Content-Type":"application/json","Authorization":`Bearer ${apiKey}`}  body { model: modelId, stream: false, messages, audio: { format: "wav", voice: voiceId || DEFAULT_VOICE } }.
+  Response: audio = data?.choices?.[0]?.message?.audio?.data; format = data?.choices?.[0]?.message?.audio?.format || "wav".
+  parseModelVoice(model, DEFAULT_MODEL, DEFAULT_VOICE, [DEFAULT_MODEL]) — known list is exactly ["mimo-v2.5-tts"].
+index.js SPECIAL_ADAPTERS includes "xiaomi-mimo": xiaomiMimo.
+registry/xiaomi-mimo.js ttsConfig: { baseUrl: "https://api.xiaomimimo.com/v1/chat/completions", authType: "apikey", authHeader: "bearer", format: "xiaomi-mimo-tts" }
+- **Rust now:** src/core/media/tts/mod.rs: get_tts_adapter match (lines 89-102) has no "xiaomi-mimo"; provider_generic_format (lines 106-119) has no xiaomi-mimo → is_tts_provider returns false → tts::dispatch returns None → falls through to generic forwarder (default.rs line 216 ProviderConfig::openai("https://api.xiaomimimo.com/v1/chat/completions")) which POSTs the OpenAI audio/speech shape — wrong contract entirely.
+- **Fix:** 1) Create src/core/media/tts/xiaomi_mimo.rs implementing TtsAdapter. Constants: DEFAULT_MODEL="mimo-v2.5-tts", DEFAULT_VOICE="mimo_default", KNOWN=&["mimo-v2.5-tts"]. Model/voice parsing mirrors base::parse_model_voice (reuse it with those defaults/known). 2) Build instructions: start empty; if let Some(lang)=request.language push `Speak in {lang}.`; if style body field present push it (style comes from body, not TtsRequest — read request.credentials? No — the JS opts.style is passed through handleTtsCore from the request; TtsRequest has no style field, so read `style` from the inbound body — thread it via TtsRequest.language only; if Rust dispatch can't pass style, at minimum implement the language instruction). 3) messages = assistant content = text; if instructions non-empty unshift user message with joined instructions. 4) POST URL "https://api.xiaomimimo.com/v1/chat/completions", headers Content-Type + `Authorization: Bearer {api_key}`. Body: {model: model_id, stream: false, messages, audio: {format: "wav", voice: voice_id or DEFAULT_VOICE}}. 5) Parse: audio = parsed["choices"][0]["message"]["audio"]["data"], format = that ["audio"]["format"] or "wav". If missing audio → error. 6) mod.rs: add `mod xiaomi_mimo;` and get_tts_adapter arm `"xiaomi-mimo" => Some(&xiaomi_mimo::ADAPTER)`. 7) is_tts_provider test list already includes via adapter.
+- **Test:** `fn xiaomi_mimo_is_tts_provider() — is_tts_provider("xiaomi-mimo") is true. fn xiaomi_mimo_messages_contract() — build the JSON body for text "hi" + language "en" and assert messages[0] == {role:"user",content:"Speak in en."} and messages[1] == {role:"assistant",content:"hi"}, audio.voice == "mimo_default".`
+- **⚠️ Risks:** Message ORDER matters: instructions (role:user) must be UNSHIFTED before the assistant message. Voice is top-level audio.voice, NOT embedded in model. stream must be false. If no audio returned, error. Style support needs the style field threaded from the body — if TtsRequest cannot carry it, do language-only and note the gap.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-C5` — Gemini TTS: stale default/KNOWN models (missing gemini-3.1-flash-tts-preview)
+- **JS:** ttsProviders/gemini.js:7-16:
+  const FALLBACK_MODEL = "gemini-3.1-flash-tts-preview";
+  const KNOWN_MODELS = [...(TTS_CFG.models || []), ...(PROVIDER_MODELS["gemini-tts-models"] || []), ...(PROVIDER_MODELS.gemini || []).filter((m) => (m.kind || m.type) === "tts")].map((m) => m?.id).filter(Boolean).filter(unique);
+  const DEFAULT_MODEL = KNOWN_MODELS[0] || FALLBACK_MODEL;
+config/ttsModels.js:114: { id: "gemini-3.1-flash-tts-preview", name: "Gemini 3.1 Flash TTS", type: "tts" }
+  115: { id: "gemini-2.5-flash-preview-tts", ... }
+  116: { id: "gemini-2.5-pro-preview-tts", ... }
+So KNOWN_MODELS[0] is "gemini-3.1-flash-tts-preview" (3.1 first).
+- **Rust now:** src/core/media/tts/gemini.rs:15-17:
+  const DEFAULT_MODEL: &str = "gemini-2.5-flash-preview-tts";
+  const KNOWN_MODELS: &[&str] = &["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"];
+- **Fix:** In src/core/media/tts/gemini.rs: 1) Add "gemini-3.1-flash-tts-preview" as the FIRST entry of KNOWN_MODELS and set DEFAULT_MODEL to "gemini-3.1-flash-tts-preview". Keep the other two. Final: `const DEFAULT_MODEL: &str = "gemini-3.1-flash-tts-preview"; const KNOWN_MODELS: &[&str] = &["gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"];`. 2) parse_model_voice iterates KNOWN_MODELS in order so 3.1 is matched first — no other change needed.
+- **Test:** `fn gemini_tts_default_is_3_1_flash() — parse_model_voice("") returns model == "gemini-3.1-flash-tts-preview"; parse_model_voice("gemini-3.1-flash-tts-preview/Kore") returns ("gemini-3.1-flash-tts-preview", "Kore").`
+- **⚠️ Risks:** KNOWN_MODELS[0] order determines DEFAULT_MODEL and match priority — 3.1 must be first. A bare voice (e.g. "Kore") still maps to DEFAULT_MODEL (now 3.1) — behavior preserved.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-C6` — Tortoise generic TTS default base URL wrong (http://localhost:8000/tts vs /api/tts on :5000)
+- **JS:** registry/tortoise.js:17-28:
+  ttsConfig: {
+    baseUrl: "http://localhost:5000/api/tts",
+    authType: "none", authHeader: "none", format: "tortoise",
+    models: [{ id: "tortoise-v2", name: "Tortoise v2" }]
+  },
+  hidden: true
+- **Rust now:** src/core/media/tts/mod.rs:153 `"tortoise" => "http://localhost:8000/tts"` in default_generic_base_url. The generic_formats.rs tortoise fn (lines 334-351) POSTs {text, voice} to req.base_url.
+- **Fix:** In src/core/media/tts/mod.rs default_generic_base_url, change line 153 to `"tortoise" => "http://localhost:5000/api/tts"`. No other change — generic_formats::tortoise already POSTs JSON {text, voice} which matches the JS genericFormats handler.
+- **Test:** `fn tortoise_default_base_url_is_api_tts_on_5000() — assert_eq!(default_generic_base_url("tortoise"), "http://localhost:5000/api/tts").`
+- **⚠️ Risks:** Port and path both differ (5000 vs 8000, /api/tts vs /tts) — change BOTH. The JS entry is hidden:true but still a registered provider — keep tortoise registered in Rust is_tts_provider.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-C7` — OpenRouter TTS headers must match registry headers (HTTP-Referer/X-Title values)
+- **JS:** ttsProviders/openrouter.js:27-40 sends:
+  headers: { "Content-Type": "application/json", "Authorization": `Bearer ${credentials.apiKey}`, ...(TTS_CFG.headers || {}) },
+registry/openrouter.js:45-49:
+  ttsConfig: {
+    baseUrl: "https://openrouter.ai/api/v1/chat/completions",
+    defaultModel: "openai/gpt-4o-mini-tts",
+    headers: {"HTTP-Referer":"https://endpoint-proxy.local","X-Title":"Endpoint Proxy"},
+  },
+- **Rust now:** src/core/media/tts/openrouter.rs:55-59 hardcodes `HTTP-Referer: https://openproxy.local` and `X-Title: OpenProxy`.
+- **Fix:** In src/core/media/tts/openrouter.rs lines 55-59, change the two values: `HTTP-Referer` → "https://endpoint-proxy.local" and `X-Title` → "Endpoint Proxy". Body and SSE parse stay unchanged.
+- **Test:** `fn openrouter_tts_referer_matches_registry() — build the HeaderMap via the adapter (or a helper) and assert get("HTTP-Referer") == "https://endpoint-proxy.local" and get("X-Title") == "Endpoint Proxy".`
+- **⚠️ Risks:** Only the two header VALUES change; keep Content-Type and Authorization Bearer. The embedding/image openrouter adapters also use HTTP-Referer https://openproxy.local in Rust — check whether JS registry headers for those also say endpoint-proxy.local (JS registry openrouter.js lines 50-58 show all three configs use https://endpoint-proxy.local) — align embedding/image openrouter headers too.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-D8` — Cloudflare AI: num_steps optional field missing (multipart models)
+- **JS:** imageProviders/cloudflareAi.js:12-19:
+  const OPTIONAL_FIELDS = ["negative_prompt","guidance","seed","num_steps","steps","strength"];
+- **Rust now:** src/core/media/image/cloudflare_ai.rs:27-33:
+  const OPTIONAL_FIELDS: &[&str] = &["negative_prompt","guidance","seed","steps","strength"];  // missing "num_steps"
+- **Fix:** In src/core/media/image/cloudflare_ai.rs, insert "num_steps" into OPTIONAL_FIELDS before "steps": `const OPTIONAL_FIELDS: &[&str] = &["negative_prompt", "guidance", "seed", "num_steps", "steps", "strength"];`. The add_optional_fields_json loop then forwards num_steps automatically.
+- **Test:** `fn cloudflare_optional_fields_include_num_steps() — assert OPTIONAL_FIELDS.contains(&"num_steps") and that add_optional_fields_json copies a num_steps value into the request map.`
+- **⚠️ Risks:** Field order in the slice doesn't matter functionally; presence does. Keep "steps" AND "num_steps" both (JS has both).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-D9` — NanoBanana: JS typo "IMAGETOIAMGE"/"TEXTTOIAMGE" must be preserved
+- **JS:** imageProviders/nanobanana.js:22-23:
+  const req = {
+    prompt: body.prompt,
+    type: isEdit ? "IMAGETOIAMGE" : "TEXTTOIAMGE",  // <-- intentional upstream typo
+    numImages: body.n || 1,
+    image_size: ratio,
+    callBackUrl: "https://localhost/callback",
+  };
+- **Rust now:** src/core/media/image/nanobanana.rs:62-68 emits `"type": if is_edit { "IMAGE_TO_IMAGE" } else { "TEXT_TO_IMAGE" }` — the CORRECTED spelling, NOT the JS typo.
+- **Fix:** In src/core/media/image/nanobanana.rs line 64, change to `"type": if is_edit { "IMAGETOIAMGE" } else { "TEXTTOIAMGE" }` (drop the underscores, match JS exactly). All other fields (numImages, image_size, callBackUrl, imageUrls) already match.
+- **Test:** `fn nanobanana_type_keeps_upstream_typo() — build_body with no image returns type == "TEXTTOIAMGE"; with an image returns type == "IMAGETOIAMGE".`
+- **⚠️ Risks:** This is a deliberate upstream typo — the upstream API keys on the misspelled string. Do NOT 'fix' it to IMAGE_TO_IMAGE. Both spellings must match JS verbatim.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-E10` — Codex image: stale user-agent/version constants (0.129.0 vs 0.136.0)
+- **JS:** imageProviders/codex.js:7-9:
+  const CODEX_USER_AGENT = "codex_cli_rs/0.136.0";
+  const CODEX_VERSION = "0.136.0";
+  const CODEX_ORIGINATOR = "codex_cli_rs";
+- **Rust now:** src/core/media/image/codex.rs:21-23:
+  const CODEX_USER_AGENT: &str = "codex-imagen/0.2.6";
+  const CODEX_VERSION: &str = "0.129.0";
+  const CODEX_ORIGINATOR: &str = "codex_cli_rs";
+- **Fix:** In src/core/media/image/codex.rs: 1) change CODEX_USER_AGENT to "codex_cli_rs/0.136.0"; 2) change CODEX_VERSION to "0.136.0"; 3) CODEX_ORIGINATOR already "codex_cli_rs" — keep. Headers are inserted from these constants in build_headers (lines 203-210), so no further change.
+- **Test:** `fn codex_version_constants_match_js() — assert CODEX_VERSION == "0.136.0" and CODEX_USER_AGENT == "codex_cli_rs/0.136.0".`
+- **⚠️ Risks:** The user-agent format differs from what JS sends (codex_cli_rs/ vs codex-imagen/) — match JS exactly. These headers gate the ChatGPT backend.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-E11` — Image handler: 401/403 → refresh-token retry ONCE is missing in Rust
+- **JS:** imageGenerationCore.js:121-155:
+  const executor = getExecutor(provider);
+  if (!executor?.noAuth && !adapter.noAuth && (providerResponse.status === 401 || providerResponse.status === 403)) {
+    const newCredentials = await refreshWithRetry(() => executor.refreshCredentials(credentials, log), 3, log);
+    if (newCredentials?.accessToken || newCredentials?.apiKey) {
+      Object.assign(credentials, newCredentials);
+      if (onCredentialsRefreshed) await onCredentialsRefreshed(newCredentials);
+      // rebuild body/headers/url and re-fetch once
+      providerResponse = await fetch(retryUrl, {...});
+    } else { log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh failed`); }
+  }
+- **Rust now:** src/core/media/image/handler.rs:93-107 — fires one POST; on non-success returns Err(ImageHandlerError::Http(status, body)) with NO 401/403 refresh+retry. There is no refresh mechanism wired into the adapter path at all.
+- **Fix:** 1) In src/core/media/image/handler.rs, after the first response, if status is 401 or 403 AND the adapter is not no_auth() AND credentials have a refresh_token, attempt refresh via the existing OAuth/credential refresh infrastructure (see src/core/auth/credential_manager.rs or src/cli/provider_oauth.rs for the refresh path; wire a callback similar to video's refresh — check what infrastructure exists; the JS uses refreshWithRetry(refreshCredentials, 3)). 2) If refresh yields a new access_token/api_key, mutate the connection credentials, rebuild body/url/headers (call adapter.build_* again), and re-send ONCE. 3) If refresh fails, return the original 401/403. 4) Only retry when a refresh actually produced credentials; never retry a second time. Mirror videoCore's guard: only OAuth accounts with refreshToken can refresh.
+- **Test:** `fn image_handler_retries_once_after_refresh() — unit-test the retry guard: given a 401 response and a refreshed credential, the adapter is invoked exactly twice; without refresh credentials it is invoked once.`
+- **⚠️ Risks:** Retry exactly ONCE (not the 3 refresh ATTEMPTS, which is refreshWithRetry's internal retry). Do not retry on 401/403 for no_auth adapters (sdwebui, comfyui). The retried request must reuse the rebuilt headers/body. Do not retry other statuses.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-F12` — Search: youcom base URL must be https://ydc-index.io/v1/search, not api.you.com
+- **JS:** registry/youcom.js:20 searchConfig: { baseUrl: "https://ydc-index.io/v1/search", method: "GET", authType: "apikey", authHeader: "x-api-key", ... } and callers.js:270-304 buildYouComRequest uses resolveBaseUrl(config, params) which defaults to that baseUrl; query params are query/count/freshness/offset/country/language/include_domains/exclude_domains/livecrawl/livecrawl_formats; header X-API-Key.
+- **Rust now:** src/core/media/search/providers.rs:828-831 YouComProvider::build_url uses `resolve_base_url("https://api.you.com/search", request)` — wrong host AND wrong path (JS builder appends NO extra path; the baseUrl already ends /v1/search). Normalizer (lines 842-905) reads container["web"]/["news"] correctly.
+- **Fix:** In src/core/media/search/providers.rs YouComProvider::build_url line 829, change the default base to "https://ydc-index.io/v1/search". The builder appends query params only (already does) — no extra path segment to add since the default already ends /v1/search. X-API-Key header (line 837) already matches JS authHeader x-api-key.
+- **Test:** `fn youcom_url_uses_ydc_index() — build_url with a token yields a URL starting with "https://ydc-index.io/v1/search?".`
+- **⚠️ Risks:** JS appends no extra path to the baseUrl (it already ends /v1/search). Do not append /search again. The default.rs entry for youcom (https://api.you.com/v1) is only for the chat fallthrough and is not used by the search adapter.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-F13` — Search: searxng default URL must come from SEARXNG_URL env (default localhost:8888/search)
+- **JS:** config/runtimeConfig.js:49: export const SEARXNG_URL = envUrl("SEARXNG_URL", "http://localhost:8888/search");
+providers/registry/searxng.js:20: searchConfig: { baseUrl: SEARXNG_URL, ... } (authType none, maxMaxResults 50, timeoutMs 10000, cacheTTLMs 180000).
+callers.js:306-327 buildSearxngRequest: appends "/search" only if baseUrl does not end with /search; params q/format=json/categories=general|news/language/time_range/pageno.
+- **Rust now:** src/core/media/search/providers.rs:920 `let base = resolve_base_url("http://localhost:8080", request);` — hardcoded, no env read, wrong default port (8080 vs 8888) and no /search suffix. There is no SEARXNG_URL env handling anywhere in Rust (verified: no match in src/).
+- **Fix:** 1) In src/core/media/search/providers.rs SearxngProvider::build_url: replace the hardcoded default with an env-driven default: `let default = std::env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8888/search".to_string());` then `let base = resolve_base_url(&default, request);`. 2) Keep the existing /search-suffix logic (line 921-924) which already appends /search only when missing — so a baseUrl of http://localhost:8888/search stays as-is. 3) This preserves the provider_options.baseUrl override via resolve_base_url.
+- **Test:** `fn searxng_default_from_env() — with SEARXNG_URL unset, build_url yields "http://localhost:8888/search?..."; with SEARXNG_URL="https://x.example" yields "https://x.example/search?" (env read).`
+- **⚠️ Risks:** Env default must be read at call time (or cached lazily), matching JS envUrl which trims. The /search suffix append must still only happen when the base doesn't already end /search. provider_options.baseUrl override must still win over env.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-F14` — Search: global timeout 15s (JS) vs 30s (Rust), and no per-provider timeoutMs
+- **JS:** handlers/search/index.js:14: const GLOBAL_TIMEOUT_MS = 15000;
+  line 94-96: const timeout = Math.min(providerConfig.timeoutMs || 10000, Math.max(remaining, 1000));  // remaining = GLOBAL_TIMEOUT_MS - elapsed
+  line 17: const NON_RETRIABLE = new Set([400, 401, 403, 404]);
+- **Rust now:** src/core/media/search/handler.rs:9 `const GLOBAL_TIMEOUT: Duration = Duration::from_secs(30);` applied via .timeout(GLOBAL_TIMEOUT) at line 47. No per-provider timeout, no remaining-budget computation.
+- **Fix:** 1) In src/core/media/search/handler.rs change GLOBAL_TIMEOUT to Duration::from_secs(15). 2) Optionally add a per-provider timeout override: SearchProvider gains a default fn timeout_ms() -> Option<u64> (None default); searxng returns Some(10000), youcom Some(10000) per registry timeoutMs. 3) In handle_search, compute `let effective = provider.timeout_ms().map(Duration::from_millis).unwrap_or(GLOBAL_TIMEOUT);` and use `.timeout(effective)`. For strict JS parity the per-provider timeout is min(providerConfig.timeoutMs||10000, remaining) — implementing just the 15s global + 10s provider floor covers the observable gap.
+- **Test:** `fn search_global_timeout_is_15s() — assert GLOBAL_TIMEOUT == Duration::from_secs(15); assert searxng provider timeout_ms() == Some(10000).`
+- **⚠️ Risks:** Do not lower the timeout below what a provider needs — searxng/youcom both 10s. The 401/403/404 non-retriable set is relevant to the chat-failover gap (P1-F15) not the timeout itself.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P1-F15` — Search: dedicated → chat-based failover missing (and provider searchViaChat config)
+- **JS:** handlers/search/index.js:181-198:
+  if (!NON_RETRIABLE.has(result.status || 0) && Date.now() - globalStartTime < GLOBAL_TIMEOUT_MS && provider.searchViaChat && providerConfig) {
+    log?.warn?.(...);
+    const fallback = await handleChatSearch({ provider: provider.id, query: clean, maxResults: normalizedBody.max_results, model: provider.searchViaChat.defaultModel, credentials, log });
+    if (fallback.success) return successResult(fallback.data);
+  }
+Non-retriable = 400,401,403,404. chatSearch.js implements gemini/openai/xai/kimi/minimax/perplexity/perplexity-agent chat-search wrappers (endpoint, buildBody, buildHeaders, extractAnswer per provider).
+- **Rust now:** src/core/media/search/handler.rs handle_search returns Err on any non-2xx (lines 56-60) with no failover. chat_search.rs is a separate chat-completions-style endpoint (POST /v1/chat/search) and there is no logic that falls back to it after a dedicated search provider fails. Rust has no chatSearch config or CHAT_SEARCH_CONFIG equivalent.
+- **Fix:** This is a large feature. Minimal parity: 1) In search handler, on upstream Http(status, _) where status NOT in {400,401,403,404} AND the provider has a configured chat fallback, call a new chat_search helper. 2) Add a provider-level `chat_fallback_model()`/`chat_fallback_endpoint()` accessor defaulting to None; implement for gemini (endpoint https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent, model gemini-2.5-flash, header x-goog-api-key) and openai (model openai/gpt-4o-mini via provider default). 3) Implement handle_chat_search (mirror chatSearch.js CHAT_SEARCH_CONFIG for at least gemini + openai; xai/kimi/minimax/perplexity optional) and merge results into SearchResultSet. 4) The fallback runs only when within the 15s global budget and the error is retriable. Recommend implementing gemini + openai first given the providers configured with searchViaChat in the JS registry.
+- **Test:** `fn search_fails_over_to_chat_on_retriable_error() — given a 502 upstream error and a provider with a chat fallback model, the fallback path is invoked; given a 404 the fallback is NOT invoked.`
+- **⚠️ Risks:** Failover must NOT run for 400/401/403/404. It must run only inside the global timeout budget. The fallback needs its own credentials (same connection). chatSearch output shape differs from SearchResultSet (citations → results) — normalize accordingly. This is the biggest gap; if too large, implement the gemini/openai chat fallback config + one code path and stub the rest.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-G16` — Video: 401/403 refresh-token retry missing (JS videoCore does refresh once)
+- **JS:** videoCore.js:120-146:
+  if ((upstream.status === 401 || upstream.status === 403) && credentials?.refreshToken) {
+    refreshed = await refreshTokenByProvider(provider, credentials, log);
+    if (refreshed?.accessToken) { Object.assign(credentials, refreshed); if (onCredentialsRefreshed) await onCredentialsRefreshed(refreshed); upstream = await doFetch(credentials.accessToken || credentials.apiKey); }
+    else log?.warn?.(... "refresh failed — account needs re-auth");
+  }
+Also videoCore.js:21-31 sanitizeSecrets strips Bearer tokens and accessToken/refreshToken/apiKey from client-bound text.
+- **Rust now:** src/server/api/media.rs video_create_handler (lines 889-993) and video_get_handler (lines 998-1059) send the request once and proxy the upstream response directly (proxy_upstream_response) with NO 401/403 refresh+retry and no secret sanitization. There is no refreshToken wiring.
+- **Fix:** 1) In media.rs video_create_handler, after the POST response, if status is 401 or 403 and the connection has a refresh_token (check connection.refresh_token or access token fields — inspect ProviderConnection type; JS uses credentials.refreshToken), call the OAuth refresh path (mirror src/core/auth/credential_manager.rs refresh or src/cli/provider_oauth.rs). 2) If a new access_token is returned, update the connection, rebuild headers via build_media_headers, and re-send ONCE. 3) If no refresh token or refresh fails, return the original 401/403. 4) Do the same in video_get_handler. 5) Sanitize upstream error text: strip `Bearer <token>` and the raw access/refresh/api keys before returning (port sanitizeSecrets).
+- **Test:** `fn video_create_retries_once_on_401_with_refresh() — with a refresh token, a 401 triggers exactly one retry with the new token; without refresh token, no retry and the 401 is returned. fn video_sanitizes_secrets() — error text containing "Bearer abcdefgh" or the raw api key is redacted.`
+- **⚠️ Risks:** JS guards retry on refreshToken presence — API-key-only accounts never refresh. Retry exactly ONCE. The creation POST is billable — but 401/403 rejection happens BEFORE job creation, so the refresh re-send is safe (matches JS comment). Sanitize before the 2000-char slice reaches the client.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P1-H17` — Search: query sanitization (control chars, NFKC, whitespace collapse) missing in Rust
+- **JS:** handlers/search/index.js:17-25:
+  const CONTROL_CHAR_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
+  function sanitizeQuery(query) {
+    if (CONTROL_CHAR_RE.test(query)) return { error: "Query contains invalid control characters" };
+    const clean = query.normalize("NFKC").trim().replace(/\s+/g, " ");
+    if (!clean) return { error: "Query is empty after normalization" };
+    return { clean };
+  }
+  Also line 28-35 sanitizeHeaders strips non-ASCII chars ([^\x00-\xFF]) from header values.
+- **Rust now:** src/core/media/search/base.rs request_from_body (lines 141-148) only checks trim + non-empty — no control-char rejection, no NFKC, no whitespace collapse. handle_search (handler.rs:28-30) only checks query.is_empty().
+- **Fix:** 1) In src/core/media/search/base.rs request_from_body, after extracting the trimmed query: reject if it contains any byte in the control set 0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F (return Err "Query contains invalid control characters"). 2) Apply NFKC-like normalization (Rust: use `unicode-normalization` crate `query.nfkc()` if available, else leave as-is — JS normalizes; at minimum implement trim + `split_whitespace().join(" ")` for whitespace collapse) then trim and collapse `\s+` to single space. 3) If result empty → Err "Query is empty after normalization". 4) Optionally sanitize header values to ASCII (strip bytes > 0x7F) in build_headers helpers.
+- **Test:** `fn search_query_rejects_control_chars() — query containing "\x07" returns Err containing "control characters". fn search_query_collapses_whitespace() — "a  b" normalizes to "a b".`
+- **⚠️ Risks:** The control-char set is NOT the full 0x00-0x1F range — 0x09 (tab), 0x0A (LF), 0x0D (CR) are excluded. Empty-after-normalization must error. Whitespace collapse must not alter meaningful spacing between words beyond collapsing runs.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-I18` — Media generic forwarder: xai/vercel/etc. chat URL leak to media routes (adapter precedence)
+- **JS:** The JS media dispatch (imageGenerationCore / embeddingsCore / ttsCore) first checks provider-specific adapters; only providers WITHOUT an adapter fall through to the generic OpenAI forwarder. For providers WITH adapters (xai image, vercel gateway image/embedding), the media route must use the adapter's URL, never the chat-completions URL.
+- **Rust now:** src/server/api/media.rs:346-360 try_provider_adapter runs adapter dispatch (image/tts/embeddings/search) and returns Some when handled; otherwise falls through to build_media_url (line 562) using get_provider_base_url (line 629) which uses default.rs chat URLs. Because xai/vercel-ai-gateway are NOT in the Rust image/embedding adapter registries, their media requests fall through to the chat URL (e.g. https://api.x.ai/v1/chat/completions/embeddings), producing wrong endpoints.
+- **Fix:** Resolved indirectly by P0-B3a and P0-B3b: registering the xai and vercel-ai-gateway adapters makes try_provider_adapter return Some for those providers' image/embedding routes, preventing the chat-URL fallthrough. Add tests asserting dispatch returns Some (not None) for xai images and vercel-ai-gateway embeddings/images.
+- **Test:** `fn media_dispatch_short_circuits_for_xai_and_vercel() — image::dispatch is Some for provider "xai"; embeddings::dispatch is Some for "vercel-ai-gateway"; image::dispatch is Some for "vercel-ai-gateway".`
+- **⚠️ Risks:** Any provider added to an adapter registry must be removed from the effective fall-through — otherwise two endpoints are reachable for the same provider+route. The fall-through URL appends /embeddings or /images/generations to a chat base — never correct.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-J19` — Embeddings: vercel-ai-gateway + xai gap in OPENAI_COMPAT_PROVIDERS (Rust registry parity)
+- **JS:** embeddingProviders/index.js:7-11: OPENAI_COMPAT_PROVIDERS = ["openai","openrouter","mistral","voyage-ai","fireworks","together","nebius","github","nvidia","jina-ai","vercel-ai-gateway"] (10 + vercel).
+- **Rust now:** src/core/media/embeddings/mod.rs:46-66 get_embedding_adapter has all 10 base providers but NOT vercel-ai-gateway (see P0-B3b). The 10 present match; vercel is the only JS-registered one missing.
+- **Fix:** Covered by P0-B3b step 1-2. No additional action.
+- **Test:** `Covered by vercel_gateway_embedding_registered in P0-B3b.`
+- **⚠️ Risks:** None beyond P0-B3b.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-K20` — OpenRouter image/embedding header values should match registry (endpoint-proxy.local)
+- **JS:** registry/openrouter.js:50-58:
+  embeddingConfig: { baseUrl: "https://openrouter.ai/api/v1/embeddings", headers: {"HTTP-Referer":"https://endpoint-proxy.local","X-Title":"Endpoint Proxy"} }
+  imageConfig: { baseUrl: "https://openrouter.ai/api/v1/images/generations", headers: {"HTTP-Referer":"https://endpoint-proxy.local","X-Title":"Endpoint Proxy"} }
+- **Rust now:** src/core/media/embeddings/base.rs:133-139 (include_referer true for OPENROUTER) inserts HTTP-Referer https://openproxy.local + X-Title OpenProxy. src/core/media/image/openai_compat.rs:69-75 same values for OPENROUTER.
+- **Fix:** 1) In src/core/media/embeddings/base.rs OpenAiCompatAdapter::build_headers, when include_referer, change values to HTTP-Referer "https://endpoint-proxy.local" and X-Title "Endpoint Proxy". 2) Same in src/core/media/image/openai_compat.rs build_headers (lines 69-75). Keep header names and the include_referer gating identical.
+- **Test:** `fn openrouter_embedding_referer_matches_registry() — OPENROUTER.build_headers yields HTTP-Referer https://endpoint-proxy.local and X-Title Endpoint Proxy. fn openrouter_image_referer_matches_registry() — same for the image adapter.`
+- **⚠️ Risks:** Change VALUES only, not names or which providers get them. openproxy.local is used nowhere in the JS registry — all openrouter media headers use endpoint-proxy.local.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-L21` — Embeddings openai adapter: encoding_format default and dimensions validation parity
+- **JS:** embeddingProviders/openai.js:20-27:
+  buildBody: (model, { input, encoding_format, dimensions }) => {
+    const body = { model, input };
+    if (encoding_format) body.encoding_format = encoding_format;
+    if (dimensions != null && dimensions !== "") {
+      const dim = Number(dimensions);
+      if (Number.isFinite(dim) && dim > 0) body.dimensions = dim;
+    }
+    return body;
+  }
+- **Rust now:** src/core/media/embeddings/base.rs:143-159 OpenAiCompatAdapter::build_body — JS only adds encoding_format if truthy; Rust ALWAYS defaults it to "float" (`let encoding_fmt = request.encoding_format().unwrap_or("float");` then inserts encoding_format always). This adds `encoding_format: "float"` even when the client did not send it — a behavioral difference.
+- **Fix:** In src/core/media/embeddings/base.rs OpenAiCompatAdapter::build_body: only insert encoding_format when the request body actually contains it. Change to: `if let Some(fmt) = request.encoding_format() { obj.insert("encoding_format".into(), json!(fmt)); }`. Keep the dimensions handling (already validates > 0 via dimensions()). This makes parity with JS (no defaulting).
+- **Test:** `fn openai_embedding_no_encoding_format_default() — build_body with body {"input":"hi"} (no encoding_format) must NOT contain "encoding_format" key; with {"input":"hi","encoding_format":"base64"} it must contain it.`
+- **⚠️ Risks:** The "float" default is a Rust-specific addition — removing it matches JS but may change downstream assumptions; verify the media.rs usage-tracking path (lines 426-489) tolerates a missing encoding_format. dimensions must still be dropped when missing/<=0.
+- **Verified:**  REFUTED
+
+### `P1-M22` — STT: auth header "key" support parity + deepgram smart_format/punctuate overrides
+- **JS:** sttCore.js:6-15 buildAuthHeaders:
+  switch (cfg.authHeader) {
+    case "bearer": return { "Authorization": `Bearer ${token}` };
+    case "token":  return { "Authorization": `Token ${token}` };
+    case "x-api-key": return { "x-api-key": token };
+    case "key":    return { "Authorization": `Key ${token}` };
+    default:        return { "Authorization": `Bearer ${token}` };
+  }
+sttCore.js:36-43 deepgram sets smart_format=true, punctuate=true, and language OR detect_language=true.
+- **Rust now:** src/server/api/stt.rs:113-131 build_auth_headers supports Bearer/Token/XApiKey/Key — matches. SttProviderConfig gemini uses SttAuthHeader::Key (line ~118) — matches. Deepgram smart_format/punctuate handled via build_deepgram_url with per-request override fields (deepgram_smart_format/deepgram_punctuate, lines 229-232). This gap is effectively CLOSED — verify the deepgram overrides are actually threaded from the request (TODO comment at media/stt/mod.rs:199-203 says not yet threaded in the orphaned module; the ACTIVE src/server/api/stt.rs does thread them).
+- **Fix:** Verify src/server/api/stt.rs build_deepgram_url reads req.deepgram_smart_format and req.deepgram_punctuate and falls back to "true". If confirmed, no change needed; add a test asserting the default fallback to true and the override path.
+- **Test:** `fn stt_deepgram_defaults_smart_format_punctuate() — build_deepgram_url without overrides yields smart_format=true&punctuate=true; with an override yields the override.`
+- **⚠️ Risks:** The orphaned media/stt/mod.rs is not the active path — edits should go to src/server/api/stt.rs only. Keep default=true fallback.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-N23` — Search: searxng maxMaxResults/timeout config parity (50, 10000ms) and youcom maxMaxResults 100
+- **JS:** registry/searxng.js:30-32: maxMaxResults: 50, timeoutMs: 10000.
+registry/youcom.js:31-33: maxMaxResults: 100, timeoutMs: 10000.
+handlers/search/index.js:75: maxResults: Math.min(body.max_results || providerConfig.defaultMaxResults || 5, providerConfig.maxMaxResults || 100)
+- **Rust now:** src/core/media/search/base.rs request_from_body caps max_results at 100 universally (line 151-154 .min(100)). There is no per-provider maxMaxResults. So searxng can be asked for up to 100 results but JS caps it at 50.
+- **Fix:** 1) Add to SearchProvider a default fn max_max_results() -> u32 { 100 }. Override in SearxngProvider to 50. 2) In base.rs request_from_body, the cap must be applied per-provider — but request_from_body doesn't know the provider. Move the cap into the provider or pass provider_id. Minimal approach: in dispatch (search/mod.rs), after building the request, clamp `request.max_results = request.max_results.min(provider_impl.max_max_results())`. 3) In chat_search-style flows that construct requests directly, apply the same clamp. youcom already effectively 100 (the builder min(100) in providers.rs line 783).
+- **Test:** `fn searxng_caps_max_results_at_50() — a request with max_results 100 through searxng dispatch results in max_results 50; youcom stays 100.`
+- **⚠️ Risks:** JS uses `body.max_results || defaultMaxResults` — a present max_results of 0 is falsy in JS and falls to defaultMaxResults (5). Rust's `unwrap_or(5)` differs (0 is used). Consider matching JS: treat 0/missing as default 5. The cap applies AFTER the default is resolved.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P1-O24` — Gemini TTS voice fetch parity (PREBUILT_VOICES exposed via voices endpoint)
+- **JS:** ttsProviders/gemini.js:93-128 PREBUILT_VOICES (30 entries: Zephyr, Puck, Charon, Kore, Fenrir, Leda, Orus, Aoede, Callirrhoe, Autonoe, Enceladus, Iapetus, Umbriel, Algieba, Despina, Erinome, Algenib, Rasalgethi, Laomedeia, Achernar, Alnilam, Schedar, Gacrux, Pulcherrima, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager, Sulafat) each {id, lang:"en", gender:"Female"|"Male"}. fetchGeminiVoices (line 126-128) maps to {voice_id, name, labels:{language,gender}}.
+- **Rust now:** src/core/media/tts/gemini.rs has no voice-list fetch. No /voices endpoint exists in Rust TTS. Rust's DEFAULT_VOICE is "Kore" which matches.
+- **Fix:** 1) Add to src/core/media/tts/gemini.rs a `pub fn gemini_voices() -> Vec<Value>` returning the 30 voices as JSON `[{voice_id, name, labels:{language:"en", gender}}]` (map from the JS table verbatim — include ALL 30 with the exact gender per entry). 2) Wire an HTTP route (or reuse an existing /api/media-providers/tts/voices endpoint if present) to return these. 3) At minimum make the data available so a voices endpoint can be added; if a voice endpoint already exists for other providers, add gemini.
+- **Test:** `fn gemini_voices_returns_30_prebuilt() — gemini_voices() has 30 entries, first is Zephyr/Female, includes Kore/Female and Sulafat/Female with labels.language == "en".`
+- **⚠️ Risks:** Voice names and genders must match JS EXACTLY (they are used for UI display and upstream voiceName). If the Rust side has no voices endpoint at all, this may be lower priority — implement the data table and wire only if an endpoint exists.
+- **Verified:** ✅ CONFIRMED
+
+### `P2-P25` — TTS: xiaomi-mimo generic dispatch and selfhosted-tts adapter parity
+- **JS:** ttsProviders/index.js:24 "selfhosted-tts": selfhostedTts SPECIAL_ADAPTER. selfhostedTts.js (full): baseUrl = creds?.providerSpecificData?.baseUrl || creds?.baseUrl || "http://localhost:8880"; strips trailing /, /v1/audio/speech, /v1; model split on '/' → [0]=model, rest=voice; POST {base}/v1/audio/speech body {model, voice, input, response_format} headers Content-Type + optional Bearer.
+- **Rust now:** src/core/media/tts/mod.rs has NO selfhosted-tts (not in get_tts_adapter, not in provider_generic_format → is_tts_provider false). xiaomi-mimo also absent (P0-C4). selfhosted-tts falls through to the generic forwarder.
+- **Fix:** 1) Create src/core/media/tts/selfhosted_tts.rs implementing TtsAdapter: base = provider_specific_data["baseUrl"] || credentials.base_url (if ProviderConnection has one) || "http://localhost:8880"; normalize base by trimming trailing '/', stripping "/v1/audio/speech" suffix, then "/v1" suffix. 2) model/voice: split on '/', filter empty; >=2 parts → (parts[0], parts[1..].join("/")); ==1 → (parts[0], DEFAULT_VOICE "af_heart"). DEFAULT_MODEL "kokoro". 3) POST {base}/v1/audio/speech body {model, voice, input, response_format} (response_format = request language? no — use the handler's response_format; TtsRequest lacks response_format — use "mp3" or thread from body). Headers Content-Type + optional Authorization Bearer if api_key present. 4) mod.rs: `mod selfhosted_tts;` and get_tts_adapter arm `"selfhosted-tts" => Some(&selfhosted_tts::ADAPTER)`.
+- **Test:** `fn selfhosted_tts_base_url_normalization() — base "http://host:8880/v1" normalizes to "http://host:8880" then appends /v1/audio/speech; bare model "kokoro" → model kokoro/voice af_heart; "kokoro/af_heart" → split correctly.`
+- **⚠️ Risks:** Bare value is the MODEL (not voice) for selfhosted — do NOT copy the OpenAI adapter's bare=voice behavior (that was the verified bug in the JS comment). Strip order matters: /v1/audio/speech then /v1. Response format default "mp3".
+- **Verified:** ✅ CONFIRMED
+
+### `P2-Q26` — OpenAI-compatible STT response passthrough parity (raw body + content-type)
+- **JS:** sttCore.js:150-153 (transcribeOpenAICompatible):
+  const ct = res.headers.get("content-type") || "application/json";
+  const txt = await res.text();
+  return { success: true, response: new Response(txt, { status: 200, headers: { "Content-Type": ct, "Access-Control-Allow-Origin": "*" } }) };
+- **Rust now:** src/server/api/stt.rs transcribe_openai (line ~715-733) reads content-type and body text and calls ok_passthrough(ct, body) which sets the content-type header and returns status 200 — matches. The orphaned media/stt/mod.rs transcribe_openai_compat also does the same.
+- **Fix:** Verify ok_passthrough preserves the exact upstream content-type (including e.g. application/json vs application/x-json). If the upstream returns non-JSON (SRT/vtt/verbose_json), the raw body must pass through. Add a test with a text/plain-ish content-type.
+- **Test:** `fn stt_openai_passthrough_preserves_content_type() — given upstream content-type "application/json" and a raw body, the response echoes it unchanged.`
+- **⚠️ Risks:** The raw body must NOT be re-parsed/re-serialized (verbose_json must stay verbatim). Content-type must be copied, not defaulted.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P2-R27` — Search: youcom/searxng content_options + provider_options pass-through completeness
+- **JS:** callers.js buildYouComRequest (lines 289-295) livecrawl support: if params.contentOptions?.full_page → qp.set("livecrawl", news|web) and qp.append("livecrawl_formats", format==="markdown"?"markdown":"html"). buildSearxngRequest (306-327) passes language/time_range/pageno. handler/index.js:72-85 builds params from body incl. content_options + provider_options + providerSpecificData.
+- **Rust now:** src/core/media/search/base.rs request_from_body carries content_options and provider_options and provider_specific_data (lines 184-192) — YouComProvider::build_url already implements livecrawl (providers.rs lines 805-826). SearxngProvider::build_url passes language/time_range/pageno (lines 938-946). Both match JS. The remaining gap is only the config defaults (P1-F13/P1-N23).
+- **Fix:** No code change required beyond P1-F13 (searxng URL) and P1-N23 (maxMaxResults). Optionally add a test that YouComProvider::build_url emits livecrawl_formats=markdown when content_options.format is markdown.
+- **Test:** `fn youcom_livecrawl_markdown_format() — with content_options {full_page:true, format:"markdown"} the URL contains livecrawl=web and livecrawl_formats=markdown.`
+- **⚠️ Risks:** content_options.format non-markdown must default to html. livecrawl value depends on search_type (news→news else web).
+- **Verified:** ✅ CONFIRMED
+
+### `P2-S28` — Embeddings: jina-ai endpoint parity (base.rs ENDPOINTS fallback)
+- **JS:** embeddingProviders/openai.js:6-11:
+  const ENDPOINTS = { "jina-ai": "https://api.jina.ai/v1/embeddings" };
+  const embedUrl = (id) => embedCfg(id).baseUrl || ENDPOINTS[id];
+- **Rust now:** src/core/media/embeddings/base.rs JINA_AI endpoint "https://api.jina.ai/v1/embeddings" (line 106-108) — matches the JS ENDPOINTS value. No change needed.
+- **Fix:** No change. Add a regression test asserting JINA_AI endpoint equals "https://api.jina.ai/v1/embeddings".
+- **Test:** `fn jina_embedding_endpoint_matches() — assert_eq!(JINA_AI.endpoint, "https://api.jina.ai/v1/embeddings").`
+- **⚠️ Risks:** None — already correct.
+- **Verified:** ✅ CONFIRMED
+
+## PART F — COMBO / MITM / RTK (19 specs)
+
+### `P0-A3` — Fix blackbox wrong URL in default.rs (and provider.rs dead copy)
+- **JS:** File .tmp/9router/open-sse/providers/registry/blackbox.js:25-28. transport.baseUrl="https://api.blackbox.ai/v1/chat/completions" (path segment /v1/chat/completions). No validateUrl, no headers. models use upstreamModelId mapping (e.g. {id:"claude-fable-5",upstreamModelId:"blackboxai/anthropic/claude-fable-5"}) — these are catalog/translator concerns, not URL.
+- **Rust now:** WRONG URL. src/core/executor/default.rs:183-184: ("blackbox", ProviderConfig::openai("https://api.blackbox.ai/api/chat/completions")). Path is /api/chat/completions but JS is /v1/chat/completions. Same wrong URL duplicated in dead provider.rs:775-777 (https://api.blackbox.ai/api/chat/completions) and src/server/api/provider_validate.rs ("https://api.blackbox.ai/chat/completions" — third variant).
+- **Fix:** 1) default.rs:183-184: change to ProviderConfig::openai("https://api.blackbox.ai/v1/chat/completions"). 2) provider.rs:775-777 (dead PROVIDER_REGISTRY): update to match too ("https://api.blackbox.ai/v1/chat/completions") for consistency, since media.rs:638 reads it. 3) provider_validate.rs blackbox branch: point at the same /v1/chat/completions endpoint. 4) Verify there is no trailing-path join issue: baseUrl is the full endpoint so build_url (default.rs:812) returns it unchanged.
+- **Test:** `tests/executor_pool_behavior.rs: #[test] fn blackbox_v1_chat_completions_url(): build_url == "https://api.blackbox.ai/v1/chat/completions" (assert it does NOT equal the old /api/chat/completions).`
+- **⚠️ Risks:** There are THREE different blackbox URLs in the repo today (default.rs /api/..., provider.rs /api/..., provider_validate.rs bare /chat/completions). All three must converge to /v1/chat/completions. The upstreamModelId field mapping (claude-fable-5 -> blackboxai/anthropic/claude-fable-5) is a translator concern and should NOT be touched by this URL fix.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A3` — preserveCacheControl hardcoded `false` in Rust filter_to_openai_format
+- **JS:** translator/index.js:124-128:
+```js
+if (targetFormat === FORMATS.OPENAI) {
+  result = filterToOpenAIFormat(result, {
+    preserveCacheControl: !!PROVIDERS[provider]?.quirks?.preserveCacheControl,
+  });
+}
+```
+Providers with the quirk: providers/registry/alicode.js:19, alicode-intl.js:19, alims-intl.js:21 all have `quirks: { preserveCacheControl: true }`.
+filterToOpenAIFormat (formats/openai.js:14-17): `function stripBlock(block) { const { signature, cache_control, ...rest } = block; return keepCache && cache_control ? { ...rest, cache_control } : rest; }` — applied ONLY to VALID_OPENAI_CONTENT_TYPES blocks; `tool_use` blocks are skipped (continue, line 44-45); `tool_result` blocks are kept but passed through stripBlock (line 46-49) so their signature/cache_control are stripped unless keepCache.
+- **Rust now:** src/core/translator/registry.rs:481-487 hardcodes `filter_to_openai_format(body, false);`. In filter_to_openai_format (registry.rs:636-693): signature is always removed (line 683); cache_control removed only when !preserve_cache_control (line 684-686); and unlike JS, BOTH tool_use and tool_result blocks are pushed verbatim (line 689-692) with NO signature/cache_control stripping and tool_use is NOT dropped.
+- **Fix:** 1. In registry.rs translate_request_with_strip, replace `filter_to_openai_format(body, false)` with a provider-aware call: read the provider from `credentials.get("provider").and_then(Value::as_str).unwrap_or("")` (credentials is the param already in scope; chat.rs:791 sets `creds["provider"] = plan.provider`) and compute `let preserve = matches!(provider, "alicode" | "alicode-intl" | "alims-intl");` then call `filter_to_openai_format(body, preserve);`.
+2. In filter_to_openai_format (registry.rs:668-693), fix the tool-block branch to match JS: `else if block_type == "tool_use" { continue; } else if block_type == "tool_result" { let mut cleaned = block; if let Some(o) = cleaned.as_object_mut() { o.remove("signature"); if !preserve_cache_control { o.remove("cache_control"); } } filtered.push(cleaned); }`. This drops tool_use from content (JS `continue`) and strips signature/cache_control from tool_result.
+- **Test:** `Add `preserves_cache_control_when_true` — body messages [{role:user,content:[{type:text,text:x,cache_control:{type:ephemeral},signature:foo}]}], call filter_to_openai_format(&mut body, true), assert cache_control still present and signature removed. Add `strips_tool_result_cache_control_when_false` — tool_result block with cache_control, preserve=false, assert cache_control gone. Add `drops_tool_use_blocks` — assistant message content [{type:tool_use,...}], assert content does not contain tool_use.`
+- **⚠️ Risks:** JS `stripBlock` is NOT applied to string-content or tool messages (returns early at formats/openai.js:24-30). The quirk list is exactly alicode/alicode-intl/alims-intl — do NOT expand it. Preserve the JS quirk where keepCache=true but a block has no cache_control: block passes through unchanged (no cache_control is ADDED).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A3` — MITM per-provider handlers (antigravity/copilot/kiro/cursor) not ported — Rust only does CONNECT tunnel capture (G1a)
+- **JS:** src/mitm/server.js:29-34 handler registry; :311-338 dispatch:
+```js
+const tool = getToolForHost(req.headers.host);
+if (!tool) return passthrough(req, res, bodyBuffer);
+const patterns = URL_PATTERNS[tool] || [];
+const isChat = patterns.some(p => req.url.includes(p));
+if (!isChat) return passthrough(req, res, bodyBuffer);
+if (tool === "cursor") return handlers[tool].intercept(req, res, bodyBuffer, null, passthrough);
+const model = extractModel(req.url, bodyBuffer);
+if (model && (MODEL_NO_MAP[tool] || []).some((re) => re.test(model))) return passthrough(...);
+const mappedModel = getMappedModel(tool, model);
+if (!mappedModel) return passthrough(...);
+return handlers[tool].intercept(req, res, bodyBuffer, mappedModel, passthrough);
+```
+URL_PATTERNS (config.js:26-31): antigravity [":generateContent", ":streamGenerateContent"], copilot ["/chat/completions", "/v1/messages", "/responses"], kiro ["/generateAssistantResponse"], cursor ["/BidiAppend", "/RunSSE", "/RunPoll", "/Run"].
+Handlers: copilot.js:5-9 URL_MAP { "/chat/completions":"/v1/chat/completions", "/v1/messages":"/v1/messages", "/responses":"/v1/responses" }; resolveRouterPath falls back to "/v1/chat/completions". antigravity.js:17 `fetchRouter(body, "/v1/chat/completions", req.headers)`; stream error chunk `data: {"error":{...}}\r\n\r\n` with 200 + text/event-stream. kiro.js:483-489 builds `openaiBody = { model: mappedModel, messages, stream: true, ...(tools.length > 0 && { tools, tool_choice: "auto" }) }`, forwards to /v1/chat/completions, converts OpenAI SSE → AWS EventStream binary frames (CRC32 poly 0xEDB88320, Smithy headers ":message-type"="event", ":event-type", ":content-type"="application/json"). cursor.js:501 Not Implemented stub. base.js fetchRouter: strips Host, content-length, connection, transfer-encoding, content-type, authorization; forwards others + `Authorization: Bearer ${API_KEY}` where API_KEY=process.env.ROUTER_API_KEY, base = MITM_ROUTER_BASE || "http://localhost:20128" (trailing slashes trimmed).
+- **Rust now:** src/core/mitm/server.rs:122-156: handle_client only supports CONNECT — writes `HTTP/1.1 502 Bad Gateway` for any non-CONNECT. handle_connect (179-273) establishes tunnel, does TLS accept with forged leaf, then byte-pumps request/response into capture files (pump_captured 275-306). There is NO HTTP parsing, NO body JSON decode, NO model extraction, NO fetchRouter call, NO format conversion. MitmState/MitmInterceptor (mod.rs:143-180) only offer `original_model` insertion and URL building; no handler logic. None of antigravity/copilot/kiro/cursor transformation exists.
+- **Fix:** 1) Add `pub mod handlers;` to src/core/mitm/mod.rs. Create src/core/mitm/handlers.rs (or dir) with: `pub fn resolve_router_path(req_path: &str) -> &'static str` returning the copilot URL_MAP match by substring ("chat/completions"→"/v1/chat/completions", "/v1/messages"→"/v1/messages", "/responses"→"/v1/responses", default "/v1/chat/completions").
+2) Add `pub async fn fetch_router(state: &AppState, openai_body: Value, path: &str, client_headers: &HashMap<String,String>) -> reqwest::Response` — strip the 6 STRIP_HEADERS (host, content-length, connection, transfer-encoding, content-type, authorization, case-insensitive), set Content-Type: application/json, add `Authorization: Bearer {router_api_key}` if configured, POST to `{settings.mitm_router_base_url trimmed of trailing '/'}{path}`.
+3) Add antigravity handler: parse body, if `body.model` present set it to the mapped model; forward to /v1/chat/completions; pipe SSE back preserving status + content-type; on error for stream endpoints (:streamGenerateContent) write `HTTP 200 text/event-stream` with body `data: {"error":{"message":"..."}}\r\n\r\n`.
+4) Add kiro handler porting kiro.js conversion: codeWhispererToMessages (history userInputMessage/assistantResponseMessage → messages with role tool/assistant, tool_calls with `id: toolUseId || call_<ms>`, `arguments: safeArgsString(input)` JSON-stringified), extractTools, build AWS EventStream frames (totalLen/headersLen/preludeCRC/messageCRC big-endian, CRC32 0xEDB88320, headers ":message-type"="event", ":event-type", ":content-type"="application/json"), convert OpenAI SSE chunks → toolUseEvent (init with name+id then incremental input fragments), reasoningContentEvent (delta.reasoning_content or <thinking>/<think> blocks), assistantResponseEvent (content text), messageStopEvent / per-tool stop:true on finish_reason, usageEvent {inputTokens, outputTokens}. Note kiro.js rejects binary EventStream request bodies (`isBinaryEventStream`) with a 500.
+5) Wire into the CONNECT handling: after TLS accept + reading the HTTP request line + headers (peek is already used), parse request target, look up tool by SNI/host (`getToolForHost` equivalent: api.individual.githubcopilot.com→copilot; daily-cloudcode-pa/cloudcode-pa.googleapis.com→antigravity; q.us-east-1.amazonaws.com/codewhisperer/runtime.us-east-1.kiro.dev→kiro; api2.cursor.sh→cursor), check URL_PATTERNS substring, extract model from URL `/models/([^/:]+)` or body `model` or conversationState.currentMessage.userInputMessage.modelId, apply MODEL_NO_MAP (antigravity `/^tab[_-]/i`), map model via MitmState route config, then call the handler instead of byte-pumping.
+6) Cursor: return the 501 `{"error":{"message":"Cursor MITM support is coming soon.","type":"not_implemented"}}` stub (parity).
+- **Test:** `cargo test mitm_resolve_router_path_maps_endpoints in src/core/mitm/mod.rs: assert resolve_router_path("/chat/completions")=="/v1/chat/completions", "/responses"=="/v1/responses", "/foo"=="/v1/chat/completions". cargo test mitm_get_tool_for_host: api.individual.githubcopilot.com→copilot, daily-cloudcode-pa.googleapis.com→antigravity, q.us-east-1.amazonaws.com→kiro, api2.cursor.sh→cursor, unknown→None.`
+- **⚠️ Risks:** The Rust MITM is a raw TCP CONNECT tunnel — introducing HTTP parsing must not break the existing capture pump. fetchRouter must NOT forward host/content-length/content-type/authorization. Kiro binary EventStream detection (isBinaryEventStream: totalLen>12 && totalLen<1000000 && headersLen<totalLen-12) must be preserved to avoid JSON.parse crash. The antigravity stream error must be SSE-shaped (200, text/event-stream) or the SDK hangs. HOST_REWRITE (server.js:25-27) rewrites cloudcode-pa.googleapis.com→daily-cloudcode-pa.googleapis.com only for `:generateContent`/`:streamGenerateContent` URLs.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A4` — Fix SiliconFlow wrong URL in default.rs (and dead provider.rs copy)
+- **JS:** File .tmp/9router/open-sse/providers/registry/siliconflow.js:16-20. transport.baseUrl="https://api.siliconflow.com/v1/chat/completions" (TLD .com, NOT .cn), validateUrl="https://api.siliconflow.com/v1/models", thinkingFormat="openai".
+- **Rust now:** WRONG TLD. src/core/executor/default.rs:101-102: ("siliconflow", ProviderConfig::openai("https://api.siliconflow.cn/v1/chat/completions")). Host is api.siliconflow.cn (.cn) but JS uses api.siliconflow.com (.com). Same wrong .cn host in dead provider.rs:831-833, api_key.rs, provider_connection_test.rs, provider_models.rs, provider_validate.rs, and tests/executor_pool_behavior.rs.
+- **Fix:** 1) default.rs:101-102: change URL to "https://api.siliconflow.com/v1/chat/completions". 2) Update the dead provider.rs:831-833 copy to "https://api.siliconflow.com/v1/chat/completions". 3) Update api_key.rs:("https://api.siliconflow.cn/v1", "Authorization") to .com. 4) Update provider_validate.rs and provider_models.rs / provider_connection_test.rs .cn references to .com. 5) Update the assertion URL in tests/executor_pool_behavior.rs if it hardcodes .cn (verified it references "https://api.siliconflow.cn/v1/chat/completions"). 6) web/src/shared/constants/providers.ts and web/open-sse/config/providers.js already use .com (per parity-report) — leave.
+- **Test:** `tests/executor_pool_behavior.rs: update existing siliconflow assertion to #[test] fn siliconflow_com_tld(): build_url == "https://api.siliconflow.com/v1/chat/completions".`
+- **⚠️ Risks:** .cn vs .com is a one-character bug that silently 404s or routes to the wrong service. Grep the whole repo for siliconflow.cn (api_key.rs, provider_models.rs, provider_validate.rs, provider_connection_test.rs, tests) and fix every occurrence — a partial fix leaves other paths broken. Do not change the model ids (deepseek-ai/DeepSeek-V4-Pro etc.).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A4` — is_error drop in Kiro request translators (status hardcoded to "success")
+- **JS:** claude-to-kiro.js:108-112: `pendingToolResults.push({ toolUseId: block.tool_use_id, status: block.is_error ? "error" : "success", content: [{ text: resultContent }] });`
+openai-to-kiro.js:146-151 (Claude tool_result block inside a user message): `pendingToolResults.push({ toolUseId: block.tool_use_id, status: block.is_error ? "error" : "success", content: [{ text: text }] });`
+openai-to-kiro.js:156-162 (OpenAI role:tool message): `pendingToolResults.push({ toolUseId: msg.tool_call_id, status: msg.is_error || msg.status === "error" ? "error" : "success", content: [{ text: toolContent }] });`
+- **Rust now:** src/core/translator/request/claude_to_kiro.rs:226-231 — `"status": "success"` hardcoded (tool_result block). src/core/translator/request/openai_to_kiro.rs:231-236 hardcodes `"status": "success"` for Claude tool_result blocks, and lines 247-251 hardcodes `"status": "success"` for role:tool messages. is_error is never read.
+- **Fix:** claude_to_kiro.rs (tool_result branch, ~line 224): before pushing, compute `let is_err = c.get("is_error").and_then(Value::as_bool).unwrap_or(false);` and set `"status": if is_err { "error" } else { "success" }`.
+openai_to_kiro.rs tool_result branch (~line 231): same — `c.get("is_error")`.
+openai_to_kiro.rs role:tool branch (~line 244): `let is_err = msg.get("is_error").and_then(Value::as_bool).unwrap_or(false) || msg.get("status").and_then(Value::as_str) == Some("error");` and set status accordingly.
+(Use a serde_json::json! with a string — Value::String. Do not add `is_error` to the result object; JS only sets `status`.)
+- **Test:** `Add `tool_result_is_error_maps_to_error_status` in claude_to_kiro.rs tests — a user message with content [{type:tool_result,tool_use_id:t1,is_error:true,content:...}], run claude_to_kiro_request, assert the currentMessage.userInputMessageContext.toolResults[0].status == "error". Add `tool_msg_status_error_maps_to_error` in openai_to_kiro.rs — role:tool msg with is_error:true, assert status == "error".`
+- **⚠️ Risks:** JS reads `is_error` ONLY on the block/message itself — never via nested paths. A false-y is_error (absent/false/null) must map to "success". Do not read is_error from a `status` field on Claude blocks (only the OpenAI role:tool message reads `msg.status`).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A4` — MITM DNS hosts-file steering + CA install paths missing (G1b/G1c)
+- **JS:** src/shared/constants/mitmToolHosts.js:5-10:
+```js
+const TOOL_HOSTS = {
+  antigravity: ["daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"],
+  copilot: ["api.individual.githubcopilot.com"],
+  kiro: ["runtime.us-east-1.kiro.dev", "q.us-east-1.amazonaws.com", "codewhisperer.us-east-1.amazonaws.com"],
+  cursor: ["api2.cursor.sh"],
+};
+```
+DNS entries written as `127.0.0.1 {host}` (dnsConfig.js:161 `entriesToAdd.map(h => \`127.0.0.1 ${h}\`).join("\r\n")`; :168 same with \n). Windows hosts file: `{SystemRoot}\System32\drivers\etc\hosts`, atomic write via `.9router.new`→`.9router.bak` rename + `ipconfig /flushdns`. macOS/Linux: tee via sudo, `dscacheutil -flushcache && killall -HUP mDNSResponder` / `resolvectl flush-caches`. Cert install (cert/install.js): ROOT_CA_CN="9Router MITM Root CA"; Windows `certutil -delstore Root "9Router MITM Root CA"` then `certutil -addstore Root <path>` via elevated PowerShell; macOS `security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain` (delete old by CN first); Linux paths [{dir:"/usr/local/share/ca-certificates",cmd:"update-ca-certificates"},{dir:"/etc/ca-certificates/trust-source/anchors",cmd:"update-ca-trust"},{dir:"/etc/pki/ca-trust/source/anchors",cmd:"update-ca-trust"},{dir:"/etc/pki/trust/anchors",cmd:"update-ca-certificates"}], copied as `9router-root-ca.crt`, plus NSS db update (`certutil -d sql:$db -A -t "C,," -n "9Router MITM Root CA"`) for $HOME/.pki/nssdb, snap chromium, ~/.mozilla/firefox, snap firefox. Root CA (cert/rootCA.js): CN "9Router MITM Root CA", org "9Router", country US, 2048-bit RSA, 10yr validity, serial "01", basicConstraints cA critical, keyUsage keyCertSign+cRLSign critical, sha256; leaf: CN=domain, 1yr, SAN [DNS:domain, DNS:*.domain], extKeyUsage serverAuth+clientAuth.
+- **Rust now:** src/core/mitm/cert.rs generate_ca/install_ca_cert/uninstall_ca_cert: only macOS `security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain` and Linux `/usr/local/share/ca-certificates` + `update-ca-certificates` (hard-coded, no Arch/Fedora/openSUSE config, no NSS db update, no Windows path — Windows returns Err("Unsupported platform")). CN is "OpenProxy MITM CA" (different from JS "9Router MITM Root CA"), key is ECDSA P-256 (rcgen PKCS_ECDSA_P256_SHA256) not RSA-2048, cert validity/serial/SAN not controlled. No hosts-file steering anywhere (src/core/dns/mod.rs is the OUTBOUND bypass resolver, not the inbound hosts-file writer). No `addDNSEntry`/`removeAllDNSEntries` equivalent. MITM_DIR is `{data_dir}/mitm` (mitm_config.rs:241) — no expiry-based regeneration (JS isCertExpired 30-day lookahead).
+- **Fix:** 1) src/core/mitm/mod.rs: add `pub const TOOL_HOSTS: &[(&str, &[&str])] = &[("antigravity", &["daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com"]), ("copilot", &["api.individual.githubcopilot.com"]), ("kiro", &["runtime.us-east-1.kiro.dev", "q.us-east-1.amazonaws.com", "codewhisperer.us-east-1.amazonaws.com"]), ("cursor", &["api2.cursor.sh"])];`
+2) Add `src/core/mitm/hosts.rs` (or extend mod.rs) with `add_dns_entry(tool, hosts_file_path)`, `remove_all_dns_entries_sync()`: on Windows read `{SystemRoot}\System32\drivers\etc\hosts`, filter lines containing any TOOL_HOSTS host, write back + `ipconfig /flushdns`; on macOS `dscacheutil -flushcache && killall -HUP mDNSResponder`; Linux `resolvectl flush-caches 2>/dev/null || true`. Entry text: `127.0.0.1 {host}` (CRLF on Windows, LF elsewhere).
+3) cert.rs: change CN to "9Router MITM Root CA", org "9Router"; add Windows install path (best-effort: document that elevated certutil addstore is required; run `certutil -addstore Root` via a UAC-triggering helper or return a clear message); add Linux multi-distro config array + NSS db update (parse $HOME/.pki/nssdb, $HOME/.mozilla/firefox/*, snap paths; run `certutil -d sql:$db -A -t "C,," -n "9Router MITM Root CA" -i {cert}` if certutil exists).
+4) Keep the CA filename but note the JS uses `rootCA.key`/`rootCA.crt` names; align generate_ca_persisted to write those filenames if consumers depend on them, or keep mitm-ca.* and document.
+5) Wire DNS add/remove: JS calls removeAllDNSEntriesSync on SIGTERM/SIGINT/SIGBREAK (server.js:392-404) and clearDumpDir() on start. Add a shutdown hook in the Rust server that calls remove_all_dns_entries_sync (best-effort).
+- **Test:** `cargo test mitm_hosts_entries_write_loopback in src/core/mitm/hosts.rs: build a temp hosts file, call add_dns_entry for antigravity, assert the file contains `127.0.0.1 daily-cloudcode-pa.googleapis.com` and `127.0.0.1 cloudcode-pa.googleapis.com` with CRLF on the windows-style path; assert remove_all removes them and leaves unrelated lines intact.`
+- **⚠️ Risks:** JS host matching for removal is substring `l.includes(h)` — a host `q.us-east-1.amazonaws.com` also matches inside other lines. Windows rename-based atomic write must roll back on failure. The Rust CA uses ECDSA while JS uses RSA-2048 — the leaf cert validity/SAN shape (CN=domain, DNS:domain, DNS:*.domain, 1yr) must be preserved for client trust. Do NOT break the existing outbound MitmBypassResolver in src/core/dns/mod.rs — it is a separate concern (bypass vs steering).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A5` — Fix youcom search base URL to ydc-index.io
+- **JS:** File .tmp/9router/open-sse/providers/registry/youcom.js:19-24. searchConfig={baseUrl:"https://ydc-index.io/v1/search",method:"GET",authType:"apikey",authHeader:"x-api-key",costPerQuery:0.005,freeMonthlyQuota:0,searchTypes:["web","news"],defaultMaxResults:5,maxMaxResults:100,timeoutMs:10000,cacheTTLMs:300000}. The dedicated-search builder open-sse/handlers/search/callers.js:270-304 buildYouComRequest uses this baseUrl; headers are Accept: application/json and X-API-Key (callers.js:301).
+- **Rust now:** WRONG URL. src/core/media/search/providers.rs:829: resolve_base_url("https://api.you.com/search", request). JS base is https://ydc-index.io/v1/search. The Rust builder's query params (count maxResults, freshness=time_range, offset, country, language, include_domains, exclude_domains, livecrawl, livecrawl_formats) already match callers.js:275-295; only the base URL is wrong.
+- **Fix:** 1) src/core/media/search/providers.rs:829: change the default to "https://ydc-index.io/v1/search". 2) Confirm the request uses GET with header X-API-Key (providers.rs:836-839 already inserts X-API-Key) — matches JS callers.js:301. 3) The query builder already appends ?... after the base; since JS baseUrl already ends with /v1/search and Rust resolve_base_url trims trailing '/', the final URL is https://ydc-index.io/v1/search?query=...&count=... — correct. 4) Also update the module doc comment at search/mod.rs:10 if it mentions youcom.
+- **Test:** `In search/providers.rs test module (or search tests): #[test] fn youcom_uses_ydc_index_base(): build_url with default settings returns a URL starting with "https://ydc-index.io/v1/search?" and NOT containing "api.you.com".`
+- **⚠️ Risks:** The header is X-API-Key (uppercase X) — already correct in Rust. The costPerQuery/timeoutMs/defaultMaxResults are metrics/throttling knobs; ensure Rust does not add a max_results cap inconsistent with JS maxMaxResults:100 (Rust providers.rs:783 already caps count at 100 via max_results.min(100)).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A5` — canonicalizeKiroConversation missing in Rust — no alternating-turn/tool-pair reconciliation
+- **JS:** open-sse/translator/concerns/kiroConversation.js (435 lines) — canonicalizeKiroConversation({history, currentMessage, modelId, toolSpecs, nameMap}) (line 383): normalizeTurns (merge consecutive same-role turns; mergeUser merges content+images+toolResults, mergeAssistant merges content+toolUses; prepend/append `{userInputMessage:{content:"continue", modelId}}` so history starts/ends with user; content trimmed with `"continue"`/`"..."` fallbacks; `delete turn.userInputMessage.userInputMessageContext.tools`), then for index 0: flatten leading orphan toolResults into text `[Tool result${status==="error" ? " (error)" : ""}: ${content}]`, then reconcileToolPair(assistant, nextUser) per pair — calls with no matching result / no spec (nameMap.get(call.name) must be in specNames) / null input are dropped and re-emitted as text `[Tool call: name(input)]`; results without a matching call are flattened as text; kept pairs get reserved unique toolUseIds (sanitize to [a-zA-Z0-9_-], else `call_msg{turnIndex}_tc{callIndex}_{name}`), then toolSpecs are cloned onto the FINAL currentMessage.userInputMessageContext.tools, then validateKiroConversation (alternating roles, adjacent one-to-one pairs, unique ids, spec names, no orphan:0); if invalid → flattenAllStructuredTools (all toolUses+results to text) and re-validate.
+normalizeKiroToolSpecs (line 79): per tool, rawName = tool.function?.name ?? tool.name (skip if empty); dedupe repeated rawName; uniqueName = sanitize/[^a-zA-Z0-9_-]/→_, collapse _+, trim _+_, truncate to 64, dedupe with _N suffix; description = truncate to 10237, default `Tool: ${rawName}`; schema = function.parameters ?? parameters ?? input_schema ?? {}; normalizeRootSchema: drop `additionalProperties`, drop empty `required:[]`, force type=object + properties={}, dedupe required. Constants (kiroConstants.js:23-25): KIRO_TOOL_NAME_MAX_LENGTH=64, KIRO_TOOL_DESCRIPTION_MAX_LENGTH=10237, KIRO_TOOL_ID_MAX_LENGTH=64.
+- **Rust now:** src/core/translator/request/claude_to_kiro.rs and openai_to_kiro.rs do only: content-only merge of consecutive user turns (lines 388-412 / 423-446) which does NOT merge context toolResults/images (JS mergeUser does); no alternating-role enforcement; no tool use/result pairing; no orphan flattening; no tool id reservation; no validate/fallback. Tools are currently placed on the FIRST history user message then moved to currentMessage (claude_to_kiro.rs:95-128, 354-360, 425-436) — JS puts them on the FINAL currentMessage only. kiro_session_replay.rs has no canonicalization.
+- **Fix:** Create `src/core/translator/concerns/kiro_conversation.rs` porting the JS:
+1. `normalize_kiro_tool_specs(tools: &Value) -> (Vec<Value>, HashMap<String,String>)` — produce toolSpecification{name,description,inputSchema:{json}} with the uniqueName sanitize/truncate(64)/dedupe logic, description truncate(10237), schema normalization (drop additionalProperties, drop empty required arrays, type=object, properties={}), rawName→uniqueName map.
+2. `canonicalize_kiro_conversation(history: &[Value], current_message: &Value, model_id: &str, tool_specs: &[Value], name_map: &HashMap<String,String>) -> (Vec<Value>, Value, KiroRepairs)` implementing normalizeTurns → leading-orphan flatten → reconcileToolPair → tools-on-final-currentMessage → validate → flattenAllStructuredTools fallback, returning (history, currentMessage). Reuse the `[Tool call: name(input)]` / `[Tool result (error): content]` text shapes verbatim.
+3. In BOTH claude_to_kiro.rs and openai_to_kiro.rs: replace the current `first_history_tools` extraction + `remove("tools")` cleanup + currentMessage tools merge (claude_to_kiro.rs:354-360 & 425-436; openai_to_kiro.rs:388-394 & 448-459) with a call to normalize_kiro_tool_specs(tools) then canonicalize_kiro_conversation(replay.history, replay.current_message, upstream_model, &specs, &name_map), and use the canonical result for payload.conversationState.history and currentMessage.userInputMessage. Delete userInputMessageContext.tools from every history turn inside canonicalize (as JS normalizeTurns does).
+4. Thread `name_map`/`specs` into the tool-result reconcile (calls whose mapped name is not in specNames get flattened).
+- **Test:** `Add `canonicalize_merges_consecutive_user_turns_with_tool_results` — history [user(content a, toolResults r1), user(content b, toolResults r2)] → one user turn content "a\n\nb" with toolResults [r1, r2]. Add `canonicalize_flattens_orphan_results` — first user turn has toolResults but no preceding assistant toolUses → toolResults flattened into content and context.toolResults removed. Add `reconcile_pairs_and_reserves_ids` — assistant toolUse call_x + next user toolResult call_x → kept pair with a reserved id. Add `invalid_calls_become_text` — toolUse with input null → removed from toolUses, `[Tool call: name(...)]` appended to assistant content.`
+- **⚠️ Risks:** The `[Tool result${status === "error" ? " (error)" : ""}: ...]` and `[Tool call: ...]` text formats are load-bearing (tests/unit/openai-to-kiro.test.js:284 asserts the orphaned output survives as `[Tool result: important orphaned output]`). Empty assistant toolUses + results → flatten; empty results → delete toolResults; empty context object → delete userInputMessageContext. The final currentMessage content must remain non-empty (validate errors on `current` otherwise).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A5` — Caveman injected prompt lacks the 8 JS shared directives + wrong dispatch (G2c)
+- **JS:** open-sse/rtk/cavemanPrompts.js:4-110. SHARED directives concatenated into every level:
+```js
+const SHARED_BOUNDARIES = "Code blocks, file paths, commands, errors, URLs: keep exact. Security warnings, irreversible action confirmations, multi-step ordered sequences: write normal. Resume terse style after.";
+const SHARED_EXAMPLES = "Not: \"Sure! I'd be happy to help you with that. The issue you're experiencing is likely caused by...\" Yes: \"Bug in auth middleware. Token expiry check use `<` not `<=`. Fix:\"";
+const SHARED_AUTO_CLARITY = "Auto-Clarity: drop caveman for security warnings, irreversible actions, multi-step sequences where fragment ambiguity risks misread, or when user repeats a question. Resume after the clear part.";
+const SHARED_PERSISTENCE = "ACTIVE EVERY RESPONSE. No revert after many turns. No filler drift. Still active if unsure.";
+const SHARED_NO_INVENTED_ABBREV = "No invented abbreviations. Standard well-known tech acronyms (DB, API, HTTP, URL, JSON, ID, OS, CPU) OK. Names of code symbols, function names, API names, error strings: keep verbatim.";
+const SHARED_PRESERVE_LANGUAGE = "Preserve the user's dominant language. User wrote Vietnamese, reply Vietnamese. User wrote English, reply English. Wenyan/classical-Chinese levels override this language-preservation rule. Code identifiers, error strings, file paths, commands: keep in their original form regardless of language.";
+const SHARED_NO_SELF_REFERENCE = 'No self-reference. Do not name or announce the style (no "caveman mode", no "me caveman think", no "compressed mode active"). Just respond.';
+const SHARED_NO_DECORATION = 'No decorative emoji. No narrating tool calls ("I will now search", "I used X to find Y"). No status phrases ("Sure!", "Of course!", "I'd be happy to"). No causal arrow shorthand ("A -> B -> fails"). State the thing, the action, the reason. Then next step.';
+```
+Each level is these + level-specific text joined with " " (single space). E.g. LITE: "Respond tersely. Keep grammar and full sentences but drop filler, hedging and pleasantries (just/really/basically/sure/of course/I'd be happy to)." + "Pattern: state the thing, the action, the reason. Then next step." + SHARED_EXAMPLES + ... . ULTRA: "Respond ultra-terse. Maximum compression. Telegraphic." + "Strip conjunctions. One word when one word enough." + "Pattern: [thing] [action] [reason]. [next step]." + shared... . WENYAN_LITE/WENYAN/WENYAN_ULTRA use classical-Chinese text. Dispatch: open-sse/rtk/caveman.js:7-9 `injectCaveman(body, format, level)` → `injectSystemPrompt(body, format, CAVEMAN_PROMPTS[level])` which switches on format (systemInject.js:12-26): CLAUDE→injectClaudeSystem, GEMINI/GEMINI_CLI/VERTEX/ANTIGRAVITY→injectGeminiSystem, default→injectMessagesSystem. The default (OpenAI) case: if `body.instructions` is string → append; else use messages[] (role system|developer) OR input[]; if none, `arr.unshift({ role: "system", content: prompt })`.
+- **Rust now:** src/core/rtk/mod.rs:49-95 CompressionLevel::prompt() — each level is a SHORT concat missing ALL 8 shared directives (only a paraphrase of "Pattern" and the boundaries snippet; e.g. Full ends "Active every response until user asks for normal mode." vs JS "ACTIVE EVERY RESPONSE. No revert..."). Missing: SHARED_EXAMPLES, SHARED_AUTO_CLARITY, SHARED_NO_INVENTED_ABBREV, SHARED_PRESERVE_LANGUAGE, SHARED_NO_SELF_REFERENCE, SHARED_NO_DECORATION. Rust dispatch (mod.rs:177-192 inject_caveman_prompt) checks body keys (`system`, `is_gemini_shape`) instead of the JS format enum, and always appends to whatever array — the JS ALSO handles the responses `input` array with part_type "input_text" (rust does via inject_openai_shape:194-208), but Rust inject_claude_system_blocks (263-281) uses `text.contains(prompt)` for idempotency while JS always splices. Also Rust has no 8 shared consts.
+- **Fix:** 1) In src/core/rtk/mod.rs add the 8 shared directive consts verbatim from cavemanPrompts.js (SHARED_BOUNDARIES, SHARED_EXAMPLES, SHARED_AUTO_CLARITY, SHARED_PERSISTENCE, SHARED_NO_INVENTED_ABBREV, SHARED_PRESERVE_LANGUAGE, SHARED_NO_SELF_REFERENCE, SHARED_NO_DECORATION) and rewrite each CompressionLevel::prompt() to `concat!(level_specific..., " ", SHARED_...)` joined with single spaces exactly matching JS. Keep as_str() and parse unchanged.
+2) Keep dispatch logic (it already handles system/claude, gemini request/systemInstruction, openai messages, input). Add the missing `instructions` string handling for responses — verify inject_openai_shape already handles `instructions` (it does, mod.rs:195-197).
+3) Ensure the wenyan levels use the JS classical-Chinese text: WenyanLite "Respond semi-classical...", Wenyan "Respond classical Chinese (文言文). Maximum classical terseness. 80-90% character reduction...", WenyanUltra "Respond extreme classical compression (文言文 ultra)...".
+- **Test:** `cargo test caveman_prompts_contain_shared_directives in src/core/rtk/mod.rs: for each level assert prompt() contains "keep exact" (boundaries), "No self-reference", "No decorative emoji", "Preserve the user's dominant language", "No invented abbreviations", and that Full contains the literal JS example "Not: \"Sure! I'd be happy to help you with that."`
+- **⚠️ Risks:** JS joins with a single space; Rust concat! must produce byte-identical text or the test in tests.rs (which asserts content.contains(prompt)) and the CLI's settings normalization could break. SHARED_PRESERVE_LANGUAGE explicitly says wenyan levels override the language-preservation rule — do not append it to wenyan levels (JS wenyan levels DO include it in the array but the rule text itself states wenyan overrides; keep verbatim). Rust inject_claude_system_blocks dedups by `text.contains(prompt)` whereas JS always splices — preserve Rust's idempotency OR match JS exactly; JS caveman is invoked once per request so idempotency differences only matter for the rtk system-inject test.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P1-B1` — clinepass OAuth config in src/oauth/providers.rs (executor covered by P0-A1e)
+- **JS:** File .tmp/9router/open-sse/providers/registry/clinepass.js:46-56. oauth={appBaseUrl:"https://app.cline.bot",apiBaseUrl:"https://api.cline.bot",authorizeUrl:"https://api.cline.bot/api/v1/auth/authorize",tokenUrl:"https://api.cline.bot/api/v1/auth/token",refreshUrl:"https://api.cline.bot/api/v1/auth/refresh"}. thinkingConfig={options:["auto","on","off"],defaultMode:"auto"}.
+- **Rust now:** src/oauth/providers.rs get_config() (parity-report A3/C2h) has no clinepass entry. oauth.rs:4217 returns unknown_provider for it. Additionally C2h: Rust exchange only exempts 'cline' from codeVerifier; JS exempts cline/clinepass/kimchi.
+- **Fix:** 1) In src/oauth/providers.rs get_config(), add a "clinepass" OAuthProviderConfig with authorize_url="https://api.cline.bot/api/v1/auth/authorize", token_url="https://api.cline.bot/api/v1/auth/token", refresh_url="https://api.cline.bot/api/v1/auth/refresh". 2) In the OAuth exchange code-verifier exemption (parity C2h), extend the exempt list from {"cline"} to {"cline","clinepass","kimchi"}. This task is listed for completeness — the executor half is P0-A1e.
+- **Test:** `src/oauth/tests/oauth_url_tests.rs: add clinepass to test_get_config_all_providers (line 272) asserting authorize_url == "https://api.cline.bot/api/v1/auth/authorize".`
+- **⚠️ Risks:** Do not reuse the cline (https://cline.bot) OAuth URLs — clinepass has a distinct /api/v1/auth/* path set. The exchange exemption list is shared logic; changing it affects cline/kimchi too (that is the intended parity fix).
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P1-B1` — RTK system prompt injector only handles OpenAI messages; missing Claude/Gemini/Responses shapes (G2d)
+- **JS:** open-sse/rtk/systemInject.js:9-98:
+```js
+export function injectSystemPrompt(body, format, prompt) {
+  if (!body || !prompt) return;
+  switch (format) {
+    case FORMATS.CLAUDE: injectClaudeSystem(body, prompt); return;
+    case FORMATS.GEMINI: case FORMATS.GEMINI_CLI: case FORMATS.VERTEX: case FORMATS.ANTIGRAVITY:
+      injectGeminiSystem(body, prompt); return;
+    default: injectMessagesSystem(body, prompt);
+  }
+}
+```
+injectMessagesSystem: if `body.instructions` is a string → `body.instructions = body.instructions ? body.instructions + "\n\n" + prompt : prompt`; else find messages[] or input[]; findIndex m.role === "system" || "developer" → appendToOpenAIMessage else `arr.unshift({ role: "system", content: prompt })`. appendToOpenAIMessage: string content → concat with "\n\n"; array content → `msg.content.push({ type: "input_text", text: prompt })`; else msg.content = prompt. injectClaudeSystem: string body.system → concat; array → insert `{type:"text", text:prompt}` BEFORE the last block with cache_control (splice(lastCacheIdx, 0, block)); else body.system = prompt. injectGeminiSystem: target = body.request ?? body; useSnake = hasOwnProperty(system_instruction); sys.parts array → push {text:prompt}; else target[key] = { parts: [{ text: prompt }] }.
+- **Rust now:** src/core/rtk/system_inject.rs:8-38 inject_system_prompt only handles OpenAI `messages[]` (finds role "system" — NOT "developer" — and only string content; array content returns false). It does NOT handle: responses `input[]`, `instructions` string, Claude `system` (string or array), Gemini `systemInstruction`/`system_instruction`/`request.systemInstruction`, or ANTIGRAVITY `request` wrapping. The caller apply_rtk_system_injection (rtk/mod.rs:152-171) reads `systemInject` bool + `systemPrompt` string from settings.extra. Note: the setting name in JS — the injector is used by caveman/ponytail; the generic system-inject in Rust reads settings.extra.systemInject/systemPrompt (no direct JS equivalent found; JS gating is the token-saver header, so system-inject is a Rust-specific extra knob).
+- **Fix:** 1) Rewrite src/core/rtk/system_inject.rs inject_system_prompt to a format-dispatch shape that ALSO detects by body: if body has `system` key → Claude path; if body has `contents`/`systemInstruction`/`system_instruction`/`request.contents` → Gemini path; else OpenAI path (messages[] or input[] or instructions string). Use PROMPT_SEPARATOR "\n\n" (same as rtk/mod.rs:21).
+2) OpenAI path: handle `instructions` string; find role "system" OR "developer"; array content push `{"type":"input_text","text":prompt}` (for input[]/responses) or `{"type":"text","text":prompt}` (for messages[]); else insert at index 0.
+3) Claude path: string system → append with "\n\n"; array → insert `{"type":"text","text":prompt}` before the last block having `cache_control` (rposition), else push; else set body.system = prompt.
+4) Gemini path: target = body.request (if object) else body; key = "system_instruction" if present else "systemInstruction"; if sys has parts array push {text:prompt} else set {parts:[{text:prompt}]}.
+5) Keep `system_inject_enabled` reading `systemInject` from settings. Keep the idempotency guard used by rtk/mod.rs inject functions (part_text equality) OR match JS (JS has no idempotency — but each request calls once).
+- **Test:** `cargo test system_inject_handles_claude_gemini_responses_shapes in src/core/rtk/tests.rs or system_inject.rs: (a) body with `system:[{type:"text",text:"A",cache_control:{}}]` → prompt inserted at index 0 (before cache block); (b) body with `input:[{role:"developer",content:[{type:"input_text",text:"x"}]}]` → appends {type:"input_text",text:prompt}; (c) body with `request:{systemInstruction:{parts:[{text:"g"}]}}` → parts gets {text:prompt}; (d) body with `instructions:"i"` → "i\n\nprompt".`
+- **⚠️ Risks:** JS CLAUDE format detection is driven by the format enum, not body keys — Rust must map format correctly or a Claude body with a top-level `messages` key could take the OpenAI path. The cache_control insertion is BEFORE the last cache block (splice at lastCacheIdx), not after. Preserve "\n\n" as the separator everywhere (already PROMPT_SEPARATOR). Do not break the existing caveman/ponytail callers that rely on inject_system_prompt behavior.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-B2` — codebuddy-intl OAuth device-code flow in src/oauth (executor covered by P0-A1f)
+- **JS:** File .tmp/9router/open-sse/providers/registry/codebuddy-intl.js:64-72. oauth={baseUrl:"https://www.codebuddy.ai",stateUrl:"https://www.codebuddy.ai/v2/plugin/auth/state",tokenUrl:"https://www.codebuddy.ai/v2/plugin/auth/token",refreshUrl:"https://www.codebuddy.ai/v2/plugin/auth/token/refresh",userAgent:"IDE/2.63.2 CodeBuddy/2.63.2",platform:"ide",pollInterval:5000}. features={usage:true,usageApikey:true}. Comment line 3: all OAuth/plugin URLs use the /v2/plugin prefix with platform=ide (CN uses platform=CLI).
+- **Rust now:** src/oauth/providers.rs:307-319 has the CodeBuddy CN device-code flow (copilot.tencent.com/v2/plugin/auth/state|token|token/refresh, platform CLI). There is NO codebuddy-intl (www.codebuddy.ai) entry. oauth.rs:4217 returns unknown_provider.
+- **Fix:** 1) In src/oauth/providers.rs add a "codebuddy-intl" OAuthProviderConfig: authorize/state url="https://www.codebuddy.ai/v2/plugin/auth/state", token_url="https://www.codebuddy.ai/v2/plugin/auth/token", refresh_url="https://www.codebuddy.ai/v2/plugin/auth/token/refresh", platform="ide", userAgent="IDE/2.63.2 CodeBuddy/2.63.2", pollInterval=5000 (device-code poll loop). 2) Model the flow on the existing codebuddy CN device-code implementation (providers.rs:307-319) but swap the base domain to www.codebuddy.ai and platform to "ide". 3) The executor side (transport headers X-Product: SaaS etc.) is P0-A1f. This is the OAuth half (parity A3).
+- **Test:** `src/oauth/tests/oauth_url_tests.rs: add codebuddy-intl asserting authorize/state URL == "https://www.codebuddy.ai/v2/plugin/auth/state" and platform == "ide".`
+- **⚠️ Risks:** Do NOT mix CN (copilot.tencent.com, platform CLI) with intl (www.codebuddy.ai, platform ide) — the state/token/refresh URLs differ only by host but the platform param must be 'ide'. The userAgent version string "IDE/2.63.2 CodeBuddy/2.63.2" differs from the transport User-Agent "IDE/2.108.1 CodeBuddy/2.108.1" (registry line 69 vs line 29) — keep them distinct as in JS.
+- **Verified:**  REFUTED
+
+### `P1-B2` — Headroom missing openai-responses + kiro format paths and size/phantom logging (G2e/F7)
+- **JS:** open-sse/rtk/headroom.js:242-332 compressWithHeadroom dispatches by format:
+- format "claude" (260-273): `claudeToOpenAIRequest(model, body, false)` → if !messages[] diag "Claude request did not translate to messages[]"; callCompress → `openaiToClaudeRequest(model, {...oai, messages: data.messages}, false)`; write back `body.messages` and `body.system` if !== undefined.
+- format "openai-responses" (278-297): if hasUnsafeResponsesInputForCompression(body) (any input item with a string `type` !== "message") → diag "skipped: openai-responses tool/reasoning input is not safe to compress"; else `openaiResponsesToOpenAIRequest(model, body, false)` → compress → `openaiToOpenAIResponsesRequest(model, {...oai, input: undefined, messages: data.messages}, false)`; write back `body.input`.
+- format "kiro" (302-313): collectKiroHeadroomMessages projects history/currentMessage userInputMessage.systemInstruction/content/toolResults tool text + assistantResponseMessage content/tool_calls into {messages, targets}; callCompress; applyKiroHeadroomMessages verifies count + role order + non-null text then writes `target.object[target.key] = text` (diag "proxy response did not match Kiro message count" / "did not preserve Kiro message order" / "missing Kiro text content").
+- OpenAI (315-327): key = "messages" or "input"; `body[key] = data.messages`.
+buildCompressEndpoint (59-71): `{base}/v1/compress`. callCompress POSTs `{ messages, model }` (+`config:{compress_user_messages:true}`) with `AbortSignal.timeout(timeoutMs)` (default 3000), returns null + diagnostic on non-ok / missing messages[]. formatHeadroomSizeLog (343-351): `body=X→Y messages=... tools=... toolHistory=... effective=%`. isHeadroomPhantomSavings (353-359): `tokens_saved>0 && before>0 && after>0 && after >= before * (1 - 0.05)`.
+- **Rust now:** src/core/rtk/headroom.rs compress_with_headroom (255-300) only dispatches "claude" (271-273) or OpenAI (276-299, key messages/input). NO openai-responses translation path, NO kiro projection path, NO diagnostics, NO buildCompressEndpoint host-masking, NO size snapshot (captureSizeSnapshot), NO formatHeadroomSizeLog, NO isHeadroomPhantomSavings. The claude path (compress_claude_body 379-442) only flattens content blocks to plain text — it does NOT call the real claudeToOpenAIRequest/openaiToClaudeRequest translators, so tool_use/tool_result/thinking blocks are dropped instead of round-tripped. Format is passed as "claude"/"openai" (chat.rs:843) — never "openai-responses"/"kiro".
+- **Fix:** 1) In src/core/rtk/headroom.rs, add a `diagnostics: &mut HeadroomDiagnostics` (new struct with `reason: Option<String>`, `endpoint: Option<String>`, `before: Option<SizeSnapshot>`, `after: Option<SizeSnapshot>`) param to compress_with_headroom (or a parallel fn) and set diag.reason only if not already set (JS setDiagnostic).
+2) Add format "openai-responses": if body.input has any item whose `type` is a non-"message" string → set reason "skipped: openai-responses tool/reasoning input is not safe to compress" and return None. Otherwise route body.input through the existing Rust responses↔openai translators (crate::core::translator::request::openai_responses::{openai_responses_to_openai_request, openai_to_openai_responses_request}) — port the JS: translate to OpenAI, call_compress, then translate back passing `input: undefined, messages: compressed` and write body["input"] = result.input.
+3) Add format "kiro": project conversationState.history + currentMessage into messages (systemInstruction→role system, content→role user, toolResults[].content[].text→role tool + tool_call_id, assistantResponseMessage content→role assistant + tool_calls with `arguments: JSON.stringify(input||{})` and `id`), record targets [(object,key)], POST, verify count/role-order/text, then write text back into each target. New fn `apply_kiro_headroom_messages`.
+4) Add captureSizeSnapshot: jsonBytes(body), jsonBytes(messages/input array), jsonBytes(tools), jsonBytes(toolHistory filtered by role tool/function or tool_calls.length or content block type tool_use/tool_result).
+5) Add buildCompressEndpoint (strip trailing '/', append /v1/compress) + maskEndpoint (strip user:pass@, query, hash).
+6) Add formatHeadroomSizeLog + isHeadroomPhantomSavings (minShrinkRatio 0.05) and call them in chat.rs after compress_with_headroom (chat.rs:853-858) for the debug log.
+7) For the claude path, keep the flatten but ALSO apply the real translators if the existing Rust claude↔openai translator functions are accessible; otherwise document that the current flatten approximates it (matches JS intent that the proxy only understands OpenAI shape).
+- **Test:** `cargo test headroom_responses_shape_rejected_when_unsafe in src/core/rtk/headroom.rs: body.input containing an item with type "function_call" → compress_with_headroom(format="openai-responses") returns None and diagnostics.reason starts with "skipped:". cargo test headroom_kiro_projection_roundtrips: build a kiro body with one history tool result; assert compressed text is written back into conversationState.history[0]....toolResults[0].content[0].text. cargo test headroom_phantom_savings_detected: tokens_saved>0 with before/after sizes where after >= before*0.95 → is_phantom true.`
+- **⚠️ Risks:** The responses round-trip MUST pass `input: undefined` to the translator so it rebuilds input from messages instead of echoing the original — the JS comment (#1998) calls this out explicitly. Kiro apply step verifies role order and returns false (with diag) when the proxy reshuffled — never write back mismatched messages. buildCompressEndpoint keeps existing query string when URL parse fails. Phantom detection threshold is exactly 0.05 (5%).
+- **Verified:** ✅ CONFIRMED
+
+### `P1-B3` — zed OAuth RSA keypair flow (oauth layer; executor base covered by P0-A1n)
+- **JS:** File .tmp/9router/open-sse/providers/registry/zed.js:54-66 (RSA flow). oauth={authorizeUrl:"https://zed.dev/native_app_signin",platform:"zed",rsaKeyExchange:true}. Comment lines 55-62: 1) App generates RSA-2048 keypair locally (PKCS#1 DER, URL-safe base64). 2) Bind random TCP port on 127.0.0.1. 3) Open https://zed.dev/native_app_signin?native_app_port={port}&native_app_public_key={pub}. 4) After login, browser redirects http://127.0.0.1:{port}/?user_id=...&access_token=... where access_token = base64(RSA-encrypted plaintext token). 5) Decrypt with private key (OAEP-SHA256, fallback PKCS1v15). No clientId/clientSecret/tokenUrl/refreshUrl — long-lived access_token, no refresh. Executor auth: "Authorization: <user_id> <access_token>" plus duplicate x-zed-cloud-token header (zed.js:32-39), baseUrl https://cloud.zed.dev/completions, forceStream, NDJSON wire protocol.
+- **Rust now:** No zed OAuth in src/oauth/providers.rs; oauth.rs:4217 unknown_provider. No RSA keypair logic anywhere in src/ (the auth header shape "<user_id> <access_token>" does not exist). The executor base entry P0-A1n only makes the provider reachable with a pre-obtained token.
+- **Fix:** 1) Add a "zed" OAuth flow in src/oauth: generate RSA-2048 keypair (use the `rsa` crate or `openssl`; PKCS#1 DER, URL-safe base64 public key). 2) Bind a random TCP port on 127.0.0.1 and open https://zed.dev/native_app_signin?native_app_port={port}&native_app_public_key={pub}. 3) On redirect http://127.0.0.1:{port}/?user_id=...&access_token=... decrypt access_token with the private key (OAEP-SHA256, fallback PKCS1v15). 4) Store user_id + plaintext token (access_token). No refresh (long-lived). 5) For the chat path, the executor must send "Authorization: <user_id> <access_token>" (two space-separated values, NOT Bearer) plus "x-zed-cloud-token": <access_token> — this requires extending DefaultExecutor with a zed-specific auth header branch (build_headers default.rs:815-982) OR a dedicated zed executor (parity A3). 6) forceStream + NDJSON/SSE translation is a follow-up (zed.js executor). Full parity is out of scope for a single pass; minimum: oauth flow + custom auth header.
+- **Test:** `oauth tests: #[test] fn zed_oauth_no_refresh_endpoint(): zed OAuthProviderConfig has no token_url/refresh_url and platform == "zed". Plus an executor test asserting the Authorization header equals "<user_id> <access_token>" format once implemented.`
+- **⚠️ Risks:** The auth scheme is deliberately non-standard (zed.js:33-39 comment: scheme is a marker; real value built in executor). Do NOT send "Bearer <user_id> <access_token>" — the upstream expects bare "<user_id> <access_token>". The x-zed-cloud-token header duplicates the token. RSA OAEP-SHA256 with PKCS1v15 fallback must match zed's server or decryption fails. This is the most complex of the 17; it is acceptable to land the reachability fix (P0-A1n) first and the OAuth+auth-header here.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-B3` — find RTK filter misses Windows backslash path handling (G2f)
+- **JS:** open-sse/rtk/filters/find.js:12-14:
+```js
+for (const path of lines) {
+  // Accept both Unix ("/a/b") and Windows ("C:\a\b") separators
+  const lastSep = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  let dir; let basename;
+  if (lastSep === -1) { dir = "."; basename = path; }
+  else { dir = path.slice(0, lastSep) || "/"; basename = path.slice(lastSep + 1); }
+  ...
+}
+// dir label: const dirLabel = dir.replace(/\\/g, "/");
+// header: `${lines.length} files in ${dirs.length} dirs:\n\n` (find.js:30)
+// per dir: `${dirLabel}/  (${files.length})\n` (find.js:36) then `  ${f}\n`
+// cap: showDirs.slice(0, FIND_TOTAL_DIR_MAX); showFiles.slice(0, FIND_PER_DIR_MAX);
+// overflow: `  +${files.length - FIND_PER_DIR_MAX}\n` (find.js:40) and `\n+${dirs.length - FIND_TOTAL_DIR_MAX} more dirs\n` (find.js:44)
+```
+- **Rust now:** src/core/rtk/filters/mod.rs:330-372 find_impl: `let last_slash = path.rfind('/');` — only forward slash. Windows path `C:\a\b.rs` splits on no '/' → dir "." , basename "C:\a\b.rs", and `dir_s` becomes "." — wrong grouping. Output format: `{}/ ({}):` uses `{}/ ({}):\n` (colon before paren, then a blank line after each dir) vs JS `${dirLabel}/  (${files.length})\n` (two spaces, no colon, no blank line). Header matches (`{} files in {} dirs:\n\n`). Also dirLabel does not normalize backslashes to slashes. Constants FIND_PER_DIR_MAX=10 / FIND_TOTAL_DIR_MAX=20 already present (constants.rs:27-31).
+- **Fix:** 1) src/core/rtk/filters/mod.rs find_impl: replace `let last_slash = path.rfind('/');` with `let last_slash = path.rfind('/').max(path.rfind('\\'));` (both separators).
+2) Normalize dir label: `let dir_label = dir_s.replace('\\', "/");` and use it in the `{}/ ({}):` line.
+3) Fix the per-dir line format to match JS: `{dir_label}/  ({count})` (TWO spaces before the open paren, NO colon) followed by a newline — i.e. `format!("{}/  ({})\n", dir_label, files.len())`, then each `  {}\n`, overflow `  +{}\n`. Remove the extra blank line JS does not emit (JS pushes `  +N` then continues to next dir with no blank separator). Keep the trailing "+N more dirs\n" only — note JS prefixes it with "\n" (`\n+${dirs.length - FIND_TOTAL_DIR_MAX} more dirs`).
+- **Test:** `cargo test find_groups_windows_backslash_paths in src/core/rtk/filters/mod.rs: find_impl("C:\\a\\b.rs\nC:\\a\\c.rs\nC:\\d.rs") → header "3 files in 2 dirs:", contains "C:/a/  (2)", contains "C:/d/  (1)", and basenames "b.rs","c.rs","d.rs". Add a format assertion: line contains `/  (` (two spaces, no colon).`
+- **⚠️ Risks:** JS `Math.max(lastIndexOf("/"), lastIndexOf("\\"))` — a path with BOTH separators uses whichever comes LAST. dir=="/" when slice(0,0) is empty for a root-relative path (JS `dir = path.slice(0, lastSep) || "/"`). dirLabel normalizes backslashes to forward slashes for display only — the grouping key keeps original separators. Do not change the `+N more dirs` leading newline (JS has it; Rust currently emits it without the leading newline — match JS: append `\n+{} more dirs`).
+- **Verified:** ✅ CONFIRMED
+
+### `P1-B4` — Capacity adapter pools (vision/pdf/audioInput/videoInput fallback models) not ported (F1)
+- **JS:** open-sse/services/capacityAdapter.js:13-16:
+```js
+const CAPABILITY_KEYS = ["vision", "pdf", "audioInput", "videoInput"];
+const HARD_CAPS = new Set(CAPABILITY_KEYS);
+const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free";
+```
+Settings default (src/lib/db/repos/settingsRepo.js:20-25): `capacityAdapter: { vision: { enabled: true, roundRobin: false, models: [] }, pdf: { enabled: false, roundRobin: false, models: [] }, audioInput: { enabled: true, roundRobin: false, models: [] }, videoInput: { enabled: false, roundRobin: false, models: [] } }`.
+getCapacityAdapterConfig (35-41): enabled pools with empty models → `[DEFAULT_FALLBACK_MODEL]` so the toggle is never a no-op.
+getCapacityAdapterModels (44-58): flatten enabled pools in CAPABILITY_KEYS order, dedup.
+getActiveAdapterStrategy (68-76): first hard capability with enabled pool → "round-robin" if roundRobin else "fallback"; default "fallback".
+augmentModelsWithCapacityAdapter (92-100): if hard req empty or models empty → unchanged; if `models.some(modelSatisfies)` → unchanged; else `[ ...pool.filter(m => !models.includes(m) && modelSatisfies(m, hard)), ...models ]` — adapter models go FIRST.
+modelSatisfies (78-84): split on first '/', `getCapabilitiesForModel(provider, model)` returns caps; `requiredHard.every(c => caps[c] === true)`.
+stripHistoryForContext (117-156): key messages|input|contents; split system/developer vs rest; tail = rest after last assistant/model; older = before; budgetChars = (contextWindow||200000) * 0.8 * 4; keep first HEAD_KEEP=6 of older verbatim; drop head turns from the end while total > budgetChars; if head == older.length unchanged; else `{...body, [key]: [...systemMsgs, ...head, ...tail]}`.
+withCapacityAdapterStripping (160-173): wrap handleSingleModel; if modelStr ∈ adapterModels, look up contextWindow and stripHistoryForContext(body, contextWindow) first.
+Wiring (src/sse/handlers/chat.js:96,124,137,144): combo → `augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings)`; solo → `augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings)`; if soloAugmented.length>1 → handleComboChat with adapter strategy.
+- **Rust now:** No capacity-adapter module. src/core/combo/mod.rs:189 HARD_CAPS = ["vision","pdf"] (missing audioInput/videoInput); detect_required_capabilities (193-253) only detects vision/pdf (scan_content_for_capabilities 256-297 — no audio/video mime or input_audio/input_video types); model_has_capability (302-345) is a hardcoded provider-prefix heuristic returning bool (no capability TABLE, no contextWindow); reorder_by_capabilities (355-384) tiers by missing hard caps but never ADDS adapter models. detect in combo/mod.rs ignores audio/video entirely. No stripHistoryForContext, no withCapacityAdapterStripping, no DEFAULT_FALLBACK_MODEL, no capacityAdapter settings parsing. Settings struct (types/mod.rs:358) has no capacity_adapter field — it would land in Settings.extra via serde flatten (types/mod.rs:535). The catalog has per-model context_window (catalog.rs:29) and per-provider vision/reasoning flags (catalog.rs:52-56).
+- **Fix:** 1) Add to src/core/combo/mod.rs (or a new capacity_adapter.rs, exposed as `pub mod capacity_adapter;`): constants `CAPABILITY_KEYS: ["vision","pdf","audioInput","videoInput"]`, `DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free"`. Add `pub struct CapacityAdapterConfig { enabled: bool, round_robin: bool, models: Vec<String> }` with `from_settings(settings) -> BTreeMap<String, CapacityAdapterConfig>` reading `settings.extra["capacityAdapter"][cap]` (accept legacy array form [{model, enabled}] → enabled+fallback, and object {enabled, roundRobin, models}); enabled pool with empty models → ["oc/mimo-v2.5-free"].
+2) Add `pub fn augment_models_with_capacity_adapter(models: &[String], required: &HashSet<String>, settings: &Settings) -> Vec<String>` mirroring JS: hard = required ∩ CAPABILITY_KEYS; if empty or models empty → return; if any model satisfies all hard → return; pool = getCapacityAdapterModels filtered `!models.contains(m) && model_satisfies(m, hard)`; if pool empty → return; return pool ++ models (adapter first).
+3) Add `pub fn model_satisfies(entry: &str, required_hard: &[&str]) -> bool` using a new capability lookup: parse provider before first '/', look up the model in the ProviderCatalog (context via a passed-in &ProviderCatalog or via catalog::static resolve) — check provider_capabilities.vision and model capabilities vec; fall back to the existing model_has_capability heuristic for unknown models. Strictly: `required_hard.iter().all(|c| caps[c] == true)`.
+4) Add `pub fn strip_history_for_context(body: &mut Value, context_window: u32) -> bool` (key messages|input|contents; HEAD_KEEP=6; budget = ctx*0.8*4 chars; keep system+head+tail, drop middle) and `with_capacity_adapter_stripping`-equivalent behavior in the chat dispatch: when a dispatched model is in the adapter pool, strip history before the single-model call.
+5) Extend detect_required_capabilities + scan_content_for_capabilities: add audioInput (mime starts_with "audio/", block types input_audio|audio_url|audio) and videoInput (mime starts_with "video/", types input_video|video_url|video) — mirroring JS scanBlock/addByMime. Update HARD_CAPS to the full 4.
+6) Wire in src/server/api/chat.rs: in the combo branch (before execute_combo_strategy_full) and the direct branch (before execute_single_model): compute `let augmented = augment_models_with_capacity_adapter(&models, &required_caps, &snapshot.settings);` and if it differs, pass augmented (JS uses adapterAdded only for stripping — simplest parity: pass the full augmented list through combo execution, and strip history inside the single-model closure when the model is in adapterAdded).
+7) Add Settings default: since settings.capacityAdapter lands in Settings.extra, provide a helper `fn capacity_adapter_defaults() -> Value` matching settingsRepo defaults and merge into Settings::default()'s extra (types/mod.rs:589 `extra: BTreeMap::new()` → insert capacityAdapter JSON).
+- **Test:** `cargo test capacity_adapter_default_fallback_model in src/core/combo/capacity_adapter.rs: config with vision enabled + empty models → models == ["oc/mimo-v2.5-free"]. cargo test augment_prepends_adapter_when_none_satisfy: models ["anthropic/claude-opus-4.6"] (no pdf in Rust heuristic) with required {pdf} → output starts with pool models. cargo test augment_unchanged_when_covered: models ["anthropic/claude-opus-4.6"] required {vision} → unchanged (claude has vision). cargo test strip_history_drops_middle_preserves_tail: body with 10 messages, last user has image, context_window 200000 → result keeps system + last user turn, drops older middle.`
+- **⚠️ Risks:** modelSatisfies uses a capability table (getCapabilitiesForModel) — Rust must use the catalog's real capabilities (provider.vision, model capabilities vec, context_window) not only the heuristic. JS checks `caps[c] === true` strictly — audioInput/videoInput false must NOT satisfy. The default fallback "oc/mimo-v2.5-free" must resolve through get_model_info in Rust (provider "oc") — verify provider "oc" exists in the catalog (src/core/model/sources/omniroute.json has mimo-v2.5-free). The JS augment leaves `models` untouched when the original covers it (combo reorderByCapabilities handles that case via autoSwitch) — do not double-reorder. stripHistoryForContext uses `contextWindow || 200000` fallback and CHARS_PER_TOKEN=4, budget 0.8.
+- **Verified:** ✅ CONFIRMED
+
+### `P1-B5` — Combo capability heuristics diverge from JS reorderByCapabilities (audio/video/search missing, no capability table)
+- **JS:** open-sse/services/combo.js:12 HARD_CAPS = new Set(["vision", "pdf", "audioInput", "videoInput"]);
+reorderByCapabilities (63-82): tierOf(m) = hard.every(c => caps[c]===true) ? (soft.every(c => caps[c]===true) ? 0 : 1) : 2 — soft caps (anything not in HARD_CAPS, e.g. "search") put a model at tier 1 instead of 0; stable sort by tier then original index. Returns models unchanged when required.size===0 or models.length<=1.
+detectRequiredCapabilities (105-150): scanBlock adds vision for image_url|image|input_image, audioInput for input_audio|audio_url|audio, videoInput for input_video|video_url|video, and for file|document|input_file infers mime from b.input_audio?.format / b.file?.file_data data: URI / b.source?.media_type / b.source?.data, falling back to pdf; gemini inlineData/fileData mime → addByMime. addByMime (109-115): image/*→vision, application/pdf→pdf, audio/*→audioInput, video/*→videoInput. trailingUserItems (94-100): items after the last assistant/model turn.
+- **Rust now:** src/core/combo/mod.rs:189 HARD_CAPS=["vision","pdf"] (missing audioInput/videoInput). detect_required_capabilities (193-253) scans messages/input/contents/request.contents; trailing_users (211-219) matches JS trailingUserItems. scan_content_for_capabilities (256-297) only adds vision for image_url|image|input_image and pdf for input_file|document|file — no audio/video types, no mime-based addByMime (only inlineData/fileData mime check for image/pdf), no file mime inference, no media:// string handling beyond vision. reorder_by_capabilities (355-384) has tiers 0/1/2 but its tier1 = "!missing_hard" (missing soft cap), tier0 = "has_all_required" — equivalent to JS tiers, BUT it cannot produce soft-cap-aware results because the required set never contains soft caps, and model_has_capability (302-345) is a hardcoded prefix heuristic (not a capability table), so audioInput/videoInput requests can never reorder.
+- **Fix:** 1) src/core/combo/mod.rs:189: change HARD_CAPS to `&["vision", "pdf", "audioInput", "videoInput"]`.
+2) scan_content_for_capabilities: add match arms for `Some("input_audio" | "audio_url" | "audio")` → insert "audioInput"; `Some("input_video" | "video_url" | "video")` → insert "videoInput"; for `input_file`/`document`/`file` blocks add mime inference: if block has input_audio.format → "audio/{format}"; if file.file_data is a data: URI → parse mime; if source.media_type → use it; if source.data data: URI → parse mime; if mime known call a new add_by_mime helper (image/*→vision, application/pdf→pdf, audio/*→audioInput, video/*→videoInput) else pdf. Also add add_by_mime for inlineData/fileData mimeType (currently only image/pdf handled).
+3) Add `fn add_by_mime(mime: &str, required: &mut HashSet<String>)`.
+4) Keep trailing_users scan; extend the gemini parts branch to use add_by_mime for inlineData/fileData mimeType (image/audio/video/pdf).
+5) model_has_capability: extend the "vision"/"pdf" arms with audioInput/videoInput knowledge AND (to reduce drift) consult a shared capability table that reads the ProviderCatalog provider.vision flag + model capabilities vec + context_window, falling back to the existing heuristic when the model is not in the catalog. At minimum, add audioInput/videoInput arms to the heuristic (gemini 2+/3*, qwen omni/3.5+, kimi k3, mimo v2.5, minimax-m3, gemini-3* patterns from capabilities.js).
+6) detect_required_capabilities must also surface SOFT caps (like search) if Rust ever needs tier1 placement parity — but JS has search disabled (combo.js:147 "search: temporarily disabled"), so leaving search out matches current 9router behavior.
+- **Test:** `cargo test detect_audio_and_video_capabilities in src/core/combo/mod.rs: body messages with last user content [{type:"input_audio", input_audio:{format:"wav"}}] → required contains "audioInput"; [{type:"input_video"}] → "videoInput". cargo test reorder_prefers_model_with_audio_when_required: models ["openai/gpt-4o", "google/gemini-2.5-pro"] required {audioInput} → gemini (audio-capable per heuristic) ordered before gpt-4o.`
+- **⚠️ Risks:** JS addByMime checks `typeof mime === "string"` and falls back to pdf for generic files. trailingUserItems only counts items after the LAST assistant/model turn — a vision image in an OLD turn must not pin. Match the exact block type strings (input_audio/audio_url/audio). Keep model_has_capability's existing behavior for known providers (openai/gpt-4*, anthropic/claude, google/gemini, vertex/*, aws/claude, gcp/gemini) so existing reorder tests don't regress — add to it rather than replace.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P1-B6` — MITM cert CA generation parity: CN name, expiry regen, Windows/nssdb install paths
+- **JS:** src/mitm/cert/rootCA.js:26-93: Root CA CN "9Router MITM Root CA", org "9Router", country US, RSA 2048, serial "01", notBefore now, notAfter now+10yr, basicConstraints cA critical, keyUsage keyCertSign+cRLSign critical, subjectKeyIdentifier, self-signed sha256. Leaf (115-164): RSA 2048, serial random 0-999999, 1yr, CN=domain, SAN [DNS:domain, DNS:*.domain], basicConstraints cA:false, keyUsage digitalSignature+keyEncipherment, extKeyUsage serverAuth+clientAuth, signed by root sha256. isCertExpired (12-20): regenerate if notAfter < now+30days. server.js:60-72 generates on start if rootCA.key/rootCA.crt missing. install.js:30 `ROOT_CA_CN = "9Router MITM Root CA"`; Windows (119-133): `certutil -delstore Root "9Router MITM Root CA" 2>$null | Out-Null; $exit = & certutil -addstore Root <certPath>` via elevated PowerShell; macOS (106-117): delete-certificate -c CN then add-trusted-cert -d -r trustRoot; Linux (226-247): copy to {config.dir}/9router-root-ca.crt + update command + updateNssDatabases.
+- **Rust now:** src/core/mitm/cert.rs:20-43 generate_ca: CN "OpenProxy MITM CA", org "OpenProxy", country US; rcgen default key (ECDSA P-256 via PKCS_ECDSA_P256_SHA256 only in sign_leaf:76). Leaf (62-83): CN = hostname via CertificateParams::new(vec![hostname]), key usages DigitalSignature+KeyEncipherment, extKeyUsage ServerAuth only (no ClientAuth), SAN = the single hostname (no wildcard `*.domain`). install_ca_cert (112-144): macOS security add-trusted-cert; Linux only /usr/local/share/ca-certificates + update-ca-certificates (no Arch/Fedora/openSUSE, no NSS, no Windows). No expiry check/regeneration (mitm_config.rs:242,383 generate_ca_persisted only checks file existence).
+- **Fix:** 1) cert.rs generate_ca: set CN "9Router MITM Root CA", org "9Router"; if practical force RSA-2048 (rcgen RSA) or keep ECDSA but document divergence — the client-trust contract is CN+SAN, key type is not usually validated by IDEs, but for strict parity use RSA. Set validity 10 years (rcgen CertificateParams::not_after/not_before) and serial "01".
+2) sign_leaf: add `params.use_authority_key_identifier_extension = true` (already), add ClientAuth to extended_key_usages, and add SAN entries `DNS:{hostname}` AND `DNS:*.{hostname}`.
+3) Add a 30-day expiry check: before serving generate_ca_persisted, parse the cert's notAfter (use x509-parser or rcgen via Certificate::from_pem) and regenerate if notAfter < now+30d (mirror isCertExpired).
+4) install_ca_cert: add Windows branch running `certutil -delstore Root "9Router MITM Root CA"` then `certutil -addstore Root {path}` (via a best-effort elevated helper or document a manual step); add Linux multi-distro config (the 4 LINUX_CERT_PATHS entries) and NSS db update (`certutil -d sql:$db -A -t "C,," -n "9Router MITM Root CA" -i {path}` for $HOME/.pki/nssdb, $HOME/.mozilla/firefox/*, snap chromium + snap firefox paths).
+5) On MITM start (mitm_config.rs start_mitm) generate certs if missing/expired before binding.
+- **Test:** `cargo test leaf_cert_has_wildcard_san in src/core/mitm/cert.rs: sign_leaf(&ca_cert,&ca_key,"example.com") → parse the returned PEM (x509-parser) and assert SAN contains "example.com" and "*.example.com" and extendedKeyUsage contains serverAuth+clientAuth. cargo test ca_cert_cn_is_9router: assert generated PEM decoded contains "9Router MITM Root CA".`
+- **⚠️ Risks:** Changing the CN to "9Router MITM Root CA" breaks existing Rust-managed trust stores that installed the old "OpenProxy MITM CA" — uninstall must delete BOTH CNs or document a reinstall. Windows install requires elevation (UAC) — the JS uses runElevatedPowerShell; Rust must not silently fail. Adding wildcard SAN `*.domain` to the leaf means the same leaf covers subdomains — matches JS. rcgen may require non-default params for RSA; if RSA-2048 is impractical keep ECDSA but the fingerprint/install checks in JS (certutil -store Root by SHA1) are hash-based so the key type must be stable across regenerations.
+- **Verified:** 🟡 PLAUSIBLE
+
+### `P2-C1` — combo handling diverges from JS on small points: transient-wait cap, first-status, sticky, no-credentials 503
+- **JS:** open-sse/services/combo.js handleComboChat:246-348:
+- Auto-switch (251-260): `detectRequiredCapabilities(body)`; if required.size>0 reorder by reorderByCapabilities; log if changed.
+- Error text extraction (280-288): `errorBody?.error?.message || errorBody?.error || errorBody?.message || statusText`; retryAfter from errorBody?.retryAfter.
+- earliestRetryAfter tracking (291-293): keep the EARLIEST (min Date).
+- Transient wait (311-315): `if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 && (status===503||502||504)) await sleep(cooldownMs)`.
+- `lastStatus` only set from the FIRST failure (`if (!lastStatus) lastStatus = result.status;` 319), and catch block sets 500 if not set.
+- Final (330-347): `allDisabled = lastError?.toLowerCase().includes("no credentials")` → status 503; else `status = lastStatus || 503`; msg = lastError || "All combo models unavailable"; if earliestRetryAfter → unavailableResponse(status, msg, retryAfter, retryHuman); else 503/status JSON `{error:{message}}`.
+- getRotatedModels (174-203): rotationKey = comboName || "__default__"; normalizeStickyLimit via Number.parseInt, `Number.isFinite(parsed) && parsed > 0 ? parsed : 1`; sticky: state {index, consecutiveUseCount}; rotates by index; when nextUseCount >= stickyLimit advance index and reset count.
+- resetComboRotation (209-212): delete by name or clear all.
+- **Rust now:** Additional divergence: JS getRotatedModels for a combo with `models.length <= 1` returns models unchanged (no rotation state written) — Rust get_rotated_models:423 `if models.len() <= 1 || strategy != RoundRobin { return models.to_vec(); }` — matches. JS normalizeStickyLimit parses strings; Rust sticky_limit.max(1) accepts u32 — the CLI writes combos with numeric sticky, acceptable.
+- **Fix:** No functional gap in the core fallback iterator — the differences worth porting are: 1) JS tracks `earliestRetryAfter` as the MINIMUM Date across failures; Rust iterate_combo_models (747-752) keeps the earliest via `current <= retry_after` — already matches. 2) JS extracts retryAfter from the error JSON body; Rust ComboAttemptError.retry_after is set by the executor from response headers (retry_after_from_headers chat.rs:3263) — verify the body-based `errorBody.retryAfter` path is also covered; if a provider returns retryAfter only in the JSON body (not header), add a parse in the dispatch error mapping.
+3) JS logs "COMBO Trying model i/N" per attempt — Rust logs via tracing (tracing::debug) — cosmetic.
+4) Confirm auto-switch log parity: JS logs `auto-switch for [caps] → model`; Rust has the COMBO_ORDER debug line (690-695). Fine.
+If no code change is needed, the spec item documents parity is already present and the only actionable item is the body-based retryAfter fallback.
+- **Test:** `cargo test combo_retry_after_from_body_parsed in src/core/combo/mod.rs or server/api/chat.rs: an error whose JSON body is `{"error":{"message":"x","retryAfter":"2026-08-13T00:00:00Z"}}` with a 429 response and no Retry-After header → ComboAttemptError.retry_after is Some with the body's date.`
+- **⚠️ Risks:** retryAfter in JS can be an ISO date string OR a number of seconds; new Date(retryAfter) normalizes both. If Rust parses only RFC3339, a numeric `retryAfter` breaks earliest-retry comparison. The "no credentials" string match is case-insensitive substring on the lastError message — preserve exact JS wording "no credentials".
+- **Verified:** ✅ CONFIRMED
+
+## PART G — WEB DASHBOARD (5 specs)
+
+### `P0-A2` — paramSupport STRIP_RULES completeness — flattenContent (cloudflare-ai) + clampToModelMaxOutput / maxOutputCap (volcengine-ark)
+- **JS:** paramSupport.js:16-24 rules and 47-72 clamp logic:
+```js
+{ provider: "cloudflare-ai", flattenContent: true },
+{ provider: "volcengine-ark", match: /glm-5/i, clampToModelMaxOutput: true },
+{ provider: "volcengine-ark", match: /kimi/i, maxOutputCap: 32768, clampToModelMaxOutput: true },
+```
+flattenContent (lines 47-56): `for (const msg of body.messages) { if (msg && Array.isArray(msg.content)) { msg.content = msg.content.map(b => (b?.type === "text" && typeof b.text === "string") ? b.text : "").join(""); } }`
+Clamp (lines 57-71): `const ceiling = Math.min(...candidates)` where candidates = [modelCeiling if clampToModelMaxOutput && Number.isFinite(modelCeiling) && modelCeiling > 0] + [maxOutputCap if finite && > 0]; then `clampNumber(body, "max_tokens", ceiling); clampNumber(body, "max_completion_tokens", ceiling); clampNumber(body, "max_output_tokens", ceiling);` clampNumber deletes nothing — it sets `body[key] = ceiling` only when `typeof body[key] === "number" && Number.isFinite(...) && body[key] > ceiling`.
+- **Rust now:** N/A — Rust strip_unsupported.rs has no flattenContent and no maxOutputCap/clampToModelMaxOutput handling; the model-ceiling lookup functions (capabilities_for_format) are never consulted in the strip path. volcengine-ark exists as a provider (default.rs:157-159, api_key.rs:346) but no kimi/glm-5 cap.
+- **Fix:** In src/core/executor/strip_unsupported.rs:
+1. After the field-removal loop (after line 56), add a flatten step: `if provider == "cloudflare-ai" { if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) { for msg in messages { if let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) { let joined: String = content.iter().map(|b| if b.get("type").and_then(Value::as_str) == Some("text") { b.get("text").and_then(Value::as_str).unwrap_or("").to_string() } else { String::new() }).collect(); msg["content"] = Value::String(joined); } } } }` — note this REPLACES the array with a plain string (cloudflare requires string content).
+2. Add a clamp step for provider == "volcengine-ark": compute `ceiling` = min of (a) model maxOutputTokens from the catalog if clampToModelMaxOutput and model matches /glm-5/i, (b) 32768 if model matches /kimi/i. Simplest exact-parity port without catalog plumbing: `let m = model.to_lowercase(); let mut cap: Option<u64> = None; if m.contains("glm-5") { cap = lookup maxOutputTokens (from src/core/model catalog for volcengine-ark, e.g. provider_catalog.json entry); } if m.contains("kimi") { cap = Some(cap.map_or(32768, |c| c.min(32768))); } if let Some(ceiling) = cap { for key in ["max_tokens","max_completion_tokens","max_output_tokens"] { if let Some(n) = obj.get(key).and_then(Value::as_u64) { if n > ceiling { obj.insert(key.to_string(), Value::from(ceiling)); } } } }`
+- **Test:** `Add `flatten_content_for_cloudflare_ai` — body messages [{"role":"user","content":[{"type":"text","text":"hi"},{"type":"image_url",...}]}], provider "cloudflare-ai", assert messages[0].content == "hi". Add `clamps_kimi_max_tokens_to_32768` — provider "volcengine-ark", model "kimi-k2.7-code", body {"max_tokens": 50000}, assert body["max_tokens"] == 32768.`
+- **⚠️ Risks:** clampNumber only fires when the current value is a finite number GREATER than ceiling (0/null untouched). flattenContent only touches `messages` — never non-array bodies (strip_unsupported returns early when body is not an object). If the Rust model catalog lookup is unavailable, fall back to the 32768 cap alone for kimi (JS min() semantics still hold).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A2` — Embeddings: selfhosted-embedding must refuse when baseUrl missing (MissingBaseUrlError)
+- **JS:** selfhostedEmbedding.js:36-46:
+  buildUrl: (_model, creds) => {
+    const rawBaseUrl = creds?.providerSpecificData?.baseUrl;
+    if (!rawBaseUrl || !String(rawBaseUrl).trim()) throw new MissingBaseUrlError();
+    const baseUrl = String(rawBaseUrl).trim().replace(/\/$/, "").replace(/\/embeddings$/, "");
+    return `${baseUrl}/embeddings`;
+  },
+Error message (lines 23-34): "Self-hosted Embedding needs an endpoint: set this connection's baseUrl to the OpenAI base URL of your server, e.g. http://host:8080/v1 (note the /v1 — \"/embeddings\" is appended to it). Refusing to fall back to api.openai.com, which would send your input and API key to OpenAI." Also registry index.js:22 maps "selfhosted-embedding" -> selfhostedEmbedding adapter (NOT openaiCompatNode).
+- **Rust now:** src/core/media/embeddings/base.rs:168-179 OpenAiCompatNodeAdapter::build_url: `let raw = ...baseUrl... .unwrap_or("https://api.openai.com/v1"); let raw = raw.strip_suffix("/embeddings").unwrap_or(raw); Ok(format!("{raw}/embeddings"))`. Falls back to api.openai.com. mod.rs get_embedding_adapter (line 46-66) maps selfhosted-embedding to none — it only matches openai-compatible-*/custom-embedding-* namespaces, so "selfhosted-embedding" returns None and falls through to the generic forwarder which uses default.rs URL (falls back to api.openai.com).
+- **Fix:** 1) Add a dedicated adapter struct `SelfhostedEmbeddingAdapter` in src/core/media/embeddings/base.rs. Implement build_url: read `request.credentials.provider_specific_data.get("baseUrl")`, require non-empty trimmed string else return Err (a config-error marker; message should contain "Self-hosted Embedding needs an endpoint"). Then `raw.trim().trim_end_matches('/').strip_suffix("/embeddings").unwrap_or(raw).to_string() + "/embeddings"`. 2) build_headers/build_body reuse OPENAI impl (same shape as OpenAiCompatNodeAdapter). 3) mod.rs get_embedding_adapter: add `"selfhosted-embedding" => Some(&base::SELFHOSTED_EMBEDDING)`. 4) Ensure the error surfaces as 400 (config error), NOT 502. In handler.rs EmbeddingsHandlerError, map build_url Err from this adapter to Validation (already done — build_url errors map to Validation). 5) Do NOT route selfhosted-embedding through the fall-through generic forwarder.
+- **Test:** `fn selfhosted_embedding_requires_base_url() — request with no baseUrl: build_url returns Err containing "needs an endpoint". fn selfhosted_embedding_appends_embeddings() — baseUrl "http://host:8080/v1" and "http://host:8080/v1/embeddings" both resolve to "http://host:8080/v1/embeddings".`
+- **⚠️ Risks:** The whole point is refusing to leak input+key to OpenAI — do NOT introduce any api.openai.com fallback. JS strips ONLY a single trailing slash then the /embeddings suffix (order matters: strip slash first). Empty/whitespace baseUrl must throw. The error must be a 4xx config error, not 502.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A2` — Donate button + DonateModal + GITHUB_CONFIG.donateUrl missing
+- **JS:** config.js:11-14 `export const GITHUB_CONFIG = { changelogUrl: "https://raw.githubusercontent.com/decolua/9router/refs/heads/master/CHANGELOG.md", donateUrl: "https://9router.com/api/donate" }`. Header.js:316-323 renders a Donate button in the header right actions: `className="flex items-center gap-1.5 px-3 h-8 rounded-lg border border-pink-500/30 bg-pink-500/10 text-pink-600 dark:text-pink-400 hover:bg-pink-500/20 transition-colors text-sm font-medium" aria-label="Donate"`, icon volunteer_activism, label Donate (hidden sm:inline), onClick setDonateOpen(true). Header.js:328 `<DonateModal isOpen={donateOpen} onClose={() => setDonateOpen(false)} />`. DonateModal.js:14-26 fetches `fetch(GITHUB_CONFIG.donateUrl, { cache: "no-store" })` -> JSON `{ title?, message?, channels:[{id,label,description,icon,color,url,qr}] }`. Card renders label, description, QR img (max-w-[180px]), and an 'Open' <a href target=_blank rel=noopener noreferrer> with style backgroundColor: color. Title falls back to 'Support 9Router'; loading shows spinner 'Loading...'; error shows 'Failed to load donate info: {err}'. Click-outside (mousedown) closes. Modal uses createPortal(document.body).
+- **Rust now:** Header.tsx:284-288 right actions are only `<HeaderSearchInput /><ThemeToggle /><HeaderMenu onLogout={handleLogout} />`. No Donate button, no DonateModal component (not in web/src/shared/components listing), no GITHUB_CONFIG.donateUrl (config.ts:11-17 has changelogUrl/repoUrl/docsUrl/licenseUrl only).
+- **Fix:** 1) config.ts GITHUB_CONFIG: add `donateUrl: "https://9router.com/api/donate"` (preserve the 9router URL verbatim - it is the upstream donate API). 2) Create web/src/shared/components/DonateModal.tsx: a portal modal (reuse existing Modal.tsx) that on open fetches GITHUB_CONFIG.donateUrl with cache no-store, parses {title,message,channels[{id,label,description,icon,color,url,qr}]}, renders a 3-col grid of channel cards (label, description, qr img, Open link styled backgroundColor:color, color value from channel.color, header icon volunteer_activism in pink), title fallback 'Support 9Router', loading spinner, error 'Failed to load donate info:', click-outside mousedown close. 3) Header.tsx: insert the Donate button between HeaderSearchInput and ThemeToggle, exact classes above, state donateOpen, render <DonateModal isOpen onClose>; keep the button aria-label Donate and volunteer_activism icon.
+- **Test:** `cargo test -p web or a vitest: component test renders header with Donate button; assert donate modal opens and calls fetch with donateUrl. Backend-side: unit test that GITHUB_CONFIG object (shared/constants/config.ts) has donateUrl equal to https://9router.com/api/donate.`
+- **⚠️ Risks:** Don't rebrand to a local URL - the JS hardcodes https://9router.com/api/donate; changing it breaks the modal. The pink button classes are a 9router brand choice - keep exact. Icon is volunteer_activism (material symbol), not favorite/heart.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-A2` — x-9router-token-saver: off per-request bypass missing (F3/G2a)
+- **JS:** open-sse/config/runtimeConfig.js:68: `export const TOKEN_SAVER_HEADER = "x-9router-token-saver";`
+
+open-sse/handlers/chatCore.js:229: `const tokenSaverEnabled = clientRawRequest?.headers?.[TOKEN_SAVER_HEADER]?.toLowerCase() !== "off";`
+Then gates EVERY token saver: 232 `compressMessages(translatedBody, tokenSaverEnabled && rtkEnabled)`, 238 `compressWithHeadroom(translatedBody, { enabled: tokenSaverEnabled && headroomEnabled, ... })`, 246 `else if (tokenSaverEnabled && headroomEnabled) log?.warn?.(...)`, 252 `if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) injectCaveman(...)`, 258 `if (tokenSaverEnabled && ponytailEnabled && ponytailLevel) injectPonytail(...)`. Header value is compared case-insensitively to the literal "off".
+- **Rust now:** src/server/api/chat.rs:831 `compress_messages(&mut body, snapshot.settings.rtk_enabled);`, 853-858 `compress_with_headroom(...)` gated only by headroom_enabled, 862 `apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model)` — none of them consult a per-request header. client_headers (HashMap<String,String> lowercased) IS available inside execute_single_model (chat.rs:732 `client_headers: Option<&HashMap<String,String>>`), and headers_map is built at chat.rs:314-322.
+- **Fix:** 1) In `execute_single_model` (src/server/api/chat.rs:724), compute once near top: `let token_saver_enabled = client_headers.map(|h| h.get("x-9router-token-saver").map(|v| !v.eq_ignore_ascii_case("off")).unwrap_or(true)).unwrap_or(true);`
+2) Line 831 → `compress_messages(&mut body, token_saver_enabled && snapshot.settings.rtk_enabled);`
+3) Headroom block (835-840): change `enabled: snapshot.settings.headroom_enabled` → `enabled: token_saver_enabled && snapshot.settings.headroom_enabled`.
+4) Line 862 → gate the whole call: `let _ = if token_saver_enabled { apply_request_preprocessing(&mut body, &snapshot.settings, &plan.model) } else { false };`
+5) The CLI paths src/cli/mod.rs:1625,1801 (`compress_messages`) and 1659,1835 (`apply_request_preprocessing`) have no headers — leave them as-is (JS CLI launcher has no header either).
+Note the header must be read from the REQUEST headers (client), NOT the upstream/response headers.
+- **Test:** `cargo test token_saver_header_disables_rtk_and_caveman in src/server/api/chat.rs or rtk/tests.rs: build a headers map with `"x-9router-token-saver" => "off"`, assert token_saver_enabled=false; with absent header → true; with `"OFF"`/`"Off"` → false (case-insensitive); with `""` (empty) → true. Unit-test the boolean gate function directly to avoid an async test.`
+- **⚠️ Risks:** The JS check is `!== "off"` — i.e. ANY value except the exact string "off" (case-insensitive) keeps savers ON, including empty string, "yes", "true". Do not invert to `== "on"`. The header key must be lowercased when read from client_headers (already lowercase in headers_map).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-B3` — Header missing OIDC identity chip
+- **JS:** Header.js:192-216 loads auth status on mount: `fetch("/api/auth/status", { cache: "no-store" })`, then `setDisplayName(data?.displayName || data?.oidcName || data?.oidcEmail || ""); setLoginMethod(data?.loginMethod || "")`. Header.js:306-314 renders when `displayName && loginMethod === "OIDC"`: `hidden sm:flex items-center max-w-[220px] px-3 py-1.5 rounded-full border border-border bg-surface/70 text-xs text-text-muted truncate` containing `person` icon (text-primary), the displayName truncated, and a badge `ml-2 shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary` with text OIDC. JS /api/auth/status route returns fields: `{ displayName, loginMethod: session?.oidc ? "OIDC" : "Password", oidcName, oidcEmail, ... }` (auth status route.js:25-29).
+- **Rust now:** Rust auth.rs:191-210 /api/auth/status returns `{ authenticated, requireLogin, hasPassword, authMode, oidcConfigured, oidcLoginLabel, oidcEnabled }` - it does NOT return displayName/oidcName/oidcEmail/loginMethod, and it returns metadata even when logged out. Header.tsx has no displayName state and no OIDC chip.
+- **Fix:** 1) Rust auth_status handler (src/server/api/auth.rs): when logged in, resolve the session identity and add `displayName`, `loginMethod` ('OIDC' when session is oidc else 'Password'), `oidcName`, `oidcEmail` to the JSON response (mirror JS order). 2) Header.tsx: add useEffect that fetches /api/auth/status with cache no-store on mount, stores displayName + loginMethod, and renders the OIDC chip (person icon + truncate name + OIDC badge) between HeaderSearchInput and ThemeToggle exactly as JS, gated on displayName && loginMethod === 'OIDC'.
+- **Test:** `cargo test oidc_chip_fields_in_auth_status: call auth_status handler with a mocked OIDC session and assert response JSON contains displayName, loginMethod == "OIDC", oidcName, oidcEmail (currently only oidcEnabled exists).`
+- **⚠️ Risks:** JS prefers displayName then oidcName then oidcEmail - order matters (use first non-empty). Rust currently returns authMode (login page) but not the session identity; must look up the session subject name from the session cookie claims, not just re-echo settings. Keep the chip hidden on <sm (hidden sm:flex).
+- **Verified:** ✅ CONFIRMED
+
+## PART H — DB / USAGE / CLI (10 specs)
+
+### `P0-H1a` — Usage history endpoint drops fields JS returns (connectionId, apiKeyMasked, endpoint, status, tokens)
+- **JS:** usageRepo.js:316-334 getUsageHistory returns per-row object:
+  return rows.map((r) => ({
+    timestamp: r.timestamp, provider: r.provider, model: r.model,
+    connectionId: r.connectionId, apiKeyMasked: maskApiKey(r.apiKey), endpoint: r.endpoint,
+    cost: r.cost, status: r.status, tokens: parseJson(r.tokens, {}),
+  }));
+with maskApiKey (usageRepo.js:6-10):
+  if (!key || typeof key !== "string") return null;
+  if (key.length <= 8) return key.charAt(0) + "***";
+  return key.slice(0, 8) + "***";
+Query (usageRepo.js:327): `SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ${where} ORDER BY id ASC`
+- **Rust now:** src/server/api/usage.rs:301-343 get_usage_history returns HistoryResponse{ total_requests, history: Vec<UsageEntryDto> } where UsageEntryDto has ONLY: timestamp, provider, model, prompt_tokens, completion_tokens, cost. It drops connectionId, apiKeyMasked, endpoint, status, tokens. No filtering (provider/model/startDate/endDate query params are ignored).
+- **Fix:** In src/server/api/usage.rs, replace the UsageEntryDto struct (lines 307-315) with a struct that also serializes the missing fields. Add `api_key_masked: Option<String>` computed via a new helper `mask_api_key(&self, api_key: Option<&str>) -> Option<String>` matching JS: if len<=8 return first char + "***", else first 8 chars + "***". Add fields: connection_id (Option<String>), endpoint (Option<String>), status (Option<String>), tokens (Option<Value> serialized from entry.tokens). Keep snake_case JSON keys: JS returns camelCase? No — JS getUsageHistory returns camelCase `connectionId`, `apiKeyMasked`, `promptTokens`, `completionTokens`. So the DTO must use #[serde(rename_all="camelCase")] with fields connection_id, api_key_masked, endpoint, status, tokens. Note Rust currently returns prompt_tokens/completion_tokens snake_case — JS returns promptTokens/completionTokens camelCase (usageRepo.js:330-333). Add #[serde(rename_all = "camelCase")] to the DTO. Add query filtering: parse Query params provider, model, startDate, endDate (as in get_request_details pattern at usage.rs:1191-1233) and filter history in Rust. Change `total_requests` to JS total_requests: JS route returns getUsageStats() (stats object with totalRequests) — see usageRepo getUsageStats line 395: stats.totalRequests is computed from byProvider sum (line 657: stats.totalRequests = Object.values(stats.byProvider).reduce((sum,p)=>sum+(p.requests||0),0)). The Rust handler returning total_requests_lifetime is a different semantic but acceptable; keep as is unless strict parity required.
+- **Test:** `test_usage_history_dto_serializes_camelcase_fields: build a UsageEntry with connection_id Some("c1"), api_key Some("0123456789abcdef"), endpoint Some("/v1/chat/completions"), status Some("ok"), tokens Some(TokenUsage{prompt_tokens:Some(10),completion_tokens:Some(20),..}); serialize via the DTO; assert json contains "connectionId":"c1", "apiKeyMasked":"01234567***", "endpoint", "status", "tokens", and asserts keys are camelCase not snake_case.`
+- **⚠️ Risks:** JS getUsageHistory is ordered id ASC; Rust history iteration is insertion order — must preserve. JS apiKeyMasked masks with first 8 chars; a key <=8 chars is masked as first-char+"***" (NOT first 8). Do not mask with slice(0,8)+"..." for short keys. The dashboard UsageHistory component reads connectionId/apiKeyMasked/endpoint/status/tokens — dropping them makes columns blank.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1b` — Request-log timestamp format: JS DD-MM-YYYY HH:MM:SS local vs Rust raw RFC3339
+- **JS:** usageRepo.js:734-737 formatLogDate:
+  function formatLogDate(date = new Date()) {
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  }
+getRecentLogs row format (usageRepo.js:766): `${ts} | ${m} | ${p} | ${account} | ${sent} | ${received} | ${r.status || "-"}`
+where ts = formatLogDate(new Date(r.timestamp)) — LOCAL time, DD-MM-YYYY HH:MM:SS. sent = r.promptTokens ?? tk.prompt_tokens ?? "-", received = r.completionTokens ?? tk.completion_tokens ?? "-". account = connMap[r.connectionId] || (r.connectionId ? r.connectionId.slice(0, 8) : "-"). provider p = r.provider?.toUpperCase() || "-".
+- **Rust now:** src/server/api/usage.rs:1266-1331 get_usage_logs + format_usage_log. format_usage_log (line 1330) produces `${timestamp} | ${model} | ${provider} | ${account} | ${sent} | ${received} | ${status}` where timestamp = entry.timestamp.as_deref().unwrap_or("-") — RAW RFC3339 (e.g. 2026-08-12T03:04:05.000Z), NOT local DD-MM-YYYY HH:MM:SS. Also provider is NOT uppercased (JS does r.provider?.toUpperCase()). status: Rust maps Some("success")->"OK", "ok"->"OK" case-insensitive, None->"OK". sent/received are taken only from tokens, NOT from entry.prompt_tokens/completion_tokens (JS prefers row promptTokens then tk.prompt_tokens). account fallback uses id.chars().take(8) (JS uses slice(0,8) then "-").
+- **Fix:** In src/server/api/usage.rs format_usage_log: (1) convert timestamp to local DD-MM-YYYY HH:MM:SS. Use chrono::Local: parse entry.timestamp via chrono::DateTime::parse_from_rfc3339, convert .with_timezone(&chrono::Local), then format with format!("{:02}-{:02}-{} {:02}:{:02}:{:02}", dt.day(), dt.month(), dt.year(), dt.hour(), dt.minute(), dt.second()). If unparseable, fall back to raw string. (2) provider: change `entry.provider.as_deref().unwrap_or("-")` to `.map(|p| p.to_uppercase()).unwrap_or_else(|| "-".to_string())`. (3) sent: prefer a new source — UsageEntry has no prompt_tokens/completion_tokens columns (they're inside tokens). JS prefers r.promptTokens ?? tk.prompt_tokens — the Rust tokens Option already covers this; keep as-is (tokens.prompt_tokens.or(tokens.input_tokens)). (4) account: JS uses connectionId.slice(0, 8) as the fallback label (no "Account ..." prefix) and "-" when no connectionId; Rust currently formats "Account" style? No — Rust format_usage_log account fallback is id.chars().take(8) with "-" fallback, matching JS. (5) status: JS returns r.status || "-" raw (not mapped to OK). Rust maps to "OK". Change to return entry.status.as_deref().unwrap_or("-") verbatim to match JS.
+- **Test:** `test_format_usage_log_local_timestamp: call format_usage_log with entry.timestamp="2026-08-12T03:04:05Z", provider Some("glm"), model "glm-4.7", connection_id Some("abc123"), status Some("success"); assert the produced line starts with a DD-MM-YYYY HH:MM:SS pattern (regex ^\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2} \| ) and contains "GLM" uppercased.`
+- **⚠️ Risks:** JS formatLogDate uses Date.parse which treats the ISO string as UTC then converts to local timezone. chrono conversion must use .with_timezone(&chrono::Local), NOT naive. Provider uppercase: JS r.provider?.toUpperCase() — if provider undefined, "-". Status: JS raw (e.g. "FAILED 502"), Rust must NOT map to "OK". Keep model "-" when empty (Rust already does).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1c` — Usage fetch does not refresh OAuth tokens before quota call nor force-retry on auth-expired
+- **JS:** 9router/src/app/api/usage/[connectionId]/route.js:23-117 refreshAndUpdateCredentials(connection, force=false): builds credentials from connection (accessToken, refreshToken, idToken, expiresAt, lastRefreshAt, connectionId, providerSpecificData, copilotToken...); `const needsRefresh = force || executor.needsRefresh(credentials);` then `executor.refreshCredentials(credentials, console, proxyOptions)`; persists via updateProviderConnection(connection.id, updateData) with accessToken/refreshToken/idToken/lastRefreshAt/expiresAt(now+expiresIn*1000)/expiresIn/providerSpecificData updates.
+GET handler route.js:158-183:
+  if (isOAuth) { try { const result = await refreshAndUpdateCredentials(connection, false, proxyOptions); connection = result.connection; } catch (refreshError) { return Response.json({ error: `Credential refresh failed: ${refreshError.message}` }, { status: 401 }); } }
+  let usage = await getUsageForProvider(connection, proxyOptions);
+  if (isOAuth && isAuthExpiredMessage(usage) && connection.refreshToken) {
+    const retryResult = await refreshAndUpdateCredentials(connection, true, proxyOptions);
+    connection = retryResult.connection;
+    usage = await getUsageForProvider(connection, proxyOptions);
+  }
+AUTH_EXPIRED_PATTERNS (route.js:11) = ["expired", "authentication", "unauthorized", "401", "re-authorize"]
+- **Rust now:** src/server/api/usage.rs:497-511: get_connection_usage calls fetch_oauth_quota(connection) directly with the stored access_token — NO refresh before the call and NO force-retry on auth-expired message. Only codex-reset-credits (usage.rs:736-775, 965-1002) has refresh_codex_token. kimi usage (fetch_kimi_oauth_usage) has no refresh. The JS behavior of refreshing then retrying when the quota fetch returns an auth-expired message is absent for all OAuth providers.
+- **Fix:** In src/server/api/usage.rs get_connection_usage (the is_oauth branch at line 497):
+1. Before calling fetch_oauth_quota, refresh the token: match connection.refresh_token (trimmed, non-empty) → call the provider's refresh fn (add match arms in fetch_oauth_quota or a new helper). Current Rust has refresh_codex_token for codex only. Add per-provider refresh dispatch (e.g. refresh_kimi_token, refresh_github_token, refresh_claude_token...) — or at minimum mirror JS by adding a `needs_refresh` check: if expires_at is present and past (or within 30s), refresh. On refresh success, persist tokens to the connection via the db update pattern already used in persist_codex_tokens (usage.rs:584-615) generalized to a persist_oauth_tokens(state, connection_id, access_token, refresh_token, id_token, expires_in). On refresh failure, return 401 Json({ "error": "Credential refresh failed: ..." }).
+2. After the quota fetch, if the returned value contains a "message" string that matches any of the JS AUTH_EXPIRED_PATTERNS (["expired","authentication","unauthorized","401","re-authorize"] lowercased substring) AND connection.refresh_token is present, force-refresh (skip needsRefresh) and re-fetch the quota once, replacing live_quotas/live_message.
+Add a helper fn is_auth_expired_message(message: &str) -> bool (mirror usage.rs:549-560 is_auth_expired_message already exists for codex).
+- **Test:** `test_fetch_oauth_quota_refreshes_and_retries: construct a ProviderConnection with auth_type "oauth", a refresh_token, and a stale/missing access_token; call get_connection_usage logic path; assert that a second quota fetch happens after refresh (e.g. via a mock client injected) and that auth-expired messages trigger force refresh. At unit level: test is_auth_expired_message matches "Grok CLI authentication expired. Please re-authorize." -> true and "Kimi Coding connected. Usage tracked per request." -> false.`
+- **⚠️ Risks:** JS refreshes BEFORE the fetch when needsRefresh (expired); if the refresh fails but accessToken still exists, JS returns the stale token (route.js:52-54: `if (connection.accessToken) return { connection, refreshed: false }`). Rust must NOT 401 if refresh fails but a token exists. Only OAuth connections refresh (apikey has no token refresh — route.js:157). The retry must happen exactly once, not in a loop. Never surface upstream errors as HTTP failures — return quotas/message, not 500.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1d` — API-key usage whitelist: Rust 6 providers vs JS 12, and Rust rejects authType api_key
+- **JS:** 9router/src/shared/constants/providers.js:158-163:
+  export const USAGE_APIKEY_PROVIDERS = REGISTRY.filter(r => r.features?.usageApikey).map(r => r.id);
+Registry files with features:{usage:true, usageApikey:true}: codebuddy-cn.js:73-75, codebuddy-intl.js:73-75, deepseek.js:51-53, glm-cn.js:31-33, glm.js:54-56, kimi.js:86-88, kiro.js:126-128, minimax-cn.js:72-74, minimax.js:79-81, ollama.js:35-37, qoder.js:53-55, vercel-ai-gateway.js:37-39. (12 total)
+Route acceptance (9router/src/app/api/usage/[connectionId]/route.js:137-145):
+  const isOAuth = connection.authType === "oauth";
+  const isApikeyAuth = connection.authType === "apikey" || connection.authType === "api_key";
+  const isApikeyEligible = isApikeyAuth && USAGE_APIKEY_PROVIDERS.includes(connection.provider);
+  if (!isOAuth && !isApikeyEligible) return Response.json({ message: "Usage not available for this connection" });
+- **Rust now:** src/server/api/usage.rs:32-37 is_usage_apikey_provider:
+  fn is_usage_apikey_provider(provider: &str) -> bool {
+      matches!(provider, "glm" | "glm-cn" | "minimax" | "minimax-cn" | "kimi" | "deepseek")
+  }
+Only 6 providers. And usage.rs:434-435: `let is_apikey_eligible = connection.auth_type == "apikey" && is_usage_apikey_provider(&connection.provider);` — rejects auth_type "api_key" (Kiro's headless flow stores "api_key"). Missing providers: kiro, ollama, qoder, vercel-ai-gateway, codebuddy-cn, codebuddy-intl. Missing fetch dispatch for these in the apikey branch (usage.rs:479-485 only has glm, minimax, kimi, deepseek).
+- **Fix:** 1. In src/server/api/usage.rs, expand is_usage_apikey_provider to: matches!(provider, "glm" | "glm-cn" | "minimax" | "minimax-cn" | "kimi" | "deepseek" | "kiro" | "ollama" | "qoder" | "vercel-ai-gateway" | "codebuddy-cn" | "codebuddy-intl").
+2. Change the auth_type check (line 434) to accept both spellings: `let is_apikey_eligible = (connection.auth_type == "apikey" || connection.auth_type == "api_key") && is_usage_apikey_provider(&connection.provider);` (JS comment route.js:135-136: "Kiro's headless api-key flow persists authType 'api_key' (underscore) while generic apikey providers persist 'apikey' — accept both spellings").
+3. In the apikey fetch match (usage.rs:479-485), add arms: "kiro" => fetch_kiro_quota(api_key, &provider, &psd).await, "ollama" => fetch_ollama_quota(api_key).await, "qoder" => fetch_qoder_quota(api_key, &provider).await, "vercel-ai-gateway" => fetch_vercel_ai_gateway_quota(api_key).await, "codebuddy-cn" => fetch_codebuddy_quota(api_key, &provider).await, "codebuddy-intl" => fetch_codebuddy_quota(api_key, &provider).await. These fetchers must be added (see P0-H1e/H1f). kiro fetch must pass provider_specific_data for profileArn.
+Note: JS getKiroUsage signature is (accessToken, providerSpecificData, proxyOptions) — for api-key kiro it still takes accessToken (route.js passes apiKey to getUsageForProvider which passes c.accessToken). Match the Rust dispatch: for kiro use api_key as the token.
+- **Test:** `test_is_usage_apikey_provider_includes_all_12: assert is_usage_apikey_provider returns true for each of [glm, glm-cn, minimax, minimax-cn, kimi, deepseek, kiro, ollama, qoder, vercel-ai-gateway, codebuddy-cn, codebuddy-intl] and false for "openai". test_apikey_eligible_accepts_api_key_underscore: build a connection with auth_type "api_key" + provider "kiro"; assert the eligibility check passes.`
+- **⚠️ Risks:** Kiro with api_key auth must NOT inject the default placeholder profileArn (JS kiro.js:62-67: 'For api-key auth, never inject the shared default placeholder profileArn — CodeWhisperer 403s'). The Rust kiro_resolve_profile_arn (quota_fetcher.rs:1540-1549) always falls back to KIRO_DEFAULT_PROFILE_ARN; must branch on authMethod. JS kiro authMethod from providerSpecificData.authMethod default "builder-id". Do not add these providers to is_usage_apikey_provider if their fetch functions don't exist — that would 500.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1e` — Vercel AI Gateway credit usage handler missing entirely
+- **JS:** 9router/open-sse/services/usage/misc.js:186-253 getVercelAiGatewayUsage:
+  const response = await proxyAwareFetch(VERCEL_AI_GATEWAY_CREDITS_URL, { method: "GET", headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" } }, proxyOptions);
+where VERCEL_AI_GATEWAY_CREDITS_URL = U("vercel-ai-gateway").url = "https://ai-gateway.vercel.sh/v1/credits" (registry vercel-ai-gateway.js:28).
+Returns { balance: "95.50", total_used: "4.50" } (USD decimal strings).
+Handling (misc.js:213-249): const balance = Number(data?.balance) || 0; const totalUsed = Number(data?.total_used) || 0; const MONTHLY_CREDIT = 5; const remainingPercentage = (balance / MONTHLY_CREDIT) * 100;
+if (balance <= 0 && totalUsed <= 0) return { plan: "Pay-as-you-go", message: "Vercel AI Gateway connected. No credit allocation found (BYOK or unfunded account).", quotas: {} };
+return { plan: "Pay-as-you-go", quotas: { "Used (USD)": { used: totalUsed, total: 0, remaining: 0, remainingPercentage: 100, unlimited: true }, "Remaining (USD)": { used: balance, total: MONTHLY_CREDIT, remaining: balance, remainingPercentage, unlimited: false } } };
+401/403 → message "Vercel AI Gateway API key invalid or expired."
+- **Rust now:** N/A — no fetch_vercel_ai_gateway_quota function exists in src/core/usage/quota_fetcher.rs. is_usage_apikey_provider omits vercel-ai-gateway. usage_message_for_provider (usage.rs:68-75) has no vercel-ai-gateway arm (falls into `other => "Usage API not implemented for {other}"`).
+- **Fix:** Add to src/core/usage/quota_fetcher.rs:
+const VERCEL_AI_GATEWAY_CREDITS_URL: &str = "https://ai-gateway.vercel.sh/v1/credits";
+pub async fn fetch_vercel_ai_gateway_quota(api_key: &str) -> Value {
+  if api_key.trim().is_empty() { return json!({ "message": "Vercel AI Gateway API key not available." }); }
+  let client = http_client();
+  let response = match client.get(VERCEL_AI_GATEWAY_CREDITS_URL).bearer_auth(api_key.trim()).header("Accept", "application/json").send().await { Ok(r)=>r, Err(e)=> return json!({ "message": format!("Vercel AI Gateway error: {e}") }) };
+  let status = response.status().as_u16();
+  if status == 401 || status == 403 { return json!({ "message": "Vercel AI Gateway API key invalid or expired." }); }
+  if !status.is_success() { let text = response.text().await.unwrap_or_default(); let trimmed: String = text.chars().take(200).collect(); return json!({ "message": format!("Vercel AI Gateway credits API error ({status}){}", if trimmed.is_empty() {"".to_string()} else {format!(": {trimmed}")}) }); }
+  let data: Value = response.json().await.unwrap_or_else(|_| json!({}));
+  let balance = data.get("balance").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+  let total_used = data.get("total_used").and_then(|v| v.as_str()).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+  const MONTHLY_CREDIT: f64 = 5.0;
+  let remaining_pct = (balance / MONTHLY_CREDIT) * 100.0;
+  if balance <= 0.0 && total_used <= 0.0 { return json!({ "plan": "Pay-as-you-go", "message": "Vercel AI Gateway connected. No credit allocation found (BYOK or unfunded account).", "quotas": {} }); }
+  json!({ "plan": "Pay-as-you-go", "quotas": { "Used (USD)": json!({ "used": total_used, "total": 0.0, "remaining": 0.0, "remainingPercentage": 100.0, "unlimited": true }), "Remaining (USD)": json!({ "used": balance, "total": MONTHLY_CREDIT, "remaining": balance, "remainingPercentage": remaining_pct, "unlimited": false }) } })
+}
+Register in usage.rs dispatch (see P0-H1d step 3) and add "vercel-ai-gateway" to is_usage_apikey_provider.
+- **Test:** `test_vercel_ai_gateway_quota_builds_two_rows: (pure fn) given balance "95.50", total_used "4.50", assert quotas has "Used (USD)" with used 4.5, total 0, remainingPercentage 100, unlimited true and "Remaining (USD)" with used 95.5, total 5, remainingPercentage 1910.0, unlimited false. test_vercel_ai_gateway_no_credit_message: balance 0 and total_used 0 → message contains "No credit allocation found".`
+- **⚠️ Risks:** JS uses Number(data?.balance) — numeric-string coercion; Rust must parse as f64 from string. remainingPercentage = balance/5*100 can exceed 100 (e.g. $10 balance → 200%); do NOT clamp. "Remaining (USD)" used field is `balance` NOT remaining. unlimited:true on "Used (USD)" is essential (total:0 + unlimited:true → QuotaTable shows infinite bar).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1f` — CodeBuddy CN/Intl quota handler missing (only executor exists)
+- **JS:** 9router/open-sse/services/usage/codebuddy-cn.js:46-138 getCodeBuddyUsage:
+  const token = accessToken || apiKey;
+  POST to U(providerId).url where providerId is "codebuddy-cn" → "https://copilot.tencent.com/v2/billing/meter/get-user-resource" (registry codebuddy-cn.js:44) and "codebuddy-intl" → "https://www.codebuddy.ai/v2/billing/meter/get-user-resource" (registry codebuddy-intl.js:43).
+  Headers (codebuddy-cn.js:56-60): { ...(PROVIDERS[providerId]?.headers || {}), Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json" }, body: "{}".
+  PROVIDERS["codebuddy-cn"].headers (registry codebuddy-cn.js:28-35): {"User-Agent": "CLI/2.108.1 CodeBuddy/2.108.1", "X-Product": "SaaS", "X-IDE-Type": "CLI", "X-IDE-Name": "CLI", "x-requested-with": "XMLHttpRequest", "x-codebuddy-request": "1"}.
+  Response: json.code must === 0 (codebuddy-cn.js:72); data = json?.data?.Response?.Data || {}; accounts = Array.isArray(data.Accounts) ? data.Accounts : [];
+  isRefill (line 89-93): const ce = cycleEndMs(acc); const de = Number(acc.DeductionEndTime); return Number.isFinite(ce) && Number.isFinite(de) && de - ce > REFILL_GAP_MS; where REFILL_GAP_MS = 2*24*60*60*1000 (line 88). cycleEndMs uses parseResetTime(acc.CycleEndTime).
+  Refill packs (lines 103-116): name from refillCadence (Monthly/Weekly/Daily by days between CycleStartTime and CycleEndTime; ≤1.5d → Daily, ≤10d → Weekly, else Monthly), de-duped as "Monthly 2", etc. quota = { used: num(acc.CycleCapacityUsedPrecise, acc.CycleCapacityUsed), total: num(acc.CycleCapacitySizePrecise, acc.CycleCapacitySize), resetAt: parseResetTime(acc.CycleEndTime), unlimited: false, recurring: true }.
+  Bonus packs (lines 121-129): `Bonus Pack ${i+1}` with used/total from CapacityUsedPrecise/CapacityUsed and CapacitySizePrecise/CapacitySize, resetAt: parseResetTime(acc.CycleEndTime), unlimited: false, recurring: false. Plan: basePkg.PackageName || basePkg.SubProductName || "CodeBuddy".
+  num() (line 29-32): const n = Number(precise ?? plain); return Number.isFinite(n) ? n : 0;
+- **Rust now:** N/A — no fetch_codebuddy_quota in src/core/usage/quota_fetcher.rs. codebuddy-cn/codebuddy-intl not in is_usage_apikey_provider (usage.rs:32-37). usage_message_for_provider has no codebuddy arm.
+- **Fix:** Add to src/core/usage/quota_fetcher.rs:
+const CODEBUDDY_CN_URL: &str = "https://copilot.tencent.com/v2/billing/meter/get-user-resource";
+const CODEBUDDY_INTL_URL: &str = "https://www.codebuddy.ai/v2/billing/meter/get-user-resource";
+const CODEBUDDY_REFILL_GAP_MS: i64 = 2*24*60*60*1000;
+pub async fn fetch_codebuddy_quota(token: &str, provider: &str) -> Value {
+  if token.trim().is_empty() { return json!({ "message": format!("CodeBuddy ({provider}) credential not available.") }); }
+  let url = if provider == "codebuddy-intl" { CODEBUDDY_INTL_URL } else { CODEBUDDY_CN_URL };
+  let client = http_client();
+  let response = match client.post(url).bearer_auth(token.trim()).header("Content-Type", "application/json").header("Accept", "application/json")
+    .header("User-Agent", "CLI/2.108.1 CodeBuddy/2.108.1").header("X-Product", "SaaS").header("X-IDE-Type", "CLI").header("X-IDE-Name", "CLI").header("x-requested-with", "XMLHttpRequest").header("x-codebuddy-request", "1")
+    .body("{}").send().await { Ok(r)=>r, Err(e)=> return json!({ "message": format!("CodeBuddy ({provider}) error: {e}") }) };
+  let status = response.status().as_u16();
+  if status == 401 || status == 403 { return json!({ "message": "CodeBuddy CN credential invalid or expired." }); }
+  if !status.is_success() { return json!({ "message": format!("CodeBuddy CN quota API error ({status}).") }); }
+  let json_body: Value = match response.json().await { Ok(v)=>v, Err(_)=> return json!({ "message": "CodeBuddy CN quota API error." }) };
+  if json_body.get("code").and_then(|v| v.as_i64()).unwrap_or(-1) != 0 { let msg = json_body.get("msg").and_then(|v| v.as_str()).unwrap_or("unknown"); return json!({ "message": format!("CodeBuddy CN quota error: {msg}") }); }
+  let data = json_body.pointer("/data/Response/Data").cloned().unwrap_or_else(|| json!({}));
+  let accounts: Vec<Value> = data.get("Accounts").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+  if accounts.is_empty() { return json!({ "message": "CodeBuddy CN connected. No credit package found." }); }
+  // parse_reset_time helper already exists; implement refillCadence: days between CycleStartTime and CycleEndTime; ≤1.5→"Daily", ≤10→"Weekly", else "Monthly".
+  // Partition refills (DeductionEndTime - CycleEndTime > REFILL_GAP_MS) and bonuses; build quota map keys "Monthly", "Monthly 2", "Bonus Pack 1"... with the exact field names above, each { used, total, resetAt, unlimited:false, recurring }.
+  // plan from first refill or first account: PackageName || SubProductName || "CodeBuddy".
+  json!({ "plan": plan, "quotas": quotas })
+}
+Register in usage.rs dispatch (P0-H1d step 3) for both codebuddy-cn and codebuddy-intl, passing provider id.
+- **Test:** `test_codebuddy_refill_cadence: parse CycleStartTime="2026-01-01T00:00:00Z" CycleEndTime="2026-01-31T00:00:00Z" → "Monthly"; 1-day span → "Daily"; 7-day → "Weekly". test_codebuddy_partitions_refill_vs_bonus: build a synthetic Accounts array where one account has DeductionEndTime - CycleEndTime > 2 days (refill) and another == 0 (bonus); assert quota keys contain "Monthly" (recurring true) and "Bonus Pack 1" (recurring false).`
+- **⚠️ Risks:** JS header set includes PROVIDERS[providerId]?.headers spread — the 6 CodeBuddy headers MUST be sent or Tencent 401s. Payload is POST with body "{}" (NOT GET). json.code === 0 gate: non-zero code → message with json.msg. The `num()` helper prefers Precise fields (CycleCapacityUsedPrecise) falling back to plain (CycleCapacityUsed). plan comes from basePkg.PackageName || basePkg.SubProductName — NOT "CodeBuddy" unless both absent. recurring:true on refill, recurring:false on bonus (drives UI Resets-in vs Expires-in).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1g` — Grok CLI quota fetch is a stub: missing JWT tier plan, Monthly/On-demand/Prepaid quota rows, exhausted row
+- **JS:** 9router/open-sse/services/usage/grok-cli.js:54-70 buildGrokCliHeaders:
+  const headers = { Authorization: `Bearer ${accessToken}`, Accept: "application/json", "User-Agent": GROK_CLI_USER_AGENT ("grok-shell/0.2.99 (linux; x86_64)" from config/grokCli.js:5), "x-xai-token-auth": "xai-grok-cli", "x-grok-client-identifier": GROK_CLI_CLIENT_IDENTIFIER ("grok-shell"), "x-grok-client-version": GROK_CLI_VERSION ("0.2.99"), "x-grok-client-mode": "headless" }; plus psd.email → "x-email", psd.userId||psd.principalId → "x-userid".
+planFromAccessToken (grok-cli.js:95-110): JWT payload.tier map {0:"Free",1:"SuperGrok",2:"X Basic",3:"X Premium",4:"X Premium Plus",5:"SuperGrok Heavy",6:"SuperGrok Lite"}.
+parseGrokCliBilling (grok-cli.js:141-298) produces quota rows: "Monthly included" (config.monthlyLimit), "On-demand" (config.onDemandCap/onDemandUsed; exhausted free/promo → synthetic {used:1,total:1,remainingPercentage:0,unlimited:false}), "Prepaid" (config.prepaidBalance → {used:0,total:prepaid,remainingPercentage:100,resetAt:null}), "Weekly SuperGrok" (creditUsagePercent), and opportunistic "Credits" bags.
+RESOLVE_PLAN (grok-cli.js:82-92): tier normalized Title Case; user.hasGrokCodeAccess → "Grok Code"; config.isUnifiedBillingUser → "Grok Build"; default "Grok Build".
+getGrokCliUsage (grok-cli.js:349-424) fetches BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits" and USER_URL = "https://cli-chat-proxy.grok.com/v1/user?include=subscription" IN PARALLEL with the 8 headers above; 401/403 → "Grok CLI authentication expired. Please re-authorize."; billing not ok → "Grok CLI billing API error (status): errText.slice(0,200)"; non-JSON → "Grok CLI billing response was not JSON."; parsed.plan = planFromAccessToken(accessToken) || parsed.plan; when quotas empty falls back to fetchGrokCliCreditsConfig gRPC; if still none: subscriptionAccess ? "Subscription access is active; Grok does not expose a numeric included quota." : "Grok Build connected, but no credit allotment was returned. Free promo may be exhausted."
+- **Rust now:** src/core/usage/quota_fetcher.rs:1901-1978 fetch_grok_cli_quota: (1) does NOT send the 7 extra headers (only Authorization Bearer); (2) parses only data.caps.total_cap/used into a single "Credits" row (line 1943-1959); (3) plan is derived only from user.subscription.name (lines 1921-1936), no JWT tier parse, no subscriptionTier/hasGrokCodeAccess/isUnifiedBillingUser resolution; (4) no Monthly included/On-demand/Prepaid/Weekly SuperGrok rows, no exhausted synthetic 1/1 row, no subscriptionAccess message differentiation; (5) gRPC fallback exists (fetch_grok_cli_credits_config line 1865) but only reached when caps.total_cap > 0 is false — and the REST parse never checks onDemandCap.
+- **Fix:** In src/core/usage/quota_fetcher.rs rewrite fetch_grok_cli_quota (lines 1901-1978):
+1. Add headers to BOTH billing and user GETs exactly as buildGrokCliHeaders: "Accept": "application/json", "User-Agent": "grok-shell/0.2.99 (linux; x86_64)", "x-xai-token-auth": "xai-grok-cli", "x-grok-client-identifier": "grok-shell", "x-grok-client-version": "0.2.99", "x-grok-client-mode": "headless".
+2. Fetch billing + user in parallel (tokio::join!).
+3. 401/403 on billing → return json!({ "message": "Grok CLI authentication expired. Please re-authorize." }).
+4. Add fn plan_from_access_token(access_token: &str) -> String: split('.') get payload, base64url-decode (use base64 URL_SAFE_NO_PAD), parse JSON, map tier 0..=6 → [Free, SuperGrok, X Basic, X Premium, X Premium Plus, SuperGrok Heavy, SuperGrok Lite], else "".
+5. Add fn resolve_plan(user: &Value, config: &Value) -> String: read subscriptionTier/subscription_tier/subscription.tier/config.subscriptionTier/config.subscription_tier; Title-Case it (replace [_-]+ with space, uppercase each word start); else user.hasGrokCodeAccess==true → "Grok Code"; else config.isUnifiedBillingUser==true → "Grok Build"; else "Grok Build".
+6. Parse quota rows mirroring parseGrokCliBilling: read config (object) with field fallbacks; compute periodEnd via parse_reset_time on billingPeriodEnd/billing_period_end/currentPeriod.end/resetAt/resetsAt/periodEnd (root-level too). For "Monthly included": monthlyLimit>0 → make_quota(used: includedUsed.is_finite? includedUsed : totalUsed.is_finite? totalUsed : 0, total: monthlyLimit, resetAt: periodEnd). For "On-demand": onDemandCap>0 → make_quota(used: max(0,onDemandUsed), total: onDemandCap); else if !subscriptionAccess && onDemandCap==0 && onDemandUsed.is_finite → synthetic {used:1,total:1,remainingPercentage:0,resetAt:periodEnd,unlimited:false}. For "Prepaid": prepaidBalance>0 → {used:0,total:prepaid,remainingPercentage:100,resetAt:null,unlimited:false}. For "Weekly SuperGrok": creditUsagePercent>=0 → make_quota(used: min(100,usedPct), total:100). make_quota helper: used/total, remainingPercentage=(max(0,total-used)/total)*100, never set absolute remaining. subscriptionAccess = tier non-empty && !/^(free|none|null)$/i.test(tier).
+7. parsed.plan = plan_from_access_token(access_token) if non-empty else resolve_plan.
+8. When no quotas: try fetch_grok_cli_credits_config; if Some → { "Weekly SuperGrok": { used: round(percent), total: 100, remainingPercentage: 100-round, resetAt, unlimited:false } }; else if subscriptionAccess → message "Subscription access is active; Grok does not expose a numeric included quota." else → "Grok Build connected, but no credit allotment was returned. Free promo may be exhausted." with quotas {}.
+9. Return { plan, quotas } when quotas non-empty (no message).
+- **Test:** `test_grok_cli_plan_from_jwt_tier: a JWT with tier=4 → "X Premium Plus"; tier=0 → "Free"; missing → "". test_grok_cli_parse_billing_on_demand_exhausted: billing {config:{onDemandCap:{val:0},onDemandUsed:{val:0}}} + user tier "free" → quotas has "On-demand" {used:1,total:1,remainingPercentage:0}; and exhausted=true. test_grok_cli_parse_billing_monthly_prepaid: config {monthlyLimit:{val:500},includedUsed:{val:50},prepaidBalance:{val:10}} → "Monthly included" total 500 used 50, "Prepaid" {used:0,total:10,remainingPercentage:100}.`
+- **⚠️ Risks:** Preserve unwrapVal semantics: `{val: number}` objects AND plain numbers/strings both accepted (grok-cli.js:46-52). plan is display-only; upstream remains authoritative. JS line 394: only attach message when there are NO quota rows; depleted accounts keep the 0% On-demand bar without a blocking message. The gRPC weekly fallback only fires when REST quotas are empty (grok-cli.js:394-404). Do NOT set absolute `remaining` on quota rows (QuotaTable treats it as 0-100 percentage).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1h` — Kiro quota fetch drops tokentype:API_KEY / TokenType:EXTERNAL_IDP headers and api-key profileArn handling
+- **JS:** 9router/open-sse/services/usage/kiro.js:51-67:
+  const authMethod = providerSpecificData?.authMethod || "builder-id";
+  const isApiKey = authMethod === "api_key";
+  const isExternalIdp = authMethod === "external_idp";
+  const apiKeyHeaders = isApiKey ? { tokentype: "API_KEY" } : {};
+  const externalIdpHeaders = isExternalIdp ? { TokenType: "EXTERNAL_IDP" } : {};
+  const profileArn = isApiKey ? (providerSpecificData?.profileArn || "") : (providerSpecificData?.profileArn || resolveDefaultProfileArn(authMethod));
+  // GET attempt (kiro.js:79-94): `${U("kiro").cwHost}${U("kiro").limitsPath}?${getUsageParams}` with headers { Authorization: `Bearer ${accessToken}`, Accept: "application/json", "x-amz-user-agent": "aws-sdk-js/1.0.0 KiroIDE", "user-agent": "aws-sdk-js/1.0.0 KiroIDE", ...apiKeyHeaders, ...externalIdpHeaders }; params isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST.
+  // POST attempt (kiro.js:96-113): to U("kiro").cwHost with Content-Type application/x-amz-json-1.0, x-amz-target AmazonCodeWhispererService.GetUsageLimits, body { origin:"AI_EDITOR", ...(profileArn?{profileArn}:{}), resourceType:"AGENTIC_REQUEST" }.
+  // Q GET attempt (kiro.js:116-131): `${U("kiro").qHost}${U("kiro").limitsPath}?${params}` with profileArn in query.
+  // On authMethod "idc" auth error → message "Kiro quota API is unavailable for the current AWS IAM Identity Center session. Chat may still work. If this persists after renewing your session, reconnect Kiro." (kiro.js:157-162); google/github → "Kiro quota API authentication expired. Chat may still work." (kiro.js:165-170); other → "Kiro quota API rejected the current token. Chat may still work." (kiro.js:172-177).
+- **Rust now:** src/core/usage/quota_fetcher.rs:1551-1705 fetch_kiro_quota: (1) NO tokentype/TokenType headers on any of the 3 attempts (lines 1572-1578, 1595-1601, 1618-1623); (2) kiro_resolve_profile_arn (1540-1549) ALWAYS falls back to KIRO_DEFAULT_PROFILE_ARN ("arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX") even for api_key auth; (3) no authMethod branching for the auth-error messages (idc/google/github/generic); (4) no per-attempt error accumulation; a single unreachable returns a generic message. The 3 attempts DO exist and the GET uses isEmailRequired=true&origin=AI_EDITOR&resourceType=AGENTIC_REQUEST correctly, POST body has origin/profileArn/resourceType.
+- **Fix:** In src/core/usage/quota_fetcher.rs fetch_kiro_quota:
+1. Read auth_method = provider_specific_data.get("authMethod").and_then(|v| v.as_str()).unwrap_or("builder-id"). is_api_key = auth_method == "api_key"; is_external_idp = auth_method == "external_idp".
+2. profile_arn = if is_api_key { psd.profileArn string or "" } else { psd.profileArn or KIRO_DEFAULT_PROFILE_ARN } — change kiro_resolve_profile_arn to take is_api_key: bool and return "" (empty) when is_api_key && no profileArn.
+3. Add headers to all 3 attempts: when is_api_key insert header("tokentype", "API_KEY"); when is_external_idp insert header("TokenType", "EXTERNAL_IDP").
+4. POST body (line 1590-1594): only include profileArn when non-empty (currently always inserted): change to build map and only insert if !profile_arn.is_empty(). Q GET query (line 1616): only append profileArn param when non-empty.
+5. Track saw_auth_error across attempts (any 401/403). After all attempts fail, branch on auth_method: "idc" → "Kiro quota API is unavailable for the current AWS IAM Identity Center session. Chat may still work. If this persists after renewing your session, reconnect Kiro."; "google" | "github" → "Kiro quota API authentication expired. Chat may still work."; else → "Kiro quota API rejected the current token. Chat may still work.". Non-auth errors → "Unable to fetch Kiro usage right now.". All return quotas {}.
+6. Accept response on any of the 3 attempts (JS loops attempts, first success wins — Rust already does).
+- **Test:** `test_kiro_quota_omits_default_profile_for_api_key: with psd {authMethod:"api_key"} and no profileArn, the resolved profile_arn must be empty (not KIRO_DEFAULT_PROFILE_ARN). test_kiro_quota_headers_match_auth_method: build the attempt headers for is_api_key and assert "tokentype"=="API_KEY" present and "TokenType" absent; for external_idp assert "TokenType"=="EXTERNAL_IDP" present.`
+- **⚠️ Risks:** JS tokentype header value is EXACTLY "API_KEY" (lowercase key, uppercase value) and "TokenType" (camelCase key) for external_idp — do not swap. profileArn is only sent for api-key auth when the connection actually owns it (JS comment: 'never inject the shared default placeholder profileArn — CodeWhisperer 403s a request whose profileArn isn't owned by the key's account'). q-get and codewhisperer-get attempt ordering must stay primary → post → q. The 401/403 detection must be per-attempt (JS errors.push per attempt) and the first successful attempt wins.
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1i` — Stuck pending-request 60s auto-clear missing in usage_live
+- **JS:** usageRepo.js:12 PENDING_TIMEOUT_MS = 60 * 1000;
+trackPendingRequest (usageRepo.js:152-194): on started, `clearTimeout(pendingTimers[timerKey]); pendingTimers[timerKey] = setTimeout(() => { delete pendingTimers[timerKey]; if (pendingRequests.byModel[modelKey] > 0) pendingRequests.byModel[modelKey] = 0; if (connectionId && pendingRequests.byAccount[connectionId]?.[modelKey] > 0) { pendingRequests.byAccount[connectionId][modelKey] = 0; } scheduleStatsEvent("pending"); }, PENDING_TIMEOUT_MS);`
+Key: `${connectionId}|${modelKey}` where modelKey = provider ? `${model} (${provider})` : model. If a request never completes, its counter is force-zeroed after 60s and a pending event is emitted. On non-started, `clearTimeout(pendingTimers[timerKey]); delete pendingTimers[timerKey];`
+- **Rust now:** src/server/usage_live.rs:65-79 start_request increments by_model/by_account and sends UsageEvent::Pending; finish_request (81-111) decrements. There is NO timer — a request whose chat handler path forgets to call finish_request leaves the counter stuck forever. No per-(connection,model_key) timer, no 60s force-zero, no Pending event on timeout.
+- **Fix:** In src/server/usage_live.rs:
+1. Add a per-key timer map: struct keyed by format!("{connection_id}|{model_key}") (connection_id may be empty → "|{model_key}"). Use tokio::time::sleep(60s) spawned tasks tracked in a Mutex<HashMap<String, tokio::task::JoinHandle>> (or parking_lot Mutex).
+2. In start_request: after incrementing, cancel any existing timer for the key, then spawn: tokio::spawn(async move { sleep(Duration::from_secs(60)).await; state.force_zero(key).await; }); store the handle. Reuse the UsageLiveState self (clone Arc if needed — UsageLiveState is not currently Arc; store a std::sync::Arc<Self> inside or restructure to take Arc<Self>).
+3. force_zero(key): parse the stored connection_id + model_key back out of the key, zero by_model[model_key] and by_account[connection_id][model_key] (delete entries when 0), then send UsageEvent::Pending. Guard: only zero if count > 0 (JS checks `pendingRequests.byModel[modelKey] > 0`).
+4. In finish_request: cancel/remove the timer for the key (JS clears on non-started).
+5. Keep PENDING_TIMEOUT_MS = 60 * 1000 as a const.
+Note: the model_key format must match model_key() in usage_live.rs (provider ? "{model} ({provider})" : model — usage_live.rs:174-180 already matches JS).
+- **Test:** `test_usage_live_force_zero_after_timeout: start_request("gpt-4","openai",Some("c1")), do NOT call finish_request, then drive a 60s timer (make the duration injectable via a fn param or a #[cfg(test)] short duration); assert pending_snapshot().by_model has the key removed after the timeout and a Pending event was broadcast (subscribe + recv_with_timeout).`
+- **⚠️ Risks:** Timer must be per (connection_id, model_key) — JS key is `${connectionId}|${modelKey}`. Cancelling the timer on finish is mandatory or a later started-count leak. In tests use an injectable timeout (default 60s) to avoid 60s sleeps. The force-zero must NOT decrement below zero (JS uses direct =0 assignment not decrement). Zeroing by_model when count hits 0 removes the key (JS deletes when ===0).
+- **Verified:** ✅ CONFIRMED
+
+### `P0-H1j` — saveRequestUsage dedupe of identical rows: JS skips exact-duplicate inserts; Rust blind-append
+- **JS:** src/app/api/usage/[connectionId]/route.js:157-183 (quoted in P0-H1c)
+- **Rust now:** See P0-H1c rust_current.
+- **Fix:** See P0-H1c impl_steps.
+- **Test:** `See P0-H1c test_spec.`
+- **Verified:** 🟡 PLAUSIBLE
 
 ---
 
-## PHẦN B — OAuth (thiếu flow & lệch wire)
-
-### B1. Trae / Windsurf / Zed OAuth — thiếu hoàn toàn (P1) [missing]
-- **JS:** `src/lib/oauth/providers/trae.js` (11.7K: GetLoginGuidance→ExchangeToken→GetUserInfo, marscode device flow), `windsurf.js` (6.1K: RegisterUser/GetOneTimeAuthToken gRPC, Firebase id-token), `zed.js` (2.4K: RSA keypair native-app). Cả 3 được thêm v0.5.45 kèm "harden callback proxies".
-- **Rust:** `src/oauth/providers.rs:446-471` `get_config` không có; `oauth.rs exchange_oauth_compat (4141-4179)` và `authorize_oauth_compat (3170-3274)` không có arm; **không có `/register-session` route**.
-- **Impl:** port 3 flow + `/register-session` route. Trae = marscode device flow (loginTraceId, verification URL). Windsurf = gRPC RegisterUser/GetOneTimeAuthToken. Zed = RSA keypair (native_app_signin).
-- **Test:** `trae_flow_produces_verification_url`, `windsurf_get_one_time_token`, `zed_native_app_signin_url`.
-
-### B2. Grok CLI / Grok Build OAuth device-code — thiếu (P1) [missing]
-- **JS:** `grok-cli.js:8-64` device-code flow (POST device/code với referrer=grok-build + UA `grok-pager/0.2.93 grok-shell/0.2.93`, poll token, postExchange `cli-chat-proxy.grok.com/v1/user`).
-- **Rust:** `oauth.rs:703` **có** liệt kê grok-cli trong `is_device_code_provider` nhưng `get_config` **không có arm** → flow lỗi trước HTTP. Refresh thì được (token_refresh.rs:1038-1045).
-- **Impl:** thêm `grok-cli` arm vào `get_config` + device-code flow.
-- **Test:** `grok_cli_device_code_starts`.
-
-### B3. CodeBuddy Intl OAuth — thiếu (P1) [missing]
-- **JS:** `codebuddy-intl.js` (device-code, X-Domain www.codebuddy.ai, platform=ide, UA IDE/2.63.2). `noPkceDeviceProviders` gồm codebuddy-intl.
-- **Rust:** `oauth.rs:692-706` `is_device_code_provider` liệt kê `codebuddy`/`codebuddy-cn` nhưng **không** `codebuddy-intl`.
-- **Impl:** thêm codebuddy-intl như provider riêng.
-- **Test:** `codebuddy_intl_is_device_code_provider`.
-
-### B4. Kimchi browser_token exchange — thiếu (P1) [missing]
-- **JS:** `kimchi.js:6-72` flowType `browser_token`, buildAuthUrl `/cli-auth?callback+state`, exchangeToken validate `api.cast.ai` rồi fetch `app.kimchi.dev/api/v1/me`. `noPkceExchangeProviders` gồm kimchi.
-- **Rust:** `providers.rs:209-227` có config kimchi (web_app_url/validation_url/user_info_url) nhưng `exchange_oauth_compat` **không có arm** → "Unknown provider".
-- **Impl:** port exchange kimchi + browser_token flow.
-- **Test:** `kimchi_browser_token_exchange`.
-
-### B5. Qoder device-token — sai wire (P1) [behavior-diff]
-- **JS:** `qoder.js:9-76` + `services/qoder.js:69-150`: sinh PKCE+nonce+machineId local, mở `qoder.com/device/selectAccounts?challenge&nonce&machine_id`, poll **GET** `openapi.qoder.sh/api/v1/deviceTokens/...`, response cần `codeVerifier`.
-- **Rust:** `src/oauth/qoder.rs` module standalone **không wire vào route**; path wired là `start_device_code` generic **POST form**.
-- **Impl:** wire qoder.rs vào route + GET poll + PKCE/nonce/machineId + trả codeVerifier.
-- **Test:** `qoder_poll_uses_get_with_nonce`.
-
-### B6. CodeBuddy CN — sai wire (P1) [behavior-diff]
-- **JS:** `codebuddy-cn.js:10-71`: POST stateUrl?platform=CLI với X-No-Authorization/X-No-User-Id → {state,authUrl}, rồi poll **GET** tokenUrl?state với X-No-Enterprise-Id/X-No-Department-Info.
-- **Rust:** generic `start_device_flow` POST form không có per-provider state-then-GET hook.
-- **Impl:** thêm hook state-then-GET cho codebuddy-cn/intl.
-- **Test:** `codebuddy_cn_posts_state_then_gets_token`.
-
-### B7. KiloCode — sai wire (P1) [behavior-diff]
-- **JS:** `kilocode.js`: JSON POST initiateUrl → {code,verificationUrl,expiresIn}; poll **GET** pollUrlBase/{code} phân biệt 202/403/410; approve → fetch `/api/profile` orgId.
-- **Rust:** generic POST form; poll_for_token xử lý mọi non-200 là error/pending, không phân biệt status, không GET.
-- **Impl:** port initiate + GET poll status mapping + org profile.
-- **Test:** `kilocode_poll_maps_202_403_410`.
-
-### B8. Kimi device-code — thiếu X-Msh headers (P1) [behavior-diff]
-- **JS:** `kimi.js:9-39`: sinh deviceId=UUID, gửi `buildKimiHeaders(deviceId)` (X-Msh-Device-Id...) trên request VÀ poll; trả `_kimiDeviceId`; verification_uri_complete = `https://www.kimi.com/code/authorize_device?user_code=...`.
-- **Rust:** `mod.rs device_code::poll_for_token (142-210)` chỉ gửi form không X-Msh; DeviceCodeResponse (592-599) thiếu `_kimiDeviceId` và `verification_uri_complete`.
-- **Impl:** thêm X-Msh headers + `_kimiDeviceId` persistence + verification_uri_complete.
-- **Test:** `kimi_poll_sends_x_msh_device_id`.
-
-### B9. Qwen OAuth — STALE (P1) [behavior-diff]
-- **JS:** v0.5.50 CHANGELOG "remove Qwen"; registry không còn qwen.
-- **Rust:** `providers.rs:143-154` qwen config + `get_config:452` + `oauth.rs:705` + `executor/qwen.rs` + `token_refresh.rs` đều còn.
-- **Impl:** xoá/disable qwen (registry, oauth, executor, refresh) như JS.
-- **Test:** `qwen_not_in_registry`.
-
-### B10. xAI authorize URL — sai param (P1) [behavior-diff]
-- **JS:** `xai.js:39-58` buildAuthUrl params: response_type, client_id, redirect_uri, scope, code_challenge, code_challenge_method, state, nonce, plan='generic', referrer='cli-proxy-api' — **KHÔNG prompt**.
-- **Rust:** `oauth.rs:3455` + `xai.rs:108` thêm `('prompt','login')`.
-- **Impl:** xoá `prompt=login`.
-- **Test:** `xai_auth_url_has_no_prompt`.
-
-### B11. Codex refresh — JSON vs form + mất id_token (P1) [behavior-diff]
-- **JS:** `tokenRefresh/providers.js:213-267` `refreshCodexToken` POST **JSON** {client_id, grant_type, refresh_token} + Content-Type application/json; trả `{accessToken, refreshToken, idToken: tokens.id_token, expiresIn}`; `mergeRefreshedCredentials` giữ idToken; `backfillCodexEmails` sửa legacy connections.
-- **Rust:** `token_refresh.rs:406-416` `refresh_form_token` (form-urlencoded); `RefreshResult` (140-144) chỉ access/refresh/expires — **thiếu id_token**; không có backfillCodexEmails.
-- **Impl:** refresh JSON body + thêm `id_token` vào RefreshResult + backfill email/chatgptAccountId.
-- **Test:** `codex_refresh_posts_json_with_id_token`.
-
-### B12. `/register-session` route — thiếu (P1) [missing]
-- **JS:** `route.js:254-266` POST register-session (state từ query+body, register trae/windsurf session + zed codeVerifier server-side; v0.5.50 fix "declare searchParams").
-- **Rust:** `oauth.rs routes() (5360-5420)` không có.
-- **Impl:** thêm route + handler, declare `searchParams`.
-- **Test:** `register_session_route_exists`.
-
-### B13. codeVerifier exempt set — lệch (P1) [behavior-diff]
-- **JS:** `route.js:346` `noPkceExchangeProviders = ["cline","clinepass","kimchi"]`.
-- **Rust:** `oauth.rs:4130-4139` chỉ `provider != "cline"`.
-- **Impl:** thêm clinepass, kimchi.
-- **Test:** `no_pkce_exchange_covers_clinepass_kimchi`.
-
-### B14. Antigravity metadata — string vs numeric (P1) [behavior-diff]
-- **JS:** `oauth.js:44-56` loadCodeAssistClientMetadata/getOAuthClientMetadata → `{ideType:9, platform:<os enum 0-5>, pluginType:2}` (numeric).
-- **Rust:** `oauth.rs:83-84` gửi string `{"ideType":"IDE_UNSPECIFIED","platform":"PLATFORM_UNSPECIFIED","pluginType":"GEMINI"}`; còn thêm `x-request-source:local` + `X-Goog-Api-Client` headers mà JS không gửi.
-- **Impl:** numeric ClientMetadata; scope header fixes chỉ tới loadCodeAssist/onboardUser.
-- **Test:** `antigravity_metadata_is_numeric`.
-
-### B15. Device-code response — thiếu fields (P1) [behavior-diff]
-- **JS:** `route.js:227-232` trả `{...deviceData, codeVerifier: deviceData.codeVerifier || authData.codeVerifier}`; kimi/kilocode/github trả `verification_uri_complete`.
-- **Rust:** `DeviceCodeResponse (592-599)` chỉ device_code/user_code/verification_uri/interval/expires_in.
-- **Impl:** thêm `verification_uri_complete` + `codeVerifier`.
-- **Test:** `device_code_response_has_code_verifier`.
-
-### B16. GitHub postExchange — v1 vs v2 (P1) [behavior-diff]
-- **JS:** `github.js:55-95` postExchange fetch `copilot_internal/v2/token` (GET) + `api.github.com/user` (Bearer + X-GitHub-Api-Version 2022-11-28 + UA GitHubCopilotChat/0.26.7); mapTokens lưu copilot v2 + PSD.
-- **Rust:** `oauth/mod.rs exchange_github_copilot_token (253-279)` POST `copilot_internal/v1/token` (v1, POST); poll_device_code lưu v1 token không merge v2+user.
-- **Impl:** GET v2 + merge user PSD + đúng UA/apiVersion.
-- **Test:** `github_post_exchange_uses_v2_get`.
-
----
-
-## PHẦN C — Media (TTS / STT / Embedding / Image / Search / Video)
-
-### C1. Selfhosted STT / TTS / Embedding (P0) [missing]
-Xem A2 — 3 provider selfhosted, per-connection baseUrl, **no-openai-fallback guard** cho embedding.
-
-### C2. Dedicated search providers không với tới qua bare provider-id (P1) [behavior-diff]
-- **JS:** `src/sse/handlers/search.js:34` nhận `body.provider || body.model` làm provider id; SKILL.md:91 ghi `"provider":"tavily" ≡ "model":"tavily"`.
-- **Rust:** `media.rs:291-298` generic_media_handler yêu cầu `body.model`; `model/mod.rs:303-338` `infer_provider_from_model_name("tavily")` không resolve (catalog có tavily/exa/serper/brave-search/searxng nhưng ALIAS_TO_PROVIDER_ID mod.rs:9-129 bỏ sót).
-- **Impl:** thêm các search provider vào ALIAS_TO_PROVIDER_ID + infer provider từ catalog khi model là search id.
-- **Test:** `bare_tavily_model_resolves_to_tavily_provider`.
-
-### C3. Chat-based search providers — thiếu (P1) [missing]
-- **JS:** `search/chatSearch.js:16-270` CHAT_SEARCH_CONFIG: gemini (google_search tool), openai (web_search tool), xai (web_search /v1/responses), kimi ($web_search builtin), minimax, perplexity, perplexity-agent, vercel-ai-gateway. Trả `{answer, citations}` — path khác hẳn (POST chat/completions với search tool).
-- **Rust:** `search/providers.rs:14-28` `lookup()` chỉ 10 dedicated providers (serper, brave-search, perplexity, exa, tavily, google-pse, linkup, searchapi, youcom, searxng); **không có chat-based**.
-- **Impl:** port chatSearch.js — mỗi provider wrap chat-completions + search tool, trả {answer, citations}.
-- **Test:** `chat_search_gemini_uses_google_search_tool`.
-
-### C4. Perplexity search adapter — endpoint KHÔNG TỒN TẠI (P1) [wrong-url]
-- **JS:** `perplexity.js:29-34` KHÔNG có searchConfig — chỉ searchViaChat `{defaultModel:"sonar", endpoint:"https://api.perplexity.ai/chat/completions"}`. `callers.js:243` buildPerplexityRequest không bao giờ được dispatch.
-- **Rust:** `search/providers.rs:240-247` PERPLEXITY.build_url → `https://api.perplexity.ai/search` (POST {query,max_results}) — **endpoint này không tồn tại**.
-- **Impl:** xoá dedicated perplexity adapter; chuyển sang chat-search (C3).
-- **Test:** `perplexity_search_uses_chat_completions_not_search`.
-
-### C5. youcom search URL (P1) [wrong-url] — `ydc-index.io/v1/search` vs `api.you.com/search`. Fix `providers.rs:829`.
-
-### C6. searxng URL + env override (P1) [behavior-diff]
-- **JS:** `runtimeConfig.js:49` `SEARXNG_URL = envUrl("SEARXNG_URL", "http://localhost:8888/search")`.
-- **Rust:** `search/providers.rs:920` hardcode `http://localhost:8080` → `/search`; **không đọc SEARXNG_URL env**.
-- **Impl:** thêm env override + đổi default sang `http://localhost:8888/search`.
-- **Test:** `searxng_url_uses_env_override`.
-
-### C7. Search timeout + sanitize (P1) [behavior-diff]
-- **JS:** `search/index.js:14` GLOBAL_TIMEOUT_MS=15000, :96 `timeout = min(providerConfig.timeoutMs||10000, remaining)`; :14-18 sanitizeQuery reject control chars `[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]` + NFKC normalize + trim + collapse whitespace.
-- **Rust:** `search/handler.rs:9` GLOBAL_TIMEOUT=30s cố định; không sanitize.
-- **Impl:** timeout per-provider (10s cap, 15s global) + sanitizeQuery.
-- **Test:** `search_query_sanitized_nfkc`.
-
-### C8. Chat-based search failover (P1) [missing]
-- **JS:** `search/index.js:165-181` khi dedicated provider fail với retriable status (không phải 400/401/403/404) trong timeout, nếu có searchViaChat → failover.
-- **Rust:** không có.
-- **Impl:** thêm failover branch.
-- **Test:** `search_fails_over_to_chat_on_500`.
-
-### C9. Xiaomi-MiMo TTS — sai API (P1) [behavior-diff]
-- **JS:** `ttsProviders/xiaomi-mimo.js` SPECIAL_ADAPTER POST `https://api.xiaomimimo.com/v1/chat/completions` với `messages:[{role:"assistant",content:text}]` + optional `{role:"user",...}` style, `audio.voice` top-level.
-- **Rust:** `tts/mod.rs` không có xiaomi-mimo; generic forwarder POST `https://api.xiaomimimo.com/v1/audio/speech` (OpenAI audio/speech) — **API khác hoàn toàn**.
-- **Impl:** port SPECIAL_ADAPTER chat-completions contract + preset voices 冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean + style control + language hint.
-- **Test:** `xiaomi_mimo_tts_posts_chat_completions`.
-
-### C10. Gemini TTS stale (P1) [behavior-diff]
-- **JS:** `gemini.js:7` FALLBACK_MODEL=`gemini-3.1-flash-tts-preview`; KNOWN_MODELS = [gemini-3.1-flash-tts-preview, gemini-2.5-flash-preview-tts, gemini-2.5-pro-preview-tts].
-- **Rust:** `tts/gemini.rs:15-17` DEFAULT_MODEL=`gemini-2.5-flash-preview-tts`, KNOWN_MODELS thiếu gemini-3.1.
-- **Impl:** cập nhật model list.
-- **Test:** `gemini_tts_default_is_3_1`.
-
-### C11. Tortoise TTS URL (P1) [wrong-url] — `http://localhost:5000/api/tts` vs `8000/tts`. Fix `tts/mod.rs:153`.
-
-### C12. OpenRouter TTS headers + model parse (P1) [behavior-diff]
-- **JS:** `openrouter.js:48` headers `HTTP-Referer: https://endpoint-proxy.local`, `X-Title: Endpoint Proxy`; single-slash model → tts_model=full, voice=last segment.
-- **Rust:** `tts/openrouter.rs:56-59` hardcode `https://openproxy.local`/`OpenProxy`; :31-43 **đảo** logic model/voice.
-- **Impl:** đúng headers + đúng split.
-- **Test:** `openrouter_tts_headers_match`.
-
-### C13. Selfhosted-embedding no-fallback guard (P1) [missing] — xem A2. Rust `OpenAiCompatNodeAdapter` (embeddings/base.rs:169-179) fallback api.openai.com — **phải chặn**.
-
-### C14. vercel-ai-gateway embeddings (P1) [missing]
-- **JS:** `embeddingProviders/index.js:9` OPENAI_COMPAT_PROVIDERS gồm vercel-ai-gateway; `vercel-ai-gateway.js:32` baseUrl `https://ai-gateway.vercel.sh/v1/embeddings`.
-- **Rust:** `embeddings/mod.rs:29-50` không có.
-- **Impl:** thêm adapter.
-- **Test:** `embeddings_covers_vercel_ai_gateway`.
-
-### C15. xai image bodyFields (P1) [behavior-diff]
-- **JS:** `xai.js:38` imageConfig `bodyFields:["model","prompt","n","response_format"]` — strip quality/style.
-- **Rust:** không có xai adapter → forward full body (rò quality/style).
-- **Impl:** thêm xai image adapter với bodyFields whitelist.
-- **Test:** `xai_image_strips_quality_style`.
-
-### C16. Antigravity image (P1) [missing]
-- **JS:** `imageProviders/antigravity.js` useExecutor → antigravity executor, body `{contents:[{parts:[text,inlineData]}]}` Gemini-style, normalize candidates[].inlineData.
-- **Rust:** không có adapter; generic forwarder → `https://cloudcode-pa.googleapis.com/v1internal/images/generations` (URL không tồn tại).
-- **Impl:** port executor-delegation path.
-- **Test:** `antigravity_image_uses_gemini_contents`.
-
-### C17. Cloudflare num_steps (P1) [behavior-diff]
-- **JS:** `cloudflareAi.js:12-19` OPTIONAL_FIELDS gồm `num_steps`.
-- **Rust:** `cloudflare_ai.rs:27-33` thiếu `num_steps`.
-- **Impl:** thêm.
-- **Test:** `cloudflare_image_keeps_num_steps`.
-
-### C18. Nanobanana typo (P1) [behavior-diff]
-- **JS:** `nanobanana.js:23` `type: isEdit ? "IMAGETOIAMGE" : "TEXTTOIAMGE"` — **cố ý** (upstream API contract).
-- **Rust:** `nanobanana.rs:64` `"IMAGE_TO_IMAGE"`/`"TEXT_TO_IMAGE"` — "sửa" sai.
-- **Impl:** **giữ nguyên typo**.
-- **Test:** `nanobanana_sends_typo_type`.
-
-### C19. Codex image stale + không SSE (P1) [behavior-diff]
-- **JS:** `codex.js:8-11` CODEX_USER_AGENT=`codex_cli_rs/0.136.0`, CODEX_VERSION=`0.136.0`; buildSseResponse pipes `progress`/`partial_image`/`done`/`error` events tới client.
-- **Rust:** `image/codex.rs:21-25` stale (`codex-imagen/0.2.6`, `0.129.0`); build_sse_response đọc cả stream vào memory (30s cap) trả JSON 1 lần.
-- **Impl:** cập nhật constants + true SSE streaming.
-- **Test:** `codex_image_streams_sse`.
-
-### C20. Media 401-403 refresh-then-retry (P1) [behavior-diff]
-- **JS:** imageGenerationCore.js:153-185 / embeddingsCore.js:117-151 / videoCore.js:155-172 — refresh trên 401/403 rồi retry.
-- **Rust:** image/embeddings/video handlers không có.
-- **Impl:** thêm refresh-then-retry cho cả 3.
-- **Test:** `image_refreshes_and_retries_on_401`.
-
-### C21. Video error sanitize + refresh (P1) [behavior-diff]
-- **JS:** `videoCore.js:42-50` sanitizeSecrets redact Bearer tokens khỏi error text; :155-172 refresh-once/retry-once.
-- **Rust:** `media.rs:980-981,1052` forward error text verbatim; không sanitize, không refresh.
-- **Impl:** thêm sanitizeSecrets + refresh branch.
-- **Test:** `video_error_redacts_bearer_token`.
-
----
-
-## PHẦN D — Translator (field mapping / wrapper / envelope)
-
-### D1. Drop temperature cho Claude models (P1) [missing]
-- **JS:** `translator/concerns/paramSupport.js:10` rule `{ match: /claude/i, drop: ["temperature"] }`, áp bởi `executors/default.js:78` `stripUnsupportedParams`. Anthropic reject temperature (#1748). Còn thiếu: github gpt-5.4 temperature rule, github copilot claude thinking/reasoning_effort rule, cloudflare-ai flattenContent rule, volcengine-ark maxOutputCap/clamp rules.
-- **Rust:** `strip_unsupported.rs:15-34` `should_strip` chỉ strip max_completion_tokens (anthropic), reasoning_effort (gemini/vertex), max_tokens (gemini). **Không có temperature rule, không model-pattern match.**
-- **Impl:** thêm STRIP_RULES: `/claude/i` → drop temperature; github gpt-5.4; copilot claude thinking/reasoning_effort; cloudflare-ai flattenContent; volcengine-ark maxOutputCap/clamp. Cần model-pattern matching.
-- **Test:** `claude_model_strips_temperature`.
-
-### D2. preserveCacheControl hardcode false — alicode hỏng (P1) [behavior-diff]
-- **JS:** `translator/index.js:125-127` `filterToOpenAIFormat(result, { preserveCacheControl: !!PROVIDERS[provider]?.quirks?.preserveCacheControl })`. Registry alicode.js:19, alicode-intl.js:19, alims-intl.js:... có `quirks.preserveCacheControl:true`.
-- **Rust:** `translator/registry.rs:486` `filter_to_openai_format(body, false)` — hardcode false, không lookup quirk.
-- **Impl:** truyền provider quirk vào filter; giữ cache_control khi flag true.
-- **Test:** `alicode_preserves_cache_control`.
-
-### D3. Kiro tool_result status hardcode "success" — mất is_error (P1) [behavior-diff]
-- **JS:** `openai-to-kiro.js:148` `status: block.is_error ? "error" : "success"`; :160 `msg.is_error || msg.status === "error" ? "error" : "success"`; `claude-to-kiro.js:110` tương tự.
-- **Rust:** `openai_to_kiro.rs:232,248` + `claude_to_kiro.rs:226` hardcode `"status":"success"`.
-- **Impl:** map is_error/status==="error" → "error".
-- **Test:** `kiro_tool_result_preserves_is_error`.
-
-### D4. canonicalizeKiroConversation — thiếu (P1) [missing]
-- **JS:** `kiroConversation.js:79-110` normalizeKiroToolSpecs (uniqueName 64-char cap, description 10237 cap), :194-209 reserveToolId, :247-324 reconcileToolPair (adjacent 1:1), cleanSchemaValue (strip additionalProperties/empty required), validateKiroConversation + flattenAllStructuredTools repair.
-- **Rust:** `openai_to_kiro.rs:85-113` + `claude_to_kiro.rs:100-125` inline naive toolSpecification, **không cap length, không dedup, không repair**.
-- **Impl:** port canonicalizeKiroConversation.
-- **Test:** `kiro_conversation_canonicalized_tool_specs`.
-
-### D5. Kiro thinking prefix thiếu max_thinking_length (P1) [behavior-diff]
-- **JS:** `kiroConstants.js:354-357` `buildThinkingSystemPrefix` emit `<thinking_mode>enabled</thinking_mode>\n<max_thinking_length>{budget}</max_thinking_length>` (clamp 1..32000); resolveKiroThinkingBudget honors anthropic-beta interleaved-thinking header + model-name hints.
-- **Rust:** `openai_to_kiro.rs:471-473` + `claude_to_kiro.rs:457-459` chỉ emit `<thinking_mode>enabled</thinking_mode>` — **thiếu tag thứ 2 + clamp**.
-- **Impl:** thêm `<max_thinking_length>` + budget resolve.
-- **Test:** `kiro_thinking_prefix_has_max_thinking_length`.
-
-### D6. Kiro system text wrap — đảo ngược (P1) [behavior-diff]
-- **JS:** `openai-to-kiro.js:165-167` wrap system-origin trong `<instructions>...</instructions>`; `claude-to-kiro.js:254` push raw system text vào systemPrompt.
-- **Rust:** `openai_to_kiro.rs:253` push raw (không wrap); `claude_to_kiro.rs:446` **wrap `<system>{sys}</system>`** mà JS không emit.
-- **Impl:** openai→kiro thêm `<instructions>` wrap; claude→kiro **bỏ** `<system>` wrap.
-- **Test:** `kiro_system_uses_instructions_wrap_openai`.
-
-### D7. Kiro inferenceConfig — JS luôn emit (P1) [behavior-diff]
-- **JS:** `openai-to-kiro.js:416-421` `if (maxTokens || temperature !== undefined || topP !== undefined)` với maxTokens const 32000 → **luôn truthy** → luôn gửi inferenceConfig.maxTokens.
-- **Rust:** `openai_to_kiro.rs:596-605` `if temperature.is_some() || top_p.is_some()` → chỉ gửi khi có temperature/topP.
-- **Impl:** luôn emit inferenceConfig với maxTokens.
-- **Test:** `kiro_always_emits_inference_config`.
-
-### D8. Antigravity envelope thiếu userAgent/requestType/requestId (P1) [missing]
-- **JS:** `openai-to-gemini.js:271-276` wrapInCloudCodeEnvelope set `userAgent:"antigravity", requestType:"agent", requestId` (uuid từ sessionId/model); `executors/antigravity.js:268-276` re-set.
-- **Rust:** `openai_to_gemini.rs:1033-1035` chỉ wrap `{"request": inner}`; `antigravity.rs:813-822` chỉ inject projectId.
-- **Impl:** thêm userAgent/requestType/requestId.
-- **Test:** `antigravity_envelope_has_request_id`.
-
-### D9. Antigravity thiếu isClaudeModel branch (P1) [missing]
-- **JS:** `openai-to-gemini.js:424-437` `isClaudeModel(model)` → claude* qua `openaiToClaudeRequestForAntigravity` + `wrapInCloudCodeEnvelopeForClaude` (generationConfig, temperature: claudeRequest.temperature||1, maxOutputTokens: claudeRequest.max_tokens||4096).
-- **Rust:** `openai_to_gemini.rs:955-1050` luôn Gemini path; không branch claude.
-- **Impl:** port claude-model branch.
-- **Test:** `antigravity_claude_model_uses_claude_envelope`.
-
-### D10. toolNameMap không seed vào streaming state (P1) [missing]
-- **JS:** `utils/stream.js:61-62` `state = {..., toolNameMap, customToolNames: new Set(...), model}`; translators đọc (claude-to-openai etc.).
-- **Rust:** `chat.rs:2689-2690,2782-2783` `ResponseTransformState::default()` không toolNameMap; `chat.rs:2620` nhận tool_name_map nhưng không ghi vào state streaming.
-- **Impl:** seed toolNameMap vào ResponseTransformState.
-- **Test:** `streaming_state_has_tool_name_map`.
-
-### D11. _customToolNames passthrough + custom_tool_call (P1) [missing]
-- **JS:** `request/openai-responses.js:113,229` set `_customToolNames`; `chatCore.js:182` extract; `utils/stream.js:62` seed; `response/openai-responses.js:261` emit `custom_tool_call` / `custom_tool_call_input.delta`.
-- **Rust:** `request/openai_responses.rs` không emit _customToolNames; `response/openai_responses.rs:290-334` luôn emit `function_call` + `function_call_arguments.delta`.
-- **Impl:** phân biệt custom tool → emit custom_tool_call.
-- **Test:** `custom_tool_streams_custom_tool_call`.
-
-### D12. openai-responses→chat drop reasoning items (P1) [behavior-diff]
-- **JS:** `request/openai-responses.js:41-59` extractReasoningText + attachPendingReasoning, :149-160 REASONING case buffer summary + encrypted_content lên assistant message kế.
-- **Rust:** `request/openai_responses.rs:152` `Some("reasoning") => {}` **no-op** — drop hết.
-- **Impl:** buffer reasoning + attach.
-- **Test:** `responses_to_chat_attaches_pending_reasoning`.
-
-### D13. client_metadata không xoá (P1) [missing]
-- **JS:** `request/openai-responses.js:247` `delete result.client_metadata`.
-- **Rust:** `request/openai_responses.rs:184-190` remove input/instructions/include/prompt_cache_key/store/reasoning nhưng **không client_metadata**.
-- **Impl:** thêm `client_metadata` vào remove list.
-- **Test:** `responses_to_chat_strips_client_metadata`.
-
-### D14. chat→responses thiếu reasoning_effort → reasoning (P1) [missing]
-- **JS:** `request/openai-responses.js:422` `if (body.reasoning_effort !== undefined) result.reasoning = { effort: body.reasoning_effort, summary: "auto" }`.
-- **Rust:** `request/openai_responses.rs:341-358` pass temperature/max_tokens/... nhưng **không build reasoning object**.
-- **Impl:** thêm mapping.
-- **Test:** `chat_to_responses_maps_reasoning_effort`.
-
-### D15. claude→openai thiếu reasoning_effort (P1) [missing]
-- **JS:** `claude-to-openai.js:83-91` `result.reasoning_effort = body.reasoning_effort ?? body.reasoning?.effort; if (body.reasoning !== undefined) result.reasoning = body.reasoning`.
-- **Rust:** `claude_to_openai.rs` không handling reasoning_effort.
-- **Impl:** thêm forward.
-- **Test:** `claude_to_openai_forwards_reasoning`.
-
-### D16. reasoning_content injector thiếu MiniMax (P1) [missing]
-- **JS:** `reasoningContentInjector.js:9` providerRuleFor đọc `PROVIDERS[provider]?.reasoningInject`; registry minimax.js:26 / minimax-cn.js:26 / deepseek.js:25 `reasoningInject: { scope: ... }`.
-- **Rust:** `reasoning_content_injector.rs:23-36` chỉ special-case "deepseek".
-- **Impl:** thêm minimax, minimax-cn.
-- **Test:** `minimax_gets_reasoning_content_placeholder`.
-
-### D17. Claude max_tokens ceiling — hardcode vs capabilities (P1) [behavior-diff]
-- **JS:** `formats/claude.js:201-218` ceiling = `getCapabilitiesForModel(...).maxOutput` (opus-4.6/4.7/4.8 = 128000) + thinking-budget reconciliation.
-- **Rust:** `claude_format.rs:155-171` hardcode opus→200000, sonnet→128000, else 64000; không reconciliation.
-- **Impl:** model-capability-driven + reconciliation.
-- **Test:** `claude_max_tokens_uses_model_capabilities`.
-
-### D18. reasoning_details array thiếu (P1) [behavior-diff]
-- **JS:** `concerns/reasoning.js:19-22` extractReasoningText handle `delta.reasoning_details` array (MiniMax reasoning_split=true: [{text|content}]).
-- **Rust:** `openai_to_claude.rs:264-270` chỉ check `reasoning_content`/`reasoning` string.
-- **Impl:** thêm reasoning_details array handling.
-- **Test:** `openai_to_claude_handles_reasoning_details`.
-
----
-
-## PHẦN E — Executor (stub hỏng / sai wire / thiếu)
-
-### E1. grok-web executor STUB HỎNG (P0) [behavior-diff]
-- **JS:** `grok-web.js:9-24` MODEL_MAP routes grok-3/4/4.1/4.2 → {grokModel,modelMode,isThinking}; :247-259 grokPayload (temporary:true, modelName, modelMode); ~15 anti-bot headers (Sentry-statsig-id...); NDJSON→SSE rewrite.
-- **Rust:** `grok_web.rs:144-146` build_url → `https://grok.com/app-chat/conversations/new` (**thiếu /rest**); :148-163 chỉ Content-Type, Accept.
-- **Impl:** port MODEL_MAP + grokPayload + anti-bot headers + NDJSON→SSE + đúng URL.
-- **Test:** `grok_web_builds_payload_with_model_map`.
-
-### E2. perplexity-web executor STUB HỎNG (P0) [behavior-diff]
-- **JS:** `perplexity-web.js:10-18` MODEL_MAP pplx-* → [mode, modelPref]; :160-182 buildPplxRequestBody (query_str, params.search_focus, frontend_uuid, last_backend_uuid); session cache; markdown post-process.
-- **Rust:** `grok_web.rs:304-306` build_url → `https://perplexity.ai/rest/sse/perplexity_ask` (**thiếu www**); :308-324 chỉ Content-Type/Accept.
-- **Impl:** port body + session cache + response cleaning + đúng host.
-- **Test:** `perplexity_web_builds_pplx_body`.
-
-### E3. windsurf — thiếu gRPC-web executor (P0) [missing]
-- **JS:** `windsurf.js:15-18` WS_CHAT_URL = `https://server.codeium.com/exa.language_server_pb.LanguageServerService/GetChatMessage`; :26-119 MODEL_ALIAS_MAP (50+); Content-Type `application/grpc-web+proto`, Bearer apiKey + Metadata.api_key protobuf; decode binary CompletionChunk → OpenAI SSE.
-- **Rust:** `provider.rs:1377-1379` windsurf = openai(`https://server.self-serve.windsurf.com`) — host thường, không phải gRPC-web.
-- **Impl:** port gRPC-web executor + MODEL_ALIAS_MAP + protobuf decode.
-- **Test:** `windsurf_uses_grpc_web_endpoint`.
-
-### E4. trae — thiếu SOLO remote-agent executor (P0) [missing]
-- **JS:** `trae.js:44-339` TraeExecutor: createSession POST /chat_sessions, streamEvents GET /chat_sessions/{id}/events?reply_to_message_id=, Cloud-IDE-JWT auth, X-Trae-Client-Type/X-Preferenced-Language/x-user-region headers, cumulative-thought rendering.
-- **Rust:** `provider.rs:1087-1089` trae = openai(`https://core-normal.trae.ai/api/remote/v1`); chat.rs không có case → fall generic.
-- **Impl:** port 2-phase SOLO agent protocol.
-- **Test:** `trae_creates_chat_session`.
-
-### E5. zed — catalogued nhưng không executor (P0) [missing]
-- **JS:** `zed.js:207-302` ZedExecutor (thread envelope {thread_id,prompt_id,provider,provider_request}, zedLlmFetch LLM-token exchange, NDJSON status-frame stream).
-- **Rust:** zed có trong provider_catalog.json:5852-5854 nhưng không có executor/provider.rs/default.rs.
-- **Impl:** port ZedExecutor + LLM-token exchange.
-- **Test:** `zed_executor_builds_thread_envelope`.
-
-### E6. codebuddy-intl — catalogued nhưng không executor (P0) [missing]
-- **JS:** `codebuddy-intl.js:16-41` transformRequest forceStream + delete reasoning_effort (none/off) + reasoning_summary=auto + message rewrite.
-- **Rust:** codebuddy-intl trong catalog (alias cbai) nhưng không có executor/registry/default.
-- **Impl:** port CodeBuddyIntlExecutor.
-- **Test:** `codebuddy_intl_forces_stream`.
-
-### E7. opencode-go — default.rs config STALE (P1) [behavior-diff]
-- **JS:** `opencode-go.js:7-14` MESSAGES_FORMAT_MODELS = {minimax-m3, m2.7, m2.5, qwen3.7-max/plus, qwen3.6-plus} → /zen/go/v1/messages.
-- **Rust:** `opencode_go.rs:26-37` đúng (6-model claude set); nhưng `default.rs:139-` giữ config STALE (sai path, chỉ 2/6 model) — hazard khi DefaultExecutor fallback.
-- **Impl:** sửa default.rs opencode-go config khớp dedicated executor.
-- **Test:** `opencode_go_default_config_matches_dedicated`.
-
-### E8. iflow — sai host mintlify (P0) [wrong-url]
-- **JS:** `iflow.js:88` buildUrl → registry baseUrl `https://apis.iflow.cn/v1/chat/completions`.
-- **Rust:** `iflow.rs:16` IFLOW_BASE_URL = `https://iflow.mintlify.cc` (không path). HMAC signature đúng nhưng endpoint sai.
-- **Impl:** đổi sang `https://apis.iflow.cn/v1/chat/completions`.
-- **Test:** `iflow_uses_apis_iflow_cn`.
-
-### E9. codebuddy-cn — thiếu neutralizer (P1) [behavior-diff]
-- **JS:** `codebuddy-cn.js:28-48` AGENT_PATTERN regex + length>2000 catch-all replace Claude Code/Cursor system prompts với NEUTRAL_PROMPT (Tencent content filter); xoá reasoning_effort none/off.
-- **Rust:** `codebuddy_cn.rs:93-111` chỉ forceStream + reasoning_summary; **không neutralize, không xoá none/off**.
-- **Impl:** port neutralizer + none/off deletion.
-- **Test:** `codebuddy_cn_neutralizes_agent_prompt`.
-
-### E10. kimchi — strip sai hướng (P1) [behavior-diff]
-- **JS:** `kimchi.js:79-87` strip `reasoning_content` từ **assistant REQUEST messages** (length>8); :110-114 xoá reasoning_effort/reasoning/thinking cho anthropic-backed (regex /claude|anthropic/i).
-- **Rust:** `kimchi.rs:144-161` strip từ **RESPONSE**; :50-52 is_anthropic_backed chỉ starts_with("kimchi-sonnet")/("kimchi-haiku") — **đảo hướng + detector hẹp**.
-- **Impl:** strip từ request assistant messages + regex detector.
-- **Test:** `kimchi_strips_request_reasoning_content`.
-
-### E11. kiro — thiếu repair loop (P1) [behavior-diff]
-- **JS:** `kiro.js:130-137` appendRepairInstruction, :139-171 stopDisposition, :173-185 isEllipsisOnly/isShortFutureAction, execute() retry với repair instruction.
-- **Rust:** `kiro.rs` không có repair (grep rỗng). Chỉ AWS EventStream wire + signing.
-- **Impl:** port repair loop + stop-disposition + future-action detection (xem thêm B5 tương tự trong media/feature).
-- **Test:** `kiro_repairs_ellipsis_response`.
-
-### E12. grok-cli — thiếu machine-id (P1) [behavior-diff]
-- **JS:** `grok-cli.js:528-549` execute() lazy resolve `getConsistentMachineId("grok-cli-agent")` khi connection không deviceId → UUID; gửi `x-grok-agent-id`.
-- **Rust:** `grok_cli.rs:537-538` agent_id = psd deviceId/agentId; **không machine-id fallback** → x-grok-agent-id (grokl_cli.rs:351-352) không bao giờ gửi.
-- **Impl:** thêm machine-id fallback.
-- **Test:** `grok_cli_derives_machine_id`.
-
-### E13. mimo-free — sai marker text (P1) [behavior-diff]
-- **JS:** `mimo-free.js:24-25` MIMO_SYSTEM_MARKER = "You are MiMoCode, an interactive CLI tool that helps users with software engineering tasks." — upstream gate check **chuỗi chính xác này**.
-- **Rust:** `mimo_free.rs:47-59` "You are MiMoCode, a helpful coding assistant created by MiMo." + rules block dài — **khác chuỗi** → marker substring absent.
-- **Impl:** dùng đúng chuỗi JS.
-- **Test:** `mimo_free_uses_exact_marker`.
-
-### E14. qoder — thiếu jt- routing (P1) [behavior-diff]
-- **JS:** `qoder.js:348-356` token bắt đầu `jt-` (và non-pt có jt- accessToken) → `api2.qoder.sh/algo/api/v2/service/...`.
-- **Rust:** `qoder.rs:26` QODER_CHAT_URL_ENCODED = `https://api3.qoder.sh/algo/...`; :503-505 luôn api3, không jt- branch.
-- **Impl:** thêm jt- branch → api2.
-- **Test:** `qoder_jt_token_routes_to_api2`.
-
-### E15. azure — sai env var names (P1) [behavior-diff]
-- **JS:** `azure.js:10-21` đọc AZURE_ENDPOINT, AZURE_API_VERSION, AZURE_DEPLOYMENT (+ providerSpecificData); fallback api.openai.com.
-- **Rust:** `azure.rs:96-136` đọc AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_VERSION, AZURE_OPENAI_DEPLOYMENT; DEFAULT empty (không fallback).
-- **Impl:** đúng env names + fallback.
-- **Test:** `azure_reads_js_env_names`.
-
-### E16. ollama-local — sai query (P1) [behavior-diff]
-- **JS:** `ollama-local.js:10` `${host}/api/chat` không query (stream là body field).
-- **Rust:** `ollama.rs:166` `{base}/api/chat?stream={stream}` — thêm query param JS không gửi.
-- **Impl:** bỏ query, stream chỉ trong body.
-- **Test:** `ollama_local_no_stream_query`.
-
----
-
-## PHẦN F — Tính năng v0.5.35–v0.5.50
-
-### F1. Vision/audio capacity adapter (P0) [missing]
-- **JS:** `capacityAdapter.js:15` DEFAULT_FALLBACK_MODEL=`oc/mimo-v2.5-free`; :36-50 getCapacityAdapterConfig default-enable pools; prepend pool models **chỉ khi** không model original thoả hard capability; strip history theo context window adapter model.
-- **Rust:** không có capacityAdapter; `combo/mod.rs:189` HARD_CAPS=["vision","pdf"]; detect_required_capabilities (193-260) chỉ vision/pdf.
-- **Impl:** port capacityAdapter service + wiring (default-enable, fallback pool, context strip). Thêm `audioInput`/`videoInput` capabilities.
-- **Test:** `capacity_adapter_prepends_fallback_model`.
-
-### F2. Auto-provision Default Key (P0) [missing]
-- **JS:** `EndpointPageClient.js:266-276` trên endpoint page load, nếu `/api/keys` trả 0 key → POST /api/keys {name:"Default Key",...}.
-- **Rust:** `web/src/components/EndpointPageClient.tsx` không có; không server-side equivalent.
-- **Impl:** thêm auto-provision client-side (hoặc server-side khi keys rỗng).
-- **Test:** `default_key_auto_provisioned_when_empty`.
-
-### F3. codex-tui / Codex Desktop detection (P1) [behavior-diff]
-- **JS:** `clientDetector.js:41-44` codex branch match `codex-tui` || `codex-cli` || `codex_cli_rs` || `codex desktop` hoặc `originator.startsWith('codex_')`.
-- **Rust:** `client_detector.rs:75` chỉ `ua.contains("codex-cli")`; **không đọc originator**.
-- **Impl:** thêm 4 UA + originator prefix.
-- **Test:** `codex_desktop_detected`.
-
-### F4. X-9Router-Token-Saver header (P1) [missing]
-- **JS:** `runtimeConfig.js:68` TOKEN_SAVER_HEADER=`x-9router-token-saver`; `chatCore.js:228-229` tokenSaverEnabled = header?.toLowerCase() !== "off" AND rtk/headroom/caveman/ponytail/pxpipe.
-- **Rust:** không có reference; `chat.rs:831` compress_messages gate chỉ settings.
-- **Impl:** đọc header, AND vào mọi saver enablement.
-- **Test:** `token_saver_off_disables_rtk`.
-
-### F5. Request-details + observability default (P1) [behavior-diff]
-- **JS:** `requestDetailsRepo.js` batched SQLite gated bởi ENABLE_REQUEST_LOGS → UI enableObservability → OBSERVABILITY_ENABLED (default true); `settingsRepo.js:35` `enableObservability: false`.
-- **Rust:** `request_repo.rs:6-22` save() **zero production caller**; `types/mod.rs:554` `observability_enabled: true` (ngược JS).
-- **Impl:** wire save() vào chat path + default OFF.
-- **Test:** `observability_defaults_off`.
-
-### F6. GitHub monthly-exhausted 402 (P1) [missing]
-- **JS:** `auth.js:13-19` githubMonthlyResetMs: resolved provider==github && status==402 && errorText includes "you've reached your additional usage limit for your plan" → cooldown = next UTC month start − now; lock cấp account (model null).
-- **Rust:** `error_config.rs:190-194` 402 → cooldown LONG_MS=2min cố định.
-- **Impl:** port githubMonthlyResetMs + next-UTC-month reset.
-- **Test:** `github_402_holds_to_month_reset`.
-
-### F7. IntelliJ h2c Upgrade (P1) [missing]
-- **JS:** `custom-server.js:69-94` http upgrade h2c → drain body (content-length bounded), replay qua normal handler, remove 'upgrade'/'http2-settings', Connection: close.
-- **Rust:** `main.rs:452` axum::serve không có hyper::upgrade/h2c.
-- **Impl:** thêm h2c upgrade → HTTP/1.1 replay middleware.
-- **Test:** `h2c_upgrade_replays_as_http1`.
-
-### F8. forceStream cached-prompt tokens (P1) [behavior-diff]
-- **JS:** `sseToJsonHandler.js:232-247` inTokens = input_tokens + cache_read_input_tokens/cached_tokens + cache_creation_input_tokens; expose prompt_tokens_details.cached_tokens.
-- **Rust:** `stream_to_json.rs:458-472` chỉ input_tokens.
-- **Impl:** sum cache tokens vào prompt_tokens.
-- **Test:** `sse_to_json_sums_cached_tokens`.
-
-### F9. Headroom byte-level report (P1) [behavior-diff]
-- **JS:** `headroom.js:344-355` formatHeadroomSizeLog body/messages/tools/toolHistory byte before→after + effective % (bodyBytes delta); captureSizeSnaps.
-- **Rust:** `headroom.rs:190-232` chỉ token counts + phantom heuristic.
-- **Impl:** port byte-level snapshot + effective %.
-- **Test:** `headroom_reports_byte_delta`.
-
-### F10. claude-adaptive thinking (P1) [behavior-diff]
-- **JS:** `thinkingUnified.js:238-247` case claude-adaptive: body.thinking = {type:"adaptive"} AND body.output_config = {effort: level}.
-- **Rust:** `thinking_suffix.rs:425-437` chỉ insert output_config.effort; **không thinking.type adaptive**.
-- **Impl:** emit cả 2 fields.
-- **Test:** `claude_adaptive_sets_thinking_type`.
-
-### F11. Kiro integrity recovery (P1) [behavior-diff]
-- **JS:** `kiro.js:149-151` stopDisposition; :400-560 runIntegrityRecovery + readIntegrityAttempt (buffer maxBytes, stall/ttft timeouts, ellipsis/short-final/invalid-tool/missing-terminal → retry once với repair instruction → kiro_* SSE codes).
-- **Rust:** `kiro.rs:288` chỉ POST + decode chunk; `kiro_to_openai.rs:238` stateless converter.
-- **Impl:** port buffer validation + repair retry + kiro_* error codes.
-- **Test:** `kiro_integrity_recovery_on_ellipsis`.
-
-### F12. Cursor HTTP/2 AgentService (P1) [behavior-diff]
-- **JS:** `cursor.js:385-390` AgentService HTTP/2-only, openAgentHttp2Stream (node:http2 duplex); isAgentTextRequest :73 routes plain-text turns.
-- **Rust:** `cursor.rs:20-24` luôn ChatService/StreamUnifiedChatWithTools.
-- **Impl:** thêm HTTP/2 AgentService branch (isAgentTextRequest routing).
-- **Test:** `cursor_agent_text_uses_http2`.
-
-### F13. Grok Build subagent config + expiresAt (P1) [behavior-diff]
-- **JS:** `grokBuildConfig.js:7` GROK_SUBAGENT_TYPES=['general-purpose','explore','plan']; :172-186 write [subagents.models] slots `9router-<type>` + preserved context_window; refresh grok-cli khi expiresAt − now < 5min.
-- **Rust:** `grok_build_settings.rs:340-367` chỉ 1 slot `[model.openproxy]`; không subagent models; không grok-cli refresh.
-- **Impl:** port subagent slots + context_window + expiresAt refresh surface.
-- **Test:** `grok_build_writes_subagent_slots`.
-
-### F14. `9router xai video` CLI (P1) [missing]
-- **JS:** CLI command xai video generation.
-- **Rust:** không có.
-- **Impl:** thêm CLI subcommand.
-- **Test:** `xai_video_cli_exists`.
-
-### F15. Ollama quota tracker (P1) [missing]
-- **JS:** `usage/ollama.js` fetch Session(5h)/Weekly(7d) real usage.
-- **Rust:** `quota_fetcher.rs` static message.
-- **Impl:** port real quota fetch.
-- **Test:** `ollama_quota_fetches_real`.
-
----
-
-## PHẦN G — MITM & RTK
-
-### G1. MITM handlers/DNS/CA (P1) [missing ×3]
-- **JS:** `src/mitm/server.js:58-72` handlers map (antigravity/copilot/kiro/cursor); :316-336 request dispatch (extractModel → MODEL_NO_MAP → rewrite body model → forward localhost router). `mitm/dns/dnsConfig.js:136-210` addDNSEntry/removeAllDNSEntries write `127.0.0.1 <toolhost>` vào /etc/hosts. `mitm/cert/install.js:1-204` installCert (certutil/UAC Windows, sudo macOS, update-ca per-distro Linux, user NSS dbs) + stale cert cleanup.
-- **Rust:** `core/mitm/server.rs:137-283` chỉ raw TLS byte-pump (pump_captured copy bytes); không decode/rewrite model; không hosts-file steering; `cert.rs:112-168` install/uninstall **không bao giờ gọi**.
-- **Impl:** port 3 thành phần MITM đầy đủ.
-- **Test:** `mitm_rewrites_model`, `mitm_hosts_steering`, `mitm_ca_installed`.
-
-### G2. RTK gaps (P1)
-- **G2a. `x-9router-token-saver: off`** — xem F4. [`core/rtk`]
-- **G2b. git-log RTK filter thiếu** — JS `gitLog.js:6-78` (commit headers/Author/Date/subject/stat, drop body, cap GIT_LOG_MAX_LINES=200); Rust `filters/mod.rs:8-101` có GitDiffFilter/GitStatusFilter nhưng không GitLogFilter; autodetect không có git-log branch. [`core/rtk/filters`]
-- **G2c. Caveman prompts thiếu 8 shared directives** — JS `cavemanPrompts.js:11-19` SHARED_EXAMPLES/BOUNDARIES/AUTO_CLARITY/PERSISTENCE/NO_INVENTED_ABBREV/PRESERVE_LANGUAGE/NO_SELF_REFERENCE/NO_DECORATION; Rust `mod.rs:49-91` mỗi level 3-6 câu. [`core/rtk`]
-- **G2d. System prompt injector chỉ OpenAI shape** — JS `systemInject.js:14-25` dispatch CLAUDE/GEMINI/VERTEX/ANTIGRAVITY/RESPONSES; Rust `system_inject.rs:8-42` chỉ messages[] OpenAI. [`core/rtk`]
-- **G2e. Headroom thiếu responses/kiro format** — JS `headroom.js:266-323` 4 shapes (claude/responses/kiro/openai) translate→compress→translate-back; Rust `headroom.rs:255-300` chỉ claude. [`core/rtk/headroom.rs`]
-- **G2f. find filter thiếu backslash** — JS `find.js:22-29` lastIndexOf("/") và "\\"; Rust `filters/mod.rs:330-342` chỉ rfind('/'). [`core/rtk/filters`]
-
----
-
-## PHẦN H — DB / Usage / CLI
-
-### H1. requestDetails observability chạy (P2) [missing] — xem F5. `request_repo.rs save()` không caller.
-
-### H2. Observability default OFF (P2) [behavior-diff] — xem F5.
-
-### H3. Stuck pending-request 60s auto-clear (P2) [missing]
-- **JS:** `usageRepo.js:12` PENDING_TIMEOUT_MS=60*1000, :172-185 trackPendingRequest set timer zero counts.
-- **Rust:** `usage_live.rs:65-111` chỉ inc/dec; không timer.
-- **Impl:** thêm timer.
-- **Test:** `pending_request_clears_after_60s`.
-
-### H4. /api/usage/history thiếu fields (P2) [behavior-diff]
-- **JS:** `usageRepo.js:327-334` getUsageHistory maps {timestamp, provider, model, connectionId, apiKeyMasked: maskApiKey(...), endpoint, status, tokens...}.
-- **Rust:** `usage.rs:307-336` UsageEntryDto chỉ {timestamp, provider, model, prompt_tokens, completion_tokens, cost}.
-- **Impl:** thêm connectionId/apiKeyMasked/endpoint/status/tokens.
-- **Test:** `usage_history_includes_api_key_masked`.
-
-### H5. Request-log timestamp format (P2) [behavior-diff]
-- **JS:** `usageRepo.js:734-737` formatLogDate pad `DD-MM-YYYY HH:MM:SS` local; :758-767 `ts | model | provider`.
-- **Rust:** raw RFC3339.
-- **Impl:** format local.
-- **Test:** `request_log_uses_local_timestamp`.
-
-### H6. Usage fetch không refresh OAuth (P2) [missing]
-- **JS:** usage fetch refresh + force-retry trên auth-expired.
-- **Rust:** không.
-- **Impl:** thêm refresh.
-- **Test:** `usage_refreshes_on_auth_expired`.
-
-### H7. API-key usage whitelist (P2) [missing]
-- **JS:** 12 providers trong whitelist; accept authType `api_key`.
-- **Rust:** 6 providers; không accept `api_key`.
-- **Impl:** mở rộng whitelist.
-- **Test:** `apikey_usage_whitelist_covers_12`.
-
-### H8. Vercel/CodeBuddy/Grok/Kiro quota handlers (P2) [missing]
-- **Vercel AI Gateway** credit usage handler thiếu. **CodeBuddy CN/Intl** quota handler thiếu. **Grok CLI** quota fetch là stub (thiếu JWT tier, Monthly/On-demand/Prepaid, exhausted row). **Kiro** quota fetch drop `tokentype:API_KEY`/`TokenType:EXTERNAL_IDP` headers + profileArn.
-- **Impl:** port 4 handlers theo JS.
-- **Test:** mỗi provider có quota test.
-
-### H9. saveRequestUsage dedupe (P2) [behavior-diff]
-- **JS:** dedupe identical rows.
-- **Rust:** `track_request` blind append.
-- **Impl:** dedupe.
-- **Test:** `request_usage_dedupes`.
-
-### H10. DB migrations (P2) [missing]
-- **JS:** có versioned migrations + additive column sync.
-- **Rust:** schema frozen tại CREATE IF NOT EXISTS.
-- **Impl:** thêm migration framework.
-- **Test:** `migrations_apply_idempotently`.
-
-### H11. Grok Build slot name (P2) [behavior-diff] — `openproxy` vs `9router` + subagentModels. Xem F13.
-
-### H12. `9router xai video` CLI (P2) [missing] — xem F14.
-
-### H13. Exa MCP toggle (P2) [missing]
-- **JS:** claude settings viết `~/.claude.json` mcpServers.
-- **Rust:** không.
-- **Impl:** thêm toggle.
-- **Test:** `exa_mcp_writes_claude_json`.
-
----
-
-## PHẦN I — Web dashboard (Astro)
-
-### I1. OAuth cards thiếu: trae / windsurf / zed (P1) [missing]
-- **JS:** `providers.js:66-68` OAUTH_PROVIDERS từ registry trae.js/windsurf.js/zed.js.
-- **Rust:** `web/src/shared/constants/providers.ts:52-83` OAUTH_PROVIDERS thiếu 3. (zed hidden trong JS nên chỉ cần khi đã thêm backend).
-- **Impl:** thêm cards.
-- **Test:** `web_oauth_cards_include_trae_windsurf`.
-
-### I2. OAuth cards thiếu: clinepass / codebuddy-cn / codebuddy-intl / gitlab (P1) [missing]
-- **JS:** registry clinepass (priority 85), codebuddy-cn (90), codebuddy-intl (90) — visible; gitlab hidden (chỉ search).
-- **Rust:** `providers.ts:52-83` thiếu cả 4 (backend có clinepass/codebuddy_cn/gitlab).
-- **Impl:** thêm cards.
-- **Test:** `web_oauth_cards_include_codebuddy_intl`.
-
-### I3. API-key cards thiếu 10 provider (P1) [missing]
-- **JS:** alims-intl, commandcode, featherless, perplexity-agent, selfhosted-embedding/stt/tts, tokenrouter, venice, vercel-ai-gateway, mmf.
-- **Rust:** `providers.ts:84-183` APIKEY_PROVIDERS thiếu (snapshot hardcode).
-- **Impl:** thêm cards + models.
-- **Test:** `web_apikey_cards_include_tokenrouter`.
-
-### I4. Qwen stale card (P1) [behavior-diff]
-- **JS:** registry v0.5.50 không còn qwen.
-- **Rust:** `providers.ts:14` qwen deprecated banner.
-- **Impl:** xoá.
-- **Test:** `web_has_no_qwen_card`.
-
-### I5. kimi duplicate card (P1) [behavior-diff]
-- **JS:** kimi.js:23 category 'oauth' duy nhất + authModes ['oauth','apikey'] → hiện 1 lần.
-- **Rust:** `providers.ts:59` (OAUTH) + `:87` (APIKEY) → 2 cards.
-- **Impl:** bỏ khỏi APIKEY_PROVIDERS.
-- **Test:** `web_kimi_shows_once`.
-
-### I6. Usage chart shape (P1) [behavior-diff]
-- **JS:** `route.js` → bare array `[{label:'Mar 7',tokens,cost}]`.
-- **Rust:** `usage.rs:1046` → `{data:[{date:'Mar 7',tokens,cost}]}`.
-- **Impl:** đổi envelope + key `date`→`label`.
-- **Test:** `usage_chart_returns_bare_array`.
-
-### I7. Quota visibility settings (P1) [missing]
-- **JS:** `ProviderLimits/index.js:152` quotaVisibility state, :575-624 updateQuotaVisibility/handleHideQuota/handleShowQuota → PATCH /api/settings {provider:{hidden:[keys]}}.
-- **Rust:** `ProviderLimits/index.tsx` không có.
-- **Impl:** thêm UI + settings field.
-- **Test:** `quota_visibility_saved`.
-
-### I8. Quota filter/sort/pagination (P1) [missing]
-- **JS:** `utils.js:27-44` CONNECTIONS_PAGE_SIZE=20, ACCOUNT_PAGE_SIZE_OPTIONS=[10,20,50,100], ACCOUNT_FILTER_OPTIONS, QUOTA_SORT_OPTIONS; server-side pagination.
-- **Rust:** chỉ expiringFirst.
-- **Impl:** thêm filter/sort/pagination.
-- **Test:** `quota_pagination_works`.
-
-### I9. ProviderTopology animation (P1) [behavior-diff]
-- **JS:** `ProviderTopology.js:160-260` TopologyEdge feTurbulence plasma + animateMotion orbs + sparks + 60s stuck-drop timeout.
-- **Rust:** `ProviderTopology.tsx:214` chỉ animated:active dashes.
-- **Impl:** port custom edge.
-- **Test:** `topology_uses_custom_edge`.
-
-### I10. PXPIPE page (P0) [missing]
-- **JS:** `pxpipe/page.js` + `PxpipeClient.js` (token savings display, timeline AreaChart) + 8 API routes.
-- **Rust:** không có.
-- **Impl:** port page + backend (xem E-phần PXPIPE).
-- **Test:** `pxpipe_page_exists`.
-
-### I11. CLI tools devin/opendesign (P1) [missing]
-- **JS:** `cliTools.js:393-457` devin (guide) + opendesign (guide); route devin-settings.
-- **Rust:** `cliTools.ts` 19 keys, thiếu 2.
-- **Impl:** thêm 2 tool + route.
-- **Test:** `cli_tools_include_devin`.
-
-### I12. ProviderIcon lazy/404-cache/aliases (P1) [behavior-diff]
-- **JS:** `providerIcon.js` ICON_ALIASES {perplexity-agent→perplexity, gitlab-duo→gitlab, vercel-ai-gateway→vercel}; session 404 cache; loading=lazy.
-- **Rust:** `ProviderIcon.tsx` không có.
-- **Impl:** thêm aliases + cache + lazy.
-- **Test:** `provider_icon_uses_aliases`.
-
-### I13. Bulk-add key gap-fill (P1) [behavior-diff]
-- **JS:** `bulkAdd.js:30-90` planBulkAdd gap-fill smallest free `<base> <n>`.
-- **Rust:** `AddApiKeyModal.tsx:95-103` blind `<base> ${i+1}` → **overwrite data-loss**.
-- **Impl:** port gap-fill.
-- **Test:** `bulk_add_skips_existing_names`.
-
-### I14. UsageStats filters (P1) [behavior-diff]
-- **JS:** `UsageStats.js:225-256` fetch /api/providers + /api/provider-nodes; filter isActive===false out; isLLMProvider; nodeNameMap.
-- **Rust:** `UsageStats.tsx:231-245` chỉ /api/providers, dedupe, không filter.
-- **Impl:** thêm filters + nodeName merge.
-- **Test:** `usage_stats_filters_inactive`.
-
-### I15. Donate button (P1) [missing]
-- **JS:** `Header.js:317-328` pink Donate + DonateModal.
-- **Rust:** `Header.tsx:283-287` không.
-- **Impl:** thêm.
-- **Test:** `header_has_donate`.
-
-### I16. OIDC chip (P1) [behavior-diff]
-- **JS:** `Header.js:309-318` OIDC display-name chip.
-- **Rust:** không (backend OIDC có).
-- **Impl:** thêm chip.
-- **Test:** `header_shows_oidc_chip`.
-
-### I17. freeTier placement (P1) [behavior-diff]
-- **JS:** 11 provider freeTier (poolside, searxng, edge-tts, google-tts, coqui, tortoise, local-device, kilo-gateway, api-airforce, bazaarlink, kimchi).
-- **Rust:** đặt dưới APIKEY.
-- **Impl:** chuyển sang free-tier category.
-- **Test:** `free_tier_providers_in_right_category`.
-
-### I18. USAGE_SUPPORTED_PROVIDERS lists (P1) [behavior-diff]
-- **JS:** `providers.js:163-170` từ registry features.usage (20 providers).
-- **Rust:** `providers.ts:275-301` thiếu codebuddy-cn/intl, qoder, trae, vercel-ai-gateway, zed.
-- **Impl:** đồng bộ với registry.
-- **Test:** `usage_supported_lists_match_registry`.
-
-### I19. OAuthModal device-code list (P1) [behavior-diff]
-- **JS:** `OAuthModal.js:225-234` deviceCodeProviders = github,kiro,kimi,kimi-coding,kilocode,codebuddy-cn,codebuddy-intl,qoder,grok-cli.
-- **Rust:** `OAuthModal.tsx:195-208` có qwen/kimchi/codebuddy (sai) + thiếu codebuddy-intl.
-- **Impl:** đồng bộ list.
-- **Test:** `oauth_modal_device_list_matches`.
-
-### I20. QuotaTable layout (P1) [behavior-diff]
-- **JS:** `QuotaTable.js:151-244` flex rows + pagination + hide.
-- **Rust:** `QuotaTable.tsx:100` HTML table fixed % widths.
-- **Impl:** flex + pagination + hide.
-- **Test:** `quota_table_flex_pagination`.
-
----
-
-## TỔNG KẾT
-
-Toàn bộ 146 gap CONFIRMED đã được chi tiết hoá ở mức **implementation-ready** (URL chính xác, header, auth, model list, field mapping, step-by-step). Các phần còn thiếu trong report này (nếu có) sẽ được bổ sung từ workflow spec `wf_bc281048-1fe` khi hoàn tất.
-
-**Thứ tự triển khai:**
-1. **P0 (Phần A + E1-E6):** 17 providers + selfhosted + OAuth zed/intl/trae/windsurf + URL fixes + grok-web/pplx stubs + xoá qwen → mọi provider chạy được.
-2. **P1 (B,C,D,E7-E16,F,G,I):** translator/oauth/media/executor chi tiết + web dashboard.
-3. **P2 (H):** usage/observability/db/cli.
-
-**Verify:** mỗi task có guard test. Chạy `cargo test --lib` sau mỗi cụm. Mở `.tmp/9router` tại dòng JS dẫn trong từng phần trước khi code.
+## SUMMARY
+
+- **P0 first:** Part A + Part B executor stubs + Part E selfhosted — get every provider working (no 500/404).
+- **Then P1:** Parts B, C, D, E, F, G — 1:1 behavior.
+- **Then P2:** Part H — usage/observability/db/cli polish.
+- Run `cargo test --lib` after each cluster. Open `.tmp/9router` at the cited JS line before coding.
