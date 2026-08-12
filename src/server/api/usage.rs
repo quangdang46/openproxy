@@ -304,11 +304,21 @@ async fn get_usage_history(State(state): State<AppState>, headers: HeaderMap) ->
         history: Vec<UsageEntryDto>,
     }
 
+    /// 9router usageRepo.js getUsageHistory parity — returns camelCase rows
+    /// with connectionId, apiKeyMasked, endpoint, status, tokens in addition
+    /// to the token/cost summary. The dashboard UsageHistory component reads
+    /// these columns.
     #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
     struct UsageEntryDto {
         timestamp: Option<String>,
         provider: Option<String>,
         model: String,
+        connection_id: Option<String>,
+        api_key_masked: Option<String>,
+        endpoint: Option<String>,
+        status: Option<String>,
+        tokens: Option<Value>,
         prompt_tokens: u64,
         completion_tokens: u64,
         cost: f64,
@@ -321,6 +331,13 @@ async fn get_usage_history(State(state): State<AppState>, headers: HeaderMap) ->
             timestamp: e.timestamp.clone(),
             provider: e.provider.clone(),
             model: e.model.clone(),
+            connection_id: e.connection_id.clone(),
+            api_key_masked: mask_api_key(e.api_key.as_deref()),
+            endpoint: e.endpoint.clone(),
+            status: e.status.clone(),
+            tokens: e.tokens.as_ref().map(|t| {
+                serde_json::to_value(t).unwrap_or(Value::Null)
+            }),
             prompt_tokens: e
                 .tokens
                 .as_ref()
@@ -340,6 +357,25 @@ async fn get_usage_history(State(state): State<AppState>, headers: HeaderMap) ->
         history,
     })
     .into_response()
+}
+
+/// 9router usageRepo.js `maskApiKey` parity:
+/// - null/non-string → null
+/// - length <= 8 → first char + "***"
+/// - otherwise → first 8 chars + "***"
+fn mask_api_key(api_key: Option<&str>) -> Option<String> {
+    let key = api_key?;
+    if key.is_empty() {
+        return None;
+    }
+    if key.chars().count() <= 8 {
+        let mut masked = String::new();
+        masked.push(key.chars().next().unwrap_or(' '));
+        masked.push_str("***");
+        Some(masked)
+    } else {
+        Some(format!("{}***", &key[..8]))
+    }
 }
 
 async fn get_usage_daily(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -1636,5 +1672,69 @@ mod tests {
     fn test_build_usage_chart_daily_bucket_count_matches_requested_period() {
         let buckets = build_usage_chart(&UsageDb::default(), "30d");
         assert_eq!(buckets.len(), 30);
+    }
+
+    #[test]
+    fn test_mask_api_key_short_and_long() {
+        // <= 8 chars → first char + "***"
+        assert_eq!(mask_api_key(Some("sk-test")), Some("s***".to_string()));
+        // > 8 chars → first 8 + "***"
+        assert_eq!(
+            mask_api_key(Some("0123456789abcdef")),
+            Some("01234567***".to_string())
+        );
+        // None / empty → None
+        assert_eq!(mask_api_key(None), None);
+        assert_eq!(mask_api_key(Some("")), None);
+    }
+
+    #[test]
+    fn test_usage_history_dto_serializes_camelcase_fields() {
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Dto {
+            timestamp: Option<String>,
+            provider: Option<String>,
+            model: String,
+            connection_id: Option<String>,
+            api_key_masked: Option<String>,
+            endpoint: Option<String>,
+            status: Option<String>,
+            tokens: Option<Value>,
+            prompt_tokens: u64,
+            completion_tokens: u64,
+            cost: f64,
+        }
+        let dto = Dto {
+            timestamp: Some("2026-01-01T00:00:00Z".into()),
+            provider: Some("openai".into()),
+            model: "gpt-4".into(),
+            connection_id: Some("c1".into()),
+            api_key_masked: Some("01234567***".into()),
+            endpoint: Some("/v1/chat/completions".into()),
+            status: Some("ok".into()),
+            tokens: Some(serde_json::json!({"prompt_tokens": 10, "completion_tokens": 20})),
+            prompt_tokens: 10,
+            completion_tokens: 20,
+            cost: 0.5,
+        };
+        let json = serde_json::to_value(&dto).unwrap();
+        let obj = json.as_object().unwrap();
+        // camelCase keys (9router usageRepo.js getUsageHistory parity).
+        assert_eq!(obj.get("connectionId").and_then(|v| v.as_str()), Some("c1"));
+        assert_eq!(
+            obj.get("apiKeyMasked").and_then(|v| v.as_str()),
+            Some("01234567***")
+        );
+        assert_eq!(
+            obj.get("endpoint").and_then(|v| v.as_str()),
+            Some("/v1/chat/completions")
+        );
+        assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("ok"));
+        assert!(obj.contains_key("tokens"));
+        // No snake_case leakage.
+        assert!(!obj.contains_key("connection_id"));
+        assert!(!obj.contains_key("api_key_masked"));
+        assert!(!obj.contains_key("prompt_tokens"), "must be promptTokens");
     }
 }
