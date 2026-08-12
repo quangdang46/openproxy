@@ -198,6 +198,11 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.kilo.ai/api/gateway/chat/completions"),
         ),
         (
+            "perplexity-agent",
+            // OpenAI Responses API — do NOT normalize to /chat/completions.
+            ProviderConfig::openai("https://api.perplexity.ai/v1/responses"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",

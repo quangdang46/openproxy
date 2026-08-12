@@ -312,6 +312,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://api.kilo.ai/api/gateway/chat/completions",
         ),
         (
+            "perplexity-agent",
+            "https://api.perplexity.ai/v1/responses",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -519,6 +523,25 @@ fn kilo_gateway_full_gateway_endpoint() {
             .build_url("kilo-auto/free", false, &connection("kilo-gateway"))
             .unwrap(),
         "https://api.kilo.ai/api/gateway/chat/completions"
+    );
+}
+
+/// Guard: perplexity-agent must route to the OpenAI Responses API endpoint
+/// (`/v1/responses`), NOT `/chat/completions`. 9router parity:
+/// `open-sse/providers/registry/perplexity-agent.js` transport.baseUrl =
+/// `https://api.perplexity.ai/v1/responses` with format "openai-responses"
+/// (translator already routes this provider to Format::OpenAiResponses).
+/// Standard Bearer auth — do NOT add to any x-api-key special-case.
+#[test]
+fn perplexity_agent_responses_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor =
+        DefaultExecutor::new("perplexity-agent", pool, None).expect("perplexity-agent executor");
+    assert_eq!(
+        executor
+            .build_url("perplexity/sonar", false, &connection("perplexity-agent"))
+            .unwrap(),
+        "https://api.perplexity.ai/v1/responses"
     );
 }
 
