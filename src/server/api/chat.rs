@@ -1750,6 +1750,8 @@ async fn forward_with_provider_fallback(
                         provider.to_string(),
                         model.to_string(),
                         Some(connection.id.clone()),
+                        api_key,
+                        endpoint,
                         normalize_for_dashboard,
                         plan,
                         tool_name_map.as_ref(),
@@ -2632,10 +2634,15 @@ async fn proxy_response_with_pending_tracking(
     provider: String,
     model: String,
     connection_id: Option<String>,
+    api_key: Option<&str>,
+    endpoint: Option<&'static str>,
     normalize_for_dashboard: bool,
     plan: &RequestPlan,
     tool_name_map: Option<&std::collections::BTreeMap<String, String>>,
 ) -> Response {
+    // Capture an owned copy of api_key for usage recording inside the stream
+    // (the SSE stream requires 'static lifetimes; &str borrows can't escape).
+    let api_key = api_key.map(|s| s.to_string());
     // Extract formats before stream closure to avoid lifetime issues
     let needs_stream_translation = plan.needs_translation();
     let stream_source_format = plan.source_format;
@@ -2698,6 +2705,7 @@ async fn proxy_response_with_pending_tracking(
             let provider = provider.clone();
             let model = model.clone();
             let connection_id = connection_id.clone();
+            let api_key = api_key.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
             let stream = async_stream::stream! {
@@ -2708,6 +2716,10 @@ async fn proxy_response_with_pending_tracking(
                 } else {
                     None
                 };
+                // Accumulate the last data frame for best-effort `usage` extraction
+                // at stream end. Streaming SSE responses usually lack a usage field,
+                // so most requests record with tokens=None (request count only).
+                let mut last_data: Option<Bytes> = None;
                 loop {
                     let next = tokio::time::timeout(SSE_STALL_TIMEOUT, upstream.try_next()).await;
                     match next {
@@ -2720,6 +2732,8 @@ async fn proxy_response_with_pending_tracking(
                                 model = %model,
                                 "SSE stalled, closing stream"
                             );
+                            record_streaming_usage(&state, &provider, &model,
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -2731,6 +2745,7 @@ async fn proxy_response_with_pending_tracking(
                             return;
                         }
                         Ok(Ok(Some(chunk))) => {
+                            last_data = Some(chunk.clone());
                             if let Some(transformer) = transformer.as_mut() {
                                 for line in transform_dashboard_sse_chunk(&chunk, transformer.as_mut(), &mut pending_text) {
                                     if let Some(frame) = sse_frame_for_dashboard(&line) {
@@ -2760,6 +2775,8 @@ async fn proxy_response_with_pending_tracking(
                         }
                         Ok(Ok(None)) => break,
                         Ok(Err(_)) => {
+                            record_streaming_usage(&state, &provider, &model,
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -2779,6 +2796,8 @@ async fn proxy_response_with_pending_tracking(
                         }
                     }
                 }
+                record_streaming_usage(&state, &provider, &model,
+                    connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
                 state
                     .usage_live
                     .finish_request(&model, &provider, connection_id.as_deref(), false)
@@ -2792,6 +2811,7 @@ async fn proxy_response_with_pending_tracking(
             let provider = provider.clone();
             let model = model.clone();
             let connection_id = connection_id.clone();
+            let api_key = api_key.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
             let stream = async_stream::stream! {
@@ -2801,6 +2821,9 @@ async fn proxy_response_with_pending_tracking(
                 } else {
                     None
                 };
+                // Accumulate the last data frame for best-effort `usage` extraction
+                // at stream end (streaming SSE responses usually lack a usage field).
+                let mut last_data: Option<Bytes> = None;
                 loop {
                     let next = tokio::time::timeout(SSE_STALL_TIMEOUT, body.frame()).await;
                     let frame_result = match next {
@@ -2811,6 +2834,8 @@ async fn proxy_response_with_pending_tracking(
                                 model = %model,
                                 "SSE stalled, closing stream"
                             );
+                            record_streaming_usage(&state, &provider, &model,
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -2827,6 +2852,7 @@ async fn proxy_response_with_pending_tracking(
                     match frame_result {
                         Ok(frame) => {
                             if let Ok(data) = frame.into_data() {
+                                last_data = Some(data.clone());
                                 if let Some(transformer) = transformer.as_mut() {
                                     for line in transform_dashboard_sse_chunk(&data, transformer.as_mut(), &mut pending_text) {
                                         if let Some(frame) = sse_frame_for_dashboard(&line) {
@@ -2856,6 +2882,8 @@ async fn proxy_response_with_pending_tracking(
                             }
                         }
                         Err(_) => {
+                            record_streaming_usage(&state, &provider, &model,
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -2875,6 +2903,8 @@ async fn proxy_response_with_pending_tracking(
                         }
                     }
                 }
+                record_streaming_usage(&state, &provider, &model,
+                    connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
                 state
                     .usage_live
                     .finish_request(&model, &provider, connection_id.as_deref(), false)
@@ -2900,6 +2930,30 @@ async fn proxy_response_with_pending_tracking(
         .headers_mut()
         .insert("Content-Type", "text/event-stream".parse().unwrap());
     response
+}
+
+/// Record usage for a streaming SSE request at stream end.
+///
+/// Streaming SSE responses from most providers do not contain a `usage` field,
+/// so we record the request with `tokens = None` (which still increments the
+/// request count and captures provider/model/endpoint). If the provider emits a
+/// final SSE data frame containing a Chat Completions `usage` block, extract it.
+async fn record_streaming_usage(
+    state: &AppState,
+    provider: &str,
+    model: &str,
+    connection_id: Option<&str>,
+    api_key: Option<&str>,
+    endpoint: Option<&'static str>,
+    last_data: &Option<Bytes>,
+) {
+    let usage = last_data
+        .as_ref()
+        .and_then(|b| extract_token_usage_from_bytes(b));
+    state
+        .usage_tracker()
+        .track_request(provider, model, usage.as_ref(), connection_id, api_key, endpoint)
+        .await;
 }
 
 fn sse_frame_for_dashboard(line: &str) -> Option<Bytes> {
@@ -3145,7 +3199,32 @@ async fn collect_upstream_response_bytes(response: UpstreamResponse) -> (Bytes, 
     }
 }
 
+/// Strip the SSE `data:` prefix from a chunk, returning the JSON payload.
+/// SSE data lines look like `data: {...}` or `data: {...}\n\nbuffer`.
+/// If the body is valid JSON already (non-streaming path), return as-is.
+fn strip_sse_data_prefix(body: &[u8]) -> &[u8] {
+    let trimmed = body
+        .split(|&b| b == b'\n')
+        .next()
+        .unwrap_or(body);
+    if trimmed.starts_with(b"data:") {
+        let after = &trimmed[b"data:".len()..];
+        let after = after.strip_prefix(b" ").or_else(|| after.strip_prefix(b"\t")).unwrap_or(after);
+        if serde_json::from_slice::<serde_json::Value>(after).is_ok() {
+            return after;
+        }
+    }
+    // Fall back: try parsing the whole body as JSON (non-streaming / already-stripped).
+    if serde_json::from_slice::<serde_json::Value>(body).is_ok() {
+        return body;
+    }
+    body
+}
+
 fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
+    // Handle SSE data-prefixed chunks (e.g. "data: {"choices":[...],"usage":{...}}")
+    // by stripping the "data: " prefix before attempting JSON parse.
+    let body = strip_sse_data_prefix(body);
     let value = serde_json::from_slice::<Value>(body).ok()?;
     let usage = value.get("usage")?.as_object()?;
 
