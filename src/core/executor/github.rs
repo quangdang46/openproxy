@@ -408,6 +408,10 @@ impl GithubExecutor {
                 .remove("reasoning_effort");
         }
 
+        // 9router executors/github.js:109 — stripUnsupportedParams("github",
+        // model, transformed). Idempotent: already-stripped fields are gone.
+        super::strip_unsupported::strip_unsupported_params("github", model, &mut transformed);
+
         transformed
     }
 

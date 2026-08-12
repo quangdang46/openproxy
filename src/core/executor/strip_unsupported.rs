@@ -30,6 +30,34 @@ fn should_strip(provider: &str, model: &str, field: &str) -> bool {
         return true;
     }
 
+    // 9router paramSupport.js STRIP_RULES (port):
+    // { match: /claude/i, drop: ["temperature"] } — no provider field, so it
+    // applies to EVERY provider when the model id matches /claude/i.
+    if field == "temperature" && model.to_ascii_lowercase().contains("claude") {
+        return true;
+    }
+
+    // { provider: "github", match: /gpt-5\.4/i, drop: ["temperature"] }
+    if field == "temperature"
+        && provider == "github"
+        && model.to_ascii_lowercase().contains("gpt-5.4")
+    {
+        return true;
+    }
+
+    // { provider: "github", match: (m) => /claude/i.test(m) &&
+    //   !/claude.*(opus|sonnet).*4\.6/i.test(m), drop: ["thinking", "reasoning_effort"] }
+    if provider == "github" && (field == "thinking" || field == "reasoning_effort") {
+        let m = model.to_ascii_lowercase();
+        let is_claude_except_46 = m.contains("claude")
+            && !(m.contains("claude")
+                && (m.contains("opus") || m.contains("sonnet"))
+                && m.contains("4.6"));
+        if is_claude_except_46 {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -223,5 +251,58 @@ mod tests {
         });
         strip_unsupported_params("volcengine-ark", "kimi-k2.7-code", &mut body);
         assert_eq!(body["max_tokens"], 1000);
+    }
+
+    #[test]
+    fn strips_temperature_for_claude_models() {
+        let mut body = json!({
+            "temperature": 0.7,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("openai", "claude-sonnet-4.5", &mut body);
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn keeps_temperature_for_non_claude() {
+        let mut body = json!({
+            "temperature": 0.7,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("openai", "gpt-4o", &mut body);
+        assert_eq!(body.get("temperature"), Some(&json!(0.7)));
+    }
+
+    #[test]
+    fn strips_thinking_and_effort_for_github_claude_except_46() {
+        // claude-sonnet-4.5 on github: thinking + reasoning_effort stripped.
+        let mut body = json!({
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("github", "claude-sonnet-4.5", &mut body);
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+
+        // claude-opus-4.6 on github: the 4.6 exception KEEPS both.
+        let mut body = json!({
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "high",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("github", "claude-sonnet-4.6", &mut body);
+        assert!(body.get("thinking").is_some());
+        assert!(body.get("reasoning_effort").is_some());
+    }
+
+    #[test]
+    fn strips_github_temperature_for_gpt_5_4() {
+        let mut body = json!({
+            "temperature": 1.0,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        strip_unsupported_params("github", "gpt-5.4", &mut body);
+        assert!(body.get("temperature").is_none());
     }
 }
