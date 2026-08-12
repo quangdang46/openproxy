@@ -19,7 +19,7 @@ use crate::core::usage::quota_fetcher::{
     get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
-use crate::oauth::token_refresh::refresh_codex_token;
+use crate::oauth::token_refresh::{dispatch_oauth_refresh, refresh_codex_token};
 use crate::server::state::AppState;
 use crate::server::usage_live::UsageEvent;
 use crate::server::usage_stream::{build_usage_stats, UsagePeriod, UsageStatsPayload};
@@ -555,7 +555,9 @@ async fn get_connection_usage(
     let mut live_plan: Option<Value> = None;
     let mut live_reset_credits: Option<Value> = None;
     if is_oauth {
-        let result = fetch_oauth_quota(connection).await;
+        // 9router route.js:158-183 — refresh credentials before the quota
+        // call and force-retry once on an auth-expired message.
+        let result = fetch_oauth_quota_with_refresh(connection).await;
         if let Some(quotas) = result.get("quotas") {
             live_quotas = quotas.clone();
         }
@@ -617,6 +619,85 @@ fn is_auth_expired_message(message: &str) -> bool {
     ]
     .iter()
     .any(|p| lower.contains(p))
+}
+
+/// Refresh an OAuth connection's tokens via the provider's refresh flow and
+/// return a cloned connection with the refreshed credentials. 9router
+/// `refreshAndUpdateCredentials` parity (route.js:23-117). Returns the
+/// original connection untouched on refresh failure (JS keeps the stale
+/// accessToken when one exists).
+async fn refresh_oauth_connection(
+    connection: &ProviderConnection,
+    force: bool,
+) -> Result<ProviderConnection, String> {
+    let Some(refresh_token) = connection
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return Ok(connection.clone());
+    };
+
+    // JS executor.needsRefresh(credentials): refresh when expired or missing.
+    let needs_refresh = force
+        || match connection.expires_at.as_deref() {
+            Some(expires_at) => crate::oauth::token_refresh::needs_refresh_with_lead(
+                &Some(expires_at.to_string()),
+                // Refresh a bit early (2 min) to avoid a doomed fetch.
+                120_000,
+            ),
+            None => connection.access_token.as_deref().is_none_or(|t| t.trim().is_empty()),
+        };
+    if !needs_refresh {
+        return Ok(connection.clone());
+    }
+
+    let provider = connection.provider.clone();
+    let psd = connection.provider_specific_data.clone();
+    let result = dispatch_oauth_refresh(&provider, refresh_token, &psd).await?;
+
+    let mut updated = connection.clone();
+    updated.access_token = Some(result.access_token);
+    if let Some(new_refresh) = result.refresh_token {
+        updated.refresh_token = Some(new_refresh);
+    }
+    if let Some(expires_in) = result.expires_in {
+        let expiry = Utc::now() + ChronoDuration::seconds(expires_in);
+        updated.expires_at = Some(expiry.to_rfc3339());
+    }
+    Ok(updated)
+}
+
+/// Fetch the OAuth quota, refreshing credentials first if stale/expired and
+/// force-retrying once when the quota response reports an auth-expired
+/// message. 9router route.js:158-183 parity.
+async fn fetch_oauth_quota_with_refresh(connection: &ProviderConnection) -> Value {
+    // 1. Refresh before the fetch when needed.
+    let connection = match refresh_oauth_connection(connection, false).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("usage oauth refresh failed for {}: {}", connection.provider, e);
+            // Keep the stored token (JS returns stale accessToken on failure).
+            connection.clone()
+        }
+    };
+
+    // 2. First fetch.
+    let result = fetch_oauth_quota(&connection).await;
+
+    // 3. Force-retry once if the quota response signals auth-expired.
+    let msg = result.get("message").and_then(|v| v.as_str()).unwrap_or("");
+    if is_auth_expired_message(msg) && connection.refresh_token.is_some() {
+        if let Ok(retried_conn) = refresh_oauth_connection(&connection, true).await {
+            let retry = fetch_oauth_quota(&retried_conn).await;
+            if retry.get("message").and_then(|v| v.as_str()).is_none_or(|m| !is_auth_expired_message(m)) {
+                return retry;
+            }
+        }
+    }
+
+    result
 }
 
 fn is_auth_expired_consume_result(
@@ -1869,5 +1950,34 @@ mod tests {
         assert!(line.contains("| OPENAI |"), "provider uppercased: {line}");
         // Missing status → "-".
         assert!(line.ends_with("| -"));
+    }
+
+    #[test]
+    fn test_is_auth_expired_message_matches_js_patterns() {
+        // 9router AUTH_EXPIRED_PATTERNS = [expired, authentication,
+        // unauthorized, 401, re-authorize].
+        assert!(is_auth_expired_message("Grok CLI authentication expired. Please re-authorize."));
+        assert!(is_auth_expired_message("401 Unauthorized"));
+        assert!(is_auth_expired_message("Token expired"));
+        assert!(is_auth_expired_message("authentication failed"));
+        assert!(!is_auth_expired_message("Kimi Coding connected. Usage tracked per request."));
+        assert!(!is_auth_expired_message("ok"));
+    }
+
+    #[test]
+    fn test_refresh_oauth_connection_no_refresh_token_is_noop() {
+        use crate::types::ProviderConnection;
+        // No refresh_token → returns the connection unchanged (JS keeps stale
+        // accessToken; never 401s when no refresh is possible).
+        let conn = ProviderConnection {
+            auth_type: "oauth".into(),
+            provider: "claude".into(),
+            access_token: Some("stale-token".into()),
+            refresh_token: None,
+            ..Default::default()
+        };
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let out = rt.block_on(refresh_oauth_connection(&conn, false)).unwrap();
+        assert_eq!(out.access_token.as_deref(), Some("stale-token"));
     }
 }
