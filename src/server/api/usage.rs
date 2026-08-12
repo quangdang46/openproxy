@@ -4,7 +4,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::{routing, Json, Router};
 use bytes::Bytes;
-use chrono::{Duration as ChronoDuration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1345,13 +1345,37 @@ fn format_usage_log(
     entry: &crate::types::UsageEntry,
     connections: &[crate::types::ProviderConnection],
 ) -> String {
-    let timestamp = entry.timestamp.as_deref().unwrap_or("-");
+    // 9router usageRepo.js formatLogDate parity: local-time
+    // DD-MM-YYYY HH:MM:SS (day-first, zero-padded), falling back to the raw
+    // string when the timestamp doesn't parse as RFC3339.
+    let timestamp = entry
+        .timestamp
+        .as_deref()
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|dt| {
+            let local = dt.with_timezone(&Local);
+            format!(
+                "{:02}-{:02}-{} {:02}:{:02}:{:02}",
+                local.day(),
+                local.month(),
+                local.year(),
+                local.hour(),
+                local.minute(),
+                local.second()
+            )
+        })
+        .unwrap_or_else(|| entry.timestamp.clone().unwrap_or_else(|| "-".to_string()));
     let model = if entry.model.is_empty() {
-        "-"
+        "-".to_string()
     } else {
-        entry.model.as_str()
+        entry.model.clone()
     };
-    let provider = entry.provider.as_deref().unwrap_or("-");
+    // JS r.provider?.toUpperCase() — "-" when absent.
+    let provider = entry
+        .provider
+        .as_deref()
+        .map(|p| p.to_uppercase())
+        .unwrap_or_else(|| "-".to_string());
     let account = entry
         .connection_id
         .as_deref()
@@ -1380,12 +1404,11 @@ fn format_usage_log(
         .and_then(|tokens| tokens.completion_tokens.or(tokens.output_tokens))
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
-    let status = match entry.status.as_deref() {
-        Some("success") => "OK".to_string(),
-        Some(value) if value.eq_ignore_ascii_case("ok") => "OK".to_string(),
-        Some(value) => value.to_string(),
-        None => "OK".to_string(),
-    };
+    // JS r.status || "-" verbatim — do NOT map success/None to "OK".
+    let status = entry
+        .status
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
 
     format!("{timestamp} | {model} | {provider} | {account} | {sent} | {received} | {status}")
 }
@@ -1809,5 +1832,42 @@ mod tests {
         let eligible2 = (conn2.auth_type == "apikey" || conn2.auth_type == "api_key")
             && is_usage_apikey_provider(&conn2.provider);
         assert!(!eligible2);
+    }
+
+    #[test]
+    fn test_format_usage_log_local_timestamp() {
+        use crate::types::UsageEntry;
+        let entry = UsageEntry {
+            timestamp: Some("2026-08-12T03:04:05Z".into()),
+            provider: Some("glm".into()),
+            model: "glm-4.7".into(),
+            connection_id: Some("abc123".into()),
+            status: Some("success".into()),
+            ..Default::default()
+        };
+        let line = format_usage_log(&entry, &[]);
+        // JS formatLogDate parity: local DD-MM-YYYY HH:MM:SS (day-first).
+        let re = regex::Regex::new(r"^\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2} \| ").unwrap();
+        assert!(re.is_match(&line), "timestamp must be local DD-MM-YYYY HH:MM:SS, got: {line}");
+        // Provider uppercased (JS r.provider?.toUpperCase()).
+        assert!(line.contains("| GLM |"), "provider must be uppercased: {line}");
+        // Status verbatim (not mapped to OK).
+        assert!(line.contains("| success"), "status must be raw: {line}");
+    }
+
+    #[test]
+    fn test_format_usage_log_unparseable_timestamp_falls_back_raw() {
+        use crate::types::UsageEntry;
+        let entry = UsageEntry {
+            timestamp: Some("not-a-timestamp".into()),
+            provider: Some("openai".into()),
+            model: "gpt-4".into(),
+            ..Default::default()
+        };
+        let line = format_usage_log(&entry, &[]);
+        assert!(line.starts_with("not-a-timestamp | "), "raw fallback expected: {line}");
+        assert!(line.contains("| OPENAI |"), "provider uppercased: {line}");
+        // Missing status → "-".
+        assert!(line.ends_with("| -"));
     }
 }
