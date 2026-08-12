@@ -281,7 +281,7 @@ Most operators only set `JWT_SECRET` and `INITIAL_PASSWORD` and leave the rest a
 | `HOSTNAME` | `127.0.0.1` | Bind host. Set `0.0.0.0` to expose on LAN. |
 | `BASE_URL` | `http://localhost:4623` | Internal base URL for cloud-sync jobs. |
 | `CLOUD_URL` | _unset_ | Cloud-sync endpoint. Leave unset to disable cloud sync. |
-| `API_KEY_SECRET` | `endpoint-proxy-api-key-secret` | HMAC secret for generated API keys. |
+| `API_KEY_SECRET` | _auto-generated, persisted_ | HMAC secret for generated API keys. When unset, a random secret is generated at first startup and persisted to `$DATA_DIR/api_key_secret`. |
 | `MACHINE_ID_SALT` | `endpoint-proxy-salt` | Salt for the stable machine-ID hash. |
 | `AUTH_COOKIE_SECURE` | `false` | Force `Secure` flag on the auth cookie. Set `true` behind HTTPS. |
 | `REQUIRE_API_KEY` | `false` | Reject `/v1/*` requests without `Authorization: Bearer …`. Recommended for any internet-exposed deploy. |
