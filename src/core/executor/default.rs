@@ -221,6 +221,14 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.venice.ai/api/v1/chat/completions"),
         ),
         (
+            "zed",
+            // MINIMAL chat-path fix: zed's non-standard auth header
+            // ("Authorization: <user_id> <access_token>", no Bearer) and NDJSON
+            // wire protocol are a separate executor task (parity A3). This entry
+            // clears UnsupportedProvider so a pre-obtained token can route.
+            ProviderConfig::openai("https://cloud.zed.dev/completions"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",

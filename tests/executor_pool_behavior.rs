@@ -332,6 +332,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://api.venice.ai/api/v1/chat/completions",
         ),
         (
+            "zed",
+            "https://cloud.zed.dev/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -626,6 +630,23 @@ fn venice_api_v1_chat_endpoint() {
             .build_url("venice-uncensored-1-2", false, &connection("venice"))
             .unwrap(),
         "https://api.venice.ai/api/v1/chat/completions"
+    );
+}
+
+/// Guard: zed must clear UnsupportedProvider and route to the cloud endpoint.
+/// 9router parity: `open-sse/providers/registry/zed.js` transport.baseUrl =
+/// `https://cloud.zed.dev/completions`. NOTE: this is the minimal chat-path
+/// fix — zed's real auth header ("<user_id> <access_token>", no Bearer) and
+/// NDJSON wire protocol are a separate executor task (parity A3).
+#[test]
+fn zed_cloud_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("zed", pool, None).expect("zed executor config");
+    assert_eq!(
+        executor
+            .build_url("anthropic/claude-sonnet-4-6", false, &connection("zed"))
+            .unwrap(),
+        "https://cloud.zed.dev/completions"
     );
 }
 
