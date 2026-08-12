@@ -14,7 +14,7 @@ Replace 9router (Node.js) with a faster, safer Rust implementation that avoids 2
 - **Security**: HMAC API keys, bcrypt auth, SSRF protection
 
 ## Beads
-Parity work: epic `openproxy-9router-parity-mj1` (+ children). See `br ready` / `bv --robot-next`.
+Parity work: epic `openproxy-9router-parity-v0550-pnc` (9router v0.5.50 → openproxy, 122 specs) (+ children). Prior v0.5.30 epic `openproxy-9router-parity-mj1` is closed. See `br ready` / `bv --robot-next`.
 
 ## Key References
 - `docs/parity-9router.md` — intentional divergences, pipeline order, executor dispatch
