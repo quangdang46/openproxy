@@ -203,6 +203,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.perplexity.ai/v1/responses"),
         ),
         (
+            "poolside",
+            ProviderConfig::openai("https://inference.poolside.ai/v1/chat/completions"),
+        ),
+        (
             "volcengine-ark",
             ProviderConfig::openai(
                 "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",

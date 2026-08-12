@@ -316,6 +316,10 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "https://api.perplexity.ai/v1/responses",
         ),
         (
+            "poolside",
+            "https://inference.poolside.ai/v1/chat/completions",
+        ),
+        (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
         ),
@@ -542,6 +546,22 @@ fn perplexity_agent_responses_endpoint() {
             .build_url("perplexity/sonar", false, &connection("perplexity-agent"))
             .unwrap(),
         "https://api.perplexity.ai/v1/responses"
+    );
+}
+
+/// Guard: poolside must route through DefaultExecutor with the full
+/// inference endpoint. 9router parity: `open-sse/providers/registry/poolside.js`
+/// transport.baseUrl = `https://inference.poolside.ai/v1/chat/completions`
+/// (freeTier apikey, no transport headers).
+#[test]
+fn poolside_inference_endpoint() {
+    let pool = Arc::new(ClientPool::new());
+    let executor = DefaultExecutor::new("poolside", pool, None).expect("poolside executor");
+    assert_eq!(
+        executor
+            .build_url("poolside/laguna-s-2.1", false, &connection("poolside"))
+            .unwrap(),
+        "https://inference.poolside.ai/v1/chat/completions"
     );
 }
 
