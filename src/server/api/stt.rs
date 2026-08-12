@@ -70,57 +70,96 @@ pub enum SttAuthHeader {
     None,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct SttProviderConfig {
-    pub base_url: &'static str,
+    pub base_url: String,
     pub auth_type_none: bool,
     pub auth_header: SttAuthHeader,
     pub format: SttFormat,
 }
 
+/// Default base URL for selfhosted STT (mirrors `selfhosted-stt.js`
+/// `sttConfig.baseUrl`). Overridden per connection via
+/// `provider_specific_data["baseUrl"]`.
+pub const SELFHOSTED_STT_DEFAULT_URL: &str = "http://localhost:8080/v1/audio/transcriptions";
+
 /// Returns the STT config for a built-in provider, or `None` if the provider
 /// does not support STT (or is a custom node — those go through the `openai`
 /// fall-through path with their own `baseUrl`).
+///
+/// `selfhosted-stt` uses the default URL here; the per-connection
+/// `provider_specific_data["baseUrl"]` override is applied at dispatch time
+/// (see [`resolve_stt_config`]).
 pub fn stt_config(provider: &str) -> Option<SttProviderConfig> {
     Some(match provider {
         "openai" => SttProviderConfig {
-            base_url: "https://api.openai.com/v1/audio/transcriptions",
+            base_url: "https://api.openai.com/v1/audio/transcriptions".to_string(),
             auth_type_none: false,
             auth_header: SttAuthHeader::Bearer,
             format: SttFormat::OpenaiCompatible,
         },
         "groq" => SttProviderConfig {
-            base_url: "https://api.groq.com/openai/v1/audio/transcriptions",
+            base_url: "https://api.groq.com/openai/v1/audio/transcriptions".to_string(),
             auth_type_none: false,
             auth_header: SttAuthHeader::Bearer,
             format: SttFormat::OpenaiCompatible,
         },
         "deepgram" => SttProviderConfig {
-            base_url: "https://api.deepgram.com/v1/listen",
+            base_url: "https://api.deepgram.com/v1/listen".to_string(),
             auth_type_none: false,
             auth_header: SttAuthHeader::Token,
             format: SttFormat::Deepgram,
         },
         "assemblyai" => SttProviderConfig {
-            base_url: "https://api.assemblyai.com/v2/transcript",
+            base_url: "https://api.assemblyai.com/v2/transcript".to_string(),
             auth_type_none: false,
             auth_header: SttAuthHeader::Bearer,
             format: SttFormat::AssemblyAi,
         },
         "huggingface" => SttProviderConfig {
-            base_url: "https://api-inference.huggingface.co/models",
+            base_url: "https://api-inference.huggingface.co/models".to_string(),
             auth_type_none: false,
             auth_header: SttAuthHeader::Bearer,
             format: SttFormat::HuggingfaceAsr,
         },
         "gemini" => SttProviderConfig {
-            base_url: "https://generativelanguage.googleapis.com/v1beta/models",
+            base_url: "https://generativelanguage.googleapis.com/v1beta/models".to_string(),
             auth_type_none: false,
             auth_header: SttAuthHeader::Key,
             format: SttFormat::GeminiStt,
         },
+        "selfhosted-stt" => SttProviderConfig {
+            base_url: SELFHOSTED_STT_DEFAULT_URL.to_string(),
+            auth_type_none: false,
+            auth_header: SttAuthHeader::Bearer,
+            format: SttFormat::OpenaiCompatible,
+        },
         _ => return None,
     })
+}
+
+/// Resolve the effective STT config for a provider + connection.
+///
+/// `selfhosted-stt` reads `provider_specific_data["baseUrl"]` (full
+/// transcriptions URL); the API key is not checked by local servers, so any
+/// non-empty value works. Never falls back to a cloud endpoint.
+fn resolve_stt_config(
+    provider: &str,
+    connection: &crate::types::ProviderConnection,
+) -> Option<SttProviderConfig> {
+    let mut cfg = stt_config(provider)?;
+    if provider == "selfhosted-stt" {
+        if let Some(base_url) = connection
+            .provider_specific_data
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            cfg.base_url = base_url.to_string();
+        }
+    }
+    Some(cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -456,7 +495,18 @@ async fn dispatch_with_fallback(
             .filter(|s| !s.is_empty());
 
         let token_ref = token.as_deref();
-        match transcribe(state, provider, &cfg, model, req, token_ref).await {
+        // selfhosted-stt resolves its base URL from the connection, not the
+        // static config. Never falls back to a cloud endpoint.
+        let effective_cfg = match resolve_stt_config(provider, &connection) {
+            Some(cfg) => cfg,
+            None => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Provider '{provider}' does not support STT"),
+                );
+            }
+        };
+        match transcribe(state, provider, &effective_cfg, model, req, token_ref).await {
             DispatchResult::Ok(resp) => return resp,
             DispatchResult::Err { status, message } => {
                 if should_fallback(status) {
@@ -689,7 +739,7 @@ async fn transcribe_openai(
         form = form.text("temperature", temp.clone());
     }
 
-    let mut request = client.post(cfg.base_url).multipart(form);
+    let mut request = client.post(&cfg.base_url).multipart(form);
     if let Some((k, v)) = build_auth_header(cfg, token) {
         request = request.header(k, v);
     }
@@ -725,7 +775,7 @@ async fn transcribe_deepgram(
     token: Option<&str>,
 ) -> DispatchResult {
     let url = build_deepgram_url(
-        cfg.base_url,
+        &cfg.base_url,
         model,
         req.language.as_deref(),
         req.deepgram_smart_format.as_deref(),
@@ -861,7 +911,7 @@ async fn transcribe_assemblyai(
 
     // 2. Submit transcript job.
     let sub = match client
-        .post(cfg.base_url)
+        .post(&cfg.base_url)
         .header(&auth.0, &auth.1)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(&json!({
@@ -956,7 +1006,7 @@ async fn transcribe_nvidia(
         )
         .text("model", model.to_string());
 
-    let mut request = client.post(cfg.base_url).multipart(form);
+    let mut request = client.post(&cfg.base_url).multipart(form);
     if let Some((k, v)) = build_auth_header(cfg, token) {
         request = request.header(k, v);
     }
@@ -1299,5 +1349,58 @@ mod tests {
     #[test]
     fn parse_upstream_error_returns_none_for_empty_body() {
         assert!(parse_upstream_error_message("").is_none());
+    }
+
+    #[test]
+    fn selfhosted_stt_uses_provider_specific_base_url() {
+        use crate::types::ProviderConnection;
+        use std::collections::BTreeMap;
+
+        // With a per-connection override, the resolved URL is that override.
+        let mut psd = BTreeMap::new();
+        psd.insert(
+            "baseUrl".to_string(),
+            serde_json::Value::String(
+                "http://192.168.1.5:8080/v1/audio/transcriptions".to_string(),
+            ),
+        );
+        let conn = ProviderConnection {
+            id: "selfhosted-1".into(),
+            provider: "selfhosted-stt".into(),
+            auth_type: "apikey".into(),
+            provider_specific_data: psd,
+            ..Default::default()
+        };
+        let cfg = resolve_stt_config("selfhosted-stt", &conn).expect("selfhosted config");
+        assert_eq!(
+            cfg.base_url,
+            "http://192.168.1.5:8080/v1/audio/transcriptions"
+        );
+        assert_eq!(cfg.format, SttFormat::OpenaiCompatible);
+        assert_eq!(cfg.auth_header, SttAuthHeader::Bearer);
+    }
+
+    #[test]
+    fn selfhosted_stt_falls_back_to_default_base_url() {
+        use crate::types::ProviderConnection;
+
+        let conn = ProviderConnection {
+            id: "selfhosted-1".into(),
+            provider: "selfhosted-stt".into(),
+            auth_type: "apikey".into(),
+            ..Default::default()
+        };
+        let cfg = resolve_stt_config("selfhosted-stt", &conn).expect("selfhosted config");
+        assert_eq!(cfg.base_url, SELFHOSTED_STT_DEFAULT_URL);
+        // Must never resolve to a cloud endpoint.
+        assert!(!cfg.base_url.contains("openai.com"));
+        assert!(!cfg.base_url.contains("googleapis.com"));
+    }
+
+    #[test]
+    fn selfhosted_stt_catalog_entry_exists() {
+        let cfg = stt_config("selfhosted-stt").expect("selfhosted-stt in catalog");
+        assert_eq!(cfg.base_url, SELFHOSTED_STT_DEFAULT_URL);
+        assert_eq!(cfg.format, SttFormat::OpenaiCompatible);
     }
 }
