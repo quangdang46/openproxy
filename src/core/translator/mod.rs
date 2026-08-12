@@ -6,6 +6,7 @@ pub enum TranslationFormat {
 }
 
 pub mod caveman;
+pub mod concerns;
 pub mod helpers;
 pub mod ponytail;
 pub mod registry;

@@ -6,6 +6,9 @@
 //! The Kiro format is the same target as `openai_to_kiro_request` produces,
 //! so this implementation mirrors that approach but reads Claude-format input.
 
+use crate::core::translator::concerns::kiro_conversation::{
+    canonicalize_kiro_conversation, normalize_kiro_tool_specs,
+};
 use serde_json::Value;
 
 /// Convert a Claude Messages API request body to Kiro format.
@@ -57,16 +60,12 @@ pub fn claude_to_kiro_request(
     let mut pending_images: Vec<Value> = Vec::new();
     let mut current_role: Option<String> = None;
 
-    let tools_array = tools.as_array().cloned().unwrap_or_default();
-
     let flush_pending = |history: &mut Vec<Value>,
                          pending_user_content: &mut Vec<String>,
                          pending_assistant_content: &mut Vec<String>,
                          pending_tool_results: &mut Vec<Value>,
                          pending_images: &mut Vec<Value>,
-                         current_role: &Option<String>,
-                         tools_arr: &[Value],
-                         history_len: usize| {
+                         current_role: &Option<String>| {
         match current_role.as_deref() {
             Some("user") => {
                 let content = pending_user_content.join("\n\n").trim().to_string();
@@ -90,41 +89,6 @@ pub fn claude_to_kiro_request(
                     user_msg["userInputMessage"]["userInputMessageContext"] = serde_json::json!({
                         "toolResults": pending_tool_results.clone()
                     });
-                }
-
-                if !tools_arr.is_empty() && history_len == 0 {
-                    if user_msg["userInputMessage"]["userInputMessageContext"].is_null() {
-                        user_msg["userInputMessage"]["userInputMessageContext"] =
-                            serde_json::json!({});
-                    }
-                    let converted_tools: Vec<Value> = tools_arr.iter().map(|t| {
-                        let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        let mut description = t.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                        if description.trim().is_empty() {
-                            description = format!("Tool: {}", name);
-                        }
-                        let schema = t.get("input_schema")
-                            .cloned()
-                            .unwrap_or(Value::Object(serde_json::Map::new()));
-                        let normalized_schema = if schema.as_object().is_none_or(|o| o.is_empty()) {
-                            serde_json::json!({"type": "object", "properties": {}, "required": []})
-                        } else {
-                            let mut s = schema.clone();
-                            if s.get("required").is_none() {
-                                s["required"] = serde_json::json!([]);
-                            }
-                            s
-                        };
-                        serde_json::json!({
-                            "toolSpecification": {
-                                "name": name,
-                                "description": description,
-                                "inputSchema": {"json": normalized_schema}
-                            }
-                        })
-                    }).collect();
-                    user_msg["userInputMessage"]["userInputMessageContext"]["tools"] =
-                        Value::Array(converted_tools);
                 }
 
                 history.push(user_msg);
@@ -169,8 +133,6 @@ pub fn claude_to_kiro_request(
                 &mut pending_tool_results,
                 &mut pending_images,
                 &current_role,
-                &tools_array,
-                hist_len,
             );
         }
         current_role = Some(role.clone());
@@ -291,8 +253,6 @@ pub fn claude_to_kiro_request(
                     &mut pending_tool_results,
                     &mut pending_images,
                     &current_role,
-                    &tools_array,
-                    hist_len,
                 );
 
                 if let Some(last) = history.last_mut() {
@@ -339,8 +299,6 @@ pub fn claude_to_kiro_request(
             &mut pending_tool_results,
             &mut pending_images,
             &current_role,
-            &tools_array,
-            hist_len,
         );
     }
 
@@ -352,14 +310,6 @@ pub fn claude_to_kiro_request(
             break;
         }
     }
-
-    // Grab tools from first history item
-    let first_history_tools = history
-        .first()
-        .and_then(|h| h.get("userInputMessage"))
-        .and_then(|m| m.get("userInputMessageContext"))
-        .and_then(|c| c.get("tools"))
-        .cloned();
 
     // Clean up history
     for item in &mut history {
@@ -422,19 +372,6 @@ pub fn claude_to_kiro_request(
                 "modelId": ""
             }
         }));
-    }
-
-    // Merge tools into currentMessage
-    if let (Some(tools), Some(ref mut cm)) = (first_history_tools, &mut current_message) {
-        if cm["userInputMessage"]["userInputMessageContext"]
-            .get("tools")
-            .is_none()
-        {
-            if cm["userInputMessage"]["userInputMessageContext"].is_null() {
-                cm["userInputMessage"]["userInputMessageContext"] = serde_json::json!({});
-            }
-            cm["userInputMessage"]["userInputMessageContext"]["tools"] = tools;
-        }
     }
 
     // Build system / volatile prefixes (9router claude-to-kiro + applyKiroSessionReplay).
@@ -523,8 +460,20 @@ pub fn claude_to_kiro_request(
         &base_current,
     );
 
-    let replay_current = replay
-        .current_message
+    // Canonicalize the replayed conversation into the strict Kiro wire shape:
+    // alternating user/assistant turns, adjacent tool-use/tool-result pairs with
+    // reserved ids, and tool specs only on the final (current) user message.
+    // Port of 9router `canonicalizeKiroConversation` (kiroConversation.js).
+    let (specs, name_map) = normalize_kiro_tool_specs(&tools);
+    let (canonical_history, canonical_current, _repairs, _valid) = canonicalize_kiro_conversation(
+        &replay.history,
+        &replay.current_message,
+        upstream_model,
+        &specs,
+        &name_map,
+    );
+
+    let replay_current = canonical_current
         .get("userInputMessage")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({ "content": "" }));
@@ -552,7 +501,7 @@ pub fn claude_to_kiro_request(
             "currentMessage": {
                 "userInputMessage": user_input_message
             },
-            "history": replay.history
+            "history": canonical_history
         },
         "agentMode": "vibe"
     });
@@ -604,16 +553,19 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn tool_results(body: &Value) -> Vec<Value> {
-        body["conversationState"]["currentMessage"]["userInputMessage"]
-            ["userInputMessageContext"]["toolResults"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
+    fn current_message_content(body: &Value) -> String {
+        body["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+            .as_str()
+            .unwrap_or("")
+            .to_string()
     }
 
+    /// A leading orphan tool_result (no preceding assistant tool_use) is
+    /// flattened to text by canonicalizeKiroConversation — parity with JS
+    /// `openai-to-kiro.test.js` ("salvage orphaned tool_result content as
+    /// text"). The is_error flag survives as the `(error)` suffix.
     #[test]
-    fn tool_result_is_error_maps_to_error_status() {
+    fn tool_result_is_error_maps_to_error_text() {
         let mut body = json!({
             "model": "claude-sonnet-4",
             "messages": [
@@ -627,13 +579,19 @@ mod tests {
             ]
         });
         claude_to_kiro_request("kiro-model", &mut body, false, None);
-        let results = tool_results(&body);
-        assert_eq!(results[0]["status"], "error");
-        assert_eq!(results[0]["toolUseId"], "t1");
+        let content = current_message_content(&body);
+        assert!(content.contains("[Tool result (error): boom]"));
+        // No structured toolResults survive — they were flattened to text.
+        assert!(
+            body["conversationState"]["currentMessage"]["userInputMessage"]
+                ["userInputMessageContext"]
+                .get("toolResults")
+                .is_none()
+        );
     }
 
     #[test]
-    fn tool_result_no_is_error_maps_to_success() {
+    fn tool_result_no_is_error_maps_to_success_text() {
         let mut body = json!({
             "model": "claude-sonnet-4",
             "messages": [
@@ -647,7 +605,7 @@ mod tests {
             ]
         });
         claude_to_kiro_request("kiro-model", &mut body, false, None);
-        let results = tool_results(&body);
-        assert_eq!(results[0]["status"], "success");
+        let content = current_message_content(&body);
+        assert!(content.contains("[Tool result: ok]"));
     }
 }
