@@ -64,7 +64,7 @@ pub async fn dispatch(
         );
     }
     let format = provider_generic_format(provider)?;
-    let base_url = generic_base_url(credentials, provider);
+    let base_url = resolve_tts_base_url(credentials, provider);
     let api_key = credentials
         .api_key
         .as_deref()
@@ -117,6 +117,7 @@ pub fn provider_generic_format(provider: &str) -> Option<GenericFormat> {
         "playht" => GenericFormat::Playht,
         "coqui" => GenericFormat::Coqui,
         "tortoise" => GenericFormat::Tortoise,
+        "selfhosted-tts" => GenericFormat::OpenaiCompat,
         _ => return None,
     })
 }
@@ -142,6 +143,24 @@ fn generic_base_url(credentials: &crate::types::ProviderConnection, provider: &s
     default_generic_base_url(provider).to_string()
 }
 
+/// Resolve the full TTS endpoint URL for a provider + connection.
+///
+/// `selfhosted-tts` treats the base URL as the server root and appends
+/// `/v1/audio/speech` (mirrors `selfhosted-tts.js`: "/v1/audio/speech is
+/// appended"). Tolerates a baseUrl that already ends in `/v1/audio/speech` by
+/// trimming trailing slashes first. Never falls back to a cloud endpoint.
+fn resolve_tts_base_url(credentials: &crate::types::ProviderConnection, provider: &str) -> String {
+    let root = generic_base_url(credentials, provider);
+    if provider != "selfhosted-tts" {
+        return root;
+    }
+    let trimmed = root.trim_end_matches('/');
+    if trimmed.ends_with("/v1/audio/speech") {
+        return trimmed.to_string();
+    }
+    format!("{trimmed}/v1/audio/speech")
+}
+
 /// Upstream defaults that mirror 9router's `providers.js` ttsConfig.
 fn default_generic_base_url(provider: &str) -> &'static str {
     match provider {
@@ -154,6 +173,7 @@ fn default_generic_base_url(provider: &str) -> &'static str {
         "playht" => "https://api.play.ht/api/v2/tts/stream",
         "coqui" => "http://localhost:5002/api/tts",
         "tortoise" => "http://localhost:8000/tts",
+        "selfhosted-tts" => "http://localhost:8880",
         _ => "",
     }
 }
@@ -236,11 +256,86 @@ mod tests {
             "deepgram",
             "nvidia",
             "huggingface",
+            "selfhosted-tts",
         ] {
             assert!(
                 !default_generic_base_url(p).is_empty(),
                 "default URL missing for {p}"
             );
         }
+    }
+
+    #[test]
+    fn selfhosted_tts_appends_speech_path() {
+        use crate::types::ProviderConnection;
+        use std::collections::BTreeMap;
+
+        // With a per-connection override, the root gets /v1/audio/speech.
+        let mut psd = BTreeMap::new();
+        psd.insert(
+            "baseUrl".to_string(),
+            serde_json::Value::String("http://192.168.1.5:8080".to_string()),
+        );
+        let conn = ProviderConnection {
+            id: "selfhosted-tts-1".into(),
+            provider: "selfhosted-tts".into(),
+            auth_type: "apikey".into(),
+            provider_specific_data: psd,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_tts_base_url(&conn, "selfhosted-tts"),
+            "http://192.168.1.5:8080/v1/audio/speech"
+        );
+    }
+
+    #[test]
+    fn selfhosted_tts_default_base_url() {
+        use crate::types::ProviderConnection;
+
+        let conn = ProviderConnection {
+            id: "selfhosted-tts-1".into(),
+            provider: "selfhosted-tts".into(),
+            auth_type: "apikey".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_tts_base_url(&conn, "selfhosted-tts"),
+            "http://localhost:8880/v1/audio/speech"
+        );
+        // Must never resolve to a cloud endpoint.
+        assert!(!resolve_tts_base_url(&conn, "selfhosted-tts").contains("openai.com"));
+    }
+
+    #[test]
+    fn selfhosted_tts_avoids_double_appending_speech_path() {
+        use crate::types::ProviderConnection;
+        use std::collections::BTreeMap;
+
+        let mut psd = BTreeMap::new();
+        psd.insert(
+            "baseUrl".to_string(),
+            serde_json::Value::String("http://192.168.1.5:8080/v1/audio/speech/".to_string()),
+        );
+        let conn = ProviderConnection {
+            id: "selfhosted-tts-1".into(),
+            provider: "selfhosted-tts".into(),
+            auth_type: "apikey".into(),
+            provider_specific_data: psd,
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_tts_base_url(&conn, "selfhosted-tts"),
+            "http://192.168.1.5:8080/v1/audio/speech"
+        );
+    }
+
+    #[test]
+    fn selfhosted_tts_maps_to_openai_compat_format() {
+        assert_eq!(
+            provider_generic_format("selfhosted-tts"),
+            Some(GenericFormat::OpenaiCompat)
+        );
+        assert!(is_tts_provider("selfhosted-tts"));
     }
 }
