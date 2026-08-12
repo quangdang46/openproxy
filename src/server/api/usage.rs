@@ -15,7 +15,7 @@ use crate::core::usage::quota_fetcher::{
     fetch_claude_quota, fetch_codex_quota, fetch_deepseek_usage, fetch_gemini_cli_quota,
     fetch_kimi_oauth_usage,
     fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota, fetch_kimi_usage,
-    fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota,
+    fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota, fetch_vercel_ai_gateway_quota,
     get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
@@ -538,9 +538,10 @@ async fn get_connection_usage(
                 "deepseek" => fetch_deepseek_usage(api_key).await,
                 "qoder" => fetch_qoder_quota(api_key, &provider).await,
                 "kiro" => fetch_kiro_quota(api_key, &provider, &psd).await,
-                // ollama / vercel-ai-gateway / codebuddy-cn / codebuddy-intl have
-                // no live apikey quota fetcher yet (beads .117/.118) — fall back
-                // to `{}` + per-request history (never 500).
+                "vercel-ai-gateway" => fetch_vercel_ai_gateway_quota(api_key).await,
+                // ollama / codebuddy-cn / codebuddy-intl have no live apikey
+                // quota fetcher yet (bead .118) — fall back to `{}` +
+                // per-request history (never 500).
                 _ => serde_json::json!({}),
             };
             if let Some(quotas) = result.get("quotas") {

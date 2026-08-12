@@ -1432,6 +1432,84 @@ pub async fn fetch_qoder_quota(access_token: &str, _provider: &str) -> Value {
     json!({ "quotas": Value::Object(quotas) })
 }
 
+/// Vercel AI Gateway credit usage (9router services/usage/misc.js getVercelAiGatewayUsage).
+/// GET https://ai-gateway.vercel.sh/v1/credits with Bearer auth; returns
+/// { balance, total_used } as USD decimal strings. Plan rows mirror JS
+/// exactly (MONTHLY_CREDIT = 5; remainingPercentage may exceed 100).
+pub async fn fetch_vercel_ai_gateway_quota(api_key: &str) -> Value {
+    if api_key.trim().is_empty() {
+        return json!({ "message": "Vercel AI Gateway API key not available." });
+    }
+    let client = http_client();
+    let response = match client
+        .get("https://ai-gateway.vercel.sh/v1/credits")
+        .bearer_auth(api_key.trim())
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return json!({ "message": format!("Vercel AI Gateway error: {e}") });
+        }
+    };
+    let status = response.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({ "message": "Vercel AI Gateway API key invalid or expired." });
+    }
+    if !(200..300).contains(&status) {
+        let text = response.text().await.unwrap_or_default();
+        let trimmed: String = text.chars().take(200).collect();
+        let suffix = if trimmed.is_empty() {
+            String::new()
+        } else {
+            format!(": {trimmed}")
+        };
+        return json!({ "message": format!("Vercel AI Gateway credits API error ({status}){suffix}") });
+    }
+    let data: Value = response.json().await.unwrap_or_else(|_| json!({}));
+    let balance = data
+        .get("balance")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    let total_used = data
+        .get("total_used")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    vercel_ai_gateway_quota_rows(balance, total_used)
+}
+
+/// Build the Vercel AI Gateway quota rows from the parsed balance/total_used
+/// (USD decimals). Pure fn for testability. 9router misc.js:213-249 parity.
+fn vercel_ai_gateway_quota_rows(balance: f64, total_used: f64) -> Value {
+    const MONTHLY_CREDIT: f64 = 5.0;
+    let remaining_pct = (balance / MONTHLY_CREDIT) * 100.0;
+
+    if balance <= 0.0 && total_used <= 0.0 {
+        return json!({
+            "plan": "Pay-as-you-go",
+            "message": "Vercel AI Gateway connected. No credit allocation found (BYOK or unfunded account).",
+            "quotas": {}
+        });
+    }
+
+    json!({
+        "plan": "Pay-as-you-go",
+        "quotas": {
+            "Used (USD)": json!({
+                "used": total_used, "total": 0.0, "remaining": 0.0,
+                "remainingPercentage": 100.0, "unlimited": true
+            }),
+            "Remaining (USD)": json!({
+                "used": balance, "total": MONTHLY_CREDIT, "remaining": balance,
+                "remainingPercentage": remaining_pct, "unlimited": false
+            })
+        }
+    })
+}
+
 pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
     if access_token.is_empty() {
         return json!({ "message": "Invalid or expired Claude token" });
@@ -2450,5 +2528,36 @@ mod tests {
             )
         });
         assert_eq!(pick.unwrap()["current_interval_total_count"], 100);
+    }
+
+    #[test]
+    fn test_vercel_ai_gateway_quota_builds_two_rows() {
+        let out = vercel_ai_gateway_quota_rows(95.5, 4.5);
+        let quotas = out["quotas"].as_object().unwrap();
+        // "Used (USD)": used 4.5, total 0, remainingPercentage 100, unlimited true.
+        let used = &quotas["Used (USD)"];
+        assert_eq!(used["used"], 4.5);
+        assert_eq!(used["total"], 0.0);
+        assert_eq!(used["remainingPercentage"], 100.0);
+        assert_eq!(used["unlimited"], true);
+        // "Remaining (USD)": used 95.5 (balance, not remaining), total 5,
+        // remainingPercentage 1910.0 (may exceed 100), unlimited false.
+        let remaining = &quotas["Remaining (USD)"];
+        assert_eq!(remaining["used"], 95.5);
+        assert_eq!(remaining["total"], 5.0);
+        assert_eq!(remaining["remaining"], 95.5);
+        // 95.5/5*100 = 1910 (float: 1910.0000000000002) — may exceed 100, never clamped.
+        let pct = remaining["remainingPercentage"].as_f64().unwrap();
+        assert!((pct - 1910.0).abs() < 1e-6, "expected ~1910, got {pct}");
+        assert_eq!(remaining["unlimited"], false);
+    }
+
+    #[test]
+    fn test_vercel_ai_gateway_no_credit_message() {
+        let out = vercel_ai_gateway_quota_rows(0.0, 0.0);
+        assert_eq!(out["plan"], "Pay-as-you-go");
+        let msg = out["message"].as_str().unwrap();
+        assert!(msg.contains("No credit allocation found"), "got: {msg}");
+        assert!(out["quotas"].as_object().unwrap().is_empty());
     }
 }
