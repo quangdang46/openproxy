@@ -18,8 +18,8 @@ use uuid::Uuid;
 use super::base::{now_secs, ImageAdapter, ImageRequest, ImageResponse, ParseContext};
 
 const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
-const CODEX_USER_AGENT: &str = "codex-imagen/0.2.6";
-const CODEX_VERSION: &str = "0.129.0";
+const CODEX_USER_AGENT: &str = "codex_cli_rs/0.136.0";
+const CODEX_VERSION: &str = "0.136.0";
 const CODEX_ORIGINATOR: &str = "codex_cli_rs";
 const CODEX_MODEL_SUFFIX: &str = "-image";
 const CODEX_REF_DETAIL: &str = "high";
@@ -305,5 +305,18 @@ impl ImageAdapter for CodexAdapter {
         let bytes = b"";
         let _placeholder = base64::engine::general_purpose::STANDARD.encode(bytes);
         body.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parity guard: headers are built from these constants, so the values
+    /// must byte-match 9router `imageProviders/codex.js` (lines 7-9).
+    #[test]
+    fn codex_version_constants_match_js() {
+        assert_eq!(CODEX_VERSION, "0.136.0");
+        assert_eq!(CODEX_USER_AGENT, "codex_cli_rs/0.136.0");
     }
 }
