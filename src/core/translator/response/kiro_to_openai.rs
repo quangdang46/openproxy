@@ -215,17 +215,109 @@ use crate::core::translator::registry::ResponseTransformState;
 
 /// Registry-compatible streaming wrapper.
 /// Signature matches `registry::ResponseTransformFn`.
+///
+/// Kiro upstream returns AWS EventStream v1 binary. We buffer bytes across
+/// chunks, decode complete frames via `EventStreamDecoder`, and assemble
+/// OpenAI `chat.completion.chunk` SSE via `KiroSseAssembler`.
+/// Falls back to the legacy JSON path for callers that already hand us
+/// decoded JSON events (e.g. tests, or a provider that skipped EventStream).
 pub fn kiro_to_openai_streaming(chunk: &[u8], state: &mut ResponseTransformState) -> Vec<String> {
-    let val: serde_json::Value = match serde_json::from_slice(chunk) {
-        Ok(v) => v,
+    // Legacy JSON path: if the chunk parses as JSON with an _eventType or
+    // chat.completion.chunk, use kiro_to_openai_response.
+    if let Ok(val) = serde_json::from_slice::<serde_json::Value>(chunk) {
+        if val.get("_eventType").is_some()
+            || val.get("event").is_some()
+            || val.get("object").and_then(|v| v.as_str()) == Some("chat.completion.chunk")
+        {
+            let inner = &mut state.kiro.state;
+            return match kiro_to_openai_response(&val, inner) {
+                Some(v) => vec![format!(
+                    "data: {}\n\n",
+                    serde_json::to_string(&v).unwrap_or_default()
+                )],
+                None => vec![],
+            };
+        }
+    }
+
+    // Binary EventStream path.
+    let buffer = &mut state.kiro.event_buffer;
+    buffer.extend_from_slice(chunk);
+
+    let events = match crate::core::executor::EventStreamDecoder::decode_chunk(buffer) {
+        Ok(events) => events,
         Err(_) => return vec![],
     };
-    let inner = &mut state.kiro.state;
-    match kiro_to_openai_response(&val, inner) {
-        Some(v) => vec![format!(
-            "data: {}\n\n",
-            serde_json::to_string(&v).unwrap_or_default()
-        )],
-        None => vec![],
+    if events.is_empty() {
+        return vec![];
     }
+
+    // Buffer any trailing partial frame for the next chunk.
+    let consumed = crate::core::executor::consumed_eventstream_bytes(buffer);
+    if consumed < buffer.len() {
+        let rest = buffer.split_off(consumed);
+        buffer.clear();
+        buffer.extend_from_slice(&rest);
+    } else {
+        buffer.clear();
+    }
+
+    // Lazily create the assembler on first event.
+    if state.kiro.assembler.is_none() {
+        let model = state
+            .kiro
+            .state
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("kiro")
+            .to_string();
+        state.kiro.assembler = Some(super::kiro_events::KiroSseAssembler::new(&model));
+    }
+
+    let mut out = Vec::new();
+    for event in &events {
+        if event.message_type == "error" || event.message_type == "exception" {
+            // Emit an SSE error chunk mirroring 9router's upstream_error.
+            out.push(format!(
+                "data: {}\n\n",
+                serde_json::json!({
+                    "error": {
+                        "message": event.payload
+                            .as_ref()
+                            .and_then(|p| p.get("message"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("Kiro upstream sent an EventStream error"),
+                        "type": "upstream_error",
+                        "code": "kiro_upstream_eventstream_error"
+                    }
+                })
+            ));
+            out.push("data: [DONE]\n\n".to_string());
+            continue;
+        }
+        // Delegate to the assembler (per-event).
+        if let Some(assembler) = state.kiro.assembler.as_mut() {
+            match assembler.process_event(event) {
+                Ok(chunks) => {
+                    for c in chunks {
+                        out.push(format!(
+                            "data: {}\n\n",
+                            serde_json::to_string(&c).unwrap_or_default()
+                        ));
+                    }
+                }
+                Err(msg) => {
+                    out.push(format!(
+                        "data: {}\n\n",
+                        serde_json::json!({
+                            "error": { "message": msg, "type": "upstream_error", "code": "kiro_event_parse_error" }
+                        })
+                    ));
+                    out.push("data: [DONE]\n\n".to_string());
+                    break;
+                }
+            }
+        }
+    }
+    out
 }
