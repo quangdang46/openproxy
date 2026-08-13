@@ -270,12 +270,12 @@ Created from `Combos` in the dashboard or `openproxy combo create`. Use the comb
 
 ## Configuration
 
-Most operators only set `JWT_SECRET` and `INITIAL_PASSWORD` and leave the rest at defaults.
+Most operators only set `JWT_SECRET` and leave the rest at defaults. The dashboard password is a random value generated on first boot (see `INITIAL_PASSWORD` below).
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `JWT_SECRET` | `openproxy-default-secret-change-me` | Sign the dashboard session cookie. **Change in production.** |
-| `INITIAL_PASSWORD` | `123456` | First-login password (one-time, replaced on first save). |
+| `INITIAL_PASSWORD` | _random, generated once_ | First-login password when no saved hash exists. When unset, a random password is generated at first boot and **printed once in the startup banner** (`$DATA_DIR/initial_password` is persisted so it stays stable). Reset it anytime with `openproxy auth reset-password`. |
 | `DATA_DIR` | `~/.openproxy` | Where `openproxy.sqlite`, data, and logs live. |
 | `PORT` | `4623` | HTTP listen port. |
 | `HOSTNAME` | `127.0.0.1` | Bind host. Set `0.0.0.0` to expose on LAN. |
@@ -528,7 +528,7 @@ For internet-exposed deploys: set `REQUIRE_API_KEY=true`, `AUTH_COOKIE_SECURE=tr
 | 401 on `/v1/chat/completions` | Wrong API key | Copy fresh from dashboard. Header: `Authorization: Bearer <key>` |
 | Quota exhausted message | Subscription / API limit hit | Combo fallback handles this — add a cheaper or free tier as the next entry |
 | `cargo build` fails with "web/dist not built" | Embedded build needs the dashboard | `(cd web && pnpm install --frozen-lockfile && pnpm run build)` first |
-| First login password rejected | `INITIAL_PASSWORD` not what you set | Default is `123456` if unset; check `.env` is sourced |
+| First login password rejected | Wrong dashboard password | If you set `INITIAL_PASSWORD`, check `.env` is sourced. Otherwise the password was generated at first boot — look for "Initial dashboard password" in the startup banner or run `openproxy auth reset-password --show` |
 
 Logs: enable with `ENABLE_REQUEST_LOGS=true`, then watch `logs/` (or stderr).
 

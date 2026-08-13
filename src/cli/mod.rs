@@ -367,6 +367,17 @@ pub enum AuthCmd {
     },
     /// List all configured profiles.
     List,
+    /// Reset the dashboard password back to the generated initial password.
+    ///
+    /// Clears the stored bcrypt hash and the persisted generated password so
+    /// the next server boot mints a fresh random one (printed in the startup
+    /// banner). Works offline against the local data dir — use this to
+    /// recover from a forgotten dashboard password.
+    ResetPassword {
+        /// Also print the freshly generated password now.
+        #[arg(long)]
+        show: bool,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -781,6 +792,13 @@ impl Cli {
                             .block_on(auth::run_whoami(ctx, &resolved, verify))
                             .map(|_| ()),
                         AuthCmd::List => auth::run_list(ctx).map(|_| ()),
+                        AuthCmd::ResetPassword { show } => rt
+                            .block_on(auth::run_reset_password(
+                                ctx,
+                                &resolved,
+                                auth::ResetPasswordOptions { show },
+                            ))
+                            .map(|_| ()),
                     }
                 }
                 Command::Usage { cmd } => {

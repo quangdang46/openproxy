@@ -110,10 +110,13 @@ export OPENPROXY_API_KEY="$APIKEY"
 If the data dir is already provisioned and the admin key is unknown, authenticate via password against the running server instead:
 
 ```bash
-# Default INITIAL_PASSWORD is "123456" unless set in env at first boot.
+# If INITIAL_PASSWORD is set in env at first boot, use that value. Otherwise
+# the password was generated at first boot — recover it with:
+openproxy auth reset-password --show
+# → prints the fresh generated password; use it below.
 curl -sS -X POST http://127.0.0.1:4623/api/auth/login \
   -H 'content-type: application/json' \
-  -d '{"password":"123456"}' \
+  -d '{"password":"<password>"}' \
   -c /tmp/op.cookies
 ```
 
@@ -286,7 +289,7 @@ Maintainers refresh the embedded snapshots by running
 | `OPENPROXY_DATA_DIR` / `DATA_DIR` | `~/.openproxy` | Where `db.json`, `usage.json`, `log.txt` live. |
 | `PORT` | `4623` | HTTP listen port. |
 | `HOSTNAME` | `127.0.0.1` | Bind host. `0.0.0.0` exposes on LAN. |
-| `INITIAL_PASSWORD` | `123456` | First-login password (replaced on first save). |
+| `INITIAL_PASSWORD` | _random, generated once_ | First-login password (replaced on first save). If unset, a random password is minted at first boot and printed in the startup banner; recover with `openproxy auth reset-password --show`. |
 | `JWT_SECRET` | `openproxy-default-secret-change-me` | **Change in any non-throwaway deploy.** |
 | `REQUIRE_API_KEY` | `false` | Reject `/v1/*` without a bearer. Required for any non-loopback bind. |
 | `OPENPROXY_NO_OPEN` | _(unset)_ | Equivalent to `--no-open`. |
