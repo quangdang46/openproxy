@@ -28,7 +28,7 @@ jobs:
       packages: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # QEMU lets buildx emulate linux/arm64 on linux/amd64 runners.
       - name: Set up QEMU
