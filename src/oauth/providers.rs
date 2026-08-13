@@ -320,6 +320,24 @@ pub fn clinepass() -> OAuthProviderConfig {
     }
 }
 
+pub fn zed() -> OAuthProviderConfig {
+    // Zed uses a non-standard RSA keypair callback flow (NOT standard OAuth):
+    // the app generates an RSA-2048 keypair, opens a local port, and
+    // https://zed.dev/native_app_signin?native_app_port=...&native_app_public_key=...
+    // redirects back with a base64 RSA-OAEP-encrypted access token. No
+    // client_id / token_url / refresh_url — the token is long-lived.
+    OAuthProviderConfig {
+        id: "zed",
+        client_id: "", // no client id — RSA keypair flow
+        authorize_url: "https://zed.dev/native_app_signin",
+        token_url: "", // token delivered via the local callback, not a token URL
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[("rsaKeyExchange", "true")],
+        refresh_lead_ms: 0,
+    }
+}
+
 pub fn cline() -> OAuthProviderConfig {
     OAuthProviderConfig {
         id: "cline",
@@ -504,6 +522,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "kilocode" => Some(kilocode()),
         "cline" => Some(cline()),
         "clinepass" => Some(clinepass()),
+        "zed" => Some(zed()),
         "gitlab" => Some(gitlab()),
         "codebuddy" => Some(codebuddy()),
         "openai-native" => Some(openai_native()),
@@ -516,5 +535,24 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "codebuddy-cn" => Some(codebuddy_cn()),
         "codebuddy-intl" => Some(codebuddy_intl()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zed_oauth_no_refresh_endpoint() {
+        // 9router zed.js: RSA keypair flow — no client_id / token_url / refresh.
+        let cfg = zed();
+        assert_eq!(cfg.id, "zed");
+        assert!(cfg.token_url.is_empty(), "zed has no token_url");
+        assert!(cfg.client_id.is_empty(), "zed has no client_id");
+        assert_eq!(cfg.authorize_url, "https://zed.dev/native_app_signin");
+        assert_eq!(cfg.uses_pkce, false);
+        assert_eq!(cfg.get_param("rsaKeyExchange"), Some("true"));
+        // Dispatcher resolves it.
+        assert!(get_config("zed").is_some());
     }
 }
