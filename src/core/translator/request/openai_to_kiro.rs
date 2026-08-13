@@ -552,27 +552,17 @@ pub fn openai_to_kiro_request(
         payload["profileArn"] = Value::String(profile_arn.to_string());
     }
 
-    // Preserve client's max_tokens; fall back to 32000 default (9router bug fixed:
-    // previously always hardcoded 32000 as a u64 literal, ignoring the client value)
-    let client_max_tokens: u64 = body
-        .get("max_tokens")
-        .or_else(|| body.get("max_completion_tokens"))
-        .and_then(|v| v.as_u64())
-        .filter(|&t| t > 0)
-        .unwrap_or(32000);
-    let max_tokens = client_max_tokens;
-    let temperature = body.get("temperature");
-    let top_p = body.get("top_p");
-    if temperature.is_some() || top_p.is_some() {
-        let mut config = serde_json::json!({"maxTokens": max_tokens});
-        if let Some(t) = temperature {
-            config["temperature"] = t.clone();
-        }
-        if let Some(t) = top_p {
-            config["topP"] = t.clone();
-        }
-        payload["inferenceConfig"] = config;
+    // JS parity (openai-to-kiro.js:309, 416-421): inferenceConfig is always
+    // emitted with the hardcoded constant maxTokens = 32000 (JS ignores
+    // body.max_tokens here).
+    let mut config = serde_json::json!({"maxTokens": 32000u64});
+    if let Some(t) = body.get("temperature") {
+        config["temperature"] = t.clone();
     }
+    if let Some(t) = body.get("top_p") {
+        config["topP"] = t.clone();
+    }
+    payload["inferenceConfig"] = config;
 
     // Tag upstream model for executor routing
     payload["_kiroUpstreamModel"] = Value::String(upstream_model.to_string());
@@ -754,5 +744,23 @@ mod tests {
                 body
             );
         }
+    }
+
+    /// Guard test per bead P0-A7 (JS openai-to-kiro.js:309, 416-421):
+    /// inferenceConfig is ALWAYS emitted with the constant maxTokens = 32000,
+    /// even with no temperature/topP in the body.
+    #[test]
+    fn inference_config_always_emitted_max_tokens_32000() {
+        let mut body = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        openai_to_kiro_request("gpt-4", &mut body, false, None);
+        assert_eq!(
+            body["inferenceConfig"],
+            json!({"maxTokens": 32000}),
+            "inferenceConfig should always be emitted with maxTokens=32000, got: {}",
+            body
+        );
     }
 }
