@@ -330,6 +330,172 @@ fn concat_arrays(arrays: &[&[u8]]) -> Vec<u8> {
     result
 }
 
+// ==================== AGENT SERVICE (9router cursor.js executeAgent) ====================
+//
+// Cursor's AgentService (agent.api5.cursor.sh/agent.v1.AgentService/Run) is an
+// HTTP/2-only Connect-RPC endpoint. This increment ports the request-side
+// pieces: the `isAgentTextRequest` routing predicate and the protobuf
+// `AgentRun` frame builder (with the guard-testable pure logic). The HTTP/2
+// duplex transport is a follow-up (see beads pnc34).
+
+/// `agent.v1.AgentService/Run` path (9router cursor.js AGENT_RUN_PATH).
+const AGENT_RUN_PATH: &str = "/agent.v1.AgentService/Run";
+/// Connect-RPC request frame flags: bit 0 = gzip.
+const CONNECT_RPC_FLAG_COMPRESSED: u8 = 0x01;
+
+/// 9router `isAgentTextRequest`: true when every message is text-only — no
+/// `tool_calls`, no `role:"tool"`, and content is a string or an array of
+/// text-only parts. Tool *schemas* on the request are ignored (AgentService
+/// answers text turns fine); a real tool-call/result conversation stays on the
+/// legacy ChatService path.
+fn is_agent_text_request(body: &Value) -> bool {
+    let Some(messages) = body.get("messages").and_then(Value::as_array) else {
+        return false;
+    };
+    messages.iter().all(|message| {
+        if message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|c| !c.is_empty())
+        {
+            return false;
+        }
+        if message.get("role").and_then(Value::as_str) == Some("tool") {
+            return false;
+        }
+        match message.get("content") {
+            Some(Value::String(_)) => true,
+            Some(Value::Array(parts)) => parts
+                .iter()
+                .all(|p| p.get("type").and_then(Value::as_str) == Some("text")),
+            _ => false,
+        }
+    })
+}
+
+/// 9router `textFromContent`: string content, or array of `{type:"text"}` parts.
+fn text_from_content(content: &Value) -> String {
+    match content {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter(|p| p.get("type").and_then(Value::as_str) == Some("text"))
+            .filter_map(|p| p.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Encode a protobuf length-delimited field (wire type 2).
+fn pb_len(field: u32, data: &[u8]) -> Vec<u8> {
+    encode_field_len(field, 2, data)
+}
+
+/// Encode a protobuf varint field (wire type 0).
+fn pb_varint(field: u32, value: u32) -> Vec<u8> {
+    encode_field_varint(field, 0, value)
+}
+
+/// 9router `encodeHistoryMessage`: a conversation-history entry.
+/// ConversationHistoryMessage.user / .assistant → repeated content → text.
+fn encode_history_message(message: &Value) -> Option<Vec<u8>> {
+    let content = text_from_content(message.get("content")?);
+    if content.is_empty() {
+        return None;
+    }
+    let text = pb_len(1, content.as_bytes());
+    let inner = pb_len(1, &text);
+    let wrapper = if message.get("role").and_then(Value::as_str) == Some("assistant") {
+        pb_len(2, &inner)
+    } else {
+        pb_len(1, &inner)
+    };
+    Some(wrapper)
+}
+
+/// 9router `buildAgentRunFrame(messages, model)`: encode the
+/// `agent.v1.AgentClientMessage.run_request` Connect-RPC frame.
+pub fn build_agent_run_frame(messages: &[Value], model: &str) -> Vec<u8> {
+    let system: String = messages
+        .iter()
+        .filter(|m| m.get("role").and_then(Value::as_str) == Some("system"))
+        .map(|m| text_from_content(m.get("content").unwrap_or(&Value::Null)))
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    let chat_messages: Vec<&Value> = messages
+        .iter()
+        .filter(|m| m.get("role").and_then(Value::as_str) != Some("system"))
+        .collect();
+
+    let current_index = chat_messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(Value::as_str) == Some("user"));
+    let current = match current_index {
+        Some(i) => chat_messages[i],
+        None => chat_messages.last().copied().unwrap_or(&Value::Null),
+    };
+
+    let history_end = current_index.unwrap_or(chat_messages.len().saturating_sub(1));
+    let history: Vec<Vec<u8>> = chat_messages
+        .iter()
+        .take(history_end)
+        .filter_map(|m| encode_history_message(m))
+        .collect();
+
+    let user_text = {
+        let t = text_from_content(current.get("content").unwrap_or(&Value::Null));
+        if t.is_empty() {
+            "Continue.".to_string()
+        } else {
+            t
+        }
+    };
+
+    // agent.v1.UserMessageAction.user_message (+ optional history).
+    let user_message = concat_arrays(&[&pb_len(1, user_text.as_bytes()), &pb_len(2, &uuid_uuid())]);
+    let conversation_history = if history.is_empty() {
+        Vec::new()
+    } else {
+        let mut buf = Vec::new();
+        for entry in &history {
+            buf.extend_from_slice(&pb_len(1, entry));
+        }
+        buf
+    };
+    let mut user_action = pb_len(1, &user_message);
+    if !conversation_history.is_empty() {
+        user_action.extend_from_slice(&pb_len(7, &conversation_history));
+    }
+    let conversation_action = pb_len(1, &user_action);
+
+    // requestedModel: field 1 model, field 7 bool true (9router agentBool(7,true)).
+    let requested_model = concat_arrays(&[&pb_len(1, model.as_bytes()), &pb_varint(7, 1)]);
+
+    let mut run_request = Vec::new();
+    run_request.extend_from_slice(&pb_len(1, &[])); // empty ConversationStateStructure
+    run_request.extend_from_slice(&pb_len(2, &conversation_action));
+    if !system.is_empty() {
+        run_request.extend_from_slice(&pb_len(8, system.as_bytes()));
+    }
+    run_request.extend_from_slice(&pb_len(9, &requested_model));
+
+    // agent.v1.AgentClientMessage.run_request → Connect-RPC frame.
+    // Cursor does not support compressed requests, so compress=false.
+    wrap_connect_rpc_frame(&pb_len(1, &run_request), false)
+}
+
+/// Random UUID for the agent user-message action (9router crypto.randomUUID).
+fn uuid_uuid() -> Vec<u8> {
+    uuid::Uuid::new_v4().as_bytes().to_vec()
+}
+
+/// 9router cursor.js AGENT_RUN_PATH constant (for tests / diagnostics).
+#[allow(dead_code)]
+const AGENT_RUN_PATH_STR: &str = AGENT_RUN_PATH;
+
 /// Format tool name: "toolName" → "mcp_custom_toolName"
 fn format_tool_name(name: &str) -> String {
     if name.is_empty() {
@@ -1242,7 +1408,10 @@ fn build_cursor_headers(
         "x-cursor-checksum",
         HeaderValue::from_str(&headers.checksum).map_err(CursorExecutorError::InvalidHeader)?,
     );
-    header_map.insert("x-cursor-client-version", HeaderValue::from_static("3.12.17"));
+    header_map.insert(
+        "x-cursor-client-version",
+        HeaderValue::from_static("3.12.17"),
+    );
     header_map.insert(
         "x-cursor-client-commit",
         HeaderValue::from_static("0fb762053c34788bb7760d5673f8a6d4c8589d50"),
@@ -2742,5 +2911,93 @@ mod tests {
             executor_err,
             CursorExecutorError::HyperClientInit(_)
         ));
+    }
+
+    // ---- AgentService increment (bead .34) ----
+
+    #[test]
+    fn test_is_agent_text_request() {
+        use serde_json::json;
+        // All-string messages → true.
+        let body = json!({
+            "messages": [
+                { "role": "user", "content": "hello" },
+                { "role": "assistant", "content": "hi" }
+            ]
+        });
+        assert!(is_agent_text_request(&body));
+
+        // Text-only content arrays → true.
+        let body2 = json!({
+            "messages": [
+                { "role": "user", "content": [
+                    { "type": "text", "text": "hello" },
+                    { "type": "text", "text": "world" }
+                ] }
+            ]
+        });
+        assert!(is_agent_text_request(&body2));
+
+        // A message with tool_calls → false.
+        let body3 = json!({
+            "messages": [
+                { "role": "user", "content": "hello" },
+                { "role": "assistant", "content": "ok", "tool_calls": [{"id":"t1"}] }
+            ]
+        });
+        assert!(!is_agent_text_request(&body3));
+
+        // A message with role "tool" → false.
+        let body4 = json!({
+            "messages": [
+                { "role": "user", "content": "hello" },
+                { "role": "tool", "content": "result", "tool_call_id": "t1" }
+            ]
+        });
+        assert!(!is_agent_text_request(&body4));
+
+        // A non-text content part (e.g. image) → false.
+        let body5 = json!({
+            "messages": [
+                { "role": "user", "content": [
+                    { "type": "text", "text": "hello" },
+                    { "type": "image_url", "image_url": {"url": "x"} }
+                ] }
+            ]
+        });
+        assert!(!is_agent_text_request(&body5));
+
+        // No messages → false.
+        assert!(!is_agent_text_request(&json!({ "model": "gpt" })));
+    }
+
+    #[test]
+    fn test_build_agent_run_frame_has_request_context_fields() {
+        use serde_json::json;
+        let messages = vec![
+            json!({ "role": "system", "content": "You are a helpful assistant." }),
+            json!({ "role": "user", "content": "What is 2+2?" }),
+        ];
+        let frame = build_agent_run_frame(&messages, "gpt-4o");
+        // Connect-RPC frame: 1 flag byte + 4-byte BE length + payload.
+        assert!(frame.len() > 5);
+        assert_eq!(frame[0], 0); // uncompressed
+        let payload_len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+        assert_eq!(frame.len(), 5 + payload_len);
+        let payload = &frame[5..];
+
+        // The payload is agent.v1.AgentClientMessage.run_request (field 1).
+        // Field 9 requestedModel encodes a varint bool true (field 7).
+        // 9router buildAgentRunFrame sets agentBool(7, true) — the encoded
+        // bytes for field 9's inner requestedModel contain tag(7,varint)=0x38.
+        assert!(
+            payload.windows(2).any(|w| w == [0x38, 0x01]),
+            "run_request should contain requestedModel bool true (tag 7 varint): {payload:?}"
+        );
+        // Field 9 requestedModel must be present (tag 9 length-delimited = 0x4A).
+        assert!(
+            payload.windows(1).any(|w| w[0] == 0x4A),
+            "run_request should contain field 9 (requestedModel): {payload:?}"
+        );
     }
 }
