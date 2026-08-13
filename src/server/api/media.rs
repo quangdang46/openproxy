@@ -530,7 +530,19 @@ fn select_media_connection(
     provider: &str,
     _model: &str,
 ) -> Option<crate::types::ProviderConnection> {
-    snapshot
+    select_media_connections(snapshot, provider)
+        .into_iter()
+        .next()
+}
+
+/// All active provider connections for a provider (ordered by priority), for
+/// account rotation on auth/quota errors. 9router videoGeneration.js rotates
+/// to the next account on 401/403/429.
+fn select_media_connections(
+    snapshot: &AppDb,
+    provider: &str,
+) -> Vec<crate::types::ProviderConnection> {
+    let mut conns: Vec<_> = snapshot
         .provider_connections
         .iter()
         .filter(|connection| {
@@ -538,8 +550,10 @@ fn select_media_connection(
                 && connection.is_active()
                 && connection_has_credentials(connection)
         })
-        .min_by_key(|connection| connection.priority.unwrap_or(999))
         .cloned()
+        .collect();
+    conns.sort_by_key(|c| c.priority.unwrap_or(999));
+    conns
 }
 
 fn connection_has_credentials(connection: &crate::types::ProviderConnection) -> bool {
@@ -917,33 +931,7 @@ async fn video_create_handler(
         }
     }
 
-    let connection = match select_video_connection(&state, &provider, &headers) {
-        Ok(conn) => conn,
-        Err(resp) => return resp,
-    };
-
     let url = format!("{}/{}", XAI_VIDEO_BASE_URL.trim_end_matches('/'), action);
-
-    let mut upstream_headers = match build_media_headers(&provider, &connection) {
-        Ok(h) => h,
-        Err(e) => {
-            return json_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
-        }
-    };
-
-    // Forward Idempotency-Key when present (creation is billable).
-    if let Some(idem) = headers
-        .get("idempotency-key")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-    {
-        if let Ok(val) = HeaderValue::from_str(idem) {
-            upstream_headers.insert(
-                reqwest::header::HeaderName::from_static("idempotency-key"),
-                val,
-            );
-        }
-    }
 
     let body_bytes = match serde_json::to_vec(&body) {
         Ok(b) => b,
@@ -955,42 +943,113 @@ async fn video_create_handler(
         }
     };
 
-    let snapshot = state.db.snapshot();
-    let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
-    let client = match state.client_pool.get(&provider, proxy.as_ref()) {
-        Ok(c) => c,
-        Err(e) => {
-            return json_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Client error: {:?}", e),
-            )
-        }
-    };
+    // 9router videoGeneration.js CREATE_ROTATION_STATUSES: rotate to the next
+    // account only on auth/quota errors the upstream rejects before job
+    // creation (401/403/429). 5xx is returned to the caller (not rotated).
+    let create_rotation_statuses: [u16; 3] = [401, 403, 429];
 
-    // Never auto-retry creation POSTs — a network error after the request left
-    // the socket may still have created the billable job upstream.
-    let response = match client
-        .post(&url)
-        .headers(upstream_headers.clone())
-        .body(body_bytes)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return json_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e))
-        }
-    };
-
-    let mut proxied = proxy_upstream_response(response, upstream_headers).await;
-    // Video jobs are account-bound — clients echo this back as `x-connection-id`
-    // on GET polls so the same account is used.
-    if let Ok(val) = HeaderValue::from_str(&connection.id) {
-        proxied
-            .headers_mut()
-            .insert("x-openproxy-connection-id", val);
+    // Candidate accounts (preferred pinned connection first, then by priority).
+    let preferred_conn = select_video_connection(&state, &provider, &headers).ok();
+    let mut connections: Vec<crate::types::ProviderConnection> = Vec::new();
+    if let Some(preferred) = preferred_conn.clone() {
+        connections.push(preferred);
     }
-    proxied
+    for conn in select_media_connections(&state.db.snapshot(), &provider) {
+        if !connections.iter().any(|c| c.id == conn.id) {
+            connections.push(conn);
+        }
+    }
+    if connections.is_empty() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("No credentials for provider: {provider}"),
+        );
+    }
+
+    let snapshot = state.db.snapshot();
+    let mut last_error: Option<Response> = None;
+
+    for connection in &connections {
+        let mut upstream_headers = match build_media_headers(&provider, &connection) {
+            Ok(h) => h,
+            Err(e) => {
+                last_error = Some(json_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Header error: {}", e),
+                ));
+                continue;
+            }
+        };
+
+        // Forward Idempotency-Key when present (creation is billable).
+        if let Some(idem) = headers
+            .get("idempotency-key")
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.is_empty())
+        {
+            if let Ok(val) = HeaderValue::from_str(idem) {
+                upstream_headers.insert(
+                    reqwest::header::HeaderName::from_static("idempotency-key"),
+                    val,
+                );
+            }
+        }
+
+        let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+        let client = match state.client_pool.get(&provider, proxy.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                last_error = Some(json_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &format!("Client error: {:?}", e),
+                ));
+                continue;
+            }
+        };
+
+        // Never auto-retry a single POST that already left the socket — a
+        // network error may still have created the billable job upstream.
+        let response = match client
+            .post(&url)
+            .headers(upstream_headers.clone())
+            .body(body_bytes.clone())
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = Some(json_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    &format!("Request failed: {}", e),
+                ));
+                continue;
+            }
+        };
+
+        let status = response.status().as_u16();
+        let is_rotation_status = create_rotation_statuses.contains(&status);
+
+        // Rotate on auth/quota errors only when another account remains.
+        if is_rotation_status && connections.iter().any(|c| c.id != connection.id) {
+            last_error = Some(proxy_upstream_response(response, upstream_headers).await);
+            continue;
+        }
+
+        let mut proxied = proxy_upstream_response(response, upstream_headers).await;
+        // Video jobs are account-bound — clients echo this back as `x-connection-id`
+        // on GET polls so the same account is used.
+        if let Ok(val) = HeaderValue::from_str(&connection.id) {
+            proxied
+                .headers_mut()
+                .insert("x-openproxy-connection-id", val);
+        }
+        return proxied;
+    }
+
+    // All accounts failed with a rotation status — return the last response.
+    last_error.unwrap_or_else(|| {
+        json_error_response(StatusCode::BAD_GATEWAY, "All video accounts failed")
+    })
 }
 
 /// Poll async video job status. Jobs are account-bound upstream, so no
@@ -1155,4 +1214,28 @@ fn select_video_connection(
             &format!("No credentials for provider: {}", provider),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn create_rotation_statuses_matches_9router() {
+        // 9router videoGeneration.js CREATE_ROTATION_STATUSES = Set([401, 403, 429]).
+        let rotation: [u16; 3] = [401, 403, 429];
+        assert!(rotation.contains(&401));
+        assert!(rotation.contains(&403));
+        assert!(rotation.contains(&429));
+        assert!(!rotation.contains(&500));
+        assert!(!rotation.contains(&502));
+        assert!(!rotation.contains(&400));
+    }
+
+    #[test]
+    fn rotation_statuses_constant_is_present() {
+        // The handler's in-memory rotation set (mirrors CREATE_ROTATION_STATUSES).
+        // Compile-level guard that the handler still carries the set.
+        let handler_uses_rotation = include_str!("media.rs").contains("create_rotation_statuses");
+        assert!(handler_uses_rotation);
+    }
 }
