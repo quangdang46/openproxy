@@ -146,6 +146,36 @@ impl ComboAttemptError {
     }
 }
 
+/// Parse a `retryAfter` value from an upstream error body into a concrete
+/// timestamp. 9router `handleComboChat` reads `errorBody.retryAfter` and
+/// normalizes via `new Date(retryAfter)`, which accepts both an ISO-8601 date
+/// string and a numeric seconds count. Returns `None` when absent/unparseable.
+pub fn parse_retry_after_from_body(body: &[u8]) -> Option<DateTime<Utc>> {
+    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let retry_after = value
+        .get("error")
+        .and_then(|e| e.get("retryAfter"))
+        .or_else(|| value.get("retryAfter"))?;
+    if let Some(iso) = retry_after.as_str() {
+        // ISO-8601 date string.
+        if let Ok(dt) = DateTime::parse_from_rfc3339(iso) {
+            return Some(dt.with_timezone(&Utc));
+        }
+        // Numeric string of seconds.
+        if let Ok(secs) = iso.parse::<i64>() {
+            return Utc::now().checked_add_signed(chrono::Duration::seconds(secs));
+        }
+        return None;
+    }
+    if let Some(secs) = retry_after.as_i64() {
+        return Utc::now().checked_add_signed(chrono::Duration::seconds(secs));
+    }
+    if let Some(secs) = retry_after.as_f64() {
+        return Utc::now().checked_add_signed(chrono::Duration::seconds(secs as i64));
+    }
+    None
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComboExecutionError {
     pub status: u16,
@@ -771,7 +801,8 @@ where
                     };
                 }
 
-                let decision = check_fallback_error(error.status, &error.message, consecutive_backoff_level);
+                let decision =
+                    check_fallback_error(error.status, &error.message, consecutive_backoff_level);
                 if !decision.should_fallback {
                     return Err(ComboExecutionError {
                         status: error.status,
@@ -831,4 +862,41 @@ where
         earliest_retry_after,
         upstream_body: final_upstream_body,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn combo_retry_after_from_body_parsed() {
+        // Acceptance guard test (bead .107): an error whose JSON body carries
+        // retryAfter as an ISO date string (no Retry-After header needed).
+        let body = br#"{"error":{"message":"rate limited","retryAfter":"2030-01-01T00:00:00Z"}}"#;
+        let retry_after = parse_retry_after_from_body(body);
+        assert!(retry_after.is_some(), "ISO retryAfter should parse");
+        if let Some(ra) = retry_after {
+            assert!(ra > Utc::now(), "parsed date should be in the future");
+        }
+    }
+
+    #[test]
+    fn combo_retry_after_from_body_numeric_seconds() {
+        // retryAfter as a numeric seconds count → future timestamp.
+        let body = br#"{"error":{"retryAfter":120}}"#;
+        let retry_after = parse_retry_after_from_body(body);
+        assert!(retry_after.is_some(), "numeric retryAfter should parse");
+        if let Some(ra) = retry_after {
+            let delta = ra.signed_duration_since(Utc::now());
+            assert!(delta.num_seconds() >= 100 && delta.num_seconds() <= 140);
+        }
+    }
+
+    #[test]
+    fn combo_retry_after_from_body_absent() {
+        // No retryAfter → None.
+        let body = br#"{"error":{"message":"boom"}}"#;
+        assert!(parse_retry_after_from_body(body).is_none());
+        assert!(parse_retry_after_from_body(b"not json").is_none());
+    }
 }

@@ -1829,8 +1829,13 @@ async fn forward_with_provider_fallback(
                     .await);
                 }
 
-                let retry_after = retry_after_from_headers(result.response.headers());
-                let message = extract_error_message(result.response).await;
+                // 9router parity: retryAfter may come from the Retry-After header
+                // OR the error JSON body (errorBody.retryAfter). Header wins; the
+                // body is the fallback when a provider returns it only in JSON.
+                let header_retry_after = retry_after_from_headers(result.response.headers());
+                let (message, body_retry_after) =
+                    extract_error_message_and_retry_after(result.response).await;
+                let retry_after = header_retry_after.or(body_retry_after);
                 state
                     .usage_live
                     .finish_request(model, provider, Some(connection.id.as_str()), true)
@@ -3422,7 +3427,12 @@ async fn extract_upstream_error_with_body(response: UpstreamResponse) -> (String
     (message, raw_body)
 }
 
-async fn extract_error_message(response: UpstreamResponse) -> String {
+/// Read the error response body once and return both the extracted message and
+/// a body-based `retryAfter` (9router `handleComboChat` reads
+/// `errorBody.retryAfter`; `new Date(retryAfter)` accepts ISO date or seconds).
+async fn extract_error_message_and_retry_after(
+    response: UpstreamResponse,
+) -> (String, Option<DateTime<Utc>>) {
     let status = response.status();
     let text = match response {
         UpstreamResponse::Reqwest(response) => response.text().await.unwrap_or_default(),
@@ -3434,27 +3444,35 @@ async fn extract_error_message(response: UpstreamResponse) -> String {
                 .unwrap_or_default()
         }
     };
-    if let Ok(value) = serde_json::from_str::<Value>(&text) {
-        if let Some(message) = value
-            .get("error")
-            .and_then(|error| error.get("message").or(Some(error)))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return message.to_string();
+    let retry_after = crate::core::combo::parse_retry_after_from_body(text.as_bytes());
+    let message = {
+        if let Ok(value) = serde_json::from_str::<Value>(&text) {
+            if let Some(message) = value
+                .get("error")
+                .and_then(|error| error.get("message").or(Some(error)))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                message.to_string()
+            } else if let Some(message) = value
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                message.to_string()
+            } else {
+                fallback_error_text(status, &text)
+            }
+        } else {
+            fallback_error_text(status, &text)
         }
+    };
+    (message, retry_after)
+}
 
-        if let Some(message) = value
-            .get("message")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return message.to_string();
-        }
-    }
-
+fn fallback_error_text(status: StatusCode, text: &str) -> String {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         status
