@@ -775,6 +775,10 @@ impl SearchProvider for YouComProvider {
     fn id(&self) -> &'static str {
         "youcom"
     }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry timeoutMs for youcom.
+        Some(10_000)
+    }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         let _ = require_token(request, "youcom")?;
         let (includes, excludes) = parse_domain_filter(&request.domain_filter);
@@ -915,6 +919,10 @@ impl SearchProvider for SearxngProvider {
     }
     fn no_auth(&self) -> bool {
         true
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry timeoutMs for searxng.
+        Some(10_000)
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         // 9router: default URL comes from SEARXNG_URL env (default

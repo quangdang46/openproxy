@@ -102,6 +102,12 @@ pub trait SearchProvider: Send + Sync {
 
     /// Normalise the upstream JSON to [`SearchResultSet`].
     fn normalize(&self, body: &Value, request: &SearchRequest<'_>) -> SearchResultSet;
+
+    /// Per-provider upstream timeout in ms (9router registry `timeoutMs`).
+    /// `None` → the global 15s timeout applies.
+    fn timeout_ms(&self) -> Option<u64> {
+        None
+    }
 }
 
 /// Split `domain_filter` into `(includes, excludes)` where excludes are
