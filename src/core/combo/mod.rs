@@ -14,6 +14,7 @@ use crate::core::account_fallback::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, MAX_BACKOFF
 use crate::types::Combo;
 
 pub mod auto_combo;
+pub mod capacity_adapter;
 pub mod fusion;
 pub mod hedging;
 pub mod shadow;
@@ -186,7 +187,7 @@ pub fn get_quota_cooldown(backoff_level: u32) -> Duration {
 
 /// Hard capabilities that models must support to handle the request — a model
 /// missing any of these gets tier-2 (last-resort) placement.
-const HARD_CAPS: &[&str] = &["vision", "pdf"];
+const HARD_CAPS: &[&str] = &["vision", "pdf", "audioInput", "videoInput"];
 
 /// Detect required capabilities from the request body by scanning the last
 /// user turn for multimodal blocks (9router detectRequiredCapabilities parity).
@@ -244,6 +245,10 @@ pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
                     required.insert("vision".to_string());
                 } else if mime == "application/pdf" {
                     required.insert("pdf".to_string());
+                } else if mime.starts_with("audio/") {
+                    required.insert("audioInput".to_string());
+                } else if mime.starts_with("video/") {
+                    required.insert("videoInput".to_string());
                 }
             }
         }
@@ -266,6 +271,12 @@ fn scan_content_for_capabilities(content: &Value, required: &mut HashSet<String>
                     Some("input_file" | "document" | "file") => {
                         required.insert("pdf".to_string());
                     }
+                    Some("input_audio" | "audio" | "input_audio_file") => {
+                        required.insert("audioInput".to_string());
+                    }
+                    Some("input_video" | "video") => {
+                        required.insert("videoInput".to_string());
+                    }
                     Some("inlineData" | "fileData") => {
                         let mime = item
                             .get("mimeType")
@@ -277,6 +288,10 @@ fn scan_content_for_capabilities(content: &Value, required: &mut HashSet<String>
                             required.insert("vision".to_string());
                         } else if mime == "application/pdf" {
                             required.insert("pdf".to_string());
+                        } else if mime.starts_with("audio/") {
+                            required.insert("audioInput".to_string());
+                        } else if mime.starts_with("video/") {
+                            required.insert("videoInput".to_string());
                         }
                     }
                     _ => {}
@@ -304,9 +319,9 @@ fn model_has_capability(entry: &str, capability: &str) -> bool {
 
     match capability {
         "vision" => {
-            // Provider-level vision signals
-            if entry_lower.starts_with("openai/gpt-4")
-                || entry_lower.starts_with("openai/o1")
+            // Provider-level vision signals (gpt-4 base has no vision; only
+            // 4o+ variants — matched via the `-4o` model-name pattern below).
+            if entry_lower.starts_with("openai/o1")
                 || entry_lower.starts_with("openai/o3")
                 || entry_lower.starts_with("anthropic/claude")
                 || entry_lower.starts_with("google/gemini")
@@ -322,6 +337,7 @@ fn model_has_capability(entry: &str, capability: &str) -> bool {
             if entry_lower.contains("vision")
                 || entry_lower.contains("-4o")
                 || entry_lower.contains("gemini")
+                || entry_lower.starts_with("oc/mimo")
             {
                 return true;
             }
@@ -340,6 +356,10 @@ fn model_has_capability(entry: &str, capability: &str) -> bool {
             }
             false
         }
+        // The capacity adapter's default pool model (oc/mimo-v2.5-free) is a
+        // multimodal free model (9router capabilities.js entry).
+        "audioInput" => entry_lower.starts_with("oc/mimo"),
+        "videoInput" => entry_lower.starts_with("oc/mimo"),
         _ => false,
     }
 }
