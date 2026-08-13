@@ -76,8 +76,8 @@ pub use grok_web::{
 pub use iflow::{IFlowExecutionRequest, IFlowExecutor, IFlowExecutorError, IFlowExecutorResponse};
 pub use kimchi::KimchiExecutor;
 pub use kiro::{
-    AwsCredentials, EventStreamDecoder, KiroExecutionRequest, KiroExecutor, KiroExecutorError,
-    KiroExecutorResponse, SseEvent as KiroSseEvent,
+    consumed_eventstream_bytes, AwsCredentials, EventStreamDecoder, KiroEvent,
+    KiroExecutionRequest, KiroExecutor, KiroExecutorError, KiroExecutorResponse,
 };
 pub use mimo_free::{MimoFreeExecutionRequest, MimoFreeExecutor, MimoFreeExecutorResponse};
 pub use ollama::{

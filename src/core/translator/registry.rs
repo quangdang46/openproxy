@@ -210,6 +210,8 @@ pub struct KiroResponseState {
     pub current_event_type: Option<String>,
     /// Generic state used by kiro_to_openai_response.
     pub state: std::collections::HashMap<String, Value>,
+    /// Streaming assembler for the binary EventStream path.
+    pub assembler: Option<super::response::kiro_events::KiroSseAssembler>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1219,9 +1221,13 @@ mod parity_tests {
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert!(
-            !content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")),
+            !content
+                .iter()
+                .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use")),
             "tool_use blocks must be dropped"
         );
-        assert!(content.iter().any(|b| b.get("type").and_then(Value::as_str) == Some("text")));
+        assert!(content
+            .iter()
+            .any(|b| b.get("type").and_then(Value::as_str) == Some("text")));
     }
 }

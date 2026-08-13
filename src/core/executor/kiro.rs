@@ -32,6 +32,19 @@ const KIRO_BASE_URLS: &[&str] = &[
 const KIRO_REGION: &str = "us-east-1";
 const KIRO_SERVICE: &str = "codewhisperer";
 
+/// Rewrite the AWS region segment of an amazonaws.com host, e.g.
+/// `q.us-east-1.amazonaws.com` → `q.{region}.amazonaws.com`.
+/// 9router getOrderedBaseUrls parity: `([a-z]+)\.[a-z0-9-]+\.amazonaws\.com`
+/// → `$1.{region}.amazonaws.com`.
+fn regionalize_host(host_url: &str, region: &str) -> String {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"([a-z]+)\.[a-z0-9-]+\.amazonaws\.com").expect("static regex")
+    });
+    re.replace(host_url, format!("$1.{region}.amazonaws.com"))
+        .into_owned()
+}
+
 fn normalize_kiro_model(model: &str) -> String {
     if let Some(stripped) = model.strip_suffix("-thinking-agentic") {
         return stripped.to_string();
@@ -76,6 +89,13 @@ pub enum KiroExecutorError {
     HyperClientInit(std::io::Error),
     Hyper(hyper_util::client::legacy::Error),
     Request(reqwest::Error),
+    /// An endpoint/auth-surface failure (401/403/404) on a URL that still had
+    /// fallback surfaces left — mirrors 9router shouldRetry.
+    EndpointStatus {
+        status: u16,
+        url: String,
+        message: String,
+    },
     EventStreamDecode(String),
     UnsupportedFormat(String),
 }
@@ -155,7 +175,8 @@ impl KiroExecutor {
     }
 
     /// Auth-aware URL order (9router getOrderedBaseUrls).
-    /// api_key / external_idp / idc → amazonaws.com hosts first.
+    /// api_key / external_idp / idc → amazonaws.com hosts first, regionalized
+    /// to the token's region when the account specifies one (default us-east-1).
     pub fn build_url(
         &self,
         _model: &str,
@@ -172,49 +193,64 @@ impl KiroExecutor {
         let is_cw_surface =
             auth_method == "api_key" || auth_method == "external_idp" || auth_method == "idc";
 
-        let mut urls: Vec<String> = KIRO_BASE_URLS.iter().map(|s| (*s).to_string()).collect();
-        if is_cw_surface {
-            let amazon: Vec<String> = urls
-                .iter()
-                .filter(|u| u.contains("amazonaws.com"))
-                .cloned()
-                .collect();
-            let others: Vec<String> = urls
-                .iter()
-                .filter(|u| !u.contains("amazonaws.com"))
-                .cloned()
-                .collect();
-            let amazon_owned = amazon.clone();
-            let others_owned = others.clone();
-            if !amazon.is_empty() {
-                urls = amazon.into_iter().chain(others).collect();
+        let base_urls: Vec<String> = KIRO_BASE_URLS.iter().map(|s| (*s).to_string()).collect();
+        if !is_cw_surface {
+            return base_urls;
+        }
+
+        // 9router getOrderedBaseUrls regionalization: rewrite the AWS region
+        // segment of every amazonaws.com host to the token's region.
+        // `([a-z]+)\.[a-z0-9-]+\.amazonaws\.com` → `$1.{region}.amazonaws.com`.
+        let region = credentials
+            .provider_specific_data
+            .get("region")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .filter(|r| !r.is_empty() && *r != "us-east-1")
+            .unwrap_or("");
+
+        let regionalize = |u: &str| -> String {
+            if region.is_empty() || !u.contains("amazonaws.com") {
+                return u.to_string();
             }
-            // API-key accounts must try the q.* surface FIRST: the legacy
-            // codewhisperer.* GenerateAssistantResponse endpoint authenticates
-            // the key but rejects the same valid payload with
-            // REQUEST_BODY_INVALID (a terminal 400). Ported from 9router
-            // v0.5.45 fix(kiro): route API keys correctly.
-            if auth_method == "api_key" {
-                let q: Vec<String> = amazon_owned
-                    .iter()
-                    .filter(|u| u.contains("://q."))
-                    .cloned()
-                    .collect();
-                let remaining: Vec<String> = amazon_owned
-                    .iter()
-                    .filter(|u| !u.contains("://q."))
-                    .cloned()
-                    .collect();
-                if !q.is_empty() {
-                    urls = q.into_iter().chain(remaining).chain(others_owned).collect();
-                } else {
-                    urls = amazon_owned.into_iter().chain(others_owned).collect();
-                }
-            } else {
-                urls = amazon_owned.into_iter().chain(others_owned).collect();
+            regionalize_host(u, region)
+        };
+
+        let amazon: Vec<String> = base_urls
+            .iter()
+            .filter(|u| u.contains("amazonaws.com"))
+            .map(|u| regionalize(u))
+            .collect();
+        let others: Vec<String> = base_urls
+            .iter()
+            .filter(|u| !u.contains("amazonaws.com"))
+            .cloned()
+            .collect();
+
+        // API-key accounts must try the q.* surface FIRST: the legacy
+        // codewhisperer.* GenerateAssistantResponse endpoint authenticates
+        // the key but rejects the same valid payload with
+        // REQUEST_BODY_INVALID (a terminal 400). Ported from 9router
+        // v0.5.45 fix(kiro): route API keys correctly.
+        if auth_method == "api_key" {
+            let q: Vec<String> = amazon
+                .iter()
+                .filter(|u| u.contains("://q."))
+                .cloned()
+                .collect();
+            let remaining: Vec<String> = amazon
+                .iter()
+                .filter(|u| !u.contains("://q."))
+                .cloned()
+                .collect();
+            if !q.is_empty() {
+                return q.into_iter().chain(remaining).chain(others).collect();
             }
         }
-        urls
+        if amazon.is_empty() {
+            return others;
+        }
+        amazon.into_iter().chain(others).collect()
     }
 
     fn build_bearer_headers(
@@ -295,7 +331,7 @@ impl KiroExecutor {
 
         // Try each URL with failover
         let mut last_error = None;
-        for url in &urls {
+        for (url_index, url) in urls.iter().enumerate() {
             // AWS JSON credentials → SigV4 (IDC / some enterprise paths)
             let is_aws_auth = request
                 .credentials
@@ -347,8 +383,27 @@ impl KiroExecutor {
                 .await
             {
                 Ok(response) => {
-                    // EventStream→SSE conversion runs in kiro_to_openai_streaming
-                    // (ResponseTransform path). URLs/auth now match 9router.
+                    // 9router shouldRetry: endpoint/auth-surface failures
+                    // (401/403/404) fall through to the next URL — the same
+                    // payload can succeed on a different surface. Payload-invalid
+                    // 400 is terminal (sending the same body everywhere cannot
+                    // repair it). EventStream→SSE conversion runs in
+                    // kiro_to_openai_streaming (ResponseTransform path).
+                    let status = response.status().as_u16();
+                    let is_fallback_status = status == 401 || status == 403 || status == 404;
+                    let has_fallback = url_index + 1 < urls.len();
+                    if is_fallback_status && has_fallback {
+                        last_error = Some(KiroExecutorError::EndpointStatus {
+                            status,
+                            url: url.clone(),
+                            message: format!(
+                                "Kiro endpoint {} returned {}; trying next surface",
+                                url,
+                                response.status()
+                            ),
+                        });
+                        continue;
+                    }
                     return Ok(KiroExecutorResponse {
                         response: UpstreamResponse::Reqwest(response),
                         url: url.clone(),
@@ -565,7 +620,10 @@ impl EventStreamDecoder {
     /// Trailing message CRC: 4 bytes.
     const TRAILING_CRC_LEN: usize = 4;
 
-    pub fn decode_chunk(data: &[u8]) -> Result<Vec<SseEvent>, KiroExecutorError> {
+    /// Decode one or more complete AWS EventStream v1 binary frames into
+    /// structured events. Partial trailing frames are ignored (the caller
+    /// buffers across chunks).
+    pub fn decode_chunk(data: &[u8]) -> Result<Vec<KiroEvent>, KiroExecutorError> {
         if data.is_empty() {
             return Ok(Vec::new());
         }
@@ -634,21 +692,32 @@ impl EventStreamDecoder {
                 )));
             }
 
-            // Extract payload and parse SSE lines
-            if payload_end > payload_start {
-                let payload = &data[payload_start..payload_end];
-                if let Ok(text) = std::str::from_utf8(payload) {
-                    for line in text.lines() {
-                        if line.starts_with("data: ") {
-                            let data_content = line.trim_start_matches("data: ");
-                            if !data_content.is_empty() && data_content != "[DONE]" {
-                                let cleaned = strip_thinking_tags(data_content);
-                                events.push(SseEvent { data: cleaned });
-                            }
-                        }
-                    }
+            // Decode headers (the `:event-type`, `:message-type`, `:content-type`
+            // etc.) and the JSON payload. 9router parseEventFrame parity.
+            let headers =
+                decode_eventstream_headers(&data[offset + Self::PRELUDE_LEN..payload_start])?;
+            let payload: Option<Value> = if payload_end > payload_start {
+                let raw = &data[payload_start..payload_end];
+                let text = std::str::from_utf8(raw).ok();
+                match text.map(str::trim) {
+                    Some(t) if !t.is_empty() => Some(serde_json::from_str(t).map_err(|e| {
+                        KiroExecutorError::EventStreamDecode(format!(
+                            "EventStream payload is not valid JSON: {}",
+                            e
+                        ))
+                    })?),
+                    _ => None,
                 }
-            }
+            } else {
+                None
+            };
+
+            events.push(KiroEvent {
+                message_type: headers.get(":message-type").cloned().unwrap_or_default(),
+                event_type: headers.get(":event-type").cloned().unwrap_or_default(),
+                content_type: headers.get(":content-type").cloned().unwrap_or_default(),
+                payload,
+            });
 
             offset += total_length;
         }
@@ -657,9 +726,149 @@ impl EventStreamDecoder {
     }
 }
 
+/// A decoded AWS EventStream v1 event frame.
 #[derive(Debug, Clone)]
-pub struct SseEvent {
-    pub data: String,
+pub struct KiroEvent {
+    pub message_type: String,
+    pub event_type: String,
+    pub content_type: String,
+    pub payload: Option<Value>,
+}
+
+/// Decode the AWS EventStream v1 headers section (9router parseEventFrame
+/// header loop). Returns a map of header-name → string value. Binary/other
+/// typed headers are stringified; UUID (type 9), blob (6), byte/int (0-4)
+/// are preserved as their text/bool/integer representation where meaningful.
+fn decode_eventstream_headers(
+    data: &[u8],
+) -> Result<std::collections::HashMap<String, String>, KiroExecutorError> {
+    let mut headers = std::collections::HashMap::new();
+    let mut offset = 0usize;
+    let header_end = data.len();
+
+    let require_bytes = |offset: usize, count: usize| -> Result<(), KiroExecutorError> {
+        if offset + count > header_end {
+            return Err(KiroExecutorError::EventStreamDecode(
+                "AWS EventStream header exceeds its declared bounds".to_string(),
+            ));
+        }
+        Ok(())
+    };
+
+    while offset < header_end {
+        require_bytes(offset, 1)?;
+        let name_len = data[offset] as usize;
+        offset += 1;
+        require_bytes(offset, name_len + 1)?;
+        let name = std::str::from_utf8(&data[offset..offset + name_len])
+            .map_err(|e| {
+                KiroExecutorError::EventStreamDecode(format!(
+                    "AWS EventStream header name is not UTF-8: {}",
+                    e
+                ))
+            })?
+            .to_string();
+        offset += name_len;
+        if headers.contains_key(&name) {
+            return Err(KiroExecutorError::EventStreamDecode(format!(
+                "AWS EventStream contains duplicate header: {}",
+                name
+            )));
+        }
+        let ty = data[offset];
+        offset += 1;
+
+        match ty {
+            0 | 1 => {
+                headers.insert(
+                    name,
+                    if ty == 0 {
+                        "false".to_string()
+                    } else {
+                        "true".to_string()
+                    },
+                );
+            }
+            2 => {
+                require_bytes(offset, 1)?;
+                headers.insert(name, data[offset].to_string());
+                offset += 1;
+            }
+            3 => {
+                require_bytes(offset, 2)?;
+                let v = u16::from_be_bytes([data[offset], data[offset + 1]]) as i16;
+                headers.insert(name, v.to_string());
+                offset += 2;
+            }
+            4 => {
+                require_bytes(offset, 4)?;
+                let v = i32::from_be_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]);
+                headers.insert(name, v.to_string());
+                offset += 4;
+            }
+            5 | 8 => {
+                // Byte array (5) / long (8) — skip, not semantically needed.
+                require_bytes(offset, 8)?;
+                offset += 8;
+            }
+            6 | 7 => {
+                // Blob (6) / string (7).
+                require_bytes(offset, 2)?;
+                let value_len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+                offset += 2;
+                require_bytes(offset, value_len)?;
+                let raw = &data[offset..offset + value_len];
+                let value = if ty == 7 {
+                    String::from_utf8_lossy(raw).to_string()
+                } else {
+                    format!("{} bytes", raw.len())
+                };
+                headers.insert(name, value);
+                offset += value_len;
+            }
+            9 => {
+                // UUID.
+                require_bytes(offset, 16)?;
+                offset += 16;
+            }
+            other => {
+                return Err(KiroExecutorError::EventStreamDecode(format!(
+                    "AWS EventStream header {} has unknown type {}",
+                    name, other
+                )));
+            }
+        }
+    }
+
+    Ok(headers)
+}
+
+/// Number of complete EventStream bytes consumed from a buffer, stopping at
+/// the first incomplete frame (so the caller can keep the tail for the next
+/// chunk). Mirrors `decode_chunk`'s framing logic without decoding payloads.
+pub fn consumed_eventstream_bytes(data: &[u8]) -> usize {
+    let mut offset = 0usize;
+    while offset + 12 <= data.len() {
+        let total_length = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        if !(16..=MAX_EVENTSTREAM_MESSAGE_LENGTH).contains(&total_length) {
+            return offset;
+        }
+        if offset + total_length > data.len() {
+            return offset;
+        }
+        offset += total_length;
+    }
+    offset
 }
 
 #[cfg(test)]
@@ -682,6 +891,41 @@ mod tests {
     }
 
     #[test]
+    fn test_event_stream_decoder_parses_headers_and_payload() {
+        // Build a minimal AWS EventStream frame:
+        //   prelude: total_length=12+headers+4, headers_length, crc(8 bytes)
+        //   headers: nameLen ":event-type" ty=7 len valueLen "assistantResponseEvent"
+        //   payload: JSON {"content":"hi"}
+        let header_bytes = {
+            let name = b":event-type";
+            let value = b"assistantResponseEvent";
+            let mut v = Vec::new();
+            v.push(name.len() as u8);
+            v.extend_from_slice(name);
+            v.push(7u8); // string
+            v.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            v.extend_from_slice(value);
+            v
+        };
+        let payload = br#"{"content":"hi"}"#;
+        let total = 12 + header_bytes.len() + payload.len() + 4;
+        let mut frame = Vec::new();
+        frame.extend_from_slice(&(total as u32).to_be_bytes());
+        frame.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
+        let prelude_crc = crc32fast::hash(&frame[..8]);
+        frame.extend_from_slice(&prelude_crc.to_be_bytes());
+        frame.extend_from_slice(&header_bytes);
+        frame.extend_from_slice(payload);
+        let msg_crc = crc32fast::hash(&frame);
+        frame.extend_from_slice(&msg_crc.to_be_bytes());
+
+        let events = EventStreamDecoder::decode_chunk(&frame).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "assistantResponseEvent");
+        assert_eq!(events[0].payload.as_ref().unwrap()["content"], "hi");
+    }
+
+    #[test]
     fn test_sha256_hex() {
         let hash = sha256_hex(b"hello");
         assert_eq!(hash.len(), 64);
@@ -691,6 +935,69 @@ mod tests {
     fn test_generate_nonce() {
         let nonce = generate_nonce();
         assert_eq!(nonce.len(), 32);
+    }
+
+    #[test]
+    fn test_regionalize_host_eu_west_1() {
+        assert_eq!(
+            regionalize_host(
+                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+                "eu-west-1"
+            ),
+            "https://q.eu-west-1.amazonaws.com/generateAssistantResponse"
+        );
+        assert_eq!(
+            regionalize_host(
+                "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+                "eu-west-1"
+            ),
+            "https://codewhisperer.eu-west-1.amazonaws.com/generateAssistantResponse"
+        );
+    }
+
+    #[test]
+    fn test_regionalize_host_noop_for_us_east_1_or_non_aws() {
+        // Default region (us-east-1) leaves the host unchanged.
+        assert_eq!(
+            regionalize_host(
+                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+                "us-east-1"
+            ),
+            "https://q.us-east-1.amazonaws.com/generateAssistantResponse"
+        );
+        // Non-amazonaws host is untouched.
+        assert_eq!(
+            regionalize_host(
+                "https://runtime.us-east-1.kiro.dev/generateAssistantResponse",
+                "eu-west-1"
+            ),
+            "https://runtime.us-east-1.kiro.dev/generateAssistantResponse"
+        );
+    }
+
+    #[test]
+    fn test_build_url_regionalizes_q_host() {
+        // 9router getOrderedBaseUrls: api_key surface regionalizes the AWS
+        // host to the account's region and orders the q.* surface first.
+        let executor = KiroExecutor::new(Arc::new(ClientPool::default()), None).unwrap();
+        let mut psd = std::collections::BTreeMap::new();
+        psd.insert("authMethod".to_string(), serde_json::json!("api_key"));
+        psd.insert("region".to_string(), serde_json::json!("eu-west-1"));
+        let credentials = ProviderConnection {
+            provider_specific_data: psd,
+            api_key: Some("key".to_string()),
+            access_token: None,
+            ..Default::default()
+        };
+        let urls = executor.build_url("amazon-nova-pro-v1.0", false, &credentials);
+        assert_eq!(
+            urls[0],
+            "https://q.eu-west-1.amazonaws.com/generateAssistantResponse"
+        );
+        assert!(urls[0].contains("q.eu-west-1.amazonaws.com"));
+        assert!(urls
+            .iter()
+            .any(|u| u.contains("codewhisperer.eu-west-1.amazonaws.com")));
     }
 
     #[test]
