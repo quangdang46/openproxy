@@ -2668,6 +2668,26 @@
      "id": "nvidia/parakeet-ctc-1.1b-asr",
      "name": "Parakeet CTC 1.1B ASR",
      "kind": "stt"
+    },
+    {
+     "id": "deepseek-ai/deepseek-v4-flash-0731",
+     "name": "deepseek-v4-flash",
+     "kind": "llm"
+    },
+    {
+     "id": "meta/llama-3.1-8b-instruct",
+     "name": "llama-3.1-8b-instruct",
+     "kind": "llm"
+    },
+    {
+     "id": "minimaxai/minimax-m3",
+     "name": "minimax-m3",
+     "kind": "llm"
+    },
+    {
+     "id": "z-ai/glm-5.2",
+     "name": "glm-5.2",
+     "kind": "llm"
     }
    ]
   },
