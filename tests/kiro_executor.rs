@@ -154,43 +154,61 @@ fn kiro_executor_new_with_provider_node() {
 // ============================================================================
 
 #[test]
-fn kiro_executor_build_url_stream_action() {
+fn kiro_executor_build_url_default_order_kiro_dev_first() {
     let pool = Arc::new(ClientPool::new());
     let executor = KiroExecutor::new(pool, None).expect("kiro executor");
+    // No authMethod → non-CodeWhisperer surface → default order (kiro.dev first).
     let creds = ProviderConnection::default();
 
     let urls = executor.build_url("claude-sonnet-4.5", true, &creds);
     assert!(!urls.is_empty());
-    assert!(urls[0].contains("claude-sonnet-4.5"));
-    assert!(urls[0].contains("/stream"));
+    assert!(
+        urls[0].contains("runtime.us-east-1.kiro.dev"),
+        "default order should keep kiro.dev first: {urls:?}"
+    );
+    assert!(urls[0].contains("generateAssistantResponse"));
 }
 
 #[test]
-fn kiro_executor_build_url_invoke_action() {
+fn kiro_executor_build_url_api_key_orders_q_first() {
     let pool = Arc::new(ClientPool::new());
     let executor = KiroExecutor::new(pool, None).expect("kiro executor");
-    let creds = ProviderConnection::default();
+    // api_key → CodeWhisperer surface → amazonaws hosts first, q.* surface first.
+    let mut psd = std::collections::BTreeMap::new();
+    psd.insert("authMethod".to_string(), serde_json::json!("api_key"));
+    let creds = ProviderConnection {
+        provider_specific_data: psd,
+        ..Default::default()
+    };
 
     let urls = executor.build_url("claude-sonnet-4.5", false, &creds);
     assert!(!urls.is_empty());
-    assert!(urls[0].contains("claude-sonnet-4.5"));
-    assert!(urls[0].contains("/invoke"));
+    assert!(
+        urls[0].contains("://q."),
+        "api_key surface must order q.* first: {urls:?}"
+    );
+    assert!(urls.iter().any(|u| u.contains("amazonaws.com")));
 }
 
 #[test]
-fn kiro_executor_build_url_with_various_models() {
+fn kiro_executor_build_url_regionalizes_aws_host() {
     let pool = Arc::new(ClientPool::new());
     let executor = KiroExecutor::new(pool, None).expect("kiro executor");
-    let creds = ProviderConnection::default();
+    // external_idp with a region → amazonaws hosts regionalized.
+    let mut psd = std::collections::BTreeMap::new();
+    psd.insert("authMethod".to_string(), serde_json::json!("external_idp"));
+    psd.insert("region".to_string(), serde_json::json!("eu-west-1"));
+    let creds = ProviderConnection {
+        provider_specific_data: psd,
+        ..Default::default()
+    };
 
-    let url1 = &executor.build_url("glm-5", true, &creds);
-    assert!(!url1.is_empty());
-    assert!(url1[0].contains("glm-5"));
-    assert!(url1[0].contains("/stream"));
-
-    let url2 = &executor.build_url("MiniMax-M2.5", false, &creds);
-    assert!(url2[0].contains("MiniMax-M2.5"));
-    assert!(url2[0].contains("/invoke"));
+    let urls = executor.build_url("amazon-nova-pro-v1.0", true, &creds);
+    assert!(!urls.is_empty());
+    assert!(
+        urls.iter().any(|u| u.contains("q.eu-west-1.amazonaws.com")),
+        "AWS hosts should be regionalized: {urls:?}"
+    );
 }
 
 // ============================================================================
@@ -369,16 +387,14 @@ fn event_stream_decoder_empty_input() {
 fn event_stream_decoder_single_sse_event() {
     use openproxy::core::executor::EventStreamDecoder;
 
-    let payload = b"data: test event\n\n";
-    let length = payload.len() as u32;
-    let mut chunk = vec![0xFF];
-    chunk.extend_from_slice(&length.to_be_bytes());
-    chunk.extend_from_slice(&[0, 0, 0, 0]);
-    chunk.extend_from_slice(payload);
-
-    let events = EventStreamDecoder::decode_chunk(&chunk).expect("should decode");
+    let frame = build_eventstream_frame("assistantResponseEvent", r#"{"content":"test event"}"#);
+    let events = EventStreamDecoder::decode_chunk(&frame).expect("should decode");
     assert_eq!(events.len(), 1, "expected 1 event, got {:?}", events);
-    assert_eq!(events[0].data, "test event");
+    assert_eq!(events[0].event_type, "assistantResponseEvent");
+    assert_eq!(
+        events[0].payload.as_ref().unwrap()["content"],
+        "test event"
+    );
 }
 
 #[test]
@@ -386,58 +402,47 @@ fn event_stream_decoder_single_sse_event() {
 fn event_stream_decoder_multiple_sse_events() {
     use openproxy::core::executor::EventStreamDecoder;
 
-    // Build first SSE event with correct EventStream format
-    let payload1 = b"data: first event\n\n";
-    let length1: u32 = payload1.len() as u32;
-    let mut chunk = vec![0xFF];
-    chunk.extend_from_slice(&length1.to_be_bytes());
-    chunk.extend_from_slice(&[0, 0, 0, 0]);
-    chunk.extend_from_slice(payload1);
-
-    // Build second SSE event - append directly to same chunk
-    let payload2 = b"data: second event\n\n";
-    let length2: u32 = payload2.len() as u32;
-    chunk.extend_from_slice(&[0xFF]);
-    chunk.extend_from_slice(&length2.to_be_bytes());
-    chunk.extend_from_slice(&[0, 0, 0, 0]);
-    chunk.extend_from_slice(payload2);
+    let mut chunk = build_eventstream_frame("assistantResponseEvent", r#"{"content":"first event"}"#);
+    chunk.extend(build_eventstream_frame(
+        "assistantResponseEvent",
+        r#"{"content":"second event"}"#,
+    ));
 
     let events = EventStreamDecoder::decode_chunk(&chunk).expect("should decode");
     assert_eq!(events.len(), 2, "expected 2 events, got {:?}", events);
-    assert_eq!(events[0].data, "first event");
-    assert_eq!(events[1].data, "second event");
+    assert_eq!(
+        events[0].payload.as_ref().unwrap()["content"],
+        "first event"
+    );
+    assert_eq!(
+        events[1].payload.as_ref().unwrap()["content"],
+        "second event"
+    );
 }
 
-#[test]
-fn event_stream_decoder_skips_done_events() {
-    use openproxy::core::executor::EventStreamDecoder;
-
-    // Event with [DONE] marker should be skipped
-    let payload = b"data: [DONE]\n\n";
-    let length = payload.len() as u32;
-    let mut chunk = vec![0xFF];
-    chunk.extend_from_slice(&length.to_be_bytes());
-    chunk.extend_from_slice(&[0, 0, 0, 0]);
-    chunk.extend_from_slice(payload);
-
-    let events = EventStreamDecoder::decode_chunk(&chunk).expect("should decode");
-    assert!(events.is_empty());
-}
-
-#[test]
-fn event_stream_decoder_skips_empty_data() {
-    use openproxy::core::executor::EventStreamDecoder;
-
-    // Event with empty data after "data: " should be skipped
-    let payload = b"data: \n\n";
-    let length = payload.len() as u32;
-    let mut chunk = vec![0xFF];
-    chunk.extend_from_slice(&length.to_be_bytes());
-    chunk.extend_from_slice(&[0, 0, 0, 0]);
-    chunk.extend_from_slice(payload);
-
-    let events = EventStreamDecoder::decode_chunk(&chunk).expect("should decode");
-    assert!(events.is_empty());
+/// Build a minimal valid AWS EventStream v1 frame with the given `:event-type`
+/// header and JSON payload.
+fn build_eventstream_frame(event_type: &str, payload_json: &str) -> Vec<u8> {
+    let name = b":event-type";
+    let value = event_type.as_bytes();
+    let mut headers = Vec::new();
+    headers.push(name.len() as u8);
+    headers.extend_from_slice(name);
+    headers.push(7u8); // string type
+    headers.extend_from_slice(&(value.len() as u16).to_be_bytes());
+    headers.extend_from_slice(value);
+    let payload = payload_json.as_bytes();
+    let total = 12 + headers.len() + payload.len() + 4;
+    let mut frame = Vec::new();
+    frame.extend_from_slice(&(total as u32).to_be_bytes());
+    frame.extend_from_slice(&(headers.len() as u32).to_be_bytes());
+    let prelude_crc = crc32fast::hash(&frame[..8]);
+    frame.extend_from_slice(&prelude_crc.to_be_bytes());
+    frame.extend_from_slice(&headers);
+    frame.extend_from_slice(payload);
+    let msg_crc = crc32fast::hash(&frame);
+    frame.extend_from_slice(&msg_crc.to_be_bytes());
+    frame
 }
 
 #[test]
@@ -454,15 +459,22 @@ fn event_stream_decoder_handles_partial_prelude() {
 fn event_stream_decoder_handles_truncated_payload() {
     use openproxy::core::executor::EventStreamDecoder;
 
-    // Prelude says 100 bytes but we only send 10
-    let length: u32 = 100;
-    let mut chunk = vec![0xFF];
-    chunk.extend_from_slice(&length.to_be_bytes());
-    chunk.extend_from_slice(&[0, 0, 0, 0]);
-    chunk.extend_from_slice(b"short");
-
-    let events = EventStreamDecoder::decode_chunk(&chunk).expect("should handle truncated");
+    // A frame whose declared total length exceeds the available bytes must
+    // yield no events (partial frame — buffered for the next chunk).
+    let chunk = build_eventstream_frame("assistantResponseEvent", r#"{"content":"hi"}"#);
+    let truncated = &chunk[..chunk.len() - 4]; // drop trailing CRC → incomplete
+    let events = EventStreamDecoder::decode_chunk(truncated).expect("should handle truncated");
     assert!(events.is_empty());
+}
+
+#[test]
+fn event_stream_decoder_malformed_prelude_errors() {
+    use openproxy::core::executor::EventStreamDecoder;
+
+    // A `data: [DONE]` SSE text blob is not a valid EventStream binary frame;
+    // the decoder must reject it rather than decode garbage.
+    let chunk = b"data: [DONE]\n\n".to_vec();
+    assert!(EventStreamDecoder::decode_chunk(&chunk).is_err());
 }
 
 #[test]
@@ -470,20 +482,13 @@ fn event_stream_decoder_handles_truncated_payload() {
 fn event_stream_decoder_ignores_non_prelude_bytes() {
     use openproxy::core::executor::EventStreamDecoder;
 
-    // First 4 bytes are NOT 0xFF, so decoder should skip them
+    // Garbage prefix bytes are not a valid prelude; the decoder must not
+    // panic and must return no decoded events from a malformed buffer.
     let non_prelude = vec![0x00, 0x01, 0x02, 0x03];
+    let chunk = non_prelude;
 
-    let payload = b"data: test\n\n";
-    let length: u32 = payload.len() as u32;
-    let mut chunk = non_prelude;
-    chunk.extend_from_slice(&[0xFF]);
-    chunk.extend_from_slice(&length.to_be_bytes());
-    chunk.extend_from_slice(&[0, 0, 0, 0]);
-    chunk.extend_from_slice(payload);
-
-    let events = EventStreamDecoder::decode_chunk(&chunk).expect("should decode");
-    assert_eq!(events.len(), 1, "expected 1 event, got {:?}", events);
-    assert_eq!(events[0].data, "test");
+    let events = EventStreamDecoder::decode_chunk(&chunk).expect("should not error");
+    assert!(events.is_empty());
 }
 
 // ============================================================================
@@ -653,26 +658,33 @@ fn kiro_executor_error_debug() {
 }
 
 // ============================================================================
-// SseEvent Clone and Debug Tests
+// KiroEvent Clone and Debug Tests
 // ============================================================================
 
 #[test]
-fn kiro_sse_event_clone() {
-    use openproxy::core::executor::KiroSseEvent;
+fn kiro_event_clone() {
+    use openproxy::core::executor::KiroEvent;
 
-    let event = KiroSseEvent {
-        data: "test data".to_string(),
+    let event = KiroEvent {
+        message_type: "event".to_string(),
+        event_type: "assistantResponseEvent".to_string(),
+        content_type: "application/json".to_string(),
+        payload: Some(serde_json::json!({"content": "test data"})),
     };
     let cloned = event.clone();
-    assert_eq!(cloned.data, event.data);
+    assert_eq!(cloned.event_type, event.event_type);
+    assert_eq!(cloned.payload, event.payload);
 }
 
 #[test]
-fn kiro_sse_event_debug() {
-    use openproxy::core::executor::KiroSseEvent;
+fn kiro_event_debug() {
+    use openproxy::core::executor::KiroEvent;
 
-    let event = KiroSseEvent {
-        data: "test data".to_string(),
+    let event = KiroEvent {
+        message_type: "event".to_string(),
+        event_type: "assistantResponseEvent".to_string(),
+        content_type: "application/json".to_string(),
+        payload: Some(serde_json::json!({"content": "test data"})),
     };
     let debug = format!("{:?}", event);
     assert!(debug.contains("test data"));
