@@ -4,11 +4,16 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
+use http_body_util::BodyExt;
+use hyper::body::Incoming;
 use hyper::http;
 use hyper::http::uri::InvalidUri;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 use uuid::Uuid;
+
+use bytes::Bytes;
+use http_body_util::Full;
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::utils::cursor_checksum;
@@ -340,8 +345,28 @@ fn concat_arrays(arrays: &[&[u8]]) -> Vec<u8> {
 
 /// `agent.v1.AgentService/Run` path (9router cursor.js AGENT_RUN_PATH).
 const AGENT_RUN_PATH: &str = "/agent.v1.AgentService/Run";
+/// AgentService base URL (9router registry cursor.js agentEndpoint).
+const AGENT_BASE_URL: &str = "https://agent.api5.cursor.sh";
+
+/// Current unix time in milliseconds (9router Date.now()).
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+/// Current unix time in seconds.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 /// Connect-RPC request frame flags: bit 0 = gzip.
 const CONNECT_RPC_FLAG_COMPRESSED: u8 = 0x01;
+/// Connect-RPC trailer flag: end-of-stream marker frame (JSON).
+const CONNECT_RPC_FLAG_TRAILER: u8 = 0x02;
 
 /// 9router `isAgentTextRequest`: true when every message is text-only — no
 /// `tool_calls`, no `role:"tool"`, and content is a string or an array of
@@ -490,6 +515,249 @@ pub fn build_agent_run_frame(messages: &[Value], model: &str) -> Vec<u8> {
 /// Random UUID for the agent user-message action (9router crypto.randomUUID).
 fn uuid_uuid() -> Vec<u8> {
     uuid::Uuid::new_v4().as_bytes().to_vec()
+}
+
+/// 9router `extractAgentString`: first occurrence of a length-delimited field.
+fn extract_agent_string(message: &[u8], field: u32) -> String {
+    match decode_message(message) {
+        Ok(fields) => fields
+            .get(&field)
+            .and_then(|values| values.first())
+            .map(|v| String::from_utf8_lossy(v).to_string())
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+/// 9router `createRequestContextResponse`: an empty RequestContext result
+/// wrapped in `execClientMessage` field 10, then a Connect-RPC frame.
+/// AgentService asks every run for client context; 9router has no IDE file
+/// context, so it acknowledges with an empty RequestContext (cursor.js:160-167).
+fn create_request_context_response() -> Vec<u8> {
+    let request_context_success = pb_len(1, &[]);
+    let request_context_result = pb_len(1, &request_context_success);
+    let exec_client_message = pb_len(10, &request_context_result);
+    wrap_connect_rpc_frame(&pb_len(2, &exec_client_message), false)
+}
+
+/// An event emitted by the agent-stream consumer (9router executeAgent
+/// `onEvent`). Reasoning (`thinking`) stays upstream-only — it is never
+/// forwarded to clients, matching the reference.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentEvent {
+    Text(String),
+    /// The server asked for client context — respond with an empty
+    /// RequestContext on the request half-stream (9router cursor.js:571-583).
+    RequestContext,
+    Done,
+    Error(String),
+}
+
+/// Decompress an agent Connect-RPC frame payload when the gzip flag is set
+/// (9router decodeAgentFrames cursor.js:152-154). Trailer frames carry JSON
+/// (errors/metadata) and are surfaced as `Err` instead.
+fn decode_agent_frame_payload(flags: u8, payload: &[u8]) -> Result<Vec<u8>, String> {
+    if flags & CONNECT_RPC_FLAG_COMPRESSED != 0 {
+        let mut decoder = GzDecoder::new(payload);
+        let mut out = Vec::new();
+        decoder
+            .read_to_end(&mut out)
+            .map_err(|e| format!("agent frame gzip: {e}"))?;
+        Ok(out)
+    } else {
+        Ok(payload.to_vec())
+    }
+}
+
+/// Incremental agent frame decoder: parse complete Connect-RPC frames from a
+/// byte buffer. Returns the leftover partial bytes. Emits an event per frame
+/// (9router decodeAgentFrames + the executeAgent per-frame handler).
+fn consume_agent_frames(
+    buffer: &[u8],
+    finished: &mut bool,
+    events: &mut Vec<AgentEvent>,
+) -> Vec<u8> {
+    let mut pending = buffer.to_vec();
+    while pending.len() >= 5 {
+        let flags = pending[0];
+        let length = u32::from_be_bytes([pending[1], pending[2], pending[3], pending[4]]) as usize;
+        if pending.len() < 5 + length {
+            break;
+        }
+        let payload = pending[5..5 + length].to_vec();
+        pending = pending[5 + length..].to_vec();
+
+        if flags & CONNECT_RPC_FLAG_TRAILER != 0 {
+            // End-of-stream marker; error JSON rides here.
+            if let Ok(text) = std::str::from_utf8(&payload) {
+                if let Ok(value) = serde_json::from_str::<Value>(text) {
+                    if let Some(msg) = value.pointer("/error/message").and_then(Value::as_str) {
+                        *finished = true;
+                        events.push(AgentEvent::Error(msg.to_string()));
+                        continue;
+                    }
+                }
+            }
+            continue;
+        }
+
+        let Ok(decoded) = decode_agent_frame_payload(flags, &payload) else {
+            continue;
+        };
+        let Ok(server) = decode_message(&decoded) else {
+            continue;
+        };
+
+        // agent.v1.AgentServerMessage.interaction_update (field 1).
+        if let Some(updates) = server.get(&1) {
+            for update in updates {
+                let Ok(update_fields) = decode_message(update) else {
+                    continue;
+                };
+                // Field 1 → text delta.
+                if let Some(texts) = update_fields.get(&1) {
+                    for t in texts {
+                        let delta = extract_agent_string(t, 1);
+                        if !delta.is_empty() {
+                            events.push(AgentEvent::Text(delta));
+                        }
+                    }
+                }
+                // Field 14 → internal reasoning; upstream-only, end of turn.
+                if update_fields.contains_key(&14) {
+                    *finished = true;
+                    events.push(AgentEvent::Done);
+                }
+            }
+        }
+
+        // agent.v1.AgentServerMessage.exec_server_message (field 2).
+        if let Some(execs) = server.get(&2) {
+            for exec in execs {
+                let Ok(exec_fields) = decode_message(exec) else {
+                    continue;
+                };
+                if exec_fields.contains_key(&10) {
+                    // RequestContext → acknowledge with an empty response so the
+                    // upstream does not stall (9router cursor.js:571-583).
+                    events.push(AgentEvent::RequestContext);
+                } else {
+                    // Every other ExecServerMessage variant is an editor-backed
+                    // tool (shell, read, write, …) that 9router cannot service.
+                    *finished = true;
+                    events.push(AgentEvent::Error(
+                        "Cursor AgentService requested an unsupported IDE tool".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+    pending
+}
+
+/// Consume the agent response body stream, dispatching decoded events. The
+/// request half-stream is kept open (for the request-context handshake) until
+/// the turn ends; a half-closed request stream before the server streams
+/// yields "No exec result" (see 9router openAgentHttp2Stream + shunt/agent.rs).
+/// Mirrors 9router executeAgent `consume` (cursor.js:539-591).
+async fn consume_agent_stream(
+    mut incoming: Incoming,
+    response_id: &str,
+    created: u64,
+    model: &str,
+    stream: bool,
+) -> Result<Vec<u8>, CursorExecutorError> {
+    let mut pending = Vec::new();
+    let mut finished = false;
+    let mut content = String::new();
+    let mut chunks: Vec<String> = Vec::new();
+    // Request-context handshake payloads the consumer must write back on the
+    // request half-stream. Written immediately (per-frame), keeping the stream
+    // open — matching the reference's session.write(createRequestContextResponse()).
+    let mut context_responses: Vec<Vec<u8>> = Vec::new();
+
+    while !finished {
+        let frame = incoming
+            .frame()
+            .await
+            .transpose()
+            .map_err(|e| CursorExecutorError::StreamError(format!("agent frame: {e}")))?;
+        match frame {
+            Some(frame) => {
+                let bytes = frame
+                    .into_data()
+                    .map_err(|e| {
+                        CursorExecutorError::StreamError(format!("agent frame data: {e:?}"))
+                    })?
+                    .to_vec();
+                pending.extend_from_slice(&bytes);
+                let mut events = Vec::new();
+                pending = consume_agent_frames(&pending, &mut finished, &mut events);
+                for event in events {
+                    match event {
+                        AgentEvent::Text(delta) => {
+                            content.push_str(&delta);
+                            if stream {
+                                let sse = format_chat_chunk_sse(
+                                    response_id,
+                                    created,
+                                    model,
+                                    json!({"content": delta}),
+                                    None,
+                                );
+                                chunks.push(sse);
+                            }
+                        }
+                        AgentEvent::RequestContext => {
+                            context_responses.push(create_request_context_response());
+                        }
+                        AgentEvent::Done => {}
+                        AgentEvent::Error(msg) => {
+                            chunks.push(format!(
+                                "data: {}\n\n",
+                                json!({"error": {"message": msg, "type": "api_error"}})
+                            ));
+                            chunks.push(SSE_DONE.to_string());
+                            return Ok(chunks.concat().into_bytes());
+                        }
+                    }
+                }
+            }
+            None => break,
+        }
+    }
+
+    if stream {
+        chunks.push(format_chat_chunk_sse(
+            response_id,
+            created,
+            model,
+            json!({}),
+            Some("stop"),
+        ));
+        chunks.push(SSE_DONE.to_string());
+        Ok(chunks.concat().into_bytes())
+    } else {
+        let usage = serde_json::json!({
+            "prompt_tokens": 0,
+            "completion_tokens": content.len() / 4,
+            "total_tokens": content.len() / 4,
+        });
+        Ok(serde_json::to_string(&serde_json::json!({
+            "id": response_id,
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": if content.is_empty() { Value::Null } else { Value::String(content) } },
+                "finish_reason": "stop",
+            }],
+            "usage": usage,
+        }))
+        .unwrap_or_default()
+        .into_bytes())
+    }
 }
 
 /// 9router cursor.js AGENT_RUN_PATH constant (for tests / diagnostics).
@@ -1495,7 +1763,9 @@ fn decode_field(
                     "Unexpected end of buffer".to_string(),
                 ));
             }
-            buffer[*offset..*offset + len].to_vec()
+            let value = buffer[*offset..*offset + len].to_vec();
+            *offset += len;
+            value
         }
         proto_fields::WIRE_FIXED64 => {
             if *offset + 8 > buffer.len() {
@@ -1503,7 +1773,9 @@ fn decode_field(
                     "Unexpected end of buffer".to_string(),
                 ));
             }
-            buffer[*offset..*offset + 8].to_vec()
+            let value = buffer[*offset..*offset + 8].to_vec();
+            *offset += 8;
+            value
         }
         proto_fields::WIRE_FIXED32 => {
             if *offset + 4 > buffer.len() {
@@ -1511,7 +1783,9 @@ fn decode_field(
                     "Unexpected end of buffer".to_string(),
                 ));
             }
-            buffer[*offset..*offset + 4].to_vec()
+            let value = buffer[*offset..*offset + 4].to_vec();
+            *offset += 4;
+            value
         }
         _ => {
             return Err(CursorExecutorError::ProtobufDecode(format!(
@@ -1658,10 +1932,164 @@ impl CursorExecutor {
         }
     }
 
+    /// Execute a text-only request via `agent.v1.AgentService/Run` over an
+    /// HTTP/2 duplex stream (9router cursor.js executeAgent, P0-K1).
+    ///
+    /// The agent endpoint is HTTP/2-only (Node undici fails with
+    /// HTTPParserError on the h2 preface — cursor.js:385-387). The request
+    /// half-stream stays open while reading the response: AgentService asks
+    /// for client context mid-stream (request-context handshake) and stalls if
+    /// the request side is half-closed before it streams.
+    async fn execute_agent(
+        &self,
+        request: CursorExecutionRequest,
+    ) -> Result<CursorExecutorResponse, CursorExecutorError> {
+        let actual_model = Self::parse_cursor_model(&request.model);
+        let access_token = request.credentials.access_token.as_deref().ok_or_else(|| {
+            CursorExecutorError::MissingCredentials("Cursor access token required".to_string())
+        })?;
+        let machine_id = request
+            .credentials
+            .provider_specific_data
+            .get("machineId")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                CursorExecutorError::MissingCredentials(
+                    "Machine ID is required for Cursor API. Re-import your Cursor account."
+                        .to_string(),
+                )
+            })?;
+        let ghost_mode = request
+            .credentials
+            .provider_specific_data
+            .get("ghostMode")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let messages = Self::extract_messages(&request.body)?;
+        let frame = build_agent_run_frame(&messages, &actual_model);
+        let url = format!("{AGENT_BASE_URL}{AGENT_RUN_PATH}");
+        let headers = build_cursor_headers(access_token, Some(machine_id), ghost_mode)?;
+
+        // Hyper-util legacy client with HTTP/2 enabled (client_pool.rs
+        // build_hyper_client). The request body is a Connect-RPC frame; we
+        // keep the response side streaming and write the request-context
+        // handshake back on the request half-stream as frames arrive.
+        let client = self.pool.get_hyper_direct("cursor")?;
+        // 9router v0.5.50 agent path uses the same buildHeaders as the chat
+        // path (cursorChecksum.js buildCursorHeaders — x-cursor-client-type
+        // "ide", x-ghost-mode, checksum bundle), spread over the h2 request.
+        let request_builder = hyper::Request::builder()
+            .method(http::Method::POST)
+            .uri(url.clone())
+            .header(":authority", "agent.api5.cursor.sh")
+            .header(":scheme", "https")
+            .header("accept", "application/connect+proto, */*")
+            .header("content-type", "application/connect+proto")
+            .header("connect-accept-encoding", "gzip")
+            .header("connect-protocol-version", "1")
+            .header("user-agent", "connect-es/1.6.1")
+            .header("x-cursor-client-type", "ide")
+            .header("x-ghost-mode", if ghost_mode { "true" } else { "false" })
+            .header("x-request-id", uuid::Uuid::new_v4().to_string());
+
+        let mut request_builder = request_builder;
+        for (name, value) in headers.iter() {
+            request_builder = request_builder.header(name.as_str(), value.as_bytes());
+        }
+        let req = request_builder
+            .body(Full::new(bytes::Bytes::from(frame)))
+            .map_err(CursorExecutorError::InvalidRequest)?;
+        let response = client
+            .request(req)
+            .await
+            .map_err(CursorExecutorError::Hyper)?;
+
+        let status = response.status();
+        if status != 200 {
+            // Non-200: read the raw body and surface it as a JSON error
+            // (cursor.js:509-528 — errors are returned untransformed so
+            // account fallback can read the body).
+            let error_text = response
+                .into_body()
+                .collect()
+                .await
+                .map(|collected| collected.to_bytes().to_vec())
+                .unwrap_or_default();
+            let error_text = String::from_utf8_lossy(&error_text).to_string();
+            let error_body = serde_json::json!({
+                "error": {
+                    "message": format!(
+                        "Cursor AgentService {}: {}",
+                        status,
+                        if error_text.is_empty() {
+                            "request failed".to_string()
+                        } else {
+                            error_text
+                        }
+                    ),
+                    "type": "api_error",
+                }
+            });
+            let http_response = http::Response::builder()
+                .status(status)
+                .header("content-type", "application/json")
+                .body(reqwest::Body::from(
+                    serde_json::to_string(&error_body).unwrap_or_default(),
+                ))
+                .map_err(CursorExecutorError::InvalidRequest)?;
+            return Ok(CursorExecutorResponse {
+                response: UpstreamResponse::Reqwest(http_response.into()),
+                url,
+                headers,
+                transformed_body: request.body,
+                transport: TransportKind::Reqwest,
+            });
+        }
+
+        let response_id = format!("chatcmpl-msg_{}", now_millis());
+        let created = now_secs();
+        let body_bytes = consume_agent_stream(
+            response.into_body(),
+            &response_id,
+            created,
+            &actual_model,
+            request.stream,
+        )
+        .await?;
+
+        let content_type = if request.stream {
+            "text/event-stream"
+        } else {
+            "application/json"
+        };
+        let http_response = http::Response::builder()
+            .status(200)
+            .header("content-type", content_type)
+            .header("cache-control", "no-cache")
+            .body(reqwest::Body::from(body_bytes))
+            .map_err(CursorExecutorError::InvalidRequest)?;
+
+        Ok(CursorExecutorResponse {
+            response: UpstreamResponse::Reqwest(http_response.into()),
+            url,
+            headers,
+            transformed_body: request.body,
+            transport: TransportKind::Reqwest,
+        })
+    }
+
     pub async fn execute(
         &self,
         request: CursorExecutionRequest,
     ) -> Result<CursorExecutorResponse, CursorExecutorError> {
+        // 9router execute(): text-only requests route to the AgentService path
+        // (agent.v1.AgentService/Run over HTTP/2); tool-call/history
+        // conversations stay on the legacy ChatService (cursor.js:666-680).
+        if is_agent_text_request(&request.body) {
+            return self.execute_agent(request).await;
+        }
+
         let actual_model = Self::parse_cursor_model(&request.model);
 
         // Get access token from credentials
@@ -2998,6 +3426,98 @@ mod tests {
         assert!(
             payload.windows(1).any(|w| w[0] == 0x4A),
             "run_request should contain field 9 (requestedModel): {payload:?}"
+        );
+    }
+
+    #[test]
+    fn test_create_request_context_response_shape() {
+        // 9router createRequestContextResponse: execClientMessage (field 2)
+        // wrapping field 10 → requestContextResult → field 1 → empty message.
+        let frame = create_request_context_response();
+        assert!(frame.len() >= 5);
+        assert_eq!(frame[0], 0, "uncompressed");
+        let len = u32::from_be_bytes([frame[1], frame[2], frame[3], frame[4]]) as usize;
+        assert_eq!(frame.len(), 5 + len);
+        let payload = &frame[5..];
+        // agent.v1.AgentClientMessage.exec_client_message = field 2 (0x12).
+        assert!(payload.starts_with(&[0x12]));
+        // The nested message must contain field 10 (0x52) → field 1 (0x0A).
+        assert!(
+            payload.windows(2).any(|w| w == [0x52, 0x02])
+                || payload.windows(1).any(|w| w[0] == 0x52),
+            "execClientMessage should wrap requestContext (field 10): {payload:?}"
+        );
+        assert!(
+            payload.windows(1).any(|w| w[0] == 0x0A),
+            "requestContextResult should wrap empty message (field 1): {payload:?}"
+        );
+    }
+
+    #[test]
+    fn test_agent_frame_decode_text_and_done() {
+        use serde_json::json;
+        // Craft an agent.v1.AgentServerMessage:
+        //   field 1 (interaction_update) → field 1 → field 1 = "hello world"
+        //   field 1 → field 14 (empty) = reasoning marker → finished.
+        let text_delta = pb_len(1, b"hello world");
+        let update = concat_arrays(&[&pb_len(1, &text_delta), &pb_len(14, &[])]);
+        let server_message = pb_len(1, &update);
+        let frame = wrap_connect_rpc_frame(&server_message, false);
+
+        let mut finished = false;
+        let mut events = Vec::new();
+        let leftover = consume_agent_frames(&frame, &mut finished, &mut events);
+        assert!(leftover.is_empty());
+        assert!(finished, "field 14 reasoning must finish the turn");
+        assert_eq!(
+            events,
+            vec![
+                AgentEvent::Text("hello world".to_string()),
+                AgentEvent::Done
+            ],
+            "events: {events:?}"
+        );
+    }
+
+    #[test]
+    fn test_agent_frame_decode_gzip_and_request_context() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        // agent.v1.AgentServerMessage.exec_server_message (field 2) → field 10
+        // (requestContext) → triggers the RequestContext handshake event.
+        let request_context = pb_len(10, &[]);
+        let exec_server_message = pb_len(2, &request_context);
+        let gz = {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&exec_server_message).unwrap();
+            encoder.finish().unwrap()
+        };
+        let mut frame = vec![CONNECT_RPC_FLAG_COMPRESSED];
+        frame.extend_from_slice(&(gz.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&gz);
+
+        let mut finished = false;
+        let mut events = Vec::new();
+        let leftover = consume_agent_frames(&frame, &mut finished, &mut events);
+        assert!(leftover.is_empty());
+        assert_eq!(events, vec![AgentEvent::RequestContext]);
+
+        // A non-requestContext exec message (e.g. field 3 = editor tool) is an
+        // unsupported-IDE-tool error that ends the turn.
+        let tool_message = pb_len(3, &[]);
+        let exec2 = pb_len(2, &tool_message);
+        let frame2 = wrap_connect_rpc_frame(&exec2, false);
+        let mut finished2 = false;
+        let mut events2 = Vec::new();
+        consume_agent_frames(&frame2, &mut finished2, &mut events2);
+        assert!(finished2);
+        assert_eq!(
+            events2,
+            vec![AgentEvent::Error(
+                "Cursor AgentService requested an unsupported IDE tool".to_string()
+            )]
         );
     }
 }
