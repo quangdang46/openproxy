@@ -647,6 +647,17 @@ impl From<hyper_util::client::legacy::Error> for ExecutorError {
     }
 }
 
+/// Resolve a provider's upstream base URL from the live map
+/// (`PROVIDER_CONFIGS`). This is the single source of truth for chat and
+/// media; it replaces the deleted `provider.rs` PROVIDER_REGISTRY, which
+/// had silently drifted (e.g. wrong blackbox URL, wrong `featherless-ai`
+/// key). Returns `None` for unknown providers.
+pub fn provider_config_base_url(provider: &str) -> Option<String> {
+    PROVIDER_CONFIGS
+        .get(provider)
+        .map(|config| config.base_url.clone())
+}
+
 impl DefaultExecutor {
     pub fn new(
         provider: impl Into<String>,

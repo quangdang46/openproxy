@@ -8,8 +8,9 @@ use std::thread;
 use std::time::Duration;
 
 use openproxy::core::executor::{
-    ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError, TransportKind,
-    CLIENT_POOL_IDLE_TIMEOUT, CLIENT_POOL_MAX_IDLE_PER_HOST, CLIENT_POOL_TCP_KEEPALIVE,
+    provider_config_base_url, ClientPool, DefaultExecutor, ExecutionRequest, ExecutorError,
+    TransportKind, CLIENT_POOL_IDLE_TIMEOUT, CLIENT_POOL_MAX_IDLE_PER_HOST,
+    CLIENT_POOL_TCP_KEEPALIVE,
 };
 use openproxy::core::proxy::{normalize, resolve_proxy_target, ProxyTarget};
 use openproxy::types::{AppDb, ProviderConnection, ProviderNode, ProxyPool, Settings};
@@ -228,10 +229,7 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "openrouter",
             "https://openrouter.ai/api/v1/chat/completions",
         ),
-        (
-            "api-airforce",
-            "https://api.airforce/v1/chat/completions",
-        ),
+        ("api-airforce", "https://api.airforce/v1/chat/completions"),
         ("deepseek", "https://api.deepseek.com/chat/completions"),
         ("groq", "https://api.groq.com/openai/v1/chat/completions"),
         ("xai", "https://api.x.ai/v1/chat/completions"),
@@ -288,18 +286,12 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "alims-intl",
             "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions",
         ),
-        (
-            "baidu",
-            "https://qianfan.baidubce.com/v2/chat/completions",
-        ),
+        ("baidu", "https://qianfan.baidubce.com/v2/chat/completions"),
         (
             "bluesminds",
             "https://api.bluesminds.com/v1/chat/completions",
         ),
-        (
-            "clinepass",
-            "https://api.cline.bot/api/v1/chat/completions",
-        ),
+        ("clinepass", "https://api.cline.bot/api/v1/chat/completions"),
         (
             "codebuddy-intl",
             "https://www.codebuddy.ai/v2/chat/completions",
@@ -312,10 +304,7 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "kilo-gateway",
             "https://api.kilo.ai/api/gateway/chat/completions",
         ),
-        (
-            "perplexity-agent",
-            "https://api.perplexity.ai/v1/responses",
-        ),
+        ("perplexity-agent", "https://api.perplexity.ai/v1/responses"),
         (
             "poolside",
             "https://inference.poolside.ai/v1/chat/completions",
@@ -328,14 +317,8 @@ fn default_executor_supports_current_passthrough_provider_matrix() {
             "tokenrouter",
             "https://api.tokenrouter.com/v1/chat/completions",
         ),
-        (
-            "venice",
-            "https://api.venice.ai/api/v1/chat/completions",
-        ),
-        (
-            "zed",
-            "https://cloud.zed.dev/completions",
-        ),
+        ("venice", "https://api.venice.ai/api/v1/chat/completions"),
+        ("zed", "https://cloud.zed.dev/completions"),
         (
             "volcengine-ark",
             "https://ark.cn-beijing.volces.com/api/coding/v3/chat/completions",
@@ -401,11 +384,15 @@ fn alims_intl_has_full_endpoint_url() {
 #[test]
 fn api_airforce_headers_and_url() {
     let pool = Arc::new(ClientPool::new());
-    let executor = DefaultExecutor::new("api-airforce", pool, None)
-        .expect("api-airforce executor config");
+    let executor =
+        DefaultExecutor::new("api-airforce", pool, None).expect("api-airforce executor config");
     assert_eq!(
         executor
-            .build_url("anthropic/claude-3.7-sonnet", false, &connection("api-airforce"))
+            .build_url(
+                "anthropic/claude-3.7-sonnet",
+                false,
+                &connection("api-airforce")
+            )
             .unwrap(),
         "https://api.airforce/v1/chat/completions"
     );
@@ -515,15 +502,20 @@ fn codebuddy_intl_url_and_headers() {
 /// v1 chat-completions endpoint. 9router parity:
 /// `open-sse/providers/registry/featherless.js` transport.baseUrl =
 /// `https://api.featherless.ai/v1/chat/completions`. The live key MUST be
-/// "featherless" (JS provider id), NOT "featherless-ai" (a dead
-/// PROVIDER_REGISTRY key that lacks /chat/completions).
+/// "featherless" (JS provider id), NOT "featherless-ai" (the old dead
+/// PROVIDER_REGISTRY key that lacked /chat/completions — removed in bead
+/// pnc.44).
 #[test]
 fn featherless_has_full_endpoint() {
     let pool = Arc::new(ClientPool::new());
     let executor = DefaultExecutor::new("featherless", pool, None).expect("featherless executor");
     assert_eq!(
         executor
-            .build_url("deepseek-ai/DeepSeek-V4-Pro", false, &connection("featherless"))
+            .build_url(
+                "deepseek-ai/DeepSeek-V4-Pro",
+                false,
+                &connection("featherless")
+            )
             .unwrap(),
         "https://api.featherless.ai/v1/chat/completions"
     );
@@ -1906,4 +1898,68 @@ async fn no_proxy_bypasses_unreachable_proxy() {
         .expect("request should bypass proxy");
 
     assert_eq!(response.status(), 200);
+}
+
+/// Guard (bead pnc.44): every enabled provider in the 9router registry must
+/// resolve through the LIVE map (`default.rs` PROVIDER_CONFIGS) — the dead
+/// provider.rs PROVIDER_REGISTRY was removed, so any provider missing from
+/// the live map now fails the chat path at construction time.
+#[test]
+fn all_enabled_providers_reachable() {
+    let pool = Arc::new(ClientPool::new());
+    let enabled = [
+        "alims-intl",
+        "api-airforce",
+        "baidu",
+        "blackbox",
+        "bluesminds",
+        "clinepass",
+        "codebuddy-intl",
+        "featherless",
+        "kilo-gateway",
+        "perplexity-agent",
+        "poolside",
+        "siliconflow",
+        "tencent",
+        "tokenrouter",
+        "venice",
+        "zed",
+    ];
+    for provider in enabled {
+        let executor = DefaultExecutor::new(provider, pool.clone(), None).unwrap_or_else(|e| {
+            panic!("provider {provider} missing from live PROVIDER_CONFIGS: {e:?}")
+        });
+        let url = executor
+            .build_url("grok-3", false, &connection(provider))
+            .expect("build_url for provider");
+        assert!(
+            url.starts_with("http"),
+            "provider {provider} resolved to a non-URL: {url}"
+        );
+    }
+}
+
+/// Guard (bead pnc.44): media baseUrl resolution must read the LIVE map —
+/// kilo-gateway/venice/featherless resolve via `provider_config_base_url`,
+/// NOT the dead-registry fallback `format!("https://api.{}.com/v1", p)`,
+/// which was wrong for these three providers.
+#[test]
+fn media_base_url_resolves_from_live_map() {
+    for (provider, expected) in [
+        (
+            "kilo-gateway",
+            "https://api.kilo.ai/api/gateway/chat/completions",
+        ),
+        ("venice", "https://api.venice.ai/api/v1/chat/completions"),
+        (
+            "featherless",
+            "https://api.featherless.ai/v1/chat/completions",
+        ),
+    ] {
+        assert_eq!(
+            provider_config_base_url(provider).as_deref(),
+            Some(expected),
+            "{provider} must resolve from live PROVIDER_CONFIGS"
+        );
+    }
 }
