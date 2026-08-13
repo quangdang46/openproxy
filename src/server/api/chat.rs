@@ -1923,6 +1923,29 @@ async fn forward_with_provider_fallback(
                 }
 
                 if decision.should_fallback {
+                    // 9router githubMonthlyResetMs: a GitHub 402 with the
+                    // monthly-usage-limit message locks the ACCOUNT (model="")
+                    // until the first of next month, and resets backoff to 0.
+                    let github_reset = crate::core::account_fallback::github_monthly_reset_ms(
+                        status.as_u16(),
+                        &message,
+                        &plan.provider,
+                    );
+                    if let Some(reset_at) = github_reset {
+                        let cooldown_ms = (reset_at - Utc::now()).to_std().unwrap_or_default();
+                        mark_connection_unavailable(
+                            state,
+                            &connection.id,
+                            "",
+                            status.as_u16(),
+                            &message,
+                            cooldown_ms,
+                            0,
+                        )
+                        .await;
+                        excluded.insert(connection.id.clone());
+                        continue;
+                    }
                     mark_connection_unavailable(
                         state,
                         &connection.id,
