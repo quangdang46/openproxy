@@ -2328,6 +2328,7 @@ dependencies = [
  "uuid",
  "whoami",
  "wiremock",
+ "x509-parser",
 ]
 
 [[package]]

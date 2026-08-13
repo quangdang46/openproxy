@@ -106,6 +106,7 @@ rsa = "0.9"
 
 rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
 rustls-pemfile = "2"
+x509-parser = "0.16"
 
 # AES-CBC encryption + supporting crates
 aes = "0.8"
