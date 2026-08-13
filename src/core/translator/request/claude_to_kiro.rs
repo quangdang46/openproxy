@@ -531,26 +531,22 @@ pub fn claude_to_kiro_request(
         payload["profileArn"] = Value::String(profile_arn.to_string());
     }
 
-    // Preserve client's max_tokens; fall back to 32000 default
-    let client_max_tokens: u64 = body
+    // JS parity (claude-to-kiro.js:222, 323-328): inferenceConfig is always
+    // emitted with maxTokens = body.max_tokens || 32000.
+    let max_tokens: u64 = body
         .get("max_tokens")
         .or_else(|| body.get("max_completion_tokens"))
         .and_then(|v| v.as_u64())
         .filter(|&t| t > 0)
         .unwrap_or(32000);
-    let max_tokens = client_max_tokens;
-    let temperature = body.get("temperature");
-    let top_p = body.get("top_p");
-    if temperature.is_some() || top_p.is_some() {
-        let mut config = serde_json::json!({"maxTokens": max_tokens});
-        if let Some(t) = temperature {
-            config["temperature"] = t.clone();
-        }
-        if let Some(t) = top_p {
-            config["topP"] = t.clone();
-        }
-        payload["inferenceConfig"] = config;
+    let mut config = serde_json::json!({"maxTokens": max_tokens});
+    if let Some(t) = body.get("temperature") {
+        config["temperature"] = t.clone();
     }
+    if let Some(t) = body.get("top_p") {
+        config["topP"] = t.clone();
+    }
+    payload["inferenceConfig"] = config;
 
     // Tag upstream model for executor routing
     payload["_kiroUpstreamModel"] = Value::String(upstream_model.to_string());
@@ -619,5 +615,28 @@ mod tests {
         claude_to_kiro_request("kiro-model", &mut body, false, None);
         let content = current_message_content(&body);
         assert!(content.contains("[Tool result: ok]"));
+    }
+
+    /// JS parity (claude-to-kiro.js:222, 323-328): inferenceConfig is always
+    /// emitted, with maxTokens = body.max_tokens || 32000.
+    #[test]
+    fn inference_config_uses_client_max_tokens() {
+        let mut body = json!({
+            "model": "claude-sonnet-4",
+            "max_tokens": 8192,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        claude_to_kiro_request("kiro-model", &mut body, false, None);
+        assert_eq!(body["inferenceConfig"]["maxTokens"], json!(8192));
+        assert!(body["inferenceConfig"].get("temperature").is_none());
+        assert!(body["inferenceConfig"].get("topP").is_none());
+
+        // Without max_tokens, falls back to the JS constant 32000.
+        let mut body = json!({
+            "model": "claude-sonnet-4",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        claude_to_kiro_request("kiro-model", &mut body, false, None);
+        assert_eq!(body["inferenceConfig"]["maxTokens"], json!(32000));
     }
 }
