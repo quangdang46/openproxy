@@ -327,17 +327,17 @@ pub async fn run_reset_password(
         emit_robot("openproxy.v1.auth.reset-password", body)?;
     } else {
         humanln(ctx, "Dashboard password reset.");
-        humanln(
-            ctx,
-            format!("  data dir: {}", cfg.data_dir.display()),
-        );
+        humanln(ctx, format!("  data dir: {}", cfg.data_dir.display()));
         if cleared {
             humanln(ctx, "  Generated initial password removed — the next server start will mint a fresh one and print it in the startup banner.");
         }
         if let Some(pw) = fresh {
             humanln(ctx, "  New initial password:");
             humanln(ctx, format!("    {pw}"));
-            humanln(ctx, "  Change it after first login (login will prompt you).");
+            humanln(
+                ctx,
+                "  Change it after first login (login will prompt you).",
+            );
         }
     }
     Ok(0)

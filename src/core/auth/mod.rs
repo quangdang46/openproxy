@@ -78,7 +78,10 @@ fn resolve_api_key_secret(env: Option<&str>, path: &std::path::Path) -> String {
 pub fn api_key_secret() -> &'static str {
     static SECRET: OnceLock<String> = OnceLock::new();
     SECRET.get_or_init(|| {
-        resolve_api_key_secret(std::env::var("API_KEY_SECRET").ok().as_deref(), &api_key_secret_path())
+        resolve_api_key_secret(
+            std::env::var("API_KEY_SECRET").ok().as_deref(),
+            &api_key_secret_path(),
+        )
     })
 }
 
@@ -89,8 +92,7 @@ fn initial_password_path() -> PathBuf {
 
 /// Generate a fresh random dashboard password: 20 base62 chars (~119 bits).
 fn generate_random_password() -> String {
-    const CHARSET: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     let mut rng = rand::thread_rng();
     (0..20)
         .map(|_| {
@@ -110,10 +112,7 @@ fn generate_random_password() -> String {
 ///    the operator sets a real one (see [`dashboard_password_is_ephemeral`]).
 /// Pure resolution: env var wins, then the persisted generated password,
 /// then a fresh random one. Testable without the process-wide cache.
-fn resolve_dashboard_initial_password(
-    env: Option<&str>,
-    path: &std::path::Path,
-) -> String {
+fn resolve_dashboard_initial_password(env: Option<&str>, path: &std::path::Path) -> String {
     if let Some(v) = env {
         if !v.trim().is_empty() {
             return v.to_string();
@@ -259,7 +258,6 @@ fn generate_crc(machine_id: &str, key_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use super::{
         api_key_secret, api_key_secret_path, dashboard_initial_password,
         dashboard_password_is_ephemeral, generate_api_key_with_machine, generate_crc,
@@ -267,6 +265,7 @@ mod tests {
         read_persisted_secret_from, reset_dashboard_initial_password, resolve_api_key_secret,
         resolve_dashboard_initial_password,
     };
+    use std::sync::Mutex;
 
     /// Serializes tests that mutate the process-global `DATA_DIR` /
     /// `INITIAL_PASSWORD` / `API_KEY_SECRET` env vars. Without this the
@@ -332,8 +331,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var("DATA_DIR", temp.path());
         persist_secret_to(api_key_secret_path(), &secret);
-        let read = read_persisted_secret_from(api_key_secret_path())
-            .expect("persisted secret readable");
+        let read =
+            read_persisted_secret_from(api_key_secret_path()).expect("persisted secret readable");
         assert_eq!(read, secret);
         std::env::remove_var("DATA_DIR");
     }
@@ -351,10 +350,7 @@ mod tests {
             "env-var-secret"
         );
         // Without env, the persisted value wins.
-        assert_eq!(
-            resolve_api_key_secret(None, &path),
-            "persisted-value"
-        );
+        assert_eq!(resolve_api_key_secret(None, &path), "persisted-value");
     }
 
     #[test]
@@ -369,7 +365,10 @@ mod tests {
         assert!(first.len() >= 20, "generated password should be ~20 chars");
         assert_ne!(first, "123456");
         let second = dashboard_initial_password();
-        assert_eq!(first, second, "persisted password must be stable across calls");
+        assert_eq!(
+            first, second,
+            "persisted password must be stable across calls"
+        );
 
         // Must be ephemeral (no INITIAL_PASSWORD env).
         assert!(dashboard_password_is_ephemeral());

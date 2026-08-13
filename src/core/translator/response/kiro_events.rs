@@ -93,6 +93,10 @@ pub struct KiroSseAssembler {
     pub usage: Option<Value>,
     /// First-chunk flag — ensures the very first emitted chunk has role.
     pub emitted_any: bool,
+    /// True once the terminal chunk (finish_reason + [DONE]) has been
+    /// emitted — either via messageStopEvent/metadataEvent or the
+    /// clean-EOF finish. Guards against a double terminal.
+    pub terminal_emitted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -329,9 +333,12 @@ impl KiroSseAssembler {
                     });
                 self.stop_reason = merge_stop_reason(&self.stop_reason, &reason);
                 // 9router emits the terminal chunk at the stop event; flush any
-                // buffered tool calls first so finish_reason lands last.
-                chunks.extend(self.flush_tools());
-                chunks.push(self.terminal_chunk());
+                // buffered tool calls first so finish_reason lands last. Guarded
+                // so a clean-EOF finish cannot double-emit the terminal.
+                if !self.terminal_emitted {
+                    chunks.extend(self.flush_tools());
+                    chunks.push(self.terminal_chunk());
+                }
             }
             "metadataEvent" | "MetadataEvent" => {
                 let payload = event.payload.as_ref();
@@ -345,11 +352,13 @@ impl KiroSseAssembler {
                 if let Some(reason) = reason {
                     self.stop_reason = merge_stop_reason(&self.stop_reason, &Some(reason));
                     // If this is a terminal stop (end_turn / tool_use / max_tokens),
-                    // flush tools and emit the terminal chunk.
+                    // flush tools and emit the terminal chunk (guarded against a
+                    // clean-EOF finish double-emit).
                     if matches!(
                         self.stop_reason.as_deref(),
                         Some("end_turn" | "tool_use" | "max_tokens")
-                    ) {
+                    ) && !self.terminal_emitted
+                    {
                         chunks.extend(self.flush_tools());
                         chunks.push(self.terminal_chunk());
                     }
@@ -440,13 +449,14 @@ impl KiroSseAssembler {
 
     /// The terminal chunk with finish_reason (no tool flush — callers flush
     /// first via `flush_tools`).
-    pub fn terminal_chunk(&self) -> Value {
+    pub fn terminal_chunk(&mut self) -> Value {
         let reason = match self.stop_reason.as_deref() {
             Some("tool_use") => "tool_calls",
             Some(r) if r == "end_turn" || r == "stop" => "stop",
             Some(r) => r,
             None => "stop",
         };
+        self.terminal_emitted = true;
         let delta = Map::new();
         self.envelope(delta, Some(reason))
     }
@@ -454,6 +464,9 @@ impl KiroSseAssembler {
     /// Emit the terminal chunk with finish_reason + any buffered tools flushed
     /// first. Call exactly once at stream end (e.g. upstream connection close).
     pub fn finish(&mut self) -> Vec<Value> {
+        if self.terminal_emitted {
+            return Vec::new();
+        }
         let mut chunks = self.flush_tools();
         chunks.push(self.terminal_chunk());
         chunks
@@ -660,5 +673,39 @@ mod tests {
         assert_eq!(terminal["usage"]["prompt_tokens"], 10);
         assert_eq!(terminal["usage"]["completion_tokens"], 20);
         assert_eq!(terminal["usage"]["total_tokens"], 30);
+    }
+
+    #[test]
+    fn test_clean_eof_finish_emits_terminal_once() {
+        // A stream that ends cleanly (EOF) without an explicit
+        // messageStopEvent must still emit the terminal chunk + finish_reason
+        // (9router transformEventStreamToSSE finish()).
+        let mut asm = KiroSseAssembler::new("test-model");
+        asm.process_event(&event(
+            "assistantResponseEvent",
+            json!({ "content": "hello" }),
+        ))
+        .unwrap();
+        let terminal = asm.finish();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(terminal[0]["choices"][0]["finish_reason"], "stop");
+        assert!(asm.terminal_emitted);
+
+        // A second finish is a no-op (terminal already emitted).
+        assert!(asm.finish().is_empty());
+    }
+
+    #[test]
+    fn test_message_stop_then_finish_does_not_double_terminal() {
+        // messageStopEvent already emits the terminal; the stream-end finish
+        // must not add a second one.
+        let mut asm = KiroSseAssembler::new("test-model");
+        asm.process_event(&event(
+            "messageStopEvent",
+            json!({ "stopReason": "end_turn" }),
+        ))
+        .unwrap();
+        assert!(asm.terminal_emitted);
+        assert!(asm.finish().is_empty());
     }
 }

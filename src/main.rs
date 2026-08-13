@@ -444,7 +444,10 @@ async fn main() -> anyhow::Result<()> {
     if banner_uses_generated_password {
         eprintln!();
         eprintln!("  Initial dashboard password (shown only once):");
-        eprintln!("    {}", openproxy::core::auth::dashboard_initial_password());
+        eprintln!(
+            "    {}",
+            openproxy::core::auth::dashboard_initial_password()
+        );
         eprintln!("  Change it from the dashboard after logging in.");
     }
     eprintln!();

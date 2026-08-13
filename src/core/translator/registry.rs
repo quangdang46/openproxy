@@ -578,6 +578,56 @@ impl TranslationRegistry {
 
         intermediates
     }
+
+    /// Flush end-of-stream state for a response transform. Called once when
+    /// the upstream stream ends (clean EOF or error). Kiro: emits the terminal
+    /// chunk (finish_reason) + `data: [DONE]` when the upstream closed without
+    /// an explicit messageStopEvent (9router transformEventStreamToSSE
+    /// `finish()` — a missing terminal is a protocol failure otherwise).
+    pub fn finish_stream(
+        &self,
+        source: Format,
+        target: Format,
+        state: &mut ResponseTransformState,
+    ) -> Vec<String> {
+        if source == target {
+            return Vec::new();
+        }
+        if let Some(transform) = self.response_transforms.get(&(source, target)) {
+            // Only the kiro binary EventStream transform has buffered state
+            // that needs flushing; route through it directly.
+            let _ = transform;
+        }
+        if source == Format::Kiro || target == Format::Kiro {
+            if let Some(assembler) = state.kiro.assembler.as_mut() {
+                let chunks = assembler.finish();
+                let mut out = Vec::new();
+                for c in chunks {
+                    out.push(format!(
+                        "data: {}\n\n",
+                        serde_json::to_string(&c).unwrap_or_default()
+                    ));
+                }
+                // A stream that ended without a terminal chunk is a protocol
+                // failure (9router finish() → kiro_missing_terminal).
+                if !assembler.terminal_emitted {
+                    out.push(format!(
+                        "data: {}\n\n",
+                        serde_json::json!({
+                            "error": {
+                                "message": "Kiro EventStream ended without a terminal stop",
+                                "type": "upstream_error",
+                                "code": "kiro_missing_terminal"
+                            }
+                        })
+                    ));
+                }
+                out.push("data: [DONE]\n\n".to_string());
+                return out;
+            }
+        }
+        Vec::new()
+    }
 }
 
 /// Apply normalization hooks that are always run regardless of translation.

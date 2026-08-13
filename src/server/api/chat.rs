@@ -2903,6 +2903,19 @@ async fn proxy_response_with_pending_tracking(
                         }
                     }
                 }
+                // End-of-stream flush: emit the terminal chunk + [DONE] for
+                // buffered binary transforms (kiro EventStream → SSE).
+                if let Some(ref mut t_state) = t_state {
+                    for line in registry::global_registry().finish_stream(
+                        stream_source_format,
+                        stream_target_format,
+                        t_state,
+                    ) {
+                        if let Some(frame) = sse_frame_for_dashboard(&line) {
+                            yield Ok::<Bytes, std::io::Error>(frame);
+                        }
+                    }
+                }
                 record_streaming_usage(&state, &provider, &model,
                     connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
                 state
@@ -3005,6 +3018,19 @@ async fn proxy_response_with_pending_tracking(
                 }
                 if let Some(transformer) = transformer.as_mut() {
                     for line in flush_dashboard_sse_chunk(transformer.as_mut(), &mut pending_text) {
+                        if let Some(frame) = sse_frame_for_dashboard(&line) {
+                            yield Ok::<Bytes, std::io::Error>(frame);
+                        }
+                    }
+                }
+                // End-of-stream flush: emit the terminal chunk + [DONE] for
+                // buffered binary transforms (kiro EventStream → SSE).
+                if let Some(ref mut t_state) = t_state {
+                    for line in registry::global_registry().finish_stream(
+                        stream_source_format,
+                        stream_target_format,
+                        t_state,
+                    ) {
                         if let Some(frame) = sse_frame_for_dashboard(&line) {
                             yield Ok::<Bytes, std::io::Error>(frame);
                         }
