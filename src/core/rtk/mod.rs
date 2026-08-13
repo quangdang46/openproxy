@@ -29,7 +29,8 @@ const DEFAULT_CONTEXT_WINDOW: usize = 16_384;
 const CAVEMAN_SHARED_BOUNDARIES: &str = "Code blocks, file paths, commands, errors, URLs: keep exact. Security warnings, irreversible action confirmations, multi-step ordered sequences: write normal. Resume terse style after.";
 const CAVEMAN_SHARED_EXAMPLES: &str = "Not: \"Sure! I'd be happy to help you with that. The issue you're experiencing is likely caused by...\" Yes: \"Bug in auth middleware. Token expiry check use `<` not `<=`. Fix:\"";
 const CAVEMAN_SHARED_AUTO_CLARITY: &str = "Auto-Clarity: drop caveman for security warnings, irreversible actions, multi-step sequences where fragment ambiguity risks misread, or when user repeats a question. Resume after the clear part.";
-const CAVEMAN_SHARED_PERSISTENCE: &str = "ACTIVE EVERY RESPONSE. No revert after many turns. No filler drift. Still active if unsure.";
+const CAVEMAN_SHARED_PERSISTENCE: &str =
+    "ACTIVE EVERY RESPONSE. No revert after many turns. No filler drift. Still active if unsure.";
 const CAVEMAN_SHARED_NO_INVENTED_ABBREV: &str = "No invented abbreviations. Standard well-known tech acronyms (DB, API, HTTP, URL, JSON, ID, OS, CPU) OK. Names of code symbols, function names, API names, error strings: keep verbatim.";
 const CAVEMAN_SHARED_PRESERVE_LANGUAGE: &str = "Preserve the user's dominant language. User wrote Vietnamese, reply Vietnamese. User wrote English, reply English. Wenyan/classical-Chinese levels override this language-preservation rule. Code identifiers, error strings, file paths, commands: keep in their original form regardless of language.";
 const CAVEMAN_SHARED_NO_SELF_REFERENCE: &str = "No self-reference. Do not name or announce the style (no \"caveman mode\", no \"me caveman think\", no \"compressed mode active\"). Just respond.";
@@ -176,7 +177,28 @@ fn apply_rtk_system_injection(body: &mut Value, settings: &Settings) -> bool {
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
     match prompt {
-        Some(p) => inject_system_prompt(body, &p),
+        Some(p) => {
+            // Dispatch by body shape (9router injectSystemPrompt format switch):
+            // Claude → body.system; Gemini → systemInstruction/request;
+            // else OpenAI messages/input/instructions.
+            let format = if body.get("system").is_some() {
+                "claude"
+            } else if body.get("systemInstruction").is_some()
+                || body.get("system_instruction").is_some()
+                || body
+                    .get("request")
+                    .map(|r| {
+                        r.get("systemInstruction").is_some()
+                            || r.get("system_instruction").is_some()
+                    })
+                    .unwrap_or(false)
+            {
+                "gemini"
+            } else {
+                "openai"
+            };
+            inject_system_prompt(body, format, &p)
+        }
         None => false,
     }
 }
@@ -1104,11 +1126,23 @@ mod tests {
             let p = level.prompt();
             assert!(p.contains("keep exact"), "boundaries in {level:?}");
             assert!(p.contains("No self-reference"), "no-self-ref in {level:?}");
-            assert!(p.contains("No decorative emoji"), "no-decoration in {level:?}");
-            assert!(p.contains("Preserve the user's dominant language"), "language in {level:?}");
-            assert!(p.contains("No invented abbreviations"), "abbrev in {level:?}");
+            assert!(
+                p.contains("No decorative emoji"),
+                "no-decoration in {level:?}"
+            );
+            assert!(
+                p.contains("Preserve the user's dominant language"),
+                "language in {level:?}"
+            );
+            assert!(
+                p.contains("No invented abbreviations"),
+                "abbrev in {level:?}"
+            );
             assert!(p.contains("Auto-Clarity"), "auto-clarity in {level:?}");
-            assert!(p.contains("ACTIVE EVERY RESPONSE"), "persistence in {level:?}");
+            assert!(
+                p.contains("ACTIVE EVERY RESPONSE"),
+                "persistence in {level:?}"
+            );
         }
         // Full contains the literal JS example.
         let full = CompressionLevel::Full.prompt();
