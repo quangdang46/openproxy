@@ -2,6 +2,10 @@
 //!
 //! Converts OpenAI Chat Completions to Kiro/AWS CodeWhisperer format.
 
+use crate::core::config::kiro_constants::{
+    build_kiro_additional_model_request_fields_for_model, build_thinking_system_prefix,
+    resolve_kiro_thinking_budget, uses_kiro_native_gpt_effort, HeaderLookup,
+};
 use crate::core::translator::concerns::kiro_conversation::{
     canonicalize_kiro_conversation, normalize_kiro_tool_specs,
 };
@@ -190,7 +194,8 @@ pub fn openai_to_kiro_request(
                             if let Some(tool_use_id) = c.get("tool_use_id").and_then(|v| v.as_str())
                             {
                                 // 9router openai-to-kiro.js:148 — status reflects is_error.
-                                let is_err = c.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                                let is_err =
+                                    c.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                                 pending_tool_results.push(serde_json::json!({
                                     "toolUseId": tool_use_id,
                                     "status": if is_err { "error" } else { "success" },
@@ -406,15 +411,6 @@ pub fn openai_to_kiro_request(
     // System-stable content goes into content_prefix (frozen on msg0); volatile
     // current-time only goes into current_content_prefix (current turn only).
     let mut system_prompt_parts: Vec<String> = Vec::new();
-    let thinking_enabled = body.get("reasoning_effort").is_some()
-        || body
-            .get("thinking")
-            .and_then(|t| t.get("type"))
-            .and_then(|v| v.as_str())
-            == Some("enabled");
-    if thinking_enabled {
-        system_prompt_parts.push("<thinking_mode>enabled</thinking_mode>".to_string());
-    }
 
     // Check for -agentic suffix
     let is_agentic = model.ends_with("-agentic");
@@ -430,6 +426,19 @@ pub fn openai_to_kiro_request(
         model
     };
 
+    // Resolve the Kiro thinking budget (9router resolveKiroThinkingBudget) and
+    // push the legacy `<thinking_mode>`/`<max_thinking_length>` prefix when a
+    // budget exists and the model does not use native GPT effort fields.
+    let raw_headers = crate::core::utils::session_manager::credentials_raw_headers(credentials);
+    let headers_lookup = raw_headers.as_ref().map(|h| h as &dyn HeaderLookup);
+    let thinking_budget = resolve_kiro_thinking_budget(body, headers_lookup, upstream_model);
+    let uses_native_gpt_effort = uses_kiro_native_gpt_effort(upstream_model, body);
+    if let Some(budget) = thinking_budget {
+        if !uses_native_gpt_effort {
+            system_prompt_parts.push(build_thinking_system_prefix(Some(budget)));
+        }
+    }
+
     let system_prompt = system_prompt_parts.join("\n\n");
     let timestamp = chrono::Utc::now().to_rfc3339();
     let current_time_context = format!("[Context: Current time is {timestamp}]");
@@ -443,7 +452,6 @@ pub fn openai_to_kiro_request(
     // Resolve conversation-stable session identity (client header / body field,
     // or ephemeral one-shot for Kiro when no client id is present).
     let connection_id = crate::core::utils::session_manager::credentials_connection_id(credentials);
-    let raw_headers = crate::core::utils::session_manager::credentials_raw_headers(credentials);
     let session_identity = crate::core::utils::session_manager::resolve_session_identity(
         raw_headers.as_ref(),
         // Body still has original OpenAI shape here (we replace *body later).
@@ -527,6 +535,12 @@ pub fn openai_to_kiro_request(
 
     if !system_prompt.is_empty() {
         payload["systemPrompt"] = Value::String(system_prompt);
+    }
+
+    // Native effort fields for supported models (9router
+    // buildKiroAdditionalModelRequestFieldsForModel).
+    if let Some(amrf) = build_kiro_additional_model_request_fields_for_model(body, upstream_model) {
+        payload["additionalModelRequestFields"] = amrf;
     }
 
     // Add profileArn if present
@@ -632,5 +646,113 @@ mod tests {
         openai_to_kiro_request("kiro-model", &mut body, false, None);
         let content = current_message_content(&body);
         assert!(content.contains("[Tool result: ok]"));
+    }
+
+    /// Guard test per bead P0-A6 (JS openai-to-kiro.test.js:289-302):
+    /// reasoning_effort low for claude-sonnet-4.6 emits
+    /// `<max_thinking_length>1024</max_thinking_length>` AND
+    /// additionalModelRequestFields with the adaptive-thinking shape.
+    #[test]
+    fn reasoning_effort_low_emits_max_thinking_length_1024() {
+        let mut body = json!({
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "low"
+        });
+        openai_to_kiro_request("claude-sonnet-4.6", &mut body, false, None);
+        let system_prompt = body["systemPrompt"].as_str().unwrap_or("");
+        assert!(
+            system_prompt.contains("<max_thinking_length>1024</max_thinking_length>"),
+            "systemPrompt should carry <max_thinking_length>1024</max_thinking_length>, got: {system_prompt}"
+        );
+        assert!(
+            system_prompt.contains("<thinking_mode>enabled</thinking_mode>"),
+            "systemPrompt should carry <thinking_mode>enabled</thinking_mode>, got: {system_prompt}"
+        );
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({
+                "thinking": {"type": "adaptive", "display": "summarized"},
+                "output_config": {"effort": "low"}
+            })
+        );
+    }
+
+    /// Guard test per bead P0-A6 (JS lines 386-400): reasoning_effort none →
+    /// no legacy prompt tags and no additionalModelRequestFields.
+    #[test]
+    fn reasoning_effort_none_emits_nothing() {
+        let mut body = json!({
+            "model": "claude-sonnet-4.6",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning_effort": "none"
+        });
+        openai_to_kiro_request("claude-sonnet-4.6", &mut body, false, None);
+        let system_prompt = body["systemPrompt"].as_str().unwrap_or("");
+        assert!(
+            !system_prompt.contains("<thinking_mode>"),
+            "systemPrompt should not contain <thinking_mode>, got: {system_prompt}"
+        );
+        assert!(
+            !system_prompt.contains("<max_thinking_length>"),
+            "systemPrompt should not contain <max_thinking_length>, got: {system_prompt}"
+        );
+        assert!(
+            body.get("additionalModelRequestFields").is_none(),
+            "additionalModelRequestFields should be absent, got: {}",
+            body
+        );
+    }
+
+    /// Guard test per bead P0-A6 (JS lines 323-338): GPT-5.6 reasoning.effort
+    /// high → additionalModelRequestFields {reasoning:{effort:high}} with NO
+    /// legacy prompt tags.
+    #[test]
+    fn gpt56_reasoning_effort_maps_to_reasoning_fields() {
+        let mut body = json!({
+            "model": "gpt-5.6-sol",
+            "messages": [{"role": "user", "content": "hi"}],
+            "reasoning": {"effort": "high"}
+        });
+        openai_to_kiro_request("gpt-5.6-sol", &mut body, false, None);
+        let system_prompt = body["systemPrompt"].as_str().unwrap_or("");
+        assert!(
+            !system_prompt.contains("<thinking_mode>"),
+            "systemPrompt should not contain <thinking_mode>, got: {system_prompt}"
+        );
+        assert_eq!(
+            body["additionalModelRequestFields"],
+            json!({"reasoning": {"effort": "high"}})
+        );
+    }
+
+    /// Guard test per bead P0-A6 (JS lines 370-384): unsupported efforts
+    /// (auto/minimal/ultra) → NO additionalModelRequestFields but legacy
+    /// `<thinking_mode>enabled</thinking_mode>` + `<max_thinking_length>`
+    /// fallback.
+    #[test]
+    fn unsupported_effort_falls_back_to_legacy_tags() {
+        for effort in ["auto", "minimal", "ultra"] {
+            let mut body = json!({
+                "model": "claude-sonnet-4.6",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": effort
+            });
+            openai_to_kiro_request("claude-sonnet-4.6", &mut body, false, None);
+            let system_prompt = body["systemPrompt"].as_str().unwrap_or("");
+            assert!(
+                system_prompt.contains("<thinking_mode>enabled</thinking_mode>"),
+                "effort {effort}: expected legacy <thinking_mode> tag, got: {system_prompt}"
+            );
+            assert!(
+                system_prompt.contains("<max_thinking_length>"),
+                "effort {effort}: expected legacy <max_thinking_length>, got: {system_prompt}"
+            );
+            assert!(
+                body.get("additionalModelRequestFields").is_none(),
+                "effort {effort}: additionalModelRequestFields should be absent, got: {}",
+                body
+            );
+        }
     }
 }

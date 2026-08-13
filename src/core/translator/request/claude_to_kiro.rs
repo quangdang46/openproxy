@@ -6,6 +6,10 @@
 //! The Kiro format is the same target as `openai_to_kiro_request` produces,
 //! so this implementation mirrors that approach but reads Claude-format input.
 
+use crate::core::config::kiro_constants::{
+    build_kiro_additional_model_request_fields_for_model, build_thinking_system_prefix,
+    resolve_kiro_thinking_budget, uses_kiro_native_gpt_effort, HeaderLookup,
+};
 use crate::core::translator::concerns::kiro_conversation::{
     canonicalize_kiro_conversation, normalize_kiro_tool_specs,
 };
@@ -186,7 +190,8 @@ pub fn claude_to_kiro_request(
                             if let Some(tool_use_id) = c.get("tool_use_id").and_then(|v| v.as_str())
                             {
                                 // 9router claude-to-kiro.js:110 — status reflects is_error.
-                                let is_err = c.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+                                let is_err =
+                                    c.get("is_error").and_then(Value::as_bool).unwrap_or(false);
                                 pending_tool_results.push(serde_json::json!({
                                     "toolUseId": tool_use_id,
                                     "status": if is_err { "error" } else { "success" },
@@ -386,17 +391,6 @@ pub fn claude_to_kiro_request(
         }
     }
 
-    // Check for thinking/reasoning_effort
-    let thinking_enabled = body.get("reasoning_effort").is_some()
-        || body
-            .get("thinking")
-            .and_then(|t| t.get("type"))
-            .and_then(|v| v.as_str())
-            == Some("enabled");
-    if thinking_enabled {
-        system_prompt_parts.push("<thinking_mode>enabled</thinking_mode>".to_string());
-    }
-
     // Check for -agentic suffix
     let is_agentic = model.ends_with("-agentic");
     if is_agentic {
@@ -411,6 +405,19 @@ pub fn claude_to_kiro_request(
         model
     };
 
+    // Resolve the Kiro thinking budget (9router resolveKiroThinkingBudget) and
+    // push the legacy `<thinking_mode>`/`<max_thinking_length>` prefix when a
+    // budget exists and the model does not use native GPT effort fields.
+    let raw_headers = crate::core::utils::session_manager::credentials_raw_headers(credentials);
+    let headers_lookup = raw_headers.as_ref().map(|h| h as &dyn HeaderLookup);
+    let thinking_budget = resolve_kiro_thinking_budget(body, headers_lookup, upstream_model);
+    let uses_native_gpt_effort = uses_kiro_native_gpt_effort(upstream_model, body);
+    if let Some(budget) = thinking_budget {
+        if !uses_native_gpt_effort {
+            system_prompt_parts.push(build_thinking_system_prefix(Some(budget)));
+        }
+    }
+
     let system_prompt = system_prompt_parts.join("\n\n");
     let timestamp = chrono::Utc::now().to_rfc3339();
     let current_time_context = format!("[Context: Current time is {timestamp}]");
@@ -424,7 +431,6 @@ pub fn claude_to_kiro_request(
     // Resolve conversation-stable session identity (client header / body field,
     // or ephemeral one-shot for Kiro when no client id is present).
     let connection_id = crate::core::utils::session_manager::credentials_connection_id(credentials);
-    let raw_headers = crate::core::utils::session_manager::credentials_raw_headers(credentials);
     let session_identity = crate::core::utils::session_manager::resolve_session_identity(
         raw_headers.as_ref(),
         // Body still has original Claude shape here (we replace *body later).
@@ -508,6 +514,12 @@ pub fn claude_to_kiro_request(
 
     if !system_prompt.is_empty() {
         payload["systemPrompt"] = Value::String(system_prompt);
+    }
+
+    // Native effort fields for supported models (9router
+    // buildKiroAdditionalModelRequestFieldsForModel).
+    if let Some(amrf) = build_kiro_additional_model_request_fields_for_model(body, upstream_model) {
+        payload["additionalModelRequestFields"] = amrf;
     }
 
     // Add profileArn if present
