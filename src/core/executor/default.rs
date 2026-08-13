@@ -1087,6 +1087,14 @@ impl DefaultExecutor {
         // Inject reasoning_content placeholder for DeepSeek/Kimi providers
         inject_reasoning_content(&self.provider, model, &mut body);
 
+        // Quirk: cerebras/mistral reject Anthropic's client_metadata field
+        // (9router default.js dropClientMetadata — top-level delete only)
+        if self.provider == "cerebras" || self.provider == "mistral" {
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("client_metadata");
+            }
+        }
+
         // Strip unsupported request params for providers that don't support them
         strip_unsupported_params(&self.provider, model, &mut body);
 
@@ -1597,5 +1605,59 @@ mod tests {
         assert!(!opencode_go_uses_claude_format("qwen3.6"));
         assert!(!opencode_go_uses_claude_format("minimax-m1"));
         assert!(!opencode_go_uses_claude_format("gpt-4o"));
+    }
+
+    #[test]
+    fn drops_client_metadata_for_cerebras() {
+        // 9router default.js dropClientMetadata quirk (cerebras.js quirks).
+        let executor = DefaultExecutor::new("cerebras", Arc::new(ClientPool::new()), None).unwrap();
+        let body = serde_json::json!({
+            "client_metadata": { "ideType": 9 },
+            "messages": []
+        });
+        let transformed = executor.transform_request(&body, "llama-3.3-70b");
+        assert!(
+            !transformed
+                .as_object()
+                .unwrap()
+                .contains_key("client_metadata"),
+            "cerebras must drop client_metadata"
+        );
+        assert_eq!(transformed["messages"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn drops_client_metadata_for_mistral() {
+        // 9router default.js dropClientMetadata quirk (mistral.js quirks).
+        let executor = DefaultExecutor::new("mistral", Arc::new(ClientPool::new()), None).unwrap();
+        let body = serde_json::json!({
+            "client_metadata": { "ideType": 9 },
+            "messages": []
+        });
+        let transformed = executor.transform_request(&body, "mistral-large-latest");
+        assert!(
+            !transformed
+                .as_object()
+                .unwrap()
+                .contains_key("client_metadata"),
+            "mistral must drop client_metadata"
+        );
+        assert_eq!(transformed["messages"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn keeps_client_metadata_for_openai() {
+        // No dropClientMetadata quirk — the field must survive (JS parity).
+        let executor = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let body = serde_json::json!({
+            "client_metadata": { "ideType": 9 },
+            "messages": []
+        });
+        let transformed = executor.transform_request(&body, "gpt-4o");
+        assert_eq!(
+            transformed["client_metadata"],
+            serde_json::json!({ "ideType": 9 }),
+            "openai must keep client_metadata"
+        );
     }
 }
