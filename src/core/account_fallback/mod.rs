@@ -457,6 +457,43 @@ impl StickySession {
     }
 }
 
+/// The GitHub monthly-usage-limit error text (9router auth.js
+/// `GITHUB_MONTHLY_USAGE_LIMIT`). Case-insensitive substring match.
+const GITHUB_MONTHLY_USAGE_LIMIT: &str = "you've reached your additional usage limit for your plan";
+
+/// 9router `githubMonthlyResetMs`: when a GitHub account returns 402 with the
+/// monthly-usage-limit message, the account is locked until the first of the
+/// NEXT month (UTC). Returns `None` otherwise.
+pub fn github_monthly_reset_ms(
+    status: u16,
+    error_text: &str,
+    provider: &str,
+) -> Option<DateTime<Utc>> {
+    use chrono::{Datelike, TimeZone};
+    if provider != "github" || status != 402 {
+        return None;
+    }
+    if !error_text
+        .to_lowercase()
+        .contains(GITHUB_MONTHLY_USAGE_LIMIT)
+    {
+        return None;
+    }
+    let now = Utc::now();
+    // First day of next month at 00:00 UTC (9router Date.UTC(now.getUTCFullYear(),
+    // now.getUTCMonth() + 1, 1)).
+    let (year, month) = if now.month() == 12 {
+        (now.year() + 1, 1)
+    } else {
+        (now.year(), now.month() + 1)
+    };
+    Some(
+        Utc.with_ymd_and_hms(year, month, 1, 0, 0, 0)
+            .single()
+            .unwrap_or(now),
+    )
+}
+
 /// Get the flat field key for a model lock.
 pub fn get_model_lock_key(model: &str) -> String {
     if model.is_empty() {
@@ -1099,5 +1136,44 @@ mod tests {
             300,
         );
         assert_eq!(idx, Some(1)); // acc2 is sticky
+    }
+
+    #[test]
+    fn github_402_monthly_reset_returns_next_month() {
+        use chrono::{Datelike, Timelike};
+        // 9router githubMonthlyResetMs: GitHub 402 + monthly-limit text → lock
+        // until the first of next month.
+        let reset = github_monthly_reset_ms(
+            402,
+            "You've reached your additional usage limit for your plan",
+            "github",
+        );
+        assert!(reset.is_some(), "github 402 monthly text should resolve");
+        if let Some(reset_at) = reset {
+            let now = Utc::now();
+            let diff = reset_at - now;
+            assert!(diff.num_days() > 0, "should be in the future");
+            assert!(diff.num_days() <= 32, "should be within a month");
+            // First of a month at 00:00 UTC.
+            assert_eq!(reset_at.day(), 1);
+            assert_eq!(reset_at.hour(), 0);
+            assert_eq!(reset_at.minute(), 0);
+            assert_eq!(reset_at.second(), 0);
+        }
+    }
+
+    #[test]
+    fn github_402_other_message_returns_none() {
+        // Non-monthly 402 text → no reset.
+        assert!(github_monthly_reset_ms(402, "card declined", "github").is_none());
+        // Non-402 github → none.
+        assert!(github_monthly_reset_ms(429, "rate limited", "github").is_none());
+        // Non-github 402 → none.
+        assert!(github_monthly_reset_ms(
+            402,
+            "you've reached your additional usage limit for your plan",
+            "openai"
+        )
+        .is_none());
     }
 }
