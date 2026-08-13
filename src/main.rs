@@ -274,6 +274,14 @@ async fn main() -> anyhow::Result<()> {
                         openproxy::cli::auth::run_whoami(ctx, &resolved, *verify).await?
                     }
                     AuthCmd::List => openproxy::cli::auth::run_list(ctx)?,
+                    AuthCmd::ResetPassword { show } => {
+                        openproxy::cli::auth::run_reset_password(
+                            ctx,
+                            &resolved,
+                            openproxy::cli::auth::ResetPasswordOptions { show: *show },
+                        )
+                        .await?
+                    }
                 };
                 if exit != 0 {
                     std::process::exit(exit);
@@ -425,6 +433,18 @@ async fn main() -> anyhow::Result<()> {
         bound.map(|a| a.port()).unwrap_or(cli.port)
     );
     eprintln!("  Press Ctrl+C to stop");
+    // Surface the generated dashboard initial password exactly once. This
+    // runs only when no `INITIAL_PASSWORD` env var and no stored bcrypt hash
+    // exists, i.e. a fresh install using the generated fallback. The line is
+    // also captured in the detached-server log ($DATA_DIR/openproxy.log).
+    if crate::core::auth::dashboard_password_is_ephemeral()
+        && openproxy::server::api::auth::settings_password_hash(&db.snapshot().settings).is_none()
+    {
+        eprintln!();
+        eprintln!("  Initial dashboard password (shown only once):");
+        eprintln!("    {}", crate::core::auth::dashboard_initial_password());
+        eprintln!("  Change it from the dashboard after logging in.");
+    }
     eprintln!();
 
     // Auto-open the dashboard in the user's default browser when running

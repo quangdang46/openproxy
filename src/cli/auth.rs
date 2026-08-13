@@ -12,6 +12,8 @@
 //!   current default).
 //! - `auth whoami`: shows the active profile, its URL, and a masked key. In
 //!   robot mode, also returns the resolved data dir and remote flag.
+//! - `auth reset-password [--show]`: clears the local dashboard password back
+//!   to the generated initial value (recovery from a forgotten password).
 //!
 //! SECURITY: storing API keys in plaintext is acceptable for personal dev
 //! boxes — it's the same trust model as `~/.netrc` or `~/.aws/credentials`.
@@ -40,6 +42,11 @@ pub struct LogoutOptions {
     pub profile: Option<String>,
     /// If true, also clear `default_profile` when removing the current default.
     pub keep_default: bool,
+}
+
+pub struct ResetPasswordOptions {
+    /// If true, also print the freshly generated password now.
+    pub show: bool,
 }
 
 /// `openproxy auth login` — persist credentials and (optionally) verify them.
@@ -271,6 +278,66 @@ pub fn run_list(ctx: OutputCtx) -> anyhow::Result<i32> {
                 };
                 humanln(ctx, format!("  {name}{marker} -> {url}"));
             }
+        }
+    }
+    Ok(0)
+}
+
+/// `openproxy auth reset-password` — reset the dashboard password back to a
+/// freshly generated random one.
+///
+/// Works offline against the local data dir: clears the stored bcrypt hash
+/// in SQLite and deletes the persisted generated password. The next server
+/// boot mints a fresh random password and prints it in the startup banner.
+/// Use this to recover from a forgotten dashboard password.
+pub async fn run_reset_password(
+    ctx: OutputCtx,
+    cfg: &ResolvedConfig,
+    opts: ResetPasswordOptions,
+) -> anyhow::Result<i32> {
+    // Clear the stored bcrypt hash so login falls back to the generated
+    // initial password again.
+    let db = crate::db::Db::load().await?;
+    db.update(|d| {
+        d.settings.password = None;
+        d.settings.extra.remove("password");
+    })
+    .await?;
+
+    // Delete the persisted generated password so the next boot generates a
+    // fresh one (never reuse the leaked value).
+    let cleared = crate::core::auth::reset_dashboard_initial_password();
+
+    // Optionally mint + print the replacement now.
+    let fresh = if opts.show {
+        Some(crate::core::auth::dashboard_initial_password())
+    } else {
+        None
+    };
+
+    if ctx.is_robot() {
+        let mut body = json!({
+            "ok": true,
+            "data_dir": cfg.data_dir.display().to_string(),
+            "password": fresh,
+        });
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("passwordReset".into(), json!(true));
+        }
+        emit_robot("openproxy.v1.auth.reset-password", body)?;
+    } else {
+        humanln(ctx, "Dashboard password reset.");
+        humanln(
+            ctx,
+            format!("  data dir: {}", cfg.data_dir.display()),
+        );
+        if cleared {
+            humanln(ctx, "  Generated initial password removed — the next server start will mint a fresh one and print it in the startup banner.");
+        }
+        if let Some(pw) = fresh {
+            humanln(ctx, "  New initial password:");
+            humanln(ctx, format!("    {pw}"));
+            humanln(ctx, "  Change it after first login (login will prompt you).");
         }
     }
     Ok(0)

@@ -3,7 +3,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Input } from "@/shared/components";
 
-const INITIAL_PASSWORD = "123456";
 const DEFAULT_OIDC_LABEL = "Sign in with OIDC";
 
 type AuthMode = "password" | "oidc" | "both";
@@ -394,11 +393,11 @@ export default function LoginPageClient() {
 
                   {resetHint && (
                     <p className="text-[12px] text-muted text-center">
-                      Forgot password? Open the{" "}
+                      Forgot password? Run{" "}
                       <code className="px-1.5 py-0.5 rounded bg-canvas border border-hairline-soft font-mono text-ink">
-                        openproxy
+                        openproxy auth reset-password
                       </code>{" "}
-                      CLI on the host → <b>Settings</b> → <b>Reset Password to Default</b>.
+                      on the host to restore the generated initial password.
                     </p>
                   )}
 
@@ -411,13 +410,6 @@ export default function LoginPageClient() {
                   >
                     {retryAfter > 0 ? `Wait ${retryAfter}s` : "Sign In"}
                   </Button>
-
-                  <p className="text-[12px] text-center text-muted">
-                    Default password:{" "}
-                    <code className="px-1.5 py-0.5 rounded bg-canvas border border-hairline-soft font-mono text-ink">
-                      {INITIAL_PASSWORD}
-                    </code>
-                  </p>
 
                   {hasPassword === false && (
                     <p className="text-[12px] text-center text-amber-700 dark:text-amber-400">

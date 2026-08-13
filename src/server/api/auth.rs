@@ -1,4 +1,3 @@
-use rand::Rng;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -20,18 +19,6 @@ use crate::server::auth::oidc::{
     code_challenge_from_verifier, generate_code_verifier, generate_state_token,
 };
 use crate::server::auth::{increment_token_epoch, jwt_secret, require_api_key, revoke_jti};
-/// Generates a cryptographically-random 16-character alphanumeric password.
-/// Used as the fallback default when no `INITIAL_PASSWORD` env var and no
-/// stored bcrypt hash exists.
-fn generate_default_password() -> String {
-    let charset: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let mut rng = rand::thread_rng();
-    (0..16).map(|_| {
-        let idx = rng.gen_range(0..charset.len());
-        charset[idx] as char
-    }).collect()
-}
 
 use crate::server::state::AppState;
 use crate::types::Settings;
@@ -115,11 +102,10 @@ pub async fn login(
     let provided_password = req.password;
     let valid = match settings_password_hash(&snapshot.settings) {
         Some(hash) => verify(&provided_password, hash).unwrap_or(false),
-        None => {
-            let initial_password =
-                std::env::var("INITIAL_PASSWORD").unwrap_or_else(|_| generate_default_password());
-            crate::core::auth::timing_safe_eq(&provided_password, &initial_password)
-        }
+        None => crate::core::auth::timing_safe_eq(
+            &provided_password,
+            &crate::core::auth::dashboard_initial_password(),
+        ),
     };
 
     if !valid {
@@ -132,7 +118,7 @@ pub async fn login(
             StatusCode::UNAUTHORIZED,
             Json(json!({
                 "error": "Invalid password",
-                "resetHint": "Forgot password? Open the OpenProxy CLI on the host → Settings → Reset Password to Default.",
+                "resetHint": "Forgot password? Run `openproxy auth reset-password` on the host to restore the generated initial password.",
             })),
         )
             .into_response();
@@ -1068,8 +1054,8 @@ pub(crate) fn settings_password_hash(settings: &Settings) -> Option<&str> {
 
 /// Verify a plaintext dashboard password for sensitive re-auth actions
 /// (database export/import). Mirrors 9router `verifyDashboardPassword`:
-/// bcrypt against the stored hash when present, otherwise the
-/// `INITIAL_PASSWORD` env var / default `"123456"`.
+/// bcrypt against the stored hash when present, otherwise the persisted
+/// initial password (see [`crate::core::auth::dashboard_initial_password`]).
 pub(crate) fn verify_dashboard_password(password: Option<&str>, settings: &Settings) -> bool {
     let Some(password) = password.map(str::trim).filter(|p| !p.is_empty()) else {
         return false;
@@ -1077,9 +1063,7 @@ pub(crate) fn verify_dashboard_password(password: Option<&str>, settings: &Setti
     if let Some(hash) = settings_password_hash(settings) {
         return verify(password, hash).unwrap_or(false);
     }
-    let initial_password =
-        std::env::var("INITIAL_PASSWORD").unwrap_or_else(|_| generate_default_password());
-    crate::core::auth::timing_safe_eq(password, &initial_password)
+    crate::core::auth::timing_safe_eq(password, &crate::core::auth::dashboard_initial_password())
 }
 
 fn is_tunnel_request(headers: &HeaderMap, settings: &Settings) -> bool {
@@ -1169,7 +1153,7 @@ fn client_ip_from_headers(headers: &HeaderMap) -> std::net::IpAddr {
 /// HTTP 429 response for a rate-limited login attempt. Includes a
 /// `Retry-After` header (seconds) and a JSON body the dashboard can render.
 fn lockout_response(retry_after_secs: u64) -> Response {
-    let reset_hint = "Forgot password? Open the OpenProxy CLI on the host → Settings → Reset Password to Default.";
+    let reset_hint = "Forgot password? Run `openproxy auth reset-password` on the host to restore the generated initial password.";
     let mut response = (
         StatusCode::TOO_MANY_REQUESTS,
         Json(json!({

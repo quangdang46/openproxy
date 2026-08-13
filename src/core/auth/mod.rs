@@ -36,19 +36,19 @@ fn generate_random_secret() -> String {
 }
 
 /// Read a persisted secret from disk, if present and non-empty.
-fn read_persisted_secret() -> Option<String> {
-    std::fs::read_to_string(api_key_secret_path())
+fn read_persisted_secret_from(path: PathBuf) -> Option<String> {
+    std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
 }
 
 /// Persist a freshly generated secret so it stays stable across restarts.
-fn persist_secret(secret: &str) {
-    if let Some(dir) = api_key_secret_path().parent() {
+fn persist_secret_to(path: PathBuf, secret: &str) {
+    if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(api_key_secret_path(), secret);
+    let _ = std::fs::write(path, secret);
 }
 
 /// Returns the HMAC secret used for API key CRC generation.
@@ -67,13 +67,76 @@ pub fn api_key_secret() -> &'static str {
                 return v;
             }
         }
-        if let Some(persisted) = read_persisted_secret() {
+        if let Some(persisted) = read_persisted_secret_from(api_key_secret_path()) {
             return persisted;
         }
         let fresh = generate_random_secret();
-        persist_secret(&fresh);
+        persist_secret_to(api_key_secret_path(), &fresh);
         fresh
     })
+}
+
+/// Path to the persisted dashboard initial-password file.
+fn initial_password_path() -> PathBuf {
+    openproxy_dir().join("initial_password")
+}
+
+/// Generate a fresh random dashboard password: 20 base62 chars (~119 bits).
+fn generate_random_password() -> String {
+    const CHARSET: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::thread_rng();
+    (0..20)
+        .map(|_| {
+            let idx = rng.gen_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
+/// Resolves the dashboard initial password.
+///
+/// Resolution order (cached for the process lifetime):
+/// 1. `INITIAL_PASSWORD` environment variable, when set.
+/// 2. A per-install random password persisted at `$DATA_DIR/initial_password`.
+///    Generated on first use so there is never a well-known default; the
+///    persisted value keeps the same password valid across restarts until
+///    the operator sets a real one (see [`dashboard_password_is_ephemeral`]).
+pub fn dashboard_initial_password() -> String {
+    if let Ok(v) = std::env::var("INITIAL_PASSWORD") {
+        if !v.trim().is_empty() {
+            return v;
+        }
+    }
+    static PASSWORD: OnceLock<String> = OnceLock::new();
+    PASSWORD
+        .get_or_init(|| {
+            if let Some(persisted) = read_persisted_secret_from(initial_password_path()) {
+                return persisted;
+            }
+            let fresh = generate_random_password();
+            persist_secret_to(initial_password_path(), &fresh);
+            fresh
+        })
+        .clone()
+}
+
+/// True when the dashboard is using the generated initial password rather
+/// than an operator-set `INITIAL_PASSWORD` or a stored bcrypt hash.
+///
+/// Used to (a) surface the password in the startup banner so it can be
+/// discovered exactly once, and (b) decide whether the operator can reset
+/// it back to a freshly generated value.
+pub fn dashboard_password_is_ephemeral() -> bool {
+    std::env::var("INITIAL_PASSWORD").is_err() && initial_password_path().exists()
+}
+
+/// Delete the persisted generated password so the next boot generates a
+/// fresh one. This is the "reset password to default" escape hatch for
+/// operators who have locked themselves out.
+pub fn reset_dashboard_initial_password() -> bool {
+    let _ = std::fs::remove_file(initial_password_path());
+    !initial_password_path().exists()
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -164,8 +227,9 @@ fn generate_crc(machine_id: &str, key_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_key_secret, generate_api_key_with_machine, generate_crc, generate_random_secret,
-        parse_api_key, persist_secret, read_persisted_secret,
+        api_key_secret, dashboard_initial_password, dashboard_password_is_ephemeral,
+        generate_api_key_with_machine, generate_crc, generate_random_secret, parse_api_key,
+        persist_secret_to, read_persisted_secret_from, reset_dashboard_initial_password,
     };
 
     #[test]
@@ -224,8 +288,9 @@ mod tests {
         // Persist/read round trip (in a temp dir via DATA_DIR).
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var("DATA_DIR", temp.path());
-        persist_secret(&secret);
-        let read = read_persisted_secret().expect("persisted secret readable");
+        persist_secret_to(api_key_secret_path(), &secret);
+        let read = read_persisted_secret_from(api_key_secret_path())
+            .expect("persisted secret readable");
         assert_eq!(read, secret);
         std::env::remove_var("DATA_DIR");
     }
@@ -236,5 +301,45 @@ mod tests {
         std::env::set_var("API_KEY_SECRET", "env-var-secret");
         assert_eq!(api_key_secret(), "env-var-secret");
         std::env::remove_var("API_KEY_SECRET");
+    }
+
+    #[test]
+    fn dashboard_password_is_random_and_persists() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("INITIAL_PASSWORD");
+        std::env::set_var("DATA_DIR", temp.path());
+
+        // First call generates + persists; second call reads the same value.
+        let first = dashboard_initial_password();
+        assert!(first.len() >= 20, "generated password should be ~20 chars");
+        assert_ne!(first, "123456");
+        let second = dashboard_initial_password();
+        assert_eq!(first, second, "persisted password must be stable across calls");
+
+        // Must be ephemeral (no INITIAL_PASSWORD env).
+        assert!(dashboard_password_is_ephemeral());
+
+        std::env::remove_var("DATA_DIR");
+    }
+
+    #[test]
+    fn dashboard_password_prefers_env_var() {
+        std::env::set_var("INITIAL_PASSWORD", "custom-secret");
+        assert_eq!(dashboard_initial_password(), "custom-secret");
+        assert!(!dashboard_password_is_ephemeral());
+        std::env::remove_var("INITIAL_PASSWORD");
+    }
+
+    #[test]
+    fn reset_dashboard_initial_password_clears_generated_value() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("INITIAL_PASSWORD");
+        std::env::set_var("DATA_DIR", temp.path());
+
+        dashboard_initial_password();
+        assert!(dashboard_password_is_ephemeral());
+        assert!(reset_dashboard_initial_password());
+
+        std::env::remove_var("DATA_DIR");
     }
 }
