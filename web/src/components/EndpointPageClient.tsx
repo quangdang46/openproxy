@@ -454,7 +454,26 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
       const keysRes = await fetch("/api/keys");
       const keysData = await keysRes.json();
       if (keysRes.ok) {
-        setKeys(keysData.keys || []);
+        let keys = keysData.keys || [];
+        // 9router parity: auto-provision a default key for first-time users so
+        // the endpoint works out of the box.
+        if (keys.length === 0) {
+          try {
+            const createRes = await fetch("/api/keys", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: "Default Key" }),
+            });
+            if (createRes.ok) {
+              const refetch = await fetch("/api/keys");
+              const refetchData = await refetch.json();
+              if (refetch.ok) keys = refetchData.keys || [];
+            }
+          } catch {
+            /* fall through to empty render */
+          }
+        }
+        setKeys(keys);
       }
     } catch (error) {
       console.log("Error fetching data:", error);
