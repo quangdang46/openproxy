@@ -1141,8 +1141,9 @@ async fn get_client_info(State(state): State<AppState>, headers: HeaderMap) -> R
     let settings = &snapshot.settings;
 
     // Get client identity - prefer hostname, fallback to os username
-    let client_id = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string());
-    let client_name = whoami::username();
+    // (whoami 2.x returns Result from hostname()/username()).
+    let client_id = whoami::hostname().unwrap_or_else(|_| "unknown".to_string());
+    let client_name = whoami::username().unwrap_or_else(|_| "unknown".to_string());
 
     Json(ClientInfoResponse {
         client_id,

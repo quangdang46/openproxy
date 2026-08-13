@@ -444,8 +444,9 @@ async fn run_validate(
 }
 
 async fn run_client_info(ctx: OutputCtx) -> anyhow::Result<()> {
-    let client_id = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".to_string());
-    let client_name = whoami::username();
+    // whoami 2.x returns Result from hostname()/username(); fall back.
+    let client_id = whoami::hostname().unwrap_or_else(|_| "unknown".to_string());
+    let client_name = whoami::username().unwrap_or_else(|_| "unknown".to_string());
     let payload = json!({
         "clientId": client_id,
         "clientName": client_name,
