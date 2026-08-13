@@ -792,6 +792,13 @@ impl Cli {
                             .block_on(auth::run_whoami(ctx, &resolved, verify))
                             .map(|_| ()),
                         AuthCmd::List => auth::run_list(ctx).map(|_| ()),
+                        AuthCmd::ResetPassword { show } => rt
+                            .block_on(auth::run_reset_password(
+                                ctx,
+                                &resolved,
+                                auth::ResetPasswordOptions { show },
+                            ))
+                            .map(|_| ()),
                     }
                 }
                 Command::Usage { cmd } => {

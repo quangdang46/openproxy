@@ -386,6 +386,10 @@ async fn main() -> anyhow::Result<()> {
     // Prune old usage/request details on startup (keep 30 days).
     spawn_usage_retention_cleanup(db.clone());
     openproxy::server::auth::spawn_jti_cleanup();
+    // Snapshot before the db handle moves into AppState: the startup banner
+    // needs the stored password-hash state after the server starts.
+    let banner_uses_generated_password = openproxy::core::auth::dashboard_password_is_ephemeral()
+        && !openproxy::core::auth::has_stored_password_hash(&db.snapshot().settings);
     let state = AppState::new(db)
         .init_oidc_from_env()
         .await
@@ -437,12 +441,10 @@ async fn main() -> anyhow::Result<()> {
     // runs only when no `INITIAL_PASSWORD` env var and no stored bcrypt hash
     // exists, i.e. a fresh install using the generated fallback. The line is
     // also captured in the detached-server log ($DATA_DIR/openproxy.log).
-    if crate::core::auth::dashboard_password_is_ephemeral()
-        && openproxy::server::api::auth::settings_password_hash(&db.snapshot().settings).is_none()
-    {
+    if banner_uses_generated_password {
         eprintln!();
         eprintln!("  Initial dashboard password (shown only once):");
-        eprintln!("    {}", crate::core::auth::dashboard_initial_password());
+        eprintln!("    {}", openproxy::core::auth::dashboard_initial_password());
         eprintln!("  Change it from the dashboard after logging in.");
     }
     eprintln!();

@@ -139,6 +139,21 @@ pub fn reset_dashboard_initial_password() -> bool {
     !initial_password_path().exists()
 }
 
+/// True when the dashboard settings carry a stored bcrypt hash — either in
+/// `settings.password` or the legacy `settings.extra["password"]` slot.
+/// Used by the startup banner to decide whether the initial password is
+/// still active (a stored hash means the operator already changed it).
+pub fn has_stored_password_hash(settings: &crate::types::Settings) -> bool {
+    if settings.password.as_deref().is_some_and(|h| !h.is_empty()) {
+        return true;
+    }
+    settings
+        .extra
+        .get("password")
+        .and_then(|v| v.as_str())
+        .is_some_and(|h| !h.is_empty())
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuthContext {
     pub provider: String,
@@ -227,9 +242,10 @@ fn generate_crc(machine_id: &str, key_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        api_key_secret, dashboard_initial_password, dashboard_password_is_ephemeral,
-        generate_api_key_with_machine, generate_crc, generate_random_secret, parse_api_key,
-        persist_secret_to, read_persisted_secret_from, reset_dashboard_initial_password,
+        api_key_secret, api_key_secret_path, dashboard_initial_password,
+        dashboard_password_is_ephemeral, generate_api_key_with_machine, generate_crc,
+        generate_random_secret, initial_password_path, parse_api_key, persist_secret_to,
+        read_persisted_secret_from, reset_dashboard_initial_password,
     };
 
     #[test]
@@ -336,7 +352,10 @@ mod tests {
         std::env::remove_var("INITIAL_PASSWORD");
         std::env::set_var("DATA_DIR", temp.path());
 
-        dashboard_initial_password();
+        // Persist directly: `dashboard_initial_password()` is OnceLock-cached
+        // process-wide, so a prior test's DATA_DIR would leak into this one.
+        let secret = generate_random_secret();
+        persist_secret_to(initial_password_path(), &secret);
         assert!(dashboard_password_is_ephemeral());
         assert!(reset_dashboard_initial_password());
 
