@@ -30,7 +30,7 @@ use crate::core::combo::{
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
-use crate::core::rtk::headroom::{compress_with_headroom, HeadroomConfig};
+use crate::core::rtk::headroom::{compress_with_headroom_diag, HeadroomConfig};
 use crate::core::rtk::{apply_request_preprocessing, compress_messages};
 use crate::core::translator::helpers::image_helper::fetch_image_as_base64;
 use crate::core::translator::helpers::modality_helper::{
@@ -896,7 +896,19 @@ async fn execute_single_model(
         };
         let final_is_claude = (plan.passthrough && plan.source_format == Format::Claude)
             || (!plan.passthrough && plan.target_format == Format::Claude);
-        let headroom_format = if final_is_claude { "claude" } else { "openai" };
+        // 9router parity: dispatch the headroom pass on the final body format.
+        // Kiro stays a Kiro-shaped body; Responses-API gets its own path.
+        let headroom_format = if final_is_claude {
+            "claude"
+        } else if plan.target_format == Format::Kiro || plan.source_format == Format::Kiro {
+            "kiro"
+        } else if plan.target_format == Format::OpenAiResponses
+            || plan.source_format == Format::OpenAiResponses
+        {
+            "openai-responses"
+        } else {
+            "openai"
+        };
         if let Ok(body_str) = serde_json::to_string(&body) {
             let est_tokens = body_str.len().div_ceil(4);
             if est_tokens > 0 {
@@ -906,11 +918,25 @@ async fn execute_single_model(
                 );
             }
         }
-        if let Some(stats) =
-            compress_with_headroom(&mut body, &headroom_cfg, &plan.model, headroom_format, None)
-                .await
+        let mut headroom_diag = crate::core::rtk::headroom::HeadroomDiagnostics::default();
+        if let Some(stats) = compress_with_headroom_diag(
+            &mut body,
+            &headroom_cfg,
+            &plan.model,
+            headroom_format,
+            None,
+            Some(&mut headroom_diag),
+        )
+        .await
         {
             tracing::debug!("{}", stats.format_headroom_log().unwrap_or_default());
+        }
+        let size_log = crate::core::rtk::headroom::format_headroom_size_log(&headroom_diag);
+        if !size_log.is_empty() {
+            tracing::debug!("headroom {size_log}");
+        }
+        if let Some(reason) = &headroom_diag.reason {
+            tracing::debug!("headroom skip={reason}");
         }
     }
 
@@ -3005,7 +3031,14 @@ async fn record_streaming_usage(
         .and_then(|b| extract_token_usage_from_bytes(b));
     state
         .usage_tracker()
-        .track_request(provider, model, usage.as_ref(), connection_id, api_key, endpoint)
+        .track_request(
+            provider,
+            model,
+            usage.as_ref(),
+            connection_id,
+            api_key,
+            endpoint,
+        )
         .await;
 }
 
@@ -3280,13 +3313,13 @@ async fn collect_upstream_response_bytes(response: UpstreamResponse) -> (Bytes, 
 /// SSE data lines look like `data: {...}` or `data: {...}\n\nbuffer`.
 /// If the body is valid JSON already (non-streaming path), return as-is.
 fn strip_sse_data_prefix(body: &[u8]) -> &[u8] {
-    let trimmed = body
-        .split(|&b| b == b'\n')
-        .next()
-        .unwrap_or(body);
+    let trimmed = body.split(|&b| b == b'\n').next().unwrap_or(body);
     if trimmed.starts_with(b"data:") {
         let after = &trimmed[b"data:".len()..];
-        let after = after.strip_prefix(b" ").or_else(|| after.strip_prefix(b"\t")).unwrap_or(after);
+        let after = after
+            .strip_prefix(b" ")
+            .or_else(|| after.strip_prefix(b"\t"))
+            .unwrap_or(after);
         if serde_json::from_slice::<serde_json::Value>(after).is_ok() {
             return after;
         }
