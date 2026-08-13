@@ -12,11 +12,11 @@ use tokio::time::{self, Duration};
 
 use crate::core::usage::quota_fetcher::{
     codex_account_id, consume_codex_rate_limit_reset_credit, fetch_antigravity_quota,
-    fetch_claude_quota, fetch_codex_quota, fetch_deepseek_usage, fetch_gemini_cli_quota,
-    fetch_kimi_oauth_usage,
-    fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota, fetch_kimi_usage,
-    fetch_kiro_quota, fetch_minimax_quota, fetch_qoder_quota, fetch_vercel_ai_gateway_quota,
-    fetch_codebuddy_quota, get_codex_rate_limit_reset_credits,
+    fetch_claude_quota, fetch_codebuddy_quota, fetch_codex_quota, fetch_deepseek_usage,
+    fetch_gemini_cli_quota, fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota,
+    fetch_kimi_oauth_usage, fetch_kimi_usage, fetch_kiro_quota, fetch_minimax_quota,
+    fetch_ollama_quota, fetch_qoder_quota, fetch_vercel_ai_gateway_quota,
+    get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::oauth::token_refresh::{dispatch_oauth_refresh, refresh_codex_token};
@@ -73,6 +73,7 @@ pub async fn fetch_oauth_quota(connection: &ProviderConnection) -> Value {
         "antigravity" => fetch_antigravity_quota(token, provider).await,
         "qoder" => fetch_qoder_quota(token, provider).await,
         "grok-cli" => fetch_grok_cli_quota(token).await,
+        "ollama" => fetch_ollama_quota(token).await,
         // Kimi OAuth connections hit /v1/usages with Bearer + X-Msh-* headers.
         "kimi" | "kimi-coding" => fetch_kimi_oauth_usage(token, psd).await,
         _ => serde_json::json!({}),
@@ -349,9 +350,10 @@ async fn get_usage_history(State(state): State<AppState>, headers: HeaderMap) ->
             api_key_masked: mask_api_key(e.api_key.as_deref()),
             endpoint: e.endpoint.clone(),
             status: e.status.clone(),
-            tokens: e.tokens.as_ref().map(|t| {
-                serde_json::to_value(t).unwrap_or(Value::Null)
-            }),
+            tokens: e
+                .tokens
+                .as_ref()
+                .map(|t| serde_json::to_value(t).unwrap_or(Value::Null)),
             prompt_tokens: e
                 .tokens
                 .as_ref()
@@ -650,7 +652,10 @@ async fn refresh_oauth_connection(
                 // Refresh a bit early (2 min) to avoid a doomed fetch.
                 120_000,
             ),
-            None => connection.access_token.as_deref().is_none_or(|t| t.trim().is_empty()),
+            None => connection
+                .access_token
+                .as_deref()
+                .is_none_or(|t| t.trim().is_empty()),
         };
     if !needs_refresh {
         return Ok(connection.clone());
@@ -680,7 +685,11 @@ async fn fetch_oauth_quota_with_refresh(connection: &ProviderConnection) -> Valu
     let connection = match refresh_oauth_connection(connection, false).await {
         Ok(c) => c,
         Err(e) => {
-            tracing::warn!("usage oauth refresh failed for {}: {}", connection.provider, e);
+            tracing::warn!(
+                "usage oauth refresh failed for {}: {}",
+                connection.provider,
+                e
+            );
             // Keep the stored token (JS returns stale accessToken on failure).
             connection.clone()
         }
@@ -694,7 +703,11 @@ async fn fetch_oauth_quota_with_refresh(connection: &ProviderConnection) -> Valu
     if is_auth_expired_message(msg) && connection.refresh_token.is_some() {
         if let Ok(retried_conn) = refresh_oauth_connection(&connection, true).await {
             let retry = fetch_oauth_quota(&retried_conn).await;
-            if retry.get("message").and_then(|v| v.as_str()).is_none_or(|m| !is_auth_expired_message(m)) {
+            if retry
+                .get("message")
+                .and_then(|v| v.as_str())
+                .is_none_or(|m| !is_auth_expired_message(m))
+            {
                 return retry;
             }
         }
@@ -1489,10 +1502,7 @@ fn format_usage_log(
         .map(|value| value.to_string())
         .unwrap_or_else(|| "-".to_string());
     // JS r.status || "-" verbatim — do NOT map success/None to "OK".
-    let status = entry
-        .status
-        .clone()
-        .unwrap_or_else(|| "-".to_string());
+    let status = entry.status.clone().unwrap_or_else(|| "-".to_string());
 
     format!("{timestamp} | {model} | {provider} | {account} | {sent} | {received} | {status}")
 }
@@ -1932,9 +1942,15 @@ mod tests {
         let line = format_usage_log(&entry, &[]);
         // JS formatLogDate parity: local DD-MM-YYYY HH:MM:SS (day-first).
         let re = regex::Regex::new(r"^\d{2}-\d{2}-\d{4} \d{2}:\d{2}:\d{2} \| ").unwrap();
-        assert!(re.is_match(&line), "timestamp must be local DD-MM-YYYY HH:MM:SS, got: {line}");
+        assert!(
+            re.is_match(&line),
+            "timestamp must be local DD-MM-YYYY HH:MM:SS, got: {line}"
+        );
         // Provider uppercased (JS r.provider?.toUpperCase()).
-        assert!(line.contains("| GLM |"), "provider must be uppercased: {line}");
+        assert!(
+            line.contains("| GLM |"),
+            "provider must be uppercased: {line}"
+        );
         // Status verbatim (not mapped to OK).
         assert!(line.contains("| success"), "status must be raw: {line}");
     }
@@ -1949,7 +1965,10 @@ mod tests {
             ..Default::default()
         };
         let line = format_usage_log(&entry, &[]);
-        assert!(line.starts_with("not-a-timestamp | "), "raw fallback expected: {line}");
+        assert!(
+            line.starts_with("not-a-timestamp | "),
+            "raw fallback expected: {line}"
+        );
         assert!(line.contains("| OPENAI |"), "provider uppercased: {line}");
         // Missing status → "-".
         assert!(line.ends_with("| -"));
@@ -1959,11 +1978,15 @@ mod tests {
     fn test_is_auth_expired_message_matches_js_patterns() {
         // 9router AUTH_EXPIRED_PATTERNS = [expired, authentication,
         // unauthorized, 401, re-authorize].
-        assert!(is_auth_expired_message("Grok CLI authentication expired. Please re-authorize."));
+        assert!(is_auth_expired_message(
+            "Grok CLI authentication expired. Please re-authorize."
+        ));
         assert!(is_auth_expired_message("401 Unauthorized"));
         assert!(is_auth_expired_message("Token expired"));
         assert!(is_auth_expired_message("authentication failed"));
-        assert!(!is_auth_expired_message("Kimi Coding connected. Usage tracked per request."));
+        assert!(!is_auth_expired_message(
+            "Kimi Coding connected. Usage tracked per request."
+        ));
         assert!(!is_auth_expired_message("ok"));
     }
 

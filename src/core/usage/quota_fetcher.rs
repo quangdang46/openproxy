@@ -1634,22 +1634,14 @@ fn codebuddy_quota_rows_from_accounts(accounts: Vec<Value>) -> Value {
     // Bonus packs: lifetime Capacity balance, recurring false, 1-based index.
     for (i, acc) in bonuses.iter().enumerate() {
         let obj = acc.as_object().cloned().unwrap_or_default();
-        quotas.insert(
-            format!("Bonus Pack {}", i + 1),
-            codebuddy_bonus_row(&obj),
-        );
+        quotas.insert(format!("Bonus Pack {}", i + 1), codebuddy_bonus_row(&obj));
     }
 
     // Plan from the first refill (or first account), like JS basePkg.
-    let plan_source: Option<&Value> = refills
-        .first()
-        .map(|v| *v)
-        .or_else(|| accounts.first());
+    let plan_source: Option<&Value> = refills.first().map(|v| *v).or_else(|| accounts.first());
     let mut plan = "CodeBuddy".to_string();
     if let Some(src) = plan_source {
-        let base = codebuddy_base_package(
-            src.as_object().unwrap_or(&serde_json::Map::new()),
-        );
+        let base = codebuddy_base_package(src.as_object().unwrap_or(&serde_json::Map::new()));
         if let Some(name) = base.get("PackageName").and_then(|v| v.as_str()) {
             if !name.is_empty() {
                 plan = name.to_string();
@@ -1956,9 +1948,7 @@ pub async fn fetch_kiro_quota(
 
     if primary_body.is_none() {
         let q_url = if profile_arn.is_empty() {
-            format!(
-                "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST"
-            )
+            format!("{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST")
         } else {
             format!(
                 "{KIRO_Q_URL}/getUsageLimits?origin=AI_EDITOR&profileArn={profile_arn}&resourceType=AGENTIC_REQUEST"
@@ -2246,8 +2236,7 @@ pub async fn fetch_grok_cli_credits_config(access_token: &str) -> Option<Value> 
         return None;
     }
     let bytes = response.bytes().await.ok()?;
-    let decoded =
-        crate::core::usage::grok_cli_quota_frame::decode_grok_credits_frame(&bytes)?;
+    let decoded = crate::core::usage::grok_cli_quota_frame::decode_grok_credits_frame(&bytes)?;
     // Round for bar display (fixed32 ratio * 100 can be 34.999… for 0.35).
     let used = (decoded.percent_used.max(0.0).min(100.0)).round();
     Some(json!({
@@ -2264,10 +2253,17 @@ pub async fn fetch_grok_cli_credits_config(access_token: &str) -> Option<Value> 
 /// open-sse/services/usage/grok-cli.js getGrokCliUsage).
 /// 9router grok-cli.js buildGrokCliHeaders (lines 54-70) — the 7 extra
 /// headers alongside Authorization Bearer.
-fn grok_cli_headers(token: &str, email: Option<&str>, user_id: Option<&str>) -> Vec<(&'static str, String)> {
+fn grok_cli_headers(
+    token: &str,
+    email: Option<&str>,
+    user_id: Option<&str>,
+) -> Vec<(&'static str, String)> {
     let mut h = vec![
         ("Accept", "application/json".to_string()),
-        ("User-Agent", "grok-shell/0.2.99 (linux; x86_64)".to_string()),
+        (
+            "User-Agent",
+            "grok-shell/0.2.99 (linux; x86_64)".to_string(),
+        ),
         ("x-xai-token-auth", "xai-grok-cli".to_string()),
         ("x-grok-client-identifier", "grok-shell".to_string()),
         ("x-grok-client-version", "0.2.99".to_string()),
@@ -2339,10 +2335,18 @@ fn resolve_grok_cli_plan(user: &Value, config: &Value) -> String {
             return t;
         }
     }
-    if user.get("hasGrokCodeAccess").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if user
+        .get("hasGrokCodeAccess")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return "Grok Code".to_string();
     }
-    if config.get("isUnifiedBillingUser").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if config
+        .get("isUnifiedBillingUser")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return "Grok Build".to_string();
     }
     "Grok Build".to_string()
@@ -2392,7 +2396,10 @@ fn parse_grok_cli_billing(
 
     let mut quotas = serde_json::Map::new();
 
-    let monthly_limit = config.get("monthlyLimit").and_then(grok_unwrap_val).unwrap_or(0.0);
+    let monthly_limit = config
+        .get("monthlyLimit")
+        .and_then(grok_unwrap_val)
+        .unwrap_or(0.0);
     let included_used = config
         .get("includedUsed")
         .and_then(grok_unwrap_val)
@@ -2405,8 +2412,14 @@ fn parse_grok_cli_billing(
         );
     }
 
-    let on_demand_cap = config.get("onDemandCap").and_then(grok_unwrap_val).unwrap_or(0.0);
-    let on_demand_used = config.get("onDemandUsed").and_then(grok_unwrap_val).unwrap_or(0.0);
+    let on_demand_cap = config
+        .get("onDemandCap")
+        .and_then(grok_unwrap_val)
+        .unwrap_or(0.0);
+    let on_demand_used = config
+        .get("onDemandUsed")
+        .and_then(grok_unwrap_val)
+        .unwrap_or(0.0);
     if on_demand_cap > 0.0 {
         quotas.insert(
             "On-demand".to_string(),
@@ -2423,7 +2436,10 @@ fn parse_grok_cli_billing(
         );
     }
 
-    let prepaid = config.get("prepaidBalance").and_then(grok_unwrap_val).unwrap_or(0.0);
+    let prepaid = config
+        .get("prepaidBalance")
+        .and_then(grok_unwrap_val)
+        .unwrap_or(0.0);
     if prepaid > 0.0 {
         quotas.insert(
             "Prepaid".to_string(),
@@ -2471,10 +2487,8 @@ pub async fn fetch_grok_cli_quota(access_token: &str) -> Value {
     let headers = grok_cli_headers(token, None, None);
 
     // Fetch billing + user in parallel (JS Promise.all).
-    let mut billing_req = client
-        .get("https://cli-chat-proxy.grok.com/v1/billing?format=credits");
-    let mut user_req = client
-        .get("https://cli-chat-proxy.grok.com/v1/user?include=subscription");
+    let mut billing_req = client.get("https://cli-chat-proxy.grok.com/v1/billing?format=credits");
+    let mut user_req = client.get("https://cli-chat-proxy.grok.com/v1/user?include=subscription");
     for (k, v) in &headers {
         billing_req = billing_req.header(*k, v);
         user_req = user_req.header(*k, v);
@@ -2626,7 +2640,12 @@ fn format_kimi_usage_error(status: u16, response_text: &str) -> String {
     }
 }
 
-fn kimi_make_quota(used: f64, total: f64, remaining: Option<f64>, reset_at: Option<String>) -> Value {
+fn kimi_make_quota(
+    used: f64,
+    total: f64,
+    remaining: Option<f64>,
+    reset_at: Option<String>,
+) -> Value {
     let safe_total = total.max(0.0);
     let safe_used = used.max(0.0);
     let remaining_pct = if safe_total > 0.0 {
@@ -2731,9 +2750,7 @@ pub async fn fetch_kimi_oauth_usage(
         for item in limits {
             let detail = item.get("detail").filter(|v| v.is_object());
             let limit = to_finite_number(
-                &detail
-                    .and_then(|d| d.get("limit"))
-                    .unwrap_or(&Value::Null),
+                &detail.and_then(|d| d.get("limit")).unwrap_or(&Value::Null),
                 0.0,
             );
             let remaining = to_finite_number(
@@ -2794,7 +2811,9 @@ pub async fn fetch_kimi_usage(api_key: &str) -> Value {
         .await;
     let response = match response {
         Ok(r) => r,
-        Err(e) => return json!({ "message": format!("Kimi Coding connected. Unable to fetch usage: {e}") }),
+        Err(e) => {
+            return json!({ "message": format!("Kimi Coding connected. Unable to fetch usage: {e}") })
+        }
     };
     let status = response.status().as_u16();
     let response_text = match response.text().await {
@@ -2820,8 +2839,18 @@ pub async fn fetch_kimi_usage(api_key: &str) -> Value {
 
     let mut quotas = serde_json::Map::new();
     let usage_obj = data.get("usage").filter(|v| v.is_object());
-    let usage_limit = to_finite_number(&usage_obj.and_then(|u| u.get("limit")).unwrap_or(&Value::Null), 0.0);
-    let usage_used = to_finite_number(&usage_obj.and_then(|u| u.get("used")).unwrap_or(&Value::Null), 0.0);
+    let usage_limit = to_finite_number(
+        &usage_obj
+            .and_then(|u| u.get("limit"))
+            .unwrap_or(&Value::Null),
+        0.0,
+    );
+    let usage_used = to_finite_number(
+        &usage_obj
+            .and_then(|u| u.get("used"))
+            .unwrap_or(&Value::Null),
+        0.0,
+    );
     let usage_remaining_raw = usage_obj
         .and_then(|u| u.get("remaining"))
         .or_else(|| usage_obj.and_then(|u| u.get("Remaining")));
@@ -2835,15 +2864,28 @@ pub async fn fetch_kimi_usage(api_key: &str) -> Value {
     if usage_limit > 0.0 {
         quotas.insert(
             "Weekly".to_string(),
-            kimi_make_quota(usage_used, usage_limit, usage_remaining, parse_reset_time(&usage_reset.unwrap_or(&Value::Null))),
+            kimi_make_quota(
+                usage_used,
+                usage_limit,
+                usage_remaining,
+                parse_reset_time(&usage_reset.unwrap_or(&Value::Null)),
+            ),
         );
     }
 
     if let Some(limits) = data.get("limits").and_then(|v| v.as_array()) {
         for item in limits {
             let detail = item.get("detail").filter(|v| v.is_object());
-            let limit = to_finite_number(&detail.and_then(|d| d.get("limit")).unwrap_or(&Value::Null), 0.0);
-            let remaining = to_finite_number(&detail.and_then(|d| d.get("remaining")).unwrap_or(&Value::Null), f64::NAN);
+            let limit = to_finite_number(
+                &detail.and_then(|d| d.get("limit")).unwrap_or(&Value::Null),
+                0.0,
+            );
+            let remaining = to_finite_number(
+                &detail
+                    .and_then(|d| d.get("remaining"))
+                    .unwrap_or(&Value::Null),
+                f64::NAN,
+            );
             let reset_time = detail
                 .and_then(|d| d.get("resetTime"))
                 .or_else(|| detail.and_then(|d| d.get("reset_at")));
@@ -2971,6 +3013,120 @@ pub async fn fetch_deepseek_usage(api_key: &str) -> Value {
     })
 }
 
+/// Convert an Ollama 0..1 usage ratio to a 0..100 quota bar.
+/// 9router usage/misc.js ratioQuota: `used = round(ratio*100)`,
+/// `{ used, total: 100, remainingPercentage: 100-used, resetAt: null, unlimited: false }`.
+pub fn ollama_ratio_quota(usage_ratio: f64) -> Value {
+    let ratio = usage_ratio.clamp(0.0, 1.0);
+    let used_pct = (ratio * 100.0).round() as u64;
+    json!({
+        "used": used_pct,
+        "total": 100,
+        "remainingPercentage": 100 - used_pct,
+        "resetAt": Value::Null,
+        "unlimited": false,
+    })
+}
+
+/// Live Ollama Cloud quota (9router usage/misc.js getOllamaUsage).
+/// GET `https://ollama.com/api/usage` + best-effort POST `/api/me` for the
+/// plan label. `data.limits.{session,weekly}.usage` are 0..1 ratios →
+/// `{used, total:100, remainingPercentage, resetAt:null, unlimited:false}`.
+pub async fn fetch_ollama_quota(api_key: &str) -> Value {
+    if api_key.is_empty() {
+        return json!({ "message": "Ollama Cloud API key not available." });
+    }
+
+    let client = http_client();
+
+    let resp = match client
+        .get("https://ollama.com/api/usage")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Ollama Cloud error: {e}") }),
+    };
+
+    let status = resp.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return json!({ "message": "Ollama Cloud API key invalid or expired." });
+    }
+    if !status.is_success() {
+        return json!({
+            "message": format!("Ollama Cloud usage API error ({}).", status.as_u16())
+        });
+    }
+
+    let data: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return json!({ "message": "Ollama Cloud usage response was not JSON." }),
+    };
+
+    // Best-effort plan label from /api/me (fail-open).
+    let plan = match client
+        .post("https://ollama.com/api/me")
+        .header("Authorization", format!("Bearer {api_key}"))
+        .header("Accept", "application/json")
+        .header("Content-Length", "0")
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => match r.json::<Value>().await {
+            Ok(me) => me
+                .get("Plan")
+                .and_then(Value::as_str)
+                .map(|raw| {
+                    // Capitalize first letter, rest lowercase.
+                    let mut chars = raw.chars();
+                    match chars.next() {
+                        Some(first) => {
+                            first.to_uppercase().collect::<String>()
+                                + &chars.as_str().to_lowercase()
+                        }
+                        None => String::new(),
+                    }
+                })
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| "Ollama Cloud".to_string()),
+            Err(_) => "Ollama Cloud".to_string(),
+        },
+        _ => "Ollama Cloud".to_string(),
+    };
+
+    let limits = data.get("limits").filter(|v| v.is_object());
+    let session_raw = limits
+        .and_then(|l| l.get("session"))
+        .and_then(|s| s.get("usage"))
+        .and_then(Value::as_f64);
+    let weekly_raw = limits
+        .and_then(|l| l.get("weekly"))
+        .and_then(|w| w.get("usage"))
+        .and_then(Value::as_f64);
+
+    let ratio_quota = |usage_ratio: f64| -> Value { ollama_ratio_quota(usage_ratio) };
+
+    match (session_raw, weekly_raw) {
+        (None, None) => json!({
+            "plan": plan,
+            "message": "Ollama Cloud connected. No usage limits reported.",
+            "quotas": Value::Object(serde_json::Map::new()),
+        }),
+        _ => {
+            let mut quotas = serde_json::Map::new();
+            if let Some(s) = session_raw {
+                quotas.insert("Session (5h)".to_string(), ratio_quota(s));
+            }
+            if let Some(w) = weekly_raw {
+                quotas.insert("Weekly (7d)".to_string(), ratio_quota(w));
+            }
+            json!({ "plan": plan, "quotas": Value::Object(quotas) })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3050,8 +3206,7 @@ mod tests {
     fn test_grok_cli_plan_from_jwt_tier() {
         // A fake JWT payload {tier: 4} → X Premium Plus.
         use base64::Engine as _;
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(br#"{"tier":4}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"tier":4}"#);
         let jwt = format!("header.{payload}.sig");
         assert_eq!(plan_from_access_token(&jwt), "X Premium Plus");
 
@@ -3129,7 +3284,10 @@ mod tests {
         if true {
             h2.insert("TokenType".to_string(), "EXTERNAL_IDP".to_string());
         }
-        assert_eq!(h2.get("TokenType").map(String::as_str), Some("EXTERNAL_IDP"));
+        assert_eq!(
+            h2.get("TokenType").map(String::as_str),
+            Some("EXTERNAL_IDP")
+        );
         assert!(!h2.contains_key("tokentype"));
     }
 
@@ -3184,6 +3342,7 @@ mod tests {
         });
         let out = codebuddy_quota_rows_from_accounts(vec![refill, bonus]);
         let quotas = out["quotas"].as_object().unwrap();
+        assert_eq!(quotas.len(), 2);
         // Refill → "Monthly" recurring true.
         let monthly = quotas.get("Monthly").expect("refill pack labeled Monthly");
         assert_eq!(monthly["recurring"], true);
@@ -3195,5 +3354,24 @@ mod tests {
         assert_eq!(bonus_pack["used"], 2.0);
         // Plan from PackageName.
         assert_eq!(out["plan"], "Tencent Coding Plan");
+    }
+
+    #[test]
+    fn ollama_ratio_quota_converts_ratio_to_percent() {
+        // 0.0 → 0%, 1.0 → 100%, 0.5 → 50%; clamped outside [0,1].
+        assert_eq!(ollama_ratio_quota(0.0)["used"], json!(0));
+        assert_eq!(ollama_ratio_quota(1.0)["used"], json!(100));
+        assert_eq!(ollama_ratio_quota(0.5)["used"], json!(50));
+        assert_eq!(ollama_ratio_quota(0.253)["used"], json!(25));
+        // Clamped.
+        assert_eq!(ollama_ratio_quota(2.0)["used"], json!(100));
+        assert_eq!(ollama_ratio_quota(-1.0)["used"], json!(0));
+        // remainingPercentage complements.
+        assert_eq!(ollama_ratio_quota(0.25)["remainingPercentage"], json!(75));
+        assert_eq!(ollama_ratio_quota(1.0)["remainingPercentage"], json!(0));
+        // Shape matches JS: total 100, resetAt null, unlimited false.
+        assert_eq!(ollama_ratio_quota(0.5)["total"], json!(100));
+        assert!(ollama_ratio_quota(0.5)["resetAt"].is_null());
+        assert_eq!(ollama_ratio_quota(0.5)["unlimited"], json!(false));
     }
 }
