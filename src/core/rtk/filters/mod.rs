@@ -137,8 +137,7 @@ pub fn git_log_impl(input: &str) -> String {
     };
 
     let commit_re =
-        regex::Regex::new(r"(?i)^commit [0-9a-f]{7,40}$|^[*|/\\ ]+commit [0-9a-f]{7,40}")
-            .unwrap();
+        regex::Regex::new(r"(?i)^commit [0-9a-f]{7,40}$|^[*|/\\ ]+commit [0-9a-f]{7,40}").unwrap();
     let author_re = regex::Regex::new(r"(?i)^[*|/\\ ]*(Author|Date):").unwrap();
     let subject_re = regex::Regex::new(r"^[*|/\\ ]*    \S").unwrap();
     let stat_re = regex::Regex::new(r"^\d+ file\w* changed").unwrap();
@@ -181,7 +180,11 @@ pub fn git_log_impl(input: &str) -> String {
             }
             // Embedded diff header — one-line marker.
             if trimmed.starts_with("diff --git ") {
-                push_line("  ... diff body omitted".to_string(), &mut out, &mut skipped);
+                push_line(
+                    "  ... diff body omitted".to_string(),
+                    &mut out,
+                    &mut skipped,
+                );
                 continue;
             }
             // Everything else in commit body — drop.
@@ -457,7 +460,9 @@ pub fn find_impl(input: &str) -> String {
         std::collections::BTreeMap::new();
 
     for path in &lines {
-        let last_slash = path.rfind('/');
+        // Accept both Unix ("/a/b") and Windows ("C:\a\b") separators.
+        // 9router find.js: `Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"))`.
+        let last_slash = path.rfind('/').max(path.rfind('\\'));
         let (dir, basename) = match last_slash {
             Some(idx) => (&path[..idx], &path[idx + 1..]),
             None => (".", *path),
@@ -474,17 +479,23 @@ pub fn find_impl(input: &str) -> String {
 
     for dir in dirs.iter().take(FIND_TOTAL_DIR_MAX) {
         let files = &by_dir[*dir];
-        out.push_str(&format!("{}/ ({}):\n", dir, files.len()));
+        // 9router find.js: normalize backslashes to slashes for the label.
+        let dir_label = dir.replace('\\', "/");
+        // Format: `${dirLabel}/  (${files.length})\n` — two spaces, no colon.
+        out.push_str(&format!("{dir_label}/  ({})\n", files.len()));
         for f in files.iter().take(FIND_PER_DIR_MAX) {
-            out.push_str(&format!("  {}\n", f));
+            out.push_str(&format!("  {f}\n"));
         }
         if files.len() > FIND_PER_DIR_MAX {
             out.push_str(&format!("  +{}\n", files.len() - FIND_PER_DIR_MAX));
         }
-        out.push('\n');
     }
     if dirs.len() > FIND_TOTAL_DIR_MAX {
-        out.push_str(&format!("+{} more dirs\n", dirs.len() - FIND_TOTAL_DIR_MAX));
+        // 9router find.js: `\n+N more dirs\n` (JS prefixes a newline).
+        out.push_str(&format!(
+            "\n+{} more dirs\n",
+            dirs.len() - FIND_TOTAL_DIR_MAX
+        ));
     }
 
     out
@@ -1447,6 +1458,33 @@ mod tests {
     fn test_find_empty() {
         let result = find_impl("");
         assert_eq!(result, "");
+    }
+
+    #[test]
+    fn find_groups_windows_backslash_paths() {
+        // Acceptance guard test (bead .103): Windows backslash separators
+        // must split dir/basename, normalize labels, and use the JS format
+        // `dir/  (count)` (two spaces, no colon).
+        let input = "C:\\a\\b.rs\nC:\\a\\c.rs\nC:\\d.rs";
+        let result = find_impl(input);
+        assert!(result.contains("3 files in 2 dirs:"), "header: {result}");
+        assert!(
+            result.contains("C:/a/  (2)"),
+            "dir label normalized: {result}"
+        );
+        // C:\d.rs has no sub-path — groups under "C:" (label stays "C:").
+        assert!(
+            result.contains("C:/  (1)"),
+            "dir label normalized: {result}"
+        );
+        assert!(result.contains("b.rs"), "basename: {result}");
+        assert!(result.contains("c.rs"), "basename: {result}");
+        assert!(result.contains("d.rs"), "basename: {result}");
+        // Format assertion: `  (` two spaces, no colon after dir label.
+        assert!(
+            result.contains("/  ("),
+            "expected 'dir/  (' two-space format: {result}"
+        );
     }
 
     #[test]
