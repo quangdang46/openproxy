@@ -5,6 +5,34 @@ use serde_json::{json, Value};
 
 const DEFAULT_TIMEOUT_MS: u64 = 3000;
 
+/// Byte-size snapshot of a request body for the headroom size log.
+/// 9router `captureSizeSnapshot`.
+#[derive(Debug, Clone, Default)]
+pub struct SizeSnapshot {
+    pub body_bytes: usize,
+    pub message_bytes: usize,
+    pub tool_schema_bytes: usize,
+    pub tool_history_bytes: usize,
+}
+
+/// Diagnostics for one headroom compression pass (9router `diagnostics`).
+#[derive(Debug, Clone, Default)]
+pub struct HeadroomDiagnostics {
+    pub reason: Option<String>,
+    pub endpoint: Option<String>,
+    pub before: Option<SizeSnapshot>,
+    pub after: Option<SizeSnapshot>,
+}
+
+impl HeadroomDiagnostics {
+    /// Set `reason` only if not already set (9router `setDiagnostic`).
+    pub fn set_reason(&mut self, reason: impl Into<String>) {
+        if self.reason.is_none() {
+            self.reason = Some(reason.into());
+        }
+    }
+}
+
 /// Rough estimate: chars per token used for phantom savings prediction.
 const PHANTOM_CHARS_PER_TOKEN: usize = 4;
 
@@ -259,17 +287,45 @@ pub async fn compress_with_headroom(
     format: &str,
     hooks: Option<&dyn HeadroomHooks>,
 ) -> Option<HeadroomStats> {
+    compress_with_headroom_diag(body, config, model, format, hooks, None).await
+}
+
+/// Like [`compress_with_headroom`] but also fills `diagnostics` when provided.
+pub async fn compress_with_headroom_diag(
+    body: &mut Value,
+    config: &HeadroomConfig,
+    model: &str,
+    format: &str,
+    hooks: Option<&dyn HeadroomHooks>,
+    mut diagnostics: Option<&mut HeadroomDiagnostics>,
+) -> Option<HeadroomStats> {
     if !config.enabled || config.url.is_empty() {
         if let Some(h) = hooks {
             h.after_compress(0, 0, &Err("compression disabled".to_string()));
         }
+        if let Some(d) = diagnostics {
+            d.set_reason("headroom disabled");
+        }
         return None;
+    }
+
+    if let Some(d) = diagnostics.as_deref_mut() {
+        d.endpoint = Some(mask_endpoint(&build_compress_endpoint(&config.url)));
+        d.before = Some(capture_size_snapshot(body));
     }
 
     let fields = body.as_object()?;
 
     if format.eq_ignore_ascii_case("claude") {
         return compress_claude_body(body, config, model, hooks).await;
+    }
+
+    if format.eq_ignore_ascii_case("openai-responses") {
+        return compress_responses_body(body, config, model, hooks, diagnostics).await;
+    }
+
+    if format.eq_ignore_ascii_case("kiro") {
+        return compress_kiro_body(body, config, model, hooks, diagnostics).await;
     }
 
     // OpenAI / Responses-API shape.
@@ -293,6 +349,9 @@ pub async fn compress_with_headroom(
     let stats = parse_stats(&data);
     write_compressed_messages(body, key, &data)?;
 
+    if let Some(d) = diagnostics.as_deref_mut() {
+        d.after = Some(capture_size_snapshot(body));
+    }
     if let Some(h) = hooks {
         h.after_compress(original_size, compressed_size, &Ok(stats.clone()));
     }
@@ -441,11 +500,456 @@ async fn compress_claude_body(
     Some(stats)
 }
 
+/// True when the Responses-API `input` contains items whose `type` is a
+/// non-"message" string (tool/reasoning/etc.) — not safe to compress.
+/// 9router `hasUnsafeResponsesInputForCompression`.
+fn has_unsafe_responses_input(body: &Value) -> bool {
+    let Some(input) = body.get("input").and_then(Value::as_array) else {
+        return false;
+    };
+    input
+        .iter()
+        .any(|item| matches!(item.get("type").and_then(Value::as_str), Some(t) if t != "message"))
+}
+
+/// Headroom pass for the OpenAI Responses-API format: translate `input` to
+/// OpenAI messages, compress, translate back, write `body.input`.
+/// 9router headroom.js `format === "openai-responses"`.
+async fn compress_responses_body(
+    body: &mut Value,
+    config: &HeadroomConfig,
+    model: &str,
+    hooks: Option<&dyn HeadroomHooks>,
+    mut diagnostics: Option<&mut HeadroomDiagnostics>,
+) -> Option<HeadroomStats> {
+    if has_unsafe_responses_input(body) {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason("skipped: openai-responses tool/reasoning input is not safe to compress");
+        }
+        return None;
+    }
+
+    let mut oai = body.clone();
+    let translated =
+        crate::core::translator::request::openai_responses::openai_responses_to_chat_request(
+            model, &mut oai, false, None,
+        );
+    if !translated {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason("openai-responses request did not translate to messages[]");
+        }
+        return None;
+    }
+    let Some(messages) = oai.get("messages").and_then(Value::as_array).cloned() else {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason("openai-responses request did not translate to messages[]");
+        }
+        return None;
+    };
+
+    if let Some(h) = hooks {
+        h.before_compress(&messages);
+    }
+    let data = call_compress(config, &messages, model).await?;
+    if let Some(d) = diagnostics.as_deref_mut() {
+        d.set_reason("compressed");
+    }
+    let stats = parse_stats(&data);
+    let compressed_messages = data.get("messages").and_then(Value::as_array).cloned()?;
+
+    // input: undefined so the translator rebuilds input from the compressed
+    // messages instead of echoing the original input (9router #1998).
+    oai["input"] = Value::Null;
+    oai["messages"] = Value::Array(compressed_messages.clone());
+    let mut responses_body = oai;
+    let translated_back =
+        crate::core::translator::request::openai_responses::chat_to_openai_responses_request(
+            model,
+            &mut responses_body,
+            false,
+            None,
+        );
+    if translated_back {
+        if let Some(input) = responses_body.get("input") {
+            body["input"] = input.clone();
+        }
+    }
+
+    if let Some(d) = diagnostics.as_deref_mut() {
+        d.after = Some(capture_size_snapshot(body));
+    }
+    if let Some(h) = hooks {
+        h.after_compress(0, 0, &Ok(stats.clone()));
+    }
+    Some(stats)
+}
+
+/// Project a Kiro `conversationState` body into OpenAI messages + JSON-pointer
+/// targets (paths into the body to write compressed text back).
+/// 9router `collectKiroHeadroomMessages`.
+fn collect_kiro_headroom_messages(body: &Value) -> Option<(Vec<Value>, Vec<String>)> {
+    let state = body.get("conversationState")?;
+    if !state.is_object() {
+        return None;
+    }
+    let mut messages: Vec<Value> = Vec::new();
+    let mut targets: Vec<String> = Vec::new();
+
+    let history = state.get("history").and_then(Value::as_array)?;
+    for (idx, item) in history.iter().enumerate() {
+        let user = item.get("userInputMessage");
+        if let Some(user) = user {
+            if let Some(text) = user.get("systemInstruction").and_then(Value::as_str) {
+                messages.push(json!({ "role": "system", "content": text }));
+                targets.push(format!(
+                    "/conversationState/history/{idx}/userInputMessage/systemInstruction"
+                ));
+            }
+            if let Some(text) = user.get("content").and_then(Value::as_str) {
+                messages.push(json!({ "role": "user", "content": text }));
+                targets.push(format!(
+                    "/conversationState/history/{idx}/userInputMessage/content"
+                ));
+            }
+            if let Some(tool_results) = user
+                .get("userInputMessageContext")
+                .and_then(|ctx| ctx.get("toolResults"))
+                .and_then(Value::as_array)
+            {
+                for (ri, tool_result) in tool_results.iter().enumerate() {
+                    let Some(content) = tool_result.get("content").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    for (pi, part) in content.iter().enumerate() {
+                        let Some(text) = part.get("text").and_then(Value::as_str) else {
+                            continue;
+                        };
+                        let mut msg = json!({ "role": "tool", "content": text });
+                        if let Some(id) = tool_result.get("toolUseId").and_then(Value::as_str) {
+                            msg["tool_call_id"] = json!(id);
+                        }
+                        messages.push(msg);
+                        targets.push(format!(
+                            "/conversationState/history/{idx}/userInputMessage/userInputMessageContext/toolResults/{ri}/content/{pi}/text"
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+
+        let assistant = item.get("assistantResponseMessage");
+        if let Some(assistant) = assistant {
+            let mut msg = json!({ "role": "assistant", "content": "" });
+            let mut has_tool_calls = false;
+            let tool_calls: Vec<Value> = assistant
+                .get("toolUses")
+                .and_then(Value::as_array)
+                .map(|uses| {
+                    uses.iter()
+                        .map(|tu| {
+                            let args = tu
+                                .get("input")
+                                .map(|input| {
+                                    serde_json::to_string(input)
+                                        .unwrap_or_else(|_| "{}".to_string())
+                                })
+                                .unwrap_or_else(|| "{}".to_string());
+                            json!({
+                                "id": tu.get("toolUseId").and_then(Value::as_str).unwrap_or(""),
+                                "type": "function",
+                                "function": {
+                                    "name": tu.get("name").and_then(Value::as_str).unwrap_or(""),
+                                    "arguments": args
+                                }
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !tool_calls.is_empty() {
+                msg["tool_calls"] = Value::Array(tool_calls);
+                has_tool_calls = true;
+            }
+            if let Some(text) = assistant.get("content").and_then(Value::as_str) {
+                msg["content"] = json!(text);
+            }
+            if !has_tool_calls
+                && msg
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .is_none_or(str::is_empty)
+            {
+                continue;
+            }
+            messages.push(msg);
+            targets.push(format!(
+                "/conversationState/history/{idx}/assistantResponseMessage/content"
+            ));
+        }
+    }
+    if messages.is_empty() {
+        return None;
+    }
+    Some((messages, targets))
+}
+
+/// Extract the text content from a headroom-compressed message
+/// (9router `textFromHeadroomMessage`).
+fn text_from_headroom_message(msg: &Value) -> Option<String> {
+    msg.get("content")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
+}
+
+/// Set a value at a JSON-pointer-ish path (`/a/b/0/c`) on a mutable body.
+/// Returns `false` if any path segment is missing.
+fn set_json_path(body: &mut Value, path: &str, value: Value) -> bool {
+    let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+    let mut cur = body;
+    for (i, seg) in segments.iter().enumerate() {
+        let is_last = i + 1 == segments.len();
+        if let Ok(idx) = seg.parse::<usize>() {
+            let arr = match cur.as_array_mut() {
+                Some(arr) => arr,
+                None => return false,
+            };
+            if idx >= arr.len() {
+                return false;
+            }
+            if is_last {
+                arr[idx] = value;
+                return true;
+            }
+            cur = &mut arr[idx];
+            continue;
+        }
+        if is_last {
+            match cur.as_object_mut() {
+                Some(obj) => {
+                    obj.insert((*seg).to_string(), value);
+                    return true;
+                }
+                None => return false,
+            }
+        }
+        let obj = match cur.as_object_mut() {
+            Some(obj) => obj,
+            None => return false,
+        };
+        match obj.get_mut(*seg) {
+            Some(next) => cur = next,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Verify the compressed messages match the Kiro projection (count, role
+/// order, non-null text) and write the compressed text back into the original
+/// Kiro fields. 9router `applyKiroHeadroomMessages`.
+fn apply_kiro_headroom_messages(
+    body: &mut Value,
+    messages: &[Value],
+    targets: &[String],
+    compressed: &[Value],
+) -> bool {
+    if compressed.len() != messages.len() {
+        return false;
+    }
+    let mut updates: Vec<(String, String)> = Vec::new();
+    for (expected, actual) in messages.iter().zip(compressed.iter()) {
+        if actual.get("role").and_then(Value::as_str)
+            != expected.get("role").and_then(Value::as_str)
+        {
+            return false;
+        }
+        let Some(text) = text_from_headroom_message(actual) else {
+            return false;
+        };
+        updates.push((String::new(), text));
+    }
+    for (i, (target, (_, text))) in targets.iter().zip(updates.iter()).enumerate() {
+        let _ = i;
+        if !set_json_path(body, target, Value::String(text.clone())) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Headroom pass for the Kiro format: project `conversationState` to OpenAI
+/// messages, compress, verify, write back. 9router `format === "kiro"`.
+async fn compress_kiro_body(
+    body: &mut Value,
+    config: &HeadroomConfig,
+    model: &str,
+    hooks: Option<&dyn HeadroomHooks>,
+    mut diagnostics: Option<&mut HeadroomDiagnostics>,
+) -> Option<HeadroomStats> {
+    let (messages, targets) = collect_kiro_headroom_messages(body)?;
+    if messages.is_empty() {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason("Kiro request did not project to messages[]");
+        }
+        return None;
+    }
+
+    if let Some(h) = hooks {
+        h.before_compress(&messages);
+    }
+    let data = call_compress(config, &messages, model).await?;
+    let stats = parse_stats(&data);
+    let compressed = data.get("messages").and_then(Value::as_array).cloned()?;
+
+    if !apply_kiro_headroom_messages(body, &messages, &targets, &compressed) {
+        if let Some(d) = diagnostics.as_deref_mut() {
+            d.set_reason("proxy response did not match Kiro message count/order/text");
+        }
+        return None;
+    }
+
+    if let Some(d) = diagnostics.as_deref_mut() {
+        d.after = Some(capture_size_snapshot(body));
+    }
+    if let Some(h) = hooks {
+        h.after_compress(0, 0, &Ok(stats.clone()));
+    }
+    Some(stats)
+}
+
 /// Replace the message array in the body under the given key.
 fn write_compressed_messages(body: &mut Value, key: &str, data: &Value) -> Option<()> {
     let compressed = data.get("messages").and_then(Value::as_array)?;
     body[key] = Value::Array(compressed.clone());
     Some(())
+}
+
+/// Byte-size snapshot of a request body for the headroom size log.
+/// 9router `captureSizeSnapshot`: body bytes, message/input array bytes,
+/// tools (top-level `tools`) bytes, and tool-history bytes (messages with
+/// role tool/function, tool_calls, or content blocks of type tool_use/tool_result).
+pub fn capture_size_snapshot(body: &Value) -> SizeSnapshot {
+    let body_bytes = json_bytes(body);
+    let message_bytes = body
+        .get("messages")
+        .or_else(|| body.get("input"))
+        .and_then(Value::as_array)
+        .map(|arr| json_bytes(&Value::Array(arr.clone())))
+        .unwrap_or(0);
+    let tool_schema_bytes = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|arr| json_bytes(&Value::Array(arr.clone())))
+        .unwrap_or(0);
+    let tool_history_bytes = body
+        .get("messages")
+        .or_else(|| body.get("input"))
+        .and_then(Value::as_array)
+        .map(|arr| {
+            let filtered: Vec<&Value> = arr
+                .iter()
+                .filter(|msg| {
+                    let role = msg.get("role").and_then(Value::as_str).unwrap_or("");
+                    if role == "tool" || role == "function" {
+                        return true;
+                    }
+                    if msg.get("tool_calls").and_then(Value::as_array).is_some() {
+                        return true;
+                    }
+                    msg.get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|blocks| {
+                            blocks.iter().any(|b| {
+                                matches!(
+                                    b.get("type").and_then(Value::as_str),
+                                    Some("tool_use" | "tool_result")
+                                )
+                            })
+                        })
+                })
+                .collect();
+            json_bytes(&Value::Array(filtered.into_iter().cloned().collect()))
+        })
+        .unwrap_or(0);
+    SizeSnapshot {
+        body_bytes,
+        message_bytes,
+        tool_schema_bytes,
+        tool_history_bytes,
+    }
+}
+
+/// JSON byte length of a value.
+fn json_bytes(v: &Value) -> usize {
+    serde_json::to_string(v).map(|s| s.len()).unwrap_or(0)
+}
+
+/// Build the `/v1/compress` endpoint from a base URL, stripping a trailing
+/// slash (9router `buildCompressEndpoint`).
+pub fn build_compress_endpoint(base_url: &str) -> String {
+    format!("{}/v1/compress", base_url.trim_end_matches('/'))
+}
+
+/// Mask credentials/query/fragment from a URL for diagnostics
+/// (9router `maskEndpoint`).
+pub fn mask_endpoint(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            parsed.set_username("").ok();
+            parsed.set_password(None).ok();
+            parsed.set_query(None);
+            parsed.set_fragment(None);
+            parsed.to_string()
+        }
+        Err(_) => url.to_string(),
+    }
+}
+
+/// Human-readable one-liner of the size delta (9router `formatHeadroomSizeLog`).
+pub fn format_headroom_size_log(diag: &HeadroomDiagnostics) -> String {
+    let (Some(before), Some(after)) = (&diag.before, &diag.after) else {
+        return String::new();
+    };
+    let effective = if before.body_bytes > 0 {
+        format!(
+            "{:.1}",
+            ((before.body_bytes - after.body_bytes) as f64 / before.body_bytes as f64) * 100.0
+        )
+    } else {
+        "0.0".to_string()
+    };
+    format!(
+        "body={}B→{}B messages={}B→{}B tools={}B→{}B toolHistory={}B→{}B effective={}%",
+        before.body_bytes,
+        after.body_bytes,
+        before.message_bytes,
+        after.message_bytes,
+        before.tool_schema_bytes,
+        after.tool_schema_bytes,
+        before.tool_history_bytes,
+        after.tool_history_bytes,
+        effective
+    )
+}
+
+/// True when the reported savings are "phantom" — the body did not actually
+/// shrink by the minimum ratio (9router `isHeadroomPhantomSavings`, default
+/// 0.05 / 5%).
+pub fn is_headroom_phantom_savings(
+    stats: &HeadroomStats,
+    diag: &HeadroomDiagnostics,
+    min_shrink_ratio: f64,
+) -> bool {
+    if stats.tokens_saved == 0 {
+        return false;
+    }
+    let before = diag.before.as_ref().map(|s| s.body_bytes).unwrap_or(0);
+    let after = diag.after.as_ref().map(|s| s.body_bytes).unwrap_or(0);
+    if before == 0 || after == 0 {
+        return false;
+    }
+    after as f64 >= before as f64 * (1.0 - min_shrink_ratio)
 }
 
 /// Extract token statistics from the Headroom response, defaulting missing
@@ -477,6 +981,164 @@ mod tests {
     use serde_json::json;
 
     // ---- phantom savings tests ----
+
+    // ---- .101 guard tests ----
+
+    #[test]
+    fn headroom_responses_shape_rejected_when_unsafe() {
+        // Acceptance: body.input with a "function_call" item → compress returns
+        // None and diagnostics.reason starts with "skipped:".
+        let mut body = json!({
+            "input": [
+                { "type": "message", "role": "user", "content": "hi" },
+                { "type": "function_call", "name": "f", "arguments": "{}" }
+            ]
+        });
+        let config = HeadroomConfig {
+            enabled: true,
+            url: "http://localhost:9999".into(),
+            ..HeadroomConfig::default()
+        };
+        let mut diag = HeadroomDiagnostics::default();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(compress_with_headroom_diag(
+            &mut body,
+            &config,
+            "gpt-4o",
+            "openai-responses",
+            None,
+            Some(&mut diag),
+        ));
+        assert!(result.is_none());
+        let reason = diag.reason.clone().unwrap_or_default();
+        assert!(
+            reason.starts_with("skipped:"),
+            "expected skipped reason, got: {reason}"
+        );
+    }
+
+    #[test]
+    fn headroom_kiro_projection_roundtrips() {
+        // Acceptance: a kiro body with one history tool result; compressed text
+        // is written back into conversationState.history[0]....toolResults[0].content[0].text.
+        let mut body = json!({
+            "conversationState": {
+                "history": [
+                    {
+                        "userInputMessage": {
+                            "content": "what's the weather",
+                            "userInputMessageContext": {
+                                "toolResults": [
+                                    {
+                                        "toolUseId": "t1",
+                                        "content": [ { "text": "old tool result text" } ]
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                ]
+            }
+        });
+        let (messages, targets) = collect_kiro_headroom_messages(&body).unwrap();
+        assert_eq!(messages.len(), 2); // user content + tool result
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["content"], "old tool result text");
+
+        // Simulate the proxy compressing to a shorter text.
+        let compressed = json!([
+            { "role": "user", "content": "what's the weather" },
+            { "role": "tool", "content": "compressed" }
+        ]);
+        let compressed_arr = compressed.as_array().unwrap();
+        assert!(apply_kiro_headroom_messages(
+            &mut body,
+            &messages,
+            &targets,
+            compressed_arr
+        ));
+        let written = &body["conversationState"]["history"][0]["userInputMessage"]
+            ["userInputMessageContext"]["toolResults"][0]["content"][0]["text"];
+        assert_eq!(written, "compressed");
+    }
+
+    #[test]
+    fn headroom_phantom_savings_detected() {
+        // Acceptance: tokens_saved>0 with before/after where after >= before*0.95
+        // → is_headroom_phantom_savings true.
+        let stats = HeadroomStats {
+            tokens_before: 100,
+            tokens_after: 98,
+            tokens_saved: 2,
+        };
+        let diag = HeadroomDiagnostics {
+            before: Some(SizeSnapshot {
+                body_bytes: 1000,
+                ..Default::default()
+            }),
+            after: Some(SizeSnapshot {
+                body_bytes: 990,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        // 990 >= 1000 * 0.95 = 950 → phantom.
+        assert!(is_headroom_phantom_savings(&stats, &diag, 0.05));
+
+        // A real shrink (after 600 < 950) → not phantom.
+        let real = HeadroomDiagnostics {
+            before: Some(SizeSnapshot {
+                body_bytes: 1000,
+                ..Default::default()
+            }),
+            after: Some(SizeSnapshot {
+                body_bytes: 600,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!is_headroom_phantom_savings(&stats, &real, 0.05));
+    }
+
+    #[test]
+    fn headroom_capture_size_snapshot_counts_components() {
+        let body = json!({
+            "messages": [ { "role": "user", "content": "hi" } ],
+            "tools": [ { "type": "function" } ]
+        });
+        let snap = capture_size_snapshot(&body);
+        assert!(snap.body_bytes > 0);
+        assert!(snap.message_bytes > 0);
+        assert!(snap.tool_schema_bytes > 0);
+        // No tool/function/tool_calls messages → empty filtered array ("[]" = 2 bytes).
+        assert!(snap.tool_history_bytes <= 2);
+
+        // A message with a tool role counts toward tool history.
+        let body2 = json!({
+            "messages": [
+                { "role": "user", "content": "hi" },
+                { "role": "tool", "content": "result", "tool_call_id": "t1" }
+            ]
+        });
+        let snap2 = capture_size_snapshot(&body2);
+        assert!(snap2.tool_history_bytes > 2);
+    }
+
+    #[test]
+    fn headroom_size_log_and_endpoint() {
+        assert_eq!(
+            build_compress_endpoint("http://localhost:4623"),
+            "http://localhost:4623/v1/compress"
+        );
+        assert_eq!(
+            build_compress_endpoint("http://localhost:4623/"),
+            "http://localhost:4623/v1/compress"
+        );
+        assert_eq!(
+            mask_endpoint("http://user:pass@host:1/x?q=1#f"),
+            "http://host:1/x"
+        );
+    }
 
     #[test]
     fn estimate_phantom_savings_returns_reasonable_estimate() {
