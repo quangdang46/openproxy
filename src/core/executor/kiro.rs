@@ -58,6 +58,212 @@ fn normalize_kiro_model(model: &str) -> String {
     model.to_string()
 }
 
+// ==================== INTEGRITY REPAIR LOOP (9router runIntegrityRecovery) ====================
+//
+// When the first attempt ends with a retryable disposition — an ellipsis-only
+// answer, a "short future action" final, or an invalid tool_call wrapper — the
+// JS executor retries ONCE with a repair instruction appended to the system
+// prompt (kiro.js runIntegrityRecovery, 411-479). The repair is gated by the
+// per-account `kiroToolCallRepair` flag (default on). A second non-complete
+// attempt surfaces as an SSE error with the `kiro_*` code.
+
+/// Max chars for the "short future action" heuristic (9router
+/// KIRO_SHORT_FINAL_MAX_CHARS).
+const KIRO_SHORT_FINAL_MAX_CHARS: usize = 800;
+
+/// The classification of a completed (non-repaired) first attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KiroRepairKind {
+    /// Answer is exactly "..." or "…".
+    Ellipsis,
+    /// Final only announced a future action.
+    ShortFinal,
+    /// A tool_call wrapper was malformed (missing name / arguments).
+    InvalidTool,
+    /// No repair needed.
+    None,
+}
+
+/// True when the content is only an ellipsis (9router isEllipsisOnly).
+pub fn is_ellipsis_only(content: &str) -> bool {
+    matches!(content.trim(), "..." | "…")
+}
+
+/// True when the content reads like a future-action announcement rather than
+/// a completed answer (9router isShortFutureAction). The English/Chinese
+/// regexes mirror kiro.js lines 46-56.
+pub fn is_short_future_action(content: &str) -> bool {
+    let text = content.trim().replace('’', "'");
+    if text.is_empty() {
+        return false;
+    }
+    // Observed whole-response signature (kiro.js OBSERVED_TRAILING_FUTURE_ACTION).
+    if text.len() > 20
+        && text.starts_with("目前證據顯示")
+        && text.contains("最後補查 504 access log")
+    {
+        return true;
+    }
+    // English future action with a result clause → already completed.
+    if ENGLISH_FUTURE_ACTION().is_match(&text) && ENGLISH_RESULT_CLAUSE().is_match(&text) {
+        return false;
+    }
+    // Chinese future action with a result clause → already completed.
+    if CHINESE_FUTURE_ACTION().is_match(&text) && CHINESE_RESULT_CLAUSE().is_match(&text) {
+        return false;
+    }
+    text.len() <= KIRO_SHORT_FINAL_MAX_CHARS
+        && SHORT_FUTURE_ACTION().is_match(&text)
+        && !USER_WAIT().is_match(&text)
+        && !COMPLETED_FINAL().is_match(&text)
+        && !RESULT_EVIDENCE().is_match(&text)
+}
+
+// English / Chinese future-action detection (kiro.js SHORT_FUTURE_ACTION +
+// companions). Each regex is compiled once and cached process-wide.
+macro_rules! kiro_re {
+    ($name:ident, $pattern:expr) => {
+        fn $name() -> &'static regex::Regex {
+            static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+            RE.get_or_init(|| regex::Regex::new($pattern).expect("static kiro regex"))
+        }
+    };
+}
+
+kiro_re!(
+    SHORT_FUTURE_ACTION,
+    r"(?i)^(?:(?:(?:現在|接著|接下來|下一步)[，,:：\s]*(?:我(?:只)?(?:會|要|將|再)?\s*)?|我只再)(?:補|查|確認|驗證|追(?:查|蹤)?|繼續|檢查|測試)|我(?:會|要|將)(?:再|重新)?(?:補(?:齊|查)?|抓取|查(?:詢)?|確認|驗證|追(?:查|蹤)?|繼續|檢查|測試)|(?:(?:next|now|then)\b[\s,:-]*)?(?:i(?:'ll| will| am going to| need to)|let me)\s+(?:verify|check|confirm|validate|investigate|trace|continue|follow up|test)\b)"
+);
+kiro_re!(
+    ENGLISH_FUTURE_ACTION,
+    r"(?i)^(?:(?:next|now|then)\b[\s,:-]*)?(?:i(?:'ll| will| am going to| need to)|let me)\s+(?:verify|check|confirm|validate|investigate|trace|continue|follow up|test)\b"
+);
+kiro_re!(
+    ENGLISH_RESULT_CLAUSE,
+    r"(?i)(?:[:;\n]|[.!?]\s+\S|\b(?:status|checksum|response|deployment)\s+(?:is|are|was|were|matches?|equals?|returned)\b)"
+);
+kiro_re!(
+    CHINESE_FUTURE_ACTION,
+    r"^(?:(?:現在|接著|接下來|下一步)[，,:：\s]*(?:我(?:只)?(?:會|要|將|再)?\s*)?|我只再|我(?:會|要|將)(?:再|重新)?)(?:補|抓取|查|確認|驗證|追|繼續|檢查|測試)"
+);
+kiro_re!(
+    CHINESE_RESULT_CLAUSE,
+    r"(?:[。！？]\s*\S|(?:版本|狀態|回應|結果|部署|校驗碼)(?:是|為|等於|顯示))"
+);
+kiro_re!(
+    USER_WAIT,
+    r"(?i)(?:請(?:你|先)|你(?:先|需要|可以|提供|確認|批准|允許)|等待(?:你|使用者)|等你|核准|同意|授權|\b(?:after|when|once)\s+you\b|\byour\s+(?:approval|confirmation|permission|input)\b|\bwait(?:ing)?\s+for\s+you\b|\bplease\s+(?:approve|confirm|provide|send)\b)"
+);
+kiro_re!(
+    COMPLETED_FINAL,
+    r"(?i)(?:已(?:經)?完成|完成(?:了|驗證|確認)|修復完成|確認無誤|驗證(?:完成|通過)|測試(?:均)?通過|結論|總結|\b(?:done|completed|fixed|verified|confirmed|passed|in conclusion|summary)\b|\b(?:is|are) complete\b)"
+);
+kiro_re!(
+    RESULT_EVIDENCE,
+    r"(?i)(?:顯示|發現|因此|成功|失敗|正常|無錯誤|沒有錯誤|\b(?:found|shows?|showed|because|therefore|succeeded|failed|healthy|green|no errors?)\b)"
+);
+
+/// The repair instruction appended to the system prompt for a given kind
+/// (9router REPAIR_INSTRUCTIONS, kiro.js 41-45).
+pub fn repair_instruction(kind: KiroRepairKind) -> &'static str {
+    match kind {
+        KiroRepairKind::Ellipsis => "Retry the previous response because it ended with only an ellipsis. Return the complete final answer, not only ... or ….",
+        KiroRepairKind::ShortFinal => "Retry the previous response because its final only announced a future action. Complete the check now and return the result or a concrete blocker.",
+        KiroRepairKind::InvalidTool => "Retry the previous response because its Kiro tool_call wrapper was malformed. If you use the wrapper tool named tool_call, its input must contain a non-empty name and an arguments field.",
+        KiroRepairKind::None => "Retry the previous incomplete Kiro response.",
+    }
+}
+
+/// Append the repair instruction to `systemPrompt` (9router
+/// appendRepairInstruction, kiro.js 130-135). Returns a cloned body.
+pub fn append_repair_instruction(body: &Value, kind: KiroRepairKind) -> Value {
+    let mut repaired = body.clone();
+    let instruction = repair_instruction(kind);
+    let existing = repaired
+        .get("systemPrompt")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let joined = if existing.is_empty() {
+        instruction.to_string()
+    } else {
+        format!("{existing}\n\n{instruction}")
+    };
+    if let Some(obj) = repaired.as_object_mut() {
+        obj.insert("systemPrompt".to_string(), Value::String(joined));
+    }
+    repaired
+}
+
+/// Accumulated output of a full first attempt, used to classify whether a
+/// repair retry is warranted (9router `readIntegrityAttempt` output).
+#[derive(Debug, Clone, Default)]
+pub struct KiroAttemptOutput {
+    pub content: String,
+    pub reasoning: String,
+    pub has_tool_calls: bool,
+    pub saw_error: bool,
+}
+
+/// Inspect a raw OpenAI-chunk SSE body and accumulate content/reasoning/tool
+/// calls (9router `inspectSSEChunk`). Malformed lines are skipped silently —
+/// the transform path diagnoses them.
+pub fn inspect_sse_body(body: &[u8], output: &mut KiroAttemptOutput) {
+    let text = String::from_utf8_lossy(body);
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(data) = line.strip_prefix("data: ") {
+            let data = data.trim();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+            let Ok(event) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if event.get("error").is_some() {
+                output.saw_error = true;
+            }
+            if let Some(choices) = event.get("choices").and_then(Value::as_array) {
+                for choice in choices {
+                    let Some(delta) = choice.get("delta") else {
+                        continue;
+                    };
+                    if let Some(c) = delta.get("content").and_then(Value::as_str) {
+                        output.content.push_str(c);
+                    }
+                    if let Some(r) = delta.get("reasoning_content").and_then(Value::as_str) {
+                        output.reasoning.push_str(r);
+                    }
+                    if delta
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .is_some_and(|t| !t.is_empty())
+                    {
+                        output.has_tool_calls = true;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Classify a completed first attempt (9router `readIntegrityAttempt` tail):
+/// ellipsis / short_final when no tool calls and the content looks truncated;
+/// otherwise no repair.
+pub fn classify_attempt(output: &KiroAttemptOutput) -> KiroRepairKind {
+    if output.has_tool_calls || output.saw_error {
+        return KiroRepairKind::None;
+    }
+    if is_ellipsis_only(&output.content)
+        || (output.content.trim().is_empty() && is_ellipsis_only(&output.reasoning))
+    {
+        return KiroRepairKind::Ellipsis;
+    }
+    if is_short_future_action(&output.content) {
+        return KiroRepairKind::ShortFinal;
+    }
+    KiroRepairKind::None
+}
+
 pub struct KiroExecutorResponse {
     pub response: super::UpstreamResponse,
     pub url: String,
@@ -321,101 +527,164 @@ impl KiroExecutor {
         Ok(headers)
     }
 
+    /// Send the request to one URL and return the raw response (headers +
+    /// post). Shared by the URL failover loop and the integrity repair retry.
+    async fn send_one(
+        &self,
+        url: &str,
+        body: &Value,
+        credentials: &ProviderConnection,
+        stream: bool,
+    ) -> Result<(reqwest::Response, HeaderMap), KiroExecutorError> {
+        let body_bytes = serde_json::to_vec(body)?;
+        let content_hash = sha256_hex(&body_bytes);
+
+        // AWS JSON credentials → SigV4 (IDC / some enterprise paths)
+        let is_aws_auth = credentials
+            .access_token
+            .as_deref()
+            .map(|t| t.trim_start().starts_with('{'))
+            .unwrap_or(false);
+
+        let headers = if is_aws_auth {
+            let creds = match Self::parse_aws_credentials(
+                credentials
+                    .access_token
+                    .as_deref()
+                    .ok_or_else(|| KiroExecutorError::MissingCredentials("kiro".to_string()))?,
+            ) {
+                Ok(c) => c,
+                Err(e) => return Err(e),
+            };
+            self.sign_request(url, &creds, &content_hash, stream)
+                .await?
+        } else {
+            self.build_bearer_headers(credentials)?
+        };
+
+        let client = self.pool.get("kiro", None)?;
+        let response = client
+            .post(url)
+            .headers(headers.clone())
+            .body(body_bytes)
+            .send()
+            .await?;
+        Ok((response, headers))
+    }
+
     pub async fn execute_request(
         &self,
         request: KiroExecutionRequest,
     ) -> Result<KiroExecutorResponse, KiroExecutorError> {
         let urls = self.build_url(&request.model, request.stream, &request.credentials);
-        let body_bytes = serde_json::to_vec(&request.body)?;
-        let content_hash = sha256_hex(&body_bytes);
 
         // Try each URL with failover
         let mut last_error = None;
         for (url_index, url) in urls.iter().enumerate() {
-            // AWS JSON credentials → SigV4 (IDC / some enterprise paths)
-            let is_aws_auth = request
-                .credentials
-                .access_token
-                .as_deref()
-                .map(|t| t.trim_start().starts_with('{'))
-                .unwrap_or(false);
-
-            let headers = if is_aws_auth {
-                let credentials =
-                    match Self::parse_aws_credentials(
-                        request.credentials.access_token.as_deref().ok_or_else(|| {
-                            KiroExecutorError::MissingCredentials("kiro".to_string())
-                        })?,
-                    ) {
-                        Ok(c) => c,
-                        Err(e) => {
-                            last_error = Some(e);
-                            continue;
-                        }
-                    };
-                match self
-                    .sign_request(url, &credentials, &content_hash, request.stream)
-                    .await
-                {
-                    Ok(h) => h,
-                    Err(e) => {
-                        last_error = Some(e);
-                        continue;
-                    }
-                }
-            } else {
-                // 9router: Bearer accessToken (+ tokentype API_KEY / EXTERNAL_IDP)
-                match self.build_bearer_headers(&request.credentials) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        last_error = Some(e);
-                        continue;
-                    }
-                }
-            };
-
-            let client = self.pool.get("kiro", request.proxy.as_ref())?;
-            match client
-                .post(url)
-                .headers(headers.clone())
-                .body(body_bytes.clone())
-                .send()
+            let (response, headers) = match self
+                .send_one(url, &request.body, &request.credentials, request.stream)
                 .await
             {
-                Ok(response) => {
-                    // 9router shouldRetry: endpoint/auth-surface failures
-                    // (401/403/404) fall through to the next URL — the same
-                    // payload can succeed on a different surface. Payload-invalid
-                    // 400 is terminal (sending the same body everywhere cannot
-                    // repair it). EventStream→SSE conversion runs in
-                    // kiro_to_openai_streaming (ResponseTransform path).
-                    let status = response.status().as_u16();
-                    let is_fallback_status = status == 401 || status == 403 || status == 404;
-                    let has_fallback = url_index + 1 < urls.len();
-                    if is_fallback_status && has_fallback {
-                        last_error = Some(KiroExecutorError::EndpointStatus {
-                            status,
-                            url: url.clone(),
-                            message: format!(
-                                "Kiro endpoint {} returned {}; trying next surface",
-                                url,
-                                response.status()
-                            ),
-                        });
-                        continue;
+                Ok(pair) => pair,
+                Err(e) => {
+                    last_error = Some(e);
+                    continue;
+                }
+            };
+            {
+                // 9router shouldRetry: endpoint/auth-surface failures
+                // (401/403/404) fall through to the next URL — the same
+                // payload can succeed on a different surface. Payload-invalid
+                // 400 is terminal (sending the same body everywhere cannot
+                // repair it). EventStream→SSE conversion runs in
+                // kiro_to_openai_streaming (ResponseTransform path).
+                let status = response.status().as_u16();
+                let is_fallback_status = status == 401 || status == 403 || status == 404;
+                let has_fallback = url_index + 1 < urls.len();
+                if is_fallback_status && has_fallback {
+                    last_error = Some(KiroExecutorError::EndpointStatus {
+                        status,
+                        url: url.clone(),
+                        message: format!(
+                            "Kiro endpoint {} returned {}; trying next surface",
+                            url,
+                            response.status()
+                        ),
+                    });
+                    continue;
+                }
+                // 9router integrity repair (kiro.js attachIntegrityGate +
+                // runIntegrityRecovery): when enabled (per-account
+                // kiroToolCallRepair, default on) and the response is a
+                // complete SSE body, classify it and retry ONCE with a
+                // repair instruction appended to the system prompt when
+                // the first attempt ended retryably (ellipsis / short
+                // future action). The response is otherwise returned
+                // untouched so the streaming path stays first-class.
+                let repair_enabled = request
+                    .credentials
+                    .provider_specific_data
+                    .get("kiroToolCallRepair")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+
+                if repair_enabled && status == 200 {
+                    let full = response
+                        .bytes()
+                        .await
+                        .map_err(|e| KiroExecutorError::Request(e))?;
+                    let mut output = KiroAttemptOutput::default();
+                    inspect_sse_body(&full, &mut output);
+                    let kind = classify_attempt(&output);
+                    if kind != KiroRepairKind::None {
+                        // One bounded retry with the repair instruction
+                        // appended to the system prompt (9router
+                        // runIntegrityRecovery). The retry goes through the
+                        // same per-URL send so SigV4/bearer auth is rebuilt.
+                        let repaired_body = append_repair_instruction(&request.body, kind);
+                        let retry = self
+                            .send_one(url, &repaired_body, &request.credentials, request.stream)
+                            .await;
+                        match retry {
+                            Ok((retry_response, retry_headers)) => {
+                                return Ok(KiroExecutorResponse {
+                                    response: UpstreamResponse::Reqwest(retry_response),
+                                    url: url.clone(),
+                                    headers: retry_headers,
+                                    transformed_body: request.body.clone(),
+                                    transport: TransportKind::Reqwest,
+                                });
+                            }
+                            Err(e) => {
+                                last_error = Some(e);
+                                continue;
+                            }
+                        }
                     }
+                    // Not retryable: return the buffered first attempt
+                    // (already OpenAI-chunk SSE).
+                    let http_response = http::Response::builder()
+                        .status(200)
+                        .header("content-type", "text/event-stream")
+                        .header("cache-control", "no-cache")
+                        .body(reqwest::Body::from(full))
+                        .map_err(KiroExecutorError::InvalidRequest)?;
                     return Ok(KiroExecutorResponse {
-                        response: UpstreamResponse::Reqwest(response),
+                        response: UpstreamResponse::Reqwest(http_response.into()),
                         url: url.clone(),
                         headers,
                         transformed_body: request.body.clone(),
                         transport: TransportKind::Reqwest,
                     });
                 }
-                Err(e) => {
-                    last_error = Some(KiroExecutorError::Request(e));
-                    continue;
-                }
+
+                return Ok(KiroExecutorResponse {
+                    response: UpstreamResponse::Reqwest(response),
+                    url: url.clone(),
+                    headers,
+                    transformed_body: request.body.clone(),
+                    transport: TransportKind::Reqwest,
+                });
             }
         }
 
@@ -998,6 +1267,103 @@ mod tests {
         assert!(urls
             .iter()
             .any(|u| u.contains("codewhisperer.eu-west-1.amazonaws.com")));
+    }
+
+    #[test]
+    fn test_is_ellipsis_only() {
+        assert!(is_ellipsis_only("..."));
+        assert!(is_ellipsis_only("…"));
+        assert!(is_ellipsis_only("  ...  "));
+        assert!(!is_ellipsis_only("... and more"));
+        assert!(!is_ellipsis_only("complete answer"));
+        assert!(!is_ellipsis_only(""));
+    }
+
+    #[test]
+    fn test_is_short_future_action() {
+        // English future-action announcement.
+        assert!(is_short_future_action("I'll verify the deployment now"));
+        assert!(is_short_future_action("Let me check the logs"));
+        assert!(is_short_future_action("Next, I will confirm the checksum"));
+        // With a result clause → already completed.
+        assert!(!is_short_future_action("I'll verify the status is green"));
+        // Too long (over 800 chars) → not short.
+        assert!(!is_short_future_action(&"I'll check ".repeat(120)));
+        // Completed-language → not a future action.
+        assert!(!is_short_future_action("done, verified and confirmed"));
+        // Chinese future action.
+        assert!(is_short_future_action("接下來我會檢查日誌"));
+        assert!(is_short_future_action("我會檢查日誌"));
+        assert!(!is_short_future_action("驗證完成，無錯誤"));
+    }
+
+    #[test]
+    fn test_classify_attempt() {
+        // Ellipsis-only content → repair.
+        let mut output = KiroAttemptOutput::default();
+        output.content = "...".to_string();
+        assert_eq!(classify_attempt(&output), KiroRepairKind::Ellipsis);
+
+        // Short future action → repair.
+        let mut output2 = KiroAttemptOutput::default();
+        output2.content = "I'll check the logs next".to_string();
+        assert_eq!(classify_attempt(&output2), KiroRepairKind::ShortFinal);
+
+        // Complete answer → no repair.
+        let mut output3 = KiroAttemptOutput::default();
+        output3.content = "The checksum matches and the deployment is green.".to_string();
+        assert_eq!(classify_attempt(&output3), KiroRepairKind::None);
+
+        // Tool calls → no repair (tools are legitimately terminal).
+        let mut output4 = KiroAttemptOutput::default();
+        output4.content = "...".to_string();
+        output4.has_tool_calls = true;
+        assert_eq!(classify_attempt(&output4), KiroRepairKind::None);
+    }
+
+    #[test]
+    fn test_append_repair_instruction() {
+        let body = serde_json::json!({
+            "systemPrompt": "You are a helpful assistant.",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let repaired = append_repair_instruction(&body, KiroRepairKind::Ellipsis);
+        let prompt = repaired["systemPrompt"].as_str().unwrap();
+        assert!(prompt.starts_with("You are a helpful assistant."));
+        assert!(prompt.contains("ellipsis"));
+        // Original body untouched.
+        assert_eq!(body["systemPrompt"], "You are a helpful assistant.");
+
+        // No existing systemPrompt → instruction becomes the whole prompt.
+        let bare = serde_json::json!({ "messages": [] });
+        let repaired2 = append_repair_instruction(&bare, KiroRepairKind::InvalidTool);
+        assert!(repaired2["systemPrompt"]
+            .as_str()
+            .unwrap()
+            .contains("tool_call"));
+    }
+
+    #[test]
+    fn test_inspect_sse_body() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"hel\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"think\"}}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]}}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let mut output = KiroAttemptOutput::default();
+        inspect_sse_body(sse.as_bytes(), &mut output);
+        assert_eq!(output.content, "hello");
+        assert_eq!(output.reasoning, "think");
+        assert!(output.has_tool_calls);
+        assert!(!output.saw_error);
+
+        // An error frame marks saw_error.
+        let err_sse = "data: {\"error\":{\"message\":\"boom\"}}\n\n";
+        let mut out2 = KiroAttemptOutput::default();
+        inspect_sse_body(err_sse.as_bytes(), &mut out2);
+        assert!(out2.saw_error);
     }
 
     #[test]
