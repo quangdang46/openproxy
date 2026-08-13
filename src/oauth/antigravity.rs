@@ -21,7 +21,7 @@ use tokio::net::TcpListener;
 
 const ANTIGRAVITY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const ANTIGRAVITY_CLIENT_SECRET: &str = "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";
+const ANTIGRAVITY_CLIENT_SECRET: &str = "";
 const ANTIGRAVITY_AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const ANTIGRAVITY_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const ANTIGRAVITY_USER_INFO_URL: &str = "https://www.googleapis.com/oauth2/v1/userinfo";

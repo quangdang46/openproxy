@@ -22,7 +22,7 @@ const OLLAMA_LOCAL_DEFAULT_HOST: &str = "http://localhost:11434";
 
 const GEMINI_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-const GEMINI_CLIENT_SECRET: &str = "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";
+const GEMINI_CLIENT_SECRET: &str = "";
 const GEMINI_CLI_MODELS_URL: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";

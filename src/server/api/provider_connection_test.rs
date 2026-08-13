@@ -30,10 +30,10 @@ const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const GEMINI_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-const GEMINI_CLIENT_SECRET: &str = "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";
+const GEMINI_CLIENT_SECRET: &str = "";
 const ANTIGRAVITY_CLIENT_ID: &str =
     "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com";
-const ANTIGRAVITY_CLIENT_SECRET: &str = "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";
+const ANTIGRAVITY_CLIENT_SECRET: &str = "";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const KIRO_SOCIAL_REFRESH_URL: &str = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken";
 const QWEN_CLIENT_ID: &str = "f0304373b74a44d2b584a3fb70ca9e56";

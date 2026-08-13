@@ -163,7 +163,7 @@ pub fn iflow() -> OAuthProviderConfig {
         scopes: &[],
         uses_pkce: false,
         extra_params: &[
-            ("client_secret", "4Z3YjXycVsQvyGF1etiNlIBB4RsqSDtW"),
+            ("client_secret", ""),
             ("userinfo_url", "https://iflow.cn/api/oauth/getUserInfo"),
         ],
         refresh_lead_ms: 4 * 60 * 60 * 1000,
@@ -355,7 +355,7 @@ pub fn antigravity() -> OAuthProviderConfig {
         ],
         uses_pkce: false,
         extra_params: &[
-            ("client_secret", "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"),
+            ("client_secret", ""),
             ("access_type", "offline"),
             ("prompt", "consent"),
             (
