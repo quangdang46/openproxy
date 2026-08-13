@@ -17,9 +17,12 @@
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
+use bytes::Bytes;
+use hyper::http;
 use hyper::http::uri::InvalidUri;
 use rand::RngCore;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE, COOKIE};
+use reqwest::Body;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -390,6 +393,91 @@ impl GrokWebExecutor {
             .send()
             .await?;
 
+        let status = response.status();
+
+        // Success path: consume the NDJSON body and rebuild it as OpenAI format
+        // (SSE chunks for streaming, chat.completion JSON otherwise). Error
+        // statuses get a rewritten `{error:{...}}` body, mirroring JS `execute`.
+        let response = if status.is_success() {
+            let body_bytes = response.bytes().await.unwrap_or_default();
+            let is_thinking = model_info.is_thinking;
+            let cid = format!("chatcmpl-grok-{}", random_hex(6));
+            let created = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs() as i64;
+
+            if request.stream {
+                let body = build_streaming_response(
+                    &body_bytes,
+                    &request.model,
+                    &cid,
+                    created,
+                    is_thinking,
+                );
+                let mut builder = http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header(http::header::CONTENT_TYPE, "text/event-stream")
+                    .header(http::header::CACHE_CONTROL, "no-cache")
+                    .header("X-Accel-Buffering", "no");
+                let http_response = builder
+                    .body(body)
+                    .map_err(GrokWebExecutorError::InvalidRequest)?;
+                reqwest::Response::from(http_response)
+            } else {
+                let body = build_non_streaming_response(
+                    &body_bytes,
+                    &request.model,
+                    &cid,
+                    created,
+                    is_thinking,
+                );
+                let mut builder = http::Response::builder()
+                    .status(http::StatusCode::OK)
+                    .header(http::header::CONTENT_TYPE, "application/json");
+                let http_response = builder
+                    .body(body)
+                    .map_err(GrokWebExecutorError::InvalidRequest)?;
+                reqwest::Response::from(http_response)
+            }
+        } else {
+            let status_u16 = status.as_u16();
+            let status_code =
+                http::StatusCode::from_u16(status_u16).unwrap_or(http::StatusCode::BAD_GATEWAY);
+            let (message, error_type, code) = match status_u16 {
+                401 | 403 => (
+                    "Grok auth failed — SSO cookie may be expired. Re-paste your sso cookie value from grok.com.",
+                    "authentication_error",
+                    format!("HTTP_{status_u16}"),
+                ),
+                429 => (
+                    "Grok rate limited. Wait a moment and retry, or rotate cookies.",
+                    "rate_limit_error",
+                    format!("HTTP_{status_u16}"),
+                ),
+                _ => (
+                    "Grok returned HTTP {status_u16}",
+                    "upstream_error",
+                    format!("HTTP_{status_u16}"),
+                ),
+            };
+            let body = json!({
+                "error": {
+                    "message": message,
+                    "type": error_type,
+                    "code": code,
+                }
+            });
+            let body_bytes = serde_json::to_vec(&body)?;
+            let mut builder = http::Response::builder()
+                .status(status_code)
+                .header(http::header::CONTENT_TYPE, "application/json");
+            let http_response = builder
+                .body(body_bytes)
+                .map_err(GrokWebExecutorError::InvalidRequest)?;
+            reqwest::Response::from(http_response)
+        };
+
         Ok(GrokWebExecutorResponse {
             response: UpstreamResponse::Reqwest(response),
             url,
@@ -718,6 +806,275 @@ impl PerplexityWebExecutor {
         Ok(Value::Object(transformed))
     }
 }
+/// Parse a Grok NDJSON response into ordered content chunks (JS extractContent).
+///
+/// Handles, in order: `event.error`, `resp.modelResponse` (final/complete —
+/// thinking close for thinking models, then `fullMessage`), and streaming
+/// `resp.token` (passed through raw; a non-thinking model never yields
+/// thinking, matching JS `extractContent` which only emits thinking for
+/// isThinkingModel).
+fn extract_content(body: &[u8], is_thinking: bool) -> Vec<ContentChunk> {
+    let mut chunks = Vec::new();
+    let mut think_opened = false;
+
+    for line in body.split(|b| *b == b'\n') {
+        let line = String::from_utf8_lossy(line).trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        let event: Value = match serde_json::from_str(&line) {
+            Ok(event) => event,
+            Err(_) => continue, // Skip non-JSON lines
+        };
+
+        if let Some(error) = event.get("error") {
+            let message = error
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    error
+                        .get("code")
+                        .and_then(Value::as_str)
+                        .map(|code| format!("Grok error: {code}"))
+                })
+                .unwrap_or_default();
+            chunks.push(ContentChunk {
+                error: Some(message),
+                done: Some(true),
+                ..ContentChunk::default()
+            });
+            return chunks;
+        }
+
+        let resp = match event.get("result").and_then(|r| r.get("response")) {
+            Some(resp) => resp,
+            None => continue,
+        };
+
+        // modelResponse = final/complete response
+        if let Some(mr) = resp.get("modelResponse") {
+            // Thinking model: the modelResponse closes the thinking block
+            // opened by the first modelResponse (spec: thinking only emitted
+            // for isThinking models when a modelResponse follows). The final
+            // message is emitted as the thinking chunk; no separate
+            // fullMessage content chunk.
+            if is_thinking {
+                if let Some(message) = mr.get("message").and_then(Value::as_str) {
+                    chunks.push(ContentChunk {
+                        thinking: Some(message.to_string()),
+                        ..ContentChunk::default()
+                    });
+                }
+                continue;
+            }
+
+            if let Some(message) = mr.get("message").and_then(Value::as_str) {
+                chunks.push(ContentChunk {
+                    full_message: Some(message.to_string()),
+                    ..ContentChunk::default()
+                });
+            }
+            continue;
+        }
+
+        // Streaming token
+        if resp.get("token").and_then(Value::as_str).is_some() {
+            let token = resp
+                .get("token")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            chunks.push(ContentChunk {
+                delta: Some(token),
+                ..ContentChunk::default()
+            });
+        }
+    }
+
+    chunks.push(ContentChunk {
+        done: Some(true),
+        ..ContentChunk::default()
+    });
+    chunks
+}
+
+/// One extracted content piece (JS ContentChunk).
+#[derive(Debug, Default)]
+struct ContentChunk {
+    delta: Option<String>,
+    thinking: Option<String>,
+    full_message: Option<String>,
+    error: Option<String>,
+    done: Option<bool>,
+}
+
+/// `data: {json}\n\n` SSE frame (JS sseChunk).
+fn sse_chunk(data: &Value) -> String {
+    format!(
+        "data: {}\n\n",
+        serde_json::to_string(data).unwrap_or_else(|_| "{}".to_string())
+    )
+}
+
+/// Streaming response builder: NDJSON → OpenAI `chat.completion.chunk` SSE
+/// (JS buildStreamingResponse): initial `{role:"assistant"}` chunk, thinking →
+/// `delta.reasoning_content` (only when isThinking), content → `delta.content`,
+/// `[Error: ...]` content delta on upstream error, `finish_reason:"stop"` +
+/// `data: [DONE]`.
+fn build_streaming_response(
+    body: &[u8],
+    model: &str,
+    cid: &str,
+    created: i64,
+    is_thinking: bool,
+) -> Body {
+    // Clone into owned values: `Body::wrap_stream` requires a `'static` stream,
+    // but the `async_stream::stream!` macro borrows `model`/`cid` when they are
+    // used inside `json!`.
+    let model = model.to_string();
+    let cid = cid.to_string();
+    // Parse the NDJSON body up front: `body` is borrowed, but the stream must
+    // be `'static` — extracting the owned chunks here keeps it that way.
+    let chunks = extract_content(body, is_thinking);
+    Body::wrap_stream(async_stream::stream! {
+        // Initial role chunk
+        let role_chunk = json!({
+            "id": cid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "system_fingerprint": null,
+            "choices": [
+                { "index": 0, "delta": { "role": "assistant" }, "finish_reason": null, "logprobs": null }
+            ],
+        });
+        yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_chunk(&role_chunk)));
+        for chunk in chunks {
+            if let Some(error) = chunk.error {
+                let error_chunk = json!({
+                    "id": cid,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "system_fingerprint": null,
+                    "choices": [
+                        { "index": 0, "delta": { "content": format!("[Error: {error}]") }, "finish_reason": null, "logprobs": null }
+                    ],
+                });
+                yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_chunk(&error_chunk)));
+                break;
+            }
+            if chunk.done.unwrap_or(false) {
+                break;
+            }
+            if let Some(thinking) = chunk.thinking {
+                let thinking_chunk = json!({
+                    "id": cid,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "system_fingerprint": null,
+                    "choices": [
+                        { "index": 0, "delta": { "reasoning_content": thinking }, "finish_reason": null, "logprobs": null }
+                    ],
+                });
+                yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_chunk(&thinking_chunk)));
+                continue;
+            }
+            if let Some(delta) = chunk.delta {
+                let delta_chunk = json!({
+                    "id": cid,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "system_fingerprint": null,
+                    "choices": [
+                        { "index": 0, "delta": { "content": delta }, "finish_reason": null, "logprobs": null }
+                    ],
+                });
+                yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_chunk(&delta_chunk)));
+            }
+        }
+
+        // Stop chunk + [DONE]
+        let stop_chunk = json!({
+            "id": cid,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "system_fingerprint": null,
+            "choices": [
+                { "index": 0, "delta": {}, "finish_reason": "stop", "logprobs": null }
+            ],
+        });
+        yield Ok::<Bytes, std::io::Error>(Bytes::from(sse_chunk(&stop_chunk)));
+        yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
+    })
+}
+
+/// Non-streaming response builder: NDJSON → OpenAI `chat.completion` JSON
+/// (JS buildNonStreamingResponse): `reasoning_content = thinkingParts.join("\n")`
+/// when non-empty, usage `prompt_tokens = completion_tokens =
+/// ceil(fullContent.length / 4)`, `total_tokens` the sum.
+fn build_non_streaming_response(
+    body: &[u8],
+    model: &str,
+    cid: &str,
+    created: i64,
+    is_thinking: bool,
+) -> Bytes {
+    let mut full_content = String::new();
+    let mut thinking_parts: Vec<String> = Vec::new();
+
+    for chunk in extract_content(body, is_thinking) {
+        if let Some(error) = chunk.error {
+            return serde_json::to_vec(&json!({
+                "error": { "message": error, "type": "upstream_error", "code": "GROK_ERROR" }
+            }))
+            .map(Bytes::from)
+            .unwrap_or_default();
+        }
+        if chunk.done.unwrap_or(false) {
+            break;
+        }
+        if let Some(thinking) = chunk.thinking {
+            thinking_parts.push(thinking);
+            continue;
+        }
+        if let Some(full_message) = chunk.full_message {
+            full_content = full_message;
+        } else if let Some(delta) = chunk.delta {
+            full_content.push_str(&delta);
+        }
+    }
+
+    let mut message = json!({ "role": "assistant", "content": full_content });
+    if !thinking_parts.is_empty() {
+        message["reasoning_content"] = json!(thinking_parts.join("\n"));
+    }
+
+    let prompt_tokens = (full_content.len() as f64 / 4.0).ceil() as u64;
+    let completion_tokens = prompt_tokens;
+
+    serde_json::to_vec(&json!({
+        "id": cid,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "system_fingerprint": null,
+        "choices": [
+            { "index": 0, "message": message, "finish_reason": "stop", "logprobs": null }
+        ],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        }
+    }))
+    .map(Bytes::from)
+    .unwrap_or_default()
+}
 
 #[cfg(test)]
 mod tests {
@@ -946,5 +1303,141 @@ mod tests {
         assert!(result.is_ok());
         let transformed = result.unwrap();
         assert!(transformed.get("session_cache_key").is_some());
+    }
+    #[test]
+    fn test_extract_content_token_and_full_message() {
+        let body = br#"{"result":{"response":{"token":"Hel"}}}
+{"result":{"response":{"token":"lo"}}}
+{"result":{"response":{"modelResponse":{"message":"Hello world"}}}}
+"#;
+        let chunks = extract_content(body, false);
+        assert_eq!(chunks.len(), 4); // 2 tokens + fullMessage + trailing done
+        assert_eq!(chunks[0].delta.as_deref(), Some("Hel"));
+        assert_eq!(chunks[1].delta.as_deref(), Some("lo"));
+        assert_eq!(chunks[2].full_message.as_deref(), Some("Hello world"));
+        assert!(chunks[3].done.unwrap_or(false));
+    }
+
+    #[test]
+    fn test_extract_content_skips_non_json_lines() {
+        let body = br#"some noise
+{"result":{"response":{"token":"ok"}}}
+"#;
+        let chunks = extract_content(body, false);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].delta.as_deref(), Some("ok"));
+        assert!(chunks[1].done.unwrap_or(false));
+    }
+
+    #[test]
+    fn test_extract_content_error_event() {
+        let body = br#"{"error":{"message":"boom","code":"X"}}
+"#;
+        let chunks = extract_content(body, false);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].error.as_deref(), Some("boom"));
+        assert!(chunks[0].done.unwrap_or(false));
+    }
+
+    #[test]
+    fn test_extract_content_thinking_only_for_thinking_models() {
+        let thinking_lines = br#"{"result":{"response":{"token":"visible"}}}
+{"result":{"response":{"modelResponse":{"message":"Final"}}}}
+"#;
+        // Non-thinking model: token is content, modelResponse closes nothing,
+        // thinking never emitted.
+        let chunks = extract_content(thinking_lines, false);
+        assert!(chunks.iter().all(|c| c.thinking.is_none()));
+        assert_eq!(chunks[0].delta.as_deref(), Some("visible"));
+        assert_eq!(chunks[1].full_message.as_deref(), Some("Final"));
+
+        // Thinking model with an open thinking block gets it closed.
+        let body = br#"{"result":{"response":{"modelResponse":{"message":"Final"}}}}
+"#;
+        let chunks = extract_content(body, true);
+        assert_eq!(chunks[0].thinking.as_deref(), Some("Final"));
+        assert!(chunks[0].full_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_build_streaming_response_sse_shape() {
+        use http_body_util::BodyExt;
+        let body = br#"{"result":{"response":{"token":"hi"}}}
+{"result":{"response":{"modelResponse":{"message":"hi"}}}}
+"#;
+        let bytes = build_streaming_response(body, "grok-4.2", "chatcmpl-grok-abc123", 1234, false)
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.starts_with("data: {"));
+        assert!(text.contains("\"object\":\"chat.completion.chunk\""));
+        assert!(text.contains("\"id\":\"chatcmpl-grok-abc123\""));
+        assert!(text.contains("\"delta\":{\"role\":\"assistant\"}"));
+        assert!(text.contains("\"delta\":{\"content\":\"hi\"}"));
+        assert!(text.contains("\"finish_reason\":\"stop\""));
+        assert!(text.ends_with("data: [DONE]\n\n"));
+    }
+
+    #[tokio::test]
+    async fn test_build_streaming_response_thinking_uses_reasoning_content() {
+        use http_body_util::BodyExt;
+        let body = br#"{"result":{"response":{"token":"t1"}}}
+{"result":{"response":{"modelResponse":{"message":"Final"}}}}
+"#;
+        // is_thinking=true: modelResponse closes the thinking block → the final
+        // message becomes a reasoning_content delta.
+        let bytes = build_streaming_response(body, "grok-4.1-expert", "cid", 1, true)
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("\"delta\":{\"content\":\"t1\"}"));
+        assert!(text.contains("\"delta\":{\"reasoning_content\":\"Final\"}"));
+        // No content delta for the final message (it went to reasoning_content).
+        assert_eq!(text.matches("\"delta\":{\"content\":\"Final\"").count(), 0);
+    }
+
+    #[test]
+    fn test_build_non_streaming_response_shape() {
+        let body = br#"{"result":{"response":{"token":"Hel"}}}
+{"result":{"response":{"token":"lo"}}}
+{"result":{"response":{"modelResponse":{"message":"Hello"}}}}
+"#;
+        let bytes =
+            build_non_streaming_response(body, "grok-4.2", "chatcmpl-grok-abc123", 1234, false);
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["object"], "chat.completion");
+        assert_eq!(value["choices"][0]["message"]["content"], "Hello");
+        assert!(value["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none());
+        assert_eq!(value["usage"]["prompt_tokens"], 2); // ceil(5/4)
+        assert_eq!(value["usage"]["completion_tokens"], 2);
+        assert_eq!(value["usage"]["total_tokens"], 4);
+    }
+
+    #[test]
+    fn test_build_non_streaming_response_thinking_joined() {
+        let body = br#"{"result":{"response":{"token":"visible"}}}
+{"result":{"response":{"modelResponse":{"message":"Final"}}}}
+"#;
+        let bytes = build_non_streaming_response(body, "grok-4.1-expert", "cid", 1, true);
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["choices"][0]["message"]["content"], "visible");
+        assert_eq!(value["choices"][0]["message"]["reasoning_content"], "Final");
+    }
+
+    #[test]
+    fn test_build_non_streaming_response_error_maps_grok_error() {
+        let body = br#"{"error":{"message":"boom"}}
+"#;
+        let bytes = build_non_streaming_response(body, "grok-4.2", "cid", 1, false);
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["message"], "boom");
+        assert_eq!(value["error"]["type"], "upstream_error");
+        assert_eq!(value["error"]["code"], "GROK_ERROR");
     }
 }
