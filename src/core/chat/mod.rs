@@ -361,7 +361,19 @@ fn apply_chat_system_prompt_injection(body: &mut Value, settings: &Settings) -> 
         .filter(|s| !s.trim().is_empty())
         .map(|s| s.to_string());
     match prompt {
-        Some(p) => inject_system_prompt(body, &p),
+        Some(p) => {
+            // Dispatch by body shape (9router injectSystemPrompt format switch).
+            let format = if body.get("system").is_some() {
+                "claude"
+            } else if body.get("systemInstruction").is_some()
+                || body.get("system_instruction").is_some()
+            {
+                "gemini"
+            } else {
+                "openai"
+            };
+            inject_system_prompt(body, format, &p)
+        }
         None => false,
     }
 }
