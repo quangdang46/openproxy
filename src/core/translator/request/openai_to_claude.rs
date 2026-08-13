@@ -667,12 +667,28 @@ pub fn openai_to_claude_request(
                 continue;
             }
 
-            let func = tool.get("function");
+            // Anthropic-compatible gateways (notably MiniMax M3 at
+            // api.minimaxi.com) may send bare `{name, description,
+            // parameters}` tools without a `function` wrapper (upstream
+            // code 2013 "invalid tool type" when the name falls through).
+            let func = tool
+                .get("function")
+                .filter(|f| {
+                    f.get("name")
+                        .and_then(Value::as_str)
+                        .map(|n| !n.is_empty())
+                        .unwrap_or(false)
+                })
+                .or(Some(tool));
             let original_name = func
                 .and_then(|f| f.get("name"))
                 .and_then(|n| n.as_str())
                 .unwrap_or("")
                 .to_string();
+            // Never push a nameless tool — gateways reject those.
+            if original_name.is_empty() {
+                continue;
+            }
 
             let tool_name = original_name
                 .strip_prefix(PROXY_TOOL_PREFIX)
@@ -942,6 +958,53 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].get("name").unwrap().as_str().unwrap(), "my_tool");
         assert!(tools[0].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn bare_function_tool_keeps_name() {
+        // Anthropic-compatible gateways (e.g. MiniMax M3) may send tools
+        // without a `type`/`function` wrapper — the name must still resolve.
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "MiniMax-M3",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {
+                    "name": "echo",
+                    "description": "d",
+                    "parameters": {}
+                }
+            ]
+        }"#,
+        )
+        .unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        let tools = body.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].get("name").unwrap().as_str().unwrap(), "echo");
+        assert!(tools[0].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn nameless_tool_is_skipped() {
+        let mut body: Value = serde_json::from_str(
+            r#"{
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "tools": [
+                {"type": "function", "function": {"description": "no name"}}
+            ]
+        }"#,
+        )
+        .unwrap();
+
+        openai_to_claude_request("claude-3", &mut body, false, None);
+
+        // When every tool is skipped the tools key is dropped entirely
+        // (result_tools is only written back when non-empty).
+        assert!(body.get("tools").is_none());
     }
 
     #[test]
