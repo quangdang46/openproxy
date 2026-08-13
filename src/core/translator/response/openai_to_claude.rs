@@ -141,6 +141,43 @@ pub fn openai_to_claude_streaming(
         .collect()
 }
 
+/// Extract reasoning text from an OpenAI delta, mirroring the upstream JS
+/// `extractReasoningText` (open-sse/translator/concerns/reasoning.js):
+/// 1. `reasoning_content` if non-empty string
+/// 2. `reasoning` if non-empty string
+/// 3. `reasoning_details` array — elements are strings or `{text}`/`{content}`
+///    objects (else ""), joined with NO separator
+/// 4. else ""
+fn extract_reasoning_text(delta: &Value) -> String {
+    if let Some(s) = delta.get("reasoning_content").and_then(Value::as_str) {
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+    if let Some(s) = delta.get("reasoning").and_then(Value::as_str) {
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+    if let Some(details) = delta.get("reasoning_details").and_then(Value::as_array) {
+        return details
+            .iter()
+            .map(|d| {
+                if let Some(s) = d.as_str() {
+                    s.to_string()
+                } else {
+                    d.get("text")
+                        .and_then(Value::as_str)
+                        .or_else(|| d.get("content").and_then(Value::as_str))
+                        .unwrap_or("")
+                        .to_string()
+                }
+            })
+            .collect::<String>();
+    }
+    String::new()
+}
+
 fn extract_sse_or_json_payload(line: &str) -> &str {
     let line = line.trim();
     if let Some(rest) = line.strip_prefix("data:") {
@@ -259,44 +296,35 @@ pub fn openai_to_claude_response(chunk: &Value, state: &mut Map<String, Value>) 
 
     let delta = choice.get("delta");
 
-    // ── reasoning_content → thinking block ─────────────────────────────
-    let reasoning = delta
-        .and_then(|d| d.get("reasoning_content"))
-        .and_then(|v| v.as_str())
-        .or_else(|| {
-            delta
-                .and_then(|d| d.get("reasoning"))
-                .and_then(|v| v.as_str())
-        });
-    if let Some(reasoning) = reasoning {
-        if !reasoning.is_empty() {
-            stop_text_block(state, &mut results);
+    // ── reasoning_content/reasoning/reasoning_details → thinking block ──
+    let reasoning = delta.map(extract_reasoning_text).unwrap_or_default();
+    if !reasoning.is_empty() {
+        stop_text_block(state, &mut results);
 
-            let already = state
-                .get("thinkingBlockStarted")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            if !already {
-                let block_idx = next_block_index(state);
-                state.insert("thinkingBlockIndex".into(), Value::from(block_idx));
-                state.insert("thinkingBlockStarted".into(), Value::Bool(true));
-                results.push(json!({
-                    "type": "content_block_start",
-                    "index": block_idx,
-                    "content_block": {"type": "thinking", "thinking": ""}
-                }));
-            }
-
-            let block_idx = state
-                .get("thinkingBlockIndex")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+        let already = state
+            .get("thinkingBlockStarted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !already {
+            let block_idx = next_block_index(state);
+            state.insert("thinkingBlockIndex".into(), Value::from(block_idx));
+            state.insert("thinkingBlockStarted".into(), Value::Bool(true));
             results.push(json!({
-                "type": "content_block_delta",
+                "type": "content_block_start",
                 "index": block_idx,
-                "delta": {"type": "thinking_delta", "thinking": reasoning}
+                "content_block": {"type": "thinking", "thinking": ""}
             }));
         }
+
+        let block_idx = state
+            .get("thinkingBlockIndex")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        results.push(json!({
+            "type": "content_block_delta",
+            "index": block_idx,
+            "delta": {"type": "thinking_delta", "thinking": reasoning}
+        }));
     }
 
     // ── content → text block ───────────────────────────────────────────
@@ -596,6 +624,41 @@ mod tests {
             .find(|v| v["type"] == "content_block_start" && v["content_block"]["type"] == "text")
             .expect("text block_start");
         assert_eq!(text_start["index"], 1);
+    }
+
+    #[test]
+    fn reasoning_details_array_decoded() {
+        // MiniMax reasoning_split=true streams reasoning as reasoning_details[].
+        let events = [
+            json!({"id": "chatcmpl-a", "model": "gpt-5", "choices": [{"index": 0, "delta": {
+                "reasoning_details": [{"text": "a"}, {"content": "b"}, "c"]
+            }}]}),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        ];
+        let out = run(&events);
+        // Elements joined with empty string, no separator → "abc".
+        let thinking_delta = out
+            .iter()
+            .find(|v| v["type"] == "content_block_delta" && v["delta"]["type"] == "thinking_delta")
+            .expect("thinking_delta");
+        assert_eq!(thinking_delta["delta"]["thinking"], "abc");
+    }
+
+    #[test]
+    fn reasoning_content_takes_priority() {
+        let events = [
+            json!({"id": "chatcmpl-a", "model": "gpt-5", "choices": [{"index": 0, "delta": {
+                "reasoning_content": "x",
+                "reasoning_details": [{"text": "y"}]
+            }}]}),
+            json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}),
+        ];
+        let out = run(&events);
+        let thinking_delta = out
+            .iter()
+            .find(|v| v["type"] == "content_block_delta" && v["delta"]["type"] == "thinking_delta")
+            .expect("thinking_delta");
+        assert_eq!(thinking_delta["delta"]["thinking"], "x");
     }
 
     #[test]
