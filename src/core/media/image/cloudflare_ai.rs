@@ -28,6 +28,7 @@ const OPTIONAL_FIELDS: &[&str] = &[
     "negative_prompt",
     "guidance",
     "seed",
+    "num_steps",
     "steps",
     "strength",
 ];
@@ -279,5 +280,27 @@ impl ImageAdapter for CloudflareAiAdapter {
         }
         let _ = empty_normalized();
         normalize_cloudflare_response(body)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cloudflare_optional_fields_include_num_steps() {
+        assert!(OPTIONAL_FIELDS.contains(&"num_steps"));
+        assert!(OPTIONAL_FIELDS.contains(&"steps"));
+        assert!(OPTIONAL_FIELDS.contains(&"strength"));
+
+        let mut target = Map::new();
+        let body = json!({
+            "prompt": "a cat",
+            "num_steps": 4,
+            "steps": 2
+        });
+        add_optional_fields_json(&mut target, &body);
+        assert_eq!(target.get("num_steps").and_then(|v| v.as_u64()), Some(4));
+        assert_eq!(target.get("steps").and_then(|v| v.as_u64()), Some(2));
     }
 }
