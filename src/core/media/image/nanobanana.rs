@@ -61,7 +61,9 @@ impl ImageAdapter for NanobananaAdapter {
 
         let mut req = json!({
             "prompt": prompt,
-            "type": if is_edit { "IMAGE_TO_IMAGE" } else { "TEXT_TO_IMAGE" },
+            // Deliberate upstream typo — NanoBanana's API keys on the
+            // misspelled string. Do NOT "fix" to IMAGE_TO_IMAGE.
+            "type": if is_edit { "IMAGETOIAMGE" } else { "TEXTTOIAMGE" },
             "numImages": request.n(),
             "image_size": ratio,
             "callBackUrl": "https://localhost/callback",
@@ -161,5 +163,40 @@ impl ImageAdapter for NanobananaAdapter {
             });
         }
         empty_normalized()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::media::image::base::ImageRequest;
+    use serde_json::json;
+
+    fn req_with_image(body: serde_json::Value) -> ImageRequest<'static> {
+        // credentials must outlive the request; use a static ProviderConnection.
+        static CREDS: std::sync::OnceLock<crate::types::ProviderConnection> =
+            std::sync::OnceLock::new();
+        let creds = CREDS.get_or_init(|| crate::types::ProviderConnection::default());
+        ImageRequest {
+            body: Box::leak(Box::new(body)),
+            model: "nanobanana",
+            credentials: creds,
+        }
+    }
+
+    #[tokio::test]
+    async fn nanobanana_type_keeps_upstream_typo() {
+        let adapter = NanobananaAdapter;
+        // No image → TEXTTOIAMGE.
+        let body = json!({ "prompt": "a cat" });
+        let req = req_with_image(body);
+        let built = adapter.build_body(&req).await.unwrap();
+        assert_eq!(built["type"], "TEXTTOIAMGE");
+
+        // With an image → IMAGETOIAMGE.
+        let body2 = json!({ "prompt": "edit", "image": "data:image/png;base64,xxx" });
+        let req2 = req_with_image(body2);
+        let built2 = adapter.build_body(&req2).await.unwrap();
+        assert_eq!(built2["type"], "IMAGETOIAMGE");
     }
 }
