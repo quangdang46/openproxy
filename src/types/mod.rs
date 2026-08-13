@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::payload_rules::{PayloadRulesConfig, SystemPromptConfig};
 
@@ -549,6 +549,11 @@ pub struct Settings {
     pub client_ping_url: String,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub client_ping_any: bool,
+    /// Per-capability model pools for the capacity adapter
+    /// (9router settingsRepo.js capacityAdapter defaults). Read at dispatch
+    /// time; PATCHed by the dashboard via `update_settings_api`.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub capacity_adapter: Value,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -608,6 +613,7 @@ impl Default for Settings {
             oidc_login_label: default_oidc_login_label(),
             client_ping_url: String::new(),
             client_ping_any: false,
+            capacity_adapter: json!({}),
             extra: BTreeMap::new(),
         }
     }

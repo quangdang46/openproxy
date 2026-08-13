@@ -2118,6 +2118,8 @@ struct UpdateSettingsRequest {
     codex_auto_ping: Option<Value>,
     /// Per-provider thinking mode map stored in settings.extra.
     provider_thinking: Option<Value>,
+    /// Per-capability model pools for the capacity adapter.
+    capacity_adapter: Option<Value>,
 }
 
 async fn update_settings_api(
@@ -2335,6 +2337,9 @@ async fn update_settings_api(
             }
             if let Some(v) = req.provider_thinking {
                 db.settings.extra.insert("providerThinking".into(), v);
+            }
+            if let Some(v) = req.capacity_adapter {
+                db.settings.capacity_adapter = v;
             }
             db.settings.normalize();
         })
