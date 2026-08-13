@@ -33,7 +33,7 @@ toml = "0.8"
 
 # JWT auth
 jsonwebtoken = "9"
-bcrypt = "0.15"
+bcrypt = "0.19"
 
 # Streaming / bytes
 bytes = "1"
