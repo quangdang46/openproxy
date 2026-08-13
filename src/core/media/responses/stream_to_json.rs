@@ -396,7 +396,16 @@ fn parse_responses_api_stream(sse: &str) -> Option<ResponsesStreamSummary> {
                 summary.status = "completed".to_string();
                 if let Some(usage) = parsed.pointer("/response/usage") {
                     let mut map = serde_json::Map::new();
-                    for key in &["input_tokens", "output_tokens", "total_tokens"] {
+                    // Keep the cache counters so the aggregation below can fold
+                    // them into prompt_tokens + prompt_tokens_details (P1-F6).
+                    for key in &[
+                        "input_tokens",
+                        "output_tokens",
+                        "total_tokens",
+                        "cache_read_input_tokens",
+                        "cached_tokens",
+                        "cache_creation_input_tokens",
+                    ] {
                         map.insert(
                             key.to_string(),
                             usage.get(*key).cloned().unwrap_or(json!(0)),
@@ -465,11 +474,44 @@ fn convert_responses_api_stream(sse: &str, fallback_model: Option<&str>) -> Opti
         .get("output_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(0);
+    // 9router sseToJsonHandler.js: `input_tokens` EXCLUDES cached tokens on
+    // cache-capable upstreams. Fold cache_read (cached_tokens) + cache_creation
+    // into the client-facing prompt_tokens and surface them in
+    // prompt_tokens_details so a client can tell a cache hit from a small prompt.
+    let cache_read = summary
+        .usage
+        .get("cache_read_input_tokens")
+        .or_else(|| summary.usage.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let cache_create = summary
+        .usage
+        .get("cache_creation_input_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let folded_input = input_tokens + cache_read + cache_create;
     let total_tokens = summary
         .usage
         .get("total_tokens")
         .and_then(|v| v.as_u64())
-        .unwrap_or_else(|| input_tokens + output_tokens);
+        .unwrap_or_else(|| folded_input + output_tokens);
+
+    // prompt_tokens_details: only when a cache counter is non-zero.
+    let mut usage_json = json!({
+        "prompt_tokens": folded_input,
+        "completion_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    });
+    if cache_read > 0 || cache_create > 0 {
+        let mut details = serde_json::Map::new();
+        if cache_read > 0 {
+            details.insert("cached_tokens".into(), json!(cache_read));
+        }
+        if cache_create > 0 {
+            details.insert("cache_creation_tokens".into(), json!(cache_create));
+        }
+        usage_json["prompt_tokens_details"] = Value::Object(details);
+    }
 
     let model = fallback_model.unwrap_or("unknown");
     let now = std::time::SystemTime::now()
@@ -490,11 +532,7 @@ fn convert_responses_api_stream(sse: &str, fallback_model: Option<&str>) -> Opti
             },
             "finish_reason": if summary.status == "completed" { "stop" } else { "error" },
         }],
-        "usage": {
-            "prompt_tokens": input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": total_tokens,
-        },
+        "usage": usage_json,
     }))
 }
 
@@ -658,5 +696,49 @@ mod tests {
     #[test]
     fn test_sse_stream_to_json_empty() {
         assert!(sse_stream_to_json(b"", None).is_none());
+    }
+
+    #[test]
+    fn test_cached_tokens_folded_into_prompt_tokens_with_details() {
+        // 9router sseToJsonHandler.js: cache-capable upstreams exclude cached
+        // tokens from input_tokens. Fold cache_read + cache_creation into
+        // prompt_tokens and surface prompt_tokens_details.
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_cached\",\"created_at\":1712345678}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_cached\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15,\"cache_read_input_tokens\":20,\"cache_creation_input_tokens\":3}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let result = sse_stream_to_json(sse.as_bytes(), Some("gpt-4o")).unwrap();
+        // 10 (input) + 20 (cache_read) + 3 (cache_creation) = 33.
+        assert_eq!(result["usage"]["prompt_tokens"], 33);
+        assert_eq!(result["usage"]["completion_tokens"], 5);
+        // total_tokens keeps the upstream value (9router keeps upstream total).
+        assert_eq!(result["usage"]["total_tokens"], 15);
+        // prompt_tokens_details surfaces the cache counters.
+        assert_eq!(
+            result["usage"]["prompt_tokens_details"]["cached_tokens"],
+            20
+        );
+        assert_eq!(
+            result["usage"]["prompt_tokens_details"]["cache_creation_tokens"],
+            3
+        );
+    }
+
+    #[test]
+    fn test_no_cache_counters_no_details() {
+        // No cache counters → no prompt_tokens_details, prompt_tokens unchanged.
+        let sse = concat!(
+            "event: response.created\n",
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_nocache\",\"created_at\":1712345678}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_nocache\",\"status\":\"completed\",\"usage\":{\"input_tokens\":10,\"output_tokens\":5,\"total_tokens\":15}}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let result = sse_stream_to_json(sse.as_bytes(), Some("gpt-4o")).unwrap();
+        assert_eq!(result["usage"]["prompt_tokens"], 10);
+        assert!(result["usage"].get("prompt_tokens_details").is_none());
     }
 }
