@@ -59,20 +59,26 @@ fn persist_secret_to(path: PathBuf, secret: &str) {
 ///    (or `~/.openproxy/api_key_secret`). Generated on first use so there is
 ///    never a well-known fallback; the persisted value keeps existing API
 ///    keys valid across restarts.
+/// Pure resolution: env var wins, then persisted file, then a fresh random
+/// secret. Testable without the process-wide cache.
+fn resolve_api_key_secret(env: Option<&str>, path: &std::path::Path) -> String {
+    if let Some(v) = env {
+        if !v.trim().is_empty() {
+            return v.to_string();
+        }
+    }
+    if let Some(persisted) = read_persisted_secret_from(path.to_path_buf()) {
+        return persisted;
+    }
+    let fresh = generate_random_secret();
+    persist_secret_to(path.to_path_buf(), &fresh);
+    fresh
+}
+
 pub fn api_key_secret() -> &'static str {
     static SECRET: OnceLock<String> = OnceLock::new();
     SECRET.get_or_init(|| {
-        if let Ok(v) = std::env::var("API_KEY_SECRET") {
-            if !v.trim().is_empty() {
-                return v;
-            }
-        }
-        if let Some(persisted) = read_persisted_secret_from(api_key_secret_path()) {
-            return persisted;
-        }
-        let fresh = generate_random_secret();
-        persist_secret_to(api_key_secret_path(), &fresh);
-        fresh
+        resolve_api_key_secret(std::env::var("API_KEY_SECRET").ok().as_deref(), &api_key_secret_path())
     })
 }
 
@@ -102,21 +108,33 @@ fn generate_random_password() -> String {
 ///    Generated on first use so there is never a well-known default; the
 ///    persisted value keeps the same password valid across restarts until
 ///    the operator sets a real one (see [`dashboard_password_is_ephemeral`]).
-pub fn dashboard_initial_password() -> String {
-    if let Ok(v) = std::env::var("INITIAL_PASSWORD") {
+/// Pure resolution: env var wins, then the persisted generated password,
+/// then a fresh random one. Testable without the process-wide cache.
+fn resolve_dashboard_initial_password(
+    env: Option<&str>,
+    path: &std::path::Path,
+) -> String {
+    if let Some(v) = env {
         if !v.trim().is_empty() {
-            return v;
+            return v.to_string();
         }
     }
+    if let Some(persisted) = read_persisted_secret_from(path.to_path_buf()) {
+        return persisted;
+    }
+    let fresh = generate_random_password();
+    persist_secret_to(path.to_path_buf(), &fresh);
+    fresh
+}
+
+pub fn dashboard_initial_password() -> String {
     static PASSWORD: OnceLock<String> = OnceLock::new();
     PASSWORD
         .get_or_init(|| {
-            if let Some(persisted) = read_persisted_secret_from(initial_password_path()) {
-                return persisted;
-            }
-            let fresh = generate_random_password();
-            persist_secret_to(initial_password_path(), &fresh);
-            fresh
+            resolve_dashboard_initial_password(
+                std::env::var("INITIAL_PASSWORD").ok().as_deref(),
+                &initial_password_path(),
+            )
         })
         .clone()
 }
@@ -241,12 +259,20 @@ fn generate_crc(machine_id: &str, key_id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use super::{
         api_key_secret, api_key_secret_path, dashboard_initial_password,
         dashboard_password_is_ephemeral, generate_api_key_with_machine, generate_crc,
         generate_random_secret, initial_password_path, parse_api_key, persist_secret_to,
-        read_persisted_secret_from, reset_dashboard_initial_password,
+        read_persisted_secret_from, reset_dashboard_initial_password, resolve_api_key_secret,
+        resolve_dashboard_initial_password,
     };
+
+    /// Serializes tests that mutate the process-global `DATA_DIR` /
+    /// `INITIAL_PASSWORD` / `API_KEY_SECRET` env vars. Without this the
+    /// parallel test harness races the temp-dir writes and the persistence
+    /// assertions fail intermittently.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn parse_api_key_accepts_new_and_old_formats() {
@@ -302,6 +328,7 @@ mod tests {
         assert_ne!(secret, "endpoint-proxy-api-key-secret");
 
         // Persist/read round trip (in a temp dir via DATA_DIR).
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::set_var("DATA_DIR", temp.path());
         persist_secret_to(api_key_secret_path(), &secret);
@@ -313,14 +340,26 @@ mod tests {
 
     #[test]
     fn api_key_secret_prefers_env_over_persisted() {
-        // Env var wins; no file access needed.
-        std::env::set_var("API_KEY_SECRET", "env-var-secret");
-        assert_eq!(api_key_secret(), "env-var-secret");
-        std::env::remove_var("API_KEY_SECRET");
+        // The resolver (not the OnceLock-cached api_key_secret()) must prefer
+        // the env var over a persisted file.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("api_key_secret");
+        persist_secret_to(path.clone(), "persisted-value");
+        assert_eq!(
+            resolve_api_key_secret(Some("env-var-secret"), &path),
+            "env-var-secret"
+        );
+        // Without env, the persisted value wins.
+        assert_eq!(
+            resolve_api_key_secret(None, &path),
+            "persisted-value"
+        );
     }
 
     #[test]
     fn dashboard_password_is_random_and_persists() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::remove_var("INITIAL_PASSWORD");
         std::env::set_var("DATA_DIR", temp.path());
@@ -340,14 +379,26 @@ mod tests {
 
     #[test]
     fn dashboard_password_prefers_env_var() {
-        std::env::set_var("INITIAL_PASSWORD", "custom-secret");
-        assert_eq!(dashboard_initial_password(), "custom-secret");
-        assert!(!dashboard_password_is_ephemeral());
-        std::env::remove_var("INITIAL_PASSWORD");
+        // The resolver (not the OnceLock-cached dashboard_initial_password())
+        // must prefer the env var over a persisted file.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("initial_password");
+        persist_secret_to(path.clone(), "persisted-password");
+        assert_eq!(
+            resolve_dashboard_initial_password(Some("custom-secret"), &path),
+            "custom-secret"
+        );
+        // Without env, the persisted value wins.
+        assert_eq!(
+            resolve_dashboard_initial_password(None, &path),
+            "persisted-password"
+        );
     }
 
     #[test]
     fn reset_dashboard_initial_password_clears_generated_value() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().expect("tempdir");
         std::env::remove_var("INITIAL_PASSWORD");
         std::env::set_var("DATA_DIR", temp.path());
