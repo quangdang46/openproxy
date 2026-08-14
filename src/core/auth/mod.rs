@@ -104,14 +104,14 @@ fn generate_random_password() -> String {
 
 /// Resolves the dashboard initial password.
 ///
-/// Resolution order (cached for the process lifetime):
+/// Resolution order:
 /// 1. `INITIAL_PASSWORD` environment variable, when set.
 /// 2. A per-install random password persisted at `$DATA_DIR/initial_password`.
 ///    Generated on first use so there is never a well-known default; the
 ///    persisted value keeps the same password valid across restarts until
-///    the operator sets a real one (see [`dashboard_password_is_ephemeral`]).
+///    the operator sets a real one or runs `openproxy auth reset-password`.
 /// Pure resolution: env var wins, then the persisted generated password,
-/// then a fresh random one. Testable without the process-wide cache.
+/// then a fresh random one.
 fn resolve_dashboard_initial_password(env: Option<&str>, path: &std::path::Path) -> String {
     if let Some(v) = env {
         if !v.trim().is_empty() {
@@ -126,26 +126,29 @@ fn resolve_dashboard_initial_password(env: Option<&str>, path: &std::path::Path)
     fresh
 }
 
+/// Resolves the dashboard initial password.
+///
+/// Reads from disk on every call (no process-wide cache) so that:
+/// - `openproxy auth reset-password` from another process takes effect
+///   immediately on the running server (a cached value would keep the old,
+///   possibly leaked password valid until restart);
+/// - a fresh install mints the password exactly once and the startup banner
+///   can display it on first boot.
 pub fn dashboard_initial_password() -> String {
-    static PASSWORD: OnceLock<String> = OnceLock::new();
-    PASSWORD
-        .get_or_init(|| {
-            resolve_dashboard_initial_password(
-                std::env::var("INITIAL_PASSWORD").ok().as_deref(),
-                &initial_password_path(),
-            )
-        })
-        .clone()
+    resolve_dashboard_initial_password(
+        std::env::var("INITIAL_PASSWORD").ok().as_deref(),
+        &initial_password_path(),
+    )
 }
 
-/// True when the dashboard is using the generated initial password rather
-/// than an operator-set `INITIAL_PASSWORD` or a stored bcrypt hash.
-///
-/// Used to (a) surface the password in the startup banner so it can be
-/// discovered exactly once, and (b) decide whether the operator can reset
-/// it back to a freshly generated value.
+/// True when the dashboard is NOT using an operator-set `INITIAL_PASSWORD`
+/// env var. Combined with "no stored bcrypt hash" (see
+/// [`has_stored_password_hash`]), this identifies a fresh install running on
+/// the generated initial password — i.e. the password is "ephemeral": minted
+/// on first use, replaced once the operator sets a real one, and resettable
+/// via `openproxy auth reset-password`.
 pub fn dashboard_password_is_ephemeral() -> bool {
-    std::env::var("INITIAL_PASSWORD").is_err() && initial_password_path().exists()
+    std::env::var("INITIAL_PASSWORD").is_err()
 }
 
 /// Delete the persisted generated password so the next boot generates a
@@ -402,12 +405,34 @@ mod tests {
         std::env::remove_var("INITIAL_PASSWORD");
         std::env::set_var("DATA_DIR", temp.path());
 
-        // Persist directly: `dashboard_initial_password()` is OnceLock-cached
-        // process-wide, so a prior test's DATA_DIR would leak into this one.
+        // Persist directly so the reset target exists independent of any prior
+        // test's generated value.
         let secret = generate_random_secret();
         persist_secret_to(initial_password_path(), &secret);
         assert!(dashboard_password_is_ephemeral());
         assert!(reset_dashboard_initial_password());
+
+        std::env::remove_var("DATA_DIR");
+    }
+
+    #[test]
+    fn reset_takes_effect_immediately_no_cache() {
+        // Regression: `dashboard_initial_password()` used to cache the value
+        // in a process-wide OnceLock, so after `openproxy auth reset-password`
+        // the running server kept accepting the old (possibly leaked) password
+        // until restart. It must now read from disk on every call.
+        let _guard = ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::env::remove_var("INITIAL_PASSWORD");
+        std::env::set_var("DATA_DIR", temp.path());
+
+        let before = dashboard_initial_password();
+        assert!(reset_dashboard_initial_password());
+        let after = dashboard_initial_password();
+        assert_ne!(
+            before, after,
+            "reset must invalidate the previously generated password"
+        );
 
         std::env::remove_var("DATA_DIR");
     }
