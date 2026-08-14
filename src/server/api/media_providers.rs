@@ -852,6 +852,12 @@ async fn get_tts_voices(
             }
         }
         "local-device" => Json(serde_json::json!({ "voices": [], "languages": [], "byLang": {} })).into_response(),
+        // Gemini prebuilt voices (9router fetchGeminiVoices) — static table.
+        "gemini" => {
+            let voices = crate::core::media::tts::gemini::gemini_voices();
+            let by_lang = serde_json::json!({ "en": { "voices": voices, "languages": [] } });
+            Json(serde_json::json!({ "voices": voices, "byLang": by_lang })).into_response()
+        }
         _ => (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": format!("Provider '{}' does not support voice listing", provider) }))).into_response(),
     }
 }
