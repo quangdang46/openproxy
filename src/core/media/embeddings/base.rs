@@ -583,4 +583,23 @@ mod tests {
             Some("Endpoint Proxy")
         );
     }
+
+    #[test]
+    fn jina_embedding_endpoint_matches() {
+        // 9router embeddingProviders/openai.js ENDPOINTS: jina-ai →
+        // https://api.jina.ai/v1/embeddings (no override needed).
+        assert_eq!(JINA_AI.endpoint, "https://api.jina.ai/v1/embeddings");
+        // The adapter's build_url returns the endpoint verbatim.
+        let body = serde_json::json!({"input": "hi"});
+        let creds = ProviderConnection::default();
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "jina-embeddings-v3",
+            credentials: &creds,
+        };
+        assert_eq!(
+            JINA_AI.build_url(&req).unwrap(),
+            "https://api.jina.ai/v1/embeddings"
+        );
+    }
 }
