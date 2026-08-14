@@ -15,6 +15,7 @@
 pub mod export;
 pub mod import;
 pub mod migrations;
+pub mod patch;
 pub mod repo;
 pub mod schema;
 

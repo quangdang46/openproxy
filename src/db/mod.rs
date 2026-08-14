@@ -241,24 +241,39 @@ impl Db {
         Arc::new(snapshot.model_aliases.clone())
     }
 
-    /// Full DB rewrite — serialises the entire `AppDb` and re-imports it
-    /// into SQLite. Prefer [`update_settings`] when only the settings have
-    /// changed to avoid unnecessary full-database I/O.
+    /// Incremental write — applies only the difference between the current
+    /// snapshot and the mutated one to SQLite (H19). Unchanged rows are never
+    /// rewritten, and the append-only `usageHistory`/`usageDaily`/
+    /// `requestDetails` tables are left untouched (previously `import_db`
+    /// wiped them on every config change even though the AppDb payload never
+    /// contains usage data).
+    ///
+    /// Prefer [`update_settings`] when only the settings have changed to
+    /// avoid the diff overhead entirely.
     pub async fn update<F>(&self, updater: F) -> anyhow::Result<Arc<AppDb>>
     where
         F: FnOnce(&mut AppDb),
     {
         let _guard = self.write_lock.write().await;
-        let mut next = (*self.snapshot()).clone();
+        let prev = (*self.snapshot()).clone();
+        let mut next = prev.clone();
         updater(&mut next);
         next.normalize();
-        // Persist to SQLite — the sole runtime store.
-        let json_val = serde_json::to_value(&next)?;
-        let sq = self.sqlite.clone();
-        tokio::task::spawn_blocking(move || crate::db::sqlite::import::import_db(&sq, &json_val))
+
+        if next != prev {
+            let sq = self.sqlite.clone();
+            let prev = prev.clone();
+            let next = next.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                sq.with_transaction(|conn| {
+                    crate::db::sqlite::patch::apply_app_db_diff(conn, &prev, &next)
+                })
+                .map_err(|e| anyhow::anyhow!("SQLite incremental write failed: {e}"))?;
+                Ok(())
+            })
             .await
-            .map_err(|e| anyhow::anyhow!("spawn_blocking for update: {e}"))?
-            .map_err(|e| anyhow::anyhow!("SQLite write failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("spawn_blocking for update: {e}"))??;
+        }
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
         Ok(next)

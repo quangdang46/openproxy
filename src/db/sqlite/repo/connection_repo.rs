@@ -15,7 +15,9 @@ const COLUMNS: &str =
     "id, provider, authType, name, email, priority, isActive, createdAt, updatedAt";
 
 fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConnection> {
-    let data_str: String = row.get(8)?;
+    // SELECT {COLUMNS}, data — 9 indexed columns at 0..8, then the `data`
+    // blob at index 9.
+    let data_str: String = row.get(9)?;
     let mut data: Value =
         serde_json::from_str(&data_str).unwrap_or(Value::Object(Default::default()));
 
@@ -40,16 +42,7 @@ fn row_to_connection(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProviderConnec
     }
 
     let encryption_key = crate::db::crypto::encryption_key().unwrap_or_default();
-    let mut conn = ProviderConnection::default();
-    let data_str = serde_json::to_string(&data).unwrap_or_default();
-    let parsed: Value = serde_json::from_str(&data_str).unwrap_or_default();
-    let mut app_db = crate::types::AppDb::default();
-    app_db.provider_connections.push(conn.clone());
-    app_db.provider_connections = vec![];
-    // Deserialize from JSON
-    let json_val = serde_json::to_value(&data).unwrap_or_default();
-    crate::db::crypto::decrypt_connection(&mut conn, &encryption_key);
-    // We need a simpler approach — just build from the row directly
+    // Build the row from the indexed columns directly.
     let mut c = ProviderConnection {
         id: row.get(0)?,
         provider: row.get(1)?,
@@ -141,6 +134,13 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<Provide
     rows.next().transpose()
 }
 
+/// `is_active` is NOT NULL in the schema. Callers (CLI/server) frequently
+/// leave it unset on newly-created connections; default to active (1), matching
+/// the behaviour of `import_db` (`item.isActive ... unwrap_or(1)`).
+fn is_active_value(c: &ProviderConnection) -> i32 {
+    c.is_active.map(|v| v as i32).unwrap_or(1)
+}
+
 pub fn create(conn: &Connection, c: &ProviderConnection) -> rusqlite::Result<()> {
     let encryption_key = crate::db::crypto::encryption_key().unwrap_or_default();
     let data = connection_to_data(c, &encryption_key);
@@ -149,7 +149,7 @@ pub fn create(conn: &Connection, c: &ProviderConnection) -> rusqlite::Result<()>
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
         params![
             c.id, c.provider, c.auth_type, c.name, c.email,
-            c.priority.map(|v| v as i64), c.is_active.map(|v| v as i32),
+            c.priority.map(|v| v as i64), is_active_value(c),
             data, c.created_at.as_deref().unwrap_or(""), c.updated_at.as_deref().unwrap_or(""),
         ],
     )?;
@@ -163,7 +163,7 @@ pub fn update(conn: &Connection, c: &ProviderConnection) -> rusqlite::Result<()>
         "UPDATE providerConnections SET provider=?2, authType=?3, name=?4, email=?5, priority=?6, isActive=?7, data=?8, updatedAt=?9 WHERE id=?1",
         params![
             c.id, c.provider, c.auth_type, c.name, c.email,
-            c.priority.map(|v| v as i64), c.is_active.map(|v| v as i32),
+            c.priority.map(|v| v as i64), is_active_value(c),
             data, c.updated_at.as_deref().unwrap_or(""),
         ],
     )?;

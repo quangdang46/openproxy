@@ -23,7 +23,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ProxyPo
 pub fn create(conn: &Connection, p: &ProxyPool) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO proxyPools(id, isActive, testStatus, data, createdAt, updatedAt) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![p.id, p.is_active.map(|v| v as i32), p.test_status, pool_to_data(p), p.created_at.as_deref().unwrap_or(""), p.updated_at.as_deref().unwrap_or("")],
+        params![p.id, p.is_active.map(|v| v as i32).unwrap_or(1), p.test_status, pool_to_data(p), p.created_at.as_deref().unwrap_or(""), p.updated_at.as_deref().unwrap_or("")],
     )?;
     Ok(())
 }
@@ -33,7 +33,7 @@ pub fn update(conn: &Connection, p: &ProxyPool) -> rusqlite::Result<()> {
         "UPDATE proxyPools SET isActive=?2, testStatus=?3, data=?4, updatedAt=?5 WHERE id=?1",
         params![
             p.id,
-            p.is_active.map(|v| v as i32),
+            p.is_active.map(|v| v as i32).unwrap_or(1),
             p.test_status,
             pool_to_data(p),
             p.updated_at.as_deref().unwrap_or("")
