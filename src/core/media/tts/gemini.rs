@@ -23,6 +23,55 @@ const SAMPLE_RATE: u32 = 24_000;
 const CHANNELS: u16 = 1;
 const BITS_PER_SAMPLE: u16 = 16;
 
+/// The 30 Gemini prebuilt voices, ported verbatim from 9router
+/// `open-sse/handlers/ttsProviders/gemini.js` PREBUILT_VOICES (lines 93-124).
+/// Each maps to `{voice_id, name, labels:{language, gender}}` per
+/// `fetchGeminiVoices` (lines 126-128).
+pub fn gemini_voices() -> Vec<Value> {
+    const VOICES: &[(&str, &str)] = &[
+        ("Zephyr", "Female"),
+        ("Puck", "Male"),
+        ("Charon", "Male"),
+        ("Kore", "Female"),
+        ("Fenrir", "Male"),
+        ("Leda", "Female"),
+        ("Orus", "Male"),
+        ("Aoede", "Female"),
+        ("Callirrhoe", "Female"),
+        ("Autonoe", "Female"),
+        ("Enceladus", "Male"),
+        ("Iapetus", "Male"),
+        ("Umbriel", "Male"),
+        ("Algieba", "Male"),
+        ("Despina", "Female"),
+        ("Erinome", "Female"),
+        ("Algenib", "Male"),
+        ("Rasalgethi", "Male"),
+        ("Laomedeia", "Female"),
+        ("Achernar", "Female"),
+        ("Alnilam", "Male"),
+        ("Schedar", "Male"),
+        ("Gacrux", "Female"),
+        ("Pulcherrima", "Female"),
+        ("Achird", "Male"),
+        ("Zubenelgenubi", "Male"),
+        ("Vindemiatrix", "Female"),
+        ("Sadachbia", "Male"),
+        ("Sadaltager", "Male"),
+        ("Sulafat", "Female"),
+    ];
+    VOICES
+        .iter()
+        .map(|(id, gender)| {
+            json!({
+                "voice_id": id,
+                "name": id,
+                "labels": { "language": "en", "gender": gender },
+            })
+        })
+        .collect()
+}
+
 fn parse_model_voice(input: &str) -> (String, String) {
     if input.is_empty() {
         return (DEFAULT_MODEL.to_string(), DEFAULT_VOICE.to_string());
@@ -175,5 +224,32 @@ mod tests {
         let (model, voice) = parse_model_voice("Kore");
         assert_eq!(model, DEFAULT_MODEL);
         assert_eq!(voice, "Kore");
+    }
+
+    #[test]
+    fn gemini_voices_returns_30_prebuilt() {
+        let voices = gemini_voices();
+        assert_eq!(voices.len(), 30, "exactly 30 prebuilt voices");
+
+        let first = &voices[0];
+        assert_eq!(first["voice_id"], "Zephyr");
+        assert_eq!(first["name"], "Zephyr");
+        assert_eq!(first["labels"]["language"], "en");
+        assert_eq!(first["labels"]["gender"], "Female");
+
+        // Spot-check genders per the JS table.
+        let by_id: std::collections::HashMap<&str, &Value> = voices
+            .iter()
+            .map(|v| (v["voice_id"].as_str().unwrap(), v))
+            .collect();
+        assert_eq!(by_id["Kore"]["labels"]["gender"], "Female");
+        assert_eq!(by_id["Puck"]["labels"]["gender"], "Male");
+        assert_eq!(by_id["Sulafat"]["labels"]["gender"], "Female");
+        assert_eq!(by_id["Enceladus"]["labels"]["gender"], "Male");
+        for v in &voices {
+            assert_eq!(v["labels"]["language"], "en");
+            let g = v["labels"]["gender"].as_str().unwrap();
+            assert!(g == "Female" || g == "Male");
+        }
     }
 }

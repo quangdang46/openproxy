@@ -13,7 +13,7 @@ mod aws_polly;
 pub mod base;
 mod edge_tts;
 mod elevenlabs;
-mod gemini;
+pub mod gemini;
 mod generic_formats;
 mod google_tts;
 pub mod handler;
