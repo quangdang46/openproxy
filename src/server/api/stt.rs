@@ -836,14 +836,8 @@ pub fn build_deepgram_url(
         // `"true"` for backward compatibility. Once the upstream JS port wires
         // these through, the fallback value should be derived from the
         // provider-level config rather than hardcoded here.
-        q.append_pair(
-            "smart_format",
-            smart_format.unwrap_or("true"),
-        );
-        q.append_pair(
-            "punctuate",
-            punctuate.unwrap_or("true"),
-        );
+        q.append_pair("smart_format", smart_format.unwrap_or("true"));
+        q.append_pair("punctuate", punctuate.unwrap_or("true"));
         match language {
             Some(lang) if !lang.trim().is_empty() => {
                 q.append_pair("language", lang.trim());
@@ -1245,7 +1239,13 @@ mod tests {
 
     #[test]
     fn deepgram_url_uses_smart_format_and_detects_language_when_unset() {
-        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", None, None, None);
+        let url = build_deepgram_url(
+            "https://api.deepgram.com/v1/listen",
+            "nova-3",
+            None,
+            None,
+            None,
+        );
         assert!(url.contains("model=nova-3"));
         assert!(url.contains("smart_format=true"));
         assert!(url.contains("punctuate=true"));
@@ -1256,7 +1256,13 @@ mod tests {
 
     #[test]
     fn deepgram_url_uses_explicit_language_when_set() {
-        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", Some("en"), None, None);
+        let url = build_deepgram_url(
+            "https://api.deepgram.com/v1/listen",
+            "nova-3",
+            Some("en"),
+            None,
+            None,
+        );
         assert!(url.contains("&language=en") || url.contains("?language=en"));
         assert!(!url.contains("detect_language=true"));
     }
@@ -1276,7 +1282,13 @@ mod tests {
 
     #[test]
     fn deepgram_url_defaults_smart_format_punctuate_to_true_when_none() {
-        let url = build_deepgram_url("https://api.deepgram.com/v1/listen", "nova-3", None, None, None);
+        let url = build_deepgram_url(
+            "https://api.deepgram.com/v1/listen",
+            "nova-3",
+            None,
+            None,
+            None,
+        );
         assert!(url.contains("&smart_format=true"));
         assert!(url.contains("&punctuate=true"));
     }
@@ -1443,5 +1455,49 @@ mod tests {
             cfg.base_url,
             "https://api.openai.com/v1/audio/transcriptions"
         );
+    }
+
+    #[test]
+    fn stt_openai_passthrough_preserves_content_type() {
+        // 9router sttCore.js:150-153: the raw body + upstream content-type are
+        // echoed unchanged (never re-parsed/re-serialized). ok_passthrough must
+        // copy the content-type and pass the body verbatim.
+        let body = "{\"text\":\"Hello world\"}".to_string();
+
+        // JSON content-type.
+        let resp = ok_passthrough(Some("application/json".into()), body.clone());
+        let DispatchResult::Ok(resp) = resp else {
+            panic!("expected Ok");
+        };
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+
+        // Non-JSON content-type (SRT/VTT) must be preserved too.
+        let resp = ok_passthrough(Some("application/x-subrip".into()), body.clone());
+        let DispatchResult::Ok(resp) = resp else {
+            panic!("expected Ok");
+        };
+        assert_eq!(
+            resp.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-subrip")
+        );
+
+        // Missing content-type → a content-type is always set (never dropped).
+        let resp = ok_passthrough(None, body.clone());
+        let DispatchResult::Ok(resp) = resp else {
+            panic!("expected Ok");
+        };
+        assert!(resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some());
     }
 }
