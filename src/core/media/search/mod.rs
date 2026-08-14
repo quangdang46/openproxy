@@ -10,6 +10,7 @@
 //!   searchapi, youcom, searxng.
 
 mod base;
+mod chat_search;
 pub mod handler;
 mod providers;
 
