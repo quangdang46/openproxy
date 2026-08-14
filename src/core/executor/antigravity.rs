@@ -24,10 +24,11 @@ use bytes::Bytes;
 use hyper::http;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Map, Value};
+use sha2::{Digest, Sha256};
 
 use crate::core::config::app_constants::{
-    ag_chat_user_agent, cloud_code_api, load_code_assist_metadata, AG_DEFAULT_TOOLS,
-    INTERNAL_REQUEST_HEADER_NAME, INTERNAL_REQUEST_HEADER_VALUE,
+    ag_chat_user_agent, cloud_code_api, load_code_assist_metadata, INTERNAL_REQUEST_HEADER_NAME,
+    INTERNAL_REQUEST_HEADER_VALUE,
 };
 use crate::core::proxy::ProxyTarget;
 use crate::core::utils::project_id_cache;
@@ -42,13 +43,136 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 /// Ported from 9router v0.5.45 (fix(gemini): daily-cloudcode host switch).
 pub const ANTIGRAVITY_BASE_URL: &str = "https://daily-cloudcode-pa.googleapis.com";
 
-/// Antigravity caps maxOutputTokens at 16k regardless of what the caller
-/// asks for; matches the upstream JS implementation.
-const MAX_ANTIGRAVITY_OUTPUT_TOKENS: u64 = 16_384;
+/// Antigravity caps maxOutputTokens at 64k regardless of what the caller
+/// asks for; matches the upstream JS `MAX_ANTIGRAVITY_OUTPUT_TOKENS` (antigravity.js:21).
+const MAX_ANTIGRAVITY_OUTPUT_TOKENS: u64 = 64_000;
 
-/// Suffix appended to every client tool name when forwarding to Antigravity.
-/// Mirrors 9router's `cloakTools()` behaviour.
-const ANTIGRAVITY_TOOL_SUFFIX: &str = "_ide";
+/// Regex for a client-supplied IDE request id that we should preserve
+/// (`agent/{conversation}/{timestamp}/{trajectory}/{step}`). Mirrors JS
+/// `ANTIGRAVITY_IDE_REQUEST_ID_RE`.
+fn matches_ide_request_id(request_id: &str) -> bool {
+    let mut parts = request_id.split('/');
+    match (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) {
+        (Some("agent"), Some(_), Some(ts), Some(_), Some(_), None) => {
+            ts.chars().all(|c| c.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+/// Deterministic UUID v5-style from a seed string, matching JS
+/// `uuidFromSeed` (antigravity.js:91-97): SHA-256(seed) → first 16 bytes →
+/// set version (5) and variant (RFC 4122) bits → hyphenated hex.
+fn uuid_from_seed(seed: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(seed.as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x50; // version 5
+    bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
+}
+
+/// Build the `requestId` for the Antigravity request envelope. Mirrors JS
+/// `buildIdeRequestId` (antigravity.js:99-110). Preserves a client-supplied
+/// `agent/...` id; otherwise derives one from the session.
+fn build_ide_request_id(
+    body: &Value,
+    request: &Value,
+    credentials: &ProviderConnection,
+    model: &str,
+    request_type: &str,
+) -> String {
+    let client_id = body.get("requestId").and_then(Value::as_str).unwrap_or("");
+    if matches_ide_request_id(client_id) {
+        return client_id.to_string();
+    }
+
+    let session_id = request
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            body.get("request")
+                .and_then(|r| r.get("sessionId"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| credentials.email.as_deref().filter(|s| !s.is_empty()))
+        .unwrap_or("anonymous");
+
+    let conversation_id = uuid_from_seed(&format!("antigravity:conversation:{session_id}"));
+    let trajectory_id = uuid_from_seed(&format!(
+        "antigravity:trajectory:{session_id}:{model}:{request_type}"
+    ));
+    let content_count = request
+        .get("contents")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(1);
+    // JS `Math.max(1, contentCount * 2 - 1)` — guard the underflow when
+    // contentCount is 0 (i64 so the -1 stays in range).
+    let step = std::cmp::max(1, (content_count as i64) * 2 - 1);
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("agent/{conversation_id}/{now_ms}/{trajectory_id}/{step}")
+}
+
+/// Parse the aspect-ratio config for an image model from its name suffix.
+/// Mirrors JS `parseImageConfig` (antigravity.js:62-88): `16x9` → "16:9",
+/// `1024x768` → gcd-reduced "4:3", default "1:1".
+fn parse_image_config(model: &str) -> Value {
+    let mut aspect_ratio = "1:1".to_string();
+    if let Some(pos) = model.rfind('-') {
+        let suffix = &model[pos + 1..];
+        let parts: Vec<&str> = suffix.splitn(2, 'x').collect();
+        if parts.len() == 2
+            && !parts[0].is_empty()
+            && !parts[1].is_empty()
+            && parts[0].chars().all(|c| c.is_ascii_digit())
+            && parts[1].chars().all(|c| c.is_ascii_digit())
+        {
+            let w: u64 = parts[0].parse().unwrap_or(0);
+            let h: u64 = parts[1].parse().unwrap_or(0);
+            if w > 0 && h > 0 {
+                if w <= 16 && h <= 16 {
+                    aspect_ratio = format!("{w}:{h}");
+                } else {
+                    let d = gcd(w, h);
+                    aspect_ratio = format!("{}:{}", w / d, h / d);
+                }
+            }
+        }
+    }
+    json!({ "aspectRatio": aspect_ratio })
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
 
 #[derive(Clone)]
 pub struct AntigravityExecutor {
@@ -339,98 +463,6 @@ impl AntigravityExecutor {
         s.chars().take(64).collect()
     }
 
-    /// Port of 9router's `cloakTools()`:
-    /// 1. Append `ANTIGRAVITY_TOOL_SUFFIX` to every existing function name
-    ///    *before* sanitization runs.
-    /// 2. Inject every name in [`app_constants::AG_DEFAULT_TOOLS`] as a
-    ///    decoy function declaration (with `_ide` suffix applied and the
-    ///    "This tool is currently unavailable" description).
-    /// 3. Defensive dedup: ensure every name in
-    ///    [`app_constants::AG_DEFAULT_TOOLS`] is present (skip if step 2
-    ///    already injected it).
-    ///
-    /// Operates on the raw `tools` array (shape: `[{functionDeclarations: ...}]`)
-    /// as it appears in the inbound request body. Caller is expected to run
-    /// this **before** the sanitize+merge loop so the `_ide` suffix is treated
-    /// as part of the name.
-    fn cloak_tools(tools: &mut Value) {
-        let Some(groups) = tools.as_array_mut() else {
-            return;
-        };
-
-        // Make sure at least one group exists so we have somewhere to inject.
-        if groups.is_empty() {
-            groups.push(json!({"functionDeclarations": []}));
-        }
-
-        // Collect every existing function name (lower-cased) so we can dedupe
-        // AG_DEFAULT_TOOLS entries without scanning twice.
-        let mut existing_names: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
-
-        // Step 1 + collect existing names.
-        for group in groups.iter_mut() {
-            let Some(decls) = group
-                .get_mut("functionDeclarations")
-                .and_then(|v| v.as_array_mut())
-            else {
-                continue;
-            };
-            for decl in decls.iter_mut() {
-                let Some(obj) = decl.as_object_mut() else {
-                    continue;
-                };
-                let raw_name = obj
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                if !raw_name.is_empty() {
-                    let new_name = format!("{raw_name}{ANTIGRAVITY_TOOL_SUFFIX}");
-                    existing_names.insert(new_name.to_ascii_lowercase());
-                    obj.insert("name".into(), Value::String(new_name));
-                }
-            }
-        }
-
-        // Make sure the first group has a `functionDeclarations` array.
-        let first_group_has_decls = groups[0]
-            .get("functionDeclarations")
-            .map(|v| v.is_array())
-            .unwrap_or(false);
-        if !first_group_has_decls {
-            if let Some(obj) = groups[0].as_object_mut() {
-                obj.insert("functionDeclarations".into(), Value::Array(Vec::new()));
-            }
-        }
-        let first_decls = groups[0]
-            .get_mut("functionDeclarations")
-            .and_then(|v| v.as_array_mut())
-            .expect("functionDeclarations array just ensured");
-
-        // Step 2 + 3: inject every AG_DEFAULT_TOOLS entry as a decoy
-        // declaration (with the `_ide` suffix applied). The `BTreeSet`
-        // iteration is deterministic.
-        for base_name in AG_DEFAULT_TOOLS.iter() {
-            let cloaked = format!("{base_name}{ANTIGRAVITY_TOOL_SUFFIX}");
-            if existing_names.contains(&cloaked.to_ascii_lowercase()) {
-                continue;
-            }
-            first_decls.push(json!({
-                "name": cloaked,
-                "description": "This tool is currently unavailable",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "reason": {"type": "string", "description": "Brief explanation"}
-                    },
-                    "required": ["reason"]
-                }
-            }));
-            existing_names.insert(cloaked.to_ascii_lowercase());
-        }
-    }
-
     /// Perform the inbound-request transformation matching `transformRequest`
     /// in 9router's antigravity.js. Mutates `body` in place and returns the
     /// derived session id so caller can pass it through to headers.
@@ -542,74 +574,10 @@ impl AntigravityExecutor {
             }
 
             // Sanitize and merge tool function declarations into a single group.
-            // Cloak first so the `_ide` suffix is part of the name when
-            // `sanitize_function_name` runs below.
-            if let Some(tools) = request_obj.get_mut("tools") {
-                Self::cloak_tools(tools);
-            }
-
-            // Also rename functionCall/functionResponse names in contents turn
-            // history. 9router's `cloakTools` walks the parts array and
-            // suffixes every function name with `_ide` so the model sees a
-            // consistent namespace between the tool declarations and the
-            // history it has to reason about.
-            if let Some(contents) = request_obj
-                .get_mut("contents")
-                .and_then(|v| v.as_array_mut())
-            {
-                for content in contents.iter_mut() {
-                    let Some(co) = content.as_object_mut() else {
-                        continue;
-                    };
-                    let Some(parts) = co.get_mut("parts").and_then(|v| v.as_array_mut()) else {
-                        continue;
-                    };
-                    for part in parts.iter_mut() {
-                        let Some(po) = part.as_object_mut() else {
-                            continue;
-                        };
-                        // Rename functionCall.name
-                        if let Some(fc) = po.get_mut("functionCall") {
-                            if let Some(fc_obj) = fc.as_object_mut() {
-                                if let Some(name) = fc_obj
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
-                                {
-                                    if !name.ends_with(ANTIGRAVITY_TOOL_SUFFIX) {
-                                        fc_obj.insert(
-                                            "name".into(),
-                                            Value::String(format!(
-                                                "{name}{ANTIGRAVITY_TOOL_SUFFIX}"
-                                            )),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        // Rename functionResponse.name
-                        if let Some(fr) = po.get_mut("functionResponse") {
-                            if let Some(fr_obj) = fr.as_object_mut() {
-                                if let Some(name) = fr_obj
-                                    .get("name")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
-                                {
-                                    if !name.ends_with(ANTIGRAVITY_TOOL_SUFFIX) {
-                                        fr_obj.insert(
-                                            "name".into(),
-                                            Value::String(format!(
-                                                "{name}{ANTIGRAVITY_TOOL_SUFFIX}"
-                                            )),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
+            // Note: 9router's transformRequest does NOT cloak tool names — it
+            // only merges, sanitizes function names, and cleans schemas. The
+            // `_ide` suffixing / decoy injection lives in the (disabled)
+            // cloakTools path, so it must NOT be applied here (parity .37).
             let merged_tools: Option<Vec<Value>> = if let Some(tools) =
                 request_obj.get("tools").and_then(|v| v.as_array()).cloned()
             {
@@ -802,8 +770,7 @@ impl AntigravityExecutor {
             request.body = json!({"request": inner});
         }
 
-        // Resolve the project ID (cached or via loadCodeAssist) and inject
-        // it into the request body so the upstream sees a valid GCP project.
+        // Resolve the project ID (cached or via loadCodeAssist).
         let connection_id = request
             .credentials
             .email
@@ -811,15 +778,6 @@ impl AntigravityExecutor {
             .or_else(|| request.credentials.id.as_str().into())
             .unwrap_or("");
         let project_id = Self::get_project_id(connection_id, &access_token).await;
-        if !project_id.is_empty() {
-            if let Some(req) = request
-                .body
-                .get_mut("request")
-                .and_then(|v| v.as_object_mut())
-            {
-                req.insert("projectId".into(), Value::String(project_id.clone()));
-            }
-        }
 
         // Spawn best-effort onboardUser notification in the background so
         // it does not block the critical path.
@@ -831,18 +789,100 @@ impl AntigravityExecutor {
             });
         }
 
+        // --- Image model support ---
+        // Detect image-generation models (Imagen). JS uses a completely
+        // different request shape for these (antigravity.js:144-188): text-only
+        // contents, generationConfig with imageConfig, sessionId, and the
+        // requestType "image_gen". No tools / systemInstruction / safetySettings.
+        let is_image = Self::is_image_model(&request.model);
+        let clean_model = if is_image {
+            Self::parse_image_model_suffix(&request.model).0.to_string()
+        } else {
+            request.model.clone()
+        };
+
+        if is_image {
+            // Capture the existing session id before the mutable borrow.
+            let image_session_id = request
+                .body
+                .get("request")
+                .and_then(|r| r.get("sessionId"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let body = &mut request.body;
+            // Build text-only contents: keep only parts with `text`, merge all.
+            let src_contents = body
+                .get("request")
+                .and_then(|r| r.get("contents"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut contents = Vec::new();
+            for c in &src_contents {
+                let role = c.get("role").and_then(Value::as_str).unwrap_or("user");
+                let text_parts: Vec<Value> = c
+                    .get("parts")
+                    .and_then(Value::as_array)
+                    .unwrap_or(&vec![])
+                    .iter()
+                    .filter(|p| p.get("text").is_some())
+                    .map(|p| json!({ "text": p.get("text").and_then(Value::as_str).unwrap_or("") }))
+                    .collect();
+                if !text_parts.is_empty() {
+                    contents.push(json!({ "role": role, "parts": text_parts }));
+                }
+            }
+            let image_config = parse_image_config(&clean_model);
+            let image_request = json!({
+                "contents": contents,
+                "generationConfig": {
+                    "temperature": 1.0,
+                    "topP": 0.95,
+                    "topK": 40,
+                    "maxOutputTokens": 8192,
+                    "imageConfig": image_config,
+                },
+                "sessionId": image_session_id,
+            });
+            // Replace the whole body with the image request envelope.
+            body["request"] = image_request;
+        }
+
         let session_id = Self::transform_request(&mut request.body, &request.credentials)?;
 
-        // --- Image model support ---
-        // Detect image-generation models (Imagen) and, for those, use a
-        // separate non-streaming generateContent path with additional fields
-        // that the Antigravity endpoint requires (candidateCount, safetySettings).
-        let is_image = Self::is_image_model(&request.model);
-        let (clean_model, _suffix) = if is_image {
-            Self::parse_image_model_suffix(&request.model)
+        // Add the top-level request envelope (JS transformRequest return,
+        // antigravity.js:268-276): project, model, userAgent, requestType,
+        // requestId around the `request` sub-object.
+        let request_type = if is_image { "image_gen" } else { "agent" };
+        let model_for_envelope = if is_image {
+            clean_model.clone()
         } else {
-            (request.model.as_str(), None)
+            request
+                .body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or(&request.model)
+                .to_string()
         };
+        let request_ref = request.body.get("request").cloned().unwrap_or(Value::Null);
+        let request_id = build_ide_request_id(
+            &request.body,
+            &request_ref,
+            &request.credentials,
+            &model_for_envelope,
+            request_type,
+        );
+        if let Some(obj) = request.body.as_object_mut() {
+            obj.insert("project".into(), Value::String(project_id.clone()));
+            obj.insert("model".into(), Value::String(model_for_envelope));
+            obj.insert("userAgent".into(), Value::String("antigravity".to_string()));
+            obj.insert(
+                "requestType".into(),
+                Value::String(request_type.to_string()),
+            );
+            obj.insert("requestId".into(), Value::String(request_id));
+        }
 
         let url = if is_image {
             // Image models always use the non-streaming path.
@@ -850,33 +890,6 @@ impl AntigravityExecutor {
         } else {
             Self::build_url(request.stream)
         };
-
-        // For image models, inject the model name (after stripping suffix)
-        // and add candidateCount + safetySettings so the upstream returns
-        // images rather than text-only candidates.
-        if is_image {
-            if let Some(req) = request
-                .body
-                .get_mut("request")
-                .and_then(|v| v.as_object_mut())
-            {
-                req.insert("model".into(), Value::String(clean_model.to_string()));
-                req.insert("candidateCount".into(), json!(1));
-                // Minimal safety settings: block nothing.  Antigravity will
-                // apply its own server-side filtering regardless.
-                if req.get("safetySettings").is_none() {
-                    req.insert(
-                        "safetySettings".into(),
-                        json!([
-                            {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
-                            {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
-                            {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
-                            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
-                        ]),
-                    );
-                }
-            }
-        }
 
         // Retry up to 3 times with exponential backoff, Retry-After header,
         // and error-body-text transient detection.
@@ -1016,7 +1029,36 @@ mod tests {
         AntigravityExecutor::transform_request(&mut body, &creds).unwrap();
         assert_eq!(
             body["request"]["generationConfig"]["maxOutputTokens"],
-            16_384
+            64_000
+        );
+    }
+
+    #[test]
+    fn test_max_output_tokens_cap_64000() {
+        // Guard test: values under the cap pass through; above are capped at 64k.
+        let mut body = json!({
+            "request": {
+                "contents": [],
+                "generationConfig": {"maxOutputTokens": 60_000}
+            }
+        });
+        let creds = ProviderConnection::default();
+        AntigravityExecutor::transform_request(&mut body, &creds).unwrap();
+        assert_eq!(
+            body["request"]["generationConfig"]["maxOutputTokens"],
+            60_000
+        );
+
+        let mut body = json!({
+            "request": {
+                "contents": [],
+                "generationConfig": {"maxOutputTokens": 200_000}
+            }
+        });
+        AntigravityExecutor::transform_request(&mut body, &creds).unwrap();
+        assert_eq!(
+            body["request"]["generationConfig"]["maxOutputTokens"],
+            64_000
         );
     }
 
@@ -1096,33 +1138,21 @@ mod tests {
         let groups = body["request"]["tools"].as_array().unwrap();
         assert_eq!(groups.len(), 1);
         let decls = groups[0]["functionDeclarations"].as_array().unwrap();
-        // 2 original tools + AG_DEFAULT_TOOLS decoys (every entry, with
-        // `_ide` suffix appended). The test does not assume a magic number
-        // -- it computes the expected count from the same source of truth
-        // the executor uses.
-        let expected_count = 2 + crate::core::config::app_constants::AG_DEFAULT_TOOLS.len();
-        assert_eq!(decls.len(), expected_count);
+        // JS transformRequest does NOT cloak: exactly the 2 original tools,
+        // sanitized, with no `_ide` suffix and no AG_DEFAULT_TOOLS decoys.
+        assert_eq!(decls.len(), 2, "no decoys should be injected");
 
         let names: Vec<&str> = decls
             .as_slice()
             .iter()
             .filter_map(|d| d.get("name").and_then(|v| v.as_str()))
             .collect();
+        assert!(names.contains(&"a"), "expected a to be in merged decls");
+        assert!(names.contains(&"b__"), "expected b__ to be in merged decls");
         assert!(
-            names.contains(&"a_ide"),
-            "expected a_ide to be in merged decls"
+            !names.iter().any(|n| n.ends_with("_ide")),
+            "no _ide suffix should be applied: {names:?}"
         );
-        assert!(
-            names.contains(&"b___ide"),
-            "expected b___ide to be in merged decls"
-        );
-        for base in crate::core::config::app_constants::AG_DEFAULT_TOOLS.iter() {
-            let required = format!("{base}_ide");
-            assert!(
-                names.contains(&required.as_str()),
-                "missing default tool: {required}"
-            );
-        }
         // toolConfig set when tools are present.
         assert_eq!(
             body["request"]["toolConfig"]["functionCallingConfig"]["mode"],
@@ -1173,17 +1203,13 @@ mod tests {
             .collect();
 
         assert!(
-            names.contains(&"my_tool_ide"),
-            "client tool should have _ide suffix"
+            names.contains(&"my_tool"),
+            "client tool should keep its bare name (no _ide suffix)"
         );
-
-        for base in crate::core::config::app_constants::AG_DEFAULT_TOOLS.iter() {
-            let required = format!("{base}_ide");
-            assert!(
-                names.contains(&required.as_str()),
-                "missing default tool: {required}"
-            );
-        }
+        assert!(
+            !names.iter().any(|n| n.ends_with("_ide")),
+            "no _ide suffix should be applied: {names:?}"
+        );
 
         assert_eq!(
             body["request"]["contents"][0]["role"], "user",
@@ -1336,5 +1362,77 @@ mod tests {
         assert!(AntigravityExecutor::is_transient_antigravity_error(
             "Rate_Limit Exceeded"
         ));
+    }
+
+    #[test]
+    fn test_uuid_from_seed_is_deterministic_and_version5() {
+        let u1 = uuid_from_seed("antigravity:conversation:abc");
+        let u2 = uuid_from_seed("antigravity:conversation:abc");
+        let u3 = uuid_from_seed("antigravity:conversation:xyz");
+        assert_eq!(u1, u2, "same seed must produce the same uuid");
+        assert_ne!(u1, u3, "different seeds must produce different uuids");
+        // Version 5 + RFC 4122 variant bits.
+        assert_eq!(&u1[14..15], "5");
+        assert!(
+            matches!(
+                u1.chars().nth(19),
+                Some('8') | Some('9') | Some('a') | Some('b')
+            ),
+            "variant bit must be RFC 4122, got {}",
+            u1.chars().nth(19).unwrap()
+        );
+        // Hyphenated shape 8-4-4-4-12.
+        let parts: Vec<&str> = u1.split('-').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0].len(), 8);
+        assert_eq!(parts[1].len(), 4);
+        assert_eq!(parts[2].len(), 4);
+        assert_eq!(parts[3].len(), 4);
+        assert_eq!(parts[4].len(), 12);
+    }
+
+    #[test]
+    fn test_build_ide_request_id_agent_pattern() {
+        let body = json!({ "requestId": "agent/conv/12345/traj/3" });
+        let request = json!({ "contents": [] });
+        let creds = ProviderConnection::default();
+        // A valid client-supplied agent id is preserved.
+        let id = build_ide_request_id(&body, &request, &creds, "gpt-5", "agent");
+        assert_eq!(id, "agent/conv/12345/traj/3");
+
+        // A non-matching id is replaced with a derived one.
+        let body2 = json!({ "requestId": "not-agent-id" });
+        let id2 = build_ide_request_id(&body2, &request, &creds, "gpt-5", "agent");
+        assert!(
+            id2.starts_with("agent/"),
+            "derived id must start with agent/: {id2}"
+        );
+        let parts: Vec<&str> = id2.split('/').collect();
+        assert_eq!(parts.len(), 5);
+        assert_eq!(parts[0], "agent");
+        assert!(
+            parts[2].chars().all(|c| c.is_ascii_digit()),
+            "timestamp part must be numeric"
+        );
+    }
+
+    #[test]
+    fn test_parse_image_config_aspect_ratio() {
+        assert_eq!(
+            parse_image_config("imagen-3.0-generate-002-16x9")["aspectRatio"],
+            "16:9"
+        );
+        assert_eq!(
+            parse_image_config("imagen-3.0-generate-002-1024x768")["aspectRatio"],
+            "4:3"
+        );
+        assert_eq!(
+            parse_image_config("imagen-3.0-generate-002")["aspectRatio"],
+            "1:1"
+        );
+        assert_eq!(
+            parse_image_config("gemini-2.5-flash-image")["aspectRatio"],
+            "1:1"
+        );
     }
 }
