@@ -94,11 +94,13 @@ impl ImageAdapter for OpenAiCompatAdapter {
             );
         }
         if self.include_referer {
+            // 9router parity (registry/openrouter.js:50-58): media endpoints
+            // use the endpoint-proxy.local referer, matching the chat path.
             headers.insert(
                 "HTTP-Referer",
-                HeaderValue::from_static("https://openproxy.local"),
+                HeaderValue::from_static("https://endpoint-proxy.local"),
             );
-            headers.insert("X-Title", HeaderValue::from_static("OpenProxy"));
+            headers.insert("X-Title", HeaderValue::from_static("Endpoint Proxy"));
         }
         Ok(headers)
     }
@@ -148,9 +150,9 @@ impl ImageAdapter for OpenAiCompatAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
     use crate::core::media::image::base::ImageRequest;
     use crate::types::ProviderConnection;
+    use serde_json::json;
 
     fn xai_request() -> ImageRequest<'static> {
         let body = json!({
@@ -178,7 +180,10 @@ mod tests {
         assert!(obj.contains_key("n"));
         // xAI whitelist = [model, prompt, n, response_format] — size/quality/style dropped.
         assert!(!obj.contains_key("size"), "size must be dropped for xai");
-        assert!(!obj.contains_key("quality"), "quality must be dropped for xai");
+        assert!(
+            !obj.contains_key("quality"),
+            "quality must be dropped for xai"
+        );
         assert!(!obj.contains_key("style"), "style must be dropped for xai");
     }
 
@@ -194,7 +199,10 @@ mod tests {
         });
         req.body = Box::leak(Box::new(body));
         let out = XAI.build_body(&req).await.unwrap();
-        assert_eq!(out.get("response_format").and_then(|v| v.as_str()), Some("b64_json"));
+        assert_eq!(
+            out.get("response_format").and_then(|v| v.as_str()),
+            Some("b64_json")
+        );
     }
 
     #[tokio::test]
@@ -236,5 +244,26 @@ mod tests {
         );
         assert!(!VERCEL_AI_GATEWAY.include_referer);
         assert!(VERCEL_AI_GATEWAY.body_fields.is_empty());
+    }
+
+    #[test]
+    fn openrouter_image_referer_matches_registry() {
+        // 9router registry/openrouter.js:56-59 — endpoint-proxy.local referer.
+        let body = json!({"prompt": "cat", "model": "dall-e-3"});
+        let creds = ProviderConnection::default();
+        let req = ImageRequest {
+            body: &body,
+            model: "dall-e-3",
+            credentials: &creds,
+        };
+        let headers = OPENROUTER.build_headers(&req, &body).unwrap();
+        assert_eq!(
+            headers.get("HTTP-Referer").and_then(|v| v.to_str().ok()),
+            Some("https://endpoint-proxy.local")
+        );
+        assert_eq!(
+            headers.get("X-Title").and_then(|v| v.to_str().ok()),
+            Some("Endpoint Proxy")
+        );
     }
 }
