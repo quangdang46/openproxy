@@ -65,6 +65,7 @@ subtle = "2"
 # URL / query
 url = "2"
 urlencoding = "2"
+unicode-normalization = "0.1"
 serde_urlencoded = "0.7"
 
 # Time
