@@ -1660,4 +1660,25 @@ mod tests {
             "openai must keep client_metadata"
         );
     }
+
+    #[test]
+    fn test_default_opencode_go_base_url() {
+        // 9router parity: opencode-go base URL must include the /go segment
+        // (JS open-sse/executors/opencode-go.js BASE = "https://opencode.ai/zen/go/v1").
+        let executor =
+            DefaultExecutor::new("opencode-go", Arc::new(ClientPool::new()), None).unwrap();
+        let creds = ProviderConnection::default();
+        // Non-claude model → /chat/completions under the /go base.
+        let url = executor.build_url("qwen3.6", false, &creds).unwrap();
+        assert_eq!(
+            url, "https://opencode.ai/zen/go/v1/chat/completions",
+            "opencode-go default URL must include the /go segment"
+        );
+        // Claude-format model → /messages under the /go base.
+        let url = executor.build_url("minimax-m3", false, &creds).unwrap();
+        assert_eq!(
+            url, "https://opencode.ai/zen/go/v1/messages",
+            "claude-format opencode-go URL must include /go"
+        );
+    }
 }
