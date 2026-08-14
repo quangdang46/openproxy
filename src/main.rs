@@ -561,7 +561,7 @@ fn spawn_usage_retention_cleanup(db: Arc<Db>) {
             let cutoff = (chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339();
             // Prune usageHistory
             match db.sqlite.with_conn(|conn| {
-                let count: u64 = conn
+                let count: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM usageHistory WHERE timestamp < ?1",
                         [&cutoff],
@@ -587,7 +587,7 @@ fn spawn_usage_retention_cleanup(db: Arc<Db>) {
             }
             // Prune requestDetails
             match db.sqlite.with_conn(|conn| {
-                let count: u64 = conn
+                let count: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM requestDetails WHERE timestamp < ?1",
                         [&cutoff],
@@ -616,7 +616,7 @@ fn spawn_usage_retention_cleanup(db: Arc<Db>) {
                 .format("%Y-%m-%d")
                 .to_string();
             match db.sqlite.with_conn(|conn| {
-                let count: u64 = conn
+                let count: i64 = conn
                     .query_row(
                         "SELECT COUNT(*) FROM usageDaily WHERE dateKey < ?1",
                         [&daily_cutoff],

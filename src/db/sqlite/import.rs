@@ -208,11 +208,11 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
 
     let count = conn
         .query_row("SELECT COUNT(*) FROM providerConnections", [], |row| {
-            row.get(0)
+            row.get::<_, i64>(0)
         })
         .unwrap_or(0);
 
-    Ok(count)
+    Ok(count as usize)
 }
 
 fn import_usage_impl(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
