@@ -929,8 +929,15 @@ async fn get_edge_tts_voices_impl(lang_filter: Option<&str>) -> axum::response::
 /// GET /api/media-providers/tts/elevenlabs/voices
 async fn get_elevenlabs_voices(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(query): Query<TtsVoiceQuery>,
 ) -> axum::response::Response {
+    // Reads the stored ElevenLabs API key from the DB — require auth like the
+    // sibling voice handlers (get_tts_voices / get_minimax_voices /
+    // get_inworld_voices). Previously unauthenticated (audit H13).
+    if let Err(e) = require_api_key(&headers, &state.db) {
+        return crate::server::api::auth_error_response(e);
+    }
     let snapshot = state.db.snapshot();
     let api_key = snapshot
         .provider_connections
