@@ -21,6 +21,7 @@ mod local_device;
 mod minimax;
 mod openai;
 mod openrouter;
+mod selfhosted_tts;
 mod xiaomi_mimo;
 
 pub use base::{TtsAdapter, TtsRequest, TtsResult};
@@ -100,6 +101,7 @@ pub fn get_tts_adapter(provider: &str) -> Option<&'static dyn TtsAdapter> {
         "local-device" => Some(&local_device::ADAPTER),
         "aws-polly" | "polly" => Some(&aws_polly::ADAPTER),
         "xiaomi-mimo" => Some(&xiaomi_mimo::ADAPTER),
+        "selfhosted-tts" => Some(&selfhosted_tts::ADAPTER),
         _ => None,
     }
 }
