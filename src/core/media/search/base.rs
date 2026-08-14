@@ -155,19 +155,39 @@ pub fn get_provider_setting(request: &SearchRequest<'_>, key: &str) -> Option<St
     }
 }
 
+/// Port of 9router `search/index.js sanitizeQuery` (index.js:17-25):
+/// reject control characters, NFKC-normalize, trim, and collapse whitespace.
+///
+/// The control-char set is NOT the full 0x00-0x1F range — tab (0x09), LF
+/// (0x0A), and CR (0x0D) are excluded (they're valid whitespace).
+pub fn sanitize_query(raw: &str) -> Result<String, String> {
+    let has_control_char = raw
+        .bytes()
+        .any(|b| matches!(b, 0x00..=0x08 | 0x0B | 0x0C | 0x0E..=0x1F | 0x7F));
+    if has_control_char {
+        return Err("Query contains invalid control characters".to_string());
+    }
+    let nfkc = unicode_normalization::UnicodeNormalization::nfkc(raw);
+    let normalized: String = nfkc.collect();
+    let clean: String = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    if clean.is_empty() {
+        return Err("Query is empty after normalization".to_string());
+    }
+    Ok(clean)
+}
+
 /// Build a SearchRequest from credentials + JSON body. Useful when the
 /// caller has the inbound `/v1/search` request body in hand.
 pub fn request_from_body<'a>(
     body: &'a Value,
     credentials: Option<&'a ProviderConnection>,
 ) -> Result<SearchRequest<'a>, String> {
-    let query = body
+    let raw_query = body
         .get("query")
         .and_then(|v| v.as_str())
-        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| "Missing required field: query".to_string())?
-        .to_string();
+        .ok_or_else(|| "Missing required field: query".to_string())?;
+    let query = sanitize_query(raw_query)?;
     let search_type = SearchType::parse(body.get("search_type").and_then(|v| v.as_str()));
     let max_results = body
         .get("max_results")
@@ -342,5 +362,44 @@ mod tests {
         let body = serde_json::json!({"query": "x", "max_results": 1000});
         let r = request_from_body(&body, None).unwrap();
         assert_eq!(r.max_results, 100);
+    }
+
+    #[test]
+    fn search_query_rejects_control_chars() {
+        assert!(sanitize_query("hello\x07").is_err());
+        assert!(sanitize_query("\x00abc").is_err());
+        assert!(sanitize_query("a\x7fb").is_err());
+        // The error message mentions control characters.
+        assert!(sanitize_query("x\x01")
+            .unwrap_err()
+            .contains("control characters"));
+        // Tab / LF / CR are allowed (valid whitespace).
+        assert!(sanitize_query("a\tb").is_ok());
+        assert!(sanitize_query("a\nb").is_ok());
+    }
+
+    #[test]
+    fn search_query_collapses_whitespace() {
+        assert_eq!(sanitize_query("a  b").unwrap(), "a b");
+        assert_eq!(
+            sanitize_query("  leading and   trailing  ").unwrap(),
+            "leading and trailing"
+        );
+        // NFKC: full-width digits normalize to ASCII.
+        assert_eq!(sanitize_query("１２３").unwrap(), "123");
+        // Empty after normalization errors.
+        assert!(sanitize_query("   ")
+            .unwrap_err()
+            .contains("empty after normalization"));
+    }
+
+    #[test]
+    fn request_from_body_uses_sanitized_query() {
+        let body = serde_json::json!({"query": "a  b\tc"});
+        let r = request_from_body(&body, None).unwrap();
+        assert_eq!(r.query, "a b c");
+        // Control char → Err.
+        let body = serde_json::json!({"query": "bad\x07query"});
+        assert!(request_from_body(&body, None).is_err());
     }
 }
