@@ -24,6 +24,7 @@ pub mod qoder;
 mod qwen;
 mod strip_unsupported;
 mod vertex;
+mod windsurf;
 mod xai;
 
 pub use antigravity::{
@@ -98,6 +99,9 @@ pub use qoder::{QoderExecutionRequest, QoderExecutor, QoderExecutorError, QoderE
 pub use qwen::{QwenExecutionRequest, QwenExecutor, QwenExecutorError, QwenExecutorResponse};
 pub use vertex::{
     VertexExecutionRequest, VertexExecutor, VertexExecutorError, VertexExecutorResponse,
+};
+pub use windsurf::{
+    WindsurfExecutionRequest, WindsurfExecutor, WindsurfExecutorError, WindsurfExecutorResponse,
 };
 pub use xai::{XaiExecutionRequest, XaiExecutor, XaiExecutorError, XaiExecutorResponse};
 
