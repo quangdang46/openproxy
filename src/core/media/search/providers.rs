@@ -1205,4 +1205,51 @@ mod tests {
         y.max_results = y.max_results.min(YOUCOM.max_max_results());
         assert_eq!(y.max_results, 100);
     }
+
+    #[test]
+    fn youcom_livecrawl_markdown_format() {
+        // 9router callers.js buildYouComRequest (289-295): full_page →
+        // livecrawl=web|news + livecrawl_formats=markdown|html.
+        let mut r = req("test", 5);
+        r.token = Some("tok".into());
+        r.content_options = Some(serde_json::json!({
+            "full_page": true,
+            "format": "markdown",
+        }));
+        let url = YOUCOM.build_url(&r).unwrap();
+        assert!(
+            url.contains("livecrawl=web"),
+            "news→web for web search: {url}"
+        );
+        assert!(
+            url.contains("livecrawl_formats=markdown"),
+            "markdown format must be passed: {url}"
+        );
+
+        // Non-markdown format defaults to html.
+        let mut r2 = req("test", 5);
+        r2.token = Some("tok".into());
+        r2.content_options = Some(serde_json::json!({
+            "full_page": true,
+            "format": "json",
+        }));
+        let url2 = YOUCOM.build_url(&r2).unwrap();
+        assert!(
+            url2.contains("livecrawl_formats=html"),
+            "non-markdown → html: {url2}"
+        );
+
+        // full_page false → no livecrawl.
+        let mut r3 = req("test", 5);
+        r3.token = Some("tok".into());
+        r3.content_options = Some(serde_json::json!({
+            "full_page": false,
+            "format": "markdown",
+        }));
+        let url3 = YOUCOM.build_url(&r3).unwrap();
+        assert!(
+            !url3.contains("livecrawl"),
+            "no livecrawl when full_page false: {url3}"
+        );
+    }
 }
