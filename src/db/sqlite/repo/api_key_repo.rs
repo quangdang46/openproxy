@@ -31,7 +31,7 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiKey>
 pub fn create(conn: &Connection, k: &ApiKey) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO apiKeys(id, key, name, machineId, isActive, createdAt) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![k.id, k.key, k.name, k.machine_id, k.is_active.map(|v| v as i32), k.created_at.as_deref().unwrap_or("")],
+        params![k.id, k.key, k.name, k.machine_id, k.is_active.map(|v| v as i32).unwrap_or(1), k.created_at.as_deref().unwrap_or("")],
     )?;
     Ok(())
 }
@@ -44,7 +44,7 @@ pub fn update(conn: &Connection, k: &ApiKey) -> rusqlite::Result<()> {
             k.key,
             k.name,
             k.machine_id,
-            k.is_active.map(|v| v as i32)
+            k.is_active.map(|v| v as i32).unwrap_or(1)
         ],
     )?;
     Ok(())
