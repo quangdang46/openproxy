@@ -20,7 +20,13 @@ impl<'a> EmbeddingRequest<'a> {
     }
 
     pub fn encoding_format(&self) -> Option<&'a str> {
-        self.body.get("encoding_format").and_then(|v| v.as_str())
+        // JS embeddingsCore.js:52 `encoding_format: body.encoding_format || "float"`
+        // coerces an empty string to "float". Treat empty as None so the caller's
+        // `unwrap_or("float")` yields "float" for both absent and empty.
+        self.body
+            .get("encoding_format")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
     }
 
     pub fn dimensions(&self) -> Option<u64> {
@@ -449,6 +455,44 @@ mod tests {
         };
         let v = OPENAI.build_body(&req).unwrap();
         assert_eq!(v["dimensions"], 256);
+    }
+
+    #[test]
+    fn openai_embedding_encoding_format_matches_js_coercion() {
+        // JS embeddingsCore.js:52 `encoding_format: body.encoding_format || "float"`
+        // always sends encoding_format upstream (client value or "float").
+        // Rust mirrors that: absent → "float"; empty → "float"; value → value.
+        let creds = ProviderConnection::default();
+
+        // Absent → "float" (both JS and Rust).
+        let body = json!({"input": "hi"});
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "x",
+            credentials: &creds,
+        };
+        let v = OPENAI.build_body(&req).unwrap();
+        assert_eq!(v["encoding_format"], "float");
+
+        // Empty string → coerced to "float" by JS `||`; Rust now treats it as None.
+        let body = json!({"input": "hi", "encoding_format": ""});
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "x",
+            credentials: &creds,
+        };
+        let v = OPENAI.build_body(&req).unwrap();
+        assert_eq!(v["encoding_format"], "float");
+
+        // Explicit value passed through.
+        let body = json!({"input": "hi", "encoding_format": "base64"});
+        let req = EmbeddingRequest {
+            body: &body,
+            model: "x",
+            credentials: &creds,
+        };
+        let v = OPENAI.build_body(&req).unwrap();
+        assert_eq!(v["encoding_format"], "base64");
     }
 
     #[test]
