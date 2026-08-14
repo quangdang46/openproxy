@@ -2,7 +2,7 @@ pub mod cline_auth;
 pub mod credential_manager;
 pub mod machine_id;
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::Rng;
 use sha2::Sha256;
 use std::path::PathBuf;
