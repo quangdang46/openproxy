@@ -74,10 +74,26 @@ pub struct SearchResultSet {
     pub total_results: Option<u64>,
 }
 
+/// 9router `searchViaChat` fallback config: when the dedicated search
+/// endpoint fails with a retriable error, fall back to a chat-completions
+/// LLM search (port of `open-sse/handlers/search/chatSearch.js`).
+#[derive(Debug, Clone, Copy)]
+pub struct ChatSearchFallback {
+    /// Chat model to use for the fallback LLM search.
+    pub model: &'static str,
+}
+
 /// Trait implemented by every search provider. Builds the upstream
 /// request and normalises the response.
 pub trait SearchProvider: Send + Sync {
     fn id(&self) -> &'static str;
+
+    /// 9router `searchViaChat` config. `Some` means the provider can fall
+    /// back to a chat-completions LLM search when the dedicated endpoint
+    /// fails with a retriable error. Defaults to `None`.
+    fn chat_fallback(&self) -> Option<ChatSearchFallback> {
+        None
+    }
 
     /// Whether the upstream is no-auth (searxng with public instance, etc.).
     fn no_auth(&self) -> bool {
