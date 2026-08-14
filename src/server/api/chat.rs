@@ -1109,8 +1109,8 @@ async fn forward_with_provider_fallback(
             OpenCodeExecutionRequest, OpenCodeExecutor, OpenCodeGoExecutionRequest,
             OpenCodeGoExecutor, PerplexityWebExecutionRequest, PerplexityWebExecutor,
             ProviderExecutionRequest, ProviderExecutor, QoderExecutionRequest, QoderExecutor,
-            QwenExecutionRequest, QwenExecutor, VertexExecutionRequest, VertexExecutor,
-            WindsurfExecutionRequest, WindsurfExecutor,
+            QwenExecutionRequest, QwenExecutor, TraeExecutionRequest, TraeExecutor,
+            VertexExecutionRequest, VertexExecutor, WindsurfExecutionRequest, WindsurfExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/") || provider == "codex";
@@ -1592,6 +1592,30 @@ async fn forward_with_provider_fallback(
                     .map_err(|e| ComboAttemptError {
                         status: 500,
                         message: format!("Windsurf execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "trae" {
+                let executor = TraeExecutor::new(state.client_pool.clone());
+                let result = executor
+                    .execute_request(TraeExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Trae execution failed: {:?}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
