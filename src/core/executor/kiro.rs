@@ -4,11 +4,17 @@ use hyper::http;
 use hyper::http::uri::InvalidUri;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 /// Maximum total AWS EventStream message length (1 MiB).
 const MAX_EVENTSTREAM_MESSAGE_LENGTH: usize = 1024 * 1024;
+
+/// Maximum bytes buffered for a repair attempt (JS `KIRO_REPAIR_BUFFER_MAX_BYTES`).
+const KIRO_REPAIR_BUFFER_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Heartbeat cadence for the integrity gate (JS `KIRO_REPAIR_HEARTBEAT_MS`).
+pub const KIRO_REPAIR_HEARTBEAT_MS: u64 = 10_000;
 
 use crate::core::proxy::ProxyTarget;
 use crate::types::{ProviderConnection, ProviderNode};
@@ -262,6 +268,87 @@ pub fn classify_attempt(output: &KiroAttemptOutput) -> KiroRepairKind {
         return KiroRepairKind::ShortFinal;
     }
     KiroRepairKind::None
+}
+
+/// Emit an SSE error frame with a `kiro_*` code, mirroring JS `encodeSSEError`
+/// (kiro.js:187-194): `data: {"error":{...}}` then `data: [DONE]`.
+pub fn encode_sse_error(code: &str, message: &str, details: Option<Value>) -> Vec<u8> {
+    let mut err = serde_json::Map::new();
+    err.insert("message".into(), Value::String(message.to_string()));
+    err.insert("type".into(), Value::String("upstream_error".to_string()));
+    err.insert("code".into(), Value::String(code.to_string()));
+    if let Some(d) = details {
+        err.insert("details".into(), d);
+    }
+    let frame = json!({ "error": Value::Object(err) });
+    let mut out = Vec::new();
+    out.extend_from_slice(
+        format!(
+            "data: {}\n\n",
+            serde_json::to_string(&frame).unwrap_or_default()
+        )
+        .as_bytes(),
+    );
+    out.extend_from_slice(b"data: [DONE]\n\n");
+    out
+}
+
+/// Classify a stop disposition (9router `stopDisposition`, kiro.js:147-156).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopDisposition {
+    Complete,
+    ToolUse,
+    Length,
+    RetryableProtocolFailure,
+    TerminalIncomplete,
+    TerminalRefusal,
+    UnknownFailure,
+}
+
+pub fn stop_disposition(stop_reason: Option<&str>, has_tool_calls: bool) -> StopDisposition {
+    let reason = stop_reason.unwrap_or("").trim();
+    if reason.is_empty() {
+        if has_tool_calls {
+            return StopDisposition::ToolUse;
+        }
+        return StopDisposition::Complete;
+    }
+    match reason.to_ascii_lowercase().as_str() {
+        "tool_use" | "tool_calls" => StopDisposition::ToolUse,
+        "length" | "max_tokens" => StopDisposition::Length,
+        "content_filter" | "recitation" => StopDisposition::RetryableProtocolFailure,
+        "refusal" | "end_turn_refusal" | "model_refusal" => StopDisposition::TerminalRefusal,
+        "complete" | "end_turn" | "stop" => StopDisposition::Complete,
+        "malformed_function_call" | "malformed_tool_call" => StopDisposition::TerminalIncomplete,
+        _ => StopDisposition::UnknownFailure,
+    }
+}
+
+/// Decode a raw kiro response body (binary AWS EventStream) into OpenAI-shaped
+/// SSE text by feeding it through the shared `kiro_to_openai_streaming`
+/// transform. This is the decode-first step the JS `readIntegrityAttempt`
+/// performs before classification (kiro.js:517-524).
+pub fn decode_body_to_sse(body: &[u8]) -> String {
+    let mut state = crate::core::translator::registry::ResponseTransformState::default();
+    let mut sse = String::new();
+    // Feed the body in one chunk (the transform buffers partial frames).
+    let lines = crate::core::translator::response::kiro_to_openai::kiro_to_openai_streaming(
+        body, &mut state,
+    );
+    for line in lines {
+        sse.push_str(&line);
+        sse.push('\n');
+    }
+    sse
+}
+
+/// Classify a fully-buffered raw kiro body by first decoding to SSE, then
+/// inspecting the transformed chunks. Returns the repair kind.
+pub fn classify_buffered_body(body: &[u8]) -> KiroRepairKind {
+    let sse = decode_body_to_sse(body);
+    let mut output = KiroAttemptOutput::default();
+    inspect_sse_body(sse.as_bytes(), &mut output);
+    classify_attempt(&output)
 }
 
 pub struct KiroExecutorResponse {
@@ -629,13 +716,69 @@ impl KiroExecutor {
                     .unwrap_or(true);
 
                 if repair_enabled && status == 200 {
-                    let full = response
-                        .bytes()
-                        .await
-                        .map_err(|e| KiroExecutorError::Request(e))?;
-                    let mut output = KiroAttemptOutput::default();
-                    inspect_sse_body(&full, &mut output);
-                    let kind = classify_attempt(&output);
+                    // Buffer the body with a bounded cap (JS KIRO_REPAIR_BUFFER_MAX_BYTES).
+                    let mut full = Vec::new();
+                    {
+                        use futures_util::StreamExt;
+                        let mut stream = response.bytes_stream();
+                        let mut over_budget = false;
+                        while let Some(chunk) = stream.next().await {
+                            match chunk {
+                                Ok(bytes) => {
+                                    if full.len() + bytes.len() > KIRO_REPAIR_BUFFER_MAX_BYTES {
+                                        over_budget = true;
+                                        break;
+                                    }
+                                    full.extend_from_slice(&bytes);
+                                }
+                                Err(e) => {
+                                    return Ok(KiroExecutorResponse {
+                                        response: UpstreamResponse::Reqwest(
+                                            http::Response::builder()
+                                                .status(200)
+                                                .header("content-type", "text/event-stream")
+                                                .body(reqwest::Body::from(encode_sse_error(
+                                                    "kiro_integrity_buffer_exceeded",
+                                                    "Kiro integrity repair buffer exceeded the 8 MiB cap",
+                                                    None,
+                                                )))
+                                                .map_err(KiroExecutorError::InvalidRequest)?
+                                                .into(),
+                                        ),
+                                        url: url.clone(),
+                                        headers,
+                                        transformed_body: request.body.clone(),
+                                        transport: TransportKind::Reqwest,
+                                    });
+                                }
+                            }
+                        }
+                        if over_budget {
+                            return Ok(KiroExecutorResponse {
+                                response: UpstreamResponse::Reqwest(
+                                    http::Response::builder()
+                                        .status(200)
+                                        .header("content-type", "text/event-stream")
+                                        .body(reqwest::Body::from(encode_sse_error(
+                                            "kiro_integrity_buffer_exceeded",
+                                            "Kiro integrity repair buffer exceeded the 8 MiB cap",
+                                            None,
+                                        )))
+                                        .map_err(KiroExecutorError::InvalidRequest)?
+                                        .into(),
+                                ),
+                                url: url.clone(),
+                                headers,
+                                transformed_body: request.body.clone(),
+                                transport: TransportKind::Reqwest,
+                            });
+                        }
+                    }
+
+                    // Decode-first classification: the body is binary AWS
+                    // EventStream, so decode to SSE before inspecting (JS
+                    // readIntegrityAttempt transforms first).
+                    let kind = classify_buffered_body(&full);
                     if kind != KiroRepairKind::None {
                         // One bounded retry with the repair instruction
                         // appended to the system prompt (9router
@@ -647,8 +790,84 @@ impl KiroExecutor {
                             .await;
                         match retry {
                             Ok((retry_response, retry_headers)) => {
+                                // Diagnose the retry: if it is still not
+                                // complete, emit the matching kiro_*_retry_failed
+                                // code (JS runIntegrityRecovery, kiro.js:457-478).
+                                let retry_status = retry_response.status().as_u16();
+                                if retry_status == 200 {
+                                    let retry_bytes = retry_response
+                                        .bytes()
+                                        .await
+                                        .map_err(|e| KiroExecutorError::Request(e))?;
+                                    let retry_kind = classify_buffered_body(&retry_bytes);
+                                    if retry_kind == KiroRepairKind::None {
+                                        // Complete: return the retry response.
+                                        return Ok(KiroExecutorResponse {
+                                            response: UpstreamResponse::Reqwest(
+                                                http::Response::builder()
+                                                    .status(200)
+                                                    .header("content-type", "text/event-stream")
+                                                    .header("cache-control", "no-cache")
+                                                    .body(reqwest::Body::from(retry_bytes))
+                                                    .map_err(KiroExecutorError::InvalidRequest)?
+                                                    .into(),
+                                            ),
+                                            url: url.clone(),
+                                            headers: retry_headers,
+                                            transformed_body: request.body.clone(),
+                                            transport: TransportKind::Reqwest,
+                                        });
+                                    }
+                                    // Retry still failed — emit the specific code.
+                                    let code = match retry_kind {
+                                        KiroRepairKind::Ellipsis => "kiro_ellipsis_retry_failed",
+                                        KiroRepairKind::ShortFinal => {
+                                            "kiro_short_final_retry_failed"
+                                        }
+                                        KiroRepairKind::InvalidTool => {
+                                            "kiro_tool_call_repair_retry_failed"
+                                        }
+                                        KiroRepairKind::None => {
+                                            "kiro_missing_terminal_retry_failed"
+                                        }
+                                    };
+                                    return Ok(KiroExecutorResponse {
+                                        response: UpstreamResponse::Reqwest(
+                                            http::Response::builder()
+                                                .status(200)
+                                                .header("content-type", "text/event-stream")
+                                                .body(reqwest::Body::from(encode_sse_error(
+                                                    code,
+                                                    "Kiro integrity validation failed after one bounded retry",
+                                                    Some(json!({ "kind": format!("{retry_kind:?}") })),
+                                                )))
+                                                .map_err(KiroExecutorError::InvalidRequest)?
+                                                .into(),
+                                        ),
+                                        url: url.clone(),
+                                        headers: retry_headers,
+                                        transformed_body: request.body.clone(),
+                                        transport: TransportKind::Reqwest,
+                                    });
+                                }
+                                // Retry returned non-200 → upstream error.
+                                let body = String::from_utf8_lossy(
+                                    &retry_response.bytes().await.unwrap_or_default(),
+                                )
+                                .to_string();
                                 return Ok(KiroExecutorResponse {
-                                    response: UpstreamResponse::Reqwest(retry_response),
+                                    response: UpstreamResponse::Reqwest(
+                                        http::Response::builder()
+                                            .status(200)
+                                            .header("content-type", "text/event-stream")
+                                            .body(reqwest::Body::from(encode_sse_error(
+                                                "kiro_integrity_retry_upstream_error",
+                                                &format!("Kiro integrity retry failed with HTTP {retry_status}: {body}"),
+                                                Some(json!({ "status": retry_status })),
+                                            )))
+                                            .map_err(KiroExecutorError::InvalidRequest)?
+                                            .into(),
+                                    ),
                                     url: url.clone(),
                                     headers: retry_headers,
                                     transformed_body: request.body.clone(),
@@ -1367,7 +1586,93 @@ mod tests {
     }
 
     #[test]
-    fn test_normalize_kiro_model() {
+    fn encode_sse_error_emits_kiro_code() {
+        let bytes = encode_sse_error("kiro_ellipsis_retry_failed", "repair failed", None);
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("kiro_ellipsis_retry_failed"));
+        assert!(text.contains("\"type\":\"upstream_error\""));
+        assert!(text.contains("repair failed"));
+        assert!(text.contains("data: [DONE]"));
+    }
+
+    #[test]
+    fn stop_disposition_classifies() {
+        assert_eq!(stop_disposition(None, false), StopDisposition::Complete);
+        assert_eq!(stop_disposition(None, true), StopDisposition::ToolUse);
+        assert_eq!(
+            stop_disposition(Some("tool_use"), false),
+            StopDisposition::ToolUse
+        );
+        assert_eq!(
+            stop_disposition(Some("length"), false),
+            StopDisposition::Length
+        );
+        assert_eq!(
+            stop_disposition(Some("content_filter"), false),
+            StopDisposition::RetryableProtocolFailure
+        );
+        assert_eq!(
+            stop_disposition(Some("refusal"), false),
+            StopDisposition::TerminalRefusal
+        );
+        assert_eq!(
+            stop_disposition(Some("malformed_function_call"), false),
+            StopDisposition::TerminalIncomplete
+        );
+        assert_eq!(
+            stop_disposition(Some("end_turn"), false),
+            StopDisposition::Complete
+        );
+        assert_eq!(
+            stop_disposition(Some("mystery"), false),
+            StopDisposition::UnknownFailure
+        );
+    }
+
+    #[test]
+    fn classify_buffered_body_uses_decode_first() {
+        // The decode-first fix: a raw kiro binary EventStream body carrying an
+        // assistantResponseEvent with content "..." must decode to SSE and
+        // classify as Ellipsis. Build a minimal AWS EventStream frame.
+        fn make_frame(event_type: &str, payload: &str) -> Vec<u8> {
+            let mut header_bytes = Vec::new();
+            let name = b":event-type";
+            header_bytes.push(name.len() as u8);
+            header_bytes.extend_from_slice(name);
+            header_bytes.push(7u8); // string
+            header_bytes.extend_from_slice(&(event_type.len() as u16).to_be_bytes());
+            header_bytes.extend_from_slice(event_type.as_bytes());
+            let payload_bytes = payload.as_bytes();
+            let total = 12 + header_bytes.len() + payload_bytes.len() + 4;
+            let mut frame = Vec::new();
+            frame.extend_from_slice(&(total as u32).to_be_bytes());
+            frame.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
+            let prelude_crc = crc32fast::hash(&frame[..8]);
+            frame.extend_from_slice(&prelude_crc.to_be_bytes());
+            frame.extend_from_slice(&header_bytes);
+            frame.extend_from_slice(payload_bytes);
+            let msg_crc = crc32fast::hash(&frame);
+            frame.extend_from_slice(&msg_crc.to_be_bytes());
+            frame
+        }
+
+        // Ellipsis-only content → Ellipsis.
+        let ellipsis_body = make_frame("assistantResponseEvent", r#"{"content":"..."}"#);
+        let kind = classify_buffered_body(&ellipsis_body);
+        assert_eq!(
+            kind,
+            KiroRepairKind::Ellipsis,
+            "binary assistantResponseEvent with content '...' must classify as Ellipsis"
+        );
+
+        // A normal completion does not repair.
+        let ok_body = make_frame("assistantResponseEvent", r#"{"content":"all done"}"#);
+        let kind = classify_buffered_body(&ok_body);
+        assert_eq!(kind, KiroRepairKind::None);
+    }
+
+    #[test]
+    fn test_normalize_kiro_model_body() {
         assert_eq!(
             normalize_kiro_model("amazon-nova-pro-v1.0-thinking-agentic"),
             "amazon-nova-pro-v1.0"
