@@ -28,6 +28,21 @@ pub struct Db {
     write_lock: RwLock<()>,
 }
 
+/// Decrypt every provider connection in an `AppDb` built from a SQLite
+/// `export_all`. The in-memory snapshot must hold plaintext credentials;
+/// SQLite's `data` column holds ciphertext. Decryption is a no-op when
+/// `OPENPROXY_ENCRYPTION_KEY` is unset (plaintext mode), and `decrypt_opt`
+/// fails-loud (clears) ciphertext that can't be decrypted.
+fn decrypt_snapshot_connections(app_db: &mut AppDb) {
+    let key = crate::db::crypto::encryption_key().unwrap_or_default();
+    if key.is_empty() {
+        return;
+    }
+    for conn in &mut app_db.provider_connections {
+        crate::db::crypto::decrypt_connection(conn, &key);
+    }
+}
+
 impl Db {
     pub async fn load() -> anyhow::Result<Self> {
         let configured = std::env::var_os("DATA_DIR").map(PathBuf::from);
@@ -135,6 +150,11 @@ impl Db {
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
                     Ok(AppDb::from_json_value(json_val))
                 })?;
+                // SQLite stores ciphertext in the `data` column; the in-memory
+                // snapshot must hold plaintext so credential checks and the
+                // executors see real tokens (H20 boundary invariant).
+                let mut app_db = app_db;
+                decrypt_snapshot_connections(&mut app_db);
                 let usage_db = sq.with_conn(|conn| -> rusqlite::Result<UsageDb> {
                     let json_val = crate::db::sqlite::export::export_usage_impl(conn)
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
@@ -164,12 +184,15 @@ impl Db {
     pub async fn reload_snapshot(&self) -> anyhow::Result<Arc<AppDb>> {
         let sq = self.sqlite.clone();
         let app_db = tokio::task::spawn_blocking(move || -> anyhow::Result<AppDb> {
-            sq.with_conn(|conn| -> rusqlite::Result<AppDb> {
-                let json_val = crate::db::sqlite::export::export_all(conn)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                Ok(AppDb::from_json_value(json_val))
-            })
-            .map_err(|e| anyhow::anyhow!("SQLite reload failed: {e}"))
+            let mut app_db = sq
+                .with_conn(|conn| -> rusqlite::Result<AppDb> {
+                    let json_val = crate::db::sqlite::export::export_all(conn)
+                        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                    Ok(AppDb::from_json_value(json_val))
+                })
+                .map_err(|e| anyhow::anyhow!("SQLite reload failed: {e}"))?;
+            decrypt_snapshot_connections(&mut app_db);
+            Ok(app_db)
         })
         .await
         .context("spawn_blocking for snapshot reload")??;
