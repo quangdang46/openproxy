@@ -124,6 +124,12 @@ pub trait SearchProvider: Send + Sync {
     fn timeout_ms(&self) -> Option<u64> {
         None
     }
+
+    /// Per-provider maximum result count (9router registry `maxMaxResults`,
+    /// default 100). Applied after the request's max_results is resolved.
+    fn max_max_results(&self) -> u32 {
+        100
+    }
 }
 
 /// Split `domain_filter` into `(includes, excludes)` where excludes are
