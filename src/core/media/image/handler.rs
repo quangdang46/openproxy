@@ -76,21 +76,25 @@ pub async fn handle_image_generation(
         ));
     }
 
-    let request_body = inputs
+    // 9router parity (imageGenerationCore.js:121-155): on 401/403, refresh the
+    // OAuth credentials (once) and re-fire the request with the rebuilt
+    // body/headers/url. Only applies to non-noAuth adapters whose connection
+    // has a refresh token. The retried request reuses the rebuilt headers.
+    let mut request_body = inputs
         .adapter
         .build_body(&inputs.request)
         .await
         .map_err(ImageHandlerError::Validation)?;
-    let url = inputs
+    let mut url = inputs
         .adapter
         .build_url(&inputs.request)
         .map_err(ImageHandlerError::Validation)?;
-    let headers = inputs
+    let mut headers = inputs
         .adapter
         .build_headers(&inputs.request, &request_body)
         .map_err(ImageHandlerError::Validation)?;
 
-    let response = inputs
+    let mut response = inputs
         .client
         .post(&url)
         .headers(headers.clone())
@@ -99,6 +103,77 @@ pub async fn handle_image_generation(
         .send()
         .await
         .map_err(|e| ImageHandlerError::Upstream(e.to_string()))?;
+
+    // One-shot refresh retry on 401/403 (never retry twice, never for
+    // no_auth adapters like sdwebui/comfyui, never on other statuses).
+    let status = response.status().as_u16();
+    if (status == 401 || status == 403)
+        && !inputs.adapter.no_auth()
+        && inputs
+            .request
+            .credentials
+            .refresh_token
+            .as_deref()
+            .is_some_and(|r| !r.is_empty())
+    {
+        let refresh_token = inputs
+            .request
+            .credentials
+            .refresh_token
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+        let provider_specific_data = inputs.request.credentials.provider_specific_data.clone();
+        let provider = inputs.request.credentials.provider.clone();
+        // Drop the first response (its body is the 401/403 error we won't use).
+        drop(response);
+        if let Ok(refresh) = crate::oauth::token_refresh::dispatch_oauth_refresh(
+            &provider,
+            &refresh_token,
+            &provider_specific_data,
+        )
+        .await
+        {
+            let mut refreshed = inputs.request.credentials.clone();
+            refreshed.access_token = Some(refresh.access_token.clone());
+            if let Some(rt) = refresh.refresh_token {
+                refreshed.refresh_token = Some(rt);
+            }
+            // `expires_at` is an ISO timestamp string; `refresh.expires_in` is
+            // seconds. The access token is what matters for the retry, so we
+            // leave expires_at as-is.
+            // Rebuild body/url/headers against the refreshed credentials and
+            // re-fire exactly once.
+            let retry_req = ImageRequest {
+                body: inputs.request.body,
+                model: inputs.request.model,
+                credentials: &refreshed,
+            };
+            let rebuilt = (
+                inputs.adapter.build_body(&retry_req).await,
+                inputs.adapter.build_url(&retry_req),
+                inputs.adapter.build_headers(&retry_req, &request_body),
+            );
+            if let (Ok(new_body), Ok(new_url), Ok(new_headers)) = rebuilt {
+                request_body = new_body;
+                url = new_url;
+                headers = new_headers;
+            }
+        }
+        // Re-fire once with the (possibly rebuilt) request. If the refresh
+        // failed, this re-sends the original body/headers — matching the JS
+        // behaviour of returning the original 401/403 on refresh failure, but
+        // we still go through the retry so parse/error handling stays uniform.
+        response = inputs
+            .client
+            .post(&url)
+            .headers(headers.clone())
+            .json(&request_body)
+            .timeout(Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| ImageHandlerError::Upstream(e.to_string()))?;
+    }
 
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -252,5 +327,116 @@ mod tests {
         };
         let err = adapter.build_url(&req).unwrap_err();
         assert!(err.contains("accountId"));
+    }
+
+    /// Test adapter whose URL points at a wiremock server, so the handler's
+    /// retry (which re-fires the request) can be observed.
+    struct TestAdapter {
+        base_url: String,
+    }
+
+    #[async_trait::async_trait]
+    impl ImageAdapter for TestAdapter {
+        fn build_url(&self, _request: &ImageRequest<'_>) -> Result<String, String> {
+            Ok(format!("{}/images/generations", self.base_url))
+        }
+        fn build_headers(
+            &self,
+            request: &ImageRequest<'_>,
+            _body: &Value,
+        ) -> Result<reqwest::header::HeaderMap, String> {
+            let mut h = reqwest::header::HeaderMap::new();
+            let token = request
+                .credentials
+                .api_key
+                .as_deref()
+                .or(request.credentials.access_token.as_deref())
+                .unwrap_or("");
+            h.insert(
+                reqwest::header::AUTHORIZATION,
+                reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
+                    .map_err(|e| e.to_string())?,
+            );
+            Ok(h)
+        }
+        async fn build_body(&self, _request: &ImageRequest<'_>) -> Result<Value, String> {
+            Ok(json!({ "prompt": "test", "model": "test-model" }))
+        }
+    }
+
+    #[tokio::test]
+    async fn image_handler_retries_once_after_refresh() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // The handler must fire the upstream request exactly once when there
+        // is no refresh_token, and exactly twice (401 → refresh → re-fire)
+        // when a refresh_token is present — even though the refresh itself
+        // fails offline, the JS path still re-fires once and returns the 401.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/images/generations"))
+            .and(header("Authorization", "Bearer sk-expired"))
+            .respond_with(ResponseTemplate::new(401))
+            .up_to_n_times(20)
+            .mount(&server)
+            .await;
+
+        // The handler requires a `&'static` adapter; leak a boxed instance.
+        let adapter: &'static TestAdapter = Box::leak(Box::new(TestAdapter {
+            base_url: server.uri(),
+        }));
+        let client = reqwest::Client::new();
+
+        // Case 1: no refresh_token → 1 request (no retry).
+        let mut creds = ProviderConnection::default();
+        creds.provider = "openai".into();
+        creds.api_key = Some("sk-expired".into());
+        let body = json!({ "prompt": "test", "model": "test-model" });
+        let req = IR {
+            body: &body,
+            model: "test-model",
+            credentials: &creds,
+        };
+        let inputs = ImageHandlerInputs {
+            client: &client,
+            adapter: adapter,
+            request: req,
+            binary_output: false,
+            stream_to_client: false,
+        };
+        let _ = handle_image_generation(inputs).await;
+        let after_case1 = server.received_requests().await.unwrap().len();
+        assert_eq!(after_case1, 1, "no refresh creds → 1 request");
+
+        // Case 2: has refresh_token → handler attempts refresh. Using an
+        // unknown provider makes dispatch_oauth_refresh fail immediately
+        // (no network), and per JS the handler still re-fires once → this case
+        // alone makes 2 requests.
+        let mut creds2 = ProviderConnection::default();
+        creds2.provider = "no-such-provider".into();
+        creds2.api_key = Some("sk-expired".into());
+        creds2.refresh_token = Some("rt-123".into());
+        let body2 = json!({ "prompt": "test", "model": "test-model" });
+        let req2 = IR {
+            body: &body2,
+            model: "test-model",
+            credentials: &creds2,
+        };
+        let inputs2 = ImageHandlerInputs {
+            client: &client,
+            adapter: adapter,
+            request: req2,
+            binary_output: false,
+            stream_to_client: false,
+        };
+        let _ = handle_image_generation(inputs2).await;
+        let after_case2 = server.received_requests().await.unwrap().len();
+
+        assert_eq!(
+            after_case2 - after_case1,
+            2,
+            "refresh creds present → handler re-fires once (2 requests in this case)"
+        );
     }
 }
