@@ -26,10 +26,13 @@ pub async fn dispatch(
     body: &serde_json::Value,
 ) -> Option<Result<serde_json::Value, super::MediaError>> {
     let provider_impl = get_search_provider(provider)?;
-    let request = match base::request_from_body(body, Some(credentials)) {
+    let mut request = match base::request_from_body(body, Some(credentials)) {
         Ok(r) => r,
         Err(msg) => return Some(Err(super::MediaError::Validation(msg))),
     };
+    // 9router parity (registry maxMaxResults): clamp to the provider cap
+    // (searxng 50, youcom/default 100) after the default is resolved.
+    request.max_results = request.max_results.min(provider_impl.max_max_results());
     Some(
         handle_search(client, provider_impl, &request)
             .await

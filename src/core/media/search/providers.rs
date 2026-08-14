@@ -924,6 +924,10 @@ impl SearchProvider for SearxngProvider {
         // 9router registry timeoutMs for searxng.
         Some(10_000)
     }
+    fn max_max_results(&self) -> u32 {
+        // 9router registry searxng.js maxMaxResults = 50.
+        50
+    }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         // 9router: default URL comes from SEARXNG_URL env (default
         // http://localhost:8888/search).
@@ -1182,5 +1186,23 @@ mod tests {
             headers.get("X-API-Key").and_then(|v| v.to_str().ok()),
             Some("tok")
         );
+    }
+
+    #[test]
+    fn searxng_caps_max_results_at_50() {
+        // 9router registry searxng.js maxMaxResults = 50; youcom = 100.
+        assert_eq!(SEARXNG.max_max_results(), 50);
+        assert_eq!(YOUCOM.max_max_results(), 100);
+        assert_eq!(SERPER.max_max_results(), 100); // default
+
+        // A request with max_results 100 clamped to searxng's 50.
+        let mut r = req("query", 100);
+        r.max_results = r.max_results.min(SEARXNG.max_max_results());
+        assert_eq!(r.max_results, 50);
+
+        // youcom stays 100.
+        let mut y = req("query", 100);
+        y.max_results = y.max_results.min(YOUCOM.max_max_results());
+        assert_eq!(y.max_results, 100);
     }
 }
