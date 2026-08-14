@@ -706,6 +706,94 @@ fn build_media_headers(
     Ok(headers)
 }
 
+/// Proxy an upstream video response, sanitizing error bodies so secrets
+/// (`Bearer <token>`, raw keys) never reach the client. Non-2xx bodies are
+/// read fully, redacted, and re-emitted; 2xx pass through as a stream.
+async fn proxy_video_response(
+    response: reqwest::Response,
+    headers: HeaderMap,
+    connection: &crate::types::ProviderConnection,
+) -> Response {
+    let status = response.status();
+    if status.is_success() {
+        return proxy_upstream_response(response, headers).await;
+    }
+    let resp_headers = response.headers().clone();
+    let body = response.bytes().await.unwrap_or_default();
+    let text = String::from_utf8_lossy(&body).to_string();
+    let sanitized = sanitize_video_secrets(&text, connection);
+    let mut proxied = Response::new(Body::from(sanitized));
+    *proxied.status_mut() = status;
+    for (name, value) in &resp_headers {
+        if !is_hop_by_hop_header(name.as_str()) {
+            proxied.headers_mut().insert(name.clone(), value.clone());
+        }
+    }
+    proxied
+}
+
+/// Port of 9router `videoCore.js sanitizeSecrets` (videoCore.js:21-31):
+/// redact `Bearer <token>` and any raw access/refresh/api key from client-bound
+/// text so secrets never leak in error responses.
+fn sanitize_video_secrets(text: &str, connection: &crate::types::ProviderConnection) -> String {
+    let mut out = text.to_string();
+    // Redact `Bearer <8+ token chars>`.
+    out = out
+        .split("Bearer ")
+        .enumerate()
+        .map(|(i, part)| {
+            if i == 0 {
+                part.to_string()
+            } else {
+                // Keep "Bearer" in the first chunk; redact the token that follows.
+                let trimmed: String = part.chars().take_while(|c| !c.is_whitespace()).collect();
+                let rest = &part[trimmed.len().min(part.len())..];
+                format!("Bearer [redacted]{rest}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    for secret in [
+        connection.access_token.as_deref(),
+        connection.refresh_token.as_deref(),
+        connection.api_key.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if secret.len() >= 8 {
+            out = out.replace(secret, "[redacted]");
+        }
+    }
+    out
+}
+
+/// Attempt a one-shot OAuth refresh for a media provider connection that
+/// received a 401/403. Returns the refreshed access token (or `None`).
+///
+/// Uses `dispatch_oauth_refresh` directly (NOT the expiry-gated
+/// `refresh_if_needed` — a still-unexpired-but-rejected token would no-op).
+async fn refresh_media_connection(
+    provider: &str,
+    connection: &crate::types::ProviderConnection,
+) -> Option<String> {
+    let refresh_token = connection
+        .refresh_token
+        .as_deref()
+        .filter(|r| !r.is_empty())?;
+    let provider_specific_data = connection.provider_specific_data.clone();
+    match crate::oauth::token_refresh::dispatch_oauth_refresh(
+        provider,
+        refresh_token,
+        &provider_specific_data,
+    )
+    .await
+    {
+        Ok(result) if !result.access_token.is_empty() => Some(result.access_token),
+        _ => None,
+    }
+}
+
 fn transform_media_request(provider: &str, route_kind: &str, body: &Value) -> Value {
     let mut transformed = body.clone();
 
@@ -1029,13 +1117,76 @@ async fn video_create_handler(
         let status = response.status().as_u16();
         let is_rotation_status = create_rotation_statuses.contains(&status);
 
+        // 9router parity (videoCore.js:120-146): on 401/403 with a refresh
+        // token, refresh the connection and re-fire the POST exactly once.
+        // xAI is the only video provider and refresh is supported.
+        if (status == 401 || status == 403)
+            && connection
+                .refresh_token
+                .as_deref()
+                .is_some_and(|r| !r.is_empty())
+        {
+            if let Some(new_access) = refresh_media_connection(&provider, connection).await {
+                // Persist the refreshed token so the next request doesn't 401.
+                let conn_id = connection.id.clone();
+                let db = state.db.clone();
+                let persist_token = new_access.clone();
+                let _ = db
+                    .update(move |app| {
+                        if let Some(idx) = app
+                            .provider_connections
+                            .iter()
+                            .position(|c| c.id == conn_id)
+                        {
+                            app.provider_connections[idx].access_token = Some(persist_token);
+                            app.provider_connections[idx].updated_at =
+                                Some(chrono::Utc::now().to_rfc3339());
+                        }
+                    })
+                    .await;
+                // Rebuild headers with the fresh token and retry once.
+                let mut refreshed = connection.clone();
+                refreshed.access_token = Some(new_access);
+                match build_media_headers(&provider, &refreshed) {
+                    Ok(retry_headers) => {
+                        let retry = client
+                            .post(&url)
+                            .headers(retry_headers.clone())
+                            .body(body_bytes.clone())
+                            .send()
+                            .await;
+                        if let Ok(retry_resp) = retry {
+                            let retry_status = retry_resp.status().as_u16();
+                            if !create_rotation_statuses.contains(&retry_status) {
+                                let mut proxied =
+                                    proxy_video_response(retry_resp, retry_headers, connection)
+                                        .await;
+                                if let Ok(val) = HeaderValue::from_str(&connection.id) {
+                                    proxied
+                                        .headers_mut()
+                                        .insert("x-openproxy-connection-id", val);
+                                }
+                                return proxied;
+                            }
+                            // Retry also 401/403/429 → fall through to rotation.
+                            last_error = Some(
+                                proxy_video_response(retry_resp, retry_headers, connection).await,
+                            );
+                            continue;
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+
         // Rotate on auth/quota errors only when another account remains.
         if is_rotation_status && connections.iter().any(|c| c.id != connection.id) {
-            last_error = Some(proxy_upstream_response(response, upstream_headers).await);
+            last_error = Some(proxy_video_response(response, upstream_headers, connection).await);
             continue;
         }
 
-        let mut proxied = proxy_upstream_response(response, upstream_headers).await;
+        let mut proxied = proxy_video_response(response, upstream_headers, connection).await;
         // Video jobs are account-bound — clients echo this back as `x-connection-id`
         // on GET polls so the same account is used.
         if let Ok(val) = HeaderValue::from_str(&connection.id) {
@@ -1067,7 +1218,7 @@ async fn video_get_handler(state: AppState, headers: HeaderMap, request_id: Stri
     }
 
     let provider = DEFAULT_VIDEO_PROVIDER.to_string();
-    let connection = match select_video_connection(&state, &provider, &headers) {
+    let mut connection = match select_video_connection(&state, &provider, &headers) {
         Ok(conn) => conn,
         Err(resp) => return resp,
     };
@@ -1078,7 +1229,7 @@ async fn video_get_handler(state: AppState, headers: HeaderMap, request_id: Stri
         urlencoding::encode(&request_id)
     );
 
-    let upstream_headers = match build_media_headers(&provider, &connection) {
+    let mut upstream_headers = match build_media_headers(&provider, &connection) {
         Ok(h) => h,
         Err(e) => {
             return json_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
@@ -1109,7 +1260,59 @@ async fn video_get_handler(state: AppState, headers: HeaderMap, request_id: Stri
         }
     };
 
-    let mut proxied = proxy_upstream_response(response, upstream_headers).await;
+    // 9router parity (videoCore.js:120-146): on 401/403 with a refresh token,
+    // refresh + persist + re-fire the GET exactly once.
+    let response = if (response.status().as_u16() == 401 || response.status().as_u16() == 403)
+        && connection
+            .refresh_token
+            .as_deref()
+            .is_some_and(|r| !r.is_empty())
+    {
+        match refresh_media_connection(&provider, &connection).await {
+            Some(new_access) => {
+                // Persist the refreshed token.
+                let conn_id = connection.id.clone();
+                let db = state.db.clone();
+                let persist_token = new_access.clone();
+                let _ = db
+                    .update(move |app| {
+                        if let Some(idx) = app
+                            .provider_connections
+                            .iter()
+                            .position(|c| c.id == conn_id)
+                        {
+                            app.provider_connections[idx].access_token = Some(persist_token);
+                            app.provider_connections[idx].updated_at =
+                                Some(chrono::Utc::now().to_rfc3339());
+                        }
+                    })
+                    .await;
+                connection.access_token = Some(new_access);
+                if let Ok(retry_headers) = build_media_headers(&provider, &connection) {
+                    upstream_headers = retry_headers;
+                }
+                match client
+                    .get(&url)
+                    .headers(upstream_headers.clone())
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return json_error_response(
+                            StatusCode::BAD_GATEWAY,
+                            &format!("Request failed: {}", e),
+                        )
+                    }
+                }
+            }
+            None => response,
+        }
+    } else {
+        response
+    };
+
+    let mut proxied = proxy_video_response(response, upstream_headers, &connection).await;
     if let Ok(val) = HeaderValue::from_str(&connection.id) {
         proxied
             .headers_mut()
@@ -1237,5 +1440,45 @@ mod tests {
         // Compile-level guard that the handler still carries the set.
         let handler_uses_rotation = include_str!("media.rs").contains("create_rotation_statuses");
         assert!(handler_uses_rotation);
+    }
+
+    #[test]
+    fn video_sanitizes_secrets() {
+        let mut conn = crate::types::ProviderConnection::default();
+        conn.api_key = Some("sk-xai-super-secret-key-123".to_string());
+        conn.access_token = Some("xai-access-token-abc123".to_string());
+        conn.refresh_token = Some("xai-refresh-token-xyz789".to_string());
+
+        let text = "Error: Bearer sk-xai-super-secret-key-123 rejected. apiKey=xai-access-token-abc123 refresh=xai-refresh-token-xyz789";
+        let sanitized = sanitize_video_secrets(text, &conn);
+        assert!(
+            !sanitized.contains("sk-xai-super-secret-key-123"),
+            "raw api key must be redacted: {sanitized}"
+        );
+        assert!(
+            !sanitized.contains("xai-access-token-abc123"),
+            "raw access token must be redacted: {sanitized}"
+        );
+        assert!(
+            !sanitized.contains("xai-refresh-token-xyz789"),
+            "raw refresh token must be redacted: {sanitized}"
+        );
+        assert!(
+            sanitized.contains("[redacted]"),
+            "should contain [redacted] markers"
+        );
+    }
+
+    #[test]
+    fn video_sanitizes_bearer_token_pattern() {
+        let conn = crate::types::ProviderConnection::default();
+        // No known secrets in the connection — only the Bearer pattern redacts.
+        let text = "Authorization header 'Bearer eyJhbGciOiJIUzI1NiJ9' was rejected";
+        let sanitized = sanitize_video_secrets(text, &conn);
+        assert!(
+            !sanitized.contains("eyJhbGciOiJIUzI1NiJ9"),
+            "Bearer token must be redacted: {sanitized}"
+        );
+        assert!(sanitized.contains("Bearer [redacted]"), "got: {sanitized}");
     }
 }
