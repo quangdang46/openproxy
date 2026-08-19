@@ -2851,6 +2851,9 @@ async fn proxy_response_with_pending_tracking(
     // Qoder wraps every SSE chunk in a {statusCodeValue, body} envelope that
     // must be unwrapped before downstream consumers see it (9router wrapQoderSSE).
     let qoder_sse_unwrap = provider == "qoder";
+    // Billing block detection state (9router v0.5.55 peekFirstQoderFrame).
+    let mut qoder_seen_first_frame = false;
+    let mut qoder_billing_block = false;
     let body = match response {
         UpstreamResponse::Reqwest(response) => {
             let state = state.clone();
@@ -2899,7 +2902,12 @@ async fn proxy_response_with_pending_tracking(
                         Ok(Ok(Some(chunk))) => {
                             last_data = Some(chunk.clone());
                             if qoder_sse_unwrap {
-                                for line in qoder_unwrap_sse_chunk(&chunk, &mut pending_text) {
+                                for line in qoder_unwrap_sse_chunk(
+                                    &chunk,
+                                    &mut pending_text,
+                                    &mut qoder_seen_first_frame,
+                                    &mut qoder_billing_block,
+                                ) {
                                     yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
                                 }
                             } else if let Some(transformer) = transformer.as_mut() {
@@ -3280,7 +3288,16 @@ fn extract_dashboard_assistant_text_from_bytes(body: &[u8]) -> Option<String> {
 /// `{statusCodeValue, body}` envelope on each `data:` line (9router
 /// wrapQoderSSE). Non-`data:` lines (keepalives) are dropped; the terminal
 /// `[DONE]` frame passes through.
-fn qoder_unwrap_sse_chunk(chunk: &Bytes, pending_text: &mut String) -> Vec<String> {
+///
+/// On the first `data:` line, checks for billing/quota blocks (9router v0.5.55
+/// peekFirstQoderFrame). If detected, emits a synthetic 403 error frame and
+/// sets `billing_block` to `true` so the caller can trigger combo fallback.
+fn qoder_unwrap_sse_chunk(
+    chunk: &Bytes,
+    pending_text: &mut String,
+    seen_first_frame: &mut bool,
+    billing_block: &mut bool,
+) -> Vec<String> {
     pending_text.push_str(&String::from_utf8_lossy(chunk));
     let mut out = Vec::new();
     while let Some(newline_index) = pending_text.find('\n') {
@@ -3291,6 +3308,20 @@ fn qoder_unwrap_sse_chunk(chunk: &Bytes, pending_text: &mut String) -> Vec<Strin
         pending_text.drain(..=newline_index);
         if line.is_empty() {
             continue;
+        }
+        // First-frame billing block detection (9router peekFirstQoderFrame).
+        if !*seen_first_frame && line.starts_with("data:") {
+            *seen_first_frame = true;
+            if let Some(billing_err) =
+                crate::core::executor::qoder::check_billing_in_sse_line(&line)
+            {
+                *billing_block = true;
+                // Emit the billing error as a JSON error frame so the chat
+                // handler sees status 403 and triggers combo fallback.
+                out.push(format!("data: {billing_err}\n\n"));
+                out.push("data: [DONE]\n\n".to_string());
+                return out;
+            }
         }
         if let Some(frame) = crate::core::executor::qoder::QoderExecutor::wrap_qoder_sse_line(&line)
         {

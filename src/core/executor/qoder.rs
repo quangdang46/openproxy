@@ -257,6 +257,70 @@ pub struct QoderExecutor {
     provider_node: Option<ProviderNode>,
 }
 
+// ---------------------------------------------------------------------------
+// Billing block detection (ported from 9router v0.5.55 qoder.js)
+// ---------------------------------------------------------------------------
+
+/// Billing/quota error codes that should trigger combo fallback.
+const QODER_BILLING_CODES: &[u64] = &[112, 10605];
+
+/// Detect a billing block in a Qoder SSE envelope body.
+///
+/// Returns `Some(error_message)` if the body is a billing/quota error that
+/// should be surfaced as a synthetic 403 to trigger combo/account fallback.
+/// Returns `None` if the body is normal (should be piped to the client).
+pub fn detect_qoder_billing_block(body: &str) -> Option<String> {
+    let envelope: Value = serde_json::from_str(body).ok()?;
+    let inner = envelope.get("body").and_then(Value::as_str)?;
+
+    // Parse the inner body as JSON (it may be a stringified JSON).
+    let inner_json: Option<Value> = serde_json::from_str(inner).ok();
+
+    // Check for billing error codes in the inner JSON.
+    if let Some(ref obj) = inner_json {
+        if let Some(code) = obj.get("code").and_then(Value::as_u64) {
+            if QODER_BILLING_CODES.contains(&code) {
+                let msg = obj
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("billing/quota error");
+                return Some(format!("qoder billing block (code {code}): {msg}"));
+            }
+        }
+        // Check for pricingUrl field (indicates billing required).
+        if obj.get("pricingUrl").is_some() {
+            return Some("qoder billing block: pricingUrl present".to_string());
+        }
+    }
+
+    // Also check the raw string for billing indicators.
+    if inner.contains("pricingUrl")
+        || inner.contains("\"code\":112")
+        || inner.contains("\"code\":10605")
+    {
+        return Some("qoder billing block detected in raw body".to_string());
+    }
+
+    None
+}
+
+/// Check if a Qoder SSE line contains a billing block.
+/// Returns `Some(error_frame)` if billing detected, `None` if normal.
+pub fn check_billing_in_sse_line(line: &str) -> Option<String> {
+    let line = line.trim_end();
+    if !line.starts_with("data:") {
+        return None;
+    }
+    let payload = line.trim_start_matches("data:").trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return None;
+    }
+    detect_qoder_billing_block(payload).map(|err_msg| {
+        // Return a synthetic 403 error frame that the chat handler can detect.
+        format!("{{\"error\":true,\"status\":403,\"message\":\"{err_msg}\"}}")
+    })
+}
+
 impl QoderExecutor {
     pub fn new(
         pool: Arc<ClientPool>,
@@ -1432,5 +1496,91 @@ mod tests {
             !out.contains('\n') || out == "data: line1line2\n\n",
             "got: {out:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Billing block detection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_detect_billing_block_code_112() {
+        let body =
+            r#"{"statusCodeValue":200,"body":"{\"code\":112,\"message\":\"Quota exhausted\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(
+            result.is_some(),
+            "code 112 should be detected as billing block"
+        );
+        assert!(result.unwrap().contains("112"));
+    }
+
+    #[test]
+    fn test_detect_billing_block_code_10605() {
+        let body =
+            r#"{"statusCodeValue":200,"body":"{\"code\":10605,\"message\":\"Queue throttle\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(
+            result.is_some(),
+            "code 10605 should be detected as billing block"
+        );
+    }
+
+    #[test]
+    fn test_detect_billing_block_pricing_url() {
+        let body = r#"{"statusCodeValue":200,"body":"{\"pricingUrl\":\"https://qoder.sh/pricing\",\"message\":\"Upgrade required\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(
+            result.is_some(),
+            "pricingUrl should be detected as billing block"
+        );
+        assert!(result.unwrap().contains("pricingUrl"));
+    }
+
+    #[test]
+    fn test_detect_billing_block_normal_response() {
+        let body =
+            r#"{"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(
+            result.is_none(),
+            "normal response should not be billing block"
+        );
+    }
+
+    #[test]
+    fn test_detect_billing_block_error_non_billing() {
+        let body = r#"{"statusCodeValue":500,"body":"{\"error\":\"internal server error\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(result.is_none(), "non-billing error should not be detected");
+    }
+
+    #[test]
+    fn test_check_billing_in_sse_line_billing() {
+        let line = r#"data: {"statusCodeValue":200,"body":"{\"code\":112,\"message\":\"Quota exhausted\"}"}"#;
+        let result = check_billing_in_sse_line(line);
+        assert!(result.is_some(), "billing SSE line should be detected");
+        let err_frame = result.unwrap();
+        assert!(err_frame.contains("403"), "error frame should contain 403");
+        assert!(
+            err_frame.contains("billing"),
+            "error frame should mention billing"
+        );
+    }
+
+    #[test]
+    fn test_check_billing_in_sse_line_normal() {
+        let line = r#"data: {"statusCodeValue":200,"body":"{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"}"#;
+        let result = check_billing_in_sse_line(line);
+        assert!(
+            result.is_none(),
+            "normal SSE line should not trigger billing"
+        );
+    }
+
+    #[test]
+    fn test_check_billing_in_sse_line_non_data() {
+        let line = ": keepalive";
+        let result = check_billing_in_sse_line(line);
+        assert!(result.is_none(), "non-data line should be ignored");
     }
 }
