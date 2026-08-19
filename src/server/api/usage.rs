@@ -459,15 +459,19 @@ struct UsageSummaryCompact {
     total_cost: f64,
 }
 
-// Handler for GET /api/usage/:connection_id
+// Handler for GET /api/usage/:connection_id?force=1
 async fn get_connection_usage(
     State(state): State<AppState>,
     axum::extract::Path(connection_id): axum::extract::Path<String>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
     if let Err(response) = require_usage_access(&headers, &state) {
         return response;
     }
+
+    // ?force=1 bypasses the in-memory quota cache (9router v0.5.55 parity).
+    let force = params.get("force").map(|v| v.as_str()) == Some("1");
 
     let snapshot = state.db.snapshot();
     let Some(connection) = snapshot
