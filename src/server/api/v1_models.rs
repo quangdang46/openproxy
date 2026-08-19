@@ -139,6 +139,8 @@ async fn build_models_list(
             "combo".to_string(),
             created,
             kind,
+            None,
+            None,
         ));
     }
 
@@ -163,6 +165,8 @@ async fn build_models_list(
                     provider_entry.alias.clone(),
                     created,
                     None,
+                    model.context_window,
+                    None,
                 ));
             }
         }
@@ -181,6 +185,8 @@ async fn build_models_list(
                     format!("{provider_alias}/{model_id}"),
                     provider_alias.to_string(),
                     created,
+                    None,
+                    None,
                     None,
                 ));
             }
@@ -274,10 +280,16 @@ async fn build_models_list(
                     continue;
                 }
 
+                // Look up context_window from catalog for this model.
+                let ctx_len = catalog
+                    .find_model(provider_id, &model_id)
+                    .and_then(|m| m.context_window);
                 models.push(model_card(
                     format!("{output_alias}/{model_id}"),
                     output_alias.clone(),
                     created,
+                    None,
+                    ctx_len,
                     None,
                 ));
             }
@@ -290,6 +302,8 @@ async fn build_models_list(
                             output_alias.clone(),
                             created,
                             None,
+                            None,
+                            None,
                         ));
                     }
                 }
@@ -301,6 +315,8 @@ async fn build_models_list(
                             output_alias.clone(),
                             created,
                             None,
+                            None,
+                            None,
                         ));
                     }
                 }
@@ -311,6 +327,8 @@ async fn build_models_list(
                         output_alias.clone(),
                         created,
                         Some("webSearch".to_string()),
+                        None,
+                        None,
                     ));
                 }
 
@@ -320,6 +338,8 @@ async fn build_models_list(
                         output_alias.clone(),
                         created,
                         Some("webFetch".to_string()),
+                        None,
+                        None,
                     ));
                 }
             }
@@ -348,6 +368,8 @@ async fn build_models_list(
                 format!("{provider_alias}/{model_id}"),
                 provider_alias.to_string(),
                 created,
+                None,
+                None,
                 None,
             ));
         }
@@ -522,7 +544,14 @@ fn dedupe_strings(values: Vec<String>) -> Vec<String> {
     deduped
 }
 
-fn model_card(id: String, owned_by: String, created: u64, kind: Option<String>) -> ModelCard {
+fn model_card(
+    id: String,
+    owned_by: String,
+    created: u64,
+    kind: Option<String>,
+    context_length: Option<u32>,
+    max_completion_tokens: Option<u32>,
+) -> ModelCard {
     let root = id.split('/').next_back().unwrap_or(&id).to_string();
     ModelCard {
         id,
@@ -533,6 +562,8 @@ fn model_card(id: String, owned_by: String, created: u64, kind: Option<String>) 
         root,
         parent: None,
         kind,
+        context_length,
+        max_completion_tokens,
     }
 }
 
@@ -592,6 +623,12 @@ struct ModelCard {
     parent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     kind: Option<String>,
+    /// Maximum context window size in tokens (9router v0.5.55 parity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_length: Option<u32>,
+    /// Maximum completion/output tokens (9router v0.5.55 parity).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
 }
 
 /// GET /v1/models/info?model={model_id}
