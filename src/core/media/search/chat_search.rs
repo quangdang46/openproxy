@@ -47,7 +47,8 @@ async fn gemini_chat_search(
     request: &SearchRequest<'_>,
 ) -> Option<SearchResultSet> {
     const MODEL: &str = "gemini-2.5-flash";
-    let base = resolve_base_url("https://generativelanguage.googleapis.com/v1beta", request);
+    let base =
+        resolve_base_url("https://generativelanguage.googleapis.com/v1beta", request).ok()?;
     let url = format!("{base}/models/{MODEL}:generateContent");
     let body = json!({
         "contents": [{ "role": "user", "parts": [{ "text": query }] }],
@@ -130,7 +131,7 @@ async fn openai_chat_search(
     if !upstream_model.to_lowercase().contains("search") {
         body["tools"] = json!([{ "type": "web_search" }]);
     }
-    let base = resolve_base_url("https://api.openai.com/v1", request);
+    let base = resolve_base_url("https://api.openai.com/v1", request).ok()?;
     let resp = client
         .post(format!("{base}/chat/completions"))
         .bearer_auth(token)

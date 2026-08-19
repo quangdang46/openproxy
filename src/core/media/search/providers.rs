@@ -69,7 +69,7 @@ impl SearchProvider for SerperProvider {
         };
         Ok(format!(
             "{}{endpoint}",
-            resolve_base_url("https://google.serper.dev", request)
+            resolve_base_url("https://google.serper.dev", request)?
         ))
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
@@ -166,7 +166,7 @@ impl SearchProvider for BraveProvider {
         }
         Ok(format!(
             "{}{endpoint}?{}",
-            resolve_base_url("https://api.search.brave.com/res/v1", request),
+            resolve_base_url("https://api.search.brave.com/res/v1", request)?,
             serde_urlencoded::to_string(&qp).unwrap_or_default()
         ))
     }
@@ -241,7 +241,7 @@ impl SearchProvider for PerplexityProvider {
         Ok(resolve_base_url(
             "https://api.perplexity.ai/search",
             request,
-        ))
+        )?)
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "perplexity")?;
@@ -316,7 +316,7 @@ impl SearchProvider for ExaProvider {
         "exa"
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url("https://api.exa.ai/search", request))
+        Ok(resolve_base_url("https://api.exa.ai/search", request)?)
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "exa")?;
@@ -405,7 +405,7 @@ impl SearchProvider for TavilyProvider {
         "tavily"
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url("https://api.tavily.com/search", request))
+        Ok(resolve_base_url("https://api.tavily.com/search", request)?)
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "tavily")?;
@@ -520,7 +520,7 @@ impl SearchProvider for GooglePseProvider {
             resolve_base_url(
                 "https://customsearch.googleapis.com/customsearch/v1",
                 request
-            ),
+            )?,
             serde_urlencoded::to_string(&qp).unwrap_or_default()
         ))
     }
@@ -591,7 +591,10 @@ impl SearchProvider for LinkupProvider {
         "linkup"
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url("https://api.linkup.so/v1/search", request))
+        Ok(resolve_base_url(
+            "https://api.linkup.so/v1/search",
+            request,
+        )?)
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "linkup")?;
@@ -712,7 +715,7 @@ impl SearchProvider for SearchApiProvider {
         }
         Ok(format!(
             "{}?{}",
-            resolve_base_url("https://www.searchapi.io/api/v1/search", request),
+            resolve_base_url("https://www.searchapi.io/api/v1/search", request)?,
             serde_urlencoded::to_string(&qp).unwrap_or_default()
         ))
     }
@@ -830,7 +833,7 @@ impl SearchProvider for YouComProvider {
         }
         Ok(format!(
             "{}?{}",
-            resolve_base_url("https://ydc-index.io/v1/search", request),
+            resolve_base_url("https://ydc-index.io/v1/search", request)?,
             serde_urlencoded::to_string(&qp).unwrap_or_default()
         ))
     }
@@ -933,7 +936,7 @@ impl SearchProvider for SearxngProvider {
         // http://localhost:8888/search).
         let default = std::env::var("SEARXNG_URL")
             .unwrap_or_else(|_| "http://localhost:8888/search".to_string());
-        let base = resolve_base_url(&default, request);
+        let base = resolve_base_url(&default, request)?;
         let url = if base.ends_with("/search") {
             base
         } else {
