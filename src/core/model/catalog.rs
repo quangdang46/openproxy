@@ -95,11 +95,27 @@ impl ProviderCatalog {
             .find(|m| m.id == model_id)
     }
 
+    /// Build reverse map: alias → provider_id.
+    ///
+    /// Self-referencing entries (where provider_id == alias) are inserted
+    /// **only** when no non-self-referencing entry already claimed that alias.
+    /// This prevents `qianfan → qianfan` from overwriting the correct
+    /// `qianfan → baidu` mapping produced by the forward entry `baidu → qianfan`.
     pub fn alias_to_provider_id(&self) -> HashMap<String, String> {
-        self.provider_id_to_alias
-            .iter()
-            .map(|(provider_id, alias)| (alias.clone(), provider_id.clone()))
-            .collect()
+        let mut map = HashMap::new();
+        // Pass 1: non-self-referencing entries (baidu → qianfan).
+        for (provider_id, alias) in &self.provider_id_to_alias {
+            if provider_id != alias {
+                map.insert(alias.clone(), provider_id.clone());
+            }
+        }
+        // Pass 2: self-referencing entries (openai → openai) only if not taken.
+        for (provider_id, alias) in &self.provider_id_to_alias {
+            if provider_id == alias && !map.contains_key(alias) {
+                map.insert(alias.clone(), provider_id.clone());
+            }
+        }
+        map
     }
 }
 
