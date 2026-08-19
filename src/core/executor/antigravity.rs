@@ -573,6 +573,27 @@ impl AntigravityExecutor {
                 }
             }
 
+            // Rewrite competitive system prompts (e.g. Zed IDE's Claude prompt) to prevent
+            // Antigravity from flagging the request and blocking it with 429 Quota Exhausted.
+            // Ported from 9router v0.5.55 antigravity.js transformRequest.
+            if let Some(system_instruction) = request_obj.get_mut("systemInstruction") {
+                if let Some(parts) = system_instruction
+                    .get_mut("parts")
+                    .and_then(|v| v.as_array_mut())
+                {
+                    for part in parts.iter_mut() {
+                        if let Some(obj) = part.as_object_mut() {
+                            if let Some(Value::String(text)) = obj.get_mut("text") {
+                                *text = text.replace(
+                                    "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+                                    "",
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
             // Sanitize and merge tool function declarations into a single group.
             // Note: 9router's transformRequest does NOT cloak tool names — it
             // only merges, sanitizes function names, and cleans schemas. The
@@ -1434,5 +1455,65 @@ mod tests {
             parse_image_config("gemini-2.5-flash-image")["aspectRatio"],
             "1:1"
         );
+    }
+
+    #[test]
+    fn transform_request_strips_competitive_system_prompt() {
+        // Regression test for openproxy-mfs3.5 (9router v0.5.55 parity).
+        // Antigravity flags requests containing Zed IDE's Claude prompt and
+        // blocks them with 429 Quota Exhausted. Strip the competitive text.
+        let competitive_text = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
+        let system_text = format!(
+            "You are a helpful assistant. {} Always be concise.",
+            competitive_text
+        );
+        let mut body = json!({
+            "request": {
+                "systemInstruction": {
+                    "parts": [{"text": system_text}]
+                },
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+            }
+        });
+        let creds = ProviderConnection::default();
+        AntigravityExecutor::transform_request(&mut body, &creds).unwrap();
+
+        let parts = body["request"]["systemInstruction"]["parts"]
+            .as_array()
+            .expect("systemInstruction.parts should be an array");
+        let text = parts[0]["text"].as_str().expect("text should be a string");
+        assert!(
+            !text.contains(competitive_text),
+            "competitive prompt should be stripped, got: {text}"
+        );
+        assert!(
+            text.contains("You are a helpful assistant"),
+            "non-competitive text should be preserved, got: {text}"
+        );
+        assert!(
+            text.contains("Always be concise"),
+            "text after the stripped prompt should be preserved, got: {text}"
+        );
+    }
+
+    #[test]
+    fn transform_request_preserves_non_competitive_system_prompt() {
+        // Non-competitive system prompts should pass through unchanged.
+        let system_text = "You are a helpful coding assistant.";
+        let mut body = json!({
+            "request": {
+                "systemInstruction": {
+                    "parts": [{"text": system_text}]
+                },
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}]
+            }
+        });
+        let creds = ProviderConnection::default();
+        AntigravityExecutor::transform_request(&mut body, &creds).unwrap();
+
+        let text = body["request"]["systemInstruction"]["parts"][0]["text"]
+            .as_str()
+            .expect("text should be a string");
+        assert_eq!(text, system_text);
     }
 }
