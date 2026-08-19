@@ -103,6 +103,11 @@ pub struct KiroSseAssembler {
     /// emitted — either via messageStopEvent/metadataEvent or the
     /// clean-EOF finish. Guards against a double terminal.
     pub terminal_emitted: bool,
+    /// Count of tool calls dropped during flush_tools due to validation
+    /// failures (9router v0.5.55 per-tool validation, droppedTools counter).
+    pub dropped_tools: u64,
+    /// First validation error message, if any (for logging).
+    pub tool_validation_error: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -151,6 +156,11 @@ impl KiroSseAssembler {
     /// 9router emitTools: for each buffered tool emit
     ///   `{id, name, type:function, function:{name, arguments:""}}` then
     ///   `{function:{arguments:JSON.stringify(input)}}`.
+    ///
+    /// Per-tool validation (9router v0.5.55): each tool call is validated
+    /// individually before emission. Invalid tool calls are dropped and
+    /// counted in `dropped_tools`, while valid ones in the same turn are
+    /// emitted normally.
     fn flush_tools(&mut self) -> Vec<Value> {
         if self.tools.is_empty() {
             return Vec::new();
@@ -158,6 +168,72 @@ impl KiroSseAssembler {
         let mut chunks = Vec::new();
         let mut tool_calls = Vec::new();
         for tool in self.tools.values() {
+            // Per-tool validation (9router v0.5.55).
+            let input = if tool.input_parts.len() == 1 {
+                tool.input_parts[0].clone()
+            } else {
+                json!(tool.input_parts)
+            };
+            // Validate: input must be a JSON object (not null, not array).
+            let parsed = match &input {
+                Value::Object(_) => input.clone(),
+                Value::Null => {
+                    self.dropped_tools += 1;
+                    if self.tool_validation_error.is_none() {
+                        self.tool_validation_error =
+                            Some("Kiro tool call input is null".to_string());
+                    }
+                    tracing::warn!(
+                        target: "openproxy::executor::kiro",
+                        "dropping unusable tool call {} ({}): input is null",
+                        tool.id,
+                        tool.name
+                    );
+                    continue;
+                }
+                Value::Array(_) => {
+                    self.dropped_tools += 1;
+                    if self.tool_validation_error.is_none() {
+                        self.tool_validation_error =
+                            Some("Kiro tool call input is an array, not object".to_string());
+                    }
+                    tracing::warn!(
+                        target: "openproxy::executor::kiro",
+                        "dropping unusable tool call {} ({}): input is array",
+                        tool.id,
+                        tool.name
+                    );
+                    continue;
+                }
+                other => other.clone(),
+            };
+            // If tool name is "tool_call", validate nested name and arguments.
+            if tool.name == "tool_call" {
+                if let Some(obj) = parsed.as_object() {
+                    let has_name = obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false);
+                    let has_args = obj.contains_key("arguments");
+                    if !has_name || !has_args {
+                        self.dropped_tools += 1;
+                        if self.tool_validation_error.is_none() {
+                            self.tool_validation_error = Some(
+                                "Invalid Kiro tool_call payload: missing nested name or arguments"
+                                    .to_string(),
+                            );
+                        }
+                        tracing::warn!(
+                            target: "openproxy::executor::kiro",
+                            "dropping unusable tool_call wrapper {} ({}): missing nested name/arguments",
+                            tool.id,
+                            tool.name
+                        );
+                        continue;
+                    }
+                }
+            }
             let index = self.tool_index;
             self.tool_index += 1;
             // First delta: declaration with empty arguments.
@@ -173,13 +249,7 @@ impl KiroSseAssembler {
             );
             tool_calls.push(delta1);
             // Second delta: the input.
-            let input = if tool.input_parts.len() == 1 {
-                tool.input_parts[0].clone()
-            } else {
-                // Multiple fragments — wrap as a JSON array of parts.
-                json!(tool.input_parts)
-            };
-            let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".to_string());
+            let input_str = serde_json::to_string(&parsed).unwrap_or_else(|_| "{}".to_string());
             let mut delta2 = Map::new();
             delta2.insert(
                 "tool_calls".to_string(),
@@ -341,7 +411,13 @@ impl KiroSseAssembler {
                 // 9router emits the terminal chunk at the stop event; flush any
                 // buffered tool calls first so finish_reason lands last. Guarded
                 // so a clean-EOF finish cannot double-emit the terminal.
-                if !self.terminal_emitted {
+                //
+                // Defer the terminal when tool_use arrives with no actual tools
+                // and no content — finish() will emit an error frame instead.
+                let tool_use_defer = self.stop_reason.as_deref() == Some("tool_use")
+                    && !self.saw_tool_use
+                    && !self.emitted_any;
+                if !self.terminal_emitted && !tool_use_defer {
                     chunks.extend(self.flush_tools());
                     chunks.push(self.terminal_chunk());
                 }
@@ -477,12 +553,34 @@ impl KiroSseAssembler {
 
     /// Emit the terminal chunk with finish_reason + any buffered tools flushed
     /// first. Call exactly once at stream end (e.g. upstream connection close).
+    ///
+    /// Per-tool validation summary (9router v0.5.55): if `tool_use` stop was
+    /// received but no tool calls were seen AND no content was emitted, the
+    /// turn is empty and should be treated as an error.
     pub fn finish(&mut self) -> Vec<Value> {
         if self.terminal_emitted {
             return Vec::new();
         }
+
+        // tool_use stop with no content and no tool calls is a protocol error.
+        let tool_use_empty = self.stop_reason.as_deref() == Some("tool_use")
+            && !self.saw_tool_use
+            && !self.emitted_any;
+
         let mut chunks = self.flush_tools();
-        chunks.push(self.terminal_chunk());
+        if tool_use_empty {
+            // Emit an error frame instead of a terminal chunk.
+            self.terminal_emitted = true;
+            chunks.push(json!({
+                "error": {
+                    "message": "Kiro tool_use stop reason did not include a complete tool call",
+                    "type": "upstream_error",
+                    "code": "kiro_tool_use_empty"
+                }
+            }));
+        } else {
+            chunks.push(self.terminal_chunk());
+        }
         chunks
     }
 }
@@ -819,5 +917,164 @@ mod tests {
             terminal["choices"][0]["finish_reason"], "stop",
             "end_turn should still map to stop"
         );
+    }
+
+    // --- Per-tool validation tests (9router v0.5.55) ---
+
+    #[test]
+    fn flush_tools_drops_null_input_tool() {
+        // A tool call with null input should be dropped, not emitted.
+        let mut asm = KiroSseAssembler::new("test-model");
+        let mut tools = HashMap::new();
+        tools.insert(
+            "tool1".to_string(),
+            KiroToolBuf {
+                id: "call_1".to_string(),
+                name: "get_weather".to_string(),
+                input_parts: vec![Value::Null],
+            },
+        );
+        asm.tools = tools;
+        let chunks = asm.flush_tools();
+        assert!(
+            chunks.is_empty(),
+            "null-input tool should be dropped, got: {:?}",
+            chunks
+        );
+        assert_eq!(asm.dropped_tools, 1);
+        assert!(asm.tool_validation_error.is_some());
+    }
+
+    #[test]
+    fn flush_tools_drops_array_input_tool() {
+        // A tool call with array input should be dropped.
+        let mut asm = KiroSseAssembler::new("test-model");
+        let mut tools = HashMap::new();
+        tools.insert(
+            "tool1".to_string(),
+            KiroToolBuf {
+                id: "call_1".to_string(),
+                name: "get_weather".to_string(),
+                input_parts: vec![json!([1, 2, 3])],
+            },
+        );
+        asm.tools = tools;
+        let chunks = asm.flush_tools();
+        assert!(chunks.is_empty(), "array-input tool should be dropped");
+        assert_eq!(asm.dropped_tools, 1);
+    }
+
+    #[test]
+    fn flush_tools_drops_invalid_tool_call_wrapper() {
+        // A tool_call wrapper missing nested name should be dropped.
+        let mut asm = KiroSseAssembler::new("test-model");
+        let mut tools = HashMap::new();
+        tools.insert(
+            "tool1".to_string(),
+            KiroToolBuf {
+                id: "call_1".to_string(),
+                name: "tool_call".to_string(),
+                input_parts: vec![json!({"arguments": {}})],
+            },
+        );
+        asm.tools = tools;
+        let chunks = asm.flush_tools();
+        assert!(
+            chunks.is_empty(),
+            "tool_call missing name should be dropped"
+        );
+        assert_eq!(asm.dropped_tools, 1);
+    }
+
+    #[test]
+    fn flush_tools_keeps_valid_tool_call_wrapper() {
+        // A valid tool_call wrapper with name and arguments should be emitted.
+        let mut asm = KiroSseAssembler::new("test-model");
+        let mut tools = HashMap::new();
+        tools.insert(
+            "tool1".to_string(),
+            KiroToolBuf {
+                id: "call_1".to_string(),
+                name: "tool_call".to_string(),
+                input_parts: vec![json!({"name": "get_weather", "arguments": {"city": "NYC"}})],
+            },
+        );
+        asm.tools = tools;
+        let chunks = asm.flush_tools();
+        assert_eq!(chunks.len(), 2, "valid tool_call should emit 2 deltas");
+        assert_eq!(asm.dropped_tools, 0);
+    }
+
+    #[test]
+    fn flush_tools_mix_valid_and_invalid() {
+        // Mix of valid and invalid: only valid emitted, bad ones counted.
+        let mut tools = HashMap::new();
+        tools.insert(
+            "bad".to_string(),
+            KiroToolBuf {
+                id: "call_bad".to_string(),
+                name: "get_weather".to_string(),
+                input_parts: vec![Value::Null],
+            },
+        );
+        tools.insert(
+            "good".to_string(),
+            KiroToolBuf {
+                id: "call_good".to_string(),
+                name: "get_time".to_string(),
+                input_parts: vec![json!({"timezone": "UTC"})],
+            },
+        );
+        let mut asm = KiroSseAssembler::new("test-model");
+        asm.tools = tools;
+        let chunks = asm.flush_tools();
+        assert_eq!(chunks.len(), 2, "only valid tool should emit 2 deltas");
+        assert_eq!(asm.dropped_tools, 1);
+    }
+
+    #[test]
+    fn tool_use_stop_with_no_content_emits_error() {
+        // tool_use stop with no tool calls and no content → error frame.
+        let mut asm = KiroSseAssembler::new("test-model");
+        asm.process_event(&event(
+            "messageStopEvent",
+            json!({ "stopReason": "tool_use" }),
+        ))
+        .unwrap();
+        // messageStopEvent sets stop_reason but doesn't emit if no tools.
+        // finish() should emit an error.
+        let chunks = asm.finish();
+        assert!(!chunks.is_empty(), "should emit error frame");
+        let last = chunks.last().unwrap();
+        assert!(
+            last.get("error").is_some(),
+            "should be an error frame, got: {:?}",
+            last
+        );
+    }
+
+    #[test]
+    fn tool_use_stop_with_content_still_emits_terminal() {
+        // tool_use stop WITH text content → normal terminal (content was kept).
+        let mut asm = KiroSseAssembler::new("test-model");
+        asm.process_event(&event(
+            "assistantResponseEvent",
+            json!({ "content": "Let me check that for you." }),
+        ))
+        .unwrap();
+        let stop_chunks = asm
+            .process_event(&event(
+                "messageStopEvent",
+                json!({ "stopReason": "tool_use" }),
+            ))
+            .unwrap();
+        // Terminal was emitted by the stop event (emitted_any was true).
+        let terminal = stop_chunks.last().unwrap();
+        assert_eq!(
+            terminal["choices"][0]["finish_reason"], "tool_calls",
+            "tool_use with content should still emit tool_calls terminal"
+        );
+        // finish() should be a no-op since terminal was already emitted.
+        assert!(asm.finish().is_empty());
     }
 }
