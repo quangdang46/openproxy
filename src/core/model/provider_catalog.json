@@ -1849,6 +1849,11 @@
    "alias": "glm",
    "models": [
     {
+     "id": "glm-5.3",
+     "name": "GLM 5.3",
+     "kind": "llm"
+    },
+    {
      "id": "glm-5.1",
      "name": "GLM 5.1",
      "kind": "llm"
@@ -1873,6 +1878,11 @@
   {
    "alias": "glm-cn",
    "models": [
+    {
+     "id": "glm-5.3",
+     "name": "GLM 5.3",
+     "kind": "llm"
+    },
     {
      "id": "glm-5.1",
      "name": "GLM 5.1",

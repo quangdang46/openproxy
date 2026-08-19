@@ -387,5 +387,15 @@ mod tests {
             .find_model("alitp-intl", "deepseek-v4-pro")
             .expect("alitp-intl/deepseek-v4-pro should resolve");
         assert_eq!(m.name.as_deref(), Some("DeepSeek V4 Pro"));
+
+        // GLM 5.3 — new in v0.5.55.
+        let m = catalog
+            .find_model("glm", "glm-5.3")
+            .expect("glm/glm-5.3 should resolve");
+        assert_eq!(m.name.as_deref(), Some("GLM 5.3"));
+        let m = catalog
+            .find_model("glm-cn", "glm-5.3")
+            .expect("glm-cn/glm-5.3 should resolve");
+        assert_eq!(m.name.as_deref(), Some("GLM 5.3"));
     }
 }
