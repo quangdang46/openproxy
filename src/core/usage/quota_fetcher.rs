@@ -1737,11 +1737,123 @@ fn codebuddy_base_package(acc: &serde_json::Map<String, Value>) -> serde_json::M
         .unwrap_or_default()
 }
 
+/// Claude usage cache: per-access-token with 5-minute TTL and in-flight dedup.
+/// Ported from 9router v0.5.55 services/usage/claude.js.
+mod claude_cache {
+    use once_cell::sync::Lazy;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use tokio::sync::Mutex;
+
+    /// Cache TTL: 5 minutes (USAGE_CACHE_TTL_MS = 300000 in 9router).
+    const CACHE_TTL: Duration = Duration::from_secs(300);
+
+    struct CacheEntry {
+        result: serde_json::Value,
+        expires_at: Instant,
+    }
+
+    struct CacheState {
+        /// Last good result per token (for stale-on-error fallback).
+        entries: HashMap<String, CacheEntry>,
+        /// In-flight requests per token (dedup key).
+        in_flight: HashMap<String, Arc<tokio::sync::OnceCell<serde_json::Value>>>,
+    }
+
+    static CACHE: Lazy<Mutex<CacheState>> = Lazy::new(|| {
+        Mutex::new(CacheState {
+            entries: HashMap::new(),
+            in_flight: HashMap::new(),
+        })
+    });
+
+    /// Try to serve from cache. Returns `Some(result)` if fresh.
+    pub async fn get_cached(token: &str) -> Option<serde_json::Value> {
+        let guard = CACHE.lock().await;
+        if let Some(entry) = guard.entries.get(token) {
+            if entry.expires_at > Instant::now() {
+                return Some(entry.result.clone());
+            }
+        }
+        None
+    }
+
+    /// Get or create an in-flight dedup cell for this token.
+    /// Returns `Some(cell)` if this caller should do the fetch (first caller).
+    /// Returns `None` if another caller is already fetching (wait on that cell).
+    pub async fn get_or_start_fetch(
+        token: &str,
+    ) -> Option<Arc<tokio::sync::OnceCell<serde_json::Value>>> {
+        let mut guard = CACHE.lock().await;
+        if let Some(cell) = guard.in_flight.get(token) {
+            return Some(Arc::clone(cell));
+        }
+        let cell = Arc::new(tokio::sync::OnceCell::new());
+        guard.in_flight.insert(token.to_string(), Arc::clone(&cell));
+        Some(cell)
+    }
+
+    /// Remove the in-flight entry and store the result in cache.
+    pub async fn complete_fetch(token: &str, result: serde_json::Value) -> serde_json::Value {
+        let mut guard = CACHE.lock().await;
+        guard.in_flight.remove(token);
+        guard.entries.insert(
+            token.to_string(),
+            CacheEntry {
+                result: result.clone(),
+                expires_at: Instant::now() + CACHE_TTL,
+            },
+        );
+        result
+    }
+
+    /// Store a result in cache (e.g. on soft failure, store the stale result).
+    pub async fn store_stale(token: &str, result: &serde_json::Value) {
+        let mut guard = CACHE.lock().await;
+        // Only store if there's no fresh entry already.
+        if let Some(entry) = guard.entries.get(token) {
+            if entry.expires_at > Instant::now() {
+                return;
+            }
+        }
+        guard.entries.insert(
+            token.to_string(),
+            CacheEntry {
+                result: result.clone(),
+                expires_at: Instant::now() + CACHE_TTL,
+            },
+        );
+    }
+
+    /// Get the last good cached result (for soft-failure fallback).
+    pub async fn get_stale(token: &str) -> Option<serde_json::Value> {
+        let guard = CACHE.lock().await;
+        guard.entries.get(token).map(|e| e.result.clone())
+    }
+}
+
 pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
     if access_token.is_empty() {
         return json!({ "message": "Invalid or expired Claude token" });
     }
 
+    // Serve from cache if fresh (9router USAGE_CACHE_TTL_MS = 300s).
+    if let Some(cached) = claude_cache::get_cached(access_token).await {
+        return cached;
+    }
+
+    // In-flight dedup: if another request is already in progress for this
+    // token, wait on the same OnceCell instead of issuing a duplicate.
+    let cell = claude_cache::get_or_start_fetch(access_token).await;
+    if let Some(cell) = &cell {
+        if let Some(result) = cell.get() {
+            // Another caller already completed — return the shared result.
+            return result.clone();
+        }
+    }
+
+    // Fetch fresh data.
     let client = http_client();
     let response = match client
         .get("https://api.anthropic.com/api/oauth/usage")
@@ -1758,9 +1870,29 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
 
     let status = response.status();
     if status.as_u16() == 401 || status.as_u16() == 403 {
+        // On auth failure, return stale cache if available (soft failure).
+        if let Some(stale) = claude_cache::get_stale(access_token).await {
+            claude_cache::complete_fetch(access_token, stale.clone()).await;
+            return stale;
+        }
+        claude_cache::complete_fetch(
+            access_token,
+            json!({ "message": "Invalid or expired Claude token" }),
+        )
+        .await;
         return json!({ "message": "Invalid or expired Claude token" });
     }
     if !status.is_success() {
+        // On non-success, return stale cache if available (soft failure).
+        if let Some(stale) = claude_cache::get_stale(access_token).await {
+            claude_cache::complete_fetch(access_token, stale.clone()).await;
+            return stale;
+        }
+        claude_cache::complete_fetch(
+            access_token,
+            json!({ "message": format!("Claude quota API error ({}).", status.as_u16()) }),
+        )
+        .await;
         return json!({
             "message": format!("Claude quota API error ({}).", status.as_u16())
         });
@@ -1831,10 +1963,14 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
     }
 
     if quotas.is_empty() {
-        return json!({ "message": "Claude connected. No quota data was returned." });
+        let result = json!({ "message": "Claude connected. No quota data was returned." });
+        claude_cache::complete_fetch(access_token, result.clone()).await;
+        return result;
     }
 
-    json!({ "quotas": Value::Object(quotas) })
+    let result = json!({ "quotas": Value::Object(quotas) });
+    claude_cache::complete_fetch(access_token, result.clone()).await;
+    result
 }
 
 const KIRO_DEFAULT_PROFILE_ARN: &str =
