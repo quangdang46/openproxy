@@ -10,16 +10,16 @@ importers:
     dependencies:
       '@astrojs/react':
         specifier: ^4.2.1
-        version: 4.4.2(@types/node@25.7.0)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(jiti@1.21.7)(react-dom@19.2.4(react@19.2.7))(react@19.2.7)(terser@5.47.1)(yaml@2.9.0)
+        version: 4.4.2(@types/node@25.7.0)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(jiti@1.21.7)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(terser@5.47.1)(yaml@2.9.0)
       '@astrojs/tailwind':
         specifier: ^6.0.2
         version: 6.0.2(astro@5.18.1(@types/node@25.7.0)(jiti@1.21.7)(rollup@4.60.4)(terser@5.47.1)(typescript@5.9.3)(yaml@2.9.0))(tailwindcss@3.4.19(yaml@2.9.0))
       '@monaco-editor/react':
         specifier: ^4.7.0
-        version: 4.7.0(monaco-editor@0.55.1)(react-dom@19.2.4(react@19.2.7))(react@19.2.7)
+        version: 4.7.0(monaco-editor@0.55.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       '@xyflow/react':
         specifier: ^12.10.1
-        version: 12.10.2(@types/react@19.2.17)(immer@11.1.8)(react-dom@19.2.4(react@19.2.7))(react@19.2.7)
+        version: 12.10.2(@types/react@19.2.17)(immer@11.1.8)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       astro:
         specifier: ^5.18.1
         version: 5.18.1(@types/node@25.7.0)(jiti@1.21.7)(rollup@4.60.4)(terser@5.47.1)(typescript@5.9.3)(yaml@2.9.0)
@@ -75,17 +75,17 @@ importers:
         specifier: 19.2.7
         version: 19.2.7
       react-dom:
-        specifier: 19.2.4
-        version: 19.2.4(react@19.2.7)
+        specifier: 19.2.7
+        version: 19.2.7(react@19.2.7)
       react-is:
         specifier: ^19.2.7
         version: 19.2.7
       recharts:
         specifier: ^3.7.0
 <<<<<<< HEAD
-        version: 3.8.1(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react-is@19.2.7)(react@19.2.4)(redux@5.0.1)
+        version: 3.8.1(@types/react@19.2.14)(react-dom@19.2.7(react@19.2.4))(react-is@19.2.7)(react@19.2.4)(redux@5.0.1)
 =======
-        version: 3.8.1(@types/react@19.2.17)(react-dom@19.2.4(react@19.2.7))(react-is@16.13.1)(react@19.2.7)(redux@5.0.1)
+        version: 3.8.1(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react-is@16.13.1)(react@19.2.7)(redux@5.0.1)
 >>>>>>> 35daeaa8 (deps(web): bump react and @types/react in /web)
       selfsigned:
         specifier: ^5.5.0
@@ -2652,7 +2652,7 @@ packages:
     resolution: {integrity: sha512-y3bGgqKj3QBdxLbLkomlohkvsA8gdAiUQlSBJnBhfn+BPxg4bc62d8TcBW15wavDfgexCgccckhcZvywyQYPOw==}
     hasBin: true
 
-  react-dom@19.2.4:
+  react-dom@19.2.7:
     resolution: {integrity: sha512-AXJdLo8kgMbimY95O2aKQqsz2iWi9jMgKJhRBAxECE4IFxfcazB2LmzloIoibJI3C12IlY20+KFaLv+71bUJeQ==}
     peerDependencies:
       react: ^19.2.4
@@ -3423,13 +3423,13 @@ snapshots:
     dependencies:
       prismjs: 1.30.0
 
-  '@astrojs/react@4.4.2(@types/node@25.7.0)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(jiti@1.21.7)(react-dom@19.2.4(react@19.2.7))(react@19.2.7)(terser@5.47.1)(yaml@2.9.0)':
+  '@astrojs/react@4.4.2(@types/node@25.7.0)(@types/react-dom@19.2.3(@types/react@19.2.17))(@types/react@19.2.17)(jiti@1.21.7)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(terser@5.47.1)(yaml@2.9.0)':
     dependencies:
       '@types/react': 19.2.17
       '@types/react-dom': 19.2.3(@types/react@19.2.17)
       '@vitejs/plugin-react': 4.7.0(vite@6.4.2(@types/node@25.7.0)(jiti@1.21.7)(terser@5.47.1)(yaml@2.9.0))
       react: 19.2.7
-      react-dom: 19.2.4(react@19.2.7)
+      react-dom: 19.2.7(react@19.2.7)
       ultrahtml: 1.6.0
       vite: 6.4.2(@types/node@25.7.0)(jiti@1.21.7)(terser@5.47.1)(yaml@2.9.0)
     transitivePeerDependencies:
@@ -3916,12 +3916,12 @@ snapshots:
     dependencies:
       state-local: 1.0.7
 
-  '@monaco-editor/react@4.7.0(monaco-editor@0.55.1)(react-dom@19.2.4(react@19.2.7))(react@19.2.7)':
+  '@monaco-editor/react@4.7.0(monaco-editor@0.55.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
     dependencies:
       '@monaco-editor/loader': 1.7.0
       monaco-editor: 0.55.1
       react: 19.2.7
-      react-dom: 19.2.4(react@19.2.7)
+      react-dom: 19.2.7(react@19.2.7)
 
   '@noble/hashes@1.4.0': {}
 
@@ -4287,12 +4287,12 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@xyflow/react@12.10.2(@types/react@19.2.17)(immer@11.1.8)(react-dom@19.2.4(react@19.2.7))(react@19.2.7)':
+  '@xyflow/react@12.10.2(@types/react@19.2.17)(immer@11.1.8)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)':
     dependencies:
       '@xyflow/system': 0.0.76
       classcat: 5.0.5
       react: 19.2.7
-      react-dom: 19.2.4(react@19.2.7)
+      react-dom: 19.2.7(react@19.2.7)
       zustand: 4.5.7(@types/react@19.2.17)(immer@11.1.8)(react@19.2.7)
     transitivePeerDependencies:
       - '@types/react'
@@ -6110,7 +6110,7 @@ snapshots:
       strip-json-comments: 2.0.1
     optional: true
 
-  react-dom@19.2.4(react@19.2.7):
+  react-dom@19.2.7(react@19.2.7):
     dependencies:
       react: 19.2.7
       scheduler: 0.27.0
@@ -6154,9 +6154,9 @@ snapshots:
   readdirp@5.0.0: {}
 
 <<<<<<< HEAD
-  recharts@3.8.1(@types/react@19.2.14)(react-dom@19.2.4(react@19.2.4))(react-is@19.2.7)(react@19.2.4)(redux@5.0.1):
+  recharts@3.8.1(@types/react@19.2.14)(react-dom@19.2.7(react@19.2.4))(react-is@19.2.7)(react@19.2.4)(redux@5.0.1):
 =======
-  recharts@3.8.1(@types/react@19.2.17)(react-dom@19.2.4(react@19.2.7))(react-is@16.13.1)(react@19.2.7)(redux@5.0.1):
+  recharts@3.8.1(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react-is@16.13.1)(react@19.2.7)(redux@5.0.1):
 >>>>>>> 35daeaa8 (deps(web): bump react and @types/react in /web)
     dependencies:
       '@reduxjs/toolkit': 2.11.2(react-redux@9.2.0(@types/react@19.2.17)(react@19.2.7)(redux@5.0.1))(react@19.2.7)
@@ -6172,7 +6172,7 @@ snapshots:
       react-redux: 9.2.0(@types/react@19.2.14)(react@19.2.4)(redux@5.0.1)
 =======
       react: 19.2.7
-      react-dom: 19.2.4(react@19.2.7)
+      react-dom: 19.2.7(react@19.2.7)
       react-is: 16.13.1
       react-redux: 9.2.0(@types/react@19.2.17)(react@19.2.7)(redux@5.0.1)
 >>>>>>> 35daeaa8 (deps(web): bump react and @types/react in /web)
