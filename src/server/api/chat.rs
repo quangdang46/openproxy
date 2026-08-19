@@ -1395,6 +1395,7 @@ async fn forward_with_provider_fallback(
                         stream,
                         credentials: connection.clone(),
                         proxy,
+                        raw_headers: std::collections::BTreeMap::new(),
                     })
                     .await
                     .map_err(|e| ComboAttemptError {
@@ -1425,6 +1426,7 @@ async fn forward_with_provider_fallback(
                         stream,
                         credentials: connection.clone(),
                         proxy,
+                        raw_headers: std::collections::BTreeMap::new(),
                     })
                     .await
                     .map_err(|e| ComboAttemptError {

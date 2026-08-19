@@ -89,6 +89,8 @@ pub struct OpenCodeGoExecutionRequest {
     pub stream: bool,
     pub credentials: ProviderConnection,
     pub proxy: Option<ProxyTarget>,
+    /// Downstream request headers for passthrough (9router rawHeaders).
+    pub raw_headers: std::collections::BTreeMap<String, String>,
 }
 
 pub struct OpenCodeGoExecutorResponse {
