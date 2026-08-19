@@ -397,5 +397,23 @@ mod tests {
             .find_model("glm-cn", "glm-5.3")
             .expect("glm-cn/glm-5.3 should resolve");
         assert_eq!(m.name.as_deref(), Some("GLM 5.3"));
+
+        // Gemini 3.7 Flash tiered — new in v0.5.55.
+        for (id, name) in [
+            ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
+            ("gemini-3.7-flash-medium", "Gemini 3.7 Flash (Medium)"),
+            ("gemini-3.7-flash-low", "Gemini 3.7 Flash (Low)"),
+        ] {
+            let m = catalog
+                .find_model("antigravity", id)
+                .unwrap_or_else(|| panic!("antigravity/{id} should resolve"));
+            assert_eq!(m.name.as_deref(), Some(name));
+            // Each tier maps to an upstreamModelId.
+            let upstream = m.upstream_model_id.as_deref().unwrap_or("");
+            assert!(
+                upstream.contains("gemini-3.7-flash-tiered"),
+                "{id} should have upstreamModelId containing tiered, got: {upstream}"
+            );
+        }
     }
 }
