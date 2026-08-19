@@ -114,6 +114,7 @@
   "zed": "zd",
   "codebuddy-intl": "cbai",
   "alims-intl": "alims-intl",
+  "alitp-intl": "alitp-intl",
   "baidu": "qianfan",
   "clinepass": "clinepass",
   "featherless": "featherless",
@@ -4818,6 +4819,41 @@
    ]
   },
   {
+   "alias": "alitp-intl",
+   "models": [
+    {
+     "id": "qwen3.8-max-preview",
+     "name": "Qwen3.8 Max Preview",
+     "kind": "llm"
+    },
+    {
+     "id": "qwen3.7-max",
+     "name": "Qwen3.7 Max",
+     "kind": "llm"
+    },
+    {
+     "id": "qwen3.7-plus",
+     "name": "Qwen3.7 Plus",
+     "kind": "llm"
+    },
+    {
+     "id": "qwen3.6-flash",
+     "name": "Qwen3.6 Flash",
+     "kind": "llm"
+    },
+    {
+     "id": "glm-5.2",
+     "name": "GLM 5.2",
+     "kind": "llm"
+    },
+    {
+     "id": "deepseek-v4-pro",
+     "name": "DeepSeek V4 Pro",
+     "kind": "llm"
+    }
+   ]
+  },
+  {
    "alias": "clinepass",
    "models": [
     {
@@ -6922,6 +6958,17 @@
   {
    "id": "alims-intl",
    "alias": "alims-intl",
+   "serviceKinds": [
+    "llm"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": false,
+   "hasFetch": false
+  },
+  {
+   "id": "alitp-intl",
+   "alias": "alitp-intl",
    "serviceKinds": [
     "llm"
    ],

@@ -256,6 +256,14 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
                 base_url: "https://token-plan-sgp.xiaomimimo.com/anthropic/v1/messages".into(),
             },
         ],
+        // Alibaba Token Plan — Singapore-only, OpenAI-compatible only.
+        // Anthropic surface is NOT authorized for this plan.
+        "alitp-intl" => vec![
+            TransportMatch {
+                format: Format::OpenAi,
+                base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions".into(),
+            },
+        ],
         _ => Vec::new(),
     }
 }
@@ -602,6 +610,18 @@ mod tests {
         assert!(t.base_url.contains("anthropic"));
         let t = resolve_transport("xmtp", Format::OpenAi).expect("openai");
         assert!(t.base_url.contains("chat/completions"));
+    }
+
+    #[test]
+    fn alitp_intl_openai_only_transport() {
+        // Alibaba Token Plan supports OpenAI-compatible only, no Claude surface.
+        let t = resolve_transport("alitp-intl", Format::OpenAi).expect("alitp-intl openai");
+        assert_eq!(
+            t.base_url,
+            "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
+        );
+        // Claude transport should NOT exist for alitp-intl.
+        assert!(resolve_transport("alitp-intl", Format::Claude).is_none());
     }
 
     #[test]

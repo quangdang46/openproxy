@@ -490,7 +490,10 @@ impl TranslationRegistry {
             let provider = credentials
                 .and_then(|c| c.get("provider").and_then(Value::as_str))
                 .unwrap_or("");
-            let preserve = matches!(provider, "alicode" | "alicode-intl" | "alims-intl");
+            let preserve = matches!(
+                provider,
+                "alicode" | "alicode-intl" | "alims-intl" | "alitp-intl"
+            );
             filter_to_openai_format(body, preserve);
         }
         if target == Format::Claude {

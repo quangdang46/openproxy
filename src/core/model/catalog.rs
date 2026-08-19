@@ -352,6 +352,7 @@ mod tests {
             ("bluesminds", "bm"),
             ("tokenrouter", "tokenrouter"),
             ("perplexity-agent", "perplexity-agent"),
+            ("alitp-intl", "alitp-intl"),
         ] {
             assert_eq!(
                 catalog.static_alias_for_provider(provider_id),
@@ -375,6 +376,16 @@ mod tests {
         let m = catalog
             .find_model("baidu", "deepseek-v4-pro")
             .expect("baidu/deepseek-v4-pro should resolve through qianfan");
+        assert_eq!(m.name.as_deref(), Some("DeepSeek V4 Pro"));
+
+        // alitp-intl (Alibaba Token Plan) — new in v0.5.55.
+        let m = catalog
+            .find_model("alitp-intl", "qwen3.7-max")
+            .expect("alitp-intl/qwen3.7-max should resolve");
+        assert_eq!(m.name.as_deref(), Some("Qwen3.7 Max"));
+        let m = catalog
+            .find_model("alitp-intl", "deepseek-v4-pro")
+            .expect("alitp-intl/deepseek-v4-pro should resolve");
         assert_eq!(m.name.as_deref(), Some("DeepSeek V4 Pro"));
     }
 }
