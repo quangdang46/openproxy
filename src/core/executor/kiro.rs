@@ -315,7 +315,17 @@ pub fn stop_disposition(stop_reason: Option<&str>, has_tool_calls: bool) -> Stop
     }
     match reason.to_ascii_lowercase().as_str() {
         "tool_use" | "tool_calls" => StopDisposition::ToolUse,
-        "length" | "max_tokens" => StopDisposition::Length,
+        "length" => StopDisposition::Length,
+        "max_tokens" => {
+            if has_tool_calls {
+                StopDisposition::TerminalIncomplete
+            } else {
+                StopDisposition::Length
+            }
+        }
+        "model_context_window_exceeded" | "cancelled" | "pause_turn" => {
+            StopDisposition::TerminalIncomplete
+        }
         "content_filter" | "recitation" => StopDisposition::RetryableProtocolFailure,
         "refusal" | "end_turn_refusal" | "model_refusal" => StopDisposition::TerminalRefusal,
         "complete" | "end_turn" | "stop" => StopDisposition::Complete,
@@ -1626,6 +1636,28 @@ mod tests {
         assert_eq!(
             stop_disposition(Some("mystery"), false),
             StopDisposition::UnknownFailure
+        );
+        // Truncation stop reasons (9router v0.5.55).
+        assert_eq!(
+            stop_disposition(Some("model_context_window_exceeded"), false),
+            StopDisposition::TerminalIncomplete
+        );
+        assert_eq!(
+            stop_disposition(Some("cancelled"), false),
+            StopDisposition::TerminalIncomplete
+        );
+        assert_eq!(
+            stop_disposition(Some("pause_turn"), false),
+            StopDisposition::TerminalIncomplete
+        );
+        // max_tokens: Length without tool calls, TerminalIncomplete with tool calls.
+        assert_eq!(
+            stop_disposition(Some("max_tokens"), false),
+            StopDisposition::Length
+        );
+        assert_eq!(
+            stop_disposition(Some("max_tokens"), true),
+            StopDisposition::TerminalIncomplete
         );
     }
 

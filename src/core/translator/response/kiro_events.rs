@@ -64,6 +64,12 @@ fn stop_reason_severity(reason: &str) -> u8 {
     }
 }
 
+/// Stop reasons that indicate truncation rather than failure (9router
+/// v0.5.55 KIRO_TRUNCATION_STOP_REASONS). When one of these occurs after
+/// content has already been streamed, the partial output is kept and the
+/// finish_reason is remapped to "length".
+const KIRO_TRUNCATION_STOP_REASONS: &[&str] = &["model_context_window_exceeded", "max_tokens"];
+
 /// Merge two stop reasons keeping the higher severity (9router mergeStopReason).
 fn merge_stop_reason(current: &Option<String>, incoming: &Option<String>) -> Option<String> {
     match (current, incoming) {
@@ -449,10 +455,18 @@ impl KiroSseAssembler {
 
     /// The terminal chunk with finish_reason (no tool flush — callers flush
     /// first via `flush_tools`).
+    ///
+    /// Truncation tolerance (9router v0.5.55): when a truncation stop reason
+    /// (`model_context_window_exceeded`, `max_tokens`) occurs and content has
+    /// already been streamed (`emitted_any`), remap to `finish_reason: "length"`
+    /// instead of propagating the raw stop reason — the partial output is kept.
     pub fn terminal_chunk(&mut self) -> Value {
-        let reason = match self.stop_reason.as_deref() {
+        let raw_reason = self.stop_reason.as_deref();
+        let reason = match raw_reason {
             Some("tool_use") => "tool_calls",
             Some(r) if r == "end_turn" || r == "stop" => "stop",
+            // Truncation tolerance: map to "length" when content was streamed.
+            Some(r) if KIRO_TRUNCATION_STOP_REASONS.contains(&r) && self.emitted_any => "length",
             Some(r) => r,
             None => "stop",
         };
@@ -707,5 +721,103 @@ mod tests {
         .unwrap();
         assert!(asm.terminal_emitted);
         assert!(asm.finish().is_empty());
+    }
+
+    // --- Truncation tolerance tests (9router v0.5.55 KIRO_TRUNCATION_STOP_REASONS) ---
+
+    #[test]
+    fn truncation_after_content_emits_length() {
+        // model_context_window_exceeded after content was streamed should
+        // remap to finish_reason "length" (partial output kept).
+        let mut asm = KiroSseAssembler::new("test-model");
+        // Stream some content first.
+        let content_chunks = asm
+            .process_event(&event(
+                "assistantResponseEvent",
+                json!({ "content": "partial output" }),
+            ))
+            .unwrap();
+        assert!(!content_chunks.is_empty(), "should emit content chunks");
+        assert!(asm.emitted_any, "content must have been emitted");
+        // Now stop with truncation — the stop event emits the terminal chunk.
+        let stop_chunks = asm
+            .process_event(&event(
+                "messageStopEvent",
+                json!({ "stopReason": "model_context_window_exceeded" }),
+            ))
+            .unwrap();
+        assert!(
+            !stop_chunks.is_empty(),
+            "stop event should produce terminal"
+        );
+        let terminal = &stop_chunks.last().unwrap();
+        assert_eq!(
+            terminal["choices"][0]["finish_reason"], "length",
+            "truncation after content should produce finish_reason=length"
+        );
+    }
+
+    #[test]
+    fn truncation_without_content_keeps_raw_reason() {
+        // model_context_window_exceeded with NO content streamed should
+        // keep the raw stop reason (no partial output to preserve).
+        let mut asm = KiroSseAssembler::new("test-model");
+        assert!(!asm.emitted_any);
+        let stop_chunks = asm
+            .process_event(&event(
+                "messageStopEvent",
+                json!({ "stopReason": "model_context_window_exceeded" }),
+            ))
+            .unwrap();
+        assert!(!stop_chunks.is_empty());
+        let terminal = &stop_chunks.last().unwrap();
+        assert_eq!(
+            terminal["choices"][0]["finish_reason"], "model_context_window_exceeded",
+            "truncation without content should keep raw reason"
+        );
+    }
+
+    #[test]
+    fn max_tokens_after_content_emits_length() {
+        // max_tokens after content was streamed should also remap to "length".
+        let mut asm = KiroSseAssembler::new("test-model");
+        asm.process_event(&event(
+            "assistantResponseEvent",
+            json!({ "content": "some text" }),
+        ))
+        .unwrap();
+        let stop_chunks = asm
+            .process_event(&event(
+                "messageStopEvent",
+                json!({ "stopReason": "max_tokens" }),
+            ))
+            .unwrap();
+        let terminal = &stop_chunks.last().unwrap();
+        assert_eq!(
+            terminal["choices"][0]["finish_reason"], "length",
+            "max_tokens after content should produce finish_reason=length"
+        );
+    }
+
+    #[test]
+    fn end_turn_still_maps_to_stop() {
+        // Normal end_turn should still produce finish_reason "stop".
+        let mut asm = KiroSseAssembler::new("test-model");
+        asm.process_event(&event(
+            "assistantResponseEvent",
+            json!({ "content": "done" }),
+        ))
+        .unwrap();
+        let stop_chunks = asm
+            .process_event(&event(
+                "messageStopEvent",
+                json!({ "stopReason": "end_turn" }),
+            ))
+            .unwrap();
+        let terminal = &stop_chunks.last().unwrap();
+        assert_eq!(
+            terminal["choices"][0]["finish_reason"], "stop",
+            "end_turn should still map to stop"
+        );
     }
 }
