@@ -256,8 +256,13 @@ pub fn chat_to_responses_response(
         }
     }
 
-    // Handle tool_calls
-    if let Some(tool_calls) = delta.get("tool_calls").and_then(|v| v.as_array()) {
+    // Handle tool_calls (skip empty arrays — 9router parity: empty array is
+    // truthy; require a real call to avoid premature message close).
+    if let Some(tool_calls) = delta
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .filter(|tc| !tc.is_empty())
+    {
         let mut func_call_ids = state
             .get("funcCallIds")
             .cloned()
@@ -986,4 +991,94 @@ pub fn responses_to_chat_streaming(
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::translator::registry::ResponseTransformState;
+    use serde_json::json;
+
+    #[test]
+    fn empty_tool_calls_array_does_not_trigger_tool_call_processing() {
+        // Regression test for openproxy-mfs3.4 (9router v0.5.55 parity).
+        // Some providers attach an empty tool_calls: [] to every SSE chunk.
+        // Without the guard, this would enter the tool_calls block and could
+        // cause the message to close prematurely on the first content token.
+        let mut state = ResponseTransformState::default();
+
+        // First chunk: content + empty tool_calls (chat completions format input
+        // to chat_to_responses_response, which converts to Responses API format).
+        let chunk1 = json!({
+            "choices": [{
+                "delta": {
+                    "content": "Hello",
+                    "tool_calls": []
+                },
+                "finish_reason": null
+            }]
+        });
+        let events = chat_to_responses_response(&chunk1, &mut state.responses.state);
+
+        // The empty tool_calls should NOT produce any function_call/tool_use events.
+        // (response.output_item events for message content are expected.)
+        let has_function_call = events.iter().any(|e| {
+            let s = serde_json::to_string(e).unwrap_or_default();
+            s.contains("function_call")
+                || s.contains("tool_use")
+                || s.contains("function_call_output")
+        });
+        assert!(
+            !has_function_call,
+            "empty tool_calls array should not produce function_call/tool_use events, got: {:?}",
+            events
+        );
+
+        // Content "Hello" should still be present in the output.
+        let has_content = events.iter().any(|e| {
+            let s = serde_json::to_string(e).unwrap_or_default();
+            s.contains("Hello")
+        });
+        assert!(
+            has_content,
+            "content should still be present, got: {:?}",
+            events
+        );
+    }
+
+    #[test]
+    fn non_empty_tool_calls_still_processed() {
+        // Verify that real tool_calls still work correctly.
+        let mut state = ResponseTransformState::default();
+
+        let chunk = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": ""
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+
+        let events = chat_to_responses_response(&chunk, &mut state.responses.state);
+
+        // Should produce function_call events for the tool call.
+        let has_function_call = events.iter().any(|e| {
+            let s = serde_json::to_string(e).unwrap_or_default();
+            s.contains("function_call") || s.contains("get_weather")
+        });
+        assert!(
+            has_function_call,
+            "non-empty tool_calls should produce function_call events, got: {:?}",
+            events
+        );
+    }
 }
