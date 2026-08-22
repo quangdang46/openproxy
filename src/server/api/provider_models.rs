@@ -195,8 +195,9 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "baseten"
                 | "nous-research"
                 | "glhf"
+                | "kilocode"
         )
-}
+    }
 
 pub(super) async fn fetch_models_for_connection(
     state: &AppState,
@@ -525,6 +526,17 @@ async fn fetch_provider_models_response(
             fetch_first_party_openai_style_models(
                 connection,
                 "https://glhf.chat/api/openai/v1/models",
+            )
+            .await
+        }
+        "kilocode" => {
+            // Kilo Code exposes an OpenAI-compatible models listing at
+            // https://api.kilo.ai/api/openrouter/models (without /v1 — the
+            // /v1/models path returns 405). Returns 368 models including
+            // :free variants like stepfun/step-3.7-flash:free.
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.kilo.ai/api/openrouter/models",
             )
             .await
         }
