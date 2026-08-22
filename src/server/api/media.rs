@@ -40,9 +40,58 @@ pub async fn audio_transcriptions(
 pub async fn audio_speech(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
-    with_cors_response(generic_media_handler(state, headers, body, "audio/speech").await)
+    // 9router tts.js:31 — `?response_format=json` returns the base64 JSON
+    // envelope; anything else (default) streams raw audio bytes.
+    let response_format = query.get("response_format").cloned().unwrap_or_default();
+    let response =
+        generic_media_handler(state, headers, body, "audio/speech").await;
+    with_cors_response(tts_binary_or_json(response, response_format).await)
+}
+
+/// Post-process a TTS JSON envelope into raw audio bytes unless the caller
+/// asked for `?response_format=json` (JS createTtsResponse parity).
+async fn tts_binary_or_json(response: Response, response_format: String) -> Response {
+    if response_format.eq_ignore_ascii_case("json") {
+        return response;
+    }
+    let (parts, body) = response.into_parts();
+    if !parts.status.is_success() {
+        return Response::from_parts(parts, body);
+    }
+    // Re-buffer (adapter output is small base64 audio).
+    let bytes = match axum::body::to_bytes(body, 64 * 1024 * 1024).await {
+        Ok(b) => b,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let parsed: Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        // Already binary or non-JSON → pass through untouched.
+        Err(_) => return Response::from_parts(parts, axum::body::Body::from(bytes)),
+    };
+    let Some(audio_b64) = parsed.get("audio").and_then(Value::as_str) else {
+        return Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    let format = parsed
+        .get("format")
+        .and_then(Value::as_str)
+        .unwrap_or("mp3");
+    let Ok(audio) = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        audio_b64,
+    ) else {
+        return Response::from_parts(parts, axum::body::Body::from(bytes));
+    };
+    let mut response = Response::new(axum::body::Body::from(audio));
+    *response.status_mut() = parts.status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(&format!("audio/{format}"))
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+    response
 }
 
 pub async fn embeddings(
