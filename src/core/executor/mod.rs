@@ -3,6 +3,7 @@ mod api_key;
 mod azure;
 mod client_pool;
 mod codebuddy_cn;
+mod codebuddy_intl;
 mod codex;
 mod commandcode;
 mod cursor;
@@ -44,6 +45,7 @@ pub use client_pool::{
     DEFAULT_STREAM_TIMEOUT,
 };
 pub use codebuddy_cn::CodeBuddyCNExecutor;
+pub use codebuddy_intl::CodeBuddyIntlExecutor;
 pub use codex::{
     convert_openai_sse_to_standard, CodexExecutionRequest, CodexExecutor, CodexExecutorError,
     CodexExecutorResponse,

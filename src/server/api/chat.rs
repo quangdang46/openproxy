@@ -1845,6 +1845,35 @@ async fn forward_with_provider_fallback(
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
+            } else if provider == "codebuddy-intl" || provider == "cbai" {
+                use crate::core::executor::CodeBuddyIntlExecutor;
+                let executor =
+                    CodeBuddyIntlExecutor::new(state.client_pool.clone(), provider_node.clone());
+                let result = executor
+                    .execute(ProviderExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream: true, // registry forceStream (JS #11101 fix)
+                        credentials: connection.clone(),
+                        proxy,
+                        signal: None,
+                        log: None,
+                        proxy_options: None,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("CodeBuddy intl execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
             } else if provider == "ollama-local" || provider == "ollama" {
                 use crate::core::executor::{OllamaExecutionRequest, OllamaExecutor};
                 let executor = OllamaExecutor::new(state.client_pool.clone());
