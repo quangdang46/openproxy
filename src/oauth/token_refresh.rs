@@ -407,6 +407,9 @@ pub async fn refresh_codex_token(refresh_token: &str) -> Result<RefreshResult, S
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("client_id", CODEX_CLIENT_ID),
+            // JS registry codex.js:71 refresh.scope — Auth0 narrows the new
+            // token's scopes to this set when the param is present.
+            ("scope", "openid profile email offline_access"),
         ],
     )
     .await

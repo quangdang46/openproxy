@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use url::form_urlencoded;
 
 pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
-
+pub mod background_refresh;
 pub mod pending;
 pub mod providers;
 pub mod secret;

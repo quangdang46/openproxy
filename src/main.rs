@@ -410,6 +410,11 @@ async fn main() -> anyhow::Result<()> {
     // Quota auto-ping foundation: observe enabled Claude/Codex OAuth windows.
     openproxy::server::api::quota_auto_ping::spawn_quota_auto_ping(state.clone());
 
+    // Background proactive OAuth token refresh (9router
+    // backgroundTokenRefresh.js): tick every 5 min, refresh tokens expiring
+    // within max(provider lead, 30 min) so idle periods don't surface 401s.
+    openproxy::oauth::background_refresh::spawn_background_token_refresh(state.clone().into());
+
     let app = openproxy::build_app(state.clone());
     let addr = format!("{}:{}", cli.host, cli.port);
     info!("Starting openproxy on {}", addr);
