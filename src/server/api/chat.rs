@@ -1734,6 +1734,32 @@ async fn forward_with_provider_fallback(
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
+            } else if provider == "zed" {
+                use crate::core::executor::{ZedExecutionRequest, ZedExecutor};
+                let executor =
+                    ZedExecutor::new(state.client_pool.clone()).unwrap_or_else(|e: std::convert::Infallible| match e {});
+                let result = executor
+                    .execute_request(ZedExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Zed execution failed: {}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
             } else if provider == "trae" {
                 let executor = TraeExecutor::new(state.client_pool.clone());
                 let result = executor

@@ -28,6 +28,7 @@ mod strip_unsupported;
 mod trae;
 mod vertex;
 mod windsurf;
+mod zed;
 mod xai;
 
 pub use antigravity::{
@@ -46,6 +47,7 @@ pub use client_pool::{
 };
 pub use codebuddy_cn::CodeBuddyCNExecutor;
 pub use codebuddy_intl::CodeBuddyIntlExecutor;
+pub use zed::{ZedExecutionRequest, ZedExecutor, ZedExecutorResponse};
 pub use codex::{
     convert_openai_sse_to_standard, CodexExecutionRequest, CodexExecutor, CodexExecutorError,
     CodexExecutorResponse,

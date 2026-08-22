@@ -60,6 +60,8 @@ hex = "0.4"
 base64 = "0.22"
 sha1 = "0.10"
 sha256 = "1.6"
+# rsa 0.9 OAEP needs digest-0.10 sha2; the workspace sha2 is 0.11.
+sha2_rsa_compat = { package = "sha2", version = "0.10" }
 subtle = "2"
 
 # URL / query
