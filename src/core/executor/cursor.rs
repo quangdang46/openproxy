@@ -550,7 +550,10 @@ pub enum AgentEvent {
     /// RequestContext on the request half-stream (9router cursor.js:571-583).
     RequestContext,
     Done,
-    Error(String),
+    /// Upstream error. The bool marks `resource_exhausted` (gRPC code 8) —
+    /// JS createErrorResponse maps it to HTTP 429 rate_limit_error so account
+    /// rotation fires; everything else is a 400 api_error.
+    Error(String, bool),
 }
 
 /// Decompress an agent Connect-RPC frame payload when the gzip flag is set
@@ -586,14 +589,25 @@ fn consume_agent_frames(
         }
         let payload = pending[5..5 + length].to_vec();
         pending = pending[5 + length..].to_vec();
-
         if flags & CONNECT_RPC_FLAG_TRAILER != 0 {
             // End-of-stream marker; error JSON rides here.
             if let Ok(text) = std::str::from_utf8(&payload) {
                 if let Ok(value) = serde_json::from_str::<Value>(text) {
-                    if let Some(msg) = value.pointer("/error/message").and_then(Value::as_str) {
+                    if value.get("error").is_some() {
+                        // JS createErrorResponse (cursor.js:257-276):
+                        // error.code == "resource_exhausted" → 429
+                        // rate_limit_error; otherwise 400 api_error.
+                        let is_rate_limit = value
+                            .pointer("/error/code")
+                            .and_then(Value::as_str)
+                            .is_some_and(|c| c == "resource_exhausted");
+                        let msg = value
+                            .pointer("/error/message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("API Error")
+                            .to_string();
                         *finished = true;
-                        events.push(AgentEvent::Error(msg.to_string()));
+                        events.push(AgentEvent::Error(msg, is_rate_limit));
                         continue;
                     }
                 }
@@ -647,6 +661,7 @@ fn consume_agent_frames(
                     *finished = true;
                     events.push(AgentEvent::Error(
                         "Cursor AgentService requested an unsupported IDE tool".to_string(),
+                        false,
                     ));
                 }
             }
@@ -712,10 +727,16 @@ async fn consume_agent_stream(
                             context_responses.push(create_request_context_response());
                         }
                         AgentEvent::Done => {}
-                        AgentEvent::Error(msg) => {
+                        AgentEvent::Error(msg, is_rate_limit) => {
+                            // JS createErrorResponse: resource_exhausted → 429
+                            // rate_limit_error so account rotation fires.
                             chunks.push(format!(
                                 "data: {}\n\n",
-                                json!({"error": {"message": msg, "type": "api_error"}})
+                                json!({"error": {
+                                    "message": msg,
+                                    "type": if is_rate_limit { "rate_limit_error" } else { "api_error" },
+                                    "code": if is_rate_limit { "resource_exhausted" } else { "unknown" },
+                                }})
                             ));
                             chunks.push(SSE_DONE.to_string());
                             return Ok(chunks.concat().into_bytes());
@@ -2058,13 +2079,19 @@ impl CursorExecutor {
         )
         .await?;
 
+        // JS createErrorResponse (cursor.js:257-276): an in-stream
+        // resource_exhausted error must surface as HTTP 429 so the caller's
+        // account rotation / combo fallback reacts instead of treating the
+        // turn as a successful empty completion.
+        let is_rate_limit = String::from_utf8_lossy(&body_bytes)
+            .contains("\"rate_limit_error\"");
         let content_type = if request.stream {
             "text/event-stream"
         } else {
             "application/json"
         };
         let http_response = http::Response::builder()
-            .status(200)
+            .status(if is_rate_limit { 429 } else { 200 })
             .header("content-type", content_type)
             .header("cache-control", "no-cache")
             .body(reqwest::Body::from(body_bytes))
@@ -3520,7 +3547,8 @@ mod tests {
         assert_eq!(
             events2,
             vec![AgentEvent::Error(
-                "Cursor AgentService requested an unsupported IDE tool".to_string()
+                "Cursor AgentService requested an unsupported IDE tool".to_string(),
+                false,
             )]
         );
     }
