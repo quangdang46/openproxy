@@ -338,18 +338,37 @@ impl Db {
         F: FnOnce(&mut UsageDb),
     {
         let _guard = self.write_lock.write().await;
-        let mut next = (*self.usage_snapshot()).clone();
+        let prev = (*self.usage_snapshot()).clone();
+        let mut next = prev.clone();
         updater(&mut next);
         next.normalize();
-        // Persist to SQLite — the sole runtime store.
-        let json_val = serde_json::to_value(&next)?;
-        let sq = self.sqlite.clone();
-        tokio::task::spawn_blocking(move || {
-            crate::db::sqlite::import::import_usage(&sq, &json_val)
-        })
-        .await
-        .map_err(|e| anyhow::anyhow!("spawn_blocking for update_usage: {e}"))?
-        .map_err(|e| anyhow::anyhow!("SQLite usage write failed: {e}"))?;
+
+        if next != prev {
+            // Incremental append (9router usageRepo.saveRequestUsage): only
+            // the new rows are INSERTed — the DELETE-all + re-INSERT rewrite
+            // previously done here (import_usage) is reserved for imports.
+            let appended: Vec<crate::types::UsageEntry> = next
+                .history
+                .iter()
+                .skip(prev.history.len())
+                .cloned()
+                .collect();
+            if !appended.is_empty() {
+                let sq = self.sqlite.clone();
+                tokio::task::spawn_blocking(move || {
+                    sq.with_transaction(|conn| {
+                        for entry in &appended {
+                            crate::db::sqlite::repo::usage_repo::insert(conn, entry)?;
+                        }
+                        Ok(())
+                    })
+                    .map_err(|e| anyhow::anyhow!("SQLite usage append failed: {e}"))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("spawn_blocking for update_usage: {e}"))??;
+            }
+        }
+
         let next = Arc::new(next);
         self.usage_snapshot.store(next.clone());
         Ok(next)

@@ -259,7 +259,7 @@ pub fn kimchi() -> OAuthProviderConfig {
 pub fn xai() -> OAuthProviderConfig {
     OAuthProviderConfig {
         id: "xai",
-        client_id: "b1a00492-073a-073a-47ea-816f-4c329264a828",
+        client_id: "b1a00492-073a-47ea-816f-4c329264a828",
         authorize_url: "https://auth.x.ai/oauth2/authorize",
         token_url: "https://auth.x.ai/oauth2/token",
         scopes: &[

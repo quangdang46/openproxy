@@ -580,10 +580,25 @@ impl UpstreamResponse {
         }
     }
 
+
     pub fn headers(&self) -> &HeaderMap {
         match self {
             Self::Reqwest(response) => response.headers(),
             Self::Hyper(response) => response.headers(),
+        }
+    }
+
+    /// Read the full body as text (lossy), consuming the response.
+    pub async fn text(self) -> String {
+        match self {
+            Self::Reqwest(response) => response.text().await.unwrap_or_default(),
+            Self::Hyper(response) => {
+                let bytes = http_body_util::BodyExt::collect(response.into_body())
+                    .await
+                    .map(|c| c.to_bytes())
+                    .unwrap_or_default();
+                String::from_utf8_lossy(&bytes).to_string()
+            }
         }
     }
 }
@@ -1276,10 +1291,24 @@ impl DefaultExecutor {
                     break;
                 }
 
-                // Other non-success status: propagate upstream error.
+                // Other non-success status: propagate the upstream error WITH
+                // its body (JS base.js returns the raw response so handlers can
+                // read quota text / RetryInfo / provider error codes — dropping
+                // the body here blinded check_fallback_error's message matching).
+                let body_text = upstream.text().await;
+                let body_text = body_text.chars().take(2000).collect::<String>();
                 return Err(ExecutorError::UpstreamStatus(
                     status,
-                    format!("upstream returned {} for URL {}", status.as_u16(), url),
+                    if body_text.is_empty() {
+                        format!("upstream returned {} for URL {}", status.as_u16(), url)
+                    } else {
+                        format!(
+                            "upstream returned {} for URL {}: {}",
+                            status.as_u16(),
+                            url,
+                            body_text
+                        )
+                    },
                 ));
             }
         }

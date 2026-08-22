@@ -7,6 +7,7 @@ mod codex;
 mod commandcode;
 mod cursor;
 mod default;
+mod devin_cli;
 mod gemini_cli;
 mod github;
 mod grok_cli;
@@ -55,6 +56,7 @@ pub use cursor::{
     parse_cursor_sse_events, CursorExecutionRequest, CursorExecutor, CursorExecutorError,
     CursorExecutorResponse, SseEvent,
 };
+pub use devin_cli::{DevinCliExecutor, DevinExecutionRequest, DevinExecutorResponse};
 pub use default::{
     provider_config_base_url, DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError,
     ProviderConfig, TransportKind, UpstreamResponse,

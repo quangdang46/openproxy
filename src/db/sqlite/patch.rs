@@ -368,6 +368,11 @@ mod tests {
 
     #[test]
     fn unchanged_rows_not_written() {
+        // Serializes against encryption_boundary_data_column_holds_ciphertext,
+        // which mutates process-global OPENPROXY_ENCRYPTION_KEY — without the
+        // lock this test intermittently reads ciphertext as plaintext (or
+        // vice versa) and fails.
+        let _guard = ENV_LOCK.lock();
         let db = open();
         let mut old = AppDb::default();
         let mut new = AppDb::default();
@@ -661,7 +666,7 @@ mod tests {
     fn encryption_boundary_data_column_holds_ciphertext() {
         // With OPENPROXY_ENCRYPTION_KEY set, the `data` column must hold the
         // encrypted (prefixed) form, and get_by_id must decrypt back.
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock();
         let temp = TempDir::new().unwrap();
         std::env::set_var("OPENPROXY_ENCRYPTION_KEY", "test-encryption-key-123");
         std::env::set_var("DATA_DIR", temp.path());

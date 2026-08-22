@@ -31,6 +31,10 @@ pub struct ComboRotationState {
     /// Per-account timestamps of last use (indexed by account position).
     /// Used for LRU-based round-robin selection (9router parity).
     pub last_used_at: Vec<i64>,
+    /// Per-account consecutive-use counters (indexed by account position).
+    /// 9router stickyRoundRobinLimit keeps the current account until its
+    /// counter reaches the limit before rotating to the next LRU account.
+    pub consecutive_uses: Vec<u32>,
 }
 
 /// Model lock state for sticky routing.
@@ -185,34 +189,91 @@ impl AccountRegistry {
         combo_id: Option<&str>,
         sticky_duration_secs: i64,
     ) -> Option<usize> {
-        if available.is_empty() {
-            return None;
-        }
+        let _ = sticky_duration_secs; // used by the Sticky arm below
+        Self::select_with_sticky_limit(
+            self,
+            available,
+            strategy,
+            combo_id,
+            sticky_duration_secs,
+            3,
+        )
+    }
 
+    /// Full form with an explicit sticky round-robin limit
+    /// (9router stickyRoundRobinLimit, default 3).
+    pub fn select_with_sticky_limit(
+        &self,
+        available: &[&ProviderConnection],
+        strategy: StrategyType,
+        combo_id: Option<&str>,
+        sticky_duration_secs: i64,
+        rr_sticky_limit: u32,
+    ) -> Option<usize> {
         match strategy {
             StrategyType::FillFirst => available
                 .iter()
                 .enumerate()
-                .max_by_key(|(_, conn)| self.get_state(&conn.id).rate_limit_remaining)
+                // 9router fill-first: strict priority order (the list is
+                // pre-sorted); quota only breaks ties between equals.
+                .min_by_key(|(i, conn)| {
+                    (
+                        conn.priority.unwrap_or(999),
+                        std::cmp::Reverse(self.get_state(&conn.id).rate_limit_remaining),
+                        *i,
+                    )
+                })
                 .map(|(i, _)| i),
             StrategyType::RoundRobin => {
                 let combo_id = combo_id?;
                 let mut rotation = self.combo_rotation.write();
                 let state = rotation.entry(combo_id.to_string()).or_default();
 
-                // Initialize last_used_at vector if available accounts changed
-                if state.last_used_at.len() != available.len() {
+                if state.last_used_at.len() != available.len()
+                    || state.consecutive_uses.len() != available.len()
+                {
                     state.last_used_at = vec![0i64; available.len()];
+                    state.consecutive_uses = vec![0u32; available.len()];
                 }
 
-                // LRU-based selection (9router parity): pick the least recently used account
-                let idx = state
+                // 9router stickyRoundRobinLimit semantics: keep the current
+                // (most recently used) account until its consecutive-use
+                // counter reaches sticky_limit; only then rotate to the LRU
+                // account and reset the counter to 1. sticky_limit <= 1 makes
+                // every request rotate (pure round-robin).
+                let current_idx = state
                     .last_used_at
                     .iter()
                     .enumerate()
-                    .min_by_key(|(_, &ts)| ts)
+                    .max_by_key(|(_, &ts)| ts)
                     .map(|(i, _)| i)
                     .unwrap_or(0);
+                let current_used = state.last_used_at[current_idx] > 0;
+                let current_count = state.consecutive_uses[current_idx];
+                let idx = if current_used && current_count < rr_sticky_limit {
+                    // Stay on the current account.
+                    state.consecutive_uses[current_idx] += 1;
+                    current_idx
+                } else {
+                    // Rotate: least recently used, counter resets to 1.
+                    let next = state
+                        .last_used_at
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, &ts)| ts == 0 || *i != current_idx)
+                        .min_by_key(|(i, &ts)| (*i == current_idx, ts))
+                        .or_else(|| {
+                            state
+                                .last_used_at
+                                .iter()
+                                .enumerate()
+                                .find(|(i, _)| *i != current_idx)
+                        })
+                        .map(|(i, _)| i)
+                        .unwrap_or(current_idx);
+                    state.consecutive_uses[next] = 1;
+                    next
+                };
 
                 state.last_used_at[idx] = Utc::now().timestamp();
                 state.last_index = (idx + 1) % available.len();
@@ -220,6 +281,11 @@ impl AccountRegistry {
                 state.last_rotation = Utc::now().timestamp();
                 Some(idx)
             }
+            StrategyType::LeastLoaded => available
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, conn)| self.in_flight_count(&conn.id))
+                .map(|(i, _)| i),
             StrategyType::Sticky => {
                 let combo_id = combo_id?;
                 if let Some(sticky) = self.get_sticky_session(combo_id) {
@@ -239,11 +305,6 @@ impl AccountRegistry {
                 }
                 Some(idx)
             }
-            StrategyType::LeastLoaded => available
-                .iter()
-                .enumerate()
-                .min_by_key(|(_, conn)| self.in_flight_count(&conn.id))
-                .map(|(i, _)| i),
         }
     }
 
@@ -1062,28 +1123,60 @@ mod tests {
         let conn3 = make_connection("acc3");
         let available = vec![&conn1, &conn2, &conn3];
 
-        let idx0 = registry.select_account_by_strategy(
+        // Pure round-robin (limit 1 rotates every request).
+        let idx0 = registry.select_with_sticky_limit(
             &available,
             StrategyType::RoundRobin,
             Some("combo1"),
             300,
+            1,
         );
-        let idx1 = registry.select_account_by_strategy(
+        let idx1 = registry.select_with_sticky_limit(
             &available,
             StrategyType::RoundRobin,
             Some("combo1"),
             300,
+            1,
         );
-        let idx2 = registry.select_account_by_strategy(
+        let idx2 = registry.select_with_sticky_limit(
             &available,
             StrategyType::RoundRobin,
             Some("combo1"),
             300,
+            1,
         );
 
         assert_eq!(idx0, Some(0));
         assert_eq!(idx1, Some(1));
         assert_eq!(idx2, Some(2));
+    }
+
+    /// 9router stickyRoundRobinLimit (default 3): the current account is
+    /// reused until its consecutive-use counter reaches the limit.
+    #[test]
+    fn test_round_robin_holds_account_until_sticky_limit() {
+        let registry = AccountRegistry::default();
+        let conn1 = make_connection("acc1");
+        let conn2 = make_connection("acc2");
+        let available = vec![&conn1, &conn2];
+
+        let picks: Vec<usize> = (0..6)
+            .map(|_| {
+                registry.select_with_sticky_limit(
+                    &available,
+                    StrategyType::RoundRobin,
+                    Some("comboSticky"),
+                    300,
+                    3,
+                )
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|x| x.unwrap())
+            .collect();
+
+        // Hold acc1 for 3 requests, then move to acc2 for the next 3.
+        assert_eq!(picks, vec![0, 0, 0, 1, 1, 1]);
     }
 
     #[test]

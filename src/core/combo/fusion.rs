@@ -99,6 +99,10 @@ pub fn flatten_tool_history(body: &Value) -> Value {
         obj.remove("functions");
         obj.remove("tool_choice");
         obj.remove("function_call");
+        // 9router #3024: panels are non-streaming; passing stream_options
+        // (include_usage etc.) alongside stream:false makes DeepSeek-style
+        // upstreams reject the whole panel request.
+        obj.remove("stream_options");
     }
 
     // Try messages array first, then input array (Responses API).
@@ -484,6 +488,60 @@ where
     F: Fn(String, Value) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = Result<Value, anyhow::Error>> + Send,
 {
+    handle_fusion_chat_inner(
+        body,
+        panel_models,
+        config,
+        judge_model,
+        handle_single_model,
+        false,
+    )
+    .await
+}
+
+/// Like [`handle_fusion_chat`] but with a deferred final dispatch.
+///
+/// 9router combo.js runs the JUDGE (and single-survivor re-dispatch) through
+/// `handleSingleModel` with the ORIGINAL client body, so `stream:true`
+/// clients receive SSE. The buffered-Value callback used here cannot carry an
+/// SSE stream, so when `defer_final_dispatch` is set the judge/survivor legs
+/// are NOT dispatched; instead the caller receives a
+/// `{"__openproxy_fusion_dispatch": {model, body}}` envelope and performs
+/// the dispatch itself with full stream semantics.
+pub async fn handle_fusion_chat_deferred<F, Fut>(
+    body: &mut Value,
+    panel_models: &[String],
+    config: &FusionConfig,
+    judge_model: Option<&str>,
+    handle_single_model: F,
+) -> Result<Value, FusionError>
+where
+    F: Fn(String, Value) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Value, anyhow::Error>> + Send,
+{
+    handle_fusion_chat_inner(
+        body,
+        panel_models,
+        config,
+        judge_model,
+        handle_single_model,
+        true,
+    )
+    .await
+}
+
+async fn handle_fusion_chat_inner<F, Fut>(
+    body: &mut Value,
+    panel_models: &[String],
+    config: &FusionConfig,
+    judge_model: Option<&str>,
+    handle_single_model: F,
+    defer_final_dispatch: bool,
+) -> Result<Value, FusionError>
+where
+    F: Fn(String, Value) -> Fut + Clone + Send + Sync + 'static,
+    Fut: Future<Output = Result<Value, anyhow::Error>> + Send,
+{
     if panel_models.is_empty() {
         return Err(FusionError {
             status: 400,
@@ -493,6 +551,14 @@ where
 
     // Single-model shortcut: bypass the fan-out and judge entirely.
     if panel_models.len() == 1 {
+        if defer_final_dispatch {
+            return Ok(json!({
+                "__openproxy_fusion_dispatch": {
+                    "model": panel_models[0],
+                    "body": body,
+                }
+            }));
+        }
         return handle_single_model(panel_models[0].clone(), body.clone())
             .await
             .map_err(|e| FusionError {
@@ -607,15 +673,6 @@ where
 
     let ok_count = outcomes.len();
 
-    // ---- Graceful degradation ----
-
-    if ok_count == 0 {
-        return Err(FusionError {
-            status: 503,
-            message: "All fusion panels failed or timed out".into(),
-        });
-    }
-
     if ok_count == 1 {
         // Single survivor — re-dispatch through handle_single_model
         // with the original body (preserving stream flag, tools, etc.)
@@ -630,6 +687,14 @@ where
                 });
             }
         };
+        if defer_final_dispatch {
+            return Ok(json!({
+                "__openproxy_fusion_dispatch": {
+                    "model": survivor.result.model,
+                    "body": body,
+                }
+            }));
+        }
         return handle_single_model(survivor.result.model, body.clone())
             .await
             .map_err(|e| FusionError {
@@ -665,9 +730,11 @@ where
         let obj = judge_body.as_object_mut().expect("body is an object");
 
         obj.insert("model".to_string(), json!(judge_model_id));
-        // Preserve client stream flag (9router judge keeps original body stream).
-        // Chat fusion path currently collects JSON for multi-panel; if stream was
-        // true, callers that support SSE can re-request. Default: keep original.
+        // 9router combo.js handleFusionChat final step: the judge leg runs
+        // handleSingleModel(judgeBody, judge) with the ORIGINAL client body,
+        // so body.stream=true flows through the normal SSE pipeline to the
+        // client. The judge body keeps whatever stream flag the client sent.
+        // (Panels are always non-streaming — see create_panel_body.)
         if !obj.contains_key("stream") {
             obj.insert("stream".to_string(), json!(false));
         }
@@ -726,6 +793,15 @@ where
         }
     }
 
+    if defer_final_dispatch {
+        return Ok(json!({
+            "__openproxy_fusion_dispatch": {
+                "model": judge_model_id,
+                "body": judge_body,
+            }
+        }));
+    }
+
     handle_single_model(judge_model_id.clone(), judge_body)
         .await
         .map_err(|e| FusionError {
@@ -773,12 +849,15 @@ mod tests {
         let body = json!({
             "model": "combo",
             "stream": true,
+            "stream_options": {"include_usage": true},
             "messages": [{"role": "user", "content": "hi"}]
         });
         let cfg = FusionConfig::default();
         let panel = create_panel_body(&body, &cfg);
 
         assert_eq!(panel["stream"], false);
+        // 9router #3024: panels must never carry stream_options.
+        assert!(panel.get("stream_options").is_none());
     }
 
     #[test]
@@ -916,5 +995,46 @@ mod tests {
             .as_str()
             .expect("content");
         assert_eq!(content, "answer A");
+    }
+
+    /// COMBO-1: with the deferred flag, the judge/survivor legs are NOT
+    /// dispatched — the caller gets an envelope carrying model + body so it
+    /// can run the final leg with full stream semantics (9router parity).
+    #[tokio::test]
+    async fn fusion_deferred_returns_dispatch_envelope() {
+        let mut body = json!({
+            "model": "combo",
+            "stream": true,
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let cfg = FusionConfig::default();
+        let models = vec!["model-a".to_string(), "model-b".to_string()];
+
+        let result = handle_fusion_chat_deferred(
+            &mut body,
+            &models,
+            &cfg,
+            None,
+            move |model: String, _body: Value| {
+                async move {
+                    if model == "model-a" {
+                        Ok(json!({
+                            "choices": [{"message": {"content": "answer A"}}]
+                        }))
+                    } else {
+                        Err(anyhow::anyhow!("model-b failed"))
+                    }
+                }
+            },
+        )
+        .await;
+
+        let resp = result.expect("deferred fusion should succeed");
+        let dispatch = resp
+            .get("__openproxy_fusion_dispatch")
+            .expect("envelope present");
+        assert_eq!(dispatch["model"], "model-a");
+        // The deferred body preserves the client stream flag.
+        assert_eq!(dispatch["body"]["stream"], true);
     }
 }

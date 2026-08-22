@@ -413,10 +413,17 @@ impl VertexExecutor {
             location,
         );
 
-        let url = if is_partner {
-            format!("{base}/publishers/{model_stripped}:streamGenerateContent",)
+        // JS vertex.js:83-97 — action verb follows the stream flag:
+        // streamGenerateContent (SSE) vs generateContent (unary).
+        let action = if stream {
+            "streamGenerateContent"
         } else {
-            format!("{base}/publishers/google/{model_stripped}:streamGenerateContent",)
+            "generateContent"
+        };
+        let url = if is_partner {
+            format!("{base}/publishers/{model_stripped}:{action}")
+        } else {
+            format!("{base}/publishers/google/{model_stripped}:{action}")
         };
 
         if stream {

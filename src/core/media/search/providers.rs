@@ -61,6 +61,10 @@ impl SearchProvider for SerperProvider {
     fn id(&self) -> &'static str {
         "serper"
     }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry serper.js timeoutMs = 10000.
+        Some(10_000)
+    }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         let endpoint = if request.search_type == SearchType::News {
             "/news"
@@ -147,6 +151,14 @@ pub static BRAVE: BraveProvider = BraveProvider;
 impl SearchProvider for BraveProvider {
     fn id(&self) -> &'static str {
         "brave-search"
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry brave-search.js timeoutMs = 10000.
+        Some(10_000)
+    }
+    fn max_max_results(&self) -> u32 {
+        // 9router registry brave-search.js maxMaxResults = 20.
+        20
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         let endpoint = if request.search_type == SearchType::News {
@@ -315,6 +327,10 @@ impl SearchProvider for ExaProvider {
     fn id(&self) -> &'static str {
         "exa"
     }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry exa.js searchConfig timeoutMs = 10000.
+        Some(10_000)
+    }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         Ok(resolve_base_url("https://api.exa.ai/search", request)?)
     }
@@ -404,6 +420,14 @@ impl SearchProvider for TavilyProvider {
     fn id(&self) -> &'static str {
         "tavily"
     }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry tavily.js searchConfig timeoutMs = 10000.
+        Some(10_000)
+    }
+    fn max_max_results(&self) -> u32 {
+        // 9router registry tavily.js searchConfig maxMaxResults = 20.
+        20
+    }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         Ok(resolve_base_url("https://api.tavily.com/search", request)?)
     }
@@ -481,6 +505,14 @@ pub static GOOGLE_PSE: GooglePseProvider = GooglePseProvider;
 impl SearchProvider for GooglePseProvider {
     fn id(&self) -> &'static str {
         "google-pse"
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry google-pse.js timeoutMs = 10000.
+        Some(10_000)
+    }
+    fn max_max_results(&self) -> u32 {
+        // 9router registry google-pse.js maxMaxResults = 10.
+        10
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         let api_key = request
@@ -589,6 +621,14 @@ pub static LINKUP: LinkupProvider = LinkupProvider;
 impl SearchProvider for LinkupProvider {
     fn id(&self) -> &'static str {
         "linkup"
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry linkup.js timeoutMs = 10000.
+        Some(10_000)
+    }
+    fn max_max_results(&self) -> u32 {
+        // 9router registry linkup.js maxMaxResults = 50.
+        50
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
         Ok(resolve_base_url(

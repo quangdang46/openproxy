@@ -129,9 +129,10 @@ mod tests {
         assert_eq!(youcom.timeout_ms(), Some(10_000));
 
         // Providers without one fall back to the 15s global.
-        let serper = get_search_provider("serper").unwrap();
-        assert_eq!(serper.timeout_ms(), None);
-        let effective = serper
+        // (perplexity.js registry defines no searchConfig.timeoutMs.)
+        let perplexity = get_search_provider("perplexity").unwrap();
+        assert_eq!(perplexity.timeout_ms(), None);
+        let effective = perplexity
             .timeout_ms()
             .map(Duration::from_millis)
             .unwrap_or(GLOBAL_TIMEOUT);

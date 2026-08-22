@@ -1095,8 +1095,11 @@ async fn video_create_handler(
             }
         };
 
-        // Never auto-retry a single POST that already left the socket — a
-        // network error may still have created the billable job upstream.
+        // 9router videoCore.js:117-124 — a network error after the POST left
+        // the socket may already have created the billable job upstream, so
+        // creation is NEVER auto-retried on another account. Return 502
+        // immediately (sanitized); rotation happens only on 401/403/429
+        // responses.
         let response = match client
             .post(&url)
             .headers(upstream_headers.clone())
@@ -1106,11 +1109,10 @@ async fn video_create_handler(
         {
             Ok(r) => r,
             Err(e) => {
-                last_error = Some(json_error_response(
+                return json_error_response(
                     StatusCode::BAD_GATEWAY,
-                    &format!("Request failed: {}", e),
-                ));
-                continue;
+                    &format!("{provider} video POST aborted: {}", e),
+                );
             }
         };
 

@@ -2465,18 +2465,22 @@ fn read_cursor_frame(
 
 // ==================== RESPONSE TRANSFORM HELPERS ====================
 
-/// Check if model is a composer model (9router parity)
+/// Check if model is a composer model (9router cursor.js isComposerModel):
+/// anchored on the FINAL path segment — `^composer(?:-|$)` case-insensitive.
 fn is_composer_model(model: &str) -> bool {
-    model.to_lowercase().contains("composer")
+    let model_id = model.split('/').next_back().unwrap_or(model);
+    let lower = model_id.to_lowercase();
+    lower == "composer" || lower.starts_with("composer-")
 }
 
 /// Extract visible content from thinking for composer models.
-/// Looks for `  `` tag and returns everything after it.
+/// JS visibleComposerContentFromThinking slices after the LAST `</think>`
+/// tag (not `</thinking>`), trimming leading whitespace only.
 fn visible_composer_content_from_thinking(thinking: &str) -> Option<String> {
-    let start_tag = "</thinking>";
-    let end_idx = thinking.find(start_tag)?;
-    let after = &thinking[end_idx + start_tag.len()..];
-    let trimmed = after.trim();
+    let end_tag = "</think>";
+    let end_idx = thinking.rfind(end_tag)?;
+    let after = &thinking[end_idx + end_tag.len()..];
+    let trimmed = after.trim_start();
     if trimmed.is_empty() {
         None
     } else {

@@ -17,7 +17,7 @@ use crate::core::account_fallback::{
     build_model_lock_update, filter_available_accounts, StrategyType,
 };
 use crate::core::chat::RequestPlan;
-use crate::core::combo::fusion::handle_fusion_chat;
+use crate::core::combo::fusion::{handle_fusion_chat, handle_fusion_chat_deferred};
 use crate::core::combo::{
     capacity_adapter::{
         augment_models_with_capacity_adapter, get_active_adapter_strategy,
@@ -437,57 +437,138 @@ async fn chat_completions_impl(
 
                 let panel_count = combo_models.len();
                 let fusion_cfg = fusion_config_for(&snapshot, &combo_name, panel_count);
-                let fusion_result = handle_fusion_chat(
-                    &mut body.clone(),
-                    &combo_models,
-                    &fusion_cfg,
-                    None,
-                    move |model: String, panel_body: Value| {
-                        let state = f_state.clone();
-                        let body = f_body.clone();
-                        let api_key = f_api_key.clone();
-                        let client_tool = f_client_tool;
-                        let headers = f_headers.clone();
-                        async move {
-                            let snapshot = state.db.snapshot();
-                            let resolved = get_model_info(&model, &snapshot);
-                            let provider = resolved
-                                .provider
-                                .as_deref()
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let resolved_model = resolved.model.clone();
-                            let mut plan =
-                                RequestPlan::new(endpoint, &body, &provider, &resolved_model);
-                            plan.passthrough = is_native_passthrough(client_tool, &provider);
-                            plan.stream = false;
-                            let response = execute_single_model(
-                                &state,
-                                &panel_body,
-                                &resolved_model,
-                                api_key.as_deref(),
-                                endpoint,
-                                &plan,
-                                client_tool,
-                                Some(&headers),
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Fusion panel failed: {}", e.message))?;
-                            let body_bytes =
-                                axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
-                                    .await
-                                    .map_err(|e| {
-                                        anyhow::anyhow!("Failed to read panel body: {}", e)
-                                    })?;
-                            serde_json::from_slice(&body_bytes)
-                                .map_err(|e| anyhow::anyhow!("Failed to parse panel body: {}", e))
-                        }
-                    },
-                )
-                .await;
+                // 9router combo.js: the judge (and single-survivor) leg runs
+                // with the ORIGINAL client stream flag — a streaming client
+                // must get SSE, not a buffered JSON blob. The buffered-Value
+                // callback below cannot carry an SSE body, so when the client
+                // asked to stream we defer the final dispatch and run it
+                // ourselves after panel collection.
+                let client_wants_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(true);
+                let fusion_result = if client_wants_stream {
+                    handle_fusion_chat_deferred(
+                        &mut body.clone(),
+                        &combo_models,
+                        &fusion_cfg,
+                        None,
+                        move |model: String, panel_body: Value| {
+                            let state = f_state.clone();
+                            let body = f_body.clone();
+                            let api_key = f_api_key.clone();
+                            let client_tool = f_client_tool;
+                            let headers = f_headers.clone();
+                            async move {
+                                let response = dispatch_fusion_leg(
+                                    &state,
+                                    &body,
+                                    &panel_body,
+                                    &model,
+                                    api_key.as_deref(),
+                                    endpoint,
+                                    client_tool,
+                                    &headers,
+                                    Some(false),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Fusion panel failed: {}", e.message)
+                                })?;
+                                let body_bytes = axum::body::to_bytes(
+                                    response.into_body(),
+                                    10 * 1024 * 1024,
+                                )
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to read panel body: {}", e)
+                                })?;
+                                serde_json::from_slice(&body_bytes).map_err(|e| {
+                                    anyhow::anyhow!("Failed to parse panel body: {e}")
+                                })
+                            }
+                        },
+                    )
+                    .await
+                } else {
+                    handle_fusion_chat(
+                        &mut body.clone(),
+                        &combo_models,
+                        &fusion_cfg,
+                        None,
+                        move |model: String, panel_body: Value| {
+                            let state = f_state.clone();
+                            let body = f_body.clone();
+                            let api_key = f_api_key.clone();
+                            let client_tool = f_client_tool;
+                            let headers = f_headers.clone();
+                            async move {
+                                let response = dispatch_fusion_leg(
+                                    &state,
+                                    &body,
+                                    &panel_body,
+                                    &model,
+                                    api_key.as_deref(),
+                                    endpoint,
+                                    client_tool,
+                                    &headers,
+                                    Some(false),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Fusion panel failed: {}", e.message)
+                                })?;
+                                let body_bytes = axum::body::to_bytes(
+                                    response.into_body(),
+                                    10 * 1024 * 1024,
+                                )
+                                .await
+                                .map_err(|e| {
+                                    anyhow::anyhow!("Failed to read panel body: {}", e)
+                                })?;
+                                serde_json::from_slice(&body_bytes).map_err(|e| {
+                                    anyhow::anyhow!("Failed to parse panel body: {e}")
+                                })
+                            }
+                        },
+                    )
+                    .await
+                };
 
                 match fusion_result {
                     Ok(value) => {
+                        // Deferred dispatch: the fusion pipeline decided which
+                        // model runs the final leg (judge or single survivor) —
+                        // run it with full stream semantics so SSE clients see
+                        // a live stream (COMBO-1 / 9router combo.js parity).
+                        if let Some(dispatch) = value.get("__openproxy_fusion_dispatch") {
+                            let model = dispatch
+                                .get("model")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string();
+                            let empty = Value::Object(Default::default());
+                            let dispatch_body =
+                                dispatch.get("body").cloned().unwrap_or_else(|| empty.clone());
+                            let dispatched = dispatch_fusion_leg(
+                                &state,
+                                &body,
+                                &dispatch_body,
+                                &model,
+                                presented_api_key.as_deref(),
+                                endpoint,
+                                client_tool,
+                                &headers_map,
+                                None,
+                            )
+                            .await;
+                            return match dispatched {
+                                Ok(response) => response,
+                                Err(error) => combo_error_response(ComboExecutionError {
+                                    status: error.status,
+                                    message: error.message,
+                                    earliest_retry_after: None,
+                                    upstream_body: None,
+                                }),
+                            };
+                        }
                         let json_str = serde_json::to_string(&value).unwrap_or_default();
                         Ok(axum::response::Response::new(axum::body::Body::from(
                             json_str,
@@ -761,6 +842,53 @@ fn apply_stream_plan(
         sp.sse_to_json,
     );
 }
+
+/// Dispatch one fusion leg (panel, judge, or deferred final leg).
+///
+/// - Panel legs pass `force_stream = Some(false)` (createPanelBody parity).
+/// - The deferred judge/survivor leg passes `force_stream = None`, so the
+///   ORIGINAL client stream flag drives the plan — SSE flows untouched.
+async fn dispatch_fusion_leg(
+    state: &AppState,
+    original_body: &Value,
+    leg_body: &Value,
+    model: &str,
+    api_key: Option<&str>,
+    endpoint: Option<&'static str>,
+    client_tool: Option<ClientTool>,
+    headers: &std::collections::HashMap<String, String>,
+    force_stream: Option<bool>,
+) -> Result<Response, ComboAttemptError> {
+    let snapshot = state.db.snapshot();
+    let resolved = get_model_info(model, &snapshot);
+    let provider = resolved
+        .provider
+        .as_deref()
+        .unwrap_or("unknown")
+        .to_string();
+    let resolved_model = resolved.model.clone();
+    let mut plan = RequestPlan::new(endpoint, original_body, &provider, &resolved_model);
+    plan.passthrough = is_native_passthrough(client_tool, &provider);
+    plan.stream = force_stream.unwrap_or_else(|| {
+        original_body
+            .get("stream")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    });
+    plan.sse_to_json = false;
+    execute_single_model(
+        state,
+        leg_body,
+        &resolved_model,
+        api_key,
+        endpoint,
+        &plan,
+        client_tool,
+        Some(headers),
+    )
+    .await
+}
+
 
 async fn execute_single_model(
     state: &AppState,
@@ -1102,15 +1230,17 @@ async fn forward_with_provider_fallback(
         use crate::core::executor::{
             AntigravityExecutionRequest, AntigravityExecutor, AzureExecutionRequest, AzureExecutor,
             CodexExecutionRequest, CodexExecutor, CommandCodeExecutionRequest, CommandCodeExecutor,
-            CursorExecutionRequest, CursorExecutor, DefaultExecutor, ExecutionRequest,
-            GeminiCliExecutionRequest, GeminiCliExecutor, GithubExecutionRequest, GithubExecutor,
-            GrokWebExecutionRequest, GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor,
-            KimchiExecutor, KiroExecutionRequest, KiroExecutor, KiroExecutorResponse,
-            OpenCodeExecutionRequest, OpenCodeExecutor, OpenCodeGoExecutionRequest,
-            OpenCodeGoExecutor, PerplexityWebExecutionRequest, PerplexityWebExecutor,
-            ProviderExecutionRequest, ProviderExecutor, QoderExecutionRequest, QoderExecutor,
-            QwenExecutionRequest, QwenExecutor, TraeExecutionRequest, TraeExecutor,
-            VertexExecutionRequest, VertexExecutor, WindsurfExecutionRequest, WindsurfExecutor,
+            CursorExecutionRequest, CursorExecutor, DefaultExecutor, DevinCliExecutor,
+            DevinExecutionRequest, ExecutionRequest, GeminiCliExecutionRequest,
+            GeminiCliExecutor, GithubExecutionRequest, GithubExecutor, GrokWebExecutionRequest,
+            GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor, KimchiExecutor,
+            KiroExecutionRequest, KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest,
+            OpenCodeExecutor, OpenCodeGoExecutionRequest, OpenCodeGoExecutor,
+            PerplexityWebExecutionRequest, PerplexityWebExecutor, ProviderExecutionRequest,
+            ProviderExecutor, QoderExecutionRequest, QoderExecutor,
+            QwenExecutionRequest, QwenExecutor,
+            TraeExecutionRequest, TraeExecutor, VertexExecutionRequest, VertexExecutor,
+            WindsurfExecutionRequest, WindsurfExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/") || provider == "codex";
@@ -1625,6 +1755,37 @@ async fn forward_with_provider_fallback(
                     response: result.response,
                     url: result.url,
                     headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "devin-cli" || provider == "dv" {
+                // ACP stdio executor — spawns `devin acp` (noAuth; the CLI
+                // carries its own credentials) and bridges session/update
+                // notifications to OpenAI SSE.
+                let executor = DevinCliExecutor::new(state.client_pool.clone())
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Devin executor init failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                let result = executor
+                    .execute_request(DevinExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Devin execution failed: {}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url.clone(),
+                    headers: HeaderMap::new(),
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
@@ -2173,10 +2334,10 @@ fn select_connection(
     // Determine strategy for this provider.
     // Uses provider_strategies map, then the account-level fallbackStrategy,
     // finally FillFirst.
-    let strategy = snapshot
-        .settings
-        .provider_strategies
-        .get(provider)
+    let provider_override = snapshot.settings.provider_strategies.get(provider).cloned();
+    let strategy = provider_override
+        .as_ref()
+        .and_then(|entry| entry.fallback_strategy())
         .and_then(|s| s.parse::<StrategyType>().ok())
         .or_else(|| {
             snapshot
@@ -2186,6 +2347,11 @@ fn select_connection(
                 .ok()
         })
         .unwrap_or(StrategyType::FillFirst);
+    // 9router stickyRoundRobinLimit: per-provider override → settings default (3).
+    let sticky_limit = provider_override
+        .as_ref()
+        .and_then(|e| e.sticky_round_robin_limit())
+        .unwrap_or(snapshot.settings.sticky_round_robin_limit);
 
     match strategy {
         StrategyType::FillFirst | StrategyType::LeastLoaded => {
@@ -2205,11 +2371,12 @@ fn select_connection(
             if let Some(reg) = registry {
                 let refs: Vec<&ProviderConnection> = candidates.iter().collect();
                 let combo_id = format!("provider_{}", provider);
-                if let Some(idx) = reg.select_account_by_strategy(
+                if let Some(idx) = reg.select_with_sticky_limit(
                     &refs,
                     StrategyType::RoundRobin,
                     Some(&combo_id),
                     300,
+                    sticky_limit.max(1),
                 ) {
                     if let Some(conn) = candidates.get(idx).cloned() {
                         return Some(conn);

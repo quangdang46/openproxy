@@ -270,6 +270,72 @@ pub enum ComboStrategyEntry {
     Config(ComboStrategyConfig),
 }
 
+/// Per-provider account-fallback strategy entry — 9router
+/// `settings.providerStrategies[providerId]`.
+///
+/// Accepts either a bare strategy string (`"round-robin"`) for backward
+/// compatibility with older openproxy data or the 9router nested object
+/// (`{ fallbackStrategy, stickyRoundRobinLimit, rotateStrategy, proxyPoolId }`)
+/// the dashboard writes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum ProviderStrategyEntry {
+    /// Legacy flat form: `"fill-first"` / `"round-robin"` / `"sticky"` / …
+    Name(String),
+    /// Nested form matching the 9router dashboard + auth service.
+    Config(ProviderStrategyConfig),
+}
+
+impl ProviderStrategyEntry {
+    /// Account fallback strategy name used by chat connection selection.
+    pub fn fallback_strategy(&self) -> Option<&str> {
+        match self {
+            Self::Name(s) => Some(s.as_str()),
+            Self::Config(c) => c.fallback_strategy.as_deref().filter(|s| !s.is_empty()),
+        }
+    }
+
+    /// Sticky round-robin limit override (9router `stickyRoundRobinLimit`).
+    pub fn sticky_round_robin_limit(&self) -> Option<u32> {
+        match self {
+            Self::Name(_) => None,
+            Self::Config(c) => c.sticky_round_robin_limit,
+        }
+    }
+
+    /// Free-provider rotation strategy (9router `rotateStrategy`).
+    pub fn rotate_strategy(&self) -> Option<&str> {
+        match self {
+            Self::Name(_) => None,
+            Self::Config(c) => c.rotate_strategy.as_deref().filter(|s| !s.is_empty()),
+        }
+    }
+
+    /// Bound proxy pool id (9router `proxyPoolId`).
+    pub fn proxy_pool_id(&self) -> Option<&str> {
+        match self {
+            Self::Name(_) => None,
+            Self::Config(c) => c.proxy_pool_id.as_deref().filter(|s| !s.is_empty()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStrategyConfig {
+    #[serde(default)]
+    pub fallback_strategy: Option<String>,
+    #[serde(default)]
+    pub sticky_round_robin_limit: Option<u32>,
+    #[serde(default)]
+    pub rotate_strategy: Option<String>,
+    #[serde(default)]
+    pub proxy_pool_id: Option<String>,
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+
 impl ComboStrategyEntry {
     /// Strategy name used by the dispatcher (`fallback` | `round-robin` | `fusion` | …).
     pub fn strategy_name(&self) -> &str {
@@ -373,13 +439,17 @@ pub struct Settings {
     pub tailscale_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub tailscale_url: String,
+    /// Sticky limit for account round-robin (9router `stickyRoundRobinLimit`).
     #[serde(
         default = "default_sticky_round_robin_limit",
         deserialize_with = "deserialize_null_default"
     )]
     pub sticky_round_robin_limit: u32,
+    /// Per-provider account-fallback overrides. Accepts legacy bare string
+    /// (`"round-robin"`) or the 9router nested object the dashboard writes
+    /// (`{ fallbackStrategy, stickyRoundRobinLimit, rotateStrategy, proxyPoolId }`).
     #[serde(default, deserialize_with = "deserialize_null_default")]
-    pub provider_strategies: BTreeMap<String, String>,
+    pub provider_strategies: BTreeMap<String, ProviderStrategyEntry>,
     #[serde(
         default = "default_combo_strategy",
         deserialize_with = "deserialize_null_default"
@@ -1236,4 +1306,51 @@ where
         .remove(key)
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod provider_strategy_tests {
+    use super::*;
+
+    /// 9router dashboard writes nested objects — must deserialize (was a
+    /// hard PATCH rejection when the field was BTreeMap<String, String>).
+    #[test]
+    fn provider_strategies_accept_nested_objects() {
+        let json = json!({
+            "providerStrategies": {
+                "claude": { "fallbackStrategy": "round-robin", "stickyRoundRobinLimit": 5 },
+                "qwen": { "rotateStrategy": "none", "proxyPoolId": "pool-1" }
+            }
+        });
+        let settings: Settings = serde_json::from_value(json).unwrap();
+        let claude = settings.provider_strategies.get("claude").unwrap();
+        assert_eq!(claude.fallback_strategy(), Some("round-robin"));
+        assert_eq!(claude.sticky_round_robin_limit(), Some(5));
+        let qwen = settings.provider_strategies.get("qwen").unwrap();
+        assert_eq!(qwen.rotate_strategy(), Some("none"));
+        assert_eq!(qwen.proxy_pool_id(), Some("pool-1"));
+    }
+
+    /// Legacy openproxy data stores bare strings.
+    #[test]
+    fn provider_strategies_accept_legacy_strings() {
+        let json = json!({ "providerStrategies": { "gemini": "round-robin" } });
+        let settings: Settings = serde_json::from_value(json).unwrap();
+        let entry = settings.provider_strategies.get("gemini").unwrap();
+        assert_eq!(entry.fallback_strategy(), Some("round-robin"));
+        assert!(matches!(entry, ProviderStrategyEntry::Name(_)));
+    }
+
+    /// Round-trips through the API payload shape.
+    #[test]
+    fn provider_strategy_entry_serializes_back_to_object() {
+        let entry = ProviderStrategyEntry::Config(ProviderStrategyConfig {
+            fallback_strategy: Some("sticky".into()),
+            sticky_round_robin_limit: Some(7),
+            ..Default::default()
+        });
+        let v = serde_json::to_value(&entry).unwrap();
+        assert_eq!(v["fallbackStrategy"], "sticky");
+        assert_eq!(v["stickyRoundRobinLimit"], 7);
+    }
 }

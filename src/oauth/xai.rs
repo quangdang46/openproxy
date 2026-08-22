@@ -23,7 +23,7 @@ use tokio::net::TcpListener;
 // ---------------------------------------------------------------------------
 
 const XAI_DISCOVERY_URL: &str = "https://auth.x.ai/.well-known/openid-configuration";
-const XAI_CLIENT_ID: &str = "b1a00492-073a-073a-47ea-816f-4c329264a828";
+const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 const XAI_LOOPBACK_PORT: u16 = 56121;
 const XAI_CALLBACK_PATH: &str = "/callback";
 const PKCE_VERIFIER_BYTES: usize = 96;
@@ -347,6 +347,9 @@ mod tests {
             "test_challenge",
             "test_nonce",
         );
+        // Regression: client_id must be the exact JS registry UUID
+        // (xai.js:25). A duplicated `073a-` segment broke every xAI login.
+        assert!(url.contains("client_id=b1a00492-073a-47ea-816f-4c329264a828"));
         assert!(url.contains(&format!("client_id={}", XAI_CLIENT_ID)));
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A56121%2Fcallback"));
         assert!(url.contains("code_challenge=test_challenge"));

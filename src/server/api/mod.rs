@@ -2070,7 +2070,7 @@ async fn get_settings_api(State(state): State<AppState>, headers: HeaderMap) -> 
 struct UpdateSettingsRequest {
     tunnel_provider: Option<String>,
     sticky_round_robin_limit: Option<u32>,
-    provider_strategies: Option<BTreeMap<String, String>>,
+    provider_strategies: Option<BTreeMap<String, crate::types::ProviderStrategyEntry>>,
     combo_strategy: Option<String>,
     combo_strategies: Option<BTreeMap<String, crate::types::ComboStrategyEntry>>,
     mitm_router_base_url: Option<String>,

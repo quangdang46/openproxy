@@ -193,7 +193,7 @@ const IFLOW_TOKEN_URL: &str = "https://iflow.cn/oauth/token";
 const QWEN_CLIENT_ID: &str = "f0304373b74a44d2b584a3fb70ca9e56";
 const QWEN_TOKEN_URL: &str = "https://chat.qwen.ai/api/v1/oauth2/token";
 
-const XAI_CLIENT_ID: &str = "b1a00492-073a-073a-47ea-816f-4c329264a828";
+const XAI_CLIENT_ID: &str = "b1a00492-073a-47ea-816f-4c329264a828";
 
 const CLINE_REFRESH_URL: &str = "https://api.cline.bot/api/v1/auth/refresh";
 

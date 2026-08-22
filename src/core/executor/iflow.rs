@@ -13,7 +13,7 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 type HmacSha256 = Hmac<Sha256>;
 
 const IFLOW_USER_AGENT: &str = "iFlow-Cli";
-const IFLOW_BASE_URL: &str = "https://iflow.mintlify.cc";
+const IFLOW_BASE_URL: &str = "https://apis.iflow.cn/v1/chat/completions";
 
 #[derive(Clone)]
 pub struct IFlowExecutor {

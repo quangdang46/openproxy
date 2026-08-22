@@ -435,6 +435,11 @@ pub fn apply_thinking_level(
                 level.as_str()
             };
             if let Some(obj) = body.as_object_mut() {
+                // 9router parity: output_config.effort alone does NOT turn
+                // thinking on — Anthropic requires an explicit
+                // thinking:{type:"adaptive"} on Opus/Sonnet 4.6+, and
+                // Anthropic-compatible shims default thinking off. Send both.
+                obj.insert("thinking".into(), json!({"type": "adaptive"}));
                 obj.insert("output_config".into(), json!({"effort": effort}));
             }
         }
@@ -646,7 +651,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_apply_claude_adaptive_uses_output_config() {
+    fn strip_apply_claude_adaptive_sends_both_fields() {
         let (clean, level) = strip_thinking_suffix_owned("claude-opus-4.7(medium)");
         assert_eq!(clean, "claude-opus-4.7");
         let mut body = json!({"messages": []});
@@ -659,7 +664,7 @@ mod tests {
             true,
         );
         assert_eq!(body["output_config"]["effort"], "medium");
-        assert!(body.get("thinking").is_none());
+        assert_eq!(body["thinking"]["type"], "adaptive");
     }
 
     #[test]

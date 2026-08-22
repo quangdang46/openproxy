@@ -580,7 +580,20 @@ impl CodexExecutor {
         mut request: CodexExecutionRequest,
     ) -> Result<CodexExecutorResponse, CodexExecutorError> {
         let actual_model = Self::parse_codex_model(&request.model);
+        // JS codex.js:394-395 — a body-level `_compact: true` flag (set by the
+        // Responses compat layer) routes to /compact and is stripped before
+        // send; model-suffix and provider_node variants keep working.
+        let body_compact = request
+            .body
+            .get("_compact")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let url = self.build_url(&actual_model);
+        let url = if body_compact && !url.ends_with("/compact") {
+            format!("{url}/compact")
+        } else {
+            url
+        };
 
         // Get API key from credentials (try api_key first, then access_token for OAuth)
         let api_key = request
@@ -600,6 +613,12 @@ impl CodexExecutor {
             .or(request.credentials.display_name.as_deref());
         // Always stream upstream (9router force stream); client JSON via chat sse_to_json
         let headers = self.build_headers(api_key, true, connection_id, &request.credentials)?;
+
+        // Strip the `_compact` routing flag before send (JS codex.js:395
+        // `delete body._compact` — the upstream never sees it).
+        if let Some(obj) = request.body.as_object_mut() {
+            obj.remove("_compact");
+        }
 
         // Prefetch remote images into inline base64 data URIs (JS prefetchImages).
         if let Some(input) = request.body.get("input") {
@@ -699,8 +718,10 @@ impl CodexExecutor {
                     });
                 }
                 if attempt + 1 < MAX_RETRIES {
-                    let delay = Duration::from_millis(500 * 2u64.pow(attempt as u32));
-                    tokio::time::sleep(delay).await;
+                    // JS codex.js reuses the flat 503 entry of
+                    // DEFAULT_RETRY_CONFIG (attempts 3, delay 2000ms) — not
+                    // exponential backoff.
+                    tokio::time::sleep(Duration::from_millis(2000)).await;
                     continue;
                 }
                 let err_body = json!({
