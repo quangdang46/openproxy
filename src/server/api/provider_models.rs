@@ -14,7 +14,7 @@ use serde_json::{json, Value};
 
 use crate::server::api::oauth::{get_refresh_lock_key, REFRESH_LOCKS};
 use crate::server::state::AppState;
-use crate::types::ProviderConnection;
+use crate::types::{CustomModel, ProviderConnection};
 
 const OPENAI_COMPATIBLE_PREFIX: &str = "openai-compatible-";
 const ANTHROPIC_COMPATIBLE_PREFIX: &str = "anthropic-compatible-";
@@ -75,6 +75,148 @@ pub(super) async fn list_provider_models(
         Ok(payload) => Json(payload).into_response(),
         Err(error) => json_error(error.status, &error.message),
     }
+}
+
+pub(super) async fn import_provider_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let Some(connection) = snapshot
+        .provider_connections
+        .iter()
+        .find(|connection| connection.id == id)
+        .cloned()
+    else {
+        return json_error(StatusCode::NOT_FOUND, "Connection not found");
+    };
+
+    let provider = connection.provider.clone();
+    let provider_alias = storage_alias_for_provider(&provider);
+    let legacy_alias = connection
+        .name
+        .clone()
+        .unwrap_or_else(|| provider.clone());
+    if legacy_alias != provider_alias {
+        let has_legacy = state
+            .db
+            .snapshot()
+            .custom_models
+            .iter()
+            .any(|m| m.provider_alias == legacy_alias);
+        if has_legacy {
+            let legacy = legacy_alias.clone();
+            let correct = provider_alias.clone();
+            let _ = state
+                .db
+                .update(move |db| {
+                    for m in &mut db.custom_models {
+                        if m.provider_alias == legacy {
+                            m.provider_alias = correct.clone();
+                        }
+                    }
+                })
+                .await;
+        }
+    }
+
+    let Ok(payload) = fetch_provider_models_response(&state, &connection).await else {
+        let snapshot = state.db.snapshot();
+        let existing = snapshot
+            .custom_models
+            .iter()
+            .filter(|m| m.provider_alias == provider_alias)
+            .count();
+        return Json(json!({
+            "provider": provider,
+            "connectionId": connection.id,
+            "imported": 0,
+            "skipped": existing,
+            "total": existing,
+        }))
+        .into_response();
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let total = payload.models.len();
+
+    for model in payload.models {
+        let model_id = model.id.trim().to_string();
+        if model_id.is_empty() {
+            continue;
+        }
+
+        // Snapshot read to decide import vs skip (mirrors create_custom_model).
+        let exists_before = state.db.snapshot().custom_models.iter().any(|m| {
+            m.provider_alias == provider_alias
+                && m.id == model_id
+                && m.r#type == "llm"
+        });
+        if exists_before {
+            skipped += 1;
+            continue;
+        }
+
+        let mut extra = model.extra.clone();
+        extra
+            .entry("source".to_string())
+            .or_insert_with(|| serde_json::Value::String("imported".to_string()));
+        extra
+            .entry("importedAt".to_string())
+            .or_insert_with(|| serde_json::Value::String(now.clone()));
+
+        let name = if model.name.is_empty() {
+            None
+        } else {
+            Some(model.name)
+        };
+
+        let model_id_owned = model_id.clone();
+        let alias = provider_alias.clone();
+        let result = state
+            .db
+            .update(move |db| {
+                // Re-check inside the write lock to guard a concurrent insert.
+                let exists = db.custom_models.iter().any(|m| {
+                    m.provider_alias == alias
+                        && m.id == model_id_owned
+                        && m.r#type == "llm"
+                });
+                if exists {
+                    return;
+                }
+
+                db.custom_models.push(CustomModel {
+                    provider_alias: alias,
+                    id: model_id_owned,
+                    r#type: "llm".to_string(),
+                    name,
+                    extra,
+                });
+            })
+            .await;
+
+        match result {
+            Ok(_) => imported += 1,
+            Err(_) => skipped += 1,
+        }
+    }
+
+    Json(json!({
+        "provider": provider,
+        "connectionId": connection.id,
+        "imported": imported,
+        "skipped": skipped,
+        "total": total,
+    }))
+    .into_response()
 }
 
 pub(super) async fn fetch_compatible_model_ids(connection: &ProviderConnection) -> Vec<String> {
@@ -1375,6 +1517,17 @@ fn is_anthropic_compatible_provider(provider: &str) -> bool {
     provider.starts_with(ANTHROPIC_COMPATIBLE_PREFIX)
 }
 
+fn storage_alias_for_provider(provider: &str) -> String {
+    if is_openai_compatible_provider(provider) || is_anthropic_compatible_provider(provider) {
+        return provider.to_string();
+    }
+    let catalog = crate::core::model::catalog::provider_catalog();
+    if let Some(alias) = catalog.static_alias_for_provider(provider) {
+        return alias.to_string();
+    }
+    provider.to_string()
+}
+
 fn dedupe_model_ids(mut ids: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     ids.retain(|id| seen.insert(id.clone()));
@@ -1652,5 +1805,79 @@ mod tests {
             models[1].extra.get("upstreamModelId"),
             Some(&Value::String("gpt-5.5".to_string()))
         );
+    }
+
+    #[test]
+    fn import_tags_models_with_source_imported() {
+        let model = ProviderModel {
+            id: "meta/llama-3.1-8b".to_string(),
+            name: "Llama 3.1 8B".to_string(),
+            extra: BTreeMap::from([(
+                "context_length".to_string(),
+                Value::from(131_072u64),
+            )]),
+        };
+        let now = "2026-08-22T00:00:00Z".to_string();
+
+        let mut extra = model.extra.clone();
+        extra
+            .entry("source".to_string())
+            .or_insert_with(|| Value::String("imported".to_string()));
+        extra
+            .entry("importedAt".to_string())
+            .or_insert_with(|| Value::String(now.clone()));
+
+        let name = if model.name.is_empty() { None } else { Some(model.name) };
+        let custom = CustomModel {
+            provider_alias: "nvidia".to_string(),
+            id: model.id.trim().to_string(),
+            r#type: "llm".to_string(),
+            name,
+            extra,
+        };
+
+        assert_eq!(custom.provider_alias, "nvidia");
+        assert_eq!(custom.id, "meta/llama-3.1-8b");
+        assert_eq!(custom.r#type, "llm");
+        assert_eq!(custom.name.as_deref(), Some("Llama 3.1 8B"));
+        assert_eq!(
+            custom.extra.get("source").unwrap().as_str(),
+            Some("imported")
+        );
+        assert_eq!(
+            custom.extra.get("importedAt").unwrap().as_str(),
+            Some("2026-08-22T00:00:00Z")
+        );
+        assert_eq!(
+            custom.extra.get("context_length").unwrap().as_u64(),
+            Some(131_072)
+        );
+    }
+
+    #[test]
+    fn import_skip_check_matches_existing_custom_model() {
+        let existing = CustomModel {
+            provider_alias: "nvidia".to_string(),
+            id: "meta/llama-3.1-8b".to_string(),
+            r#type: "llm".to_string(),
+            name: None,
+            extra: BTreeMap::new(),
+        };
+        let provider_alias = "nvidia".to_string();
+        let model_id = "meta/llama-3.1-8b".to_string();
+
+        let exists = [existing.clone()].iter().any(|m| {
+            m.provider_alias == provider_alias
+                && m.id == model_id
+                && m.r#type == "llm"
+        });
+        assert!(exists, "existing (provider_alias, id, type) should match");
+
+        let missing = [existing.clone()].iter().any(|m| {
+            m.provider_alias == provider_alias
+                && m.id == "different/model"
+                && m.r#type == "llm"
+        });
+        assert!(!missing, "different id should not match");
     }
 }
