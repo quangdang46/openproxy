@@ -237,16 +237,28 @@ fn test_codebuddy_intl_device_config() {
     // 9router registry/codebuddy-intl.js:64-72 — www.codebuddy.ai, platform ide.
     let cfg = providers::codebuddy_intl();
     assert!(!cfg.uses_pkce);
-    assert_eq!(cfg.authorize_url, "https://www.codebuddy.ai/v2/plugin/auth/state");
-    assert_eq!(cfg.token_url, "https://www.codebuddy.ai/v2/plugin/auth/token");
+    assert_eq!(
+        cfg.authorize_url,
+        "https://www.codebuddy.ai/v2/plugin/auth/state"
+    );
+    assert_eq!(
+        cfg.token_url,
+        "https://www.codebuddy.ai/v2/plugin/auth/token"
+    );
     // platform must be "ide" (NOT "CLI" — that's codebuddy-cn).
-    assert!(cfg.extra_params.iter().any(|(k, v)| *k == "platform" && *v == "ide"));
+    assert!(cfg
+        .extra_params
+        .iter()
+        .any(|(k, v)| *k == "platform" && *v == "ide"));
     // OAuth user-agent is IDE/2.63.2 (distinct from the transport UA).
     assert!(cfg
         .extra_params
         .iter()
         .any(|(k, v)| *k == "user_agent" && *v == "IDE/2.63.2 CodeBuddy/2.63.2"));
-    assert_eq!(cfg.authorize_url, expected_auth_url_prefix("codebuddy-intl"));
+    assert_eq!(
+        cfg.authorize_url,
+        expected_auth_url_prefix("codebuddy-intl")
+    );
 }
 
 // ─── PKCE verifier length tests ───────────────────────────────────────────

@@ -211,8 +211,10 @@ fn same_usage_row(a: &UsageEntry, b: &UsageEntry) -> bool {
     fn tokens_of(e: &UsageEntry) -> (u64, u64) {
         let t = e.tokens.as_ref();
         (
-            t.and_then(|t| t.prompt_tokens.or(t.input_tokens)).unwrap_or(0),
-            t.and_then(|t| t.completion_tokens.or(t.output_tokens)).unwrap_or(0),
+            t.and_then(|t| t.prompt_tokens.or(t.input_tokens))
+                .unwrap_or(0),
+            t.and_then(|t| t.completion_tokens.or(t.output_tokens))
+                .unwrap_or(0),
         )
     }
     let (pa, ca) = tokens_of(a);

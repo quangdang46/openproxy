@@ -57,7 +57,10 @@ impl TtsAdapter for XiaomiMimoAdapter {
 
         let mut messages = vec![json!({ "role": "assistant", "content": request.text })];
         if !instructions.is_empty() {
-            messages.insert(0, json!({ "role": "user", "content": instructions.join(" ") }));
+            messages.insert(
+                0,
+                json!({ "role": "user", "content": instructions.join(" ") }),
+            );
         }
 
         let mut headers = HeaderMap::new();
@@ -141,8 +144,12 @@ mod tests {
     /// Build the request body exactly as the adapter would, to lock the
     /// message/audio contract without a live HTTP call.
     fn build_body(text: &str, language: Option<&str>, style: Option<&str>, model: &str) -> Value {
-        let (model_id, voice_id) =
-            crate::core::media::tts::base::parse_model_voice(model, DEFAULT_MODEL, DEFAULT_VOICE, KNOWN_MODELS);
+        let (model_id, voice_id) = crate::core::media::tts::base::parse_model_voice(
+            model,
+            DEFAULT_MODEL,
+            DEFAULT_VOICE,
+            KNOWN_MODELS,
+        );
         let mut instructions: Vec<String> = Vec::new();
         if let Some(language) = language {
             instructions.push(format!("Speak in {language}."));
@@ -154,7 +161,10 @@ mod tests {
         }
         let mut messages = vec![json!({ "role": "assistant", "content": text })];
         if !instructions.is_empty() {
-            messages.insert(0, json!({ "role": "user", "content": instructions.join(" ") }));
+            messages.insert(
+                0,
+                json!({ "role": "user", "content": instructions.join(" ") }),
+            );
         }
         json!({
             "model": model_id,

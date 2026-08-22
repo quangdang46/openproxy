@@ -14,11 +14,11 @@ use url::form_urlencoded;
 pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 pub mod background_refresh;
 pub mod pending;
-pub mod zed_auth;
 pub mod providers;
 pub mod secret;
 #[cfg(test)]
 pub mod tests;
+pub mod zed_auth;
 
 pub enum OAuthFlowKind {
     AuthorizationCodePkce,

@@ -391,10 +391,7 @@ fn event_stream_decoder_single_sse_event() {
     let events = EventStreamDecoder::decode_chunk(&frame).expect("should decode");
     assert_eq!(events.len(), 1, "expected 1 event, got {:?}", events);
     assert_eq!(events[0].event_type, "assistantResponseEvent");
-    assert_eq!(
-        events[0].payload.as_ref().unwrap()["content"],
-        "test event"
-    );
+    assert_eq!(events[0].payload.as_ref().unwrap()["content"], "test event");
 }
 
 #[test]
@@ -402,7 +399,8 @@ fn event_stream_decoder_single_sse_event() {
 fn event_stream_decoder_multiple_sse_events() {
     use openproxy::core::executor::EventStreamDecoder;
 
-    let mut chunk = build_eventstream_frame("assistantResponseEvent", r#"{"content":"first event"}"#);
+    let mut chunk =
+        build_eventstream_frame("assistantResponseEvent", r#"{"content":"first event"}"#);
     chunk.extend(build_eventstream_frame(
         "assistantResponseEvent",
         r#"{"content":"second event"}"#,

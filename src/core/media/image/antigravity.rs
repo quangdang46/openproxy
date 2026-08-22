@@ -169,7 +169,11 @@ mod tests {
         };
         let adapter = &ADAPTER;
         let body = adapter.build_body(&request).await.unwrap();
-        let parts = body.pointer("/contents/0/parts").unwrap().as_array().unwrap();
+        let parts = body
+            .pointer("/contents/0/parts")
+            .unwrap()
+            .as_array()
+            .unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["inlineData"]["mimeType"], "image/jpeg");
         assert_eq!(parts[1]["text"], "edit this");

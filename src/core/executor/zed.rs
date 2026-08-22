@@ -16,10 +16,10 @@ use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{json, Value};
 
 use super::{TransportKind, UpstreamResponse};
-use hyper::http;
 use crate::core::translator::response_transform::{transform_sse_stream, transformer_for_provider};
 use crate::oauth::zed_auth;
 use crate::types::ProviderConnection;
+use hyper::http;
 
 const ZED_LLM_BASE_URL: &str = zed_auth::ZED_CLOUD_BASE_URL;
 
@@ -74,11 +74,7 @@ fn normalize_zed_provider(raw_provider: Option<&str>, model: &str) -> ZedProvide
 
 /// JS buildProviderRequest — translate the OpenAI chat body into the
 /// provider-shaped request Zed's upstream expects.
-fn build_provider_request(
-    provider: ZedProvider,
-    model: &str,
-    body: &mut Value,
-) -> Value {
+fn build_provider_request(provider: ZedProvider, model: &str, body: &mut Value) -> Value {
     use crate::core::translator::request::openai_to_claude::openai_to_claude_request;
     use crate::core::translator::request::openai_to_gemini::openai_to_gemini_request;
     match provider {
@@ -103,16 +99,20 @@ fn build_provider_request(
 /// Streaming transformer for the provider leg (JS convertProviderEvent /
 /// initProviderState): anthropic + google reuse the existing SSE translators;
 /// xAI/OpenAI pass through as already-OpenAI-shaped events.
-fn transformer_for_zed(provider: ZedProvider) -> Box<dyn crate::core::translator::response_transform::StreamingTransformer> {
+fn transformer_for_zed(
+    provider: ZedProvider,
+) -> Box<dyn crate::core::translator::response_transform::StreamingTransformer> {
     match provider {
-        ZedProvider::Anthropic => {
-            transformer_for_provider("claude")
-                .unwrap_or_else(|| Box::new(crate::core::translator::response_transform::OpenAiTransformer::new()))
-        }
-        ZedProvider::Google => transformer_for_provider("gemini")
-            .unwrap_or_else(|| Box::new(crate::core::translator::response_transform::OpenAiTransformer::new())),
+        ZedProvider::Anthropic => transformer_for_provider("claude").unwrap_or_else(|| {
+            Box::new(crate::core::translator::response_transform::OpenAiTransformer::new())
+        }),
+        ZedProvider::Google => transformer_for_provider("gemini").unwrap_or_else(|| {
+            Box::new(crate::core::translator::response_transform::OpenAiTransformer::new())
+        }),
         ZedProvider::OpenAiResponses | ZedProvider::XAi => transformer_for_provider("openai")
-            .unwrap_or_else(|| Box::new(crate::core::translator::response_transform::OpenAiTransformer::new())),
+            .unwrap_or_else(|| {
+                Box::new(crate::core::translator::response_transform::OpenAiTransformer::new())
+            }),
     }
 }
 
@@ -148,10 +148,7 @@ impl ZedExecutor {
     /// Exchange the RSA-decrypted access token for a short-lived LLM bearer.
     /// Organization id comes from psd (`organizationId`); when missing we
     /// probe `/client/users/me` best-effort like the JS flow does.
-    async fn resolve_llm_token(
-        &self,
-        credentials: &ProviderConnection,
-    ) -> Result<String, String> {
+    async fn resolve_llm_token(&self, credentials: &ProviderConnection) -> Result<String, String> {
         let psd = &credentials.provider_specific_data;
         let user_id = psd
             .get("userId")
@@ -207,12 +204,18 @@ impl ZedExecutor {
 
     /// Convert one NDJSON line into OpenAI SSE frames via the provider
     /// transformer (JS processLine + unwrapZedLine).
-    fn line_to_sse(line: &str, transformer: &mut dyn crate::core::translator::response_transform::StreamingTransformer) -> Vec<String> {
+    fn line_to_sse(
+        line: &str,
+        transformer: &mut dyn crate::core::translator::response_transform::StreamingTransformer,
+    ) -> Vec<String> {
         let text = line.trim().trim_end_matches('\r');
         if text.is_empty() {
             return Vec::new();
         }
-        let payload = text.strip_prefix("data:").map(str::trim_start).unwrap_or(text);
+        let payload = text
+            .strip_prefix("data:")
+            .map(str::trim_start)
+            .unwrap_or(text);
         if payload == "[DONE]" {
             return vec![String::new()]; // sentinel handled by caller
         }
@@ -231,10 +234,7 @@ impl ZedExecutor {
                 String::new()
             };
             if status_type == "failed" {
-                let failed = status
-                    .get("failed")
-                    .cloned()
-                    .unwrap_or(status.clone());
+                let failed = status.get("failed").cloned().unwrap_or(status.clone());
                 let message = failed
                     .get("message")
                     .or_else(|| failed.get("error"))
@@ -249,7 +249,9 @@ impl ZedExecutor {
         }
 
         // Provider event frame.
-        let Some(event) = parsed.get("event") else { return Vec::new() };
+        let Some(event) = parsed.get("event") else {
+            return Vec::new();
+        };
         let sse_text = serde_json::to_vec(event).unwrap_or_default();
         let bytes = bytes::Bytes::from_owner(sse_text);
         transform_sse_stream(&bytes, transformer)
@@ -316,7 +318,11 @@ impl ZedExecutor {
                     .cloned()
             })
             .unwrap_or(json!(uuid::Uuid::new_v4().to_string()));
-        let prompt_id = request.body.get("prompt_id").cloned().unwrap_or(Value::Null);
+        let prompt_id = request
+            .body
+            .get("prompt_id")
+            .cloned()
+            .unwrap_or(Value::Null);
 
         let payload = json!({
             "thread_id": thread_id,

@@ -221,7 +221,10 @@ fn sse_chunk(
     if let Some(u) = usage {
         obj["usage"] = u;
     }
-    format!("data: {}\n\n", serde_json::to_string(&obj).unwrap_or_default())
+    format!(
+        "data: {}\n\n",
+        serde_json::to_string(&obj).unwrap_or_default()
+    )
 }
 
 fn http_sse_response(body: String) -> UpstreamResponse {
@@ -237,7 +240,6 @@ fn http_sse_response(body: String) -> UpstreamResponse {
     );
     UpstreamResponse::Reqwest(reqwest::Response::from(http_resp))
 }
-
 
 impl DevinCliExecutor {
     /// Drive the full ACP session and collect the SSE payload.
@@ -294,12 +296,9 @@ impl DevinCliExecutor {
         let stdout = child.stdout.take().ok_or("devin stdout unavailable")?;
         let mut stdin = stdin;
 
-
         // Simple sequential state machine mirroring the JS reader loop.
         let mut id_counter: u64 = 1;
-        let mut rpc = |stdin: &mut tokio::process::ChildStdin,
-                       method: &str,
-                       params: Value| {
+        let mut rpc = |stdin: &mut tokio::process::ChildStdin, method: &str, params: Value| {
             let msg = json!({
                 "jsonrpc": "2.0",
                 "method": method,
@@ -363,40 +362,39 @@ impl DevinCliExecutor {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
 
-        let finish =
-            |tx: &mpsc::UnboundedSender<String>,
-             finished: &mut bool,
-             total_text: &mut String,
-             error: Option<String>,
-             finish_reason: &str| {
-                if *finished {
-                    return;
-                }
-                *finished = true;
-                if let Some(err) = error {
-                    let _ = tx.send(format!(
-                        "data: {}\n\ndata: [DONE]\n\n",
-                        json!({"error": {"message": err, "type": "devin_cli_error"}})
-                    ));
-                } else {
-                    let usage = json!({
-                        "prompt_tokens": (prompt_text.len() as i64 + 3) / 4,
-                        "completion_tokens": (total_text.len() as i64 + 3) / 4,
-                        "total_tokens":
-                            (prompt_text.len() as i64 + total_text.len() as i64 + 3) / 4,
-                        "estimated": true,
-                    });
-                    let _ = tx.send(sse_chunk(
-                        &response_id,
-                        created,
-                        &model,
-                        json!({}),
-                        Some(finish_reason),
-                        Some(usage),
-                    ));
-                    let _ = tx.send("data: [DONE]\n\n".to_string());
-                }
-            };
+        let finish = |tx: &mpsc::UnboundedSender<String>,
+                      finished: &mut bool,
+                      total_text: &mut String,
+                      error: Option<String>,
+                      finish_reason: &str| {
+            if *finished {
+                return;
+            }
+            *finished = true;
+            if let Some(err) = error {
+                let _ = tx.send(format!(
+                    "data: {}\n\ndata: [DONE]\n\n",
+                    json!({"error": {"message": err, "type": "devin_cli_error"}})
+                ));
+            } else {
+                let usage = json!({
+                    "prompt_tokens": (prompt_text.len() as i64 + 3) / 4,
+                    "completion_tokens": (total_text.len() as i64 + 3) / 4,
+                    "total_tokens":
+                        (prompt_text.len() as i64 + total_text.len() as i64 + 3) / 4,
+                    "estimated": true,
+                });
+                let _ = tx.send(sse_chunk(
+                    &response_id,
+                    created,
+                    &model,
+                    json!({}),
+                    Some(finish_reason),
+                    Some(usage),
+                ));
+                let _ = tx.send("data: [DONE]\n\n".to_string());
+            }
+        };
 
         while let Ok(Some(line)) = lines.next_line().await {
             let line = line.trim();
@@ -468,8 +466,7 @@ impl DevinCliExecutor {
             }
 
             // Agent stopped notification (devin stop signal).
-            if msg.get("method").and_then(Value::as_str)
-                == Some("_cognition.ai/agent_stopped")
+            if msg.get("method").and_then(Value::as_str) == Some("_cognition.ai/agent_stopped")
                 || msg.get("method").and_then(Value::as_str) == Some("$/agent_stopped")
             {
                 let cause = msg.pointer("/params/cause").and_then(Value::as_str);
@@ -493,7 +490,10 @@ impl DevinCliExecutor {
                 msg.get("method").and_then(Value::as_str),
                 Some("session/update") | Some("$/update")
             ) {
-                let update = msg.pointer("/params/update").cloned().unwrap_or(Value::Null);
+                let update = msg
+                    .pointer("/params/update")
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 let type_ = update
                     .get("sessionUpdate")
                     .and_then(Value::as_str)
@@ -524,8 +524,7 @@ impl DevinCliExecutor {
                 };
 
                 match type_ {
-                    "agent_message_chunk" | "message_delta" | "text_delta"
-                    | "content_delta" => {
+                    "agent_message_chunk" | "message_delta" | "text_delta" | "content_delta" => {
                         if !delta_text.is_empty() {
                             emit_delta(&tx, &mut role_emitted, &mut total_text, &delta_text);
                         }
@@ -594,9 +593,7 @@ fn extract_result_text(res: Option<&Value>) -> Option<String> {
             return Some(out);
         }
     }
-    res.get("text")
-        .and_then(Value::as_str)
-        .map(String::from)
+    res.get("text").and_then(Value::as_str).map(String::from)
 }
 
 #[derive(Clone)]

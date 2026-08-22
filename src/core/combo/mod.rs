@@ -364,7 +364,9 @@ fn scan_message_capabilities(m: &Value, required: &mut HashSet<String>) {
     for key in ["experimental_attachments", "attachments"] {
         if let Some(attachments) = obj.get(key).and_then(Value::as_array) {
             for att in attachments {
-                let Some(att_obj) = att.as_object() else { continue };
+                let Some(att_obj) = att.as_object() else {
+                    continue;
+                };
                 let url_mime = att_obj
                     .get("url")
                     .and_then(Value::as_str)

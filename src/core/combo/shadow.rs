@@ -225,7 +225,8 @@ where
     // Spawn shadow dispatches in the background. They run concurrently
     // with the primary. Store JoinHandles so we can cancel them
     // when the primary completes (H22).
-    let mut shadow_handles: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(shadow_slice.len());
+    let mut shadow_handles: Vec<tokio::task::JoinHandle<()>> =
+        Vec::with_capacity(shadow_slice.len());
     for shadow_model in &shadow_slice {
         let model = shadow_model.clone();
         let sb = shadow_body.clone();
@@ -409,10 +410,7 @@ mod tests {
             None,
         )
         .await;
-        assert!(
-            result.is_ok(),
-            "shadow fallback should win: {result:?}"
-        );
+        assert!(result.is_ok(), "shadow fallback should win: {result:?}");
         assert_eq!(result.unwrap()["from"], "shadow-1");
     }
 

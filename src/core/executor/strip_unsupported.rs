@@ -122,7 +122,10 @@ fn flatten_content(obj: &mut serde_json::Map<String, Value>) {
             .iter()
             .map(|b| {
                 if b.get("type").and_then(Value::as_str) == Some("text") {
-                    b.get("text").and_then(Value::as_str).unwrap_or("").to_string()
+                    b.get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string()
                 } else {
                     String::new()
                 }

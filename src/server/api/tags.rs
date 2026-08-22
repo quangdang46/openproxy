@@ -1,9 +1,4 @@
-use axum::{
-    http::StatusCode,
-    response::Response,
-    routing::get,
-    Router,
-};
+use axum::{http::StatusCode, response::Response, routing::get, Router};
 use serde_json::json;
 
 use crate::server::state::AppState;

@@ -136,7 +136,12 @@ impl OidcClient {
 
     /// Build the `authorization_endpoint` URL with all required PKCE
     /// parameters appended.
-    pub fn build_authorize_url(&self, state: &str, nonce: &str, code_challenge: &str) -> Result<String, OidcError> {
+    pub fn build_authorize_url(
+        &self,
+        state: &str,
+        nonce: &str,
+        code_challenge: &str,
+    ) -> Result<String, OidcError> {
         let scope = self.scopes.join(" ");
         let mut url = url::Url::parse(&self.authorization_endpoint)?;
         {
@@ -272,47 +277,47 @@ fn jwks_lookup(jwks: &Value, kid: &Option<String>) -> Result<JwkKey, OidcError> 
         let kty = key.get("kty").and_then(|v| v.as_str()).unwrap_or_default();
         return match kty {
             "RSA" => {
-                let n = key
-                    .get("n")
-                    .and_then(|v| v.as_str())
-                    .ok_or(OidcError::JwksMissingField {
-                        kid: target_kid.to_string(),
-                        field: "n",
-                    })?;
-                let e = key
-                    .get("e")
-                    .and_then(|v| v.as_str())
-                    .ok_or(OidcError::JwksMissingField {
-                        kid: target_kid.to_string(),
-                        field: "e",
-                    })?;
+                let n =
+                    key.get("n")
+                        .and_then(|v| v.as_str())
+                        .ok_or(OidcError::JwksMissingField {
+                            kid: target_kid.to_string(),
+                            field: "n",
+                        })?;
+                let e =
+                    key.get("e")
+                        .and_then(|v| v.as_str())
+                        .ok_or(OidcError::JwksMissingField {
+                            kid: target_kid.to_string(),
+                            field: "e",
+                        })?;
                 Ok(JwkKey::Rsa {
                     n: n.to_string(),
                     e: e.to_string(),
                 })
             }
             "EC" => {
-                let crv = key
-                    .get("crv")
-                    .and_then(|v| v.as_str())
-                    .ok_or(OidcError::JwksMissingField {
-                        kid: target_kid.to_string(),
-                        field: "crv",
-                    })?;
-                let x = key
-                    .get("x")
-                    .and_then(|v| v.as_str())
-                    .ok_or(OidcError::JwksMissingField {
-                        kid: target_kid.to_string(),
-                        field: "x",
-                    })?;
-                let y = key
-                    .get("y")
-                    .and_then(|v| v.as_str())
-                    .ok_or(OidcError::JwksMissingField {
-                        kid: target_kid.to_string(),
-                        field: "y",
-                    })?;
+                let crv =
+                    key.get("crv")
+                        .and_then(|v| v.as_str())
+                        .ok_or(OidcError::JwksMissingField {
+                            kid: target_kid.to_string(),
+                            field: "crv",
+                        })?;
+                let x =
+                    key.get("x")
+                        .and_then(|v| v.as_str())
+                        .ok_or(OidcError::JwksMissingField {
+                            kid: target_kid.to_string(),
+                            field: "x",
+                        })?;
+                let y =
+                    key.get("y")
+                        .and_then(|v| v.as_str())
+                        .ok_or(OidcError::JwksMissingField {
+                            kid: target_kid.to_string(),
+                            field: "y",
+                        })?;
                 Ok(JwkKey::Ec {
                     crv: crv.to_string(),
                     x: x.to_string(),
@@ -320,16 +325,14 @@ fn jwks_lookup(jwks: &Value, kid: &Option<String>) -> Result<JwkKey, OidcError> 
                 })
             }
             "OKP" => {
-                let x = key
-                    .get("x")
-                    .and_then(|v| v.as_str())
-                    .ok_or(OidcError::JwksMissingField {
-                        kid: target_kid.to_string(),
-                        field: "x",
-                    })?;
-                Ok(JwkKey::OctetKeyPair {
-                    x: x.to_string(),
-                })
+                let x =
+                    key.get("x")
+                        .and_then(|v| v.as_str())
+                        .ok_or(OidcError::JwksMissingField {
+                            kid: target_kid.to_string(),
+                            field: "x",
+                        })?;
+                Ok(JwkKey::OctetKeyPair { x: x.to_string() })
             }
             other => Err(OidcError::UnsupportedKty(other.to_string())),
         };

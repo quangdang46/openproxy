@@ -1434,7 +1434,10 @@ fn parse_grok_line(
             .and_then(Value::as_str)
             .map(String::from)
             .unwrap_or_else(|| {
-                format!("Grok error: {}", event.pointer("/error/code").cloned().unwrap_or(Value::Null))
+                format!(
+                    "Grok error: {}",
+                    event.pointer("/error/code").cloned().unwrap_or(Value::Null)
+                )
             });
         return GrokEvent::Error(msg);
     }
@@ -1555,7 +1558,11 @@ async fn convert_grok_response(
             );
         } else {
             if !thinking_text.is_empty() {
-                push(&mut sse, json!({ "reasoning_content": thinking_text }), None);
+                push(
+                    &mut sse,
+                    json!({ "reasoning_content": thinking_text }),
+                    None,
+                );
             }
             if !full_message.is_empty() {
                 push(&mut sse, json!({ "content": full_message }), None);
@@ -1580,7 +1587,9 @@ async fn convert_grok_response(
             reqwest::header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache"),
         );
-        Ok(UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)))
+        Ok(UpstreamResponse::Reqwest(reqwest::Response::from(
+            http_resp,
+        )))
     } else {
         let content = match &error_text {
             Some(e) => format!("[Error: {e}]"),
@@ -1611,7 +1620,9 @@ async fn convert_grok_response(
             reqwest::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         );
-        Ok(UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)))
+        Ok(UpstreamResponse::Reqwest(reqwest::Response::from(
+            http_resp,
+        )))
     }
 }
 

@@ -116,7 +116,9 @@ pub fn remove_all_dns_entries(path: &PathBuf) -> Result<usize, String> {
 pub fn flush_dns() {
     #[cfg(windows)]
     {
-        let _ = std::process::Command::new("ipconfig").arg("/flushdns").status();
+        let _ = std::process::Command::new("ipconfig")
+            .arg("/flushdns")
+            .status();
     }
     #[cfg(target_os = "macos")]
     {

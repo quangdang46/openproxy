@@ -512,10 +512,7 @@ fn add_placeholders(obj: &mut Value) {
             // Empty schema {} (no type, no properties) after $ref removal — treat as
             // object with placeholder. Mirrors the v0.5.45 upstream guard.
             if map.is_empty() {
-                map.insert(
-                    "type".to_string(),
-                    Value::String("object".to_string()),
-                );
+                map.insert("type".to_string(), Value::String("object".to_string()));
                 map.insert(
                     "properties".to_string(),
                     serde_json::json!({

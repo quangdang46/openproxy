@@ -107,9 +107,8 @@ impl IFlowExecutor {
             return Ok(String::new());
         }
         let payload = format!("{}:{}:{}", user_agent, session_id, timestamp);
-        let mut mac = HmacSha256::new_from_slice(api_key.as_bytes()).map_err(|_| {
-            IFlowExecutorError::HmacKey("invalid HMAC key".to_string())
-        })?;
+        let mut mac = HmacSha256::new_from_slice(api_key.as_bytes())
+            .map_err(|_| IFlowExecutorError::HmacKey("invalid HMAC key".to_string()))?;
         mac.update(payload.as_bytes());
         Ok(hex::encode(mac.finalize().into_bytes()))
     }

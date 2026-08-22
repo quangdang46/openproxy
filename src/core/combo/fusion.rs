@@ -1015,15 +1015,13 @@ mod tests {
             &models,
             &cfg,
             None,
-            move |model: String, _body: Value| {
-                async move {
-                    if model == "model-a" {
-                        Ok(json!({
-                            "choices": [{"message": {"content": "answer A"}}]
-                        }))
-                    } else {
-                        Err(anyhow::anyhow!("model-b failed"))
-                    }
+            move |model: String, _body: Value| async move {
+                if model == "model-a" {
+                    Ok(json!({
+                        "choices": [{"message": {"content": "answer A"}}]
+                    }))
+                } else {
+                    Err(anyhow::anyhow!("model-b failed"))
                 }
             },
         )

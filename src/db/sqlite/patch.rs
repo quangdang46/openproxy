@@ -22,9 +22,7 @@ use serde_json::Value;
 
 use crate::types::{AppDb, ModelAliasTarget, PricingTable, Settings};
 
-use super::repo::{
-    api_key_repo, combo_repo, connection_repo, kv_repo, node_repo, pool_repo,
-};
+use super::repo::{api_key_repo, combo_repo, connection_repo, kv_repo, node_repo, pool_repo};
 
 /// The in-memory representation of disabled models: `provider -> [model ids]`.
 type DisabledMap = BTreeMap<String, Vec<String>>;
@@ -86,14 +84,24 @@ pub fn apply_app_db_diff(conn: &Connection, old: &AppDb, new: &AppDb) -> rusqlit
         |c, id| combo_repo::delete(c, id),
     )?;
 
-    diff_kv_scope(conn, "modelAliases", kv_map(&old.model_aliases), kv_map(&new.model_aliases))?;
+    diff_kv_scope(
+        conn,
+        "modelAliases",
+        kv_map(&old.model_aliases),
+        kv_map(&new.model_aliases),
+    )?;
     diff_kv_scope(
         conn,
         "mitmAlias",
         kv_map_nested(&old.mitm_alias),
         kv_map_nested(&new.mitm_alias),
     )?;
-    diff_kv_scope(conn, "pricing", kv_map_pricing(&old.pricing), kv_map_pricing(&new.pricing))?;
+    diff_kv_scope(
+        conn,
+        "pricing",
+        kv_map_pricing(&old.pricing),
+        kv_map_pricing(&new.pricing),
+    )?;
     diff_kv_scope(
         conn,
         "customModels",
@@ -190,12 +198,7 @@ fn diff_kv_scope(
 /// Serialize a `BTreeMap<String, ModelAliasTarget>` into a `String → Value` map.
 fn kv_map(map: &BTreeMap<String, ModelAliasTarget>) -> HashMap<String, Value> {
     map.iter()
-        .map(|(k, v)| {
-            (
-                k.clone(),
-                serde_json::to_value(v).unwrap_or(Value::Null),
-            )
-        })
+        .map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(Value::Null)))
         .collect()
 }
 
@@ -284,7 +287,9 @@ fn disabled_from_extra(extra: &BTreeMap<String, Value>) -> DisabledMap {
                 let provider = item.get("provider").and_then(Value::as_str).unwrap_or("");
                 let model = item.get("model").and_then(Value::as_str).unwrap_or("");
                 if !provider.is_empty() && !model.is_empty() {
-                    out.entry(provider.to_string()).or_default().push(model.to_string());
+                    out.entry(provider.to_string())
+                        .or_default()
+                        .push(model.to_string());
                 }
             }
             out
@@ -306,10 +311,8 @@ mod tests {
     }
 
     fn count_rows(db: &SqliteDb, table: &str) -> i64 {
-        db.with_conn(|c| {
-            c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
-        })
-        .unwrap_or(0)
+        db.with_conn(|c| c.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0)))
+            .unwrap_or(0)
     }
 
     fn seed_connection(id: &str, provider: &str, api_key: &str) -> ProviderConnection {
@@ -329,7 +332,8 @@ mod tests {
         let db = open();
         let old = AppDb::default();
         let new = AppDb::default();
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         // Nothing written; settings row absent (created only on first write).
         assert_eq!(count_rows(&db, "settings"), 0);
         assert_eq!(count_rows(&db, "providerConnections"), 0);
@@ -342,15 +346,18 @@ mod tests {
         let mut new = AppDb::default();
 
         // Create.
-        new.provider_connections.push(seed_connection("c1", "openai", "sk-1"));
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        new.provider_connections
+            .push(seed_connection("c1", "openai", "sk-1"));
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         assert_eq!(count_rows(&db, "providerConnections"), 1);
 
         // Update (change provider + api key).
         old = new.clone();
         new.provider_connections[0].provider = "anthropic".into();
         new.provider_connections[0].api_key = Some("sk-2".into());
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         assert_eq!(count_rows(&db, "providerConnections"), 1);
         let stored = db
             .with_conn(|c| crate::db::sqlite::repo::connection_repo::get_by_id(c, "c1"))
@@ -362,7 +369,8 @@ mod tests {
         // Delete.
         old = new.clone();
         new.provider_connections.clear();
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         assert_eq!(count_rows(&db, "providerConnections"), 0);
     }
 
@@ -376,14 +384,18 @@ mod tests {
         let db = open();
         let mut old = AppDb::default();
         let mut new = AppDb::default();
-        new.provider_connections.push(seed_connection("c1", "openai", "sk-1"));
-        new.provider_connections.push(seed_connection("c2", "anthropic", "sk-2"));
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        new.provider_connections
+            .push(seed_connection("c1", "openai", "sk-1"));
+        new.provider_connections
+            .push(seed_connection("c2", "anthropic", "sk-2"));
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
 
         // Change only c2; c1 must be untouched.
         old = new.clone();
         new.provider_connections[1].api_key = Some("sk-2b".into());
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         let c1 = db
             .with_conn(|c| crate::db::sqlite::repo::connection_repo::get_by_id(c, "c1"))
             .unwrap()
@@ -397,12 +409,14 @@ mod tests {
         let mut old = AppDb::default();
         let mut new = AppDb::default();
         new.settings.tunnel_enabled = true;
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         assert_eq!(count_rows(&db, "settings"), 1);
 
         old = new.clone();
         new.settings.tunnel_enabled = false;
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         assert_eq!(count_rows(&db, "settings"), 1);
     }
 
@@ -419,8 +433,11 @@ mod tests {
                 extra: BTreeMap::new(),
             }),
         );
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
-        let all = db.with_conn(|c| kv_repo::get_all(c, "modelAliases")).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
+        let all = db
+            .with_conn(|c| kv_repo::get_all(c, "modelAliases"))
+            .unwrap();
         assert_eq!(all.len(), 1);
 
         // Change value.
@@ -433,7 +450,8 @@ mod tests {
                 extra: BTreeMap::new(),
             }),
         );
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         let v = db
             .with_conn(|c| kv_repo::get(c, "modelAliases", "gpt"))
             .unwrap()
@@ -443,8 +461,11 @@ mod tests {
         // Remove.
         old = new.clone();
         new.model_aliases.clear();
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
-        let all = db.with_conn(|c| kv_repo::get_all(c, "modelAliases")).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
+        let all = db
+            .with_conn(|c| kv_repo::get_all(c, "modelAliases"))
+            .unwrap();
         assert_eq!(all.len(), 0);
     }
 
@@ -460,14 +481,20 @@ mod tests {
             name: Some("custom-1".into()),
             extra: BTreeMap::new(),
         });
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
-        let all = db.with_conn(|c| kv_repo::get_all(c, "customModels")).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
+        let all = db
+            .with_conn(|c| kv_repo::get_all(c, "customModels"))
+            .unwrap();
         assert_eq!(all.len(), 1);
 
         old = new.clone();
         new.custom_models.clear();
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
-        let all = db.with_conn(|c| kv_repo::get_all(c, "customModels")).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
+        let all = db
+            .with_conn(|c| kv_repo::get_all(c, "customModels"))
+            .unwrap();
         assert_eq!(all.len(), 0);
     }
 
@@ -480,7 +507,8 @@ mod tests {
             "disabledModels".into(),
             json!({ "openai": ["gpt-4o", "gpt-4"] }),
         );
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         let rows: i64 = db
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM disabledModels", [], |r| r.get(0)))
             .unwrap();
@@ -488,8 +516,10 @@ mod tests {
 
         // Remove one model.
         old = new.clone();
-        new.extra.insert("disabledModels".into(), json!({ "openai": ["gpt-4o"] }));
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        new.extra
+            .insert("disabledModels".into(), json!({ "openai": ["gpt-4o"] }));
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         let rows: i64 = db
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM disabledModels", [], |r| r.get(0)))
             .unwrap();
@@ -498,7 +528,8 @@ mod tests {
         // Remove all.
         old = new.clone();
         new.extra.remove("disabledModels");
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         let rows: i64 = db
             .with_conn(|c| c.query_row("SELECT COUNT(*) FROM disabledModels", [], |r| r.get(0)))
             .unwrap();
@@ -521,7 +552,8 @@ mod tests {
         let mut old = AppDb::default();
         let mut new = AppDb::default();
         new.settings.tunnel_enabled = true;
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         assert_eq!(count_rows(&db, "usageHistory"), 1);
     }
 
@@ -532,8 +564,10 @@ mod tests {
         let mut new = AppDb::default();
         // Simulate a closure touching settings + mitm_alias together.
         new.settings.tunnel_enabled = true;
-        new.mitm_alias.insert("router".into(), BTreeMap::from([("a".into(), "b".into())]));
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        new.mitm_alias
+            .insert("router".into(), BTreeMap::from([("a".into(), "b".into())]));
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
         assert_eq!(count_rows(&db, "settings"), 1);
         let all = db.with_conn(|c| kv_repo::get_all(c, "mitmAlias")).unwrap();
         assert_eq!(all.len(), 1);
@@ -652,8 +686,7 @@ mod tests {
             if matches!(side.extra.get("disabledModels"), Some(Value::Array(a)) if a.is_empty()) {
                 side.extra.remove("disabledModels");
             }
-            side
-                .provider_connections
+            side.provider_connections
                 .sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));
         }
         assert_eq!(
@@ -674,14 +707,25 @@ mod tests {
         let db = open();
         let mut old = AppDb::default();
         let mut new = AppDb::default();
-        new.provider_connections.push(seed_connection("c1", "openai", "sk-secret"));
-        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new)).unwrap();
+        new.provider_connections
+            .push(seed_connection("c1", "openai", "sk-secret"));
+        db.with_transaction(|tx| apply_app_db_diff(tx, &old, &new))
+            .unwrap();
 
         // Raw data column holds ciphertext.
         let raw: String = db
-            .with_conn(|c| c.query_row("SELECT data FROM providerConnections WHERE id='c1'", [], |r| r.get(0)))
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT data FROM providerConnections WHERE id='c1'",
+                    [],
+                    |r| r.get(0),
+                )
+            })
             .unwrap();
-        assert!(raw.contains("opxenc1:") || raw.contains("opxenc2:"), "expected ciphertext in data column, got {raw:?}");
+        assert!(
+            raw.contains("opxenc1:") || raw.contains("opxenc2:"),
+            "expected ciphertext in data column, got {raw:?}"
+        );
 
         // get_by_id decrypts back.
         let c = db

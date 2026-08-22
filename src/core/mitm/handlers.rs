@@ -12,8 +12,14 @@
 /// URL path substrings that mark a request as a chat turn for each tool
 /// (9router config.js URL_PATTERNS:26-31).
 pub const URL_PATTERNS: &[(&str, &[&str])] = &[
-    ("antigravity", &[":generateContent", ":streamGenerateContent"]),
-    ("copilot", &["/chat/completions", "/v1/messages", "/responses"]),
+    (
+        "antigravity",
+        &[":generateContent", ":streamGenerateContent"],
+    ),
+    (
+        "copilot",
+        &["/chat/completions", "/v1/messages", "/responses"],
+    ),
     ("kiro", &["/generateAssistantResponse"]),
     ("cursor", &["/BidiAppend", "/RunSSE", "/RunPoll", "/Run"]),
 ];
@@ -80,7 +86,10 @@ mod tests {
 
     #[test]
     fn mitm_resolve_router_path_maps_endpoints() {
-        assert_eq!(resolve_router_path("/chat/completions"), "/v1/chat/completions");
+        assert_eq!(
+            resolve_router_path("/chat/completions"),
+            "/v1/chat/completions"
+        );
         assert_eq!(resolve_router_path("/api/v1/messages"), "/v1/messages");
         assert_eq!(resolve_router_path("/v1/responses"), "/v1/responses");
         assert_eq!(resolve_router_path("/foo"), "/v1/chat/completions");
@@ -96,20 +105,14 @@ mod tests {
             get_tool_for_host("daily-cloudcode-pa.googleapis.com"),
             Some("antigravity")
         );
-        assert_eq!(
-            get_tool_for_host("q.us-east-1.amazonaws.com"),
-            Some("kiro")
-        );
+        assert_eq!(get_tool_for_host("q.us-east-1.amazonaws.com"), Some("kiro"));
         assert_eq!(get_tool_for_host("api2.cursor.sh"), Some("cursor"));
         assert_eq!(get_tool_for_host("example.com"), None);
     }
 
     #[test]
     fn mitm_get_tool_for_host_matches_with_port() {
-        assert_eq!(
-            get_tool_for_host("api2.cursor.sh:443"),
-            Some("cursor")
-        );
+        assert_eq!(get_tool_for_host("api2.cursor.sh:443"), Some("cursor"));
     }
 
     #[test]

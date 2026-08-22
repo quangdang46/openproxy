@@ -162,7 +162,10 @@ struct ToolHandler {
 fn validate_length(value: Option<&str>, field: &str) -> Result<(), String> {
     if let Some(v) = value {
         if v.len() > 255 {
-            return Err(format!("'{field}' exceeds maximum length of 255 characters (got {})", v.len()));
+            return Err(format!(
+                "'{field}' exceeds maximum length of 255 characters (got {})",
+                v.len()
+            ));
         }
     }
     Ok(())

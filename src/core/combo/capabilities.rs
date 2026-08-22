@@ -66,7 +66,9 @@ impl Default for ModelCapabilities {
 impl ModelCapabilities {
     fn from_value(v: &Value) -> Self {
         let mut caps = Self::default();
-        let Some(obj) = v.as_object() else { return caps };
+        let Some(obj) = v.as_object() else {
+            return caps;
+        };
         if let Some(b) = obj.get("vision").and_then(Value::as_bool) {
             caps.vision = b;
         }
@@ -154,7 +156,6 @@ impl ModelCapabilities {
     }
 }
 
-
 static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static str, Value>>> =
     LazyLock::new(|| {
         let mut table: HashMap<&'static str, HashMap<&'static str, Value>> = HashMap::new();
@@ -213,132 +214,464 @@ static PROVIDER_CAPABILITIES: LazyLock<HashMap<&'static str, HashMap<&'static st
 
 static MODEL_CAPABILITIES: LazyLock<HashMap<&'static str, Value>> = LazyLock::new(|| {
     HashMap::from([
-    ("claude-opus-5", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-5-thinking", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-5-agentic", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-5-thinking-agentic", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-4.6", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-4.7", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-4-7", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-4.8", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-4-6", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-4-8", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-4.8-thinking", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-opus-4-8-thinking", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-sonnet-4.6", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-sonnet-4-6", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-sonnet-5", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-sonnet-5-thinking", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-sonnet-5-agentic", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("claude-sonnet-5-thinking-agentic", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("gpt-image-1", serde_json::json!({ "imageOutput": true, "tools": false })),
-    ("glm-4.6v", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "zai", "contextWindow": 128000 })),
-    ("vision-model", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000 })),
-    ("coder-model", serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000 })),
-    ("kimi-k3", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 })),
-    ("k3", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 })),
-    ("kimi-for-coding", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 })),
-    ("kimi-for-coding-highspeed", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 })),
-    ("kimi-k2.7-code", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 })),
-    ("kimi-k2.7-code-highspeed", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 })),
+        (
+            "claude-opus-5",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-5-thinking",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-5-agentic",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-5-thinking-agentic",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-4.6",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-4.7",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-4-7",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-4.8",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-4-6",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-4-8",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-4.8-thinking",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-opus-4-8-thinking",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-sonnet-4.6",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-sonnet-4-6",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-sonnet-5",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-sonnet-5-thinking",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-sonnet-5-agentic",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "claude-sonnet-5-thinking-agentic",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "gpt-image-1",
+            serde_json::json!({ "imageOutput": true, "tools": false }),
+        ),
+        (
+            "glm-4.6v",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "zai", "contextWindow": 128000 }),
+        ),
+        (
+            "vision-model",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000 }),
+        ),
+        (
+            "coder-model",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000 }),
+        ),
+        (
+            "kimi-k3",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        (
+            "k3",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        (
+            "kimi-for-coding",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 }),
+        ),
+        (
+            "kimi-for-coding-highspeed",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 }),
+        ),
+        (
+            "kimi-k2.7-code",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 }),
+        ),
+        (
+            "kimi-k2.7-code-highspeed",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 }),
+        ),
     ])
 });
 
-static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> =
-    LazyLock::new(|| {
-        vec![
-    ("*claude*opus-5*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("*claude*opus-4.6*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" })),
-    ("*claude*opus-4.7*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" })),
-    ("*claude*opus-4.8*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" })),
-    ("*claude*sonnet-4.6*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" })),
-    ("*claude*sonnet-4.7*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" })),
-    ("*claude*haiku*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" })),
-    ("*claude*opus*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" })),
-    ("*claude*sonnet*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" })),
-    ("*claude*fable*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("*claude*mythos*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget", "contextWindow": 1000000, "maxOutput": 128000 })),
-    ("*claude-3*", serde_json::json!({ "vision": true })),
-    ("*claude*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" })),
-    ("*gemini*image*", serde_json::json!({ "vision": true, "imageOutput": true, "contextWindow": 1048576 })),
-    ("*gemini-3.7*", serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65536 })),
-    ("*gemini-3*pro*", serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65535 })),
-    ("*gemini-3*", serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65536 })),
-    ("*gemini-2*", serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "search": true, "contextWindow": 1048576, "maxOutput": 65536 })),
-    ("*gemini*", serde_json::json!({ "vision": true, "search": true, "contextWindow": 1048576 })),
-    ("*gemma*", serde_json::json!({ "vision": true, "contextWindow": 128000 })),
-    ("*nanobanana*", serde_json::json!({ "vision": true, "imageOutput": true })),
-    ("*gpt-5*image*", serde_json::json!({ "imageOutput": true })),
-    ("*gpt-5*codex*", serde_json::json!({ "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 400000, "maxOutput": 128000 })),
-    ("*gpt-5*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 400000, "maxOutput": 128000 })),
-    ("*gpt-4o*", serde_json::json!({ "vision": true, "search": true, "contextWindow": 128000, "maxOutput": 16384 })),
-    ("*gpt-4.1*", serde_json::json!({ "vision": true, "contextWindow": 1000000, "maxOutput": 32768 })),
-    ("*gpt-4-turbo*", serde_json::json!({ "vision": true, "contextWindow": 128000 })),
-    ("*gpt-4*", serde_json::json!({ "contextWindow": 128000 })),
-    ("*gpt-3.5*", serde_json::json!({ "contextWindow": 16385, "maxOutput": 4096 })),
-    ("*gpt-oss*", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 128000 })),
-    ("*o1-mini*", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 128000 })),
-    ("*o1*", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 100000 })),
-    ("*o3*", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 100000 })),
-    ("*o4*", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 100000 })),
-    ("*grok*image*", serde_json::json!({ "imageOutput": true })),
-    ("*grok-code*", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 256000 })),
-    ("*grok-4.5*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 500000, "maxOutput": 64000 })),
-    ("*grok-4*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 256000 })),
-    ("*grok-3*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 131072 })),
-    ("*grok*", serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 256000 })),
-    ("*qwen*vl*", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 262144 })),
-    ("*qwen*omni*", serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 262144, "maxOutput": 65536 })),
-    ("*qwen*coder*", serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000 })),
-    ("*qwen*max*", serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 })),
-    ("*qwen3.5*", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 })),
-    ("*qwen3.6*", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 })),
-    ("*qwen3.7*", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 })),
-    ("*qwen*plus*", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 })),
-    ("*qwen*235b*", serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 262144 })),
-    ("*qwq*", serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "thinkingCanDisable": false, "contextWindow": 131072 })),
-    ("*qwen*", serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 262144 })),
-    ("*kimi*k3*", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 })),
-    ("*kimi*for-coding*", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 })),
-    ("*kimi*k2.7*code*", serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 })),
-    ("*kimi*k2*", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "kimi", "contextWindow": 262144, "maxOutput": 262144 })),
-    ("*kimi*", serde_json::json!({ "reasoning": true, "thinkingFormat": "kimi", "contextWindow": 262144 })),
-    ("*glm-5*", serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000, "maxOutput": 128000 })),
-    ("*glm-4.7*", serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000, "maxOutput": 128000 })),
-    ("*glm-4*", serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000 })),
-    ("*glm*", serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000 })),
-    ("*deepseek-v4*", serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 384000 })),
-    ("*reasoner*", serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "thinkingCanDisable": false, "contextWindow": 128000 })),
-    ("*deepseek-r*", serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "thinkingCanDisable": false, "contextWindow": 128000 })),
-    ("*deepseek-chat*", serde_json::json!({ "contextWindow": 128000 })),
-    ("*deepseek*", serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 128000 })),
-    ("*minimax*image*", serde_json::json!({ "imageOutput": true })),
-    ("*minimax-m3*", serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "minimax", "contextWindow": 1048576, "maxOutput": 512000 })),
-    ("*minimax-m2.7*", serde_json::json!({ "reasoning": true, "thinkingFormat": "minimax", "thinkingCanDisable": false, "contextWindow": 204800, "maxOutput": 131072 })),
-    ("*minimax*", serde_json::json!({ "reasoning": true, "thinkingFormat": "minimax", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 131072 })),
-    ("*mimo*v2.5*", serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "contextWindow": 1048576, "maxOutput": 131072 })),
-    ("*mimo*omni*", serde_json::json!({ "vision": true, "audioInput": true, "contextWindow": 262144, "maxOutput": 131072 })),
-    ("*mimo*", serde_json::json!({ "vision": true, "contextWindow": 262144, "maxOutput": 131072 })),
-    ("*llama-4*", serde_json::json!({ "vision": true, "contextWindow": 1000000 })),
-    ("*llama*", serde_json::json!({ "contextWindow": 128000 })),
-    ("*codestral*", serde_json::json!({ "contextWindow": 256000 })),
-    ("*mistral-large*", serde_json::json!({ "vision": true, "contextWindow": 256000 })),
-    ("*mistral*", serde_json::json!({ "contextWindow": 128000 })),
-    ("*command-a-vision*", serde_json::json!({ "vision": true, "contextWindow": 128000 })),
-    ("*command*", serde_json::json!({ "contextWindow": 128000 })),
-    ("*sonar*", serde_json::json!({ "search": true, "contextWindow": 128000 })),
-    ("*pplx*", serde_json::json!({ "search": true, "contextWindow": 128000 })),
-    ("*perplexity*", serde_json::json!({ "search": true, "contextWindow": 128000 })),
-    ("*laguna-s-2.1*free*", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 32000 })),
-    ("*laguna-s-2.1*", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 32000 })),
-    ("*laguna*", serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 32000 })),
-    ("*hunyuan*", serde_json::json!({ "reasoning": true, "thinkingFormat": "hunyuan", "contextWindow": 262144, "maxOutput": 262144 })),
-    ("hy3*", serde_json::json!({ "reasoning": true, "thinkingFormat": "hunyuan", "contextWindow": 262144, "maxOutput": 262144 })),
-    ("*step-*", serde_json::json!({ "reasoning": true, "thinkingFormat": "step", "contextWindow": 128000 })),
-    ("*nemotron*", serde_json::json!({ "reasoning": true, "contextWindow": 128000 })),
-    ("*ling-*", serde_json::json!({ "reasoning": true, "contextWindow": 128000 })),
-        ]
-    });
+static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::new(|| {
+    vec![
+        (
+            "*claude*opus-5*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "*claude*opus-4.6*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+        ),
+        (
+            "*claude*opus-4.7*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+        ),
+        (
+            "*claude*opus-4.8*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+        ),
+        (
+            "*claude*sonnet-4.6*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+        ),
+        (
+            "*claude*sonnet-4.7*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-adaptive" }),
+        ),
+        (
+            "*claude*haiku*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
+        ),
+        (
+            "*claude*opus*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
+        ),
+        (
+            "*claude*sonnet*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
+        ),
+        (
+            "*claude*fable*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        (
+            "*claude*mythos*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget", "contextWindow": 1000000, "maxOutput": 128000 }),
+        ),
+        ("*claude-3*", serde_json::json!({ "vision": true })),
+        (
+            "*claude*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "claude-budget" }),
+        ),
+        (
+            "*gemini*image*",
+            serde_json::json!({ "vision": true, "imageOutput": true, "contextWindow": 1048576 }),
+        ),
+        (
+            "*gemini-3.7*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65536 }),
+        ),
+        (
+            "*gemini-3*pro*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65535 }),
+        ),
+        (
+            "*gemini-3*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "search": true, "thinkingFormat": "gemini-level", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 65536 }),
+        ),
+        (
+            "*gemini-2*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "search": true, "contextWindow": 1048576, "maxOutput": 65536 }),
+        ),
+        (
+            "*gemini*",
+            serde_json::json!({ "vision": true, "search": true, "contextWindow": 1048576 }),
+        ),
+        (
+            "*gemma*",
+            serde_json::json!({ "vision": true, "contextWindow": 128000 }),
+        ),
+        (
+            "*nanobanana*",
+            serde_json::json!({ "vision": true, "imageOutput": true }),
+        ),
+        ("*gpt-5*image*", serde_json::json!({ "imageOutput": true })),
+        (
+            "*gpt-5*codex*",
+            serde_json::json!({ "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 400000, "maxOutput": 128000 }),
+        ),
+        (
+            "*gpt-5*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 400000, "maxOutput": 128000 }),
+        ),
+        (
+            "*gpt-4o*",
+            serde_json::json!({ "vision": true, "search": true, "contextWindow": 128000, "maxOutput": 16384 }),
+        ),
+        (
+            "*gpt-4.1*",
+            serde_json::json!({ "vision": true, "contextWindow": 1000000, "maxOutput": 32768 }),
+        ),
+        (
+            "*gpt-4-turbo*",
+            serde_json::json!({ "vision": true, "contextWindow": 128000 }),
+        ),
+        ("*gpt-4*", serde_json::json!({ "contextWindow": 128000 })),
+        (
+            "*gpt-3.5*",
+            serde_json::json!({ "contextWindow": 16385, "maxOutput": 4096 }),
+        ),
+        (
+            "*gpt-oss*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 128000 }),
+        ),
+        (
+            "*o1-mini*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 128000 }),
+        ),
+        (
+            "*o1*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 100000 }),
+        ),
+        (
+            "*o3*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 100000 }),
+        ),
+        (
+            "*o4*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 100000 }),
+        ),
+        ("*grok*image*", serde_json::json!({ "imageOutput": true })),
+        (
+            "*grok-code*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 256000 }),
+        ),
+        (
+            "*grok-4.5*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 500000, "maxOutput": 64000 }),
+        ),
+        (
+            "*grok-4*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 256000 }),
+        ),
+        (
+            "*grok-3*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 131072 }),
+        ),
+        (
+            "*grok*",
+            serde_json::json!({ "vision": true, "reasoning": true, "search": true, "thinkingFormat": "openai", "contextWindow": 256000 }),
+        ),
+        (
+            "*qwen*vl*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 262144 }),
+        ),
+        (
+            "*qwen*omni*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 262144, "maxOutput": 65536 }),
+        ),
+        (
+            "*qwen*coder*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000 }),
+        ),
+        (
+            "*qwen*max*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 }),
+        ),
+        (
+            "*qwen3.5*",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 }),
+        ),
+        (
+            "*qwen3.6*",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 }),
+        ),
+        (
+            "*qwen3.7*",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 }),
+        ),
+        (
+            "*qwen*plus*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 1000000, "maxOutput": 65536 }),
+        ),
+        (
+            "*qwen*235b*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 262144 }),
+        ),
+        (
+            "*qwq*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "thinkingCanDisable": false, "contextWindow": 131072 }),
+        ),
+        (
+            "*qwen*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "qwen", "contextWindow": 262144 }),
+        ),
+        (
+            "*kimi*k3*",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        (
+            "*kimi*for-coding*",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 }),
+        ),
+        (
+            "*kimi*k2.7*code*",
+            serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 }),
+        ),
+        (
+            "*kimi*k2*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "kimi", "contextWindow": 262144, "maxOutput": 262144 }),
+        ),
+        (
+            "*kimi*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "kimi", "contextWindow": 262144 }),
+        ),
+        (
+            "*glm-5*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000, "maxOutput": 128000 }),
+        ),
+        (
+            "*glm-4.7*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000, "maxOutput": 128000 }),
+        ),
+        (
+            "*glm-4*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000 }),
+        ),
+        (
+            "*glm*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "zai", "contextWindow": 200000 }),
+        ),
+        (
+            "*deepseek-v4*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 1000000, "maxOutput": 384000 }),
+        ),
+        (
+            "*reasoner*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "thinkingCanDisable": false, "contextWindow": 128000 }),
+        ),
+        (
+            "*deepseek-r*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "thinkingCanDisable": false, "contextWindow": 128000 }),
+        ),
+        (
+            "*deepseek-chat*",
+            serde_json::json!({ "contextWindow": 128000 }),
+        ),
+        (
+            "*deepseek*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "deepseek", "contextWindow": 128000 }),
+        ),
+        (
+            "*minimax*image*",
+            serde_json::json!({ "imageOutput": true }),
+        ),
+        (
+            "*minimax-m3*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "minimax", "contextWindow": 1048576, "maxOutput": 512000 }),
+        ),
+        (
+            "*minimax-m2.7*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "minimax", "thinkingCanDisable": false, "contextWindow": 204800, "maxOutput": 131072 }),
+        ),
+        (
+            "*minimax*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "minimax", "thinkingCanDisable": false, "contextWindow": 200000, "maxOutput": 131072 }),
+        ),
+        (
+            "*mimo*v2.5*",
+            serde_json::json!({ "vision": true, "audioInput": true, "videoInput": true, "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        (
+            "*mimo*omni*",
+            serde_json::json!({ "vision": true, "audioInput": true, "contextWindow": 262144, "maxOutput": 131072 }),
+        ),
+        (
+            "*mimo*",
+            serde_json::json!({ "vision": true, "contextWindow": 262144, "maxOutput": 131072 }),
+        ),
+        (
+            "*llama-4*",
+            serde_json::json!({ "vision": true, "contextWindow": 1000000 }),
+        ),
+        ("*llama*", serde_json::json!({ "contextWindow": 128000 })),
+        (
+            "*codestral*",
+            serde_json::json!({ "contextWindow": 256000 }),
+        ),
+        (
+            "*mistral-large*",
+            serde_json::json!({ "vision": true, "contextWindow": 256000 }),
+        ),
+        ("*mistral*", serde_json::json!({ "contextWindow": 128000 })),
+        (
+            "*command-a-vision*",
+            serde_json::json!({ "vision": true, "contextWindow": 128000 }),
+        ),
+        ("*command*", serde_json::json!({ "contextWindow": 128000 })),
+        (
+            "*sonar*",
+            serde_json::json!({ "search": true, "contextWindow": 128000 }),
+        ),
+        (
+            "*pplx*",
+            serde_json::json!({ "search": true, "contextWindow": 128000 }),
+        ),
+        (
+            "*perplexity*",
+            serde_json::json!({ "search": true, "contextWindow": 128000 }),
+        ),
+        (
+            "*laguna-s-2.1*free*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 32000 }),
+        ),
+        (
+            "*laguna-s-2.1*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1000000, "maxOutput": 32000 }),
+        ),
+        (
+            "*laguna*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "openai", "contextWindow": 200000, "maxOutput": 32000 }),
+        ),
+        (
+            "*hunyuan*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "hunyuan", "contextWindow": 262144, "maxOutput": 262144 }),
+        ),
+        (
+            "hy3*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "hunyuan", "contextWindow": 262144, "maxOutput": 262144 }),
+        ),
+        (
+            "*step-*",
+            serde_json::json!({ "reasoning": true, "thinkingFormat": "step", "contextWindow": 128000 }),
+        ),
+        (
+            "*nemotron*",
+            serde_json::json!({ "reasoning": true, "contextWindow": 128000 }),
+        ),
+        (
+            "*ling-*",
+            serde_json::json!({ "reasoning": true, "contextWindow": 128000 }),
+        ),
+    ]
+});
 
 /// JS matchPattern: `*` wildcards, anchored to the full model id,
 /// case-insensitive.
@@ -370,7 +703,6 @@ fn match_pattern(pattern: &str, model: &str) -> bool {
     }
     true
 }
-
 
 pub fn get_capabilities_for_model(provider: &str, model: &str) -> ModelCapabilities {
     if model.is_empty() {

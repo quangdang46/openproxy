@@ -108,12 +108,8 @@ fn read_field(buffer: &[u8], offset: usize) -> Option<(u64, WireValue, usize)> {
             }
             // SAFETY: the slice lives as long as `buffer`; we return a static
             // marker and re-borrow below via indices.
-            let bytes: &'static [u8] = unsafe {
-                std::slice::from_raw_parts(
-                    buffer.as_ptr().add(body_start),
-                    length,
-                )
-            };
+            let bytes: &'static [u8] =
+                unsafe { std::slice::from_raw_parts(buffer.as_ptr().add(body_start), length) };
             Some((field_number, WireValue::Bytes(bytes), body_start + length))
         }
         WIRE_TYPE_FIXED64 => {
@@ -308,7 +304,11 @@ mod tests {
         };
         let credits = [
             encode_field(CREDITS_FIELD_USAGE_RATIO, WIRE_TYPE_FIXED32, &ratio),
-            encode_field(CREDITS_FIELD_RESET_TIMESTAMP, WIRE_TYPE_LENGTH_DELIMITED, &timestamp),
+            encode_field(
+                CREDITS_FIELD_RESET_TIMESTAMP,
+                WIRE_TYPE_LENGTH_DELIMITED,
+                &timestamp,
+            ),
         ]
         .concat();
         let payload = encode_field(FIELD_CREDITS_INFO, WIRE_TYPE_LENGTH_DELIMITED, &credits);

@@ -193,6 +193,9 @@ mod tests {
         }
         // A non-codex originator is not misdetected.
         let headers = h(&[("originator", "claude_work_desktop")]);
-        assert_ne!(detect_client_tool(&headers, &json!({})), Some(ClientTool::Codex));
+        assert_ne!(
+            detect_client_tool(&headers, &json!({})),
+            Some(ClientTool::Codex)
+        );
     }
 }

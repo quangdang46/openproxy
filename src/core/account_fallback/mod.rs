@@ -190,14 +190,7 @@ impl AccountRegistry {
         sticky_duration_secs: i64,
     ) -> Option<usize> {
         let _ = sticky_duration_secs; // used by the Sticky arm below
-        Self::select_with_sticky_limit(
-            self,
-            available,
-            strategy,
-            combo_id,
-            sticky_duration_secs,
-            3,
-        )
+        Self::select_with_sticky_limit(self, available, strategy, combo_id, sticky_duration_secs, 3)
     }
 
     /// Full form with an explicit sticky round-robin limit

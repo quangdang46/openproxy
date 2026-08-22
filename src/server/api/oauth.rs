@@ -4173,8 +4173,7 @@ async fn exchange_oauth_compat(
             // 9router noPkceExchangeProviders: ["cline","clinepass","kimchi"]
             // — clinepass shares Cline's endpoints (registry clinepass.js:49-50)
             // but must store the connection under its own provider id.
-            match exchange_cline_compat(code, redirect_uri, &provider).await
-            {
+            match exchange_cline_compat(code, redirect_uri, &provider).await {
                 Ok(value) => value,
                 Err(error) => return internal_error_response(error),
             }
@@ -4661,10 +4660,8 @@ pub async fn poll_device_code(
                     let _ = state
                         .db
                         .update(move |db| {
-                            if let Some(target) = db
-                                .provider_connections
-                                .iter_mut()
-                                .find(|c| c.id == conn.id)
+                            if let Some(target) =
+                                db.provider_connections.iter_mut().find(|c| c.id == conn.id)
                             {
                                 for (k, v) in extra_psd {
                                     target.provider_specific_data.insert(k, v);

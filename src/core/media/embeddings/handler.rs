@@ -108,7 +108,12 @@ pub async fn handle_embeddings(
                     headers = new_headers;
                 }
                 if let Ok(new_body) = adapter.build_body(&retry_req) {
-                    res = client.post(&url).headers(headers).json(&new_body).send().await
+                    res = client
+                        .post(&url)
+                        .headers(headers)
+                        .json(&new_body)
+                        .send()
+                        .await
                         .map_err(|e| EmbeddingsHandlerError::Upstream(e.to_string()))?;
 
                     if !res.status().is_success() {

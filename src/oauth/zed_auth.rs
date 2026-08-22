@@ -17,9 +17,9 @@
 use base64::Engine as _;
 use rand::rngs::OsRng;
 use rsa::pkcs1::{DecodeRsaPrivateKey, EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding};
-use sha2_rsa_compat::Sha256;
 use rsa::{Oaep, Pkcs1v15Encrypt, RsaPrivateKey, RsaPublicKey};
 use serde_json::Value;
+use sha2_rsa_compat::Sha256;
 
 pub const ZED_WEB_BASE_URL: &str = "https://zed.dev";
 pub const ZED_CLOUD_BASE_URL: &str = "https://cloud.zed.dev";
@@ -51,7 +51,10 @@ fn from_b64url(value: &str) -> Vec<u8> {
 }
 
 /** Generate a fresh RSA keypair + the zed.dev native_app_signin URL for it. */
-pub fn create_native_auth_data(native_app_port: Option<u16>, system_id: Option<String>) -> NativeAuthData {
+pub fn create_native_auth_data(
+    native_app_port: Option<u16>,
+    system_id: Option<String>,
+) -> NativeAuthData {
     let mut rng = OsRng;
     let private_key =
         RsaPrivateKey::new(&mut rng, 2048).expect("RSA-2048 keygen cannot fail on OsRng");
@@ -127,7 +130,9 @@ pub fn parse_callback_payload(input: &str) -> Result<(String, String), String> {
         // Query-string / path?query / partial-query form.
         let query_part = raw.split_once('?').map(|(_, q)| q).unwrap_or(raw);
         for pair in query_part.trim_start_matches('/').split('&') {
-            let Some((key, value)) = pair.split_once('=') else { continue };
+            let Some((key, value)) = pair.split_once('=') else {
+                continue;
+            };
             match key {
                 "user_id" | "userId" => user_id = Some(value.to_string()),
                 "access_token" | "accessToken" | "token" => encrypted = Some(value.to_string()),
@@ -152,7 +157,9 @@ pub fn decrypt_access_token(
     // JS uses base64url for the encrypted blob.
     let encrypted = B64URL
         .decode(encrypted_access_token.trim())
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(encrypted_access_token.trim()))
+        .or_else(|_| {
+            base64::engine::general_purpose::STANDARD.decode(encrypted_access_token.trim())
+        })
         .map_err(|e| format!("Zed access token is not valid base64: {e}"))?;
 
     if let Ok(plain) = private_key.decrypt(Oaep::new::<Sha256>(), &encrypted) {
@@ -253,8 +260,7 @@ mod tests {
         assert_eq!(uid, "u1");
         assert_eq!(tok, "abc");
 
-        let (uid2, tok2) =
-            parse_callback_payload(r#"{"userId": "u2", "token": "t2"}"#).unwrap();
+        let (uid2, tok2) = parse_callback_payload(r#"{"userId": "u2", "token": "t2"}"#).unwrap();
         assert_eq!(uid2, "u2");
         assert_eq!(tok2, "t2");
 

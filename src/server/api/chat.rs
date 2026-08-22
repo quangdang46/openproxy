@@ -443,7 +443,8 @@ async fn chat_completions_impl(
                 // callback below cannot carry an SSE body, so when the client
                 // asked to stream we defer the final dispatch and run it
                 // ourselves after panel collection.
-                let client_wants_stream = body.get("stream").and_then(Value::as_bool).unwrap_or(true);
+                let client_wants_stream =
+                    body.get("stream").and_then(Value::as_bool).unwrap_or(true);
                 let fusion_result = if client_wants_stream {
                     handle_fusion_chat_deferred(
                         &mut body.clone(),
@@ -472,17 +473,14 @@ async fn chat_completions_impl(
                                 .map_err(|e| {
                                     anyhow::anyhow!("Fusion panel failed: {}", e.message)
                                 })?;
-                                let body_bytes = axum::body::to_bytes(
-                                    response.into_body(),
-                                    10 * 1024 * 1024,
-                                )
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Failed to read panel body: {}", e)
-                                })?;
-                                serde_json::from_slice(&body_bytes).map_err(|e| {
-                                    anyhow::anyhow!("Failed to parse panel body: {e}")
-                                })
+                                let body_bytes =
+                                    axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+                                        .await
+                                        .map_err(|e| {
+                                            anyhow::anyhow!("Failed to read panel body: {}", e)
+                                        })?;
+                                serde_json::from_slice(&body_bytes)
+                                    .map_err(|e| anyhow::anyhow!("Failed to parse panel body: {e}"))
                             }
                         },
                     )
@@ -515,17 +513,14 @@ async fn chat_completions_impl(
                                 .map_err(|e| {
                                     anyhow::anyhow!("Fusion panel failed: {}", e.message)
                                 })?;
-                                let body_bytes = axum::body::to_bytes(
-                                    response.into_body(),
-                                    10 * 1024 * 1024,
-                                )
-                                .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Failed to read panel body: {}", e)
-                                })?;
-                                serde_json::from_slice(&body_bytes).map_err(|e| {
-                                    anyhow::anyhow!("Failed to parse panel body: {e}")
-                                })
+                                let body_bytes =
+                                    axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
+                                        .await
+                                        .map_err(|e| {
+                                            anyhow::anyhow!("Failed to read panel body: {}", e)
+                                        })?;
+                                serde_json::from_slice(&body_bytes)
+                                    .map_err(|e| anyhow::anyhow!("Failed to parse panel body: {e}"))
                             }
                         },
                     )
@@ -545,8 +540,10 @@ async fn chat_completions_impl(
                                 .unwrap_or_default()
                                 .to_string();
                             let empty = Value::Object(Default::default());
-                            let dispatch_body =
-                                dispatch.get("body").cloned().unwrap_or_else(|| empty.clone());
+                            let dispatch_body = dispatch
+                                .get("body")
+                                .cloned()
+                                .unwrap_or_else(|| empty.clone());
                             let dispatched = dispatch_fusion_leg(
                                 &state,
                                 &body,
@@ -889,7 +886,6 @@ async fn dispatch_fusion_leg(
     .await
 }
 
-
 async fn execute_single_model(
     state: &AppState,
     request_body: &Value,
@@ -1231,14 +1227,13 @@ async fn forward_with_provider_fallback(
             AntigravityExecutionRequest, AntigravityExecutor, AzureExecutionRequest, AzureExecutor,
             CodexExecutionRequest, CodexExecutor, CommandCodeExecutionRequest, CommandCodeExecutor,
             CursorExecutionRequest, CursorExecutor, DefaultExecutor, DevinCliExecutor,
-            DevinExecutionRequest, ExecutionRequest, GeminiCliExecutionRequest,
-            GeminiCliExecutor, GithubExecutionRequest, GithubExecutor, GrokWebExecutionRequest,
-            GrokWebExecutor, IFlowExecutionRequest, IFlowExecutor, KimchiExecutor,
-            KiroExecutionRequest, KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest,
-            OpenCodeExecutor, OpenCodeGoExecutionRequest, OpenCodeGoExecutor,
-            PerplexityWebExecutionRequest, PerplexityWebExecutor, ProviderExecutionRequest,
-            ProviderExecutor, QoderExecutionRequest, QoderExecutor,
-            QwenExecutionRequest, QwenExecutor,
+            DevinExecutionRequest, ExecutionRequest, GeminiCliExecutionRequest, GeminiCliExecutor,
+            GithubExecutionRequest, GithubExecutor, GrokWebExecutionRequest, GrokWebExecutor,
+            IFlowExecutionRequest, IFlowExecutor, KimchiExecutor, KiroExecutionRequest,
+            KiroExecutor, KiroExecutorResponse, OpenCodeExecutionRequest, OpenCodeExecutor,
+            OpenCodeGoExecutionRequest, OpenCodeGoExecutor, PerplexityWebExecutionRequest,
+            PerplexityWebExecutor, ProviderExecutionRequest, ProviderExecutor,
+            QoderExecutionRequest, QoderExecutor, QwenExecutionRequest, QwenExecutor,
             TraeExecutionRequest, TraeExecutor, VertexExecutionRequest, VertexExecutor,
             WindsurfExecutionRequest, WindsurfExecutor,
         };
@@ -1736,8 +1731,8 @@ async fn forward_with_provider_fallback(
                 })
             } else if provider == "zed" {
                 use crate::core::executor::{ZedExecutionRequest, ZedExecutor};
-                let executor =
-                    ZedExecutor::new(state.client_pool.clone()).unwrap_or_else(|e: std::convert::Infallible| match e {});
+                let executor = ZedExecutor::new(state.client_pool.clone())
+                    .unwrap_or_else(|e: std::convert::Infallible| match e {});
                 let result = executor
                     .execute_request(ZedExecutionRequest {
                         model: model.to_string(),
@@ -1788,13 +1783,14 @@ async fn forward_with_provider_fallback(
                 // ACP stdio executor — spawns `devin acp` (noAuth; the CLI
                 // carries its own credentials) and bridges session/update
                 // notifications to OpenAI SSE.
-                let executor = DevinCliExecutor::new(state.client_pool.clone())
-                    .map_err(|e| ComboAttemptError {
+                let executor = DevinCliExecutor::new(state.client_pool.clone()).map_err(|e| {
+                    ComboAttemptError {
                         status: 500,
                         message: format!("Devin executor init failed: {:?}", e),
                         retry_after: None,
                         upstream_body: None,
-                    })?;
+                    }
+                })?;
                 let result = executor
                     .execute_request(DevinExecutionRequest {
                         model: model.to_string(),

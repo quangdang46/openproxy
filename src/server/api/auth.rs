@@ -199,7 +199,10 @@ pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> R
     } else {
         "Password"
     };
-    let display_name = oidc_name.clone().or_else(|| oidc_email.clone()).unwrap_or_default();
+    let display_name = oidc_name
+        .clone()
+        .or_else(|| oidc_email.clone())
+        .unwrap_or_default();
 
     let mut body = json!({
         "authenticated": logged_in,

@@ -22,9 +22,7 @@
 use aes::cipher::{
     block_padding::Pkcs7, generic_array::GenericArray, BlockDecryptMut, BlockEncryptMut, KeyIvInit,
 };
-use aes_gcm::{
-    aead::Aead, Aes256Gcm, KeyInit as GcmKeyInit, Nonce,
-};
+use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit as GcmKeyInit, Nonce};
 use anyhow::Context;
 use argon2::Argon2;
 use base64::Engine;
@@ -349,7 +347,10 @@ fn encrypt_opt(field: &mut Option<String>, key: &str) {
     if plain.starts_with(ENC_PREFIX) {
         let payload = &plain[ENC_PREFIX.len()..];
         if let Ok(decoded) = decrypt_value(key, payload) {
-            *field = Some(format!("{ENC_PREFIX_V2}{}", encrypt_value_v2(key, &decoded)));
+            *field = Some(format!(
+                "{ENC_PREFIX_V2}{}",
+                encrypt_value_v2(key, &decoded)
+            ));
             return;
         }
         // Undecryptable v1 (wrong key?) — leave as-is, don't destroy it.
@@ -359,7 +360,10 @@ fn encrypt_opt(field: &mut Option<String>, key: &str) {
     // Unprefixed legacy 9router blob: if it decrypts with v1, re-wrap as v2;
     // otherwise treat as plaintext and encrypt with v2.
     if let Ok(decoded) = decrypt_value(key, &plain) {
-        *field = Some(format!("{ENC_PREFIX_V2}{}", encrypt_value_v2(key, &decoded)));
+        *field = Some(format!(
+            "{ENC_PREFIX_V2}{}",
+            encrypt_value_v2(key, &decoded)
+        ));
         return;
     }
     *field = Some(format!("{ENC_PREFIX_V2}{}", encrypt_value_v2(key, &plain)));
@@ -843,7 +847,10 @@ mod tests {
         let key = "dispatch-key";
         // v2 encrypted field.
         let mut v2_conn = ProviderConnection {
-            api_key: Some(format!("{ENC_PREFIX_V2}{}", encrypt_value_v2(key, "v2-plain"))),
+            api_key: Some(format!(
+                "{ENC_PREFIX_V2}{}",
+                encrypt_value_v2(key, "v2-plain")
+            )),
             ..Default::default()
         };
         decrypt_connection(&mut v2_conn, key);

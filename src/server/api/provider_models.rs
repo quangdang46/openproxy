@@ -825,13 +825,12 @@ async fn fetch_gemini_cli_models_with_fallback(
     if matches!(response, Err(FetchJsonError::Http(status, _)) if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN)
     {
         if let Some(refresh_token) = connection.refresh_token.as_deref() {
-            if let Ok(refreshed) =
-                refresh_google_token(
-                    refresh_token,
-                    GEMINI_CLIENT_ID,
-                    crate::oauth::secret::gemini_cli_client_secret(),
-                )
-                .await
+            if let Ok(refreshed) = refresh_google_token(
+                refresh_token,
+                GEMINI_CLIENT_ID,
+                crate::oauth::secret::gemini_cli_client_secret(),
+            )
+            .await
             {
                 persist_refreshed_credentials(state, connection, &refreshed).await;
                 response =

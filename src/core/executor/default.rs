@@ -580,7 +580,6 @@ impl UpstreamResponse {
         }
     }
 
-
     pub fn headers(&self) -> &HeaderMap {
         match self {
             Self::Reqwest(response) => response.headers(),

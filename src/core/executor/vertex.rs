@@ -440,7 +440,6 @@ impl VertexExecutor {
         }
     }
 
-
     pub async fn execute_request(
         &self,
         request: VertexExecutionRequest,
@@ -750,20 +749,29 @@ mod tests {
     fn partner_url_uses_global_openapi_endpoint() {
         // JS vertex.js:78-80 — partner models route to the global
         // OpenAI-compatible endpoint regardless of stream flag.
-        let url = VertexExecutor::build_vertex_url("glm-5-maas", "my-project", "us-central1", true, true);
+        let url =
+            VertexExecutor::build_vertex_url("glm-5-maas", "my-project", "us-central1", true, true);
         assert_eq!(
             url,
             "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global/endpoints/openapi/chat/completions"
         );
-        let url2 = VertexExecutor::build_vertex_url("glm-5-maas", "my-project", "us-central1", true, false);
+        let url2 = VertexExecutor::build_vertex_url(
+            "glm-5-maas",
+            "my-project",
+            "us-central1",
+            true,
+            false,
+        );
         assert_eq!(url, url2, "partner URL must not vary with stream");
     }
 
     #[test]
     fn gemini_url_action_follows_stream_flag() {
-        let streaming = VertexExecutor::build_vertex_url("gemini-3-flash", "p", "us-central1", false, true);
+        let streaming =
+            VertexExecutor::build_vertex_url("gemini-3-flash", "p", "us-central1", false, true);
         assert!(streaming.contains(":streamGenerateContent?alt=sse"));
-        let unary = VertexExecutor::build_vertex_url("gemini-3-flash", "p", "us-central1", false, false);
+        let unary =
+            VertexExecutor::build_vertex_url("gemini-3-flash", "p", "us-central1", false, false);
         assert!(unary.contains(":generateContent"));
         assert!(!unary.contains("streamGenerateContent"));
     }

@@ -289,10 +289,19 @@ mod tests {
         assert_eq!(snap.by_model.get("gpt-4 (openai)"), Some(&2));
         assert_eq!(snap.by_account["c1"].get("gpt-4 (openai)"), Some(&2));
         // Simulate the 60s timeout firing → force zero (no finish_request).
-        st.force_zero(&pending_key(Some("c1"), "gpt-4 (openai)")).await;
+        st.force_zero(&pending_key(Some("c1"), "gpt-4 (openai)"))
+            .await;
         let snap = st.pending_snapshot().await;
-        assert_eq!(snap.by_model.get("gpt-4 (openai)"), Some(&0), "by_model zeroed");
-        assert_eq!(snap.by_account["c1"].get("gpt-4 (openai)"), Some(&0), "by_account zeroed");
+        assert_eq!(
+            snap.by_model.get("gpt-4 (openai)"),
+            Some(&0),
+            "by_model zeroed"
+        );
+        assert_eq!(
+            snap.by_account["c1"].get("gpt-4 (openai)"),
+            Some(&0),
+            "by_account zeroed"
+        );
         // A Pending event was broadcast after force-zero.
         assert!(rx.recv().await.is_ok(), "Pending event after force-zero");
     }
@@ -302,7 +311,8 @@ mod tests {
         let st = state();
         st.start_request("gpt-4", "openai", Some("c1")).await;
         st.start_request("gpt-5", "openai", Some("c1")).await;
-        st.force_zero(&pending_key(Some("c1"), "gpt-4 (openai)")).await;
+        st.force_zero(&pending_key(Some("c1"), "gpt-4 (openai)"))
+            .await;
         let snap = st.pending_snapshot().await;
         // gpt-4 zeroed, gpt-5 untouched.
         assert_eq!(snap.by_model.get("gpt-4 (openai)"), Some(&0));
@@ -316,10 +326,14 @@ mod tests {
         st.start_request("gpt-4", "openai", Some("c1")).await;
         // Timer armed.
         assert!(st.timers.lock().unwrap().contains_key(&key));
-        st.finish_request("gpt-4", "openai", Some("c1"), false).await;
+        st.finish_request("gpt-4", "openai", Some("c1"), false)
+            .await;
         // Timer cancelled + removed on finish.
         assert!(!st.timers.lock().unwrap().contains_key(&key));
         let snap = st.pending_snapshot().await;
-        assert!(snap.by_model.get("gpt-4 (openai)").is_none(), "count removed on finish");
+        assert!(
+            snap.by_model.get("gpt-4 (openai)").is_none(),
+            "count removed on finish"
+        );
     }
 }

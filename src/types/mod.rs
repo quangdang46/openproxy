@@ -335,7 +335,6 @@ pub struct ProviderStrategyConfig {
     pub extra: BTreeMap<String, Value>,
 }
 
-
 impl ComboStrategyEntry {
     /// Strategy name used by the dispatcher (`fallback` | `round-robin` | `fusion` | …).
     pub fn strategy_name(&self) -> &str {

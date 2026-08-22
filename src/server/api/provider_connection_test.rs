@@ -1872,7 +1872,10 @@ fn is_refreshable_provider(provider: &str) -> bool {
 }
 
 fn is_check_expiry_provider(provider: &str) -> bool {
-    matches!(provider, "claude" | "qwen" | "kiro" | "kimi-coding" | "kimi")
+    matches!(
+        provider,
+        "claude" | "qwen" | "kiro" | "kimi-coding" | "kimi"
+    )
 }
 
 fn cline_headers(token: &str, extra_headers: Vec<(String, String)>) -> Vec<(String, String)> {

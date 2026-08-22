@@ -770,14 +770,8 @@ const USAGE_SUPPORTED_PROVIDERS: &[&str] = &[
     "minimax-cn",
 ];
 
-const USAGE_APIKEY_PROVIDERS: &[&str] = &[
-    "glm",
-    "glm-cn",
-    "minimax",
-    "minimax-cn",
-    "kimi",
-    "deepseek",
-];
+const USAGE_APIKEY_PROVIDERS: &[&str] =
+    &["glm", "glm-cn", "minimax", "minimax-cn", "kimi", "deepseek"];
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]

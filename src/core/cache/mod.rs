@@ -311,12 +311,8 @@ impl ResponseCache {
             // improvement path.
             if self.inner.len() > self.max_entries {
                 let excess = self.inner.len() - self.max_entries;
-                let to_remove: Vec<[u8; 32]> = self
-                    .inner
-                    .iter()
-                    .take(excess)
-                    .map(|e| *e.key())
-                    .collect();
+                let to_remove: Vec<[u8; 32]> =
+                    self.inner.iter().take(excess).map(|e| *e.key()).collect();
                 for key in &to_remove {
                     self.inner.remove(key);
                 }

@@ -158,14 +158,22 @@ impl KimchiExecutor {
 /// or joins it with an existing system message (`text\n\n{existing}`, or
 /// `{type:"text",text}` unshifted onto an array-content system message).
 fn merge_top_level_system(body: &mut Value) {
-    let Some(obj) = body.as_object_mut() else { return };
+    let Some(obj) = body.as_object_mut() else {
+        return;
+    };
     if obj.get("system").is_none() {
         return;
     }
-    if !obj.get("messages").and_then(Value::as_array).is_some_and(|m| !m.is_empty()) {
+    if !obj
+        .get("messages")
+        .and_then(Value::as_array)
+        .is_some_and(|m| !m.is_empty())
+    {
         return;
     }
-    let text = system_to_text(obj.get("system").expect("system checked above")).trim().to_string();
+    let text = system_to_text(obj.get("system").expect("system checked above"))
+        .trim()
+        .to_string();
     if text.is_empty() {
         return;
     }
@@ -174,9 +182,9 @@ fn merge_top_level_system(body: &mut Value) {
         .get_mut("messages")
         .and_then(Value::as_array_mut)
         .expect("messages checked above");
-    let existing = messages.iter_mut().find(|m| {
-        m.get("role").and_then(Value::as_str) == Some("system")
-    });
+    let existing = messages
+        .iter_mut()
+        .find(|m| m.get("role").and_then(Value::as_str) == Some("system"));
 
     match existing {
         None => {
@@ -207,7 +215,11 @@ fn system_to_text(system: &Value) -> String {
             .iter()
             .map(|part| match part {
                 Value::String(s) => s.clone(),
-                Value::Object(m) => m.get("text").and_then(Value::as_str).unwrap_or("").to_string(),
+                Value::Object(m) => m
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 _ => String::new(),
             })
             .filter(|s| !s.is_empty())
@@ -220,7 +232,9 @@ fn system_to_text(system: &Value) -> String {
 /// JS `stripMessageArtifacts` parity: remove message-level `cache_control`,
 /// and from each content part remove `cache_control` + `signature`.
 fn strip_message_artifacts(value: &mut Value) {
-    let Some(obj) = value.as_object_mut() else { return };
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
     obj.remove("cache_control");
     if let Some(content) = obj.get_mut("content").and_then(Value::as_array_mut) {
         for block in content.iter_mut() {
@@ -562,7 +576,10 @@ mod tests {
         let result =
             executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
         let msgs = result["messages"].as_array().unwrap();
-        assert_eq!(msgs[0].get("reasoning_content").and_then(Value::as_str), Some("    "));
+        assert_eq!(
+            msgs[0].get("reasoning_content").and_then(Value::as_str),
+            Some("    ")
+        );
     }
 
     #[test]
@@ -576,7 +593,11 @@ mod tests {
         });
         let result =
             executor.transform_request(&body, "gpt-4", true, &ProviderConnection::default());
-        assert_eq!(result.get("system"), None, "top-level system must be removed");
+        assert_eq!(
+            result.get("system"),
+            None,
+            "top-level system must be removed"
+        );
         let msgs = result["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "You are helpful.");

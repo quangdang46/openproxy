@@ -64,9 +64,7 @@ pub fn select_connections_needing_refresh(
             let Some(expires_at) = conn.expires_at.as_deref() else {
                 return false;
             };
-            let Ok(expires_at) =
-                chrono::DateTime::parse_from_rfc3339(expires_at)
-            else {
+            let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
                 return false;
             };
             let expires_at_ms = expires_at.timestamp_millis();
@@ -140,11 +138,7 @@ async fn persist_refresh(
     let _ = state
         .db
         .update(move |db| {
-            if let Some(conn) = db
-                .provider_connections
-                .iter_mut()
-                .find(|c| c.id == id)
-            {
+            if let Some(conn) = db.provider_connections.iter_mut().find(|c| c.id == id) {
                 conn.access_token = Some(access);
                 if let Some(rt) = refresh {
                     conn.refresh_token = Some(rt);
@@ -180,7 +174,12 @@ mod tests {
     use super::*;
     use crate::types::ProviderConnection;
 
-    fn conn(provider: &str, auth_type: &str, refresh: Option<&str>, expires_in_secs: i64) -> ProviderConnection {
+    fn conn(
+        provider: &str,
+        auth_type: &str,
+        refresh: Option<&str>,
+        expires_in_secs: i64,
+    ) -> ProviderConnection {
         ProviderConnection {
             provider: provider.to_string(),
             auth_type: auth_type.to_string(),
@@ -195,10 +194,10 @@ mod tests {
     #[test]
     fn selects_oauth_conn_expiring_within_30min() {
         let conns = vec![
-            conn("claude", "oauth", Some("rt"), 10 * 60),      // 10 min → due
-            conn("claude", "oauth", Some("rt"), 6 * 60 * 60),  // 6 h → not due
-            conn("claude", "apikey", Some("rt"), 10 * 60),     // wrong auth type
-            conn("claude", "oauth", None, 10 * 60),            // no refresh token
+            conn("claude", "oauth", Some("rt"), 10 * 60), // 10 min → due
+            conn("claude", "oauth", Some("rt"), 6 * 60 * 60), // 6 h → not due
+            conn("claude", "apikey", Some("rt"), 10 * 60), // wrong auth type
+            conn("claude", "oauth", None, 10 * 60),       // no refresh token
         ];
         let due = select_connections_needing_refresh(&conns, now_ms());
         assert_eq!(due.len(), 1);
@@ -209,11 +208,17 @@ mod tests {
     fn provider_lead_extends_window() {
         // codex lead is 5 days → a connection expiring in 4 days IS due.
         let conns = vec![conn("codex", "oauth", Some("rt"), 4 * 24 * 60 * 60)];
-        assert_eq!(select_connections_needing_refresh(&conns, now_ms()).len(), 1);
+        assert_eq!(
+            select_connections_needing_refresh(&conns, now_ms()).len(),
+            1
+        );
         // claude lead is 4h > the 30-min floor → max() wins; a connection
         // expiring in 2h IS due (window = max(lead, floor)).
         let conns = vec![conn("claude", "oauth", Some("rt"), 2 * 60 * 60)];
-        assert_eq!(select_connections_needing_refresh(&conns, now_ms()).len(), 1);
+        assert_eq!(
+            select_connections_needing_refresh(&conns, now_ms()).len(),
+            1
+        );
         // A connection expiring beyond claude's 4h lead is NOT due.
         let conns = vec![conn("claude", "oauth", Some("rt"), 6 * 60 * 60)];
         assert!(select_connections_needing_refresh(&conns, now_ms()).is_empty());

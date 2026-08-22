@@ -28,8 +28,8 @@ mod strip_unsupported;
 mod trae;
 mod vertex;
 mod windsurf;
-mod zed;
 mod xai;
+mod zed;
 
 pub use antigravity::{
     AntigravityExecutionRequest, AntigravityExecutor, AntigravityExecutorError,
@@ -47,7 +47,6 @@ pub use client_pool::{
 };
 pub use codebuddy_cn::CodeBuddyCNExecutor;
 pub use codebuddy_intl::CodeBuddyIntlExecutor;
-pub use zed::{ZedExecutionRequest, ZedExecutor, ZedExecutorResponse};
 pub use codex::{
     convert_openai_sse_to_standard, CodexExecutionRequest, CodexExecutor, CodexExecutorError,
     CodexExecutorResponse,
@@ -60,11 +59,11 @@ pub use cursor::{
     parse_cursor_sse_events, CursorExecutionRequest, CursorExecutor, CursorExecutorError,
     CursorExecutorResponse, SseEvent,
 };
-pub use devin_cli::{DevinCliExecutor, DevinExecutionRequest, DevinExecutorResponse};
 pub use default::{
     provider_config_base_url, DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError,
     ProviderConfig, TransportKind, UpstreamResponse,
 };
+pub use devin_cli::{DevinCliExecutor, DevinExecutionRequest, DevinExecutorResponse};
 pub use gemini_cli::{
     GeminiCliExecutionRequest, GeminiCliExecutor, GeminiCliExecutorError, GeminiCliExecutorResponse,
 };
@@ -112,6 +111,7 @@ pub use windsurf::{
     WindsurfExecutionRequest, WindsurfExecutor, WindsurfExecutorError, WindsurfExecutorResponse,
 };
 pub use xai::{XaiExecutionRequest, XaiExecutor, XaiExecutorError, XaiExecutorResponse};
+pub use zed::{ZedExecutionRequest, ZedExecutor, ZedExecutorResponse};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutorKind {

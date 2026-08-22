@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use super::{
     default::{DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError},
-    ClientPool, ProviderExecutor, ProviderExecutionRequest, ProviderExecutionResponse,
+    ClientPool, ProviderExecutionRequest, ProviderExecutionResponse, ProviderExecutor,
     ProviderExecutorError,
 };
 use crate::types::{ProviderConnection, ProviderNode};
@@ -36,12 +36,8 @@ pub struct CodeBuddyIntlExecutor {
 impl CodeBuddyIntlExecutor {
     pub fn new(pool: Arc<ClientPool>, _provider_node: Option<ProviderNode>) -> Self {
         Self {
-            inner: DefaultExecutor::new(
-                "codebuddy-intl",
-                pool,
-                None,
-            )
-            .expect("codebuddy-intl is a registered provider config"),
+            inner: DefaultExecutor::new("codebuddy-intl", pool, None)
+                .expect("codebuddy-intl is a registered provider config"),
         }
     }
 }
@@ -100,7 +96,8 @@ impl ProviderExecutor for CodeBuddyIntlExecutor {
                     ProviderExecutorError::MissingCredentials(p)
                 }
                 other => ProviderExecutorError::UnsupportedProvider(format!(
-                    "codebuddy-intl: {:?}", other
+                    "codebuddy-intl: {:?}",
+                    other
                 )),
             })?;
         Ok(ProviderExecutionResponse {
@@ -124,7 +121,10 @@ impl CodeBuddyIntlExecutor {
         body["stream"] = Value::Bool(true);
 
         // 2. reasoning_effort handling.
-        let effort = body.get("reasoning_effort").and_then(Value::as_str).map(String::from);
+        let effort = body
+            .get("reasoning_effort")
+            .and_then(Value::as_str)
+            .map(String::from);
         match effort.as_deref() {
             Some("none") | Some("off") => {
                 body.as_object_mut().map(|o| o.remove("reasoning_effort"));
@@ -151,7 +151,12 @@ impl CodeBuddyIntlExecutor {
             if role == "system" || role == "developer" {
                 continue;
             }
-            if role == "user" && message.get("content").map(Value::is_string).unwrap_or(false) {
+            if role == "user"
+                && message
+                    .get("content")
+                    .map(Value::is_string)
+                    .unwrap_or(false)
+            {
                 let mut m = message.clone();
                 m["content"] = json!([{
                     "type": "text",

@@ -34,10 +34,7 @@ pub fn routes() -> Router<AppState> {
 /// Reports the library-mode skeleton: PXPIPE is not installed/managed by
 /// openproxy, so install fields are false/empty. Settings-driven values
 /// reflect the current `Settings` (pxpipeEnabled etc.).
-async fn status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn status(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(resp) = require_dashboard_or_management_api_key(&headers, &state) {
         return resp;
     }

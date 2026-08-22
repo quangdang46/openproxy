@@ -46,8 +46,7 @@ pub async fn audio_speech(
     // 9router tts.js:31 — `?response_format=json` returns the base64 JSON
     // envelope; anything else (default) streams raw audio bytes.
     let response_format = query.get("response_format").cloned().unwrap_or_default();
-    let response =
-        generic_media_handler(state, headers, body, "audio/speech").await;
+    let response = generic_media_handler(state, headers, body, "audio/speech").await;
     with_cors_response(tts_binary_or_json(response, response_format).await)
 }
 
@@ -78,10 +77,8 @@ async fn tts_binary_or_json(response: Response, response_format: String) -> Resp
         .get("format")
         .and_then(Value::as_str)
         .unwrap_or("mp3");
-    let Ok(audio) = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        audio_b64,
-    ) else {
+    let Ok(audio) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, audio_b64)
+    else {
         return Response::from_parts(parts, axum::body::Body::from(bytes));
     };
     let mut response = Response::new(axum::body::Body::from(audio));

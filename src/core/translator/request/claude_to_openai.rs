@@ -1067,7 +1067,10 @@ mod tests {
         )
         .unwrap();
         claude_to_openai_request("gpt-4", &mut body, false, None);
-        assert_eq!(body.get("reasoning_effort").unwrap().as_str().unwrap(), "high");
+        assert_eq!(
+            body.get("reasoning_effort").unwrap().as_str().unwrap(),
+            "high"
+        );
     }
 
     #[test]
@@ -1082,7 +1085,10 @@ mod tests {
         )
         .unwrap();
         claude_to_openai_request("gpt-4", &mut body, false, None);
-        assert_eq!(body.get("reasoning_effort").unwrap().as_str().unwrap(), "medium");
+        assert_eq!(
+            body.get("reasoning_effort").unwrap().as_str().unwrap(),
+            "medium"
+        );
         // reasoning object is also forwarded verbatim.
         assert!(body.get("reasoning").is_some());
         assert_eq!(body["reasoning"]["effort"], "medium");

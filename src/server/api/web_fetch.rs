@@ -595,7 +595,11 @@ fn normalize_fetch_response(
             let title = text
                 .lines()
                 .next()
-                .and_then(|line| line.strip_prefix("Title:").map(str::trim).map(str::to_string))
+                .and_then(|line| {
+                    line.strip_prefix("Title:")
+                        .map(str::trim)
+                        .map(str::to_string)
+                })
                 .or_else(|| {
                     text.lines()
                         .next()
