@@ -1,6 +1,42 @@
 # 9router → OpenProxy logic parity
 
-Evidence-based parity against 9router v0.5.30 (`open-sse`). Beads: `openproxy-9router-parity-mj1*`.
+Evidence-based parity against 9router v0.5.55 (`decolua/9router` @ 699edac). Beads:
+`openproxy-9router-parity-mj1*`, epic `openproxy-9router-parity-v0550-pnc`.
+
+## 2026-08-22 deep-audit pass (8-agent swarm vs v0.5.55)
+
+Fixed (commits e839d283, 9ef44223):
+
+| Gap | Fix |
+|-----|-----|
+| xAI client_id duplicated `073a-` segment (4 files) — every xai/grok-cli OAuth broken | Corrected UUID + regression test |
+| Fusion judge buffered JSON for `stream:true` clients | `handle_fusion_chat_deferred` envelope; chat.rs dispatches final leg with original stream flag |
+| Fusion panels leaked `stream_options` (#3024) | stripped in `flatten_tool_history` |
+| RR account rotation ignored stickyRoundRobinLimit | `select_with_sticky_limit` + per-provider override |
+| FillFirst picked max-quota account | priority-first, quota tiebreak only |
+| devin-cli executor missing entirely | new `devin_cli.rs` ACP stdio port + dispatch |
+| iflow base URL pointed at mintlify docs site | `apis.iflow.cn/v1/chat/completions` |
+| grok-web returned raw NDJSON, no error mapping | NDJSON→SSE/JSON converter + 401/403/429 messages |
+| codebuddy-intl missing from forceStream list | added (+`cbai`) |
+| codex `_compact` body flag ignored | routes to `/compact`, flag stripped pre-send |
+| codex SSE retry exponential vs JS flat 2s | flat 2000ms |
+| cursor composer `</thinking>` terminator | `</think>` via lastIndexOf + anchored composer match |
+| vertex non-stream still called `:streamGenerateContent` | verb follows stream flag |
+| DefaultExecutor dropped upstream error bodies | capped body text into `UpstreamStatus` |
+| embeddings handler no 401/403 refresh-once | ported from embeddingsCore.js |
+| video creation re-fired at next account on network error | immediate 502 (never re-bill) |
+| usage tracker DELETE-all + rewrite per request | incremental row append |
+| kimi device_id regenerated every boot | persisted psd.deviceId; headers take hostname + stable id |
+| `/api/oauth/:p/refresh` generic form grant | routed through per-provider `dispatch_oauth_refresh` |
+| MITM kiro detection missed IDE ≥1.0.228 header form | `is_chat_request()` checks `x-amz-target` |
+| sync snapshot pinned v0.5.45 | regenerated against v0.5.55 (98 providers / 991 models) |
+| search registry caps/timeouts partial | all 9 providers match JS (brave 20, linkup 50, google-pse 10, tavily 20…) |
+| adaptive thinking sent only output_config.effort | sends `thinking:{type:adaptive}` too (Anthropic requires both) |
+| settings PATCH rejected nested providerStrategies | `ProviderStrategyEntry` string-or-object |
+
+Open beads track the remaining P1/P2 items (windsurf/trae/zed executors .35/.36/.102,
+MITM intercept pipeline, background refresh scheduler, chat-search failover breadth,
+cloudflare multipart, antigravity image adapter, TTS binary audio).
 
 ## How to test
 
