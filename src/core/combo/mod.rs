@@ -14,6 +14,7 @@ use crate::core::account_fallback::{BACKOFF_BASE_MS, BACKOFF_MAX_MS, MAX_BACKOFF
 use crate::types::Combo;
 
 pub mod auto_combo;
+pub mod capabilities;
 pub mod capacity_adapter;
 pub mod fusion;
 pub mod hedging;
