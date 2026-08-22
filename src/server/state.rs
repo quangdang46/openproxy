@@ -13,7 +13,7 @@ use crate::core::tunnel::TunnelManager;
 use crate::core::usage::UsageTracker;
 use crate::db::Db;
 use crate::oauth::pending::PendingFlowStore;
-use crate::server::api::oauth::{CodexProxyState, XaiProxyState};
+use crate::server::api::oauth::{CodexProxyState, XaiProxyState, ZedProxyState};
 use crate::server::auth::login_limiter::LoginLimiter;
 use crate::server::auth::oidc::OidcClient;
 use crate::server::console_logs::{shared_console_log_buffer, ConsoleLogBuffer};
@@ -40,6 +40,7 @@ pub struct AppState {
     pub sessions: Arc<RwLock<HashMap<String, SessionInfo>>>,
     pub codex_proxy: Arc<CodexProxyState>,
     pub xai_proxy: Arc<XaiProxyState>,
+    pub zed_proxy: Arc<ZedProxyState>,
 
     /// Progressive lockout store for `POST /api/auth/login`. Tracks failed
     /// attempts per client IP and escalates lockout duration on repeat
@@ -111,6 +112,7 @@ impl AppState {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             codex_proxy: Arc::new(CodexProxyState::new()),
             xai_proxy: Arc::new(XaiProxyState::new()),
+            zed_proxy: Arc::new(ZedProxyState::new()),
             login_limiter: Arc::new(LoginLimiter::new(&db.data_dir)),
             oidc_client: Arc::new(RwLock::new(None)),
             dashboard_sidecar_url: None,

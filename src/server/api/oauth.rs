@@ -3026,12 +3026,41 @@ async fn codex_start_proxy_compat(
     Path(provider): Path<String>,
     Query(query): Query<CodexStartProxyQuery>,
 ) -> Response {
-    if provider != "codex" && provider != "xai" {
+    if provider != "codex" && provider != "xai" && provider != "zed" {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Proxy only supported for codex/xai" })),
+            Json(json!({ "error": "Proxy only supported for codex/xai/trae/windsurf/zed" })),
         )
             .into_response();
+    }
+
+    // Zed: RSA native-app flow — start the callback listener on the
+    // preferred port (58443, random fallback) and register the session
+    // carrying the encoded private-key verifier.
+    if provider == "zed" {
+        let preferred = query
+            .app_port
+            .unwrap_or(crate::oauth::zed_auth::ZED_DEFAULT_NATIVE_APP_PORT);
+        let state_value = query.state.clone().unwrap_or_default();
+        let verifier = query.code_verifier.clone().unwrap_or_default();
+        match state.zed_proxy.start(state.clone(), preferred).await {
+            Ok(port) => {
+                let registered = {
+                    let mut inner = state.zed_proxy.inner.lock().await;
+                    ZedProxyState::register_session_locked(&mut inner, &state_value, &verifier)
+                };
+                return Json(json!({
+                    "success": true,
+                    "port": port,
+                    "callbackUrl": format!("http://127.0.0.1:{port}/"),
+                    "serverSide": registered,
+                }))
+                .into_response();
+            }
+            Err(e) => {
+                return Json(json!({ "success": false, "reason": e })).into_response();
+            }
+        }
     }
 
     let Some(app_port) = query.app_port else {
@@ -3086,12 +3115,43 @@ async fn codex_poll_status_compat(
     Path(provider): Path<String>,
     Query(query): Query<CodexPollStatusQuery>,
 ) -> Response {
-    if provider != "codex" && provider != "xai" {
+    if provider != "codex" && provider != "xai" && provider != "zed" {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Poll only supported for codex/xai" })),
+            Json(json!({ "error": "Poll only supported for codex/xai/trae/windsurf/zed" })),
         )
             .into_response();
+    }
+
+    if provider == "zed" {
+        let Some(state_param) = query
+            .state
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Missing state" })),
+            )
+                .into_response();
+        };
+        let Some((status, error, connection_id, email)) =
+            state.zed_proxy.get_session(state_param).await
+        else {
+            return Json(json!({ "status": "unknown" })).into_response();
+        };
+        let mut payload = json!({ "status": status });
+        if !error.is_empty() {
+            payload["error"] = json!(error);
+        }
+        if let Some(cid) = connection_id {
+            payload["connectionId"] = json!(cid);
+        }
+        if let Some(mail) = email {
+            payload["email"] = json!(mail);
+        }
+        return Json(payload).into_response();
     }
 
     let Some(state_param) = query
@@ -3135,18 +3195,18 @@ async fn codex_stop_proxy_compat(
     State(state): State<AppState>,
     Path(provider): Path<String>,
 ) -> Response {
-    if provider != "codex" && provider != "xai" {
+    if provider != "codex" && provider != "xai" && provider != "zed" {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Proxy only supported for codex/xai" })),
+            Json(json!({ "error": "Proxy only supported for codex/xai/trae/windsurf/zed" })),
         )
             .into_response();
     }
 
-    if provider == "xai" {
-        state.xai_proxy.stop().await;
-    } else {
-        state.codex_proxy.stop().await;
+    match provider.as_str() {
+        "xai" => state.xai_proxy.stop().await,
+        "zed" => state.zed_proxy.stop().await,
+        _ => state.codex_proxy.stop().await,
     }
     Json(json!({ "success": true })).into_response()
 }
@@ -5446,4 +5506,343 @@ pub fn routes() -> Router<AppState> {
         .route("/api/oauth/{provider}/poll", post(poll_device_code))
         .route("/api/oauth/{provider}/refresh", post(refresh_token))
         .route("/api/oauth/{provider}/status", get(oauth_status))
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Zed RSA native-app proxy (9router server.js zedProxy parity, bead .102).
+// Singleton session; the callback GET http://127.0.0.1:<port>/?user_id=…&
+// access_token=<RSA-encrypted> is decrypted with the session's private-key
+// verifier and stored as a `zed` oauth connection.
+// ───────────────────────────────────────────────────────────────────────────
+
+const ZED_PROXY_TIMEOUT_MS: u64 = 600_000;
+const ZED_PREFERRED_PORT: u16 = 58443;
+
+#[derive(Clone)]
+pub struct ZedProxyState {
+    inner: Arc<Mutex<ZedProxyInner>>,
+}
+
+#[derive(Default)]
+struct ZedProxyInner {
+    server: Option<CodexProxyServer>,
+    session: Option<ZedPendingLogin>,
+    bound_port: Option<u16>,
+}
+
+struct ZedPendingLogin {
+    state: String,
+    private_key_verifier: String,
+    status: String,
+    created_at: i64,
+    connection_id: Option<String>,
+    email: Option<String>,
+    error: Option<String>,
+}
+
+impl Default for ZedProxyState {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(ZedProxyInner::default())),
+        }
+    }
+}
+
+impl ZedProxyState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Start the local callback listener on the preferred port (58443),
+    /// falling back to an OS-assigned port when busy.
+    async fn start(&self, state: AppState, preferred_port: u16) -> Result<u16, String> {
+        let mut inner = self.inner.lock().await;
+        if let Some(port) = inner.bound_port {
+            return Ok(port);
+        }
+
+        let listener = match TcpListener::bind(("127.0.0.1", preferred_port)).await {
+            Ok(l) => l,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                TcpListener::bind(("127.0.0.1", 0))
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+        let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+
+        let proxy_state = self.clone();
+        let app_state = state.clone();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => {
+                        let (mut stream, _) = match accepted {
+                            Ok(p) => p,
+                            Err(_) => break,
+                        };
+                        let proxy_state = proxy_state.clone();
+                        let app_state = app_state.clone();
+                        tokio::spawn(async move {
+                            handle_zed_proxy_connection(proxy_state, app_state, &mut stream)
+                                .await;
+                        });
+                    }
+                }
+            }
+        });
+
+        let proxy_state2 = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ZED_PROXY_TIMEOUT_MS)).await;
+            proxy_state2.stop().await;
+        });
+
+        inner.server = Some(CodexProxyServer {
+            shutdown_tx: Some(shutdown_tx),
+        });
+        inner.bound_port = Some(port);
+        Ok(port)
+    }
+
+    async fn stop(&self) {
+        let server = {
+            let mut inner = self.inner.lock().await;
+            inner.bound_port = None;
+            inner.server.take()
+        };
+        if let Some(mut server) = server {
+            if let Some(shutdown_tx) = server.shutdown_tx.take() {
+                let _ = shutdown_tx.send(());
+            }
+        }
+    }
+
+    async fn get_session(
+        &self,
+        state: &str,
+    ) -> Option<(String, String, Option<String>, Option<String>)> {
+        let inner = self.inner.lock().await;
+        inner
+            .session
+            .as_ref()
+            .filter(|s| s.state == state)
+            .map(|s| {
+                (
+                    s.status.clone(),
+                    s.error.clone().unwrap_or_default(),
+                    s.connection_id.clone(),
+                    s.email.clone(),
+                )
+            })
+    }
+
+    fn register_session_locked(
+        inner: &mut ZedProxyInner,
+        state: &str,
+        code_verifier: &str,
+    ) -> bool {
+        if state.trim().is_empty() || code_verifier.trim().is_empty() {
+            return false;
+        }
+        inner.session = Some(ZedPendingLogin {
+            state: state.to_string(),
+            private_key_verifier: code_verifier.to_string(),
+            status: "pending".into(),
+            created_at: chrono::Utc::now().timestamp_millis(),
+            connection_id: None,
+            email: None,
+            error: None,
+        });
+        true
+    }
+}
+
+/// Accept one callback: parse user_id + access_token, decrypt with the
+/// session's verifier, store the `zed` oauth connection, and answer HTML.
+async fn handle_zed_proxy_connection(
+    proxy_state: ZedProxyState,
+    state: AppState,
+    stream: &mut tokio::net::TcpStream,
+) {
+    use crate::oauth::zed_auth;
+
+    let mut buffer = vec![0u8; 64 * 1024];
+    let bytes_read = match stream.read(&mut buffer).await {
+        Ok(n) if n > 0 => n,
+        _ => return,
+    };
+    let request = String::from_utf8_lossy(&buffer[..bytes_read]);
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("/");
+    let parsed = match url::Url::parse(&format!("http://localhost{target}")) {
+        Ok(u) => u,
+        Err(_) => {
+            write_http_response(
+                stream,
+                "400 Bad Request",
+                &[("Content-Type", "text/plain; charset=utf-8".to_string())],
+                "Invalid callback URL",
+            )
+            .await;
+            return;
+        }
+    };
+
+    if parsed.path() != "/" && parsed.path() != "/callback" {
+        write_http_response(
+            stream,
+            "404 Not Found",
+            &[("Content-Type", "text/plain; charset=utf-8".to_string())],
+            "Not found",
+        )
+        .await;
+        return;
+    }
+
+    // Snapshot + clear the pending session under one lock.
+    let session = {
+        let mut inner = proxy_state.inner.lock().await;
+        inner.session.take()
+    };
+    let Some(session) = session else {
+        write_http_response(
+            stream,
+            "200 OK",
+            &[("Content-Type", "text/html; charset=utf-8".to_string())],
+            "<html><body><h3>No active Zed login session</h3></body></html>",
+        )
+        .await;
+        return;
+    };
+
+    let user_id = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "user_id" || k == "userId")
+        .map(|(_, v)| v.into_owned());
+    let encrypted = parsed
+        .query_pairs()
+        .find(|(k, _)| matches!(k.as_ref(), "access_token" | "accessToken" | "token"))
+        .map(|(_, v)| v.into_owned());
+
+    let (Some(user_id), Some(encrypted)) = (user_id, encrypted) else {
+        let mut inner = proxy_state.inner.lock().await;
+        inner.session = Some(ZedPendingLogin {
+            error: Some("Zed callback must include user_id and access_token".into()),
+            ..session
+        });
+        write_http_response(
+            stream,
+            "200 OK",
+            &[("Content-Type", "text/html; charset=utf-8".to_string())],
+            "<html><body><h3>Zed login failed</h3><p>Missing user_id or access_token</p></body></html>",
+        )
+        .await;
+        return;
+    };
+
+    let access_token =
+        match zed_auth::decrypt_access_token(&encrypted, &session.private_key_verifier) {
+            Ok(t) => t,
+            Err(e) => {
+                let mut inner = proxy_state.inner.lock().await;
+                inner.session = Some(ZedPendingLogin {
+                    error: Some(e.clone()),
+                    ..session
+                });
+                write_http_response(
+                    stream,
+                    "200 OK",
+                    &[("Content-Type", "text/html; charset=utf-8".to_string())],
+                    &format!("<html><body><h3>Zed login failed</h3><p>{e}</p></body></html>"),
+                )
+                .await;
+                return;
+            }
+        };
+
+    // Best-effort user info for display name/email.
+    let client = reqwest::Client::new();
+    let auth = zed_auth::build_user_auth_header(&user_id, &access_token).unwrap_or_default();
+    let mut email: Option<String> = None;
+    if let Ok(info) = client
+        .get(format!(
+            "{}{}",
+            crate::oauth::zed_auth::ZED_CLOUD_BASE_URL,
+            "/client/users/me"
+        ))
+        .header("Accept", "application/json")
+        .header("Authorization", auth)
+        .send()
+        .await
+    {
+        if let Ok(data) = info.json::<Value>().await {
+            email = data.get("email").and_then(Value::as_str).map(String::from);
+        }
+    }
+
+    // Persist the connection.
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    let psd_entry = ("userId".to_string(), Value::String(user_id.clone()));
+    let store_result = state
+        .db
+        .update(move |db| {
+            db.provider_connections
+                .push(crate::types::ProviderConnection {
+                    id: connection_id.clone(),
+                    provider: "zed".into(),
+                    auth_type: "oauth".into(),
+                    is_active: Some(true),
+                    created_at: Some(now.clone()),
+                    updated_at: Some(now),
+                    access_token: Some(access_token),
+                    provider_specific_data: std::collections::BTreeMap::from([
+                        psd_entry,
+                        ("authMethod".to_string(), Value::String("oauth".into())),
+                    ]),
+                    test_status: Some("active".into()),
+                    ..Default::default()
+                });
+        })
+        .await;
+
+    match store_result {
+        Ok(_) => {
+            let mut inner = proxy_state.inner.lock().await;
+            inner.session = Some(ZedPendingLogin {
+                status: "done".into(),
+                connection_id: None,
+                email: email.clone(),
+                ..session
+            });
+            write_http_response(
+                stream,
+                "200 OK",
+                &[("Content-Type", "text/html; charset=utf-8".to_string())],
+                "<html><body><h3>Zed login successful</h3><p>You can close this window.</p></body></html>",
+            )
+            .await;
+        }
+        Err(e) => {
+            let mut inner = proxy_state.inner.lock().await;
+            inner.session = Some(ZedPendingLogin {
+                error: Some(e.to_string()),
+                ..session
+            });
+            write_http_response(
+                stream,
+                "200 OK",
+                &[("Content-Type", "text/html; charset=utf-8".to_string())],
+                &format!("<html><body><h3>Zed login failed</h3><p>{e}</p></body></html>"),
+            )
+            .await;
+        }
+    }
 }
