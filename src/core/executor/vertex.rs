@@ -421,17 +421,25 @@ impl VertexExecutor {
             "generateContent"
         };
         let url = if is_partner {
-            format!("{base}/publishers/{model_stripped}:{action}")
+            // JS vertex.js:78-80 — partner models (Llama/Mistral/GLM/Qwen)
+            // use the GLOBAL OpenAI-compatible openapi endpoint, not the
+            // regional Gemini publishers path, and never take :action verbs.
+            format!(
+                "https://aiplatform.googleapis.com/v1/projects/{project_id}/locations/global/endpoints/openapi/chat/completions"
+            )
         } else {
             format!("{base}/publishers/google/{model_stripped}:{action}")
         };
 
-        if stream {
+        if is_partner {
+            url
+        } else if stream {
             format!("{}?alt=sse", url)
         } else {
             url
         }
     }
+
 
     pub async fn execute_request(
         &self,
@@ -736,5 +744,27 @@ mod tests {
         let sa = result.unwrap();
         assert_eq!(sa.client_email, "test@test.com");
         assert_eq!(sa.project_id, Some("my-project".to_string()));
+    }
+
+    #[test]
+    fn partner_url_uses_global_openapi_endpoint() {
+        // JS vertex.js:78-80 — partner models route to the global
+        // OpenAI-compatible endpoint regardless of stream flag.
+        let url = VertexExecutor::build_vertex_url("glm-5-maas", "my-project", "us-central1", true, true);
+        assert_eq!(
+            url,
+            "https://aiplatform.googleapis.com/v1/projects/my-project/locations/global/endpoints/openapi/chat/completions"
+        );
+        let url2 = VertexExecutor::build_vertex_url("glm-5-maas", "my-project", "us-central1", true, false);
+        assert_eq!(url, url2, "partner URL must not vary with stream");
+    }
+
+    #[test]
+    fn gemini_url_action_follows_stream_flag() {
+        let streaming = VertexExecutor::build_vertex_url("gemini-3-flash", "p", "us-central1", false, true);
+        assert!(streaming.contains(":streamGenerateContent?alt=sse"));
+        let unary = VertexExecutor::build_vertex_url("gemini-3-flash", "p", "us-central1", false, false);
+        assert!(unary.contains(":generateContent"));
+        assert!(!unary.contains("streamGenerateContent"));
     }
 }

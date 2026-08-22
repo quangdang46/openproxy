@@ -3987,6 +3987,7 @@ async fn exchange_iflow_compat(
 async fn exchange_cline_compat(
     code: &str,
     redirect_uri: &str,
+    provider_id: &str,
 ) -> Result<ProviderConnection, String> {
     let tokens = if let Some(decoded) = decode_cline_exchange_code(code) {
         decoded
@@ -4075,7 +4076,7 @@ async fn exchange_cline_compat(
     }
 
     Ok(ProviderConnection {
-        provider: "cline".to_string(),
+        provider: provider_id.to_string(),
         auth_type: "oauth".to_string(),
         email,
         access_token: Some(access_token),
@@ -4130,7 +4131,7 @@ async fn exchange_oauth_compat(
 
     if code.is_empty()
         || redirect_uri.is_empty()
-        || (code_verifier.is_empty() && provider != "cline")
+        || (code_verifier.is_empty() && provider != "cline" && provider != "clinepass")
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -4168,10 +4169,16 @@ async fn exchange_oauth_compat(
             Ok(value) => value,
             Err(error) => return internal_error_response(error),
         },
-        "cline" => match exchange_cline_compat(code, redirect_uri).await {
-            Ok(value) => value,
-            Err(error) => return internal_error_response(error),
-        },
+        "cline" | "clinepass" => {
+            // 9router noPkceExchangeProviders: ["cline","clinepass","kimchi"]
+            // — clinepass shares Cline's endpoints (registry clinepass.js:49-50)
+            // but must store the connection under its own provider id.
+            match exchange_cline_compat(code, redirect_uri, &provider).await
+            {
+                Ok(value) => value,
+                Err(error) => return internal_error_response(error),
+            }
+        }
         "xai" => match exchange_xai_compat(code, redirect_uri, code_verifier).await {
             Ok(value) => value,
             Err(error) => return internal_error_response(error),
