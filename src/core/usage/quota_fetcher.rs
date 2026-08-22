@@ -2807,13 +2807,14 @@ fn kimi_make_quota(
 /// Kimi Coding usage over OAuth — GET /v1/usages with Bearer + X-Msh-* headers.
 pub async fn fetch_kimi_oauth_usage(
     access_token: &str,
-    _psd: &std::collections::BTreeMap<String, Value>,
+    psd: &std::collections::BTreeMap<String, Value>,
 ) -> Value {
     if access_token.trim().is_empty() {
         return json!({ "message": "Kimi access token or API key not available." });
     }
     let client = http_client();
-    let msh = crate::core::config::app_constants::build_kimi_headers();
+    let device_id = psd.get("deviceId").and_then(Value::as_str);
+    let msh = crate::core::config::app_constants::build_kimi_headers(device_id);
     let mut request = client
         .get(KIMI_USAGE_URL)
         .header("Authorization", format!("Bearer {}", access_token.trim()))

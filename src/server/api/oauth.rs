@@ -4616,6 +4616,15 @@ pub async fn poll_device_code(
                 token_response
             };
 
+            // Kimi device-flow parity (kimi.js): mint a stable deviceId at
+            // login and persist it in providerSpecificData so refreshes and
+            // usage fetches keep the same X-Msh-Device-Id across restarts.
+            let mut extra_psd = std::collections::BTreeMap::new();
+            if provider == "kimi" || provider == "kimi-coding" {
+                let device_id = uuid::Uuid::new_v4().to_string();
+                extra_psd.insert("deviceId".to_string(), json!(device_id));
+            }
+
             if let Err(e) = store_connection(
                 &state.db,
                 &flow.account_id,
@@ -4631,6 +4640,32 @@ pub async fn poll_device_code(
                     "storage_error",
                     &provider,
                 );
+            }
+
+            if !extra_psd.is_empty() {
+                if let Some(conn) = state
+                    .db
+                    .snapshot()
+                    .provider_connections
+                    .iter()
+                    .find(|c| c.provider == provider && c.id == flow.account_id)
+                    .cloned()
+                {
+                    let _ = state
+                        .db
+                        .update(move |db| {
+                            if let Some(target) = db
+                                .provider_connections
+                                .iter_mut()
+                                .find(|c| c.id == conn.id)
+                            {
+                                for (k, v) in extra_psd {
+                                    target.provider_specific_data.insert(k, v);
+                                }
+                            }
+                        })
+                        .await;
+                }
             }
 
             Json(PollResponse {
@@ -4730,18 +4765,6 @@ pub async fn refresh_token(
         );
     }
 
-    let provider_config = match get_provider_config(&provider) {
-        Some(config) => config,
-        None => {
-            return make_error_response(
-                StatusCode::BAD_REQUEST,
-                "Unknown provider",
-                "unknown_provider",
-                &provider,
-            )
-        }
-    };
-
     // Per-token lock prevents Auth0 `refresh_token_reused` errors from concurrent refreshes
     let stable_id = connection.map(|c| c.id.clone()).unwrap_or_default();
     let lock_key = get_refresh_lock_key(&provider, &stable_id);
@@ -4754,40 +4777,41 @@ pub async fn refresh_token(
     };
     let _permit = lock_arc.lock().await;
 
-    let client = reqwest::Client::new();
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("refresh_token", &refresh_token),
-        ("client_id", "openproxy"),
-    ];
+    // 9router parity (tokenRefresh/providers.js REFRESH_PROFILES): every
+    // provider has its own refresh wire format — claude posts JSON to
+    // api.anthropic.com, codex via refreshCodexToken, iflow adds a Basic
+    // auth header, xai/grok use their own client_id. The generic
+    // form-encoded grant with client_id "openproxy" only ever worked for
+    // Auth0-style endpoints, so route through the per-provider dispatcher.
+    let provider_specific_data = connection
+        .map(|c| c.provider_specific_data.clone())
+        .unwrap_or_default();
 
-    let resp = match client
-        .post(provider_config.token_url)
-        .form(&params)
-        .send()
-        .await
+    let refreshed = match crate::oauth::token_refresh::dispatch_oauth_refresh(
+        &provider,
+        &refresh_token,
+        &provider_specific_data,
+    )
+    .await
     {
         Ok(r) => r,
         Err(e) => {
             return make_error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("Request failed: {}", e),
-                "request_failed",
+                StatusCode::BAD_GATEWAY,
+                &format!("Refresh failed: {}", e),
+                "refresh_failed",
                 &provider,
             );
         }
     };
 
-    let token_response: TokenResponse = match resp.json().await {
-        Ok(t) => t,
-        Err(_) => {
-            return make_error_response(
-                StatusCode::BAD_REQUEST,
-                "Failed to parse token response",
-                "parse_error",
-                &provider,
-            );
-        }
+    let token_response = TokenResponse {
+        access_token: refreshed.access_token,
+        expires_in: refreshed.expires_in.map(|s| s as i64),
+        refresh_token: refreshed.refresh_token,
+        id_token: None,
+        token_type: None,
+        scope: None,
     };
 
     if let Err(e) = store_connection(&state.db, &account_id, &provider, &token_response, None).await

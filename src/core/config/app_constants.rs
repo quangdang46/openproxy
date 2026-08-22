@@ -287,18 +287,54 @@ pub fn oauth_endpoint(provider: &str) -> Option<OAuthEndpoint> {
 // ─── Kimi OAuth headers ──────────────────────────────────────────────────
 
 /// Build the custom Kimi OAuth headers identifying this client to the
-/// Kimi server. Mirrors `buildKimiHeaders()` in 9router.
-pub fn build_kimi_headers() -> serde_json::Value {
+/// Kimi server. Mirrors `buildKimiHeaders()` in 9router appConstants.js:
+///
+/// - `device_id` comes from the connection's `providerSpecificData.deviceId`
+///   (persisted at device-flow login) so the identity is stable across
+///   process restarts — a fresh id per boot looks like a new device to Kimi.
+/// - `X-Msh-Device-Name` carries the hostname.
+pub fn build_kimi_headers(device_id: Option<&str>) -> serde_json::Value {
     let timestamp_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    let resolved_id = match device_id.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => format!("kimi-{timestamp_ms}"),
+    };
+    let device_model = match std::env::consts::OS {
+        "macos" => format!("macOS {}", std::env::consts::ARCH),
+        "windows" => format!("Windows {}", std::env::consts::ARCH),
+        "linux" => format!("Linux {}", std::env::consts::ARCH),
+        other => format!("{other} {}", std::env::consts::ARCH),
+    };
     json!({
         "X-Msh-Platform": "openproxy",
         "X-Msh-Version": "2.1.2",
-        "X-Msh-Device-Model": format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
-        "X-Msh-Device-Id": format!("kimi-{timestamp_ms}"),
+        "X-Msh-Device-Name": hostname(),
+        "X-Msh-Device-Model": device_model,
+        "X-Msh-Device-Id": resolved_id,
     })
+}
+
+fn hostname() -> String {
+    hostname_cmd()
+}
+
+fn hostname_cmd() -> String {
+    #[cfg(test)]
+    {
+        "test-host".to_string()
+    }
+    #[cfg(not(test))]
+    {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
 }
 
 #[cfg(test)]

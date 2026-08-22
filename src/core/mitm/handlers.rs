@@ -18,6 +18,26 @@ pub const URL_PATTERNS: &[(&str, &[&str])] = &[
     ("cursor", &["/BidiAppend", "/RunSSE", "/RunPoll", "/Run"]),
 ];
 
+/// 9router config.js isChatRequest(): URL pattern match first; for kiro also
+/// accept IDE ≥1.0.228 which POSTs to `/` with
+/// `x-amz-target: KiroRuntimeService.GenerateAssistantResponse`.
+pub fn is_chat_request(tool: &str, url: &str, x_amz_target: Option<&str>) -> bool {
+    let patterns = URL_PATTERNS
+        .iter()
+        .find(|(t, _)| *t == tool)
+        .map(|(_, p)| *p)
+        .unwrap_or(&[]);
+    if patterns.iter().any(|p| url.contains(p)) {
+        return true;
+    }
+    if tool == "kiro" {
+        return x_amz_target
+            .unwrap_or("")
+            .contains("GenerateAssistantResponse");
+    }
+    false
+}
+
 /// Upstream host → tool mapping (9router config.js getToolForHost).
 /// Hosts are matched case-insensitively by substring.
 const TOOL_HOSTS: &[(&str, &str)] = &[

@@ -693,7 +693,10 @@ pub async fn refresh_openai_token(refresh_token: &str) -> Result<RefreshResult, 
 /// Refresh a Kimi Coding access token.
 /// Kimi OAuth merged into the dual-auth `kimi` provider (68566f5): endpoints
 /// moved to auth.kimi.com and requests carry the X-Msh-* device headers.
-pub async fn refresh_kimi_coding_token(refresh_token: &str) -> Result<RefreshResult, String> {
+pub async fn refresh_kimi_coding_token(
+    refresh_token: &str,
+    device_id: Option<&str>,
+) -> Result<RefreshResult, String> {
     let client = reqwest::Client::new();
     let mut request = client
         .post("https://auth.kimi.com/api/oauth/token")
@@ -704,8 +707,9 @@ pub async fn refresh_kimi_coding_token(refresh_token: &str) -> Result<RefreshRes
             ("refresh_token", refresh_token),
             ("client_id", "17e5f671-d194-4dfb-9706-5516cb48c098"),
         ]);
-    // X-Msh-* device headers (buildKimiHeaders parity).
-    let msh = crate::core::config::app_constants::build_kimi_headers();
+    // X-Msh-* device headers (buildKimiHeaders parity) — the device id comes
+    // from the connection's persisted psd so restarts keep the same identity.
+    let msh = crate::core::config::app_constants::build_kimi_headers(device_id);
     if let Some(obj) = msh.as_object() {
         for (key, value) in obj {
             if let Some(v) = value.as_str() {
@@ -957,9 +961,14 @@ pub async fn dispatch_oauth_refresh(
         }
         "kimi" | "kimi-coding" => {
             let rt = refresh_token.to_string();
+            let device_id = provider_specific_data
+                .get("deviceId")
+                .and_then(Value::as_str)
+                .map(String::from);
             dedup_refresh(provider, refresh_token, move || {
                 let rt = rt.clone();
-                async move { refresh_kimi_coding_token(&rt).await }
+                let device_id = device_id.clone();
+                async move { refresh_kimi_coding_token(&rt, device_id.as_deref()).await }
             })
             .await
         }

@@ -398,8 +398,53 @@ impl GrokWebExecutor {
             .send()
             .await?;
 
+        // JS grok-web.js:295-330 — map upstream failures to JSON error bodies
+        // with actionable messages (auth/429 text drives account rotation).
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let (msg, code): (&str, String) = match status {
+                401 | 403 => (
+                    "Grok auth failed — SSO cookie may be expired. Re-paste your sso cookie value from grok.com.",
+                    format!("HTTP_{status}"),
+                ),
+                429 => (
+                    "Grok rate limited. Wait a moment and retry, or rotate cookies.",
+                    format!("HTTP_{status}"),
+                ),
+                _ => (
+                    &format!("Grok returned HTTP {status}")[..],
+                    format!("HTTP_{status}"),
+                ),
+            };
+            return Ok(GrokWebExecutorResponse {
+                response: json_error(status, msg, "upstream_error", Some(&code)),
+                url,
+                headers,
+                transformed_body,
+                transport: TransportKind::Reqwest,
+            });
+        }
+
+        // grok.com replies in NDJSON (result.response.token deltas etc.).
+        // Convert to OpenAI SSE (stream) or a chat.completion JSON (non-stream)
+        // exactly like buildStreamingResponse / buildNonStreamingResponse.
+        let cid = format!(
+            "chatcmpl-grok-{}",
+            uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+        );
+        let created = chrono::Utc::now().timestamp();
+        let converted = convert_grok_response(
+            response,
+            &request.model,
+            &cid,
+            created,
+            model_info.is_thinking,
+            request.stream,
+        )
+        .await?;
+
         Ok(GrokWebExecutorResponse {
-            response: UpstreamResponse::Reqwest(response),
+            response: converted,
             url,
             headers,
             transformed_body,
@@ -1361,6 +1406,215 @@ fn sse_chunk(
     )
 }
 
+/// One parsed grok NDJSON line → what the converter should emit.
+enum GrokEvent {
+    Delta(String),
+    Thinking(String),
+    FullMessage(String),
+    Fingerprint(String),
+    Error(String),
+    Done,
+    Skip,
+}
+
+/// Parse one NDJSON line (JS extractContent per-line body, grok-web.js:113-146).
+fn parse_grok_line(
+    line: &str,
+    fingerprint: &mut String,
+    response_id: &mut String,
+    think_opened: &mut bool,
+    is_thinking_model: bool,
+) -> GrokEvent {
+    let Ok(event) = serde_json::from_str::<Value>(line) else {
+        return GrokEvent::Skip;
+    };
+    if event.get("error").is_some() {
+        let msg = event
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| {
+                format!("Grok error: {}", event.pointer("/error/code").cloned().unwrap_or(Value::Null))
+            });
+        return GrokEvent::Error(msg);
+    }
+    let Some(resp) = event.pointer("/result/response") else {
+        return GrokEvent::Skip;
+    };
+
+    if let Some(hash) = resp.pointer("/llmInfo/modelHash").and_then(Value::as_str) {
+        *fingerprint = hash.to_string();
+    }
+    if let Some(rid) = resp.get("responseId").and_then(Value::as_str) {
+        *response_id = rid.to_string();
+    }
+
+    if let Some(mr) = resp.get("modelResponse") {
+        let message = mr.get("message").and_then(Value::as_str).unwrap_or("");
+        if *think_opened && is_thinking_model && !message.is_empty() {
+            *think_opened = false;
+            return GrokEvent::Thinking(message.to_string());
+        }
+        if !message.is_empty() {
+            if let Some(h) = mr
+                .pointer("/metadata/llm_info/modelHash")
+                .and_then(Value::as_str)
+            {
+                *fingerprint = h.to_string();
+            }
+            return GrokEvent::FullMessage(message.to_string());
+        }
+        return GrokEvent::Skip;
+    }
+
+    match resp.get("token") {
+        Some(Value::String(token)) => GrokEvent::Delta(token.clone()),
+        Some(Value::Number(_)) | Some(Value::Bool(true)) => {
+            GrokEvent::Delta(resp["token"].to_string())
+        }
+        _ => GrokEvent::Skip,
+    }
+}
+
+/// Convert the grok.com NDJSON reply into an OpenAI SSE stream or a
+/// non-streaming chat.completion JSON (JS buildStreamingResponse /
+/// buildNonStreamingResponse, grok-web.js:128-240).
+async fn convert_grok_response(
+    response: reqwest::Response,
+    model: &str,
+    cid: &str,
+    created: i64,
+    is_thinking_model: bool,
+    stream: bool,
+) -> Result<UpstreamResponse, GrokWebExecutorError> {
+    use futures_util::StreamExt;
+
+    // Drain the whole NDJSON body first (grok.com sends no SSE framing).
+    let mut text = String::new();
+    let mut stream_body = response.bytes_stream();
+    while let Some(chunk) = stream_body.next().await {
+        let bytes = chunk.map_err(GrokWebExecutorError::Request)?;
+        text.push_str(&String::from_utf8_lossy(&bytes));
+    }
+
+    let mut fingerprint = String::new();
+    let mut response_id = String::new();
+    let mut think_opened = false;
+    let mut full_message = String::new();
+    let mut thinking_text = String::new();
+    let mut error_text: Option<String> = None;
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match parse_grok_line(
+            line,
+            &mut fingerprint,
+            &mut response_id,
+            &mut think_opened,
+            is_thinking_model,
+        ) {
+            GrokEvent::Delta(d) => full_message.push_str(&d),
+            GrokEvent::Thinking(t) => thinking_text.push_str(&t),
+            GrokEvent::FullMessage(m) => full_message = m,
+            GrokEvent::Fingerprint(_) => {}
+            GrokEvent::Error(e) => {
+                error_text = Some(e);
+                break;
+            }
+            GrokEvent::Done | GrokEvent::Skip => {}
+        }
+    }
+
+    let fp: Value = if fingerprint.is_empty() {
+        Value::Null
+    } else {
+        Value::String(fingerprint.clone())
+    };
+
+    let mut sse = String::new();
+    let push = |sse: &mut String, delta: Value, finish: Option<&str>| {
+        sse.push_str(&sse_chunk(cid, created, model, delta, finish));
+    };
+
+    if stream {
+        sse.push_str(&sse_chunk(
+            cid,
+            created,
+            model,
+            json!({ "role": "assistant" }),
+            None,
+        ));
+        if let Some(err) = &error_text {
+            push(
+                &mut sse,
+                json!({ "content": format!("[Error: {err}]") }),
+                None,
+            );
+        } else {
+            if !thinking_text.is_empty() {
+                push(&mut sse, json!({ "reasoning_content": thinking_text }), None);
+            }
+            if !full_message.is_empty() {
+                push(&mut sse, json!({ "content": full_message }), None);
+            }
+        }
+        let done = sse_chunk(cid, created, model, json!({}), Some("stop"));
+        // Attach the collected fingerprint to every emitted frame.
+        let done = done.replace(
+            "\"system_fingerprint\":null",
+            &format!("\"system_fingerprint\":{}", fp),
+        );
+        sse.push_str(&done);
+        sse.push_str("data: [DONE]\n\n");
+
+        let mut http_resp = http::Response::new(ReqwestBody::from(sse));
+        *http_resp.status_mut() = reqwest::StatusCode::OK;
+        http_resp.headers_mut().insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        http_resp.headers_mut().insert(
+            reqwest::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        );
+        Ok(UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)))
+    } else {
+        let content = match &error_text {
+            Some(e) => format!("[Error: {e}]"),
+            None => full_message.clone(),
+        };
+        let body = json!({
+            "id": cid,
+            "object": "chat.completion",
+            "created": created,
+            "model": model,
+            "system_fingerprint": fp,
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": content},
+                "finish_reason": "stop",
+                "logprobs": Value::Null,
+            }],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "total_tokens": 0,
+            },
+        });
+        let bytes = serde_json::to_vec(&body).unwrap_or_default();
+        let mut http_resp = http::Response::new(ReqwestBody::from(bytes));
+        *http_resp.status_mut() = reqwest::StatusCode::OK;
+        http_resp.headers_mut().insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        Ok(UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)))
+    }
+}
+
 fn json_error(status: u16, message: &str, err_type: &str, code: Option<&str>) -> UpstreamResponse {
     let mut body = serde_json::json!({ "error": { "message": message, "type": err_type } });
     if let Some(code) = code {
@@ -1738,6 +1992,83 @@ impl PerplexityWebExecutor {
         }
 
         Ok(headers)
+    }
+}
+
+#[cfg(test)]
+mod grok_ndjson_tests {
+    use super::*;
+
+    #[test]
+    fn token_delta_yields_content() {
+        let mut fp = String::new();
+        let mut rid = String::new();
+        let mut think = false;
+        let ev = parse_grok_line(
+            r#"{"result":{"response":{"token":"hello","responseId":"r1"}}}"#,
+            &mut fp,
+            &mut rid,
+            &mut think,
+            false,
+        );
+        assert!(matches!(&ev, GrokEvent::Delta(d) if d == "hello"));
+    }
+
+    #[test]
+    fn model_response_closes_thinking_then_full_message() {
+        let mut fp = String::new();
+        let mut rid = String::new();
+        let mut think = true;
+        let ev = parse_grok_line(
+            r#"{"result":{"response":{"modelResponse":{"message":"final answer"}}}}"#,
+            &mut fp,
+            &mut rid,
+            &mut think,
+            true,
+        );
+        // JS: when thinking is open on a thinking model, the full message is
+        // surfaced as reasoning first.
+        assert!(matches!(ev, GrokEvent::Thinking(_)));
+        assert!(!think);
+    }
+
+    #[test]
+    fn error_line_maps_to_error_event() {
+        let mut fp = String::new();
+        let mut rid = String::new();
+        let mut think = false;
+        let ev = parse_grok_line(
+            r#"{"error":{"message":"boom","code":42}}"#,
+            &mut fp,
+            &mut rid,
+            &mut think,
+            false,
+        );
+        assert!(matches!(&ev, GrokEvent::Error(m) if m == "boom"));
+    }
+
+    #[test]
+    fn model_hash_updates_fingerprint() {
+        let mut fp = String::new();
+        let mut rid = String::new();
+        let mut think = false;
+        let _ = parse_grok_line(
+            r#"{"result":{"response":{"llmInfo":{"modelHash":"abc123"},"token":"x"}}}"#,
+            &mut fp,
+            &mut rid,
+            &mut think,
+            false,
+        );
+        assert_eq!(fp, "abc123");
+    }
+
+    #[test]
+    fn non_json_lines_are_skipped() {
+        let mut fp = String::new();
+        let mut rid = String::new();
+        let mut think = false;
+        let ev = parse_grok_line("not json", &mut fp, &mut rid, &mut think, false);
+        assert!(matches!(ev, GrokEvent::Skip));
     }
 }
 
