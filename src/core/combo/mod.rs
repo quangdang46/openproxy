@@ -254,88 +254,160 @@ pub fn detect_required_capabilities(body: &Value) -> HashSet<String> {
     }
 
     for last_user in &trailing_users {
-        // Scan OpenAI-style content (messages/input arrays).
-        if let Some(content) = last_user.get("content") {
-            scan_content_for_capabilities(content, &mut required);
-        }
-        // For Gemini-style parts (contents array), scan each part for
-        // inlineData/fileData MIME types.
-        if let Some(parts) = last_user.get("parts").and_then(Value::as_array) {
-            for part in parts {
-                if part.get("text").and_then(Value::as_str).is_some() {
-                    continue;
-                }
-                let mime = part
-                    .get("inlineData")
-                    .and_then(|d| d.get("mimeType"))
-                    .or_else(|| part.get("fileData").and_then(|d| d.get("mimeType")))
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                if mime.starts_with("image/") {
-                    required.insert("vision".to_string());
-                } else if mime == "application/pdf" {
-                    required.insert("pdf".to_string());
-                } else if mime.starts_with("audio/") {
-                    required.insert("audioInput".to_string());
-                } else if mime.starts_with("video/") {
-                    required.insert("videoInput".to_string());
-                }
-            }
-        }
+        // Full message scan (JS scanMessage): images[], attachments,
+        // message-level media keys, array blocks, data-URI strings.
+        scan_message_capabilities(last_user, &mut required);
     }
 
     required
 }
 
-/// Scan a single content value (string or array) for vision/pdf capability signals.
-fn scan_content_for_capabilities(content: &Value, required: &mut HashSet<String>) {
-    match content {
-        Value::Array(arr) => {
-            for item in arr {
-                match item.get("type").and_then(Value::as_str) {
-                    // 9router: image_url | image | input_image
-                    Some("image_url" | "image" | "input_image") => {
-                        required.insert("vision".to_string());
-                    }
-                    // 9router: file | document | input_file
-                    Some("input_file" | "document" | "file") => {
-                        required.insert("pdf".to_string());
-                    }
-                    Some("input_audio" | "audio" | "input_audio_file") => {
-                        required.insert("audioInput".to_string());
-                    }
-                    Some("input_video" | "video") => {
-                        required.insert("videoInput".to_string());
-                    }
-                    Some("inlineData" | "fileData") => {
-                        let mime = item
-                            .get("mimeType")
-                            .or_else(|| item.get("inlineData").and_then(|d| d.get("mimeType")))
-                            .or_else(|| item.get("fileData").and_then(|d| d.get("mimeType")))
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        if mime.starts_with("image/") {
-                            required.insert("vision".to_string());
-                        } else if mime == "application/pdf" {
-                            required.insert("pdf".to_string());
-                        } else if mime.starts_with("audio/") {
-                            required.insert("audioInput".to_string());
-                        } else if mime.starts_with("video/") {
-                            required.insert("videoInput".to_string());
-                        }
-                    }
-                    _ => {}
+/// Extract a mime from a `data:…` URI (JS /^data:([^;,]+)/).
+fn data_uri_mime(value: &str) -> Option<&str> {
+    let rest = value.strip_prefix("data:")?;
+    let end = rest.find([';', ','])?;
+    Some(&rest[..end])
+}
+
+fn add_by_mime(mime: &str, required: &mut HashSet<String>) {
+    if mime.starts_with("image/") {
+        required.insert("vision".to_string());
+    } else if mime == "application/pdf" {
+        required.insert("pdf".to_string());
+    } else if mime.starts_with("audio/") {
+        required.insert("audioInput".to_string());
+    } else if mime.starts_with("video/") {
+        required.insert("videoInput".to_string());
+    }
+}
+
+/// Scan one content block (JS combo.js scanBlock, lines 117-136).
+fn scan_block(b: &Value, required: &mut HashSet<String>) {
+    let Some(obj) = b.as_object() else { return };
+    match obj.get("type").and_then(Value::as_str) {
+        Some("image_url" | "image" | "input_image") => {
+            required.insert("vision".to_string());
+        }
+        Some("input_audio" | "audio_url" | "audio") => {
+            required.insert("audioInput".to_string());
+        }
+        Some("input_video" | "video_url" | "video") => {
+            required.insert("videoInput".to_string());
+        }
+        Some("file" | "document" | "input_file") => {
+            // Infer modality from the embedded mime when available; generic
+            // files fall back to pdf.
+            let mut fmime: Option<String> = None;
+            if let Some(format) = obj
+                .get("input_audio")
+                .and_then(|ia| ia.get("format"))
+                .and_then(Value::as_str)
+            {
+                fmime = Some(format!("audio/{format}"));
+            } else if let Some(fd) = obj
+                .get("file")
+                .and_then(|f| f.get("file_data"))
+                .and_then(Value::as_str)
+            {
+                fmime = data_uri_mime(fd).map(String::from);
+            } else if let Some(mt) = obj
+                .get("source")
+                .and_then(|src| src.get("media_type"))
+                .and_then(Value::as_str)
+            {
+                fmime = Some(mt.to_string());
+            } else if let Some(sd) = obj
+                .get("source")
+                .and_then(|src| src.get("data"))
+                .and_then(Value::as_str)
+            {
+                fmime = data_uri_mime(sd).map(String::from);
+            }
+            match fmime {
+                Some(ref m) => add_by_mime(m, required),
+                None => {
+                    required.insert("pdf".to_string());
                 }
-                // Also check Claude content blocks with source
-                if let Some(source) = item.get("source") {
-                    if source.get("type").and_then(Value::as_str) == Some("url") {
-                        required.insert("vision".to_string());
+            }
+        }
+        _ => {}
+    }
+    // Gemini parts: inlineData/fileData carry a mime.
+    for key in ["inlineData", "fileData"] {
+        if let Some(mime) = obj
+            .get(key)
+            .and_then(|d| d.get("mimeType"))
+            .and_then(Value::as_str)
+        {
+            add_by_mime(mime, required);
+        }
+    }
+}
+
+/// Scan one message (JS combo.js scanMessage, lines 141-173): Ollama images[],
+/// Vercel AI SDK attachments, direct message-level media keys, array blocks,
+/// and data-URIs embedded in plain-string content.
+fn scan_message_capabilities(m: &Value, required: &mut HashSet<String>) {
+    let Some(obj) = m.as_object() else { return };
+
+    // Ollama / Hermes images array.
+    if obj
+        .get("images")
+        .and_then(Value::as_array)
+        .is_some_and(|a| !a.is_empty())
+    {
+        required.insert("vision".to_string());
+    }
+
+    // Vercel AI SDK / Hermes experimental_attachments / attachments.
+    for key in ["experimental_attachments", "attachments"] {
+        if let Some(attachments) = obj.get(key).and_then(Value::as_array) {
+            for att in attachments {
+                let Some(att_obj) = att.as_object() else { continue };
+                let url_mime = att_obj
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .and_then(data_uri_mime);
+                let mime = att_obj
+                    .get("contentType")
+                    .or_else(|| att_obj.get("mediaType"))
+                    .and_then(Value::as_str)
+                    .or(url_mime);
+                match mime {
+                    Some(m) => add_by_mime(m, required),
+                    None => {
+                        if att_obj.contains_key("url") || att_obj.contains_key("data") {
+                            required.insert("vision".to_string());
+                        }
                     }
                 }
             }
         }
-        Value::String(text) if text.contains("media://") => {
-            required.insert("vision".to_string());
+    }
+
+    // Direct message-level modality properties.
+    if obj.contains_key("image_url") || obj.contains_key("image") {
+        required.insert("vision".to_string());
+    }
+    if obj.contains_key("audio_url") || obj.contains_key("audio") {
+        required.insert("audioInput".to_string());
+    }
+
+    // Array / string content.
+    match obj.get("content") {
+        Some(Value::Array(blocks)) => {
+            for b in blocks {
+                scan_block(b, required);
+            }
+        }
+        Some(Value::String(text)) => {
+            if text.contains("data:image/") {
+                required.insert("vision".to_string());
+            } else if text.contains("data:audio/") {
+                required.insert("audioInput".to_string());
+            } else if text.contains("data:application/pdf") {
+                required.insert("pdf".to_string());
+            }
         }
         _ => {}
     }
@@ -865,6 +937,66 @@ where
 }
 
 #[cfg(test)]
+mod capability_scan_tests {
+    use super::*;
+
+    #[test]
+    fn audio_url_and_video_url_types_detected() {
+        let body = json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "audio_url", "audio_url": {"url": "https://x/a.wav"}},
+                {"type": "video_url", "video_url": {"url": "https://x/v.mp4"}}
+            ]}]
+        });
+        let caps = detect_required_capabilities(&body);
+        assert!(caps.contains("audioInput"));
+        assert!(caps.contains("videoInput"));
+    }
+
+    #[test]
+    fn claude_document_media_type_infers_modality() {
+        // source.media_type drives inference; not hardcoded pdf.
+        let body = json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "document", "source": {
+                    "type": "base64", "media_type": "application/pdf", "data": "..."}}
+            ]}, {"role": "user", "content": [
+                {"type": "document", "source": {
+                    "type": "base64", "media_type": "image/png", "data": "..."}}
+            ]}]
+        });
+        let caps = detect_required_capabilities(&body);
+        assert!(caps.contains("pdf"));
+        assert!(caps.contains("vision"));
+    }
+
+    #[test]
+    fn input_audio_format_infers_audio_mime() {
+        let body = json!({
+            "messages": [{"role": "user", "content": [
+                {"type": "file", "input_audio": {"format": "wav"}}
+            ]}]
+        });
+        assert!(detect_required_capabilities(&body).contains("audioInput"));
+    }
+
+    #[test]
+    fn ollama_images_array_and_attachments() {
+        let ollama = json!({"messages": [{"role": "user", "content": "hi", "images": ["b64"]}]});
+        assert!(detect_required_capabilities(&ollama).contains("vision"));
+        let vercel = json!({"messages": [{"role": "user", "content": "hi",
+            "experimental_attachments": [{"url": "data:application/pdf;base64,x"}]}]});
+        assert!(detect_required_capabilities(&vercel).contains("pdf"));
+    }
+
+    #[test]
+    fn data_uri_in_plain_string_content() {
+        let body = json!({"messages": [{"role": "user",
+            "content": "look at data:image/png;base64,AAA please"}]});
+        assert!(detect_required_capabilities(&body).contains("vision"));
+    }
+}
+
 mod tests {
     use super::*;
 
