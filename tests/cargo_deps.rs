@@ -28,7 +28,7 @@ fn key_dependencies_present_with_correct_versions() {
         ("url", "2"),
         ("tower-http", "0.6"),
         ("tracing-subscriber", "0.3"),
-        ("sha2", "0.10"),
+        ("sha2", "0.11"),
         ("simd-json", "0.14"),
         ("rsa", "0.9"),
         ("dotenvy", "0.15"),

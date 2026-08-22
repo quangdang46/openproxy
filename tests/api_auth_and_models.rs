@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
@@ -773,6 +774,7 @@ async fn models_availability_get_matches_js_issue_payload() {
         .oneshot(
             Request::builder()
                 .uri("/api/models/availability")
+                .header("authorization", "Bearer valid-bearer")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -838,6 +840,7 @@ async fn models_availability_post_clears_cooldown_like_js() {
             Request::builder()
                 .method("POST")
                 .uri("/api/models/availability")
+                .header("authorization", "Bearer valid-bearer")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     json!({
@@ -893,6 +896,7 @@ async fn models_availability_post_rejects_invalid_request() {
             Request::builder()
                 .method("POST")
                 .uri("/api/models/availability")
+                .header("authorization", "Bearer valid-bearer")
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "action": "wrong" }).to_string()))
                 .unwrap(),

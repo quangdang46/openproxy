@@ -1183,10 +1183,16 @@ async fn forward_with_provider_fallback(
             });
         }
 
+        // get_model_info resolves openai-compatible/anthropic-compatible
+        // nodes to their node NAME as the provider — match on name OR prefix
+        // so the node-aware DefaultExecutor path is taken for both.
         let provider_node = snapshot
             .provider_nodes
             .iter()
-            .find(|node| node.prefix.as_deref() == Some(provider))
+            .find(|node| {
+                node.prefix.as_deref() == Some(provider)
+                    || (node.r#type.ends_with("-compatible") && node.name == provider)
+            })
             .cloned();
         let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
 

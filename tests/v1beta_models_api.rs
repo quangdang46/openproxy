@@ -101,7 +101,7 @@ async fn v1beta_models_options_and_list_are_available() {
                 "custom",
                 "http://example.invalid/v1",
             )],
-            vec![connection("conn-1", "node-openai", "upstream-key")],
+            vec![connection("conn-1", "Compatible", "upstream-key")],
         )
         .await,
     );
@@ -186,7 +186,7 @@ async fn v1beta_generate_content_converts_request_and_response() {
                 "custom",
                 &format!("{}/v1", upstream.uri()),
             )],
-            vec![connection("conn-1", "node-openai", "upstream-key")],
+            vec![connection("conn-1", "Compatible", "upstream-key")],
         )
         .await,
     );
@@ -256,7 +256,7 @@ async fn v1beta_stream_generate_content_converts_sse_chunks() {
                 "custom",
                 &format!("{}/v1", upstream.uri()),
             )],
-            vec![connection("conn-1", "node-openai", "upstream-key")],
+            vec![connection("conn-1", "Compatible", "upstream-key")],
         )
         .await,
     );

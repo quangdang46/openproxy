@@ -641,7 +641,9 @@ impl Default for Settings {
             provider_strategies: BTreeMap::new(),
             combo_strategy: default_combo_strategy(),
             combo_strategies: BTreeMap::new(),
-            require_login: false,
+            // 9router settingsRepo.js:26 requireLogin defaults TRUE — a fresh
+            // install must not expose /v1/* or admin routes unauthenticated.
+            require_login: true,
             tunnel_dashboard_access: true,
             observability_enabled: true,
             observability_max_records: default_observability_max_records(),

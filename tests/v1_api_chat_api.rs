@@ -151,7 +151,7 @@ async fn v1_api_chat_defaults_to_streaming_and_returns_ollama_ndjson() {
                 "custom",
                 &format!("{}/v1", upstream.uri()),
             )],
-            vec![connection("conn-1", "node-openai", "upstream-key")],
+            vec![connection("conn-1", "Compatible", "upstream-key")],
         )
         .await,
     );
@@ -247,7 +247,7 @@ async fn v1_api_chat_non_streaming_converts_openai_json_to_ollama_json() {
                 "custom",
                 &format!("{}/v1", upstream.uri()),
             )],
-            vec![connection("conn-1", "node-openai", "upstream-key")],
+            vec![connection("conn-1", "Compatible", "upstream-key")],
         )
         .await,
     );
