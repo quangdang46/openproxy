@@ -10,6 +10,7 @@
 //! the HTTP request, handles 401 retry-after-refresh, parses the
 //! response, and emits an OpenAI-shaped response body.
 
+mod antigravity;
 mod base;
 mod black_forest_labs;
 mod cloudflare_ai;
@@ -74,6 +75,7 @@ pub fn get_image_adapter(provider: &str) -> Option<&'static dyn ImageAdapter> {
         "vercel-ai-gateway" => Some(&openai_compat::VERCEL_AI_GATEWAY),
         "gemini" => Some(&gemini::ADAPTER),
         "codex" => Some(&codex::ADAPTER),
+        "antigravity" => Some(&antigravity::ADAPTER),
         "sdwebui" => Some(&sdwebui::ADAPTER),
         "comfyui" => Some(&comfyui::ADAPTER),
         "huggingface" => Some(&huggingface::ADAPTER),

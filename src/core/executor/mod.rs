@@ -1,4 +1,4 @@
-mod antigravity;
+pub mod antigravity;
 mod api_key;
 mod azure;
 mod client_pool;
