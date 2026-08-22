@@ -258,18 +258,128 @@ pub async fn video_generations(
 pub async fn video_edits(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Result<Json<Value>, JsonRejection>,
+    request: axum::extract::Request,
 ) -> Response {
-    with_cors_response(video_create_handler(state, headers, body, "edits").await)
+    with_cors_response(video_edits_extensions_proxy(state, headers, request, "edits").await)
 }
 
 /// POST /v1/videos/extensions — async video extension job create (xAI Grok Imagine).
 pub async fn video_extensions(
     State(state): State<AppState>,
     headers: HeaderMap,
-    body: Result<Json<Value>, JsonRejection>,
+    request: axum::extract::Request,
 ) -> Response {
-    with_cors_response(video_create_handler(state, headers, body, "extensions").await)
+    with_cors_response(video_edits_extensions_proxy(state, headers, request, "extensions").await)
+}
+
+/// Raw-byte passthrough for video edits/extensions (9router
+/// videoGeneration.js:45-61 readForwardableBody): multipart/other content
+/// types are forwarded byte-for-byte (re-encoding FormData would change the
+/// multipart boundary); JSON keeps the model-prefix-strip + rotation path.
+async fn video_edits_extensions_proxy(
+    state: AppState,
+    headers: HeaderMap,
+    request: axum::extract::Request,
+    action: &'static str,
+) -> Response {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/json")
+        .to_string();
+    if content_type.starts_with("application/json") {
+        // Parse into Json<Value> and reuse the JSON pipeline.
+        let bytes = match axum::body::to_bytes(request.into_body(), 32 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid body"),
+        };
+        match serde_json::from_slice::<Value>(&bytes) {
+            Ok(v) => video_create_handler(state, headers, Ok(Json(v)), action).await,
+            Err(_) => json_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
+        }
+    } else {
+        // Multipart / other: forward raw bytes verbatim.
+        let raw_body = match axum::body::to_bytes(request.into_body(), 512 * 1024 * 1024).await {
+            Ok(b) => b,
+            Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid body"),
+        };
+        video_forward_raw(state, headers, &content_type, raw_body, action).await
+    }
+}
+
+/// Forward a non-JSON video creation payload byte-for-byte to the xAI video
+/// endpoint on the highest-priority active connection.
+async fn video_forward_raw(
+    state: AppState,
+    headers: HeaderMap,
+    content_type: &str,
+    raw_body: bytes::Bytes,
+    action: &'static str,
+) -> Response {
+    let provider = DEFAULT_VIDEO_PROVIDER;
+    let snapshot = state.db.snapshot();
+    let Some(connection) = snapshot
+        .provider_connections
+        .iter()
+        .filter(|c| c.provider == provider && c.is_active())
+        .min_by_key(|c| c.priority.unwrap_or(999))
+        .cloned()
+    else {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("No credentials for provider: {provider}"),
+        );
+    };
+
+    let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+    let client = match state.client_pool.get(provider, proxy.as_ref()) {
+        Ok(c) => c,
+        Err(e) => return json_error_response(StatusCode::BAD_GATEWAY, &format!("{e}")),
+    };
+
+    let token = connection
+        .api_key
+        .as_deref()
+        .or(connection.access_token.as_deref())
+        .unwrap_or("");
+    let url = format!("{}/{}", XAI_VIDEO_BASE_URL.trim_end_matches('/'), action);
+
+    let response = client
+        .post(&url)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(header::CONTENT_TYPE, content_type)
+        .body(raw_body)
+        .send()
+        .await;
+
+    let mut proxied = match response {
+        Ok(r) => {
+            let status =
+                StatusCode::from_u16(r.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+            let ct = r
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .cloned()
+                .unwrap_or(HeaderValue::from_static("application/json"));
+            let bytes = r.bytes().await.unwrap_or_default();
+            let mut resp = Response::new(axum::body::Body::from(bytes));
+            *resp.status_mut() = status;
+            resp.headers_mut().insert(header::CONTENT_TYPE, ct);
+            resp
+        }
+        Err(e) => {
+            return json_error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("{provider} video POST failed: {e}"),
+            )
+        }
+    };
+    if let Ok(val) = HeaderValue::from_str(&connection.id) {
+        proxied
+            .headers_mut()
+            .insert("x-openproxy-connection-id", val);
+    }
+    proxied
 }
 
 /// GET /v1/videos/{id} — poll async video job status (xAI Grok Imagine).
