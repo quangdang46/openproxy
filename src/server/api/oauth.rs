@@ -5218,6 +5218,13 @@ async fn kiro_api_key_import(
         Value::String("api_key".to_string()),
     );
     provider_specific_data.insert("provider".to_string(), Value::String("API Key".to_string()));
+    if let Some(profile_arn) = body.get("profileArn").and_then(Value::as_str) {
+        let profile_arn = profile_arn.trim();
+        if !profile_arn.is_empty() {
+            provider_specific_data
+                .insert("profileArn".to_string(), Value::String(profile_arn.to_string()));
+        }
+    }
 
     let result = state
         .db

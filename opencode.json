@@ -1,0 +1,28 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/mimo-v2.5-free",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "rm *": "ask",
+      "rmdir *": "ask"
+    },
+    "websearch": "allow",
+    "webfetch": "allow"
+  },
+  "plugin": [
+    "opencode-agent-tmux",
+    "oh-my-openagent@latest"
+  ],
+  "mcp": {
+    "context7": {
+      "type": "remote",
+      "url": "https://mcp.context7.com/mcp",
+      "headers": {
+        "CONTEXT7_API_KEY": "{env:CONTEXT7_API_KEY}"
+      }
+    }
+    
+  },
+  "provider": {}
+}

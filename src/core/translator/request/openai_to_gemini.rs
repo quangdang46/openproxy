@@ -606,8 +606,8 @@ pub const DEFAULT_THINKING_GEMINI_CLI_SIGNATURE: &str = "CiQBjz1rX/AlslZWMe5RgBt
 
 /// Core: Convert OpenAI request to Gemini format.
 fn openai_to_gemini_base(model: &str, body: &Value, stream: bool, signature: &str) -> Value {
+    let _ = model;
     let mut result = serde_json::json!({
-        "model": model,
         "contents": [],
         "generationConfig": {},
         "safetySettings": [
@@ -1027,7 +1027,8 @@ pub fn openai_to_antigravity_request(
         }
     }
 
-    // Wrap in Cloud Code envelope
+    // Cloud Code URL omits the model, so surface it inside the envelope body.
+    gemini["model"] = serde_json::json!(model);
     let inner = std::mem::replace(&mut gemini, Value::Null);
     *body = serde_json::json!({"request": inner});
 
