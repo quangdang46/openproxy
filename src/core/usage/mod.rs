@@ -22,5 +22,6 @@ mod pricing;
 pub mod quota_fetcher;
 mod tracker;
 
+pub(crate) use pricing::parse_model_pricing;
 pub use pricing::{CostModel, ModelPricing, Pricing};
 pub use tracker::{DailyUsageSummary, ProviderUsage, UsageSummary, UsageTracker};

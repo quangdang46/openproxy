@@ -482,10 +482,7 @@ impl TranslationRegistry {
         // Target-format post-hooks (9router translator/index.js:124-128).
         // preserveCacheControl follows the provider quirk (alicode / alicode-intl
         // / alims-intl carry quirks.preserveCacheControl:true).
-        if (target == Format::OpenAi
-            || target == Format::OpenAiResponses
-            || target == Format::Codex)
-            && target == Format::OpenAi
+        if target == Format::OpenAi || target == Format::OpenAiResponses || target == Format::Codex
         {
             let provider = credentials
                 .and_then(|c| c.get("provider").and_then(Value::as_str))

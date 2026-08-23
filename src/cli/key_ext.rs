@@ -257,6 +257,7 @@ async fn run_apply(db: &Db, ctx: OutputCtx, from_file: &str, prune: bool) -> any
                     machine_id: Some(machine_id),
                     is_active: Some(item.is_active.unwrap_or(true)),
                     created_at: Some(now.clone()),
+                    monthly_budget_usd: None,
                     extra: std::collections::BTreeMap::new(),
                 });
                 diff.created.push(item.name.clone());

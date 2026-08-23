@@ -14,11 +14,24 @@ use serde_json::{json, Value};
 
 use crate::server::api::oauth::{get_refresh_lock_key, REFRESH_LOCKS};
 use crate::server::state::AppState;
-use crate::types::ProviderConnection;
+use crate::types::{CustomModel, ProviderConnection};
 
 const OPENAI_COMPATIBLE_PREFIX: &str = "openai-compatible-";
 const ANTHROPIC_COMPATIBLE_PREFIX: &str = "anthropic-compatible-";
 const OLLAMA_LOCAL_DEFAULT_HOST: &str = "http://localhost:11434";
+/// Live-verified: `/v1/models` → 200 OpenAI shape (`{"object":"list","data":[…]}`),
+/// with or without a Bearer key. `/api/v1/models` → 404.
+const OLLAMA_CLOUD_OPENAI_MODELS_URL: &str = "https://ollama.com/v1/models";
+/// Live-verified: → 200 Ollama-native shape (`{"models":[{"name":…,"model":…}]}`),
+/// no `data` envelope, hence `parse_ollama_native_models`.
+const OLLAMA_CLOUD_NATIVE_TAGS_URL: &str = "https://ollama.com/api/tags";
+
+/// Live-verified: no key → 403 PERMISSION_DENIED; `x-goog-api-key: <bogus>` →
+/// 400 API_KEY_INVALID, i.e. the header is honoured. Never use `?key=`, which
+/// would leak the key into logged URLs.
+const GEMINI_API_MODELS_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const GEMINI_API_MODELS_PAGE_SIZE: &str = "1000";
+const GEMINI_API_MODELS_MAX_PAGES: usize = 10;
 
 const GEMINI_CLIENT_ID: &str =
     "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
@@ -32,6 +45,9 @@ const KIRO_MODELS_TARGET: &str = "AmazonCodeWhispererService.ListAvailableModels
 
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_STALE_DAYS: i64 = 8;
+
+const OPENROUTER_REFERER: &str = "https://endpoint-proxy.local";
+const OPENROUTER_TITLE: &str = "Endpoint Proxy";
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -75,6 +91,142 @@ pub(super) async fn list_provider_models(
         Ok(payload) => Json(payload).into_response(),
         Err(error) => json_error(error.status, &error.message),
     }
+}
+
+pub(super) async fn import_provider_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
+    let snapshot = state.db.snapshot();
+    let Some(connection) = snapshot
+        .provider_connections
+        .iter()
+        .find(|connection| connection.id == id)
+        .cloned()
+    else {
+        return json_error(StatusCode::NOT_FOUND, "Connection not found");
+    };
+
+    let provider = connection.provider.clone();
+    let provider_alias = storage_alias_for_provider(&provider);
+    let legacy_alias = connection.name.clone().unwrap_or_else(|| provider.clone());
+    if legacy_alias != provider_alias {
+        let has_legacy = state
+            .db
+            .snapshot()
+            .custom_models
+            .iter()
+            .any(|m| m.provider_alias == legacy_alias);
+        if has_legacy {
+            let legacy = legacy_alias.clone();
+            let correct = provider_alias.clone();
+            let _ = state
+                .db
+                .update(move |db| {
+                    for m in &mut db.custom_models {
+                        if m.provider_alias == legacy {
+                            m.provider_alias = correct.clone();
+                        }
+                    }
+                })
+                .await;
+        }
+    }
+
+    let Ok(payload) = fetch_provider_models_response(&state, &connection).await else {
+        let snapshot = state.db.snapshot();
+        let existing = snapshot
+            .custom_models
+            .iter()
+            .filter(|m| m.provider_alias == provider_alias)
+            .count();
+        return Json(json!({
+            "provider": provider,
+            "connectionId": connection.id,
+            "imported": 0,
+            "skipped": existing,
+            "total": existing,
+        }))
+        .into_response();
+    };
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut imported = 0usize;
+    let mut skipped = 0usize;
+    let total = payload.models.len();
+
+    for model in payload.models {
+        let model_id = model.id.trim().to_string();
+        if model_id.is_empty() {
+            continue;
+        }
+
+        // Snapshot read to decide import vs skip (mirrors create_custom_model).
+        let exists_before =
+            state.db.snapshot().custom_models.iter().any(|m| {
+                m.provider_alias == provider_alias && m.id == model_id && m.r#type == "llm"
+            });
+        if exists_before {
+            skipped += 1;
+            continue;
+        }
+
+        let mut extra = model.extra.clone();
+        extra
+            .entry("source".to_string())
+            .or_insert_with(|| serde_json::Value::String("imported".to_string()));
+        extra
+            .entry("importedAt".to_string())
+            .or_insert_with(|| serde_json::Value::String(now.clone()));
+
+        let name = if model.name.is_empty() {
+            None
+        } else {
+            Some(model.name)
+        };
+
+        let model_id_owned = model_id.clone();
+        let alias = provider_alias.clone();
+        let result = state
+            .db
+            .update(move |db| {
+                // Re-check inside the write lock to guard a concurrent insert.
+                let exists = db.custom_models.iter().any(|m| {
+                    m.provider_alias == alias && m.id == model_id_owned && m.r#type == "llm"
+                });
+                if exists {
+                    return;
+                }
+
+                db.custom_models.push(CustomModel {
+                    provider_alias: alias,
+                    id: model_id_owned,
+                    r#type: "llm".to_string(),
+                    name,
+                    extra,
+                });
+            })
+            .await;
+
+        match result {
+            Ok(_) => imported += 1,
+            Err(_) => skipped += 1,
+        }
+    }
+
+    Json(json!({
+        "provider": provider,
+        "connectionId": connection.id,
+        "imported": imported,
+        "skipped": skipped,
+        "total": total,
+    }))
+    .into_response()
 }
 
 pub(super) async fn fetch_compatible_model_ids(connection: &ProviderConnection) -> Vec<String> {
@@ -195,6 +347,7 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "baseten"
                 | "nous-research"
                 | "glhf"
+                | "kilocode"
         )
 }
 
@@ -318,15 +471,10 @@ async fn fetch_provider_models_response(
                 .await
         }
         "openrouter" => {
-            fetch_first_party_openai_style_models(connection, "https://openrouter.ai/api/v1/models")
-                .await
+            fetch_openrouter_models(connection, "https://openrouter.ai/api/v1/models").await
         }
         "opencode-zen" => {
-            // OpenCode Zen exposes an OpenAI-compatible models listing. Same
-            // endpoint the dashboard's modelsFetcher uses for the `opencode`
-            // free provider (https://opencode.ai/zen/v1/models).
-            fetch_first_party_openai_style_models(connection, "https://opencode.ai/zen/v1/models")
-                .await
+            fetch_public_openai_style_models(connection, "https://opencode.ai/zen/v1/models").await
         }
         "alicode" => {
             fetch_first_party_openai_style_models(
@@ -418,9 +566,7 @@ async fn fetch_provider_models_response(
             )
             .await
         }
-        "ollama" => {
-            fetch_first_party_openai_style_models(connection, "https://ollama.com/api/tags").await
-        }
+        "ollama" => fetch_ollama_cloud_models(connection).await,
         "nanobanana" => {
             fetch_first_party_openai_style_models(
                 connection,
@@ -528,6 +674,17 @@ async fn fetch_provider_models_response(
             )
             .await
         }
+        "kilocode" => {
+            // Kilo Code exposes an OpenAI-compatible models listing at
+            // https://api.kilo.ai/api/openrouter/models (without /v1 — the
+            // /v1/models path returns 405). Returns 368 models including
+            // :free variants like stepfun/step-3.7-flash:free.
+            fetch_first_party_openai_style_models(
+                connection,
+                "https://api.kilo.ai/api/openrouter/models",
+            )
+            .await
+        }
         other => Err(RouteError::bad_request(format!(
             "Provider {other} does not support models listing"
         ))),
@@ -541,6 +698,53 @@ async fn fetch_first_party_openai_style_models(
     let token = primary_token(connection)
         .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
     fetch_openai_style_models_with_bearer(connection, url, &token).await
+}
+
+/// Models listing for a `noAuth: true` provider (OpenCode Zen): the catalog is
+/// public, so a credential-less connection must still discover models.
+async fn fetch_public_openai_style_models(
+    connection: &ProviderConnection,
+    url: &str,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let client = http_client()?;
+    let mut request = client.get(url).header(CONTENT_TYPE, "application/json");
+    if let Some(token) = primary_token(connection) {
+        request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
+    Ok(response_with_models(
+        connection,
+        parse_openai_style_models(&payload),
+        None,
+    ))
+}
+
+/// OpenRouter listing carries the same `HTTP-Referer` + `X-Title` attribution
+/// as the chat executor. OpenRouter-fronted gateways (kilocode, nvidia, llm7)
+/// deliberately omit them.
+async fn fetch_openrouter_models(
+    connection: &ProviderConnection,
+    url: &str,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let token = primary_token(connection)
+        .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
+    let client = http_client()?;
+    let request = client
+        .get(url)
+        .header(CONTENT_TYPE, "application/json")
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .header("HTTP-Referer", OPENROUTER_REFERER)
+        .header("X-Title", OPENROUTER_TITLE);
+    let payload = fetch_json(request)
+        .await
+        .map_err(map_upstream_route_error)?;
+    Ok(response_with_models(
+        connection,
+        parse_openai_style_models(&payload),
+        None,
+    ))
 }
 
 async fn fetch_openai_compatible_models(
@@ -615,18 +819,138 @@ async fn fetch_gemini_api_models(
     token: &str,
 ) -> Result<ProviderModelsResponse, RouteError> {
     let client = http_client()?;
-    let request = client
-        .get("https://generativelanguage.googleapis.com/v1beta/models")
-        .query(&[("key", token)])
-        .header(CONTENT_TYPE, "application/json");
-    let payload = fetch_json(request)
-        .await
-        .map_err(map_upstream_route_error)?;
-    Ok(response_with_models(
-        connection,
-        parse_array_models(payload.get("models")),
-        None,
-    ))
+    let mut models: Vec<ProviderModel> = Vec::new();
+    let mut page_token: Option<String> = None;
+
+    for _ in 0..GEMINI_API_MODELS_MAX_PAGES {
+        let mut query: Vec<(&str, String)> =
+            vec![("pageSize", GEMINI_API_MODELS_PAGE_SIZE.to_string())];
+        if let Some(next) = page_token.as_deref() {
+            query.push(("pageToken", next.to_string()));
+        }
+
+        let request = client
+            .get(GEMINI_API_MODELS_URL)
+            .query(&query)
+            .header(CONTENT_TYPE, "application/json")
+            .header("x-goog-api-key", token);
+        let payload = fetch_json(request).await.map_err(map_gemini_fetch_error)?;
+
+        models.extend(parse_gemini_api_models(&payload));
+
+        page_token = payload
+            .get("nextPageToken")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|next| !next.is_empty())
+            .map(str::to_string);
+        if page_token.is_none() {
+            break;
+        }
+    }
+
+    Ok(response_with_models(connection, models, None))
+}
+
+/// `models.list` returns `{"models":[{"name":"models/gemini-2.5-flash",
+/// "displayName":…,"supportedGenerationMethods":["generateContent",…]}]}`.
+/// The `models/` prefix must be stripped (the chat path re-adds it when
+/// building `…/v1beta/models/<id>:generateContent`), and entries that cannot
+/// serve `generateContent` — embedders, `aqa`, prediction-only models — must
+/// not enter the chat catalog.
+fn parse_gemini_api_models(payload: &Value) -> Vec<ProviderModel> {
+    payload
+        .get("models")
+        .and_then(Value::as_array)
+        .map(|items| items.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|item| {
+            let object = item.as_object()?;
+            let id = object
+                .get("name")
+                .or_else(|| object.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .map(|name| name.strip_prefix("models/").unwrap_or(name))
+                .filter(|id| !id.is_empty())?;
+
+            if let Some(methods) = object
+                .get("supportedGenerationMethods")
+                .and_then(Value::as_array)
+            {
+                let supports_chat = methods.iter().any(|method| {
+                    matches!(
+                        method.as_str(),
+                        Some("generateContent") | Some("streamGenerateContent")
+                    )
+                });
+                if !supports_chat {
+                    return None;
+                }
+            }
+
+            let extra = object
+                .iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "id" | "name" | "displayName"))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+
+            Some(ProviderModel {
+                id: id.to_string(),
+                name: object
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(id)
+                    .to_string(),
+                extra,
+            })
+        })
+        .collect()
+}
+
+/// Keeps Google's own status (401 invalid credential, 403 PERMISSION_DENIED for
+/// a missing key, 400 API_KEY_INVALID) instead of collapsing to a bare 500, and
+/// points the operator at the fix.
+fn map_gemini_fetch_error(error: FetchJsonError) -> RouteError {
+    match error {
+        FetchJsonError::Http(status, body) => {
+            let detail = gemini_error_detail(&body);
+            let hint = if matches!(
+                status,
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::BAD_REQUEST
+            ) {
+                " — check the Gemini API key (https://aistudio.google.com/app/apikey)"
+            } else {
+                ""
+            };
+            RouteError::new(
+                status,
+                format!(
+                    "Failed to fetch Gemini models: {} {detail}{hint}",
+                    status.as_u16()
+                ),
+            )
+        }
+        FetchJsonError::Network(message) | FetchJsonError::Decode(message) => {
+            RouteError::internal(format!("Failed to fetch Gemini models: {message}"))
+        }
+    }
+}
+
+fn gemini_error_detail(body: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| body.chars().take(200).collect())
 }
 
 async fn fetch_codex_models_with_token(
@@ -875,7 +1199,62 @@ async fn fetch_ollama_local_models(
         .map_err(map_upstream_route_error)?;
     Ok(response_with_models(
         connection,
-        parse_openai_style_models(&payload),
+        parse_ollama_native_models(&payload),
+        None,
+    ))
+}
+
+/// Ollama Cloud catalog. Prefers the OpenAI-shaped `/v1/models` listing (same
+/// host and version prefix the chat endpoint uses) and falls back to the native
+/// `/api/tags` shape, which needs `parse_ollama_native_models`.
+///
+/// The Bearer key is optional here: both endpoints answer 200 unauthenticated,
+/// so a fresh connection can import its catalog before the key is pasted.
+async fn fetch_ollama_cloud_models(
+    connection: &ProviderConnection,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let token = primary_token(connection);
+    let client = http_client()?;
+
+    let mut request = client
+        .get(OLLAMA_CLOUD_OPENAI_MODELS_URL)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json");
+    if let Some(token) = token.as_deref() {
+        request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    match fetch_json(request).await {
+        Ok(payload) => {
+            let models = parse_openai_style_models(&payload);
+            if !models.is_empty() {
+                return Ok(response_with_models(connection, models, None));
+            }
+        }
+        Err(error) => {
+            tracing::debug!(
+                "Ollama Cloud {} failed ({}), falling back to {}",
+                OLLAMA_CLOUD_OPENAI_MODELS_URL,
+                fetch_json_error_message(error),
+                OLLAMA_CLOUD_NATIVE_TAGS_URL
+            );
+        }
+    }
+
+    let mut fallback = client
+        .get(OLLAMA_CLOUD_NATIVE_TAGS_URL)
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json");
+    if let Some(token) = token.as_deref() {
+        fallback = fallback.header(AUTHORIZATION, format!("Bearer {token}"));
+    }
+
+    let payload = fetch_json(fallback)
+        .await
+        .map_err(map_upstream_route_error)?;
+    Ok(response_with_models(
+        connection,
+        parse_ollama_native_models(&payload),
         None,
     ))
 }
@@ -1114,6 +1493,50 @@ fn parse_openai_style_models(payload: &Value) -> Vec<ProviderModel> {
             .or_else(|| payload.get("models"))
             .or_else(|| payload.get("results")),
     )
+}
+
+/// Ollama-native `/api/tags` shape: `{"models":[{"name":"gpt-oss:120b",
+/// "model":"gpt-oss:120b","modified_at":…,"size":…,"digest":…,"details":{…}}]}`.
+/// Both `name` and `model` carry the tag, and there is no `data` envelope or
+/// `id` field, so the OpenAI parser's `id` lookup never applies.
+fn parse_ollama_native_models(payload: &Value) -> Vec<ProviderModel> {
+    let items = payload
+        .get("models")
+        .or_else(|| payload.get("data"))
+        .and_then(Value::as_array)
+        .map(|items| items.as_slice())
+        .or_else(|| payload.as_array().map(|items| items.as_slice()))
+        .unwrap_or_default();
+
+    items
+        .iter()
+        .filter_map(|item| {
+            if item.is_string() {
+                return provider_model_from_value(item);
+            }
+
+            let object = item.as_object()?;
+            let id = object
+                .get("model")
+                .or_else(|| object.get("name"))
+                .or_else(|| object.get("id"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())?;
+
+            let extra = object
+                .iter()
+                .filter(|(key, _)| !matches!(key.as_str(), "id" | "model" | "name"))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect();
+
+            Some(ProviderModel {
+                id: id.to_string(),
+                name: id.to_string(),
+                extra,
+            })
+        })
+        .collect()
 }
 
 fn parse_array_models(value: Option<&Value>) -> Vec<ProviderModel> {
@@ -1375,6 +1798,17 @@ fn is_anthropic_compatible_provider(provider: &str) -> bool {
     provider.starts_with(ANTHROPIC_COMPATIBLE_PREFIX)
 }
 
+fn storage_alias_for_provider(provider: &str) -> String {
+    if is_openai_compatible_provider(provider) || is_anthropic_compatible_provider(provider) {
+        return provider.to_string();
+    }
+    let catalog = crate::core::model::catalog::provider_catalog();
+    if let Some(alias) = catalog.static_alias_for_provider(provider) {
+        return alias.to_string();
+    }
+    provider.to_string()
+}
+
 fn dedupe_model_ids(mut ids: Vec<String>) -> Vec<String> {
     let mut seen = std::collections::BTreeSet::new();
     ids.retain(|id| seen.insert(id.clone()));
@@ -1497,10 +1931,177 @@ mod tests {
         assert!(supports_models_discovery("opencode-zen"));
         assert!(supports_models_discovery("nvidia"));
         assert!(supports_models_discovery("openrouter"));
+        assert!(supports_models_discovery("kilocode"));
         assert!(supports_models_discovery("ollama-local"));
         assert!(supports_models_discovery("openai-compatible-chat"));
         assert!(supports_models_discovery("anthropic-compatible-chat"));
         assert!(!supports_models_discovery("totally-unknown-provider"));
+    }
+
+    #[test]
+    fn ollama_cloud_openai_shape_parses_tag_ids() {
+        // Live shape of https://ollama.com/v1/models.
+        let payload = json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-oss:120b", "object": "model", "created": 1754352000, "owned_by": "ollama" },
+                { "id": "glm-5.2", "object": "model", "created": 1781622000, "owned_by": "ollama" }
+            ]
+        });
+
+        let ids: Vec<String> = parse_openai_style_models(&payload)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(ids, vec!["gpt-oss:120b", "glm-5.2"]);
+    }
+
+    #[test]
+    fn ollama_native_tags_shape_parses_without_data_envelope() {
+        // Live shape of https://ollama.com/api/tags (and the local daemon's).
+        let payload = json!({
+            "models": [
+                { "name": "gpt-oss:120b", "model": "gpt-oss:120b", "size": 65290180781u64,
+                  "digest": "d98fe6ba01e6", "details": { "family": "" } },
+                { "name": "kimi-k2.7-code", "model": "kimi-k2.7-code", "size": 0 }
+            ]
+        });
+
+        let models = parse_ollama_native_models(&payload);
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-oss:120b", "kimi-k2.7-code"]);
+        assert_eq!(models[0].name, "gpt-oss:120b");
+        assert!(models[0].extra.contains_key("digest"));
+        assert!(!models[0].extra.contains_key("model"));
+    }
+
+    #[test]
+    fn ollama_native_parser_still_reads_openai_shape() {
+        let payload = json!({ "data": [{ "id": "llama3.2:3b" }] });
+        let ids: Vec<String> = parse_ollama_native_models(&payload)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(ids, vec!["llama3.2:3b"]);
+    }
+
+    #[test]
+    fn gemini_models_list_strips_prefix_and_drops_non_chat_models() {
+        // Live shape of GET /v1beta/models (x-goog-api-key auth).
+        let payload = json!({
+            "models": [
+                {
+                    "name": "models/gemini-2.5-flash",
+                    "displayName": "Gemini 2.5 Flash",
+                    "inputTokenLimit": 1048576,
+                    "supportedGenerationMethods": ["generateContent", "countTokens"]
+                },
+                {
+                    "name": "models/text-embedding-004",
+                    "displayName": "Text Embedding 004",
+                    "supportedGenerationMethods": ["embedContent"]
+                },
+                {
+                    "name": "models/aqa",
+                    "displayName": "Model that performs Attributed Question Answering",
+                    "supportedGenerationMethods": ["generateAnswer"]
+                },
+                {
+                    "name": "models/gemini-3-pro-preview",
+                    "displayName": "Gemini 3 Pro Preview"
+                }
+            ]
+        });
+
+        let models = parse_gemini_api_models(&payload);
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["gemini-2.5-flash", "gemini-3-pro-preview"]);
+        assert_eq!(models[0].name, "Gemini 2.5 Flash");
+        assert!(models[0].extra.contains_key("inputTokenLimit"));
+    }
+
+    #[test]
+    fn gemini_fetch_error_preserves_status_and_upstream_message() {
+        let error = FetchJsonError::Http(
+            StatusCode::FORBIDDEN,
+            json!({
+                "error": {
+                    "code": 403,
+                    "message": "Method doesn't allow unregistered callers",
+                    "status": "PERMISSION_DENIED"
+                }
+            })
+            .to_string(),
+        );
+
+        let mapped = map_gemini_fetch_error(error);
+        assert_eq!(mapped.status, StatusCode::FORBIDDEN);
+        assert!(mapped.message.contains("unregistered callers"));
+        assert!(mapped.message.contains("aistudio.google.com"));
+    }
+
+    #[test]
+    fn openrouter_and_kilocode_free_variants_survive_parsing() {
+        // Live shapes: openrouter.ai/api/v1/models and
+        // api.kilo.ai/api/openrouter/models both wrap entries in `data` and
+        // expose `:free` ids that discovery must keep.
+        let payload = json!({
+            "data": [
+                { "id": "tencent/hy3:free", "name": "HY3 (free)", "context_length": 262144,
+                  "pricing": { "prompt": "0", "completion": "0" } },
+                { "id": "stepfun/step-3.7-flash:free", "name": "Step 3.7 Flash (free)" },
+                { "id": "anthropic/claude-opus-4.5", "name": "Claude Opus 4.5" }
+            ]
+        });
+
+        let ids: Vec<String> = parse_openai_style_models(&payload)
+            .into_iter()
+            .map(|model| model.id)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "tencent/hy3:free",
+                "stepfun/step-3.7-flash:free",
+                "anthropic/claude-opus-4.5"
+            ]
+        );
+    }
+
+    #[test]
+    fn opencode_zen_list_shape_parses_without_prefix_munging() {
+        // Live shape: {"object":"list","data":[{"id":"gpt-5.6-sol","object":"model",…}]}
+        let payload = json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-5.6-sol", "object": "model", "owned_by": "opencode" },
+                { "id": "claude-opus-5", "object": "model", "owned_by": "opencode" },
+                { "id": "hy3-free", "object": "model", "owned_by": "opencode" }
+            ]
+        });
+
+        let models = parse_openai_style_models(&payload);
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpt-5.6-sol", "claude-opus-5", "hy3-free"]);
+        assert_eq!(models[0].name, "gpt-5.6-sol");
+    }
+
+    #[test]
+    fn opencode_zen_discovery_does_not_require_a_token() {
+        // noAuth provider: primary_token() is empty yet discovery must proceed.
+        let connection = connection("opencode-zen");
+        assert!(primary_token(&connection).is_none());
+        assert!(supports_models_discovery("opencode-zen"));
+    }
+
+    #[test]
+    fn openrouter_attribution_matches_chat_executor_values() {
+        assert_eq!(OPENROUTER_REFERER, "https://endpoint-proxy.local");
+        assert_eq!(OPENROUTER_TITLE, "Endpoint Proxy");
+        assert_eq!(
+            crate::core::executor::provider_config_base_url("openrouter").as_deref(),
+            Some("https://openrouter.ai/api/v1/chat/completions")
+        );
     }
 
     #[test]
@@ -1652,5 +2253,76 @@ mod tests {
             models[1].extra.get("upstreamModelId"),
             Some(&Value::String("gpt-5.5".to_string()))
         );
+    }
+
+    #[test]
+    fn import_tags_models_with_source_imported() {
+        let model = ProviderModel {
+            id: "meta/llama-3.1-8b".to_string(),
+            name: "Llama 3.1 8B".to_string(),
+            extra: BTreeMap::from([("context_length".to_string(), Value::from(131_072u64))]),
+        };
+        let now = "2026-08-22T00:00:00Z".to_string();
+
+        let mut extra = model.extra.clone();
+        extra
+            .entry("source".to_string())
+            .or_insert_with(|| Value::String("imported".to_string()));
+        extra
+            .entry("importedAt".to_string())
+            .or_insert_with(|| Value::String(now.clone()));
+
+        let name = if model.name.is_empty() {
+            None
+        } else {
+            Some(model.name)
+        };
+        let custom = CustomModel {
+            provider_alias: "nvidia".to_string(),
+            id: model.id.trim().to_string(),
+            r#type: "llm".to_string(),
+            name,
+            extra,
+        };
+
+        assert_eq!(custom.provider_alias, "nvidia");
+        assert_eq!(custom.id, "meta/llama-3.1-8b");
+        assert_eq!(custom.r#type, "llm");
+        assert_eq!(custom.name.as_deref(), Some("Llama 3.1 8B"));
+        assert_eq!(
+            custom.extra.get("source").unwrap().as_str(),
+            Some("imported")
+        );
+        assert_eq!(
+            custom.extra.get("importedAt").unwrap().as_str(),
+            Some("2026-08-22T00:00:00Z")
+        );
+        assert_eq!(
+            custom.extra.get("context_length").unwrap().as_u64(),
+            Some(131_072)
+        );
+    }
+
+    #[test]
+    fn import_skip_check_matches_existing_custom_model() {
+        let existing = CustomModel {
+            provider_alias: "nvidia".to_string(),
+            id: "meta/llama-3.1-8b".to_string(),
+            r#type: "llm".to_string(),
+            name: None,
+            extra: BTreeMap::new(),
+        };
+        let provider_alias = "nvidia".to_string();
+        let model_id = "meta/llama-3.1-8b".to_string();
+
+        let exists = [existing.clone()]
+            .iter()
+            .any(|m| m.provider_alias == provider_alias && m.id == model_id && m.r#type == "llm");
+        assert!(exists, "existing (provider_alias, id, type) should match");
+
+        let missing = [existing.clone()].iter().any(|m| {
+            m.provider_alias == provider_alias && m.id == "different/model" && m.r#type == "llm"
+        });
+        assert!(!missing, "different id should not match");
     }
 }

@@ -2,6 +2,9 @@ import { Suspense, useState, useEffect } from "react";
 // import { useSearchParams, useRouter } from "next/navigation";  // ported: next.js -> Astro+React
 import { UsageStats, RequestLogger, CardSkeleton, SegmentedControl } from "@/shared/components";
 import RequestDetailsTab from "@/components/usage/RequestDetailsTab";
+import ProviderBreakdownTable from "@/components/usage/ProviderBreakdownTable";
+import UsageAnalyticsGrid from "@/components/usage/UsageAnalyticsGrid";
+import CompressionStats from "@/components/usage/CompressionStats";
 
 const PERIODS = [
   { value: "today", label: "Today" },
@@ -40,9 +43,11 @@ function UsageContent() {
   const [period, setPeriod] = useState("today");
 
   const tabFromUrl = searchParams.get("tab");
-  const activeTab = tabFromUrl && ["overview", "logs", "details"].includes(tabFromUrl)
-    ? tabFromUrl
-    : "overview";
+  const activeTab =
+    tabFromUrl &&
+    ["overview", "logs", "details", "providers", "analytics", "compression"].includes(tabFromUrl)
+      ? tabFromUrl
+      : "overview";
 
   const handleTabChange = (value: string) => {
     if (value === activeTab) return;
@@ -60,6 +65,9 @@ function UsageContent() {
         <SegmentedControl
           options={[
             { value: "overview", label: "Overview" },
+            { value: "providers", label: "Providers" },
+            { value: "analytics", label: "Analytics" },
+            { value: "compression", label: "Compression" },
             { value: "details", label: "Details" },
           ]}
           value={activeTab}
@@ -87,6 +95,9 @@ function UsageContent() {
             </Suspense>
           )}
           {activeTab === "logs" && <RequestLogger />}
+          {activeTab === "providers" && <ProviderBreakdownTable period={period} />}
+          {activeTab === "analytics" && <UsageAnalyticsGrid period={period} />}
+          {activeTab === "compression" && <CompressionStats period={period} />}
           {activeTab === "details" && <RequestDetailsTab />}
         </>
       )}

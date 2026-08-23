@@ -14,7 +14,9 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::core::combo::{check_fallback_error, get_combo_models_from_data, ComboStrategy};
+use crate::core::combo::{
+    check_fallback_error, get_combo_models_from_data, strategy_for_combo, ComboStrategy,
+};
 use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
@@ -110,7 +112,7 @@ async fn handle_web_fetch(
 
     // ── 4. Combo detection (baseline parity) ────────────────────────────────
     if let Some(combo_models) = get_combo_models_from_data(&provider_input, &snapshot.combos) {
-        let strategy = combo_strategy_for(&snapshot, &provider_input);
+        let strategy = strategy_for_combo(&snapshot, &provider_input);
         let fetch_state = state.clone();
         let req_url = url.clone();
         let req_format = format.to_string();
@@ -186,29 +188,6 @@ async fn execute_combo_fetch(
         earliest_retry_after: e.earliest_retry_after,
         upstream_body: e.upstream_body,
     })
-}
-
-fn combo_strategy_for(snapshot: &crate::types::AppDb, combo_name: &str) -> ComboStrategy {
-    let value = snapshot
-        .settings
-        .combo_strategies
-        .get(combo_name)
-        .map(|e| e.strategy_name())
-        .unwrap_or(snapshot.settings.combo_strategy.as_str());
-
-    if value.eq_ignore_ascii_case("round-robin") {
-        ComboStrategy::RoundRobin
-    } else if value.eq_ignore_ascii_case("fusion") {
-        ComboStrategy::Fusion
-    } else if value.eq_ignore_ascii_case("auto-combo") {
-        ComboStrategy::AutoCombo
-    } else if value.eq_ignore_ascii_case("hedging") {
-        ComboStrategy::Hedging
-    } else if value.eq_ignore_ascii_case("shadow") {
-        ComboStrategy::Shadow
-    } else {
-        ComboStrategy::Fallback
-    }
 }
 
 // ─── Single provider execution ───────────────────────────────────────────────

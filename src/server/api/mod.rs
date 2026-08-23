@@ -1,6 +1,7 @@
 pub mod a2a;
 pub mod admin_items;
 mod auth;
+pub mod budget_guard;
 pub mod chat;
 pub mod chat_search;
 pub mod cli_tools;
@@ -358,6 +359,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route("/api/settings/proxy-test", post(proxy_test_api))
         .route("/api/version", get(get_version_api))
         .route("/api/version/update", post(version_update_api))
+        .route("/api/cache/stats", get(chat::cache_stats))
         .route(
             "/api/settings/database",
             get(settings_database_export_api).post(settings_database_import_api),
@@ -419,12 +421,25 @@ async fn v1_root() -> Response {
     .into_response()
 }
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse::new("api"))
+/// Liveness probe plus per-provider health summary.
+///
+/// The `status` / `component` keys are unchanged for backwards compatibility;
+/// `providers` is additive and reports the health daemon's latest verdicts
+/// (counts per status and which providers are inside a degrade window).
+async fn health(State(state): State<AppState>) -> Response {
+    let base = HealthResponse::new("api");
+    let summary = state.health.summary();
+    Json(json!({
+        "status": base.status,
+        "component": base.component,
+        "providers": summary,
+    }))
+    .into_response()
 }
 
-async fn api_health() -> Response {
-    Json(json!({ "ok": true })).into_response()
+async fn api_health(State(state): State<AppState>) -> Response {
+    let summary = state.health.summary();
+    Json(json!({ "ok": true, "providers": summary })).into_response()
 }
 
 async fn api_catalog() -> Response {
@@ -1351,6 +1366,9 @@ struct CreateComboRequest {
     #[serde(default)]
     models: Vec<String>,
     kind: Option<String>,
+    /// Free-form extra fields (e.g. `strategy`) preserved on the created combo.
+    #[serde(default)]
+    extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 async fn create_combo_api(
@@ -1413,7 +1431,7 @@ async fn create_combo_api(
         kind: req.kind.filter(|kind| !kind.is_empty()),
         created_at: Some(now.clone()),
         updated_at: Some(now),
-        extra: std::collections::BTreeMap::new(),
+        extra: req.extra,
     };
 
     let result = state
@@ -1553,6 +1571,8 @@ async fn list_keys_api(State(state): State<AppState>, headers: HeaderMap) -> Res
 #[derive(Debug, Deserialize)]
 struct CreateKeyRequest {
     name: Option<String>,
+    #[serde(default)]
+    monthly_budget_usd: Option<f64>,
 }
 
 async fn create_key_api(
@@ -1596,6 +1616,7 @@ async fn create_key_api(
         machine_id: Some(machine_id),
         is_active: Some(true),
         created_at: Some(now),
+        monthly_budget_usd: req.monthly_budget_usd,
         extra: std::collections::BTreeMap::new(),
     };
 
@@ -1631,6 +1652,7 @@ async fn create_key_api(
 struct UpdateKeyRequest {
     name: Option<String>,
     is_active: Option<bool>,
+    monthly_budget_usd: Option<f64>,
 }
 
 async fn update_key_api(
@@ -1663,6 +1685,9 @@ async fn update_key_api(
                 }
                 if let Some(is_active) = req.is_active {
                     key.is_active = Some(is_active);
+                }
+                if req.monthly_budget_usd.is_some() {
+                    key.monthly_budget_usd = req.monthly_budget_usd;
                 }
             }
         })

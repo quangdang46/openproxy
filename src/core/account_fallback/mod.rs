@@ -593,12 +593,36 @@ pub fn is_model_lock_active(
 }
 
 /// Check if account is currently unavailable (cooldown not expired).
+///
+/// Two independent cooldowns are honoured:
+/// 1. `rateLimitedUntil` — set by the dispatcher when the upstream returns 429.
+/// 2. `degradedUntil` — set by the health daemon from the last probe status
+///    (429 → 2 min, 503 → 10 min, 500/502/504 → 5 min). Reading the persisted
+///    field keeps this helper pure and testable; the in-memory
+///    `core::health` registry gates combo members separately.
 pub fn is_account_unavailable(connection: &ProviderConnection, now: DateTime<Utc>) -> bool {
-    connection
+    let rate_limited = connection
         .rate_limited_until
         .as_deref()
         .and_then(parse_timestamp)
-        .is_some_and(|until| until > now)
+        .is_some_and(|until| until > now);
+
+    rate_limited || is_account_degraded(connection, now)
+}
+
+/// Whether the health daemon's degrade window for this account is still open.
+pub fn is_account_degraded(connection: &ProviderConnection, now: DateTime<Utc>) -> bool {
+    account_degraded_until(connection).is_some_and(|until| until > now)
+}
+
+/// Absolute end of the health degrade window, regardless of whether it has
+/// already elapsed. Used for UI cooldown display.
+pub fn account_degraded_until(connection: &ProviderConnection) -> Option<DateTime<Utc>> {
+    connection
+        .extra
+        .get(crate::core::health::DEGRADED_UNTIL_KEY)
+        .and_then(|value| value.as_str())
+        .and_then(parse_timestamp)
 }
 
 /// Get earliest active model lock expiry across all modelLock_* fields.

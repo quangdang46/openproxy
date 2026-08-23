@@ -396,7 +396,7 @@ pub struct Combo {
     pub extra: BTreeMap<String, Value>,
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKey {
     pub id: String,
@@ -408,6 +408,11 @@ pub struct ApiKey {
     pub is_active: Option<bool>,
     #[serde(default)]
     pub created_at: Option<String>,
+    /// Per-key monthly spend cap in USD. When set, requests are hard-blocked
+    /// with HTTP 429 once the current calendar month's tracked spend reaches
+    /// it (free-tier Feature 3: budget caps & hard kill-switch).
+    #[serde(default)]
+    pub monthly_budget_usd: Option<f64>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }
@@ -415,6 +420,21 @@ pub struct ApiKey {
 impl ApiKey {
     pub fn is_active(&self) -> bool {
         self.is_active.unwrap_or(true)
+    }
+
+    /// Effective monthly budget in USD, resolving the typed field first and
+    /// then the `extra` fallbacks (`monthlyBudgetUsd`, `monthly_budget_usd`).
+    /// Returns `None` when no budget is configured.
+    pub fn monthly_budget(&self) -> Option<f64> {
+        if let Some(value) = self.monthly_budget_usd {
+            return Some(value);
+        }
+        for key in ["monthlyBudgetUsd", "monthly_budget_usd"] {
+            if let Some(value) = self.extra.get(key).and_then(|v| v.as_f64()) {
+                return Some(value);
+            }
+        }
+        None
     }
 }
 

@@ -27,6 +27,7 @@ async fn app_state() -> AppState {
             is_active: Some(true),
             created_at: None,
             extra: Default::default(),
+            monthly_budget_usd: None,
         }];
     })
     .await

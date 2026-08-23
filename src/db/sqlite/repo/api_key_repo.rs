@@ -6,7 +6,7 @@ use crate::types::ApiKey;
 
 pub fn get_active(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
     let mut stmt = conn.prepare(
-        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE isActive IS NOT 0",
+        "SELECT id, key, name, machineId, isActive, createdAt, monthly_budget_usd FROM apiKeys WHERE isActive IS NOT 0",
     )?;
     let rows = stmt.query_map([], row_to_api_key)?;
     rows.collect()
@@ -14,7 +14,7 @@ pub fn get_active(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
 
 pub fn get_all(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
     let mut stmt = conn.prepare(
-        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys ORDER BY createdAt DESC",
+        "SELECT id, key, name, machineId, isActive, createdAt, monthly_budget_usd FROM apiKeys ORDER BY createdAt DESC",
     )?;
     let rows = stmt.query_map([], row_to_api_key)?;
     rows.collect()
@@ -22,7 +22,7 @@ pub fn get_all(conn: &Connection) -> rusqlite::Result<Vec<ApiKey>> {
 
 pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiKey>> {
     let mut stmt = conn.prepare(
-        "SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys WHERE id = ?1",
+        "SELECT id, key, name, machineId, isActive, createdAt, monthly_budget_usd FROM apiKeys WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_api_key)?;
     rows.next().transpose()
@@ -30,21 +30,22 @@ pub fn get_by_id(conn: &Connection, id: &str) -> rusqlite::Result<Option<ApiKey>
 
 pub fn create(conn: &Connection, k: &ApiKey) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO apiKeys(id, key, name, machineId, isActive, createdAt) VALUES(?1,?2,?3,?4,?5,?6)",
-        params![k.id, k.key, k.name, k.machine_id, k.is_active.map(|v| v as i32).unwrap_or(1), k.created_at.as_deref().unwrap_or("")],
+        "INSERT INTO apiKeys(id, key, name, machineId, isActive, createdAt, monthly_budget_usd) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![k.id, k.key, k.name, k.machine_id, k.is_active.map(|v| v as i32).unwrap_or(1), k.created_at.as_deref().unwrap_or(""), k.monthly_budget_usd],
     )?;
     Ok(())
 }
 
 pub fn update(conn: &Connection, k: &ApiKey) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE apiKeys SET key=?2, name=?3, machineId=?4, isActive=?5 WHERE id=?1",
+        "UPDATE apiKeys SET key=?2, name=?3, machineId=?4, isActive=?5, monthly_budget_usd=?6 WHERE id=?1",
         params![
             k.id,
             k.key,
             k.name,
             k.machine_id,
-            k.is_active.map(|v| v as i32).unwrap_or(1)
+            k.is_active.map(|v| v as i32).unwrap_or(1),
+            k.monthly_budget_usd
         ],
     )?;
     Ok(())
@@ -62,6 +63,7 @@ fn row_to_api_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiKey> {
     let machine_id: Option<String> = row.get(3)?;
     let is_active: Option<i32> = row.get(4)?;
     let created_at: String = row.get(5)?;
+    let monthly_budget_usd: Option<f64> = row.get(6)?;
 
     Ok(ApiKey {
         id,
@@ -70,6 +72,7 @@ fn row_to_api_key(row: &rusqlite::Row<'_>) -> rusqlite::Result<ApiKey> {
         machine_id,
         is_active: is_active.map(|v| v != 0),
         created_at: Some(created_at),
+        monthly_budget_usd,
         ..Default::default()
     })
 }
