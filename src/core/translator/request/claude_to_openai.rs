@@ -113,10 +113,13 @@ fn fix_missing_tool_responses(messages: &mut Vec<Value>) {
 /// Returns either a single message Value or an array of message Values.
 fn convert_claude_message(msg: &Value) -> Option<Value> {
     let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("user");
-    let converted_role = if role == "user" || role == "tool" {
-        "user"
-    } else {
-        "assistant"
+    let converted_role = match role {
+        "user" | "tool" => "user",
+        // Preserve system messages — converting them to assistant corrupted
+        // forwarded bodies on /v1/messages (openai-compatible upstreams
+        // rejected the unexpected assistant turn).
+        "system" => "system",
+        _ => "assistant",
     };
     let final_role = if role == "tool" {
         "tool"
