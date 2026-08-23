@@ -1190,7 +1190,8 @@ async fn forward_with_provider_fallback(
             .provider_nodes
             .iter()
             .find(|node| {
-                node.prefix.as_deref() == Some(provider)
+                node.id == provider
+                    || node.prefix.as_deref() == Some(provider)
                     || (node.r#type.ends_with("-compatible") && node.name == provider)
             })
             .cloned();

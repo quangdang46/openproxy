@@ -41,6 +41,21 @@ impl Drop for EnvVarGuard {
 async fn app_state() -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
+    db.update(|state| {
+        // Management key: oauth proxy routes sit in the admin tier now that
+        // requireLogin defaults to true (9router parity).
+        state.api_keys.push(openproxy::types::ApiKey {
+            id: "mgmt-1".into(),
+            name: "Management".into(),
+            key: "codex-proxy-mgmt-key".into(),
+            machine_id: None,
+            is_active: Some(true),
+            created_at: None,
+            extra: Default::default(),
+        });
+    })
+    .await
+    .expect("seed db");
     AppState::new(db)
 }
 
@@ -48,6 +63,7 @@ fn get_request(uri: &str) -> Request<Body> {
     Request::builder()
         .method(Method::GET)
         .uri(uri)
+        .header("authorization", "Bearer codex-proxy-mgmt-key")
         .body(Body::empty())
         .unwrap()
 }

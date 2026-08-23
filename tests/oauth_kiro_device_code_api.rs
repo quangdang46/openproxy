@@ -41,6 +41,21 @@ impl Drop for EnvVarGuard {
 async fn app_state() -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
+    db.update(|state| {
+        // Management key: oauth proxy routes sit in the admin tier now that
+        // requireLogin defaults to true (9router parity).
+        state.api_keys.push(openproxy::types::ApiKey {
+            id: "mgmt-1".into(),
+            name: "Management".into(),
+            key: "kiro-mgmt-key".into(),
+            machine_id: None,
+            is_active: Some(true),
+            created_at: None,
+            extra: Default::default(),
+        });
+    })
+    .await
+    .expect("seed db");
     AppState::new(db)
 }
 
@@ -48,6 +63,7 @@ fn get_request(uri: &str) -> Request<Body> {
     Request::builder()
         .method(Method::GET)
         .uri(uri)
+        .header("authorization", "Bearer kiro-mgmt-key")
         .body(Body::empty())
         .unwrap()
 }
@@ -56,6 +72,7 @@ fn post_request(uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
+        .header("authorization", "Bearer kiro-mgmt-key")
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()
@@ -226,7 +243,11 @@ async fn kiro_poll_returns_missing_device_code_without_api_key() {
 
     let (status, json) = response_json(response).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json, json!({ "error": "Missing device code" }));
+    // Handler returns the standard error envelope with provider context.
+    assert_eq!(
+        json["error"]["message"],
+        "Missing device_code in request body"
+    );
 }
 
 #[tokio::test]

@@ -505,7 +505,8 @@ fn model_resolution_supports_aliases_nodes_and_combos() {
     assert_eq!(explicit_combo.model, "writer");
 
     let compatible = get_model_info("custom/gpt-4.1", &db);
-    assert_eq!(compatible.provider.as_deref(), Some("Custom"));
+    // JS model.js: provider = matchedOpenAI.id (node id), not display name.
+    assert_eq!(compatible.provider.as_deref(), Some("node-openai"));
     assert_eq!(compatible.model, "gpt-4.1");
 
     let inferred = get_model_info("gpt-4.1-mini", &db);

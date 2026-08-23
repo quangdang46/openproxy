@@ -13,12 +13,28 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 async fn app_state() -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
+    db.update(|state| {
+        // Management key: oauth proxy routes sit in the admin tier now that
+        // requireLogin defaults to true (9router parity).
+        state.api_keys.push(openproxy::types::ApiKey {
+            id: "mgmt-1".into(),
+            name: "Management".into(),
+            key: "gitlab-pat-mgmt-key".into(),
+            machine_id: None,
+            is_active: Some(true),
+            created_at: None,
+            extra: Default::default(),
+        });
+    })
+    .await
+    .expect("seed db");
     AppState::new(db)
 }
 
 fn request(body: Body) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
+        .header("authorization", "Bearer gitlab-pat-mgmt-key")
         .uri("/api/oauth/gitlab/pat")
         .header("content-type", "application/json")
         .body(body)

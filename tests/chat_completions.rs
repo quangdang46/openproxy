@@ -138,7 +138,7 @@ async fn chat_completions_streams_openai_compatible_response() {
             "custom",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", 1, "upstream-key")],
+        vec![connection("conn-1", "node-openai", 1, "upstream-key")],
         Vec::new(),
     )
     .await;
@@ -164,6 +164,12 @@ async fn chat_completions_streams_openai_compatible_response() {
         .await
         .unwrap();
 
+    if response.status() != StatusCode::OK {
+        let b = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        panic!("DBG500: {}", String::from_utf8_lossy(&b));
+    }
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get("content-type").unwrap(),
@@ -207,7 +213,7 @@ async fn chat_completions_injects_caveman_prompt_for_long_requests() {
             "custom",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", 1, "upstream-key")],
+        vec![connection("conn-1", "node-openai", 1, "upstream-key")],
         Vec::new(),
         settings,
     )
@@ -290,7 +296,7 @@ async fn chat_completions_skips_caveman_prompt_for_short_requests() {
             "custom",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", 1, "upstream-key")],
+        vec![connection("conn-1", "node-openai", 1, "upstream-key")],
         Vec::new(),
         settings,
     )
@@ -370,7 +376,7 @@ async fn chat_completions_preserves_chat_content_part_schema_when_injecting_cave
             "custom",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", 1, "upstream-key")],
+        vec![connection("conn-1", "node-openai", 1, "upstream-key")],
         Vec::new(),
         settings,
     )
@@ -469,8 +475,8 @@ async fn chat_completions_falls_back_to_next_account_on_retryable_error() {
             &format!("{}/v1", upstream.uri()),
         )],
         vec![
-            connection("conn-bad", "Compatible", 1, "bad-key"),
-            connection("conn-good", "Compatible", 2, "good-key"),
+            connection("conn-bad", "node-openai", 1, "bad-key"),
+            connection("conn-good", "node-openai", 2, "good-key"),
         ],
         Vec::new(),
     )
@@ -554,7 +560,7 @@ async fn chat_completions_uses_combo_fallback_across_models() {
         updated_at: None,
         extra: BTreeMap::new(),
     };
-    let mut combo_connection = connection("conn-1", "Compatible", 1, "upstream-key");
+    let mut combo_connection = connection("conn-1", "node-openai", 1, "upstream-key");
     combo_connection.default_model = None;
     combo_connection
         .provider_specific_data
@@ -620,13 +626,13 @@ async fn chat_completions_skips_accounts_that_do_not_advertise_requested_model()
         .mount(&upstream)
         .await;
 
-    let mut unsupported = connection("conn-unsupported", "Compatible", 1, "bad-key");
+    let mut unsupported = connection("conn-unsupported", "node-openai", 1, "bad-key");
     unsupported.default_model = None;
     unsupported
         .provider_specific_data
         .insert("enabledModels".into(), json!(["gpt-other"]));
 
-    let mut supported = connection("conn-supported", "Compatible", 2, "good-key");
+    let mut supported = connection("conn-supported", "node-openai", 2, "good-key");
     supported.default_model = None;
     supported
         .provider_specific_data
@@ -696,7 +702,7 @@ async fn chat_completions_returns_retry_after_while_model_is_cooling_down() {
             "custom",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", 1, "upstream-key")],
+        vec![connection("conn-1", "node-openai", 1, "upstream-key")],
         Vec::new(),
     )
     .await;
@@ -801,7 +807,7 @@ async fn chat_completions_does_not_cool_down_entire_connection_for_model_specifi
         .mount(&upstream)
         .await;
 
-    let mut connection = connection("conn-1", "Compatible", 1, "upstream-key");
+    let mut connection = connection("conn-1", "node-openai", 1, "upstream-key");
     connection.default_model = None;
     connection
         .provider_specific_data
@@ -895,7 +901,7 @@ async fn chat_completions_supports_enabled_models_with_nested_slashes() {
         .mount(&upstream)
         .await;
 
-    let mut connection = connection("conn-1", "Compatible", 1, "upstream-key");
+    let mut connection = connection("conn-1", "node-openai", 1, "upstream-key");
     connection.default_model = None;
     connection
         .provider_specific_data
@@ -976,8 +982,8 @@ async fn chat_completions_preserves_earliest_retry_after_when_all_accounts_fail(
             &format!("{}/v1", upstream.uri()),
         )],
         vec![
-            connection("conn-1", "Compatible", 1, "first-key"),
-            connection("conn-2", "Compatible", 2, "second-key"),
+            connection("conn-1", "node-openai", 1, "first-key"),
+            connection("conn-2", "node-openai", 2, "second-key"),
         ],
         Vec::new(),
     )
@@ -1020,7 +1026,7 @@ async fn chat_completions_preserves_earliest_retry_after_when_all_accounts_fail(
 async fn chat_completions_rejects_connections_without_credentials() {
     let upstream = MockServer::start().await;
 
-    let mut missing_credentials = connection("conn-1", "Compatible", 1, "unused-key");
+    let mut missing_credentials = connection("conn-1", "node-openai", 1, "unused-key");
     missing_credentials.api_key = None;
     missing_credentials.default_model = Some("gpt-4o-mini".into());
 
