@@ -126,7 +126,9 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
                     item.get("id").and_then(Value::as_str).unwrap_or(""),
                     item.get("isActive").and_then(Value::as_bool).map(|v| v as i32).unwrap_or(1),
                     item.get("testStatus").and_then(Value::as_str),
-                    "{}",
+                    // Preserve the full payload — pool fields (name, proxyUrl,
+                    // strictProxy, …) live in the JSON `data` blob.
+                    &serde_json::to_string(item).unwrap_or_else(|_| "{}".into()),
                     item.get("createdAt").and_then(Value::as_str).unwrap_or(""),
                     item.get("updatedAt").and_then(Value::as_str).unwrap_or(""),
                 ],

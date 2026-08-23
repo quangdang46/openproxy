@@ -118,9 +118,17 @@ pub fn sign_leaf(
     // 9router rootCA.js leaf (115-164): SAN [DNS:domain, DNS:*.domain],
     // extKeyUsage serverAuth + clientAuth, 1yr validity.
     let mut params = CertificateParams::new(Vec::<String>::new())?;
-    let san_domain: rcgen::Ia5String = hostname.to_string().try_into()?;
-    let san_wildcard: rcgen::Ia5String = format!("*.{}", hostname).try_into()?;
-    params.subject_alt_names = vec![SanType::DnsName(san_domain), SanType::DnsName(san_wildcard)];
+    // IP-literal hostnames (e.g. 127.0.0.1) must use an IpAddress SAN —
+    // rustls rejects a DnsName SAN that does not match the connect target.
+    if hostname.parse::<std::net::IpAddr>().is_ok() {
+        let ip: std::net::IpAddr = hostname.parse().unwrap();
+        params.subject_alt_names = vec![SanType::IpAddress(ip)];
+    } else {
+        let san_domain: rcgen::Ia5String = hostname.to_string().try_into()?;
+        let san_wildcard: rcgen::Ia5String = format!("*.{}", hostname).try_into()?;
+        params.subject_alt_names =
+            vec![SanType::DnsName(san_domain), SanType::DnsName(san_wildcard)];
+    }
     params.is_ca = IsCa::NoCa;
     params.key_usages = vec![
         KeyUsagePurpose::DigitalSignature,

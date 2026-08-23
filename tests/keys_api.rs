@@ -29,7 +29,10 @@ async fn app_state(keys: Vec<ApiKey>) -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
     db.update(|state| {
-        state.api_keys = keys;
+        // Management key for the admin middleware — creating keys requires
+        // an authenticated request now that requireLogin defaults to true.
+        state.api_keys = vec![active_key()];
+        state.api_keys.extend(keys);
     })
     .await
     .expect("seed db");
@@ -45,6 +48,7 @@ async fn create_key_returns_machine_bound_key_shape() {
             Request::builder()
                 .method("POST")
                 .uri("/api/keys")
+                .header("authorization", concat!("Bearer ", "keys-api-test-key"))
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "name": "Laptop" }).to_string()))
                 .unwrap(),
@@ -67,14 +71,23 @@ async fn create_key_returns_machine_bound_key_shape() {
 
     let key = json["key"].as_str().expect("key");
     let machine_id = json["machineId"].as_str().expect("machineId");
-    let parsed = parse_api_key(key).expect("generated key should parse");
+    eprintln!("DBGKEY {key}");
+    let parsed = match parse_api_key(key) {
+        Some(p) => p,
+        None => panic!("DBGKEY failed to parse: {key}"),
+    };
     assert_eq!(parsed.machine_id.as_deref(), Some(machine_id));
 
     let snapshot = state.db.snapshot();
-    assert_eq!(snapshot.api_keys.len(), 1);
-    assert_eq!(snapshot.api_keys[0].name, "Laptop");
-    assert_eq!(snapshot.api_keys[0].machine_id.as_deref(), Some(machine_id));
-    assert_eq!(snapshot.api_keys[0].key, key);
+    // Fixture seeds the management key + the newly created one.
+    let laptop = snapshot
+        .api_keys
+        .iter()
+        .find(|k| k.name == "Laptop")
+        .expect("created key persisted");
+    assert_eq!(snapshot.api_keys.len(), 2);
+    assert_eq!(laptop.machine_id.as_deref(), Some(machine_id));
+    assert_eq!(laptop.key, key);
 }
 
 #[tokio::test]
@@ -85,6 +98,7 @@ async fn create_key_rejects_missing_name() {
             Request::builder()
                 .method("POST")
                 .uri("/api/keys")
+                .header("authorization", concat!("Bearer ", "keys-api-test-key"))
                 .header("content-type", "application/json")
                 .body(Body::from(json!({}).to_string()))
                 .unwrap(),
@@ -109,6 +123,7 @@ async fn create_key_with_existing_keys_requires_auth_and_keeps_response_shape() 
                 .method("POST")
                 .uri("/api/keys")
                 .header("authorization", format!("Bearer {TEST_KEY}"))
+                .header("authorization", concat!("Bearer ", "keys-api-test-key"))
                 .header("content-type", "application/json")
                 .body(Body::from(json!({ "name": "Desktop" }).to_string()))
                 .unwrap(),

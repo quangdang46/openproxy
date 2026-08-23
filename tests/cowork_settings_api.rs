@@ -132,14 +132,11 @@ async fn cowork_settings_get_returns_not_installed_without_claude_dirs() {
 
     let (status, json) = response_json(response).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        json,
-        json!({
-            "installed": false,
-            "config": null,
-            "message": "Claude Desktop (Cowork mode) not detected"
-        })
-    );
+    // Handler also returns defaultPlugins/localStdioPlugins catalogs —
+    // check the status fields this test targets.
+    assert_eq!(json["installed"], false);
+    assert_eq!(json["config"], serde_json::Value::Null);
+    assert_eq!(json["message"], "Claude Desktop (Cowork mode) not detected");
 }
 
 #[tokio::test]

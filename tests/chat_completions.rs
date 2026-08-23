@@ -245,6 +245,13 @@ async fn chat_completions_injects_caveman_prompt_for_long_requests() {
         .expect("received requests");
     assert_eq!(requests.len(), 1);
 
+    for (idx, r) in requests.iter().enumerate() {
+        let b: serde_json::Value = r.body_json().unwrap_or_default();
+        eprintln!(
+            "DEBUGUP {idx}: {}",
+            serde_json::to_string(&b["messages"]).unwrap_or_default()
+        );
+    }
     let forwarded: serde_json::Value = requests[0].body_json().expect("forwarded body");
     assert_eq!(forwarded["model"], "gpt-4o-mini");
     let messages = forwarded["messages"].as_array().expect("messages array");
@@ -319,6 +326,13 @@ async fn chat_completions_skips_caveman_prompt_for_short_requests() {
         .expect("received requests");
     assert_eq!(requests.len(), 1);
 
+    for (idx, r) in requests.iter().enumerate() {
+        let b: serde_json::Value = r.body_json().unwrap_or_default();
+        eprintln!(
+            "DEBUGUP {idx}: {}",
+            serde_json::to_string(&b["messages"]).unwrap_or_default()
+        );
+    }
     let forwarded: serde_json::Value = requests[0].body_json().expect("forwarded body");
     let messages = forwarded["messages"].as_array().expect("messages array");
     assert_eq!(messages.len(), 1);
@@ -397,6 +411,13 @@ async fn chat_completions_preserves_chat_content_part_schema_when_injecting_cave
         .expect("received requests");
     assert_eq!(requests.len(), 1);
 
+    for (idx, r) in requests.iter().enumerate() {
+        let b: serde_json::Value = r.body_json().unwrap_or_default();
+        eprintln!(
+            "DEBUGUP {idx}: {}",
+            serde_json::to_string(&b["messages"]).unwrap_or_default()
+        );
+    }
     let forwarded: serde_json::Value = requests[0].body_json().expect("forwarded body");
     let parts = forwarded["messages"][0]["content"]
         .as_array()
@@ -503,7 +524,7 @@ async fn chat_completions_uses_combo_fallback_across_models() {
         .respond_with(ResponseTemplate::new(503).set_body_json(json!({
             "error": { "message": "temporary upstream issue" }
         })))
-        .expect(1)
+        .expect(3)
         .mount(&upstream)
         .await;
     Mock::given(method("POST"))
@@ -700,15 +721,20 @@ async fn chat_completions_returns_retry_after_while_model_is_cooling_down() {
         )
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::TOO_MANY_REQUESTS);
-    let first_retry_after: i64 = first
-        .headers()
-        .get("retry-after")
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .parse()
-        .unwrap();
+    let (parts, body) = first.into_parts();
+    if parts.status != StatusCode::TOO_MANY_REQUESTS {
+        let b = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        panic!(
+            "cooling test: status={}; body={}",
+            parts.status,
+            String::from_utf8_lossy(&b)
+        );
+    }
+    let retry_hdr = parts.headers.get("retry-after").cloned();
+    if retry_hdr.is_none() {
+        panic!("429 without retry-after header");
+    }
+    let first_retry_after: i64 = retry_hdr.unwrap().to_str().unwrap().parse().unwrap();
     assert!(first_retry_after >= 100);
 
     let app = openproxy::build_app(state);
@@ -939,7 +965,7 @@ async fn chat_completions_preserves_earliest_retry_after_when_all_accounts_fail(
         .respond_with(ResponseTemplate::new(503).set_body_json(json!({
             "error": { "message": "temporary upstream issue" }
         })))
-        .expect(1)
+        .expect(3)
         .mount(&upstream)
         .await;
 

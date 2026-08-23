@@ -176,6 +176,7 @@ async fn cloud_routes_require_authorization_bearer_like_openproxy() {
         let app = openproxy::build_app(app_state().await);
         let response = app.oneshot(request).await.unwrap();
         let (status, json) = response_json(response).await;
+        eprintln!("CLOUDCASE status={status} json={json}");
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(json, json!({ "error": "Missing API key" }));
     }

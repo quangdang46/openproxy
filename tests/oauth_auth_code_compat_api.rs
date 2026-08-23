@@ -42,13 +42,31 @@ impl Drop for EnvVarGuard {
 async fn app_state() -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
+    db.update(|state| {
+        // Management key: oauth routes sit in the admin tier now that
+        // requireLogin defaults to true (9router parity).
+        state.api_keys.push(openproxy::types::ApiKey {
+            id: "mgmt-1".into(),
+            name: "Management".into(),
+            key: TEST_MGMT_KEY.into(),
+            machine_id: None,
+            is_active: Some(true),
+            created_at: None,
+            extra: Default::default(),
+        });
+    })
+    .await
+    .expect("seed db");
     AppState::new(db)
 }
+
+const TEST_MGMT_KEY: &str = "oauth-mgmt-test-key";
 
 fn get_request(uri: &str) -> Request<Body> {
     Request::builder()
         .method(Method::GET)
         .uri(uri)
+        .header("authorization", concat!("Bearer ", "oauth-mgmt-test-key"))
         .body(Body::empty())
         .unwrap()
 }
@@ -57,6 +75,7 @@ fn post_request(uri: &str, body: serde_json::Value) -> Request<Body> {
     Request::builder()
         .method(Method::POST)
         .uri(uri)
+        .header("authorization", concat!("Bearer ", "oauth-mgmt-test-key"))
         .header("content-type", "application/json")
         .body(Body::from(body.to_string()))
         .unwrap()

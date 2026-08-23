@@ -2008,12 +2008,7 @@ async fn forward_with_provider_fallback(
                         proxy,
                     })
                     .await
-                    .map_err(|err| ComboAttemptError {
-                        status: 500,
-                        message: format!("Execution failed: {:?}", err),
-                        retry_after: None,
-                        upstream_body: None,
-                    })?;
+                    .map_err(|err| err.into_combo_attempt_error())?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
                     url: result.url,

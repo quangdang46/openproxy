@@ -727,8 +727,11 @@ mod tests {
         assert_eq!(tools[1]["type"], "web_search");
     }
 
+    static TURN_STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn turn_idx_monotonic() {
+        let _g = TURN_STORE_LOCK.lock();
         reset_grok_cli_turn_store();
         let input = json!([
             {"type": "message", "role": "user", "content": "a"},
@@ -745,6 +748,7 @@ mod tests {
 
     #[test]
     fn turn_idx_without_session_uses_input_count() {
+        let _g = TURN_STORE_LOCK.lock();
         reset_grok_cli_turn_store();
         let input = json!([{"type": "message", "role": "user", "content": "x"}]);
         assert_eq!(resolve_grok_cli_turn_idx(None, &input), 1);

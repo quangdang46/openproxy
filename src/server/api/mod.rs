@@ -315,7 +315,6 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(cli_tools::routes())
         .merge(quota_auto_ping::routes())
         .merge(db_backups::routes())
-        .merge(locale::routes())
         .merge(models_disabled::routes())
         .merge(models_alias::routes())
         .merge(models_availability::routes())
@@ -325,8 +324,6 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(settings_payload_rules::routes())
         .merge(tunnel::routes())
         .merge(usage::routes())
-        .merge(cloud_sync::routes())
-        .merge(cloud_credentials::routes())
         .merge(admin_items::routes())
         .merge(pricing::routes())
         .merge(tags::routes())
@@ -374,6 +371,15 @@ pub fn routes(state: AppState) -> Router<AppState> {
 
     // ── Remaining modules: complex/mixed auth managed per-handler ──
     let remaining = Router::new()
+        // /api/init is a public liveness probe and /api/locale sets the
+        // visitor's language cookie — both are public pre-login routes in
+        // 9router.
+        .merge(cloud_sync::routes())
+        .merge(locale::routes())
+        // /api/cloud/* validates its own strict Bearer-only scheme (JS
+        // "Bearer-like" parity) — must not inherit the admin middleware,
+        // whose dashboard error message differs from the handler contract.
+        .merge(cloud_credentials::routes())
         .merge(media_providers::routes())
         .merge(observability::routes())
         .merge(mitm_config::routes())
@@ -1724,6 +1730,8 @@ pub fn consistent_machine_id() -> String {
     let salt =
         std::env::var("MACHINE_ID_SALT").unwrap_or_else(|_| "endpoint-proxy-salt".to_string());
 
+    // JS parity: ALWAYS hash to a 16-hex-char id — a UUID with dashes would
+    // break the sk-{machineId}-{keyId}-{crc} parse (split on '-' expects 4).
     match raw_machine_id() {
         Some(raw_machine_id) => {
             use sha2::Digest;
@@ -1733,7 +1741,13 @@ pub fn consistent_machine_id() -> String {
             hasher.update(salt.as_bytes());
             hex::encode(hasher.finalize())[..16].to_string()
         }
-        None => Uuid::new_v4().to_string(),
+        None => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(b"openproxy-fallback-machine");
+            hasher.update(salt.as_bytes());
+            hex::encode(hasher.finalize())[..16].to_string()
+        }
     }
 }
 

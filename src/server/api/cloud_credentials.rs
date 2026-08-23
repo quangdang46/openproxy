@@ -49,6 +49,10 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 }
 
 fn require_cloud_bearer_api_key(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
+    eprintln!(
+        "CLOUDAUTH reached, auth={:?}",
+        headers.get(AUTHORIZATION_HEADER)
+    );
     let Some(auth_header) = headers
         .get(AUTHORIZATION_HEADER)
         .and_then(|value| value.to_str().ok())

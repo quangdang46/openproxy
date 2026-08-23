@@ -232,7 +232,10 @@ async fn codex_executor_execute_returns_correct_url() {
     };
 
     let response = executor.execute(req).await.expect("execute request");
-    assert_eq!(response.url, "https://api.openai.com/v1/responses");
+    assert_eq!(
+        response.url,
+        "https://chatgpt.com/backend-api/codex/responses"
+    );
 }
 
 #[tokio::test]
@@ -318,7 +321,12 @@ async fn codex_executor_execute_non_streaming_no_accept_header() {
     };
 
     let response = executor.execute(req).await.expect("execute request");
-    assert!(response.headers.get("accept").is_none());
+    // Parity: codex force-streams upstream regardless of client preference,
+    // so the SSE Accept header is always set.
+    assert_eq!(
+        response.headers.get("accept").map(|v| v.to_str().unwrap()),
+        Some("text/event-stream")
+    );
 }
 
 #[tokio::test]
@@ -341,7 +349,15 @@ async fn codex_executor_execute_multiple_messages_input() {
     };
 
     let response = executor.execute(req).await.expect("execute request");
-    assert_eq!(response.transformed_body["input"], "Hello\nHi\nThere");
+    // Parity: multi-message input is forwarded as typed input_text items.
+    let input_items = response.transformed_body["input"]
+        .as_array()
+        .expect("input array");
+    let texts: Vec<&str> = input_items
+        .iter()
+        .filter_map(|it| it.pointer("/content/0/text").and_then(|v| v.as_str()))
+        .collect();
+    assert_eq!(texts, vec!["Hello", "Hi", "There"]);
 }
 
 #[tokio::test]
@@ -426,9 +442,14 @@ async fn codex_executor_execute_all_params_copied() {
     };
 
     let response = executor.execute(req).await.expect("execute request");
-    assert_eq!(response.transformed_body["temperature"], 0.7);
-    assert_eq!(response.transformed_body["max_tokens"], 1000);
-    assert_eq!(response.transformed_body["top_p"], 0.9);
+    // Parity (codex.js:462-479): unsupported sampling params are deleted —
+    // temperature, top_p, max_tokens. `stop` is preserved.
+    for key in ["temperature", "top_p", "max_tokens"] {
+        assert!(
+            response.transformed_body.get(key).is_none(),
+            "{key} must be stripped"
+        );
+    }
     assert_eq!(response.transformed_body["stop"], json!(["END"]));
 }
 
@@ -449,7 +470,15 @@ async fn codex_executor_execute_reasoning_param_stripped() {
     };
 
     let response = executor.execute(req).await.expect("execute request");
-    assert!(response.transformed_body.get("reasoning").is_none());
+    // Parity (bead .38): the reasoning parameter is preserved — Codex
+    // upstream consumes reasoning.effort for thinking effort control.
+    assert_eq!(
+        response
+            .transformed_body
+            .pointer("/reasoning/effort")
+            .and_then(|v| v.as_str()),
+        Some("high")
+    );
 }
 
 #[test]
