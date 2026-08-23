@@ -169,9 +169,21 @@ async fn messages_route_promotes_system_field_before_forwarding() {
     // Catch-all to log unmatched requests
     Mock::given(method("POST"))
         .respond_with(|req: &wiremock::Request| {
-            let body = std::str::from_utf8(&req.body).unwrap_or_default().to_string();
-            let auth = req.headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-            eprintln!("UNMATCHED path={} auth={:?} body={}", req.url.path(), auth, body);
+            let body = std::str::from_utf8(&req.body)
+                .unwrap_or_default()
+                .to_string();
+            let auth = req
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            eprintln!(
+                "UNMATCHED path={} auth={:?} body={}",
+                req.url.path(),
+                auth,
+                body
+            );
             wiremock::ResponseTemplate::new(599).set_body_string("UNMATCHED")
         })
         .mount(&upstream)
