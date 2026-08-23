@@ -20,6 +20,17 @@ Parity work: epic `openproxy-9router-parity-v0550-pnc` (9router v0.5.50 → open
 - `docs/parity-9router.md` — intentional divergences, pipeline order, executor dispatch
 - 9router reference: `/tmp/9router` (open-sse) — do NOT copy JS bugs blindly
 
+## Core Product Surfaces (TOP PRIORITY)
+
+These 4 surfaces ARE the product. Everything else is optional. They must be flawless, reliable, and mutually consistent — always prioritize regressions and improvements here:
+
+1. **Providers page** — `/dashboard/providers/<provider>` (e.g. kilocode): user controls Available Models (disable/enable/custom). Configuration is user data, persisted in SQLite — must survive binary rebuilds/updates.
+2. **CLI tools config** — `/dashboard/cli-tools/opencode` (opencode is the primary client).
+3. **Combos page** — `/dashboard/combos`.
+4. **`web/src/shared/components/ModelSelectModal.tsx`** — the single model-picker used everywhere; must exactly mirror the provider page's Available Models (same disabled map + custom rows + catalog merge). Any change to model-list logic MUST be applied consistently to both the provider page and this modal.
+
+Core workflow that must never break: configure provider → customize available models → create combos → select models for opencode CLI config.
+
 ## Status
 Active parity port. Run `cargo test -p openproxy --lib parity_tests stream_flags` for smoke.
 

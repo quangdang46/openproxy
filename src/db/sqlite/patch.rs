@@ -109,6 +109,18 @@ pub fn apply_app_db_diff(conn: &Connection, old: &AppDb, new: &AppDb) -> rusqlit
         custom_models_map(&new.custom_models),
     )?;
 
+    let old_filters: HashMap<String, Value> = old
+        .extra
+        .get("providerFilters")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let new_filters: HashMap<String, Value> = new
+        .extra
+        .get("providerFilters")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    diff_kv_scope(conn, "providerFilters", old_filters, new_filters)?;
+
     diff_disabled_models(
         conn,
         &disabled_from_extra(&old.extra),

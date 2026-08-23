@@ -8,6 +8,7 @@ import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
+import { buildAvailableModels, fetchLiveModels, type LiveModel } from "@/shared/models/availableModels";
 import React from "react";
 
 interface Model {
@@ -102,6 +103,8 @@ export default function ModelSelectModal({
   const [providerNodes, setProviderNodes] = useState<ProviderNode[]>([]);
   const [customModels, setCustomModels] = useState<CustomModel[]>([]);
   const [disabledMap, setDisabledMap] = useState<Record<string, string[]>>({});
+  const [liveModelsByAlias, setLiveModelsByAlias] = useState<Record<string, LiveModel[]>>({});
+  const [freeOnlyByAlias, setFreeOnlyByAlias] = useState<Record<string, boolean>>({});
   const listRef = useRef<HTMLDivElement>(null);
 
   const fetchCombos = async () => {
@@ -167,6 +170,44 @@ export default function ModelSelectModal({
 
   useEffect(() => {
     if (isOpen) fetchDisabledMap();
+  }, [isOpen]);
+
+  // Fetch live model lists (kilo free-models, opencode-zen / openrouter /
+  // opencode fetchers) + per-provider freeOnly filters so the modal's groups
+  // match the provider page's Available Models exactly.
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const liveCapable = Object.entries(AI_PROVIDERS)
+      .filter(([id, p]) => id === "kilocode" || !!p.modelsFetcher)
+      .map(([id]) => id);
+
+    Promise.all(
+      liveCapable.map(async (id) => {
+        const alias = getProviderAlias(id);
+        const models = await fetchLiveModels(id, alias);
+        return [alias, models] as const;
+      })
+    )
+      .then((entries) => {
+        const map: Record<string, LiveModel[]> = {};
+        for (const [alias, models] of entries) map[alias] = models;
+        setLiveModelsByAlias(map);
+      })
+      .catch(() => {});
+
+    fetch("/api/providers/filters", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const filters = (data && data.filters) || {};
+        const map: Record<string, boolean> = {};
+        for (const [alias, entry] of Object.entries(filters)) {
+          const freeOnly = (entry as { freeOnly?: boolean } | null)?.freeOnly;
+          if (typeof freeOnly === "boolean") map[alias] = freeOnly;
+        }
+        setFreeOnlyByAlias(map);
+      })
+      .catch(() => {});
   }, [isOpen]);
 
   const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS }), []);
@@ -240,19 +281,25 @@ export default function ModelSelectModal({
             if (supports) combined = [{ id: providerId, name: providerInfo.name, value: alias }];
           }
         } else if (!kindFilter) {
-          const catalogLlm = getModelsByProviderId(providerId)
-            .filter((m) => (!m.type || m.type === "llm") && !isDisabled(alias, m.id))
-            .map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type }));
-          const customRows = getProviderCustomModelRows({
+          const built = buildAvailableModels({
+            catalogModels: getModelsByProviderId(providerId) as any,
+            liveModels: liveModelsByAlias[alias] || [],
             customModels: customModels as any,
             modelAliases,
+            disabledIds: disabledMap[alias] || [],
             providerAlias: alias,
-            builtInModels: getModelsByProviderId(providerId) as any,
             type: "llm",
-          }).map((r) => ({ id: r.id, name: r.name || r.id, value: r.fullModel, isCustom: true }));
-          const seen = new Set(aliasModels.map((m) => m.value));
-          const merged = [...aliasModels, ...catalogLlm.filter((m) => !seen.has(m.value)), ...customRows.filter((m) => !seen.has(m.value) && !catalogLlm.some((c) => c.value === m.value))];
-          if (merged.length > 0) combined = merged;
+            freeOnly: freeOnlyByAlias[alias] || false,
+          });
+          const mapped = built.enabledRows.map((r) => ({
+            id: r.id,
+            name: r.name,
+            value: r.fullModel,
+            type: r.type,
+            isFree: r.isFree,
+            isCustom: r.source === "custom" || r.source === "legacyAlias",
+          }));
+          if (mapped.length > 0) combined = mapped;
         }
 
         if (combined.length > 0) {
@@ -289,44 +336,74 @@ export default function ModelSelectModal({
         }];
         groups[providerId] = { name: displayName, alias: nodePrefix, color: providerInfo.color, models: modelsToShow, isCustom: true, hasModels: nodeModels.length > 0 };
       } else {
-        const allCatalog = getModelsByProviderId(providerId);
-        const hardcodedModels = allCatalog.filter((m) => !isDisabled(alias, m.id));
-        const hardcodedIds = new Set(hardcodedModels.map((m) => m.id));
-        const customRows = getProviderCustomModelRows({
-          customModels: customModels as any,
-          modelAliases,
-          providerAlias: alias,
-          builtInModels: allCatalog as any,
-          type: (kindFilter && TYPED_KINDS.has(kindFilter) ? kindFilter : "llm") as any,
-        });
-        const customAliasModels = customRows
-          .filter((r) => r.source === "legacyAlias")
-          .map((r) => ({ id: r.id, name: r.alias || r.id, value: r.fullModel, isCustom: true }));
-        const customRegisteredModels = customRows
-          .filter((r) => r.source === "custom")
-          .map((r) => ({ id: r.id, name: r.name || r.id, value: r.fullModel, isCustom: true }));
+        if (kindFilter && TYPED_KINDS.has(kindFilter)) {
+          const allCatalog = getModelsByProviderId(providerId);
+          const hardcodedModels = allCatalog.filter((m) => !isDisabled(alias, m.id));
+          const customRows = getProviderCustomModelRows({
+            customModels: customModels as any,
+            modelAliases,
+            providerAlias: alias,
+            builtInModels: allCatalog as any,
+            type: kindFilter as any,
+          });
+          const customAliasModels = customRows
+            .filter((r) => r.source === "legacyAlias")
+            .map((r) => ({ id: r.id, name: r.alias || r.id, value: r.fullModel, isCustom: true }));
+          const customRegisteredModels = customRows
+            .filter((r) => r.source === "custom")
+            .map((r) => ({ id: r.id, name: r.name || r.id, value: r.fullModel, isCustom: true }));
 
-        let allModels = filterByKind([
-          ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type })),
-          ...customAliasModels,
-          ...customRegisteredModels,
-        ]);
+          let allModels = filterByKind([
+            ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type })),
+            ...customAliasModels,
+            ...customRegisteredModels,
+          ]);
 
-        if (allModels.length === 0 && kindFilter && ALLOW_PROVIDER_FALLBACK_KINDS.has(kindFilter)) {
-          const supports = (providerInfo.serviceKinds || ["llm"]).includes(kindFilter);
-          if (supports) allModels = [{ id: providerId, name: providerInfo.name, value: alias }];
-        }
+          if (allModels.length === 0 && ALLOW_PROVIDER_FALLBACK_KINDS.has(kindFilter)) {
+            const supports = (providerInfo.serviceKinds || ["llm"]).includes(kindFilter);
+            if (supports) allModels = [{ id: providerId, name: providerInfo.name, value: alias }];
+          }
 
-        if (allModels.length > 0) {
-          groups[providerId] = { name: providerInfo.name, alias, color: providerInfo.color, models: allModels };
-        } else if (allModels.length === 0 && kindFilter === null && (providerInfo.serviceKinds || ["llm"]).includes("llm")) {
-          groups[providerId] = { name: providerInfo.name, alias, color: providerInfo.color, models: [{ id: providerId, name: providerInfo.name, value: alias }] };
+          if (allModels.length > 0) {
+            groups[providerId] = { name: providerInfo.name, alias, color: providerInfo.color, models: allModels };
+          } else if (allModels.length === 0 && kindFilter === null && (providerInfo.serviceKinds || ["llm"]).includes("llm")) {
+            groups[providerId] = { name: providerInfo.name, alias, color: providerInfo.color, models: [{ id: providerId, name: providerInfo.name, value: alias }] };
+          }
+        } else {
+          const built = buildAvailableModels({
+            catalogModels: getModelsByProviderId(providerId) as any,
+            liveModels: liveModelsByAlias[alias] || [],
+            customModels: customModels as any,
+            modelAliases,
+            disabledIds: disabledMap[alias] || [],
+            providerAlias: alias,
+            type: "llm",
+            freeOnly: freeOnlyByAlias[alias] || false,
+          });
+          let allModels = built.enabledRows.map((r) => ({
+            id: r.id,
+            name: r.name,
+            value: r.fullModel,
+            type: r.type,
+            isFree: r.isFree,
+            isCustom: r.source === "custom" || r.source === "legacyAlias",
+          }));
+
+          if (allModels.length === 0 && kindFilter === null && (providerInfo.serviceKinds || ["llm"]).includes("llm")) {
+            allModels = [{ id: providerId, name: providerInfo.name, value: alias }];
+          }
+
+          if (allModels.length > 0) {
+            groups[providerId] = { name: providerInfo.name, alias, color: providerInfo.color, models: allModels };
+          } else if (allModels.length === 0 && kindFilter === null && (providerInfo.serviceKinds || ["llm"]).includes("llm")) {
+            groups[providerId] = { name: providerInfo.name, alias, color: providerInfo.color, models: [{ id: providerId, name: providerInfo.name, value: alias }] };
+          }
         }
       }
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, kindFilter, disabledMap]);
+  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, kindFilter, disabledMap, liveModelsByAlias, freeOnlyByAlias]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {

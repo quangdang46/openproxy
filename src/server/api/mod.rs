@@ -19,6 +19,7 @@ pub mod media_providers;
 pub mod mitm_config;
 pub mod models_alias;
 pub mod models_availability;
+pub mod provider_filters;
 pub mod models_custom;
 pub mod models_disabled;
 pub mod oauth;
@@ -319,6 +320,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(models_disabled::routes())
         .merge(models_alias::routes())
         .merge(models_availability::routes())
+        .merge(provider_filters::routes())
         .merge(models_custom::routes())
         .merge(provider_nodes::routes())
         .merge(providers::routes())
