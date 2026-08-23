@@ -167,6 +167,7 @@ async fn messages_route_promotes_system_field_before_forwarding() {
         .expect(1)
         .mount(&upstream)
         .await;
+    eprintln!("MOCK mounted for upstream {}", upstream.uri());
 
     let state = seeded_state(
         vec![provider_node(
@@ -174,7 +175,7 @@ async fn messages_route_promotes_system_field_before_forwarding() {
             "compat",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", "upstream-key")],
+        vec![connection("conn-1", "node-openai", "upstream-key")],
     )
     .await;
 
@@ -248,7 +249,7 @@ async fn responses_compact_normalizes_input_and_sets_compact_flag() {
             "compat",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", "upstream-key")],
+        vec![connection("conn-1", "node-openai", "upstream-key")],
     )
     .await;
 

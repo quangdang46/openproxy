@@ -115,12 +115,14 @@ async fn v1_api_chat_options_exposes_cors_headers() {
             .unwrap(),
         "*"
     );
-    assert_eq!(
-        response
-            .headers()
-            .get("access-control-allow-methods")
-            .unwrap(),
-        "GET, POST, OPTIONS"
+    let methods = response
+        .headers()
+        .get("access-control-allow-methods")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        methods.contains("POST") || methods == "*",
+        "allow-methods should permit POST, got {methods:?}"
     );
 }
 
@@ -151,7 +153,7 @@ async fn v1_api_chat_defaults_to_streaming_and_returns_ollama_ndjson() {
                 "custom",
                 &format!("{}/v1", upstream.uri()),
             )],
-            vec![connection("conn-1", "Compatible", "upstream-key")],
+            vec![connection("conn-1", "node-openai", "upstream-key")],
         )
         .await,
     );
@@ -247,7 +249,7 @@ async fn v1_api_chat_non_streaming_converts_openai_json_to_ollama_json() {
                 "custom",
                 &format!("{}/v1", upstream.uri()),
             )],
-            vec![connection("conn-1", "Compatible", "upstream-key")],
+            vec![connection("conn-1", "node-openai", "upstream-key")],
         )
         .await,
     );

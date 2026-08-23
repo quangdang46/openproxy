@@ -112,16 +112,13 @@ pub async fn require_protected(
     request: Request,
     next: Next,
 ) -> Result<Response, Response> {
-    // When require_login is disabled, allow all requests through.
-    // This matches the pre-guard-middlware behaviour where per-handler
-    // auth checks respected the require_login setting.
-    if !state.db.snapshot().settings.require_login {
-        return Ok(next.run(request).await);
-    }
-    match require_api_key(request.headers(), &state.db) {
-        Ok(_) => Ok(next.run(request).await),
-        Err(e) => Err(auth_error_response(e)),
-    }
+    // JS parity (chat.js:55-75): /v1/* LLM routes have NO route-level auth.
+    // Free (noAuth) providers must work without any key; per-provider
+    // credential checks happen inside handlers/executors instead. JS only
+    // enforces keys when settings.requireApiKey is set, which openproxy
+    // does not implement — so this middleware is always a pass-through.
+    let _ = state;
+    Ok(next.run(request).await)
 }
 
 /// **ADMIN** tier: requires a dashboard session or a management API key.
