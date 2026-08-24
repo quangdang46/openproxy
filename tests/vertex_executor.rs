@@ -74,11 +74,23 @@ fn vertex_executor_new_succeeds_with_provider_node() {
 
 #[tokio::test]
 async fn vertex_executor_execute_request_missing_credentials() {
+    // Isolate from ambient ADC credentials: point GOOGLE_APPLICATION_CREDENTIALS
+    // at a nonexistent path and HOME at a tempdir so the gcloud default path
+    // (~/.config/gcloud/...) cannot resolve either. Without this, machines
+    // with `gcloud auth application-default login` state make the executor
+    // succeed instead of returning MissingCredentials.
+    let adc_home = tempfile::tempdir().expect("adc home tempdir");
+    let adc_home_path = adc_home.path().to_path_buf();
+    unsafe {
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json");
+        std::env::set_var("HOME", &adc_home_path);
+    }
     let executor =
         openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
             .expect("vertex executor");
 
     let mut conn = connection("vertex");
+    conn.api_key = None;
     conn.access_token = None;
 
     let body = json!({"contents": []});
@@ -103,11 +115,23 @@ async fn vertex_executor_execute_request_missing_credentials() {
 
 #[tokio::test]
 async fn vertex_executor_execute_request_invalid_service_account_json() {
+    // Isolate from ambient ADC credentials: point GOOGLE_APPLICATION_CREDENTIALS
+    // at a nonexistent path and HOME at a tempdir so the gcloud default path
+    // (~/.config/gcloud/...) cannot resolve either. Without this, machines
+    // with `gcloud auth application-default login` state make the executor
+    // succeed instead of returning MissingCredentials.
+    let adc_home = tempfile::tempdir().expect("adc home tempdir");
+    let adc_home_path = adc_home.path().to_path_buf();
+    unsafe {
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json");
+        std::env::set_var("HOME", &adc_home_path);
+    }
     let executor =
         openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
             .expect("vertex executor");
 
     let mut conn = connection("vertex");
+    conn.api_key = None;
     conn.access_token = Some("not valid json".to_string());
 
     let body = json!({"contents": []});
@@ -132,11 +156,23 @@ async fn vertex_executor_execute_request_invalid_service_account_json() {
 
 #[tokio::test]
 async fn vertex_executor_execute_request_wrong_service_account_type() {
+    // Isolate from ambient ADC credentials: point GOOGLE_APPLICATION_CREDENTIALS
+    // at a nonexistent path and HOME at a tempdir so the gcloud default path
+    // (~/.config/gcloud/...) cannot resolve either. Without this, machines
+    // with `gcloud auth application-default login` state make the executor
+    // succeed instead of returning MissingCredentials.
+    let adc_home = tempfile::tempdir().expect("adc home tempdir");
+    let adc_home_path = adc_home.path().to_path_buf();
+    unsafe {
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json");
+        std::env::set_var("HOME", &adc_home_path);
+    }
     let executor =
         openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
             .expect("vertex executor");
 
     let mut conn = connection("vertex");
+    conn.api_key = None;
     conn.access_token = Some(r#"{"type":"wrong","client_email":"test@test.com","private_key":"key","token_uri":"https://oauth2.googleapis.com/token"}"#.to_string());
 
     let body = json!({"contents": []});
@@ -161,11 +197,23 @@ async fn vertex_executor_execute_request_wrong_service_account_type() {
 
 #[tokio::test]
 async fn vertex_executor_execute_request_empty_private_key() {
+    // Isolate from ambient ADC credentials: point GOOGLE_APPLICATION_CREDENTIALS
+    // at a nonexistent path and HOME at a tempdir so the gcloud default path
+    // (~/.config/gcloud/...) cannot resolve either. Without this, machines
+    // with `gcloud auth application-default login` state make the executor
+    // succeed instead of returning MissingCredentials.
+    let adc_home = tempfile::tempdir().expect("adc home tempdir");
+    let adc_home_path = adc_home.path().to_path_buf();
+    unsafe {
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json");
+        std::env::set_var("HOME", &adc_home_path);
+    }
     let executor =
         openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
             .expect("vertex executor");
 
     let mut conn = connection("vertex");
+    conn.api_key = None;
     conn.access_token = Some(r#"{"type":"service_account","client_email":"test@test.com","private_key":"","token_uri":"https://oauth2.googleapis.com/token"}"#.to_string());
 
     let body = json!({"contents": []});
@@ -190,11 +238,23 @@ async fn vertex_executor_execute_request_empty_private_key() {
 
 #[tokio::test]
 async fn vertex_executor_execute_request_empty_client_email() {
+    // Isolate from ambient ADC credentials: point GOOGLE_APPLICATION_CREDENTIALS
+    // at a nonexistent path and HOME at a tempdir so the gcloud default path
+    // (~/.config/gcloud/...) cannot resolve either. Without this, machines
+    // with `gcloud auth application-default login` state make the executor
+    // succeed instead of returning MissingCredentials.
+    let adc_home = tempfile::tempdir().expect("adc home tempdir");
+    let adc_home_path = adc_home.path().to_path_buf();
+    unsafe {
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json");
+        std::env::set_var("HOME", &adc_home_path);
+    }
     let executor =
         openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
             .expect("vertex executor");
 
     let mut conn = connection("vertex");
+    conn.api_key = None;
     conn.access_token = Some(r#"{"type":"service_account","client_email":"","private_key":"key","token_uri":"https://oauth2.googleapis.com/token"}"#.to_string());
 
     let body = json!({"contents": []});
@@ -219,11 +279,23 @@ async fn vertex_executor_execute_request_empty_client_email() {
 
 #[tokio::test]
 async fn vertex_executor_execute_request_empty_token_uri() {
+    // Isolate from ambient ADC credentials: point GOOGLE_APPLICATION_CREDENTIALS
+    // at a nonexistent path and HOME at a tempdir so the gcloud default path
+    // (~/.config/gcloud/...) cannot resolve either. Without this, machines
+    // with `gcloud auth application-default login` state make the executor
+    // succeed instead of returning MissingCredentials.
+    let adc_home = tempfile::tempdir().expect("adc home tempdir");
+    let adc_home_path = adc_home.path().to_path_buf();
+    unsafe {
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json");
+        std::env::set_var("HOME", &adc_home_path);
+    }
     let executor =
         openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
             .expect("vertex executor");
 
     let mut conn = connection("vertex");
+    conn.api_key = None;
     conn.access_token = Some(r#"{"type":"service_account","client_email":"test@test.com","private_key":"key","token_uri":""}"#.to_string());
 
     let body = json!({"contents": []});
@@ -248,11 +320,23 @@ async fn vertex_executor_execute_request_empty_token_uri() {
 
 #[tokio::test]
 async fn vertex_executor_execute_request_network_error() {
+    // Isolate from ambient ADC credentials: point GOOGLE_APPLICATION_CREDENTIALS
+    // at a nonexistent path and HOME at a tempdir so the gcloud default path
+    // (~/.config/gcloud/...) cannot resolve either. Without this, machines
+    // with `gcloud auth application-default login` state make the executor
+    // succeed instead of returning MissingCredentials.
+    let adc_home = tempfile::tempdir().expect("adc home tempdir");
+    let adc_home_path = adc_home.path().to_path_buf();
+    unsafe {
+        std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", "/nonexistent/adc.json");
+        std::env::set_var("HOME", &adc_home_path);
+    }
     let executor =
         openproxy::core::executor::VertexExecutor::new(Arc::new(ClientPool::new()), None)
             .expect("vertex executor");
 
     let mut conn = connection("vertex");
+    conn.api_key = None;
     conn.access_token = Some(r#"{"type":"service_account","client_email":"test@project.iam.gserviceaccounts.com","private_key":"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF8PbnGy0FFDcEPQ8gNLzmRszKzX9f\ndkKNOHKFxkC3hY8m6xM6FGBvA9wWVRqSvh7x8nGJhPxwLlpYD9wQ/E8qOj8dL0\nj6pW1N5zT3mJ8w5qZkJpF4e3pJPhNPLkZP5m8vPjx4c7F6b4L8pVS8mN7xZhJ6\nqF1yF2kP5p0T3mJ8w5qZkJpF4e3pJPhNPLkZP5m8vPjx4c7F6b4L8pVS8mN7x\n-----END RSA PRIVATE KEY-----","token_uri":"http://localhost:99999/nonexistent"}"#.to_string());
 
     let body = json!({"contents": []});

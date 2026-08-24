@@ -11,7 +11,7 @@ pub fn routes() -> Router<AppState> {
 
 async fn get_tags() -> Response {
     let body = json!({
-        "tags": [
+        "models": [
             {
                 "name": "llama3.2",
                 "modified_at": "2025-12-26T00:00:00Z",

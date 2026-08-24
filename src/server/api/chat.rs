@@ -1190,7 +1190,8 @@ async fn forward_with_provider_fallback(
             .provider_nodes
             .iter()
             .find(|node| {
-                node.prefix.as_deref() == Some(provider)
+                node.id == provider
+                    || node.prefix.as_deref() == Some(provider)
                     || (node.r#type.ends_with("-compatible") && node.name == provider)
             })
             .cloned();
@@ -2008,12 +2009,7 @@ async fn forward_with_provider_fallback(
                         proxy,
                     })
                     .await
-                    .map_err(|err| ComboAttemptError {
-                        status: 500,
-                        message: format!("Execution failed: {:?}", err),
-                        retry_after: None,
-                        upstream_body: None,
-                    })?;
+                    .map_err(|err| err.into_combo_attempt_error())?;
                 Ok(KiroExecutorResponse {
                     response: result.response,
                     url: result.url,

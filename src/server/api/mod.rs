@@ -276,11 +276,12 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .route(
             "/v1/v1/audio/voices",
             get(media::audio_voices).options(media::cors_options),
-        )
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            guard::require_protected,
-        ));
+        );
+    // JS parity: /v1/* LLM routes have NO route-level auth — free
+    // (noAuth) providers must work without any key. Per-provider
+    // credential checks happen inside handlers/executors instead
+    // (chat.js only enforces keys when settings.requireApiKey is set,
+    // which openproxy does not implement).
 
     // ── ADMIN: dashboard session or management API key required ──
     let admin_local_only = Router::new()
@@ -316,7 +317,6 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(cli_tools::routes())
         .merge(quota_auto_ping::routes())
         .merge(db_backups::routes())
-        .merge(locale::routes())
         .merge(models_disabled::routes())
         .merge(models_alias::routes())
         .merge(models_availability::routes())
@@ -327,13 +327,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(settings_payload_rules::routes())
         .merge(tunnel::routes())
         .merge(usage::routes())
-        .merge(cloud_sync::routes())
-        .merge(cloud_credentials::routes())
         .merge(admin_items::routes())
         .merge(pricing::routes())
         .merge(tags::routes())
         .merge(translator::routes())
-        .merge(shutdown::routes())
         .merge(oauth::routes())
         .merge(admin_local_only)
         .route(
@@ -376,6 +373,18 @@ pub fn routes(state: AppState) -> Router<AppState> {
 
     // ── Remaining modules: complex/mixed auth managed per-handler ──
     let remaining = Router::new()
+        // /api/shutdown authenticates via its own SHUTDOWN_SECRET, not the
+        // dashboard session (9router parity).
+        .merge(shutdown::routes())
+        // /api/init is a public liveness probe and /api/locale sets the
+        // visitor's language cookie — both are public pre-login routes in
+        // 9router.
+        .merge(cloud_sync::routes())
+        .merge(locale::routes())
+        // /api/cloud/* validates its own strict Bearer-only scheme (JS
+        // "Bearer-like" parity) — must not inherit the admin middleware,
+        // whose dashboard error message differs from the handler contract.
+        .merge(cloud_credentials::routes())
         .merge(media_providers::routes())
         .merge(observability::routes())
         .merge(mitm_config::routes())
@@ -1726,6 +1735,8 @@ pub fn consistent_machine_id() -> String {
     let salt =
         std::env::var("MACHINE_ID_SALT").unwrap_or_else(|_| "endpoint-proxy-salt".to_string());
 
+    // JS parity: ALWAYS hash to a 16-hex-char id — a UUID with dashes would
+    // break the sk-{machineId}-{keyId}-{crc} parse (split on '-' expects 4).
     match raw_machine_id() {
         Some(raw_machine_id) => {
             use sha2::Digest;
@@ -1735,7 +1746,13 @@ pub fn consistent_machine_id() -> String {
             hasher.update(salt.as_bytes());
             hex::encode(hasher.finalize())[..16].to_string()
         }
-        None => Uuid::new_v4().to_string(),
+        None => {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(b"openproxy-fallback-machine");
+            hasher.update(salt.as_bytes());
+            hex::encode(hasher.finalize())[..16].to_string()
+        }
     }
 }
 
@@ -1942,14 +1959,16 @@ async fn update_pool_api(
         .db
         .update(|db| {
             if let Some(pool) = db.proxy_pools.iter_mut().find(|p| p.id == id) {
+                // 9router proxy-pools/route.js:13-15 — name/proxyUrl/noProxy
+                // are trimmed before persisting.
                 if let Some(name) = req.name {
-                    pool.name = name;
+                    pool.name = name.trim().to_string();
                 }
                 if let Some(proxy_url) = req.proxy_url {
-                    pool.proxy_url = proxy_url;
+                    pool.proxy_url = proxy_url.trim().to_string();
                 }
                 if let Some(no_proxy) = req.no_proxy {
-                    pool.no_proxy = no_proxy;
+                    pool.no_proxy = no_proxy.trim().to_string();
                 }
                 if let Some(is_active) = req.is_active {
                     pool.is_active = Some(is_active);
@@ -1958,7 +1977,13 @@ async fn update_pool_api(
                     pool.strict_proxy = Some(strict_proxy);
                 }
                 if let Some(r#type) = req.r#type {
-                    pool.r#type = r#type;
+                    // JS [id]/route.js:40-43 — invalid type falls back to "http".
+                    let valid = ["http", "vercel", "cloudflare"];
+                    pool.r#type = if valid.contains(&r#type.as_str()) {
+                        r#type
+                    } else {
+                        "http".to_string()
+                    };
                 }
                 pool.updated_at = Some(chrono::Utc::now().to_rfc3339());
             }

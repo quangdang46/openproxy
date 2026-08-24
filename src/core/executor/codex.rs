@@ -320,6 +320,10 @@ impl CodexExecutor {
         if let Some(tool_choice) = body.get("tool_choice") {
             request_body["tool_choice"] = tool_choice.clone();
         }
+        // JS keeps `stop` (not in the delete list, codex.js:462-479).
+        if let Some(stop) = body.get("stop") {
+            request_body["stop"] = stop.clone();
+        }
 
         // Include reasoning encrypted content — Codex backend requires this for
         // reasoning models. JS: `if effort !== "none" → body.include =

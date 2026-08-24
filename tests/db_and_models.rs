@@ -364,10 +364,15 @@ async fn db_preserves_valid_sections_when_legacy_fields_are_null_or_invalid() {
     .await
     .expect("write usage json");
 
+    eprintln!(
+        "DBGFILES exists db={} usage={}",
+        db_json.exists(),
+        usage_json.exists()
+    );
     let db = Db::load_from(temp.path()).await.expect("load db");
     let snapshot = db.snapshot();
     let usage = db.usage_snapshot();
-
+    eprintln!("DBGCONN count={}", snapshot.provider_connections.len());
     assert_eq!(snapshot.provider_connections.len(), 1);
     assert_eq!(snapshot.provider_connections[0].auth_type, "cookie");
     assert!(snapshot.provider_connections[0]
@@ -421,7 +426,22 @@ async fn usage_updates_persist_and_migrate_daily_summary() {
 
     let reloaded = Db::load_from(temp.path()).await.expect("reload");
     let usage = reloaded.usage_snapshot();
+    eprintln!(
+        "DBG usage hist={} daily_keys={:?}",
+        usage.history.len(),
+        usage.daily_summary.keys().collect::<Vec<_>>()
+    );
+    if usage.daily_summary.get("2026-02-02").is_none() {
+        panic!(
+            "DBG missing day; lifetime={}",
+            usage.total_requests_lifetime
+        );
+    }
     let summary = &usage.daily_summary["2026-02-02"];
+    eprintln!(
+        "DBGEP keys={:?}",
+        summary.by_endpoint.keys().collect::<Vec<_>>()
+    );
 
     assert_eq!(usage.total_requests_lifetime, 1);
     assert_eq!(summary.requests, 1);
@@ -485,6 +505,7 @@ fn model_resolution_supports_aliases_nodes_and_combos() {
     assert_eq!(explicit_combo.model, "writer");
 
     let compatible = get_model_info("custom/gpt-4.1", &db);
+    // JS model.js: provider = matchedOpenAI.id (node id), not display name.
     assert_eq!(compatible.provider.as_deref(), Some("node-openai"));
     assert_eq!(compatible.model, "gpt-4.1");
 

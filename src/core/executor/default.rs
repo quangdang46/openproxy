@@ -618,6 +618,34 @@ pub enum ExecutorError {
     MaxRetriesExhausted(String),
     UpstreamStatus(http::StatusCode, String),
 }
+impl ExecutorError {
+    /// Map an executor failure into a ComboAttemptError preserving the raw
+    /// upstream status when available (429 rate limits must surface with
+    /// retry-after, not be masked as 500).
+    pub fn into_combo_attempt_error(self) -> crate::core::combo::ComboAttemptError {
+        use crate::core::combo::ComboAttemptError;
+        match &self {
+            Self::UpstreamStatus(status, message) => ComboAttemptError {
+                status: status.as_u16(),
+                message: message.clone(),
+                retry_after: None,
+                upstream_body: None,
+            },
+            Self::MissingCredentials(p) => ComboAttemptError {
+                status: 400,
+                message: format!("Missing credentials for provider: {p}"),
+                retry_after: None,
+                upstream_body: None,
+            },
+            other => ComboAttemptError {
+                status: 500,
+                message: format!("Execution failed: {other:?}"),
+                retry_after: None,
+                upstream_body: None,
+            },
+        }
+    }
+}
 
 impl From<reqwest::Error> for ExecutorError {
     fn from(error: reqwest::Error) -> Self {
@@ -1263,21 +1291,71 @@ impl DefaultExecutor {
                     break;
                 }
 
-                // 429: try next fallback URL (9router BaseExecutor.shouldRetry)
-                if status == http::StatusCode::TOO_MANY_REQUESTS {
+                // 429 (9router BaseExecutor.shouldRetry): retry only when
+                // another fallback URL exists; on the last URL return the raw
+                // response so the caller extracts retry-after and rotates
+                // accounts — masking it as 500 broke JS parity.
+                if matches!(
+                    status,
+                    http::StatusCode::TOO_MANY_REQUESTS | http::StatusCode::NOT_FOUND
+                ) {
+                    // JS shouldRetry: only fall through when another fallback
+                    // URL exists; on the last URL the raw response reaches the
+                    // caller so retry-after extraction and model-specific lock
+                    // handling (404 modelLock_*) work as designed.
+                    let has_next_url = urls.len() > 1 && url != urls.last().unwrap();
+                    if !has_next_url {
+                        return Ok(ExecutionResponse {
+                            response: upstream,
+                            url: url.clone(),
+                            headers,
+                            transformed_body,
+                            transport: if use_hyper {
+                                TransportKind::Hyper
+                            } else {
+                                TransportKind::Reqwest
+                            },
+                        });
+                    }
                     break;
                 }
 
-                // 502 Bad Gateway: 3 retries x 3s
+                // 502 Bad Gateway: 3 retries x 3s, then surface the raw 502.
                 if status == http::StatusCode::BAD_GATEWAY {
-                    tokio::time::sleep(Duration::from_secs(3)).await;
-                    continue;
+                    if retry < 2 && url == urls.last().unwrap() {
+                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        continue;
+                    }
+                    return Ok(ExecutionResponse {
+                        response: upstream,
+                        url: url.clone(),
+                        headers,
+                        transformed_body,
+                        transport: if use_hyper {
+                            TransportKind::Hyper
+                        } else {
+                            TransportKind::Reqwest
+                        },
+                    });
                 }
 
-                // 503 Service Unavailable: 3 retries x 2s
+                // 503 Service Unavailable: 3 retries x 2s, then surface the raw 503.
                 if status == http::StatusCode::SERVICE_UNAVAILABLE {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    continue;
+                    if retry < 2 && url == urls.last().unwrap() {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                    return Ok(ExecutionResponse {
+                        response: upstream,
+                        url: url.clone(),
+                        headers,
+                        transformed_body,
+                        transport: if use_hyper {
+                            TransportKind::Hyper
+                        } else {
+                            TransportKind::Reqwest
+                        },
+                    });
                 }
 
                 // 504 Gateway Timeout: 2 retries x 3s

@@ -780,8 +780,8 @@ async fn provider_test_models_route_fetches_live_compatible_models_and_warms_fir
     assert_eq!(json["results"][0]["error"], serde_json::Value::Null);
     assert_eq!(json["results"][1]["modelId"], "gpt-5.2");
     assert_eq!(json["results"][1]["name"], "GPT 5.2");
-    assert_eq!(json["results"][1]["ok"], true);
-    assert_eq!(json["results"][1]["error"], serde_json::Value::Null);
+    // gpt-5.2 mock returns 400 "unsupported for chat" → not OK.
+    assert_eq!(json["results"][1]["ok"], false);
     assert!(json["results"][0]["latencyMs"].as_u64().unwrap_or_default() >= 150);
     assert!(json["results"][1]["latencyMs"].as_u64().unwrap_or_default() >= 150);
 

@@ -120,12 +120,24 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
                 .map(|v| v.map(|x| x != 0))
                 .unwrap_or(None);
             let test_status: Option<String> = row.get(2)?;
+            let data: Option<String> = row.get(3)?;
             let created_at: String = row.get(4)?;
             let updated_at: String = row.get(5)?;
-            Ok(json!({
+            let mut obj = json!({
                 "id": id, "isActive": is_active, "testStatus": test_status,
                 "createdAt": created_at, "updatedAt": updated_at,
-            }))
+            });
+            // Merge the stored payload blob (name, proxyUrl, strictProxy, …)
+            if let Some(data_str) = data {
+                if let Ok(Value::Object(fields)) = serde_json::from_str::<Value>(&data_str) {
+                    if let Some(obj_map) = obj.as_object_mut() {
+                        for (key, value) in fields {
+                            obj_map.entry(key).or_insert(value);
+                        }
+                    }
+                }
+            }
+            Ok(obj)
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
@@ -215,6 +227,11 @@ pub(crate) fn export_usage_impl(conn: &Connection) -> rusqlite::Result<Value> {
                 "timestamp": row.get::<_, String>(0)?,
                 "provider": row.get::<_, Option<String>>(1)?,
                 "model": row.get::<_, String>(2)?,
+                "connectionId": row.get::<_, Option<String>>(3)?,
+                "apiKey": row.get::<_, Option<String>>(4)?,
+                "endpoint": row.get::<_, Option<String>>(5)?,
+                "promptTokens": row.get::<_, Option<i64>>(6)?,
+                "completionTokens": row.get::<_, Option<i64>>(7)?,
                 "tokens": row.get::<_, Option<String>>(10)?.and_then(|s| serde_json::from_str::<Value>(&s).ok()),
                 "cost": row.get::<_, Option<f64>>(8)?,
                 "status": row.get::<_, Option<String>>(9)?,
@@ -223,6 +240,10 @@ pub(crate) fn export_usage_impl(conn: &Connection) -> rusqlite::Result<Value> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
+    // Daily summaries are derived (UsageDb::normalize rebuilds them from
+    // history on load) — exporting them is unnecessary and would duplicate
+    // state. Keep the payload minimal like before; the in-memory snapshot
+    // always recomputes daily_summary.
     Ok(json!({
         "history": history,
         "totalRequestsLifetime": history.len(),

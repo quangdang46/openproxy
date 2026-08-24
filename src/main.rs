@@ -479,11 +479,20 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await?;
+    // Exit the process when /api/shutdown signals a successful shutdown
+    // (9router parity: POST with valid SHUTDOWN_SECRET stops the server).
+    let shutdown_signal = state.shutdown_signal.clone();
+    tokio::select! {
+        result = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        ) => {
+            result?;
+        }
+        _ = shutdown_signal.notified() => {
+            info!("Shutdown signal received — stopping server");
+        }
+    }
     Ok(())
 }
 

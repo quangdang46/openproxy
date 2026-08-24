@@ -13,6 +13,17 @@ async fn app_state() -> AppState {
     let temp = tempdir().expect("tempdir");
     let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
     db.update(|state| {
+        // Management key: pricing routes sit in the admin tier now that
+        // requireLogin defaults to true (9router parity).
+        state.api_keys.push(openproxy::types::ApiKey {
+            id: "mgmt-1".into(),
+            name: "Management".into(),
+            key: "pricing-mgmt-key".into(),
+            machine_id: None,
+            is_active: Some(true),
+            created_at: None,
+            extra: Default::default(),
+        });
         state.pricing = BTreeMap::from([(
             "openai".to_string(),
             BTreeMap::from([(
@@ -33,6 +44,7 @@ fn request(method: Method, uri: &str, body: Body) -> Request<Body> {
     Request::builder()
         .method(method)
         .uri(uri)
+        .header("authorization", "Bearer pricing-mgmt-key")
         .header("content-type", "application/json")
         .body(body)
         .unwrap()

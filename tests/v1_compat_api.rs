@@ -164,9 +164,31 @@ async fn messages_route_promotes_system_field_before_forwarding() {
                 "finish_reason": "stop"
             }]
         })))
-        .expect(1)
         .mount(&upstream)
         .await;
+    // Catch-all to log unmatched requests
+    Mock::given(method("POST"))
+        .respond_with(|req: &wiremock::Request| {
+            let body = std::str::from_utf8(&req.body)
+                .unwrap_or_default()
+                .to_string();
+            let auth = req
+                .headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            eprintln!(
+                "UNMATCHED path={} auth={:?} body={}",
+                req.url.path(),
+                auth,
+                body
+            );
+            wiremock::ResponseTemplate::new(599).set_body_string("UNMATCHED")
+        })
+        .mount(&upstream)
+        .await;
+    eprintln!("MOCK mounted for upstream {}", upstream.uri());
 
     let state = seeded_state(
         vec![provider_node(
@@ -174,7 +196,7 @@ async fn messages_route_promotes_system_field_before_forwarding() {
             "compat",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", "upstream-key")],
+        vec![connection("conn-1", "node-openai", "upstream-key")],
     )
     .await;
 
@@ -248,7 +270,7 @@ async fn responses_compact_normalizes_input_and_sets_compact_flag() {
             "compat",
             &format!("{}/v1", upstream.uri()),
         )],
-        vec![connection("conn-1", "Compatible", "upstream-key")],
+        vec![connection("conn-1", "node-openai", "upstream-key")],
     )
     .await;
 

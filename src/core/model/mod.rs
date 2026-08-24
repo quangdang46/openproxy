@@ -241,7 +241,10 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
                             && node.prefix.as_deref() == Some(provider_alias.as_str())
                     }) {
                         return ResolvedModel {
-                            provider: Some(node.name.clone()),
+                            // JS parity: credentials are keyed by the node's
+                            // id/prefix (the connection `provider` value), not
+                            // the display name.
+                            provider: node.id.clone().into(),
                             model,
                             route_kind: ModelRouteKind::Direct,
                         };
