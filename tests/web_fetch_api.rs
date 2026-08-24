@@ -63,13 +63,15 @@ async fn web_fetch_options_exposes_cors_and_post_method() {
             .unwrap(),
         "*"
     );
-    assert_eq!(
-        resp.headers()
-            .get("access-control-allow-methods")
-            .unwrap()
-            .to_str()
-            .unwrap(),
-        "POST, OPTIONS"
+    // CorsLayer with allow_methods(Any) emits "*"; either form must permit POST.
+    let methods = resp
+        .headers()
+        .get("access-control-allow-methods")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        methods == "*" || methods.contains("POST"),
+        "allow-methods should permit POST, got {methods:?}"
     );
 }
 
