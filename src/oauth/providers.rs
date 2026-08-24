@@ -220,7 +220,7 @@ pub fn kimi() -> OAuthProviderConfig {
     config
 }
 
-/// KiloCode — device-code flow (same URL for both endpoints).
+/// KiloCode — custom device auth flow (matches OmniRoute).
 pub fn kilocode() -> OAuthProviderConfig {
     OAuthProviderConfig {
         id: "kilocode",
@@ -229,7 +229,10 @@ pub fn kilocode() -> OAuthProviderConfig {
         token_url: "https://api.kilo.ai/api/device-auth/codes",
         scopes: &[],
         uses_pkce: false,
-        extra_params: &[],
+        extra_params: &[
+            ("initiate_url", "https://api.kilo.ai/api/device-auth/codes"),
+            ("poll_url_base", "https://api.kilo.ai/api/device-auth/codes"),
+        ],
         refresh_lead_ms: 0,
     }
 }

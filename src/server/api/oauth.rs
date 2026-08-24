@@ -4490,12 +4490,25 @@ pub async fn start_device_code(
     };
 
     // Kiro uses a special combined flow: register client + start device code
+    // KiloCode uses a custom device auth flow (initiateUrl + pollUrlBase)
     let (device_resp, kiro_credentials) = if provider == "kiro" {
         match device_code::kiro_start_device_flow().await {
             Ok(kiro_flow) => {
                 let creds = Some((kiro_flow.client_id.clone(), kiro_flow.client_secret.clone()));
                 (kiro_flow.device_code, creds)
             }
+            Err(e) => {
+                return make_error_response(
+                    StatusCode::BAD_REQUEST,
+                    &e.error_description.unwrap_or_else(|| e.error.clone()),
+                    &e.error,
+                    &provider,
+                );
+            }
+        }
+    } else if provider == "kilocode" {
+        match device_code::kilocode_start_device_flow(&provider_config).await {
+            Ok(resp) => (resp, None),
             Err(e) => {
                 return make_error_response(
                     StatusCode::BAD_REQUEST,
@@ -4657,118 +4670,117 @@ pub async fn poll_device_code(
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(5);
 
-    match device_code::poll_for_token(&provider_config, &device_code, &user_code, interval).await {
-        Ok(token_response) => {
-            state.pending_flows.remove(&device_code);
-
-            // GitHub special: exchange OAuth token for Copilot token
-            let final_token_response = if provider == "github" {
-                match device_code::exchange_github_copilot_token(&token_response.access_token).await
-                {
-                    Ok(copilot_token) => copilot_token,
-                    Err(e) => {
-                        return make_error_response(
-                            StatusCode::BAD_REQUEST,
-                            &format!(
-                                "Copilot token exchange failed: {}",
-                                e.error_description.unwrap_or_else(|| e.error.clone())
-                            ),
-                            "copilot_exchange_failed",
-                            &provider,
-                        );
-                    }
-                }
-            } else {
-                token_response
-            };
-
-            // Kimi device-flow parity (kimi.js): mint a stable deviceId at
-            // login and persist it in providerSpecificData so refreshes and
-            // usage fetches keep the same X-Msh-Device-Id across restarts.
-            let mut extra_psd = std::collections::BTreeMap::new();
-            if provider == "kimi" || provider == "kimi-coding" {
-                let device_id = uuid::Uuid::new_v4().to_string();
-                extra_psd.insert("deviceId".to_string(), json!(device_id));
+    let token_response = if provider == "kilocode" {
+        match device_code::kilocode_poll_for_token(&provider_config, &device_code).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let pending = e.error == "authorization_pending" || e.error == "slow_down";
+                return Json(json!({
+                    "success": false,
+                    "error": e.error,
+                    "errorDescription": e.error_description,
+                    "pending": pending,
+                }))
+                .into_response();
             }
-
-            if let Err(e) = store_connection(
-                &state.db,
-                &flow.account_id,
-                &provider,
-                &final_token_response,
-                None,
-            )
+        }
+    } else {
+        match device_code::poll_for_token(&provider_config, &device_code, &user_code, interval)
             .await
-            {
+        {
+            Ok(resp) => resp,
+            Err(e) => {
+                let pending = e.error == "authorization_pending" || e.error == "slow_down";
+                return Json(json!({
+                    "success": false,
+                    "error": e.error,
+                    "errorDescription": e.error_description,
+                    "pending": pending,
+                }))
+                .into_response();
+            }
+        }
+    };
+
+    // GitHub special: exchange OAuth token for Copilot token
+    let final_token_response = if provider == "github" {
+        match device_code::exchange_github_copilot_token(&token_response.access_token).await {
+            Ok(copilot_token) => copilot_token,
+            Err(e) => {
                 return make_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to store connection: {}", e),
-                    "storage_error",
+                    StatusCode::BAD_REQUEST,
+                    &format!(
+                        "Copilot token exchange failed: {}",
+                        e.error_description.unwrap_or_else(|| e.error.clone())
+                    ),
+                    "copilot_exchange_failed",
                     &provider,
                 );
             }
-
-            if !extra_psd.is_empty() {
-                if let Some(conn) = state
-                    .db
-                    .snapshot()
-                    .provider_connections
-                    .iter()
-                    .find(|c| c.provider == provider && c.id == flow.account_id)
-                    .cloned()
-                {
-                    let _ = state
-                        .db
-                        .update(move |db| {
-                            if let Some(target) =
-                                db.provider_connections.iter_mut().find(|c| c.id == conn.id)
-                            {
-                                for (k, v) in extra_psd {
-                                    target.provider_specific_data.insert(k, v);
-                                }
-                            }
-                        })
-                        .await;
-                }
-            }
-
-            Json(PollResponse {
-                success: true,
-                provider: provider.clone(),
-                expires_in: final_token_response.expires_in.map(|e| e as u64),
-                pending: Some(false),
-                retry_after: None,
-                message: Some("Authorization successful".to_string()),
-            })
-            .into_response()
         }
-        Err(e) => {
-            if e.error == "authorization_pending" || e.error == "slow_down" {
-                let retry_after = provider_config
-                    .get_param("interval")
-                    .and_then(|s| s.parse::<u64>().ok())
-                    .unwrap_or(5);
-                return Json(PollResponse {
-                    success: false,
-                    provider: provider.clone(),
-                    expires_in: None,
-                    pending: Some(true),
-                    retry_after: Some(retry_after),
-                    message: Some("Pending authorization".to_string()),
+    } else {
+        token_response
+    };
+
+    // Kimi device-flow parity (kimi.js): mint a stable deviceId at
+    // login and persist it in providerSpecificData so refreshes and
+    // usage fetches keep the same X-Msh-Device-Id across restarts.
+    let mut extra_psd = std::collections::BTreeMap::new();
+    if provider == "kimi" || provider == "kimi-coding" {
+        let device_id = uuid::Uuid::new_v4().to_string();
+        extra_psd.insert("deviceId".to_string(), json!(device_id));
+    }
+
+    if let Err(e) = store_connection(
+        &state.db,
+        &flow.account_id,
+        &provider,
+        &final_token_response,
+        None,
+    )
+    .await
+    {
+        return make_error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to store connection: {}", e),
+            "storage_error",
+            &provider,
+        );
+    }
+
+    if !extra_psd.is_empty() {
+        if let Some(conn) = state
+            .db
+            .snapshot()
+            .provider_connections
+            .iter()
+            .find(|c| c.provider == provider && c.id == flow.account_id)
+            .cloned()
+        {
+            let _ = state
+                .db
+                .update(move |db| {
+                    if let Some(target) =
+                        db.provider_connections.iter_mut().find(|c| c.id == conn.id)
+                    {
+                        for (k, v) in extra_psd {
+                            target.provider_specific_data.insert(k, v);
+                        }
+                    }
                 })
-                .into_response();
-            }
-
-            state.pending_flows.remove(&device_code);
-
-            make_error_response(
-                StatusCode::BAD_REQUEST,
-                &e.error_description.unwrap_or_else(|| e.error.clone()),
-                &e.error,
-                &provider,
-            )
+                .await;
         }
     }
+
+    Json(PollResponse {
+        success: true,
+        provider: provider.clone(),
+        expires_in: final_token_response.expires_in.map(|e| e as u64),
+        pending: Some(false),
+        retry_after: None,
+        message: Some("Authorization successful".to_string()),
+    })
+    .into_response()
 }
 
 // POST /api/oauth/:provider/refresh

@@ -13,6 +13,7 @@ use url::form_urlencoded;
 
 pub const TOKEN_EXPIRY_BUFFER_MS: u64 = 5 * 60 * 1000;
 pub mod background_refresh;
+pub mod kilocode;
 pub mod pending;
 pub mod providers;
 pub mod secret;
@@ -367,6 +368,19 @@ pub mod device_code {
             .unwrap_or_default();
 
         Ok((registered_client_id, client_secret))
+    }
+
+    pub async fn kilocode_start_device_flow(
+        provider_config: &OAuthProviderConfig,
+    ) -> Result<DeviceCodeResponse, OAuthError> {
+        super::kilocode::kilocode_start_device_flow(provider_config).await
+    }
+
+    pub async fn kilocode_poll_for_token(
+        provider_config: &OAuthProviderConfig,
+        device_code: &str,
+    ) -> Result<TokenResponse, OAuthError> {
+        super::kilocode::kilocode_poll_for_token(provider_config, device_code).await
     }
 }
 
