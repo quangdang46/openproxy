@@ -1,6 +1,6 @@
 {
   "name": "openproxy",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "OpenProxy Astro dashboard sidecar",
   "private": true,
   "packageManager": "pnpm@10.33.2",
