@@ -1115,6 +1115,8 @@ export default function ProviderDetailPageClient() {
             isFree={false}
             caps={getCaps(`${providerId}/${model.id}`)}
             thinkingSuffix={resolveThinkingSuffix(model.id)}
+            isFavorite={am.isFavorite(model.id)}
+            onToggleFavorite={() => am.toggleFavorite(model.id)}
           />
         ))}
 
@@ -1141,6 +1143,8 @@ export default function ProviderDetailPageClient() {
               onDisable={() => handleDisableModel(model.id)}
               caps={getCaps(`${providerId}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
+              isFavorite={am.isFavorite(model.id)}
+              onToggleFavorite={() => am.toggleFavorite(model.id)}
             />
           );
         })}

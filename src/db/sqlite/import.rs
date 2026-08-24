@@ -192,6 +192,8 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
     }
     import_kv_scope(conn, "mitmAlias", payload.get("mitmAlias"))?;
     import_kv_scope(conn, "pricing", payload.get("pricing"))?;
+    import_kv_scope(conn, "providerFilters", payload.get("providerFilters"))?;
+    import_kv_scope(conn, "favoriteModels", payload.get("favoriteModels"))?;
 
     // Disabled models
     if let Some(arr) = payload.get("disabledModels").and_then(Value::as_array) {

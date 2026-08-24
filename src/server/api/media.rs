@@ -639,6 +639,7 @@ async fn execute_media_provider(
                         Some(connection_id),
                         Some(&api_key),
                         Some(url.as_str()),
+                        None,
                     )
                     .await;
             }

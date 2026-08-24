@@ -20,7 +20,6 @@ expression: result
     }
   ],
   "generationConfig": {},
-  "model": "test-model",
   "safetySettings": [
     {
       "category": "HARM_CATEGORY_HARASSMENT",

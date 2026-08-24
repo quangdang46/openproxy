@@ -8,7 +8,7 @@ import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
-import { buildAvailableModels, fetchLiveModels, type LiveModel } from "@/shared/models/availableModels";
+import { buildAvailableModels, fetchLiveModels, useFavorites, type LiveModel } from "@/shared/models/availableModels";
 import React from "react";
 
 interface Model {
@@ -74,6 +74,11 @@ interface ModelSelectModalProps {
   // When false, picking a model does not close the modal; the user must press
   // Done. Useful when the parent uses onSelect to toggle multiple entries.
   closeOnSelect?: boolean;
+  // Multi-select mode: rows render a checkbox, clicking a row toggles
+  // selection (instead of opening), and the footer shows "Apply N".
+  selectionMode?: "single" | "multi";
+  // Called with the selected model ids when the user presses "Apply N".
+  onSelectIds?: (ids: string[]) => void;
 }
 
 export default function ModelSelectModal({
@@ -86,6 +91,8 @@ export default function ModelSelectModal({
   modelAliases = {},
   kindFilter = null,
   closeOnSelect = true,
+  selectionMode = "single",
+  onSelectIds,
 }: ModelSelectModalProps) {
   useEnsureCatalog();
   const { getCaps } = useModelCaps();
@@ -106,6 +113,20 @@ export default function ModelSelectModal({
   const [liveModelsByAlias, setLiveModelsByAlias] = useState<Record<string, LiveModel[]>>({});
   const [freeOnlyByAlias, setFreeOnlyByAlias] = useState<Record<string, boolean>>({});
   const listRef = useRef<HTMLDivElement>(null);
+
+  // Shared favorites (star) store — same cache the provider page uses.
+  const { isFavorite, toggleFavorite } = useFavorites();
+
+  // Multi-select state (modal-scoped; the modal is the single owner since it
+  // spans many providers at once).
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const toggleSelect = (id: string) =>
+    setSelectedIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  useEffect(() => {
+    if (isOpen) setSelectedIds([]);
+  }, [isOpen]);
 
   const fetchCombos = async () => {
     try {
@@ -448,6 +469,13 @@ export default function ModelSelectModal({
     }
   };
 
+  const handleApplyMulti = () => {
+    if (onSelectIds) onSelectIds(selectedIds);
+    onClose();
+    setSearchQuery("");
+    setSelectedIds([]);
+  };
+
   return (
     <Modal
       isOpen={isOpen}
@@ -459,7 +487,32 @@ export default function ModelSelectModal({
       size="md"
       className="p-4!"
       footer={
-        !closeOnSelect ? (
+        selectionMode === "multi" ? (
+          <div className="flex w-full items-center justify-between gap-2">
+            <span className="text-xs text-text-muted">
+              {selectedIds.length} selected
+            </span>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  onClose();
+                  setSearchQuery("");
+                }}
+              >
+                Close
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleApplyMulti}
+                disabled={selectedIds.length === 0}
+              >
+                Apply {selectedIds.length}
+              </Button>
+            </div>
+          </div>
+        ) : !closeOnSelect ? (
           <Button
             onClick={() => {
               onClose();
@@ -565,25 +618,62 @@ export default function ModelSelectModal({
 
             <div className="flex flex-wrap gap-1.5">
               {group.models.map((model) => {
-                const isSelected = Array.isArray(selectedModel)
-                  ? selectedModel.includes(model.value)
-                  : selectedModel === model.value;
                 const isPlaceholder = model.isPlaceholder;
+                const isLlm = model.type === "llm";
+                const favAlias = getProviderAlias(providerId);
+                const fav = isLlm ? isFavorite(favAlias, model.id) : false;
+                const isMulti = selectionMode === "multi";
+                const isMultiSelected = isMulti && selectedIds.includes(model.value);
+                const isSingleSelected = !isMulti && (Array.isArray(selectedModel)
+                  ? selectedModel.includes(model.value)
+                  : selectedModel === model.value);
+                const rowClick = () => {
+                  if (isMulti) toggleSelect(model.value);
+                  else handleSelect(model);
+                };
                 return (
-                  <button
+                  <div
                     key={model.value}
-                    onClick={() => handleSelect(model)}
+                    onClick={rowClick}
                     title={isPlaceholder ? "Select to pre-fill, then edit model ID in the input" : undefined}
                     className={`
-                      px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer
+                      inline-flex items-center gap-1 px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer
                       ${isPlaceholder
                         ? "border-dashed border-border text-text-muted hover:border-primary/50 hover:text-primary bg-surface italic"
-                        : isSelected
-                          ? "bg-primary text-white border-primary"
-                          : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
+                        : isMultiSelected
+                          ? "border-primary bg-primary/10 text-text-main"
+                          : isSingleSelected
+                            ? "bg-primary text-white border-primary"
+                            : "bg-surface border-border text-text-main hover:border-primary/50 hover:bg-primary/5"
                       }
                     `}
                   >
+                    {isLlm && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleFavorite(favAlias, model.id);
+                        }}
+                        className="shrink-0 rounded p-0.5 -ml-1 hover:bg-black/5 dark:hover:bg-white/5"
+                        title={fav ? "Remove from favorites" : "Add to favorites"}
+                        aria-label={fav ? "Remove from favorites" : "Add to favorites"}
+                      >
+                        <span className={`material-symbols-outlined text-[14px] ${fav ? "text-yellow-400" : "text-text-muted"}`}>
+                          {fav ? "star" : "star_outline"}
+                        </span>
+                      </button>
+                    )}
+                    {isMulti && (
+                      <input
+                        type="checkbox"
+                        checked={isMultiSelected}
+                        onChange={() => toggleSelect(model.value)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="h-3.5 w-3.5 rounded border-gray-300 text-primary focus:ring-primary shrink-0"
+                        aria-label={`Select ${model.name}`}
+                      />
+                    )}
                     {isPlaceholder ? (
                       <span className="flex items-center gap-1">
                         <span className="material-symbols-outlined text-[11px]">edit</span>
@@ -593,15 +683,15 @@ export default function ModelSelectModal({
                       <span className="flex items-center gap-1">
                         {model.name}
                         <span className="text-[9px] opacity-60 font-normal">custom</span>
-                        <CapacityBadges caps={getCaps(model.value)} size={12} colorOverride={isSelected ? "text-white/80" : undefined} />
+                        <CapacityBadges caps={getCaps(model.value)} size={12} colorOverride={isMultiSelected || isSingleSelected ? "text-white/80" : undefined} />
                       </span>
                     ) : (
                       <span className="flex items-center gap-1">
                         {model.name}
-                        <CapacityBadges caps={getCaps(model.value)} size={12} colorOverride={isSelected ? "text-white/80" : undefined} />
+                        <CapacityBadges caps={getCaps(model.value)} size={12} colorOverride={isMultiSelected || isSingleSelected ? "text-white/80" : undefined} />
                       </span>
                     )}
-                  </button>
+                  </div>
                 );
               })}
             </div>

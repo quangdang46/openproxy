@@ -23,9 +23,12 @@ interface ModelRowProps {
   isTesting?: boolean;
   caps?: ModelCaps | null;
   thinkingSuffix?: string;
+  /** Favorite (star) state + toggle, shared with ModelSelectModal. */
+  isFavorite?: boolean;
+  onToggleFavorite?: () => void;
 }
 
-export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onDisable, onTest, isTesting, caps, thinkingSuffix }: ModelRowProps): React.ReactNode {
+export default function ModelRow({ model, fullModel, alias, copied, onCopy, testStatus, isCustom, isFree, onDeleteAlias, onDisable, onTest, isTesting, caps, thinkingSuffix, isFavorite, onToggleFavorite }: ModelRowProps): React.ReactNode {
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -43,6 +46,19 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
   return (
     <div className={`group min-w-0 max-w-full rounded-lg border px-3 py-2 ${borderColor} hover:bg-sidebar/50`}>
       <div className="flex min-w-0 items-start gap-2 sm:items-center">
+        {onToggleFavorite && (
+          <button
+            type="button"
+            onClick={onToggleFavorite}
+            className="shrink-0 rounded p-0.5 hover:bg-sidebar"
+            title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+            aria-label={isFavorite ? "Remove from favorites" : "Add to favorites"}
+          >
+            <span className={`material-symbols-outlined text-[16px] ${isFavorite ? "text-yellow-400" : "text-text-muted"}`}>
+              {isFavorite ? "star" : "star_outline"}
+            </span>
+          </button>
+        )}
         <span
           className="material-symbols-outlined shrink-0 text-base"
           style={iconColor ? { color: iconColor } : undefined}

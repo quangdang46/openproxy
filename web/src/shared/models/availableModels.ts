@@ -285,6 +285,91 @@ async function saveFreeOnly(alias: string, value: boolean): Promise<void> {
   }
 }
 
+// ── Favorites (star) persistence ────────────────────────────────────────
+// Backend contract:
+//   GET  /api/models/favorites → { favorites: { [alias]: string[] } }
+//   PUT  /api/models/favorites  → { alias, favorites: string[] }
+// Module-level singleton so the multi-provider ModelSelectModal and the
+// single-provider ProviderDetailPageClient share ONE cache and update
+// instantly. Both key favorites by getProviderAlias(providerId).
+
+let _favorites: Record<string, string[]> = {};
+const _favListeners = new Set<() => void>();
+let _favLoaded = false;
+
+function _emitFav(): void {
+  _favListeners.forEach((l) => l());
+}
+
+export async function loadFavorites(): Promise<void> {
+  try {
+    const res = await fetch("/api/models/favorites", { cache: "no-store" });
+    if (res.ok) {
+      const data = await res.json();
+      if (data && data.favorites && typeof data.favorites === "object") {
+        _favorites = data.favorites as Record<string, string[]>;
+      }
+    }
+  } catch {
+    // ignore — start empty
+  } finally {
+    _favLoaded = true;
+    _emitFav();
+  }
+}
+
+export function isFavoriteModel(alias: string, id: string): boolean {
+  return Array.isArray(_favorites[alias]) && _favorites[alias].includes(id);
+}
+
+export async function toggleFavoriteModel(alias: string, id: string): Promise<void> {
+  const current = _favorites[alias] || [];
+  const next = current.includes(id)
+    ? current.filter((x) => x !== id)
+    : [...current, id];
+  // Optimistic update so the star flips instantly in every view.
+  _favorites = { ..._favorites, [alias]: next };
+  _emitFav();
+  try {
+    await fetch("/api/models/favorites", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ alias, favorites: next }),
+    });
+  } catch {
+    // Revert on failure.
+    _favorites = { ..._favorites, [alias]: current };
+    _emitFav();
+  }
+}
+
+/**
+ * Shared favorites store. Any component that calls this re-renders when the
+ * favorites cache changes, so the modal and provider page stay in sync.
+ */
+export function useFavorites(): {
+  favorites: Record<string, string[]>;
+  isFavorite: (alias: string, id: string) => boolean;
+  toggleFavorite: (alias: string, id: string) => void;
+} {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const l = () => force((x) => x + 1);
+    _favListeners.add(l);
+    if (!_favLoaded) void loadFavorites();
+    return () => {
+      _favListeners.delete(l);
+    };
+  }, []);
+  return {
+    favorites: _favorites,
+    isFavorite: isFavoriteModel,
+    toggleFavorite: (alias: string, id: string) => {
+      void toggleFavoriteModel(alias, id);
+    },
+  };
+}
+
 export interface UseAvailableModelsResult extends BuildAvailableModelsResult {
   liveModels: LiveModel[];
   customModels: CustomModelEntry[];
@@ -452,6 +537,23 @@ export function useAvailableModels(providerId: string): UseAvailableModelsResult
     [providerAlias]
   );
 
+  // Favorites (star) — backed by the shared module-level store so the modal
+  // and this provider page reflect the same persisted state instantly.
+  const { isFavorite: isFav, toggleFavorite: toggleFav } = useFavorites();
+  const isFavorite = useCallback(
+    (id: string) => isFav(providerAlias, id),
+    [providerAlias, isFav]
+  );
+  const toggleFavorite = useCallback(
+    (id: string) => {
+      toggleFav(providerAlias, id);
+    },
+    [providerAlias, toggleFav]
+  );
+  const loadFav = useCallback(() => {
+    void loadFavorites();
+  }, []);
+
   return {
     ...result,
     liveModels,
@@ -467,5 +569,9 @@ export function useAvailableModels(providerId: string): UseAvailableModelsResult
     loading,
     refresh,
     providerAlias,
+    favorites: _favorites[providerAlias] || [],
+    isFavorite,
+    toggleFavorite,
+    loadFavorites: loadFav,
   };
 }

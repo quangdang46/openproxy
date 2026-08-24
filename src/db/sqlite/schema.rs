@@ -165,7 +165,11 @@ pub const TABLES_SQL: &[&str] = &[
         cost             REAL DEFAULT 0,
         status           TEXT,
         tokens           TEXT,
-        meta             TEXT
+        meta             TEXT,
+        bytesBefore      INTEGER DEFAULT 0,
+        bytesAfter       INTEGER DEFAULT 0,
+        bytesSaved       INTEGER DEFAULT 0,
+        imagePrompts     INTEGER DEFAULT 0
     )
     "#,
     r#"
