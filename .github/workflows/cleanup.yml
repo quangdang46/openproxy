@@ -1,0 +1,63 @@
+name: Cleanup
+
+# Periodic disk-hygiene for the repo + GitHub Actions cache.
+#
+# Two jobs:
+#   1. script-smoke — runs scripts/cleanup.sh in --dry-run on Linux + macOS to
+#      prove the script is portable and safe (deletes nothing) on every runner.
+#   2. prune-caches — deletes GitHub Actions caches not touched in 7 days so the
+#      shared cache quota doesn't fill up with stale cargo/web artifacts.
+#
+# CI runners are ephemeral, so we don't aggressively wipe their local disks;
+# the real protection for developer machines lives in scripts/cleanup.sh
+# (wired into scripts/dev.sh) and the cron/systemd examples in CONTRIBUTING.md.
+
+on:
+  schedule:
+    - cron: '17 4 * * 1'   # weekly, Mondays 04:17 UTC (off-peak, low collision)
+  workflow_dispatch: {}    # allow manual trigger from the Actions tab
+
+permissions:
+  actions: read
+
+jobs:
+  script-smoke:
+    name: Validate cleanup.sh (dry-run, no deletes)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Run cleanup.sh --dry-run
+        run: bash scripts/cleanup.sh --dry-run
+
+      - name: Run cleanup.sh --aggressive --dry-run
+        run: bash scripts/cleanup.sh --aggressive --dry-run
+
+  prune-caches:
+    name: Prune stale GitHub Actions caches
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write   # required to delete caches
+    steps:
+      - name: Delete caches not accessed in 7 days
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cutoff="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+          echo "cutoff = $cutoff"
+          ids="$(gh cache list --limit 100 --json id,lastAccessedAt \
+                  | jq -r --arg cutoff "$cutoff" \
+                    '.[] | select(.lastAccessedAt < $cutoff) | .id')"
+          if [[ -z "$ids" ]]; then
+            echo "no stale caches to prune"
+            exit 0
+          fi
+          printf '%s\n' "$ids" | while read -r id; do
+            echo "deleting cache $id"
+            gh cache delete "$id" || true
+          done
+          echo "cache prune complete"

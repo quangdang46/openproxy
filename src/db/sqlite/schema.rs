@@ -103,7 +103,8 @@ pub const TABLES_SQL: &[&str] = &[
         name        TEXT,
         machineId   TEXT,
         isActive    INTEGER NOT NULL DEFAULT 1,
-        createdAt   TEXT NOT NULL
+        createdAt   TEXT NOT NULL,
+        monthly_budget_usd REAL
     )
     "#,
     r#"

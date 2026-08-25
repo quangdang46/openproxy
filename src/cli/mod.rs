@@ -7,7 +7,10 @@ use clap_complete::Shell;
 use serde_json::Value;
 
 use crate::core::account_fallback::AccountRegistry;
-use crate::core::combo::{get_combo_models_from_data, ComboStrategy};
+use crate::core::combo::{
+    get_combo_models_from_data, sort_models_by_cost, sort_models_by_latency, strategy_for_combo,
+    ComboStrategy,
+};
 use crate::core::executor::{ClientPool, DefaultExecutor, ExecutionRequest};
 use crate::core::model::get_model_info;
 use crate::core::proxy::resolve_proxy_target;
@@ -1364,6 +1367,7 @@ pub async fn run_key(cmd: KeyCmd, db: &Db, ctx: output::OutputCtx) -> anyhow::Re
                 machine_id: None,
                 is_active: Some(true),
                 created_at: Some(chrono::Utc::now().to_rfc3339()),
+                monthly_budget_usd: None,
                 extra: std::collections::BTreeMap::new(),
             };
 
@@ -1783,20 +1787,16 @@ async fn run_combo_route(
         std::process::exit(1);
     };
 
-    let strategy = snapshot
-        .settings
-        .combo_strategies
-        .get(combo_name)
-        .map(|e| e.strategy_name())
-        .unwrap_or(snapshot.settings.combo_strategy.as_str());
-
-    let _combo_strategy = if strategy.eq_ignore_ascii_case("round-robin") {
-        ComboStrategy::RoundRobin
-    } else {
-        ComboStrategy::Fallback
+    let combo_strategy = strategy_for_combo(&snapshot, combo_name);
+    // Cost/latency-aware strategies change which member leads the chain, and
+    // this one-shot CLI route only dispatches the leading member.
+    let ordered_models = match combo_strategy {
+        ComboStrategy::Cheapest => sort_models_by_cost(&combo_models, &snapshot.pricing),
+        ComboStrategy::Fastest => sort_models_by_latency(&combo_models, &snapshot.pricing),
+        _ => combo_models.clone(),
     };
 
-    let model_str = combo_models
+    let model_str = ordered_models
         .first()
         .map(|m| m.as_str())
         .unwrap_or("gpt-4o-mini");

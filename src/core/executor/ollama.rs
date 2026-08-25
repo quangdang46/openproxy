@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use hyper::http::uri::InvalidUri;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, CONTENT_TYPE};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
 
 use crate::core::proxy::ProxyTarget;
 use crate::types::ProviderConnection;
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
+
+const OLLAMA_CLOUD_BASE_URL: &str = "https://ollama.com";
+const OLLAMA_LOCAL_BASE_URL: &str = "http://localhost:11434";
 
 pub struct OllamaExecutionRequest {
     pub model: String,
@@ -119,7 +122,7 @@ impl OllamaExecutor {
         request: OllamaExecutionRequest,
     ) -> Result<OllamaExecutorResponse, OllamaExecutorError> {
         let url = self.build_url(&request.model, request.stream, &request.credentials);
-        let headers = self.build_headers()?;
+        let headers = self.build_headers(&request.credentials)?;
 
         let transformed_body = self.transform_request(&request.body)?;
 
@@ -147,7 +150,8 @@ impl OllamaExecutor {
     /// Order of precedence:
     ///   1. `credentials.provider_specific_data.baseUrl` (e.g. when
     ///      operating against a remote/host-overridden Ollama instance).
-    ///   2. The default `http://localhost:11434`.
+    ///   2. `https://ollama.com` for the hosted Ollama Cloud provider ids.
+    ///   3. The default `http://localhost:11434` for `ollama-local`.
     ///
     /// No `?stream=` query parameter — 9router's ollama-local.js returns
     /// plain `${base}/api/chat`; streaming is driven by the body's `stream`.
@@ -164,15 +168,48 @@ impl OllamaExecutor {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(str::to_string)
-            .unwrap_or_else(|| "http://localhost:11434".to_string());
+            .unwrap_or_else(|| Self::default_base_url(&credentials.provider).to_string());
         let base = base.trim_end_matches('/');
         format!("{base}/api/chat")
     }
 
-    fn build_headers(&self) -> Result<HeaderMap, OllamaExecutorError> {
+    /// `ollama` is Ollama Cloud (hosted, API key from ollama.com/settings/keys);
+    /// only `ollama-local` talks to a machine-local daemon.
+    fn default_base_url(provider: &str) -> &'static str {
+        match provider {
+            "ollama" | "ollama-cloud" => OLLAMA_CLOUD_BASE_URL,
+            _ => OLLAMA_LOCAL_BASE_URL,
+        }
+    }
+
+    /// Ollama Cloud rejects unauthenticated `/api/chat` with 401 (verified
+    /// live), while a local daemon takes no credentials — so the Bearer header
+    /// is attached only when the connection actually carries a key.
+    fn build_headers(
+        &self,
+        credentials: &crate::types::ProviderConnection,
+    ) -> Result<HeaderMap, OllamaExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+
+        if let Some(token) = credentials
+            .api_key
+            .as_deref()
+            .or(credentials.access_token.as_deref())
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            headers.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+                    OllamaExecutorError::InvalidCredentials(
+                        "Ollama API key contains invalid header characters".to_string(),
+                    )
+                })?,
+            );
+        }
+
         Ok(headers)
     }
 
@@ -325,10 +362,71 @@ mod tests {
     #[test]
     fn test_build_headers() {
         let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
-        let headers = executor.build_headers();
+        let creds = crate::types::ProviderConnection::default();
+        let headers = executor.build_headers(&creds);
         assert!(headers.is_ok());
         let headers = headers.unwrap();
         assert!(headers.contains_key(CONTENT_TYPE));
         assert!(headers.contains_key(ACCEPT));
+    }
+
+    #[test]
+    fn local_provider_keeps_localhost_default() {
+        let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
+        let mut creds = crate::types::ProviderConnection::default();
+        creds.provider = "ollama-local".to_string();
+        assert_eq!(
+            executor.build_url("llama3", false, &creds),
+            "http://localhost:11434/api/chat"
+        );
+    }
+
+    #[test]
+    fn cloud_provider_targets_ollama_com() {
+        let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
+        let mut creds = crate::types::ProviderConnection::default();
+        creds.provider = "ollama".to_string();
+        assert_eq!(
+            executor.build_url("gpt-oss:120b", true, &creds),
+            "https://ollama.com/api/chat"
+        );
+    }
+
+    #[test]
+    fn cloud_base_url_override_still_wins() {
+        let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
+        let mut creds = crate::types::ProviderConnection::default();
+        creds.provider = "ollama".to_string();
+        creds.provider_specific_data.insert(
+            "baseUrl".to_string(),
+            serde_json::json!("http://192.168.1.10:11434"),
+        );
+        assert_eq!(
+            executor.build_url("gpt-oss:120b", false, &creds),
+            "http://192.168.1.10:11434/api/chat"
+        );
+    }
+
+    #[test]
+    fn cloud_api_key_becomes_bearer_header() {
+        let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
+        let mut creds = crate::types::ProviderConnection::default();
+        creds.provider = "ollama".to_string();
+        creds.api_key = Some("  ollama-key-123  ".to_string());
+        let headers = executor.build_headers(&creds).unwrap();
+        assert_eq!(
+            headers.get(AUTHORIZATION).unwrap(),
+            "Bearer ollama-key-123",
+            "Ollama Cloud /api/chat returns 401 without a Bearer key"
+        );
+    }
+
+    #[test]
+    fn local_without_key_sends_no_authorization() {
+        let executor = OllamaExecutor::new(Arc::new(ClientPool::default()));
+        let mut creds = crate::types::ProviderConnection::default();
+        creds.provider = "ollama-local".to_string();
+        let headers = executor.build_headers(&creds).unwrap();
+        assert!(!headers.contains_key(AUTHORIZATION));
     }
 }

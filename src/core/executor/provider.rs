@@ -350,8 +350,13 @@ impl UnifiedExecutor {
         }
     }
 
-    /// Build URL with optional API key appended as query param for providers that need it.
-    /// Currently used by gemini free tier which has 15 RPM limit.
+    /// Append the API key as a query param for providers that cannot use a
+    /// header. The separator depends on whether `build_url` already emitted a
+    /// query string (`:streamGenerateContent?alt=sse` does, `:generateContent`
+    /// does not — appending `&key=` to the latter yields a 404, verified live).
+    ///
+    /// Gemini does not use this: it authenticates with the `x-goog-api-key`
+    /// header, which keeps the key out of logged URLs.
     pub fn build_url_with_api_key(
         &self,
         model: &str,
@@ -359,10 +364,10 @@ impl UnifiedExecutor {
         api_key: Option<&str>,
     ) -> String {
         let base_url = self.build_url(model, stream, None, None);
-        if let Some(key) = api_key {
-            format!("{base_url}&key={key}")
-        } else {
-            base_url
+        match api_key {
+            Some(key) if base_url.contains('?') => format!("{base_url}&key={key}"),
+            Some(key) => format!("{base_url}?key={key}"),
+            None => base_url,
         }
     }
 
@@ -535,18 +540,13 @@ impl UnifiedExecutor {
         &self,
         request: ProviderExecutionRequest,
     ) -> Result<ProviderExecutionResponse, ProviderExecutorError> {
-        let api_key = request.credentials.api_key.as_deref();
         let url_index = request.proxy_options.as_ref().and_then(|o| o.url_index);
-        let url = if self.provider == "gemini" && api_key.is_some() {
-            self.build_url_with_api_key(&request.model, request.stream, api_key)
-        } else {
-            self.build_url(
-                &request.model,
-                request.stream,
-                url_index,
-                Some(&request.credentials),
-            )
-        };
+        let url = self.build_url(
+            &request.model,
+            request.stream,
+            url_index,
+            Some(&request.credentials),
+        );
         let headers = self.build_headers(&request.credentials, request.stream)?;
         let transformed_body = self.transform_request(
             &request.body,

@@ -22,6 +22,7 @@ fn active_key() -> ApiKey {
         is_active: Some(true),
         created_at: None,
         extra: BTreeMap::new(),
+        monthly_budget_usd: None,
     }
 }
 

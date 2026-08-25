@@ -482,11 +482,10 @@ async fn auth_status_returns_oidc_identity_chip_fields() {
     let client = Arc::new(client_for(&server));
     let (app, _state) = boot_with_oidc(Some(client.clone())).await;
 
-    let cookies = format!(
-        "oidc_state=fixed-state-for-test; Path=/; HttpOnly; SameSite=Lax; \
+    let cookies = "oidc_state=fixed-state-for-test; Path=/; HttpOnly; SameSite=Lax; \
          oidc_nonce=fixed-nonce-for-test; Path=/; HttpOnly; SameSite=Lax; \
          oidc_verifier=fixed-verifier-for-test; Path=/; HttpOnly; SameSite=Lax"
-    );
+        .to_string();
     let mut query = HashMap::new();
     query.insert("code".to_string(), "test-auth-code".to_string());
     query.insert("state".to_string(), "fixed-state-for-test".to_string());

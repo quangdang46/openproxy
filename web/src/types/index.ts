@@ -3,6 +3,17 @@
 // Theme types
 export type Theme = "light" | "dark" | "system";
 
+// Dashboard API key (GET /api/keys). `monthlyBudgetUsd` is the optional
+// per-key monthly spend cap in USD (free-tier budget kill-switch).
+export interface ApiKey {
+  id: string;
+  name: string;
+  key: string;
+  createdAt: string;
+  isActive?: boolean;
+  monthlyBudgetUsd?: number | null;
+}
+
 // Provider types
 export interface Provider {
   id: string;
@@ -52,6 +63,8 @@ export interface Provider {
     refreshUrl?: string;
   };
   authHint?: string;
+  /** True when the provider is part of the free-tier set (see FREE_TIER_PROVIDER_IDS). */
+  freeTier?: boolean;
   searchConfig?: SearchConfig;
   fetchConfig?: FetchConfig;
   imageConfig?: ImageConfig;
@@ -189,6 +202,28 @@ export interface ModelPricing {
   input?: number;
   output?: number;
   unit?: string;
+}
+
+// Combo routing types — mirrors backend `core::combo::ComboStrategy`.
+export type ComboStrategyName =
+  | "fallback"
+  | "round-robin"
+  | "fusion"
+  | "cheapest"
+  | "fastest"
+  | "quality";
+
+/** Mirrors backend `ComboStrategyConfig` (camelCase over the wire). */
+export interface ComboStrategyConfig {
+  fallbackStrategy?: ComboStrategyName | string;
+  judgeModel?: string;
+  fusionTuning?: Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface ComboStrategyOption {
+  value: ComboStrategyName;
+  label: string;
 }
 
 // Store types

@@ -409,6 +409,9 @@ async fn main() -> anyhow::Result<()> {
     }
     // Quota auto-ping foundation: observe enabled Claude/Codex OAuth windows.
     openproxy::server::api::quota_auto_ping::spawn_quota_auto_ping(state.clone());
+    // Provider health daemon: probe API-key providers every 3 min and degrade
+    // them per observed status (429 → 2 min, 503 → 10 min, 5xx → 5 min).
+    openproxy::core::health::spawn_health_daemon(state.clone());
 
     // Background proactive OAuth token refresh (9router
     // backgroundTokenRefresh.js): tick every 5 min, refresh tokens expiring
@@ -678,6 +681,7 @@ async fn seed_default_api_key_if_missing(db: &Db) -> anyhow::Result<()> {
         machine_id: Some(machine_id),
         is_active: Some(true),
         created_at: Some(chrono::Utc::now().to_rfc3339()),
+        monthly_budget_usd: None,
         extra: std::collections::BTreeMap::new(),
     };
 

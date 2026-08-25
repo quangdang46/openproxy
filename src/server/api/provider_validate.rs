@@ -36,6 +36,7 @@ async fn validate_provider(
         "sdwebui",
         "comfyui",
         "ollama-local",
+        "opencode-zen",
     ];
     if no_auth.contains(&provider.as_str()) {
         return Json(json!({ "valid": true })).into_response();

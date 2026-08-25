@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::hash::Hash;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,11 +17,18 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 /// Default TTL for cached responses when no per-provider override is set.
-const DEFAULT_CACHE_TTL_SECS: u64 = 60;
+///
+/// Free-tier operators run on $0 providers with hard daily quotas, so a long
+/// TTL maximizes cache reuse (a repeated prompt never leaves the box). 24h is
+/// the default; upstream `Cache-Control` or a per-provider override can shorten
+/// it. The previous 60s default was tuned for paid per-token billing where
+/// freshness matters more than quota savings.
+const DEFAULT_CACHE_TTL_SECS: u64 = 86_400; // 24 hours
 
-/// Maximum TTL cap. Even if upstream `Cache-Control: max-age` says a year,
-/// we won't hold the response longer than this.
-const MAX_CACHE_TTL_SECS: u64 = 3600; // 1 hour
+/// Caps the upstream `Cache-Control` `max-age`/`s-maxage` only. The default
+/// and per-provider TTLs may be larger (e.g. the 24h free-tier default); this
+/// limit just prevents an upstream from forcing an unbounded hold.
+const MAX_UPSTREAM_CACHE_TTL_SECS: u64 = 3600; // 1 hour
 
 /// A single cached entry.
 #[derive(Clone)]
@@ -53,6 +61,12 @@ pub struct ResponseCache {
     default_ttl: Duration,
     /// Maximum number of entries before proactive eviction.
     max_entries: usize,
+    /// Monotonic hit counter (cache served a stored response).
+    hits: Arc<AtomicU64>,
+    /// Monotonic miss counter (lookup found nothing / expired / no-cache).
+    misses: Arc<AtomicU64>,
+    /// Monotonic store counter (a response was inserted).
+    sets: Arc<AtomicU64>,
 }
 
 impl Default for ResponseCache {
@@ -62,6 +76,9 @@ impl Default for ResponseCache {
             provider_ttls: Arc::new(DashMap::new()),
             default_ttl: Duration::from_secs(DEFAULT_CACHE_TTL_SECS),
             max_entries: 10_000,
+            hits: Arc::new(AtomicU64::new(0)),
+            misses: Arc::new(AtomicU64::new(0)),
+            sets: Arc::new(AtomicU64::new(0)),
         }
     }
 }
@@ -74,6 +91,9 @@ impl ResponseCache {
             provider_ttls: Arc::new(DashMap::new()),
             default_ttl: Duration::from_secs(default_ttl_secs.max(1)),
             max_entries: 10_000,
+            hits: Arc::new(AtomicU64::new(0)),
+            misses: Arc::new(AtomicU64::new(0)),
+            sets: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -171,33 +191,54 @@ impl ResponseCache {
     /// Attempt to retrieve a cached response for the given request body.
     ///
     /// Returns `None` if no cache entry exists, if it has expired, or if the
-    /// request carries `Cache-Control: no-cache`.
+    /// request carries `Cache-Control: no-cache`. Increments the hit/miss
+    /// counters used for the dashboard hit-rate display.
     pub fn get(&self, body: &Value) -> Option<Vec<u8>> {
+        self.get_with_ttl(body).map(|(body, _ttl)| body)
+    }
+
+    /// Like [`ResponseCache::get`] but also returns the remaining TTL (seconds)
+    /// of the served entry. Used by the HIT path to report `ttl_remaining` in
+    /// the `openproxy.v1.cache.hit` robot envelope.
+    pub fn get_with_ttl(&self, body: &Value) -> Option<(Vec<u8>, u64)> {
         // Honor explicit Cache-Control: no-cache from the client request
         if has_no_cache_directive(body) {
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
         let key = Self::build_cache_key(body);
 
-        // Fast path: check existence
-        let entry = self.inner.get(&key)?;
+        // Fast path: check existence. A missing entry is a miss.
+        let entry = match self.inner.get(&key) {
+            Some(entry) => entry,
+            None => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                return None;
+            }
+        };
 
         if entry.is_expired() {
             // Drop the guard before removing to avoid deadlock on the same shard
             drop(entry);
             self.inner.remove(&key);
+            self.misses.fetch_add(1, Ordering::Relaxed);
             return None;
         }
 
-        Some(entry.body.clone())
+        let remaining = entry
+            .ttl
+            .saturating_sub(entry.created_at.elapsed())
+            .as_secs();
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        Some((entry.body.clone(), remaining))
     }
 
     /// Store a response in the cache.
     ///
     /// `upstream_cache_control` is an optional `Cache-Control` header value from
     /// the upstream response. If present, its `max-age` or `s-maxage` directive
-    /// is used as the TTL (capped at [`MAX_CACHE_TTL_SECS`]).
+    /// is used as the TTL (capped at [`MAX_UPSTREAM_CACHE_TTL_SECS`]).
     ///
     /// Provider-scoped TTL is used when the upstream response does not specify
     /// a `Cache-Control` header.
@@ -277,7 +318,7 @@ impl ResponseCache {
         // Determine TTL: upstream Cache-Control > provider TTL > default
         let ttl = upstream_cache_control
             .and_then(parse_max_age_from_cache_control)
-            .map(|secs| Duration::from_secs(secs.min(MAX_CACHE_TTL_SECS)))
+            .map(|secs| Duration::from_secs(secs.min(MAX_UPSTREAM_CACHE_TTL_SECS)))
             .unwrap_or_else(|| self.ttl_for_provider(provider));
 
         let entry = CacheEntry {
@@ -287,6 +328,7 @@ impl ResponseCache {
         };
 
         self.inner.insert(key, entry);
+        self.sets.fetch_add(1, Ordering::Relaxed);
 
         // Proactive eviction when cache grows too large
         if self.inner.len() > self.max_entries {
@@ -341,6 +383,46 @@ impl ResponseCache {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+
+    /// Snapshot of cache counters for the dashboard hit-rate display.
+    ///
+    /// `hit_rate` is `hits / (hits + misses)` in the range `[0.0, 1.0]`. Lookups
+    /// that are skipped because the client sent `Cache-Control: no-cache` count
+    /// as misses (they never consult storage). Stores are not part of the
+    /// hit-rate denominator — a stored response is only a "hit" when it is
+    /// later served.
+    pub fn stats(&self) -> CacheStats {
+        let hits = self.hits.load(Ordering::Relaxed);
+        let misses = self.misses.load(Ordering::Relaxed);
+        let total = hits + misses;
+        let hit_rate = if total == 0 {
+            0.0
+        } else {
+            hits as f64 / total as f64
+        };
+        CacheStats {
+            hits,
+            misses,
+            sets: self.sets.load(Ordering::Relaxed),
+            entries: self.inner.len(),
+            hit_rate,
+        }
+    }
+}
+
+/// Cache counters surfaced to the dashboard and `/api/cache/stats`.
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct CacheStats {
+    /// Number of responses served from cache.
+    pub hits: u64,
+    /// Number of lookups that found nothing (missing / expired / no-cache).
+    pub misses: u64,
+    /// Number of responses stored.
+    pub sets: u64,
+    /// Live entry count.
+    pub entries: usize,
+    /// `hits / (hits + misses)`, `0.0` when no lookups have occurred.
+    pub hit_rate: f64,
 }
 
 /// Check if the request body carries a `Cache-Control: no-cache` directive
@@ -695,5 +777,84 @@ mod tests {
             }
         });
         assert!(has_no_cache_directive(&body));
+    }
+
+    #[test]
+    fn test_default_ttl_is_24h() {
+        // Free-tier default: a repeated prompt should stay cached for a day.
+        let cache = ResponseCache::default();
+        assert_eq!(
+            cache.default_ttl,
+            Duration::from_secs(86_400),
+            "default TTL must be 24h for free-tier quota savings"
+        );
+
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+        });
+        cache.set(&body, b"response".to_vec(), "openai", None);
+
+        // Immediately after set, the entry is live and served.
+        assert!(cache.get(&body).is_some());
+    }
+
+    #[test]
+    fn test_stats_counters_track_hits_misses_sets() {
+        let cache = ResponseCache::new(86_400);
+
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+        });
+
+        // Miss before anything is stored.
+        assert!(cache.get(&body).is_none());
+        let s0 = cache.stats();
+        assert_eq!(s0.hits, 0);
+        assert_eq!(s0.misses, 1);
+        assert_eq!(s0.sets, 0);
+        assert_eq!(s0.hit_rate, 0.0);
+
+        // Store a response.
+        cache.set(&body, b"response".to_vec(), "openai", None);
+        let s1 = cache.stats();
+        assert_eq!(s1.sets, 1);
+
+        // Subsequent identical lookup is a hit.
+        assert!(cache.get(&body).is_some());
+        let s2 = cache.stats();
+        assert_eq!(s2.hits, 1);
+        assert_eq!(s2.misses, 1);
+        assert!((s2.hit_rate - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_stats_no_cache_directive_counts_as_miss() {
+        let cache = ResponseCache::new(86_400);
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "metadata": { "cache_control": "no-cache" }
+        });
+        assert!(cache.get(&body).is_none());
+        let s = cache.stats();
+        assert_eq!(s.misses, 1);
+        assert_eq!(s.hits, 0);
+    }
+
+    #[test]
+    fn test_get_with_ttl_reports_remaining() {
+        let cache = ResponseCache::new(86_400);
+        let body = json!({
+            "model": "gpt-4o",
+            "messages": [{"role": "user", "content": "Hello"}],
+        });
+        cache.set(&body, b"response".to_vec(), "openai", None);
+
+        let (served, remaining) = cache.get_with_ttl(&body).expect("should hit");
+        assert_eq!(served, b"response");
+        // 24h TTL, just inserted → remaining is essentially the full day.
+        assert!(remaining > 86_000, "remaining TTL should be ~24h");
     }
 }

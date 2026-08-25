@@ -146,6 +146,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             "opencode-go",
             ProviderConfig::openai("https://opencode.ai/zen/go/v1"),
         ),
+        // Zen answers 200 for unauthenticated POSTs, so auth is optional
+        // (`PROVIDER_OPTIONAL_AUTH`) and model ids pass through verbatim.
+        (
+            "opencode-zen",
+            ProviderConfig::openai("https://opencode.ai/zen/v1/chat/completions"),
+        ),
         (
             "glm-cn",
             ProviderConfig::openai("https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"),
@@ -1047,6 +1053,10 @@ impl DefaultExecutor {
             ] {
                 headers.remove(h);
             }
+        } else if provider_allows_missing_credentials(&self.provider)
+            && bearer_token(credentials).is_none()
+        {
+            // Intentionally no Authorization header: noAuth provider, no credential.
         } else {
             // Prefer access_token over api_key for Bearer (9router BaseExecutor)
             let token = credentials
@@ -1574,6 +1584,18 @@ fn non_empty_option(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
+fn bearer_token(credentials: &ProviderConnection) -> Option<&str> {
+    non_empty_option(credentials.access_token.as_deref())
+        .or_else(|| non_empty_option(credentials.api_key.as_deref()))
+}
+
+/// Providers whose upstream accepts unauthenticated requests (dashboard
+/// `noAuth: true`). They must reach the upstream without an Authorization
+/// header instead of failing with `MissingCredentials`.
+fn provider_allows_missing_credentials(provider: &str) -> bool {
+    matches!(provider, "opencode-zen")
+}
+
 /// 9router open-sse/executors/opencode-go.js MESSAGES_FORMAT_MODELS — these
 /// route to `${BASE}/messages` with `x-api-key` + `anthropic-version` headers.
 fn opencode_go_uses_claude_format(model: &str) -> bool {
@@ -1813,5 +1835,84 @@ mod tests {
             url, "https://opencode.ai/zen/go/v1/messages",
             "claude-format opencode-go URL must include /go"
         );
+    }
+
+    fn zen_executor() -> DefaultExecutor {
+        DefaultExecutor::new("opencode-zen", Arc::new(ClientPool::new()), None)
+            .expect("opencode-zen must be a supported provider")
+    }
+
+    #[test]
+    fn opencode_zen_posts_to_live_zen_chat_endpoint() {
+        // Live-verified: POST https://opencode.ai/zen/v1/chat/completions → 200.
+        let url = zen_executor()
+            .build_url("gpt-5.6-sol", false, &ProviderConnection::default())
+            .unwrap();
+        assert_eq!(url, "https://opencode.ai/zen/v1/chat/completions");
+    }
+
+    #[test]
+    fn opencode_zen_omits_authorization_without_credentials() {
+        // noAuth provider: an unauthenticated POST is accepted upstream, so a
+        // credential-less connection must not fail with MissingCredentials.
+        let headers = zen_executor()
+            .build_headers("hy3-free", &ProviderConnection::default(), false)
+            .expect("noAuth provider must build headers without credentials");
+        assert!(!headers.contains_key(AUTHORIZATION));
+    }
+
+    #[test]
+    fn opencode_zen_sends_bearer_when_credential_present() {
+        let credentials = ProviderConnection {
+            api_key: Some("zen-key".to_string()),
+            ..ProviderConnection::default()
+        };
+        let headers = zen_executor()
+            .build_headers("hy3-free", &credentials, false)
+            .unwrap();
+        assert_eq!(headers[AUTHORIZATION], "Bearer zen-key");
+    }
+
+    #[test]
+    fn openrouter_sends_attribution_headers_and_gateways_omit_them() {
+        let credentials = ProviderConnection {
+            api_key: Some("sk-or-test".to_string()),
+            ..ProviderConnection::default()
+        };
+        let openrouter =
+            DefaultExecutor::new("openrouter", Arc::new(ClientPool::new()), None).unwrap();
+        let headers = openrouter
+            .build_headers("meta/llama-3.1-8b-instruct:free", &credentials, false)
+            .unwrap();
+        assert_eq!(headers["HTTP-Referer"], "https://endpoint-proxy.local");
+        assert_eq!(headers["X-Title"], "Endpoint Proxy");
+
+        // OpenRouter-fronted gateways must not claim OpenRouter attribution.
+        for provider in ["kilocode", "nvidia"] {
+            let executor = DefaultExecutor::new(provider, Arc::new(ClientPool::new()), None);
+            if let Ok(executor) = executor {
+                let headers = executor
+                    .build_headers("tencent/hy3:free", &credentials, false)
+                    .unwrap();
+                assert!(
+                    !headers.contains_key("HTTP-Referer"),
+                    "{provider} must omit HTTP-Referer"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn kilocode_posts_to_live_openrouter_gateway_endpoint() {
+        // Live-verified: POST https://api.kilo.ai/api/openrouter/chat/completions → 200.
+        let executor = DefaultExecutor::new("kilocode", Arc::new(ClientPool::new()), None).unwrap();
+        let credentials = ProviderConnection {
+            api_key: Some("kc-test".to_string()),
+            ..ProviderConnection::default()
+        };
+        let url = executor
+            .build_url("tencent/hy3:free", false, &credentials)
+            .unwrap();
+        assert_eq!(url, "https://api.kilo.ai/api/openrouter/chat/completions");
     }
 }

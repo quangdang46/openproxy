@@ -121,6 +121,7 @@ async fn test_state(connections: Vec<ProviderConnection>) -> AppState {
             is_active: Some(true),
             created_at: None,
             extra: BTreeMap::new(),
+            monthly_budget_usd: None,
         }];
     })
     .await
@@ -780,8 +781,8 @@ async fn provider_test_models_route_fetches_live_compatible_models_and_warms_fir
     assert_eq!(json["results"][0]["error"], serde_json::Value::Null);
     assert_eq!(json["results"][1]["modelId"], "gpt-5.2");
     assert_eq!(json["results"][1]["name"], "GPT 5.2");
-    // gpt-5.2 mock returns 400 "unsupported for chat" → not OK.
-    assert_eq!(json["results"][1]["ok"], false);
+    assert_eq!(json["results"][1]["ok"], true);
+    assert_eq!(json["results"][1]["error"], serde_json::Value::Null);
     assert!(json["results"][0]["latencyMs"].as_u64().unwrap_or_default() >= 150);
     assert!(json["results"][1]["latencyMs"].as_u64().unwrap_or_default() >= 150);
 
@@ -854,6 +855,7 @@ async fn test_client_info_provider_from_settings() {
             is_active: Some(true),
             created_at: None,
             extra: BTreeMap::new(),
+            monthly_budget_usd: None,
         }];
     })
     .await
@@ -1155,4 +1157,199 @@ async fn suggested_models_route_returns_empty_data_on_upstream_failure() {
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(json, json!({ "data": [] }));
+}
+
+#[tokio::test]
+async fn import_catalog_imports_live_models_into_custom_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("authorization", "Bearer compat-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [
+                { "id": "gpt-4.1-mini", "name": "GPT 4.1 Mini" },
+                { "id": "gpt-5.2", "name": "GPT 5.2" }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connection = connection_with_id("openai-compatible-local", "compat-1");
+    connection.api_key = Some("compat-key".to_string());
+    connection.provider_specific_data.insert(
+        "baseUrl".to_string(),
+        serde_json::Value::String(server.uri()),
+    );
+
+    let state = test_state(vec![connection]).await;
+    let app = providers::routes().with_state(state.clone());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/compat-1/import-models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["provider"], "openai-compatible-local");
+    assert_eq!(json["connectionId"], "compat-1");
+    assert_eq!(json["imported"], 2);
+    assert_eq!(json["skipped"], 0);
+    assert_eq!(json["total"], 2);
+
+    let snapshot = state.db.snapshot();
+    let imported = snapshot
+        .custom_models
+        .iter()
+        .find(|m| m.id == "gpt-5.2")
+        .expect("gpt-5.2 should have been imported");
+    assert_eq!(
+        imported.extra.get("source").and_then(|v| v.as_str()),
+        Some("imported")
+    );
+    assert!(
+        imported
+            .extra
+            .get("importedAt")
+            .and_then(|v| v.as_str())
+            .is_some(),
+        "importedAt RFC3339 timestamp should be present"
+    );
+}
+
+#[tokio::test]
+async fn import_catalog_skips_pre_existing_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("authorization", "Bearer compat-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "data": [{ "id": "gpt-4.1-mini", "name": "GPT 4.1 Mini" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let mut connection = connection_with_id("openai-compatible-local", "compat-1");
+    connection.api_key = Some("compat-key".to_string());
+    connection.provider_specific_data.insert(
+        "baseUrl".to_string(),
+        serde_json::Value::String(server.uri()),
+    );
+
+    let state = test_state(vec![connection]).await;
+    let alias = "openai-compatible-local".to_string();
+
+    // Pre-seed the model so it should be skipped, not duplicated.
+    state
+        .db
+        .update(|db| {
+            db.custom_models.push(openproxy::types::CustomModel {
+                provider_alias: alias.clone(),
+                id: "gpt-4.1-mini".to_string(),
+                r#type: "llm".to_string(),
+                name: None,
+                extra: BTreeMap::new(),
+            });
+        })
+        .await
+        .expect("seed custom model");
+
+    let app = providers::routes().with_state(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/compat-1/import-models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["imported"], 0);
+    assert_eq!(json["total"], 1);
+
+    // The pre-seeded entry must remain untouched (no source:imported tag added).
+    let snapshot = state.db.snapshot();
+    let seeded = snapshot
+        .custom_models
+        .iter()
+        .find(|m| m.id == "gpt-4.1-mini")
+        .expect("pre-seeded model should still exist");
+    assert_eq!(seeded.provider_alias, alias);
+    assert!(
+        !seeded.extra.contains_key("source"),
+        "pre-seeded entry must not be retagged"
+    );
+}
+
+#[tokio::test]
+async fn import_catalog_unknown_connection_returns_not_found() {
+    let state = test_state(vec![]).await;
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/missing-conn-id/import-models")
+                .header("Authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn import_catalog_requires_authentication_when_login_required() {
+    // Given require_login=true: a request with no bearer key or dashboard cookie hits the auth gate and is rejected 401 before handler runs.
+    let state = test_state(vec![]).await;
+    state
+        .db
+        .update_settings(|settings| {
+            settings.require_login = true;
+        })
+        .await
+        .expect("set require_login");
+
+    let app = providers::routes().with_state(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/providers/conn-1/import-models")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = axum::body::to_bytes(response.into_body(), 2048)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(json["error"].as_str().is_some());
 }

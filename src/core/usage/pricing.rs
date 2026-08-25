@@ -274,7 +274,10 @@ impl Default for Pricing {
     }
 }
 
-fn parse_model_pricing(provider: &str, model: &str, value: &Value) -> ModelPricing {
+/// Accepted entry shapes: `{input,output,cached,cache_creation}`,
+/// `{*PricePerMillion}`, legacy `{pricePerMillion}`, or a bare number.
+/// Crate-public so `core::combo::ordering` reads pricing identically.
+pub(crate) fn parse_model_pricing(provider: &str, model: &str, value: &Value) -> ModelPricing {
     if let Some(obj) = value.as_object() {
         let cost_model = obj
             .get("costModel")

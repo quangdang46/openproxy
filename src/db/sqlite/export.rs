@@ -144,8 +144,9 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
 
     // API keys
     let api_keys: Vec<Value> = {
-        let mut stmt =
-            conn.prepare("SELECT id, key, name, machineId, isActive, createdAt FROM apiKeys")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, key, name, machineId, isActive, createdAt, monthly_budget_usd FROM apiKeys",
+        )?;
         let rows = stmt.query_map([], |row| {
             let id: String = row.get(0)?;
             let key: String = row.get(1)?;
@@ -156,9 +157,11 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
                 .map(|v| v.map(|x| x != 0))
                 .unwrap_or(None);
             let created_at: String = row.get(5)?;
+            let monthly_budget_usd: Option<f64> = row.get(6)?;
             Ok(json!({
                 "id": id, "key": key, "name": name, "machineId": machine_id,
                 "isActive": is_active, "createdAt": created_at,
+                "monthlyBudgetUsd": monthly_budget_usd,
             }))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?

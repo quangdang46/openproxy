@@ -140,7 +140,7 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
     if let Some(arr) = payload.get("apiKeys").and_then(Value::as_array) {
         for item in arr {
             conn.execute(
-                "INSERT INTO apiKeys(id, key, name, machineId, isActive, createdAt) VALUES(?1,?2,?3,?4,?5,?6)",
+                "INSERT INTO apiKeys(id, key, name, machineId, isActive, createdAt, monthly_budget_usd) VALUES(?1,?2,?3,?4,?5,?6,?7)",
                 rusqlite::params![
                     item.get("id").and_then(Value::as_str).unwrap_or(""),
                     item.get("key").and_then(Value::as_str).unwrap_or(""),
@@ -148,6 +148,7 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
                     item.get("machineId").and_then(Value::as_str),
                     item.get("isActive").and_then(Value::as_bool).map(|v| v as i32).unwrap_or(1),
                     item.get("createdAt").and_then(Value::as_str).unwrap_or(""),
+                    item.get("monthlyBudgetUsd").and_then(Value::as_f64),
                 ],
             )?;
         }

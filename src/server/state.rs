@@ -6,8 +6,10 @@ use tokio::sync::{Notify, RwLock};
 
 use crate::core::a2a::TaskStore;
 use crate::core::account_fallback::AccountRegistry;
+use crate::core::cache::ResponseCache;
 use crate::core::circuit_breaker::CircuitBreakerRegistry;
 use crate::core::executor::ClientPool;
+use crate::core::health::{health_registry, HealthRegistry};
 use crate::core::mitm::server::MitmProxyHandle;
 use crate::core::tunnel::TunnelManager;
 use crate::core::usage::UsageTracker;
@@ -94,6 +96,17 @@ pub struct AppState {
     /// A2A (Agent-to-Agent) task store. Used by the A2A protocol endpoints
     /// to track task lifecycle across agent interactions.
     pub a2a_task_store: TaskStore,
+
+    /// Provider health records written by the health daemon. Shares the
+    /// process-global registry (`core::health::health_registry`) so the combo
+    /// dispatcher and account fallback observe the same degrade windows.
+    pub health: Arc<HealthRegistry>,
+
+    /// Feature4 response cache (SHA-256 keyed, non-streaming chat completions).
+    /// Consulted before provider dispatch (HIT) and populated after a
+    /// successful miss (MISS). `Arc` because `ResponseCache` is shared across
+    /// request tasks via interior mutability.
+    pub response_cache: Arc<ResponseCache>,
 }
 
 impl AppState {
@@ -122,6 +135,8 @@ impl AppState {
             shutdown_signal: Arc::new(Notify::new()),
             circuit_breaker: Arc::new(CircuitBreakerRegistry::default()),
             a2a_task_store: TaskStore::new(),
+            health: health_registry(),
+            response_cache: Arc::new(ResponseCache::default()),
         }
     }
 

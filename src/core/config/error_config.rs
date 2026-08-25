@@ -187,12 +187,6 @@ pub const ERROR_RULES: &[ErrorRule] = &[
     },
     ErrorRule {
         text: None,
-        status: Some(402),
-        cooldown: Some(Duration::from_millis(cooldown_consts::LONG_MS)),
-        backoff: false,
-    },
-    ErrorRule {
-        text: None,
         status: Some(403),
         cooldown: Some(Duration::from_millis(cooldown_consts::LONG_MS)),
         backoff: false,
@@ -254,7 +248,7 @@ pub fn classify_error(message: Option<&str>, status: Option<u16>) -> ErrorClassi
     // Permanent errors (400, 401, 403) that matched no rule at all
     // should not trigger fallback — the error is client-side, not
     // a transient provider issue.
-    if matches!(status, Some(400) | Some(401) | Some(403)) {
+    if matches!(status, Some(400) | Some(401) | Some(402) | Some(403)) {
         return ErrorClassification::Permanent;
     }
     ErrorClassification::NoMatch

@@ -25,7 +25,8 @@ use crate::core::combo::{
     },
     check_fallback_error, detect_required_capabilities, execute_combo_strategy_full,
     get_combo_models_from_data, get_disabled_members_for_combo, mark_combo_member_quarantined,
-    ComboAttemptError, ComboExecutionError, ComboStrategy, FusionConfig, ModelCapacity,
+    strategy_for_combo, ComboAttemptError, ComboExecutionError, ComboStrategy, FusionConfig,
+    ModelCapacity,
 };
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
@@ -370,7 +371,48 @@ async fn chat_completions_impl(
         }
         BypassDecision::Pass => {}
     }
-    match resolved.route_kind {
+
+    // Feature4: ResponseCache — consult before provider dispatch.
+    // Only non-streaming requests are cached: the cache stores a single JSON
+    // body, and a streaming client would misinterpret a cached non-SSE body.
+    let is_streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+
+    if !is_streaming {
+        if let Some((cached, ttl_remaining)) = state.response_cache.get_with_ttl(&body) {
+            let mut resp = Response::new(Body::from(cached));
+            resp.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            resp.headers_mut()
+                .insert("x-cache", HeaderValue::from_static("HIT"));
+
+            // Robot envelope: lets agents detect a cache hit and its remaining
+            // TTL without parsing the body. Carried as a header so the OpenAI-
+            // compatible JSON body stays untouched.
+            let envelope = json!({
+                "schema": "openproxy.v1.cache.hit",
+                "ok": true,
+                "data": {
+                    "cache_hit": true,
+                    "model": body.get("model").and_then(Value::as_str).unwrap_or(""),
+                    "provider": resolved.provider.as_deref().unwrap_or("unknown"),
+                    "ttl_remaining": ttl_remaining,
+                },
+                "meta": {},
+            });
+            if let Ok(value) = serde_json::to_string(&envelope) {
+                if let Ok(hv) = HeaderValue::from_str(&value) {
+                    resp.headers_mut().insert("x-cache-envelope", hv);
+                }
+            }
+            return resp;
+        }
+    }
+
+    let cache_provider = resolved.provider.as_deref().unwrap_or("unknown");
+
+    let response = match resolved.route_kind {
         ModelRouteKind::Combo => {
             let combo_name = resolved.model;
             let Some(combo_models) = get_combo_models_from_data(&combo_name, &snapshot.combos)
@@ -398,7 +440,7 @@ async fn chat_completions_impl(
                 .filter(|m| !combo_models.contains(m))
                 .cloned()
                 .collect();
-            let mut strategy = combo_strategy_for(&snapshot, &combo_name);
+            let mut strategy = strategy_for_combo(&snapshot, &combo_name);
             // Solo-augmented path: an adapter model was prepended to a
             // single-member combo — use the adapter pool's strategy.
             if !adapter_added.is_empty() && combo_models.len() == 1 {
@@ -589,6 +631,7 @@ async fn chat_completions_impl(
                     &disabled_members,
                     sticky_limit,
                     Some(&required_caps),
+                    &snapshot.pricing,
                     capacity_check,
                     move |combo_model| {
                         let state = combo_state.clone();
@@ -711,7 +754,13 @@ async fn chat_completions_impl(
                 Err(error) => attempt_error_response(error),
             }
         }
+    };
+
+    // Feature4: populate the cache on a successful non-streaming miss.
+    if !is_streaming {
+        return cache_miss_response(&state, &body, cache_provider, response).await;
     }
+    response
 }
 
 /// Inject provider-level thinking override onto the **source** body
@@ -808,6 +857,61 @@ async fn prefetch_images_in_messages(body: &mut Value) {
             }
         }
     }
+}
+
+/// Feature4: cache a successful response and tag it `X-Cache: MISS`.
+async fn cache_miss_response(
+    state: &AppState,
+    body: &Value,
+    provider: &str,
+    response: Response,
+) -> Response {
+    if !response.status().is_success() {
+        // Don't cache errors; just mark the miss.
+        let mut response = response;
+        response
+            .headers_mut()
+            .insert("x-cache", HeaderValue::from_static("MISS"));
+        return response;
+    }
+
+    let headers = response.headers().clone();
+    let bytes = match axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            // Body unreadable (should not happen for non-streaming JSON).
+            let mut err = Response::new(Body::from(""));
+            *err.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            return err;
+        }
+    };
+
+    state
+        .response_cache
+        .set(body, bytes.to_vec(), provider, None);
+
+    let mut resp = Response::new(Body::from(bytes));
+    *resp.headers_mut() = headers;
+    resp.headers_mut()
+        .insert("x-cache", HeaderValue::from_static("MISS"));
+    resp
+}
+
+/// GET /api/cache/stats — response-cache hit-rate counters for the dashboard.
+///
+/// Returns the live `hits` / `misses` / `sets` / `entries` counts and the
+/// derived `hit_rate` (`hits / (hits + misses)`). Cheap: counters are atomic
+/// and the entry count is a single DashMap len.
+pub async fn cache_stats(State(state): State<AppState>) -> Response {
+    let stats = state.response_cache.stats();
+    Json(json!({
+        "hits": stats.hits,
+        "misses": stats.misses,
+        "sets": stats.sets,
+        "entries": stats.entries,
+        "hit_rate": stats.hit_rate,
+    }))
+    .into_response()
 }
 
 /// Apply 9router stream decision to a RequestPlan (mutates stream + sse_to_json).
@@ -1152,6 +1256,13 @@ async fn forward_with_provider_fallback(
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
     let registry = &state.account_registry;
+
+    // Per-key monthly budget kill-switch (free-tier Feature 3): block the
+    // request with 429 before any provider dispatch when the cap is reached.
+    let budget_remaining = match crate::server::api::budget_guard::enforce_budget(state, api_key) {
+        Ok(remaining) => remaining,
+        Err(response) => return Ok(response),
+    };
 
     // Extract tool name map from body (set by Claude cloaking).
     // Remove from body before dispatch to avoid serializing it upstream.
@@ -2041,7 +2152,7 @@ async fn forward_with_provider_fallback(
                     }
                     clear_connection_error_for_model(state, &connection.id, Some(model)).await;
                     if dashboard_stream {
-                        return Ok(proxy_dashboard_sse_with_usage_tracking(
+                        let response = proxy_dashboard_sse_with_usage_tracking(
                             result.response,
                             state,
                             provider,
@@ -2051,7 +2162,11 @@ async fn forward_with_provider_fallback(
                             endpoint,
                             compression.clone(),
                         )
-                        .await);
+                        .await;
+                        return Ok(crate::server::api::budget_guard::with_budget_header(
+                            response,
+                            budget_remaining,
+                        ));
                     }
                     // forceStream + client non-stream → collect SSE → JSON (9router)
                     if plan.sse_to_json {
@@ -2061,7 +2176,7 @@ async fn forward_with_provider_fallback(
                             provider,
                             model
                         );
-                        return Ok(proxy_sse_to_json_response(
+                        let response = proxy_sse_to_json_response(
                             result.response,
                             state,
                             provider,
@@ -2072,10 +2187,14 @@ async fn forward_with_provider_fallback(
                             plan,
                             compression.clone(),
                         )
-                        .await);
+                        .await;
+                        return Ok(crate::server::api::budget_guard::with_budget_header(
+                            response,
+                            budget_remaining,
+                        ));
                     }
                     if !stream {
-                        return Ok(proxy_response_with_usage_tracking(
+                        let response = proxy_response_with_usage_tracking(
                             result.response,
                             state,
                             provider,
@@ -2087,11 +2206,15 @@ async fn forward_with_provider_fallback(
                             tool_name_map.as_ref(),
                             compression.clone(),
                         )
-                        .await);
+                        .await;
+                        return Ok(crate::server::api::budget_guard::with_budget_header(
+                            response,
+                            budget_remaining,
+                        ));
                     }
                     let normalize_for_dashboard =
                         endpoint == Some("/api/dashboard/chat/completions");
-                    return Ok(proxy_response_with_pending_tracking(
+                    let response = proxy_response_with_pending_tracking(
                         result.response,
                         state.clone(),
                         provider.to_string(),
@@ -2104,7 +2227,11 @@ async fn forward_with_provider_fallback(
                         tool_name_map.as_ref(),
                         compression.clone(),
                     )
-                    .await);
+                    .await;
+                    return Ok(crate::server::api::budget_guard::with_budget_header(
+                        response,
+                        budget_remaining,
+                    ));
                 }
 
                 // 9router parity: retryAfter may come from the Retry-After header
@@ -2607,30 +2734,6 @@ fn earliest_retry_after(
         })
         .filter(|until| *until > now)
         .min()
-}
-
-fn combo_strategy_for(snapshot: &AppDb, combo_name: &str) -> ComboStrategy {
-    let value = snapshot
-        .settings
-        .combo_strategies
-        .get(combo_name)
-        .map(|e| e.strategy_name())
-        .unwrap_or(snapshot.settings.combo_strategy.as_str());
-
-    if value.eq_ignore_ascii_case("round-robin") {
-        ComboStrategy::RoundRobin
-    } else if value.eq_ignore_ascii_case("fusion") {
-        ComboStrategy::Fusion
-    } else if value.eq_ignore_ascii_case("hedging") {
-        // Documented: hedging module exists; dispatcher falls back until wired
-        ComboStrategy::Fallback
-    } else if value.eq_ignore_ascii_case("shadow") {
-        ComboStrategy::Fallback
-    } else if value.eq_ignore_ascii_case("auto-combo") || value.eq_ignore_ascii_case("autocombo") {
-        ComboStrategy::Fallback
-    } else {
-        ComboStrategy::Fallback
-    }
 }
 
 /// Merge 9router nested comboStrategies[name] (judgeModel / fusionTuning) into FusionConfig.

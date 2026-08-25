@@ -44,6 +44,8 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use parking_lot::Mutex;
 
+use crate::core::health::HealthStatus;
+
 // ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
@@ -105,6 +107,10 @@ struct Entry {
     probes_used: usize,
     /// Config for this entry (falls back to global defaults).
     config: CircuitBreakerConfig,
+    /// Status-specific Open window that overrides `config.open_timeout` for the
+    /// current Open period. Set by [`CircuitBreakerRegistry::open_for`] so a
+    /// `503` can stay open 10 min while a `429` stays open 2 min.
+    open_override: Option<Duration>,
 }
 
 impl Entry {
@@ -115,7 +121,12 @@ impl Entry {
             opened_at: None,
             probes_used: 0,
             config,
+            open_override: None,
         }
+    }
+
+    fn open_timeout(&self) -> Duration {
+        self.open_override.unwrap_or(self.config.open_timeout)
     }
 
     fn transition_to_open(&mut self, now: Instant) {
@@ -134,6 +145,7 @@ impl Entry {
         self.failure_count = 0;
         self.opened_at = None;
         self.probes_used = 0;
+        self.open_override = None;
     }
 }
 
@@ -239,6 +251,7 @@ impl CircuitBreakerRegistry {
                 CircuitState::Closed => {
                     // Reset failure count on success.
                     entry.failure_count = 0;
+                    entry.open_override = None;
                 }
                 CircuitState::Open => {
                     // Open + success??? Shouldn't happen normally (we reject before sending),
@@ -270,6 +283,51 @@ impl CircuitBreakerRegistry {
             RequestOutcome::ClientError => {
                 // Client errors do NOT affect the failure count (they're the caller's fault).
                 // But they also don't reset the count – they're neutral.
+            }
+        }
+    }
+
+    /// Open the circuit for `key` immediately, staying open for `duration`
+    /// instead of `config.open_timeout`.
+    ///
+    /// Used by the health daemon to translate an upstream status into a
+    /// status-specific Open window without waiting for `failure_threshold`
+    /// consecutive failures: one `503` is enough evidence that the upstream is
+    /// down. The override is cleared as soon as the circuit closes again.
+    pub fn open_for(&self, key: &str, duration: Duration) {
+        self.register(key, None);
+        if let Some(entry) = self.entries.get(key) {
+            let mut entry = entry.lock();
+            entry.open_override = Some(duration);
+            entry.failure_count = entry.failure_count.saturating_add(1);
+            entry.transition_to_open(Instant::now());
+        }
+    }
+
+    /// Status-aware transition driven by an observed upstream HTTP status.
+    ///
+    /// The status → Open-window policy is shared with the health daemon
+    /// ([`crate::core::health::HealthStatus::degrade_duration`]): `429` → 2 min,
+    /// `503` → 10 min, `500`/`502`/`504` → 5 min. `2xx` closes the circuit,
+    /// `401`/`403` and other `4xx` are recorded as client errors (an operator
+    /// problem no cooldown can fix). `None` means a transport failure and is
+    /// treated like a `500`.
+    pub fn record_status(&self, key: &str, http_status: Option<u16>) {
+        let status = match http_status {
+            Some(code) => HealthStatus::from_http(code),
+            None => HealthStatus::from_transport_failure(),
+        };
+
+        match status.degrade_duration() {
+            Some(window) => self.open_for(key, window),
+            None => {
+                self.register(key, None);
+                let outcome = if status == HealthStatus::Healthy {
+                    RequestOutcome::Success
+                } else {
+                    RequestOutcome::ClientError
+                };
+                self.record(key, outcome);
             }
         }
     }
@@ -310,7 +368,7 @@ impl CircuitBreakerRegistry {
     fn maybe_transition_to_half_open(&self, entry: &mut Entry, now: Instant) {
         if entry.state == CircuitState::Open {
             if let Some(opened_at) = entry.opened_at {
-                if now.duration_since(opened_at) >= entry.config.open_timeout {
+                if now.duration_since(opened_at) >= entry.open_timeout() {
                     entry.transition_to_half_open();
                 }
             }
@@ -488,5 +546,72 @@ mod tests {
     fn test_key_format() {
         let key = CircuitBreakerRegistry::key("openai", "/chat/completions");
         assert_eq!(key, "openai:/chat/completions");
+    }
+
+    #[test]
+    fn record_status_opens_immediately_on_degrading_statuses() {
+        for status in [429u16, 503, 500, 502, 504] {
+            let registry = new_registry();
+            let key = "provider:conn";
+            registry.record_status(key, Some(status));
+            assert_eq!(
+                registry.state(key),
+                CircuitState::Open,
+                "status {status} must open the circuit without reaching the failure threshold"
+            );
+            assert!(!registry.allow_request(key));
+        }
+    }
+
+    #[test]
+    fn record_status_keeps_circuit_closed_for_auth_and_client_errors() {
+        let registry = new_registry();
+        for status in [401u16, 403, 404, 400] {
+            let key = "provider:conn";
+            registry.record_status(key, Some(status));
+            assert_eq!(registry.state(key), CircuitState::Closed);
+            assert!(registry.allow_request(key));
+        }
+    }
+
+    #[test]
+    fn record_status_success_closes_an_open_circuit() {
+        let registry = new_registry();
+        let key = "provider:conn";
+        registry.record_status(key, Some(503));
+        assert_eq!(registry.state(key), CircuitState::Open);
+
+        registry.record_status(key, Some(200));
+        assert_eq!(registry.state(key), CircuitState::Closed);
+    }
+
+    #[test]
+    fn record_status_transport_failure_opens_circuit() {
+        let registry = new_registry();
+        let key = "provider:conn";
+        registry.record_status(key, None);
+        assert_eq!(registry.state(key), CircuitState::Open);
+    }
+
+    #[test]
+    fn status_open_window_overrides_default_timeout() {
+        // Default timeout is 10 ms; the 503 policy window is 10 min, so the
+        // circuit must still be Open long after the default would have expired.
+        let registry = CircuitBreakerRegistry::new(CircuitBreakerConfig {
+            failure_threshold: 5,
+            open_timeout: Duration::from_millis(10),
+            half_open_max_probes: 1,
+        });
+        let key = "provider:conn";
+        registry.record_status(key, Some(503));
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(registry.state(key), CircuitState::Open);
+
+        // A short explicit window still honours the override and re-probes.
+        let fast_key = "provider:fast";
+        registry.open_for(fast_key, Duration::from_millis(10));
+        assert_eq!(registry.state(fast_key), CircuitState::Open);
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(registry.state(fast_key), CircuitState::HalfOpen);
     }
 }

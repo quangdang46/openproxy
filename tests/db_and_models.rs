@@ -100,6 +100,7 @@ fn app_db_round_trips_through_serde() {
             is_active: Some(true),
             created_at: Some("2026-01-01T00:00:00Z".into()),
             extra: BTreeMap::new(),
+            monthly_budget_usd: None,
         }],
         settings: Settings::default(),
         pricing: BTreeMap::new(),

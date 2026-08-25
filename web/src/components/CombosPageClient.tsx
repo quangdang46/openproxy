@@ -7,14 +7,18 @@ import { useNotificationStore } from "@/store/notificationStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
+import type { ComboStrategyConfig, ComboStrategyOption } from "@/types";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
 
-const STRATEGY_OPTIONS = [
+const STRATEGY_OPTIONS: ComboStrategyOption[] = [
   { value: "fallback", label: "Fallback — try in order" },
   { value: "round-robin", label: "Round Robin — rotate" },
   { value: "fusion", label: "Fusion — panel + judge" },
+  { value: "cheapest", label: "Cheapest — free/lowest cost first" },
+  { value: "fastest", label: "Fastest — lowest latency first" },
+  { value: "quality", label: "Quality — capability tier first" },
 ];
 
 interface Combo {
@@ -29,14 +33,6 @@ interface Provider {
   id: string;
   provider: string;
   isActive?: boolean;
-}
-
-/** Nested form matching backend `ComboStrategyConfig` (camelCase over the wire). */
-interface ComboStrategyConfig {
-  fallbackStrategy?: string;
-  judgeModel?: string;
-  fusionTuning?: Record<string, unknown>;
-  [key: string]: unknown;
 }
 
 /** Normalize settings.comboStrategies[name] which may be a bare string or nested object. */

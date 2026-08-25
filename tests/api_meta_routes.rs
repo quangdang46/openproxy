@@ -22,6 +22,7 @@ async fn build_test_app() -> axum::Router {
             is_active: Some(true),
             created_at: None,
             extra: Default::default(),
+            monthly_budget_usd: None,
         }];
         state.settings.require_login = false;
     })
