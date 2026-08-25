@@ -12,8 +12,7 @@ pub fn get_history(
 ) -> rusqlite::Result<Vec<UsageEntry>> {
     let mut stmt = conn.prepare(
         "SELECT timestamp, provider, model, connectionId, apiKey, endpoint,
-                promptTokens, completionTokens, cost, status, tokens, meta,
-                bytesBefore, bytesAfter, bytesSaved, imagePrompts
+                promptTokens, completionTokens, cost, status, tokens, meta
          FROM usageHistory ORDER BY timestamp DESC LIMIT ?1 OFFSET ?2",
     )?;
     let rows = stmt.query_map(params![limit, offset], row_to_usage)?;
@@ -27,9 +26,8 @@ pub fn insert(conn: &Connection, entry: &UsageEntry) -> rusqlite::Result<()> {
         .map(|t| serde_json::to_string(t).unwrap_or_default());
     conn.execute(
         "INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint,
-                promptTokens, completionTokens, cost, status, tokens, meta,
-                bytesBefore, bytesAfter, bytesSaved, imagePrompts)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                promptTokens, completionTokens, cost, status, tokens, meta)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
         params![
             entry.timestamp.as_deref().unwrap_or(""),
             entry.provider.as_deref(),
@@ -51,10 +49,6 @@ pub fn insert(conn: &Connection, entry: &UsageEntry) -> rusqlite::Result<()> {
             entry.status.as_deref(),
             tokens_json,
             None::<String>,
-            entry.bytes_before as i64,
-            entry.bytes_after as i64,
-            entry.bytes_saved as i64,
-            entry.image_prompts as i64,
         ],
     )?;
     Ok(())
@@ -94,10 +88,6 @@ fn row_to_usage(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageEntry> {
     let cost: Option<f64> = row.get(8)?;
     let status: Option<String> = row.get(9)?;
     let tokens_str: Option<String> = row.get(10)?;
-    let bytes_before: u64 = row.get::<_, i64>(12).unwrap_or(0) as u64;
-    let bytes_after: u64 = row.get::<_, i64>(13).unwrap_or(0) as u64;
-    let bytes_saved: u64 = row.get::<_, i64>(14).unwrap_or(0) as u64;
-    let image_prompts: u64 = row.get::<_, i64>(15).unwrap_or(0) as u64;
 
     let tokens = tokens_str.and_then(|s| serde_json::from_str(&s).ok());
 
@@ -108,10 +98,6 @@ fn row_to_usage(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageEntry> {
         tokens,
         cost,
         status,
-        bytes_before,
-        bytes_after,
-        bytes_saved,
-        image_prompts,
         ..Default::default()
     })
 }

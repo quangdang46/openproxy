@@ -562,18 +562,6 @@ fn part_text(value: &Value) -> Option<&str> {
         .or_else(|| value.get("content").and_then(Value::as_str))
 }
 
-fn is_image_block(block: &serde_json::Map<String, Value>) -> bool {
-    match block.get("type").and_then(Value::as_str) {
-        Some("image_url") | Some("image") | Some("input_image") => true,
-        _ => block
-            .get("inlineData")
-            .or_else(|| block.get("fileData"))
-            .and_then(|d| d.get("mimeType"))
-            .and_then(Value::as_str)
-            .is_some_and(|mime| mime.starts_with("image/")),
-    }
-}
-
 pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
     if !enabled {
         return None;
@@ -603,7 +591,6 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
     let mut stats = RtkStats {
         bytes_before: 0,
         bytes_after: 0,
-        image_prompts: 0,
         hits: Vec::new(),
     };
 
@@ -672,13 +659,6 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
             for block in content.iter_mut() {
                 let block_fields = block.as_object_mut()?;
                 if block_fields.get("type").and_then(Value::as_str) != Some("tool_result") {
-                    if is_image_block(block_fields) {
-                        let block_bytes =
-                            serde_json::to_string(block).map(|s| s.len()).unwrap_or(0);
-                        stats.bytes_before += block_bytes;
-                        stats.bytes_after += block_bytes;
-                        stats.image_prompts += 1;
-                    }
                     continue;
                 }
                 if block_fields.get("is_error").and_then(Value::as_bool) == Some(true) {
@@ -738,7 +718,6 @@ fn compress_kiro_format(body: &mut Value) -> RtkStats {
     let mut stats = RtkStats {
         bytes_before: 0,
         bytes_after: 0,
-        image_prompts: 0,
         hits: Vec::new(),
     };
 
@@ -1443,54 +1422,5 @@ mod tests {
         assert!(stats.is_some());
         // No tool messages → no hits, but the function still returns Some.
         assert_eq!(stats.unwrap().hits.len(), 0);
-    }
-
-    #[test]
-    fn compress_messages_accounts_for_image_blocks() {
-        let mut body = json!({
-            "model": "gpt-4o",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        { "type": "text", "text": "A" },
-                        { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }
-                    ]
-                }
-            ]
-        });
-        let stats = compress_messages(&mut body, true).expect("returns stats with images");
-        assert_eq!(stats.image_prompts, 1, "one image block should be counted");
-        assert!(
-            stats.bytes_before > 0,
-            "image bytes should be counted in bytes_before"
-        );
-        assert_eq!(
-            stats.bytes_before, stats.bytes_after,
-            "image bytes pass through unchanged"
-        );
-    }
-
-    #[test]
-    fn compress_messages_skips_image_only_messages() {
-        let mut body = json!({
-            "model": "gpt-4o",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo=" } }
-                    ]
-                }
-            ]
-        });
-        let stats = compress_messages(&mut body, true).expect("returns Some even with only images");
-        assert_eq!(stats.image_prompts, 1);
-        assert!(stats.bytes_before > 0);
-        assert_eq!(
-            stats.hits.len(),
-            0,
-            "no text compression hits for image-only message"
-        );
     }
 }

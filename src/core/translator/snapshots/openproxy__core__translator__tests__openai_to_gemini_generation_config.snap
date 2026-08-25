@@ -19,6 +19,7 @@ expression: result
     "topK": 40,
     "topP": 0.95
   },
+  "model": "test-model",
   "safetySettings": [
     {
       "category": "HARM_CATEGORY_HARASSMENT",

@@ -7,11 +7,10 @@ import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, THINKING_CONFIG } from "@/shared/constants/providers";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
-import { useAvailableModels } from "@/shared/models/availableModels";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
-import { type CustomModelEntry } from "@/shared/utils/providerCustomModels";
+import { getProviderCustomModelRows, type CustomModelEntry } from "@/shared/utils/providerCustomModels";
 import {
   getThinkingLevels,
   unionThinkingLevels,
@@ -53,8 +52,6 @@ export default function ProviderDetailPageClient() {
     back: () => { window.history.back(); },
   };
   const providerId = params.id;
-  // Authoritative Available Models list (catalog + live + custom, merged).
-  const am = useAvailableModels(providerId);
   const [connections, setConnections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [providerNode, setProviderNode] = useState(null);
@@ -84,6 +81,8 @@ export default function ProviderDetailPageClient() {
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [suggestedModels, setSuggestedModels] = useState([]);
+  const [kiloFreeModels, setKiloFreeModels] = useState([]);
+  const [disabledModelIds, setDisabledModelIds] = useState([]);
   const [autoPing, setAutoPing] = useState<{ enabled: boolean; connections: Record<string, boolean> }>({ enabled: false, connections: {} });
   const [showAgRiskModal, setShowAgRiskModal] = useState(false);
   const [oneByOneRunning, setOneByOneRunning] = useState(false);
@@ -164,7 +163,7 @@ export default function ProviderDetailPageClient() {
       const kind = (m as any)?.kind || m?.type;
       if (!kind || kind === "llm") modelIds.push(m.id);
     }
-    for (const m of am.liveModels) modelIds.push(m.id);
+    for (const m of kiloFreeModels) modelIds.push(m.id);
     for (const entry of customModels) {
       if (entry.providerAlias !== providerStorageAlias) continue;
       if ((entry.kind || entry.type || "llm") !== "llm") continue;
@@ -177,15 +176,39 @@ export default function ProviderDetailPageClient() {
     return cfg ? (["auto", ...cfg] as string[]) : null;
   })();
   
-  const handleDisableModel = async (modelId: string) => {
-    await am.disable([modelId]);
+  const fetchDisabledModels = useCallback(async () => {
+    try {
+      const res = await fetch(`/api/models/disabled?providerAlias=${encodeURIComponent(providerStorageAlias)}`, { cache: "no-store" });
+      const data = await res.json();
+      if (res.ok) setDisabledModelIds(data.ids || []);
+    } catch (error) {
+      console.log("Error fetching disabled models:", error);
+    }
+  }, [providerStorageAlias]);
+
+  const handleDisableModel = async (modelId) => {
+    try {
+      const res = await fetch("/api/models/disabled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerAlias: providerStorageAlias, ids: [modelId] }),
+      });
+      if (res.ok) await fetchDisabledModels();
+    } catch (error) {
+      console.log("Error disabling model:", error);
+    }
   };
 
-  const handleEnableModel = async (modelId: string) => {
-    await am.enable(modelId);
+  const handleEnableModel = async (modelId) => {
+    try {
+      const res = await fetch(`/api/models/disabled?providerAlias=${encodeURIComponent(providerStorageAlias)}&id=${encodeURIComponent(modelId)}`, { method: "DELETE" });
+      if (res.ok) await fetchDisabledModels();
+    } catch (error) {
+      console.log("Error enabling model:", error);
+    }
   };
 
-  const handleDisableAll = (ids: string[]) => {
+  const handleDisableAll = (ids) => {
     if (!ids.length) return;
     setDisableAllTarget(ids);
   };
@@ -194,8 +217,17 @@ export default function ProviderDetailPageClient() {
     const ids = disableAllTarget;
     if (!ids || !ids.length) return;
     try {
-      await am.disable(ids);
-      notify.success(`Disabled ${ids.length} model(s)`);
+      const res = await fetch("/api/models/disabled", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerAlias: providerStorageAlias, ids }),
+      });
+      if (res.ok) {
+        await fetchDisabledModels();
+        notify.success(`Disabled ${ids.length} model(s)`);
+      } else {
+        notify.error("Failed to disable models");
+      }
     } catch (error) {
       console.log("Error disabling all models:", error);
       notify.error("Failed to disable models");
@@ -205,7 +237,12 @@ export default function ProviderDetailPageClient() {
   };
 
   const handleEnableAll = async () => {
-    await am.enableAll();
+    try {
+      const res = await fetch(`/api/models/disabled?providerAlias=${encodeURIComponent(providerStorageAlias)}`, { method: "DELETE" });
+      if (res.ok) await fetchDisabledModels();
+    } catch (error) {
+      console.log("Error enabling all models:", error);
+    }
   };
 
   // Define callbacks BEFORE the useEffect that uses them
@@ -232,6 +269,15 @@ export default function ProviderDetailPageClient() {
       console.log("Error fetching custom models:", error);
     }
   }, []);
+
+  // Fetch free models from Kilo API for kilocode provider
+  useEffect(() => {
+    if (providerId !== "kilocode") return;
+    fetch("/api/providers/kilo/free-models")
+      .then((res) => res.json())
+      .then((data) => { if (data.models?.length) setKiloFreeModels(data.models); })
+      .catch(() => {});
+  }, [providerId]);
 
   const fetchConnections = useCallback(async () => {
     try {
@@ -597,7 +643,8 @@ export default function ProviderDetailPageClient() {
     fetchConnections();
     fetchAliases();
     fetchCustomModels();
-  }, [fetchConnections, fetchAliases, fetchCustomModels]);
+    fetchDisabledModels();
+  }, [fetchConnections, fetchAliases, fetchCustomModels, fetchDisabledModels]);
 
   // Fetch suggested models from provider's public API (if configured)
   useEffect(() => {
@@ -616,7 +663,6 @@ export default function ProviderDetailPageClient() {
       });
       if (res.ok) {
         await fetchAliases();
-        am.refresh();
       } else {
         const data = await res.json();
         notify.error(data.error || "Failed to set alias");
@@ -633,7 +679,6 @@ export default function ProviderDetailPageClient() {
       });
       if (res.ok) {
         await fetchAliases();
-        am.refresh();
       }
     } catch (error) {
       console.log("Error deleting alias:", error);
@@ -649,7 +694,6 @@ export default function ProviderDetailPageClient() {
       });
       if (res.ok) {
         await fetchCustomModels();
-        am.refresh();
         if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
       } else {
         const data = await res.json();
@@ -666,7 +710,6 @@ export default function ProviderDetailPageClient() {
       const res = await fetch(`/api/models/custom?${params}`, { method: "DELETE" });
       if (res.ok) {
         await fetchCustomModels();
-        am.refresh();
         if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
       }
     } catch (error) {
@@ -1084,10 +1127,26 @@ export default function ProviderDetailPageClient() {
         />
       );
     }
-    // Single source of truth: catalog + live + custom, merged by the hook.
-    const customModelRows = am.customRows;
-    const displayModels = am.enabledCoreRows;
-    const disabledDisplayModels = am.disabledCoreRows;
+    // Combine hardcoded models with Kilo free models (deduplicated)
+    // Exclude non-llm models (embedding, tts, etc.) — they have dedicated pages under media-providers
+    const allModels = [
+      ...models,
+      ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
+    ].filter((m) => {
+      const kind = (m as any)?.kind || m?.type;
+      return !kind || kind === "llm";
+    });
+    const disabledSet = new Set(disabledModelIds);
+    const displayModels = allModels.filter((m) => !disabledSet.has(m.id));
+    const disabledDisplayModels = allModels.filter((m) => disabledSet.has(m.id));
+    // Custom models added by user (stored as aliases: modelId → providerAlias/modelId)
+    const customModelRows = getProviderCustomModelRows({
+      customModels,
+      modelAliases,
+      providerAlias: providerStorageAlias,
+      builtInModels: models,
+      type: "llm",
+    });
 
     return (
       <div className="flex flex-wrap gap-3">
@@ -1115,8 +1174,6 @@ export default function ProviderDetailPageClient() {
             isFree={false}
             caps={getCaps(`${providerId}/${model.id}`)}
             thinkingSuffix={resolveThinkingSuffix(model.id)}
-            isFavorite={am.isFavorite(model.id)}
-            onToggleFavorite={() => am.toggleFavorite(model.id)}
           />
         ))}
 
@@ -1143,8 +1200,6 @@ export default function ProviderDetailPageClient() {
               onDisable={() => handleDisableModel(model.id)}
               caps={getCaps(`${providerId}/${model.id}`)}
               thinkingSuffix={resolveThinkingSuffix(model.id)}
-              isFavorite={am.isFavorite(model.id)}
-              onToggleFavorite={() => am.toggleFavorite(model.id)}
             />
           );
         })}
@@ -1656,26 +1711,17 @@ export default function ProviderDetailPageClient() {
             )}
           </div>
           {!isCompatible && (() => {
-            const hasFreeModels = am.allRows.some((r) => r.isFree);
-            const activeIds = am.enabledRows.map((r) => r.id);
+            const allIds = [
+              ...models,
+              ...kiloFreeModels.filter((fm) => !models.some((m) => m.id === fm.id)),
+            ].filter((m) => {
+              const kind = (m as any)?.kind || m?.type;
+              return !kind || kind === "llm";
+            }).map((m) => m.id);
+            const activeIds = allIds.filter((id) => !disabledModelIds.includes(id));
             return (
-              <div className="flex flex-wrap items-center gap-2">
-                {hasFreeModels && (
-                  <button
-                    type="button"
-                    onClick={() => am.setFreeOnly(!am.freeOnly)}
-                    className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors ${
-                      am.freeOnly
-                        ? "border-primary bg-primary/10 text-primary"
-                        : "border-border bg-surface text-text-muted hover:border-primary/50 hover:text-primary"
-                    }`}
-                    title="Show only free models"
-                  >
-                    <span className="material-symbols-outlined text-[13px]">sell</span>
-                    Free only
-                  </button>
-                )}
-                {am.disabledCoreRows.length > 0 && (
+              <div className="flex gap-2">
+                {disabledModelIds.length > 0 && (
                   <Button size="sm" variant="secondary" icon="restart_alt" onClick={handleEnableAll}>
                     Active All
                   </Button>

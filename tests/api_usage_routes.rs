@@ -73,10 +73,6 @@ async fn build_test_app() -> axum::Router {
             endpoint: Some("/v1/chat/completions".to_string()),
             cost: Some(0.5),
             status: Some("success".to_string()),
-            bytes_before: 0,
-            bytes_after: 0,
-            bytes_saved: 0,
-            image_prompts: 0,
             extra,
         }];
         usage.total_requests_lifetime = 1;

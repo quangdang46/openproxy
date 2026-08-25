@@ -11,7 +11,6 @@ use hyper::{Request as HyperRequest, Response as HyperResponse, Uri};
 use once_cell::sync::Lazy;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE};
 use serde_json::Value;
-use tokio::sync::{self, Semaphore};
 
 use crate::core::proxy::ProxyTarget;
 use crate::core::translator::helpers::openai_helper::normalize_developer_role;
@@ -213,7 +212,8 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "tokenrouter",
-            ProviderConfig::openai("https://tokenrouter.com/chat/completions"),
+            // Chat endpoint only — embedding/image baseUrls belong to the media layer.
+            ProviderConfig::openai("https://api.tokenrouter.com/v1/chat/completions"),
         ),
         (
             "venice",
@@ -484,9 +484,6 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
     ])
 });
 
-// Semaphore for tokenrouter free models to limit concurrent requests to 1
-static TOKENROUTER_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderConfig {
     pub base_url: String,
@@ -617,7 +614,6 @@ pub enum ExecutorError {
     HyperClientInit(io::Error),
     Hyper(hyper_util::client::legacy::Error),
     Request(reqwest::Error),
-    SemaphoreAcquisitionFailed,
     CredentialRefreshFailed(String),
     MaxRetriesExhausted(String),
     UpstreamStatus(http::StatusCode, String),
@@ -690,12 +686,6 @@ impl From<io::Error> for ExecutorError {
 impl From<hyper_util::client::legacy::Error> for ExecutorError {
     fn from(error: hyper_util::client::legacy::Error) -> Self {
         Self::Hyper(error)
-    }
-}
-
-impl From<tokio::sync::AcquireError> for ExecutorError {
-    fn from(_: tokio::sync::AcquireError) -> Self {
-        Self::SemaphoreAcquisitionFailed
     }
 }
 
@@ -1240,16 +1230,6 @@ impl DefaultExecutor {
         // Try primary then fallback URLs.
         let urls = self.resolve_urls(&request.model, request.stream, &request.credentials);
 
-        // Acquire semaphore for tokenrouter free models to limit concurrent requests to 1
-        let _tokenrouter_permit = if self.provider == "tokenrouter"
-            && (request.model == "qwen/qwen3.8-max-free"
-                || request.model == "moonshotai/kimi-k3-free")
-        {
-            Some(TOKENROUTER_SEMAPHORE.acquire().await?)
-        } else {
-            None
-        };
-
         for url in &urls {
             let use_hyper = self.use_hyper_transport(&request, url);
 
@@ -1311,25 +1291,18 @@ impl DefaultExecutor {
                     break;
                 }
 
-                // 429: tokenrouter free models get exponential backoff; other 429/404
-                // follow 9router BaseExecutor.shouldRetry — retry only when another
-                // fallback URL exists, otherwise surface raw response for retry-after
-                // extraction and model-specific lock handling (404 modelLock_*).
+                // 429 (9router BaseExecutor.shouldRetry): retry only when
+                // another fallback URL exists; on the last URL return the raw
+                // response so the caller extracts retry-after and rotates
+                // accounts — masking it as 500 broke JS parity.
                 if matches!(
                     status,
                     http::StatusCode::TOO_MANY_REQUESTS | http::StatusCode::NOT_FOUND
                 ) {
-                    let is_tokenrouter_free = self.provider == "tokenrouter"
-                        && (request.model == "qwen/qwen3.8-max-free"
-                            || request.model == "moonshotai/kimi-k3-free");
-                    if is_tokenrouter_free
-                        && status == http::StatusCode::TOO_MANY_REQUESTS
-                        && retry < 2
-                    {
-                        let delay_secs = 2u64.pow(retry as u32);
-                        tokio::time::sleep(Duration::from_secs(delay_secs)).await;
-                        continue;
-                    }
+                    // JS shouldRetry: only fall through when another fallback
+                    // URL exists; on the last URL the raw response reaches the
+                    // caller so retry-after extraction and model-specific lock
+                    // handling (404 modelLock_*) work as designed.
                     let has_next_url = urls.len() > 1 && url != urls.last().unwrap();
                     if !has_next_url {
                         return Ok(ExecutionResponse {

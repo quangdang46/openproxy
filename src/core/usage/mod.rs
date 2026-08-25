@@ -23,4 +23,4 @@ pub mod quota_fetcher;
 mod tracker;
 
 pub use pricing::{CostModel, ModelPricing, Pricing};
-pub use tracker::{CompressionStats, DailyUsageSummary, ProviderUsage, UsageSummary, UsageTracker};
+pub use tracker::{DailyUsageSummary, ProviderUsage, UsageSummary, UsageTracker};

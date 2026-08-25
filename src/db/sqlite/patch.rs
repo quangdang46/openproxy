@@ -109,30 +109,6 @@ pub fn apply_app_db_diff(conn: &Connection, old: &AppDb, new: &AppDb) -> rusqlit
         custom_models_map(&new.custom_models),
     )?;
 
-    let old_filters: HashMap<String, Value> = old
-        .extra
-        .get("providerFilters")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let new_filters: HashMap<String, Value> = new
-        .extra
-        .get("providerFilters")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    diff_kv_scope(conn, "providerFilters", old_filters, new_filters)?;
-
-    let old_favorites: HashMap<String, Value> = old
-        .extra
-        .get("favoriteModels")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let new_favorites: HashMap<String, Value> = new
-        .extra
-        .get("favoriteModels")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    diff_kv_scope(conn, "favoriteModels", old_favorites, new_favorites)?;
-
     diff_disabled_models(
         conn,
         &disabled_from_extra(&old.extra),
@@ -702,21 +678,13 @@ mod tests {
         let mut actual = roundtripped;
         actual.normalize();
         // Benign export artifacts: `export_all` hardcodes schemaVersion=2,
-        // always emits (possibly empty) disabledModels/providerFilters/
-        // favoriteModels, and sorts connections by (provider, priority)
-        // rather than insertion order. Normalize these away before diffing.
+        // always emits a (possibly empty) disabledModels array, and sorts
+        // connections by (provider, priority) rather than insertion order.
+        // Normalize these away before diffing.
         actual.schema_version = expected.schema_version;
         for side in [&mut actual, &mut expected] {
             if matches!(side.extra.get("disabledModels"), Some(Value::Array(a)) if a.is_empty()) {
                 side.extra.remove("disabledModels");
-            }
-            if matches!(side.extra.get("disabledModels"), Some(Value::Object(m)) if m.is_empty()) {
-                side.extra.remove("disabledModels");
-            }
-            for k in ["providerFilters", "favoriteModels"] {
-                if matches!(side.extra.get(k), Some(Value::Object(m)) if m.is_empty()) {
-                    side.extra.remove(k);
-                }
             }
             side.provider_connections
                 .sort_by(|a, b| (&a.provider, &a.id).cmp(&(&b.provider, &b.id)));

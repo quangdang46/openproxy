@@ -189,8 +189,7 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
     let custom_models: Vec<Value> = kv_scope_to_array(conn, "customModels");
     let mitm_alias: Value = kv_scope_to_map(conn, "mitmAlias");
     let pricing: Value = kv_scope_to_map(conn, "pricing");
-    let provider_filters: Value = kv_scope_to_map(conn, "providerFilters");
-    let favorite_models: Value = kv_scope_to_map(conn, "favoriteModels");
+
     // Disabled models
     let disabled_models: Vec<Value> = {
         let mut stmt = conn.prepare("SELECT provider, model FROM disabledModels")?;
@@ -212,8 +211,6 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
         "customModels": custom_models,
         "mitmAlias": mitm_alias,
         "pricing": pricing,
-        "providerFilters": provider_filters,
-        "favoriteModels": favorite_models,
         "disabledModels": disabled_models,
     }))
 }

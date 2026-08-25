@@ -44,7 +44,6 @@ const navItems: NavItem[] = [
   { href: "/dashboard/providers", label: "Providers", icon: "dns" },
   { href: "/dashboard/combos", label: "Combos", icon: "layers" },
   { href: "/dashboard/token-saver", label: "Token Saver", icon: "token" },
-  { href: "/dashboard/compression", label: "Compression", icon: "compress" },
   { href: "/dashboard/pxpipe", label: "PXPIPE", icon: "compress" },
   { href: "/dashboard/payload-rules", label: "Payload Rules", icon: "tune" },
   { href: "/dashboard/db-backups", label: "DB Backups", icon: "backup" },

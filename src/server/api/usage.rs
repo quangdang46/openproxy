@@ -122,7 +122,6 @@ pub fn routes() -> Router<AppState> {
         )
         .route("/api/usage/logs", routing::get(get_usage_logs))
         .route("/api/usage/request-logs", routing::get(get_usage_logs))
-        .route("/api/compression/stats", routing::get(compression_stats))
 }
 
 async fn get_usage(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -165,81 +164,6 @@ async fn get_usage_stats(
     };
 
     let payload = build_dashboard_usage_stats(&state, period).await;
-    Json(payload).into_response()
-}
-
-/// GET /api/compression/stats
-///
-/// Aggregates RTK compression savings recorded on `usageHistory`
-/// (rows where `bytesSaved > 0`) and returns the dashboard's expected shape.
-async fn compression_stats(State(state): State<AppState>, _query: Query<StatsQuery>) -> Response {
-    let aggregates = state.db.sqlite.with_conn(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT COUNT(*),
-                    COALESCE(SUM(bytesSaved), 0),
-                    COALESCE(SUM(bytesBefore), 0),
-                    COALESCE(SUM(promptTokens), 0),
-                    COALESCE(SUM(completionTokens), 0),
-                    COALESCE(SUM(imagePrompts), 0)
-             FROM usageHistory WHERE bytesSaved > 0",
-        )?;
-        stmt.query_row(rusqlite::params![], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, i64>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-            ))
-        })
-    });
-
-    let (total, saved, before_total, prompt, completion, image_prompts) = match aggregates {
-        Ok(t) => t,
-        Err(_) => (0, 0, 0, 0, 0, 0),
-    };
-
-    let total = total as u64;
-    let saved = saved as u64;
-    let before_total = before_total as u64;
-    let prompt = prompt as u64;
-    let completion = completion as u64;
-    let image_prompts = image_prompts as u64;
-
-    let avg_savings_pct = if before_total > 0 {
-        (saved as f64 / before_total as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    let payload = json!({
-        "totalRequests": total,
-        "tokensSaved": saved,
-        "avgSavingsPct": avg_savings_pct,
-        "avgDurationMs": 0,
-        "receipts": 0,
-        "fallbacks": 0,
-        "imagePrompts": image_prompts,
-        "realUsage": {
-            "promptTokens": prompt,
-            "completionTokens": completion,
-            "totalTokens": prompt + completion,
-            "cacheTokens": 0,
-            "sources": {
-                "provider": total,
-                "stream": 0
-            }
-        },
-        "modeBreakdown": [
-            {
-                "mode": "Standard",
-                "requests": total,
-                "tokensSaved": saved
-            }
-        ]
-    });
-
     Json(payload).into_response()
 }
 

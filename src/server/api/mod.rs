@@ -25,7 +25,6 @@ pub mod oauth;
 pub mod observability;
 pub mod pricing;
 mod provider_connection_test;
-pub mod provider_filters;
 mod provider_model_tests;
 mod provider_models;
 pub mod provider_nodes;
@@ -320,7 +319,6 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(models_disabled::routes())
         .merge(models_alias::routes())
         .merge(models_availability::routes())
-        .merge(provider_filters::routes())
         .merge(models_custom::routes())
         .merge(provider_nodes::routes())
         .merge(providers::routes())

@@ -496,11 +496,11 @@ export default function OpenCodeToolCard({ tool, isExpanded, onToggle, baseUrl, 
       <ModelSelectModal
         isOpen={modalOpen}
         onClose={() => setModalOpen(false)}
-        selectionMode="multi"
-        onSelectIds={(ids: string[]) => {
-          const merged = Array.from(new Set([...selectedModels, ...ids]));
-          setSelectedModels(merged);
-          if (!activeModel && merged.length > 0) setActiveModel(merged[0]);
+        onSelect={(model: { value: string }) => {
+          if (!selectedModels.includes(model.value)) {
+            setSelectedModels([...selectedModels, model.value]);
+            if (!activeModel) setActiveModel(model.value);
+          }
           setModalOpen(false);
         }}
         selectedModel={null}
