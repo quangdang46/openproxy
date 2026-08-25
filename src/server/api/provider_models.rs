@@ -197,7 +197,7 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "glhf"
                 | "kilocode"
         )
-    }
+}
 
 pub(super) async fn fetch_models_for_connection(
     state: &AppState,
