@@ -1172,6 +1172,11 @@ pub fn routes() -> Router<AppState> {
             "/api/providers/{id}/models",
             get(super::provider_models::list_provider_models),
         )
+        // Provider catalog import - POST /api/providers/{id}/import-models
+        .route(
+            "/api/providers/{id}/import-models",
+            post(super::provider_models::import_provider_models),
+        )
         // Provider model tests - POST /api/providers/{id}/test-models
         .route(
             "/api/providers/{id}/test-models",
