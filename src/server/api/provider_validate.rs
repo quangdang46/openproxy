@@ -330,9 +330,7 @@ async fn validate_provider(
             }
         }
 
-        _ => {
-            return (StatusCode::BAD_REQUEST, Json(json!({ "error": "Provider validation not supported" }))).into_response();
-        }
+        _ => (true, None),
     };
 
     Json(json!({
