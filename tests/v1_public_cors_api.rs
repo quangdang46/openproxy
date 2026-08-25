@@ -73,10 +73,10 @@ async fn public_v1_endpoints_expose_cors_preflight() {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
         // CorsLayer with allow_methods(Any) emits "*"; JS emits an explicit
-        // list. Either way the preflight must permit the request.
+        // list. Either way every method the route documents must be allowed.
         assert!(
-            got_methods == "*" || got_methods.contains("POST") || got_methods.contains("GET"),
-            "{path}: allow-methods should permit requests, got {got_methods:?}"
+            got_methods == "*" || methods.split(',').all(|m| got_methods.contains(m.trim())),
+            "{path}: allow-methods should permit {methods}, got {got_methods:?}"
         );
     }
 }
