@@ -20,7 +20,7 @@
     "@astrojs/react": "^4.2.1",
     "@astrojs/tailwind": "^6.0.2",
     "@monaco-editor/react": "^4.7.0",
-    "@xyflow/react": "^12.10.1",
+    "@xyflow/react": "^12.11.3",
     "astro": "^5.18.1",
     "bcryptjs": "^3.0.3",
     "confbox": "^0.2.4",
