@@ -3,7 +3,7 @@ use axum::http::{Request, StatusCode};
 use openproxy::db::Db;
 use openproxy::server::state::AppState;
 use openproxy::types::{ApiKey, ProviderConnection, ProviderNode};
-use serde_json::{json};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tempfile::tempdir;
@@ -159,7 +159,10 @@ async fn input_sanitization_strips_control_chars_before_upstream() {
         .await
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("sanitized"), "upstream content reached client: {text}");
+    assert!(
+        text.contains("sanitized"),
+        "upstream content reached client: {text}"
+    );
     assert!(text.contains("data: [DONE]"), "streaming finished cleanly");
 }
 
@@ -219,7 +222,10 @@ async fn input_sanitization_preserves_code_indentation_and_newlines() {
         .await
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("indented-ok"), "upstream content reached client: {text}");
+    assert!(
+        text.contains("indented-ok"),
+        "upstream content reached client: {text}"
+    );
 }
 
 #[tokio::test]
@@ -287,7 +293,10 @@ async fn input_sanitization_noop_for_clean_payload() {
         .await
         .unwrap();
     let text = String::from_utf8(body.to_vec()).unwrap();
-    assert!(text.contains("Hello!"), "clean payload passed through: {text}");
+    assert!(
+        text.contains("Hello!"),
+        "clean payload passed through: {text}"
+    );
 }
 
 #[tokio::test]

@@ -98,10 +98,7 @@ pub(super) async fn import_provider_models(
 
     let provider = connection.provider.clone();
     let provider_alias = storage_alias_for_provider(&provider);
-    let legacy_alias = connection
-        .name
-        .clone()
-        .unwrap_or_else(|| provider.clone());
+    let legacy_alias = connection.name.clone().unwrap_or_else(|| provider.clone());
     if legacy_alias != provider_alias {
         let has_legacy = state
             .db
@@ -154,11 +151,10 @@ pub(super) async fn import_provider_models(
         }
 
         // Snapshot read to decide import vs skip (mirrors create_custom_model).
-        let exists_before = state.db.snapshot().custom_models.iter().any(|m| {
-            m.provider_alias == provider_alias
-                && m.id == model_id
-                && m.r#type == "llm"
-        });
+        let exists_before =
+            state.db.snapshot().custom_models.iter().any(|m| {
+                m.provider_alias == provider_alias && m.id == model_id && m.r#type == "llm"
+            });
         if exists_before {
             skipped += 1;
             continue;
@@ -185,9 +181,7 @@ pub(super) async fn import_provider_models(
             .update(move |db| {
                 // Re-check inside the write lock to guard a concurrent insert.
                 let exists = db.custom_models.iter().any(|m| {
-                    m.provider_alias == alias
-                        && m.id == model_id_owned
-                        && m.r#type == "llm"
+                    m.provider_alias == alias && m.id == model_id_owned && m.r#type == "llm"
                 });
                 if exists {
                     return;
@@ -1812,10 +1806,7 @@ mod tests {
         let model = ProviderModel {
             id: "meta/llama-3.1-8b".to_string(),
             name: "Llama 3.1 8B".to_string(),
-            extra: BTreeMap::from([(
-                "context_length".to_string(),
-                Value::from(131_072u64),
-            )]),
+            extra: BTreeMap::from([("context_length".to_string(), Value::from(131_072u64))]),
         };
         let now = "2026-08-22T00:00:00Z".to_string();
 
@@ -1827,7 +1818,11 @@ mod tests {
             .entry("importedAt".to_string())
             .or_insert_with(|| Value::String(now.clone()));
 
-        let name = if model.name.is_empty() { None } else { Some(model.name) };
+        let name = if model.name.is_empty() {
+            None
+        } else {
+            Some(model.name)
+        };
         let custom = CustomModel {
             provider_alias: "nvidia".to_string(),
             id: model.id.trim().to_string(),
@@ -1866,17 +1861,13 @@ mod tests {
         let provider_alias = "nvidia".to_string();
         let model_id = "meta/llama-3.1-8b".to_string();
 
-        let exists = [existing.clone()].iter().any(|m| {
-            m.provider_alias == provider_alias
-                && m.id == model_id
-                && m.r#type == "llm"
-        });
+        let exists = [existing.clone()]
+            .iter()
+            .any(|m| m.provider_alias == provider_alias && m.id == model_id && m.r#type == "llm");
         assert!(exists, "existing (provider_alias, id, type) should match");
 
         let missing = [existing.clone()].iter().any(|m| {
-            m.provider_alias == provider_alias
-                && m.id == "different/model"
-                && m.r#type == "llm"
+            m.provider_alias == provider_alias && m.id == "different/model" && m.r#type == "llm"
         });
         assert!(!missing, "different id should not match");
     }
