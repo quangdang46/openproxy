@@ -19,9 +19,54 @@ Parity work: epic `openproxy-9router-parity-v0550-pnc` (9router v0.5.50 → open
 ## Key References
 - `docs/parity-9router.md` — intentional divergences, pipeline order, executor dispatch
 - 9router reference: `/tmp/9router` (open-sse) — do NOT copy JS bugs blindly
+- **OmniRoute v3.8.50** (`/tmp/omniroute_v3850`, SHA `6cd4d38`) — authoritative reference for provider parity. When a provider behaves unexpectedly, compare against OmniRoute's `src/managed/` implementations, not the legacy JS `9router`. Key files: `credentialHealth.ts` (`HealthStatus`: 200/401/429/503/500), `healthCheck.ts`, `modelDiscovery.ts` (`discoverProviderModels` — GET `/v1/models` with provider-specific headers), `managedModelImport.ts` (merge/sync remote catalog → local config, `preserveRemovedCustomModelCompat`). Header-fidelity rules for parity: OpenRouter must send `HTTP-Referer` + `X-Title`; nvidia/llm7 omit `HTTP-Referer`; gemini sends `x-goog-api-key`; kiro/opencode/free-providers use the appropriate OAuth token flow. Always check `/tmp/omniroute_v3850` before making provider-specific decisions.
+
+## Dev Workflow — backend + dashboard rebuild
+
+Single smooth loop — backend and dashboard are **separate builds** served by the same binary:
+
+```bash
+./scripts/dev.sh              # incremental cargo build --bin openproxy + run on :4623 (foreground)
+./scripts/dev.sh detach       # build + run detached
+./scripts/dev.sh build        # only cargo build, don't run
+```
+
+**Dashboard is not live-reloaded.** `web/src` → `web/dist` (Astro) is what the Rust server serves.
+After any `web/src` change you **must** rebuild the dashboard or the feature will be invisible
+(past "feature not found" confusion was a missing rebuild, not a missing backend):
+
+```bash
+cd web && pnpm install        # once
+pnpm build                    # rebuild web/dist after every web/src change
+# or during iteration:
+pnpm dev                      # Astro dev on :4624 (proxy API to :4623)
+```
+
+Full loop for a feature touching both layers:
+
+```bash
+./scripts/dev.sh build && (cd web && pnpm build) && ./scripts/dev.sh detach
+curl -s http://127.0.0.1:4623/health
+open http://127.0.0.1:4623/dashboard/providers
+```
+
+## Contributing & Git Hygiene
+
+Systematic, not arbitrary — all contributions follow two documents linked from the intelligence brief:
+
+- **Workflow & expectations:** [`CONTRIBUTING.md`](CONTRIBUTING.md) — prerequisites, `scripts/dev.sh` quick/full, project layout, coding standards, testing matrix, beads parity workflow, secrets policy, releases.
+- **Enforceable git rules:** [`docs/git-conventions.md`](docs/git-conventions.md) — branch naming (`<type>/<kebab>`), Conventional Commits (`<type>(<scope>): <subject>`), atomic bisectable commits, verification before each commit (`cargo fmt --check` + `cargo clippy --all-targets --all-features`), history hygiene (rebase, no `git add .`), PR hygiene (template, ≤400 lines, CI `web` → `rust` must be green), issue/beads discipline, tagging.
+
+PRs use [`.github/pull_request_template.md`](.github/pull_request_template.md); bugs/features use [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/). CI (`.github/workflows/ci.yml`) enforces `web: astro check + build → rust: fmt + clippy + tests` on `ubuntu` + `macos`. The checklist in `docs/git-conventions.md` §10 is the gate — all green means systematic.
 
 ## Status
 Active parity port. Run `cargo test -p openproxy --lib parity_tests stream_flags` for smoke.
+
+## Local Config & Secrets — Never Commit
+- **Do not commit** local user config or secrets: `opencode.json`, `.env`, `.env.*`, `*.pem`, `~/.openproxy/db.json`, `~/.openproxy/admin.key`, API keys, `provider_specific_data` with live credentials, or any file containing `sk-`, `Bearer`, `refresh_token`.
+- `opencode.json` is local agent config (model, MCP keys like `CONTEXT7_API_KEY`, permissions) — keep untracked. `scripts/dev.sh` builds locally; real secrets live in SQLite (`db.json` encrypted) + `OPENPROXY_API_KEY` env, not in git.
+- Before `git add`/`commit`, run `git status` and `git diff --cached`; if a file contains secrets or is machine-local, `git restore --staged <file>` and add it to `.gitignore`. Prefer `git check-ignore -v <file>` to verify.
+- If a secret is accidentally committed, rotate it immediately and purge history (`git filter-repo` or BFG) — do not just revert.
 
 ## Schema stability (`openproxy.v1.*`)
 

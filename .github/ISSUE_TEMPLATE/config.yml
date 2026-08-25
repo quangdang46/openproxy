@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussion / Question
+    url: https://github.com/quangdang46/openproxy/discussions
+    about: Ask a question or start a discussion before filing an issue
+  - name: Agent skill (install & wiring)
+    url: https://github.com/quangdang46/openproxy/blob/main/.agents/skills/openproxy/SKILL.md
+    about: OpenProxy agent skill — install, provider apply, CLI wiring

@@ -42,6 +42,12 @@ excalidraw.log
 # vercel
 .vercel
 
+# local agent/user config — never commit (see AGENTS.md)
+opencode.json
+opencode.jsonc
+.openproxy/
+admin.key
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts
@@ -56,6 +62,7 @@ source/*
 .cursor/*
 docs/*
 !docs/ARCHITECTURE.md
+!docs/git-conventions.md
 !docs/integrations/
 !docs/parity-9router.md
 test/*
