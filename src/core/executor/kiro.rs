@@ -111,18 +111,18 @@ pub fn is_short_future_action(content: &str) -> bool {
         return true;
     }
     // English future action with a result clause → already completed.
-    if ENGLISH_FUTURE_ACTION().is_match(&text) && ENGLISH_RESULT_CLAUSE().is_match(&text) {
+    if english_future_action().is_match(&text) && english_result_clause().is_match(&text) {
         return false;
     }
     // Chinese future action with a result clause → already completed.
-    if CHINESE_FUTURE_ACTION().is_match(&text) && CHINESE_RESULT_CLAUSE().is_match(&text) {
+    if chinese_future_action().is_match(&text) && chinese_result_clause().is_match(&text) {
         return false;
     }
     text.len() <= KIRO_SHORT_FINAL_MAX_CHARS
-        && SHORT_FUTURE_ACTION().is_match(&text)
-        && !USER_WAIT().is_match(&text)
-        && !COMPLETED_FINAL().is_match(&text)
-        && !RESULT_EVIDENCE().is_match(&text)
+        && short_future_action().is_match(&text)
+        && !user_wait().is_match(&text)
+        && !completed_final().is_match(&text)
+        && !result_evidence().is_match(&text)
 }
 
 // English / Chinese future-action detection (kiro.js SHORT_FUTURE_ACTION +
@@ -137,35 +137,35 @@ macro_rules! kiro_re {
 }
 
 kiro_re!(
-    SHORT_FUTURE_ACTION,
+    short_future_action,
     r"(?i)^(?:(?:(?:現在|接著|接下來|下一步)[，,:：\s]*(?:我(?:只)?(?:會|要|將|再)?\s*)?|我只再)(?:補|查|確認|驗證|追(?:查|蹤)?|繼續|檢查|測試)|我(?:會|要|將)(?:再|重新)?(?:補(?:齊|查)?|抓取|查(?:詢)?|確認|驗證|追(?:查|蹤)?|繼續|檢查|測試)|(?:(?:next|now|then)\b[\s,:-]*)?(?:i(?:'ll| will| am going to| need to)|let me)\s+(?:verify|check|confirm|validate|investigate|trace|continue|follow up|test)\b)"
 );
 kiro_re!(
-    ENGLISH_FUTURE_ACTION,
+    english_future_action,
     r"(?i)^(?:(?:next|now|then)\b[\s,:-]*)?(?:i(?:'ll| will| am going to| need to)|let me)\s+(?:verify|check|confirm|validate|investigate|trace|continue|follow up|test)\b"
 );
 kiro_re!(
-    ENGLISH_RESULT_CLAUSE,
+    english_result_clause,
     r"(?i)(?:[:;\n]|[.!?]\s+\S|\b(?:status|checksum|response|deployment)\s+(?:is|are|was|were|matches?|equals?|returned)\b)"
 );
 kiro_re!(
-    CHINESE_FUTURE_ACTION,
+    chinese_future_action,
     r"^(?:(?:現在|接著|接下來|下一步)[，,:：\s]*(?:我(?:只)?(?:會|要|將|再)?\s*)?|我只再|我(?:會|要|將)(?:再|重新)?)(?:補|抓取|查|確認|驗證|追|繼續|檢查|測試)"
 );
 kiro_re!(
-    CHINESE_RESULT_CLAUSE,
+    chinese_result_clause,
     r"(?:[。！？]\s*\S|(?:版本|狀態|回應|結果|部署|校驗碼)(?:是|為|等於|顯示))"
 );
 kiro_re!(
-    USER_WAIT,
+    user_wait,
     r"(?i)(?:請(?:你|先)|你(?:先|需要|可以|提供|確認|批准|允許)|等待(?:你|使用者)|等你|核准|同意|授權|\b(?:after|when|once)\s+you\b|\byour\s+(?:approval|confirmation|permission|input)\b|\bwait(?:ing)?\s+for\s+you\b|\bplease\s+(?:approve|confirm|provide|send)\b)"
 );
 kiro_re!(
-    COMPLETED_FINAL,
+    completed_final,
     r"(?i)(?:已(?:經)?完成|完成(?:了|驗證|確認)|修復完成|確認無誤|驗證(?:完成|通過)|測試(?:均)?通過|結論|總結|\b(?:done|completed|fixed|verified|confirmed|passed|in conclusion|summary)\b|\b(?:is|are) complete\b)"
 );
 kiro_re!(
-    RESULT_EVIDENCE,
+    result_evidence,
     r"(?i)(?:顯示|發現|因此|成功|失敗|正常|無錯誤|沒有錯誤|\b(?:found|shows?|showed|because|therefore|succeeded|failed|healthy|green|no errors?)\b)"
 );
 
