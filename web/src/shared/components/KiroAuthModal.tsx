@@ -21,6 +21,7 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }: KiroA
   const [cliProxyJson, setCliProxyJson] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiKeyRegion, setApiKeyRegion] = useState("us-east-1");
+  const [apiKeyProfileArn, setApiKeyProfileArn] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
   const [autoDetecting, setAutoDetecting] = useState(false);
@@ -159,9 +160,10 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }: KiroA
       const res = await fetch("/api/oauth/kiro/api-key", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+         body: JSON.stringify({
           apiKey: apiKey.trim(),
           region: apiKeyRegion.trim() || "us-east-1",
+          profileArn: apiKeyProfileArn.trim() || undefined,
         }),
       });
 
@@ -380,12 +382,28 @@ export default function KiroAuthModal({ isOpen, onMethodSelect, onClose }: KiroA
                 placeholder="us-east-1"
                 className="font-mono text-sm"
               />
-              <p className="text-xs text-text-muted mt-1">
-                AWS region for the key (default: us-east-1)
-              </p>
-            </div>
+               <p className="text-xs text-text-muted mt-1">
+                 AWS region for the key (default: us-east-1)
+               </p>
+             </div>
 
-            {error && (
+             <div>
+               <label className="block text-sm font-medium mb-2">
+                 Profile ARN
+               </label>
+               <Input
+                 value={apiKeyProfileArn}
+                 onChange={(e) => setApiKeyProfileArn(e.target.value)}
+                 placeholder="arn:aws:codewhisperer:us-east-1:...:profile/default"
+                 className="font-mono text-sm"
+               />
+               <p className="text-xs text-text-muted mt-1">
+                 Required by CodeWhisperer. Find it in AWS Console → CodeWhisperer
+                 → Profiles, or omit to auto-resolve from the key.
+               </p>
+             </div>
+
+             {error && (
               <div className="bg-red-50 dark:bg-red-900/20 p-3 rounded-lg border border-red-200 dark:border-red-800">
                 <p className="text-sm text-red-600 dark:text-red-400">{error}</p>
               </div>

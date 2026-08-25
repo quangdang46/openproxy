@@ -59,6 +59,17 @@ Systematic, not arbitrary — all contributions follow two documents linked from
 
 PRs use [`.github/pull_request_template.md`](.github/pull_request_template.md); bugs/features use [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/). CI (`.github/workflows/ci.yml`) enforces `web: astro check + build → rust: fmt + clippy + tests` on `ubuntu` + `macos`. The checklist in `docs/git-conventions.md` §10 is the gate — all green means systematic.
 
+## Core Product Surfaces (TOP PRIORITY)
+
+These 4 surfaces ARE the product. Everything else is optional. They must be flawless, reliable, and mutually consistent — always prioritize regressions and improvements here:
+
+1. **Providers page** — `/dashboard/providers/<provider>` (e.g. kilocode): user controls Available Models (disable/enable/custom). Configuration is user data, persisted in SQLite — must survive binary rebuilds/updates.
+2. **CLI tools config** — `/dashboard/cli-tools/opencode` (opencode is the primary client).
+3. **Combos page** — `/dashboard/combos`.
+4. **`web/src/shared/components/ModelSelectModal.tsx`** — the single model-picker used everywhere; must exactly mirror the provider page's Available Models (same disabled map + custom rows + catalog merge). Any change to model-list logic MUST be applied consistently to both the provider page and this modal.
+
+Core workflow that must never break: configure provider → customize available models → create combos → select models for opencode CLI config.
+
 ## Status
 Active parity port. Run `cargo test -p openproxy --lib parity_tests stream_flags` for smoke.
 

@@ -122,8 +122,9 @@
   "selfhosted-embedding": "selfhosted-embedding",
   "selfhosted-stt": "selfhosted-stt",
   "selfhosted-tts": "selfhosted-tts",
-  "tokenrouter": "tokenrouter"
- },
+   "tokenrouter": "tokenrouter",
+   "agentrouter": "ar"
+  },
  "providerModels": [
   {
    "alias": "cc",
@@ -370,21 +371,81 @@
     }
    ]
   },
-  {
-   "alias": "gc",
-   "models": [
-    {
-     "id": "gemini-3-flash-preview",
-     "name": "Gemini 3 Flash Preview",
-     "kind": "llm"
-    },
-    {
-     "id": "gemini-3-pro-preview",
-     "name": "Gemini 3 Pro Preview",
-     "kind": "llm"
-    }
-   ]
-  },
+   {
+    "alias": "gc",
+    "models": [
+     {
+      "id": "gemini-3-flash-preview",
+      "name": "Gemini 3 Flash Preview",
+      "kind": "llm"
+     },
+     {
+      "id": "gemini-3-pro-preview",
+      "name": "Gemini 3 Pro Preview",
+      "kind": "llm"
+     }
+    ]
+   },
+   {
+    "alias": "ar",
+    "models": [
+     {
+      "id": "claude-sonnet-4",
+      "name": "Claude Sonnet 4",
+      "kind": "llm"
+     },
+     {
+      "id": "claude-sonnet-4-5",
+      "name": "Claude Sonnet 4.5",
+      "kind": "llm"
+     },
+     {
+      "id": "gpt-4o",
+      "name": "GPT-4o",
+      "kind": "llm"
+     },
+     {
+      "id": "gpt-4o-mini",
+      "name": "GPT-4o Mini",
+      "kind": "llm"
+     },
+     {
+      "id": "gemini-2.0-flash",
+      "name": "Gemini 2.0 Flash",
+      "kind": "llm"
+     },
+     {
+      "id": "gemini-2.0-flash-lite",
+      "name": "Gemini 2.0 Flash Lite",
+      "kind": "llm"
+     },
+     {
+      "id": "deepseek-v3",
+      "name": "DeepSeek V3",
+      "kind": "llm"
+     },
+     {
+      "id": "deepseek-r1",
+      "name": "DeepSeek R1",
+      "kind": "llm"
+     },
+     {
+      "id": "qwen3-235b-a22b",
+      "name": "Qwen3 235B A22B",
+      "kind": "llm"
+     },
+     {
+      "id": "command-r-plus",
+      "name": "Cohere Command R+",
+      "kind": "llm"
+     },
+     {
+      "id": "command-r7b",
+      "name": "Cohere Command R7B",
+      "kind": "llm"
+     }
+    ]
+   },
   {
    "alias": "qw",
    "models": [
@@ -5699,17 +5760,28 @@
    "hasSearch": false,
    "hasFetch": false
   },
-  {
-   "id": "gemini-cli",
-   "alias": "gc",
-   "serviceKinds": [
-    "llm"
-   ],
-   "ttsModels": [],
-   "embeddingModels": [],
-   "hasSearch": false,
-   "hasFetch": false
-  },
+   {
+    "id": "gemini-cli",
+    "alias": "gc",
+    "serviceKinds": [
+     "llm"
+    ],
+    "ttsModels": [],
+    "embeddingModels": [],
+    "hasSearch": false,
+    "hasFetch": false
+   },
+   {
+    "id": "agentrouter",
+    "alias": "ar",
+    "serviceKinds": [
+     "llm"
+    ],
+    "ttsModels": [],
+    "embeddingModels": [],
+    "hasSearch": false,
+    "hasFetch": false
+   },
   {
    "id": "iflow",
    "alias": "if",

@@ -38,6 +38,7 @@ use crate::core::translator::helpers::modality_helper::{
 };
 use crate::core::translator::registry::{self, Format};
 use crate::core::translator::response_transform::{transform_sse_stream, transformer_for_provider};
+use crate::core::usage::CompressionStats;
 use crate::core::utils::bypass_handler::{detect_bypass, BypassDecision, DEFAULT_BYPASS_TEXT};
 use crate::core::utils::claude_cloaking::{cloak_claude_tools, CloakedRequest};
 use crate::core::utils::client_detector::{detect_client_tool, is_native_passthrough, ClientTool};
@@ -1005,10 +1006,16 @@ async fn execute_single_model(
     );
 
     // 4. RTK tool-result compression (after translate — 9router parity)
-    compress_messages(
+    let compression_stats: Option<CompressionStats> = compress_messages(
         &mut body,
         token_saver_enabled && snapshot.settings.rtk_enabled,
-    );
+    )
+    .map(|rtk_stats| CompressionStats {
+        bytes_before: rtk_stats.bytes_before as u64,
+        bytes_after: rtk_stats.bytes_after as u64,
+        bytes_saved: rtk_stats.hits.iter().map(|h| h.saved as u64).sum(),
+        image_prompts: rtk_stats.image_prompts as u64,
+    });
 
     // 5. Headroom (after translate — 9router parity; format = final body shape)
     {
@@ -1126,6 +1133,7 @@ async fn execute_single_model(
         endpoint,
         plan,
         client_tool,
+        compression_stats,
     )
     .await
 }
@@ -1139,6 +1147,7 @@ async fn forward_with_provider_fallback(
     endpoint: Option<&'static str>,
     plan: &RequestPlan,
     client_tool: Option<ClientTool>,
+    compression: Option<CompressionStats>,
 ) -> Result<Response, ComboAttemptError> {
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
@@ -2040,6 +2049,7 @@ async fn forward_with_provider_fallback(
                             Some(connection.id.as_str()),
                             api_key,
                             endpoint,
+                            compression.clone(),
                         )
                         .await);
                     }
@@ -2060,6 +2070,7 @@ async fn forward_with_provider_fallback(
                             api_key,
                             endpoint,
                             plan,
+                            compression.clone(),
                         )
                         .await);
                     }
@@ -2074,6 +2085,7 @@ async fn forward_with_provider_fallback(
                             endpoint,
                             plan,
                             tool_name_map.as_ref(),
+                            compression.clone(),
                         )
                         .await);
                     }
@@ -2090,6 +2102,7 @@ async fn forward_with_provider_fallback(
                         normalize_for_dashboard,
                         plan,
                         tool_name_map.as_ref(),
+                        compression.clone(),
                     )
                     .await);
                 }
@@ -2269,6 +2282,7 @@ async fn proxy_dashboard_sse_with_usage_tracking(
     connection_id: Option<&str>,
     api_key: Option<&str>,
     endpoint: Option<&str>,
+    compression: Option<CompressionStats>,
 ) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
@@ -2285,6 +2299,7 @@ async fn proxy_dashboard_sse_with_usage_tracking(
                 connection_id,
                 api_key,
                 endpoint,
+                compression,
             )
             .await;
         state.usage_live.notify_update();
@@ -2762,6 +2777,7 @@ async fn proxy_sse_to_json_response(
     api_key: Option<&str>,
     endpoint: Option<&str>,
     plan: &RequestPlan,
+    compression: Option<CompressionStats>,
 ) -> Response {
     let status = response.status();
     let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
@@ -2794,6 +2810,7 @@ async fn proxy_sse_to_json_response(
                 connection_id,
                 api_key,
                 endpoint,
+                compression,
             )
             .await;
     }
@@ -2827,6 +2844,7 @@ async fn proxy_response_with_usage_tracking(
     endpoint: Option<&str>,
     plan: &RequestPlan,
     tool_name_map: Option<&std::collections::BTreeMap<String, String>>,
+    compression: Option<CompressionStats>,
 ) -> Response {
     let status = response.status();
     let headers = response.headers().clone();
@@ -2864,6 +2882,7 @@ async fn proxy_response_with_usage_tracking(
                 connection_id,
                 api_key,
                 endpoint,
+                compression,
             )
             .await;
         state.usage_live.notify_update();
@@ -3010,6 +3029,7 @@ async fn proxy_response_with_pending_tracking(
     normalize_for_dashboard: bool,
     plan: &RequestPlan,
     tool_name_map: Option<&std::collections::BTreeMap<String, String>>,
+    compression: Option<CompressionStats>,
 ) -> Response {
     // Capture an owned copy of api_key for usage recording inside the stream
     // (the SSE stream requires 'static lifetimes; &str borrows can't escape).
@@ -3083,6 +3103,7 @@ async fn proxy_response_with_pending_tracking(
             let model = model.clone();
             let connection_id = connection_id.clone();
             let api_key = api_key.clone();
+            let compression = compression.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
             let stream = async_stream::stream! {
@@ -3110,7 +3131,7 @@ async fn proxy_response_with_pending_tracking(
                                 "SSE stalled, closing stream"
                             );
                             record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -3162,7 +3183,7 @@ async fn proxy_response_with_pending_tracking(
                         Ok(Ok(None)) => break,
                         Ok(Err(_)) => {
                             record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -3196,7 +3217,7 @@ async fn proxy_response_with_pending_tracking(
                     }
                 }
                 record_streaming_usage(&state, &provider, &model,
-                    connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
+                    connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
                 state
                     .usage_live
                     .finish_request(&model, &provider, connection_id.as_deref(), false)
@@ -3211,6 +3232,7 @@ async fn proxy_response_with_pending_tracking(
             let model = model.clone();
             let connection_id = connection_id.clone();
             let api_key = api_key.clone();
+            let compression = compression.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
             let stream = async_stream::stream! {
@@ -3234,7 +3256,7 @@ async fn proxy_response_with_pending_tracking(
                                 "SSE stalled, closing stream"
                             );
                             record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -3282,7 +3304,7 @@ async fn proxy_response_with_pending_tracking(
                         }
                         Err(_) => {
                             record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -3316,7 +3338,7 @@ async fn proxy_response_with_pending_tracking(
                     }
                 }
                 record_streaming_usage(&state, &provider, &model,
-                    connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data).await;
+                    connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
                 state
                     .usage_live
                     .finish_request(&model, &provider, connection_id.as_deref(), false)
@@ -3358,6 +3380,7 @@ async fn record_streaming_usage(
     api_key: Option<&str>,
     endpoint: Option<&'static str>,
     last_data: &Option<Bytes>,
+    compression: Option<CompressionStats>,
 ) {
     let usage = last_data
         .as_ref()
@@ -3371,6 +3394,7 @@ async fn record_streaming_usage(
             connection_id,
             api_key,
             endpoint,
+            compression,
         )
         .await;
 }
@@ -3688,11 +3712,24 @@ fn strip_sse_data_prefix(body: &[u8]) -> &[u8] {
 }
 
 fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
-    // Handle SSE data-prefixed chunks (e.g. "data: {"choices":[...],"usage":{...}}")
-    // by stripping the "data: " prefix before attempting JSON parse.
     let body = strip_sse_data_prefix(body);
     let value = serde_json::from_slice::<Value>(body).ok()?;
-    let usage = value.get("usage")?.as_object()?;
+
+    let usage_obj = value
+        .get("usage")
+        .and_then(Value::as_object)
+        .or_else(|| {
+            value
+                .get("data")
+                .and_then(|d| d.get("usage"))
+                .and_then(Value::as_object)
+        })
+        .or_else(|| {
+            value
+                .get("result")
+                .and_then(|d| d.get("usage"))
+                .and_then(Value::as_object)
+        });
 
     let known_fields = [
         "prompt_tokens",
@@ -3706,24 +3743,80 @@ fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
         "cache_creation_input_tokens",
     ];
 
-    Some(TokenUsage {
-        prompt_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
-        input_tokens: usage.get("input_tokens").and_then(Value::as_u64),
-        completion_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
-        output_tokens: usage.get("output_tokens").and_then(Value::as_u64),
-        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
-        reasoning_tokens: usage.get("reasoning_tokens").and_then(Value::as_u64),
-        cached_tokens: usage.get("cached_tokens").and_then(Value::as_u64),
-        cache_read_input_tokens: usage.get("cache_read_input_tokens").and_then(Value::as_u64),
-        cache_creation_input_tokens: usage
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64),
-        extra: usage
-            .iter()
-            .filter(|(key, _)| !known_fields.contains(&key.as_str()))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect::<BTreeMap<_, _>>(),
+    if let Some(usage) = usage_obj {
+        return Some(TokenUsage {
+            prompt_tokens: extract_u64(usage, "prompt_tokens"),
+            input_tokens: extract_u64(usage, "input_tokens"),
+            completion_tokens: extract_u64(usage, "completion_tokens"),
+            output_tokens: extract_u64(usage, "output_tokens"),
+            total_tokens: extract_u64(usage, "total_tokens"),
+            reasoning_tokens: extract_u64(usage, "reasoning_tokens"),
+            cached_tokens: extract_u64(usage, "cached_tokens"),
+            cache_read_input_tokens: extract_u64(usage, "cache_read_input_tokens"),
+            cache_creation_input_tokens: extract_u64(usage, "cache_creation_input_tokens"),
+            extra: usage
+                .iter()
+                .filter(|(key, _)| !known_fields.contains(&key.as_str()))
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        });
+    }
+
+    // Fallback: some providers put input_tokens/output_tokens directly at the
+    // top level (e.g. Anthropic, some proxies). Only use this when at least
+    // one token field is present to avoid creating a zero-filled entry for
+    // responses that have no usage data at all.
+    let input = extract_u64_from_value(&value, "input_tokens");
+    let prompt = extract_u64_from_value(&value, "prompt_tokens");
+    let output = extract_u64_from_value(&value, "output_tokens");
+    let completion = extract_u64_from_value(&value, "completion_tokens");
+    let total = extract_u64_from_value(&value, "total_tokens");
+    if input + prompt + output + completion + total > 0 {
+        return Some(TokenUsage {
+            prompt_tokens: opt(prompt).or(opt(input)),
+            input_tokens: opt(input).filter(|_| prompt == 0),
+            completion_tokens: opt(completion).or(opt(output)),
+            output_tokens: opt(output).filter(|_| completion == 0),
+            total_tokens: opt(total),
+            reasoning_tokens: opt(extract_u64_from_value(&value, "reasoning_tokens")),
+            cached_tokens: opt(extract_u64_from_value(&value, "cached_tokens")),
+            cache_read_input_tokens: opt(extract_u64_from_value(&value, "cache_read_input_tokens")),
+            cache_creation_input_tokens: opt(extract_u64_from_value(
+                &value,
+                "cache_creation_input_tokens",
+            )),
+            extra: BTreeMap::new(),
+        });
+    }
+
+    None
+}
+
+fn extract_u64(obj: &serde_json::Map<String, Value>, key: &str) -> Option<u64> {
+    obj.get(key).and_then(|v| match v {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.parse().ok(),
+        _ => None,
     })
+}
+
+fn extract_u64_from_value(value: &Value, key: &str) -> u64 {
+    value
+        .get(key)
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+fn opt(v: u64) -> Option<u64> {
+    if v > 0 {
+        Some(v)
+    } else {
+        None
+    }
 }
 
 /// Extract the error message AND raw body bytes from an upstream error response.

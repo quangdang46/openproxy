@@ -1,0 +1,10 @@
+---
+import Layout from '@/layouts/Layout.astro';
+import DashboardLayout from '@/shared/components/layouts/DashboardLayout';
+import CompressionPageClient from '@/components/compression/CompressionPageClient';
+---
+<Layout title="Compression">
+  <DashboardLayout client:only="react">
+    <CompressionPageClient client:only="react" />
+  </DashboardLayout>
+</Layout>

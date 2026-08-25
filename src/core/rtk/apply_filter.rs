@@ -4,6 +4,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 pub struct RtkStats {
     pub bytes_before: usize,
     pub bytes_after: usize,
+    pub image_prompts: usize,
     pub hits: Vec<RtkHit>,
 }
 
