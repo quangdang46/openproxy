@@ -7,7 +7,7 @@ import Card from "./Card";
 import OverviewCards from "@/components/usage/OverviewCards";
 import UsageTable, { fmt, fmtTime } from "@/components/usage/UsageTable";
 import ProviderTopology from "@/components/usage/ProviderTopologyWrapper";
-import UsageChart from "@/components/usage/UsageChart";
+import ProviderBreakdownTable from "@/components/usage/ProviderBreakdownTable";
 import React from "react";
 
 interface UsageStatsProps {
@@ -21,6 +21,7 @@ interface StatsData {
   byAccount?: Record<string, any>;
   byApiKey?: Record<string, any>;
   byEndpoint?: Record<string, any>;
+  byProvider?: Record<string, { requests?: number; promptTokens?: number; completionTokens?: number; cachedTokens?: number; totalTokens?: number; cost?: number }>;
   activeRequests?: any[];
   recentRequests?: any[];
   errorProvider?: string;
@@ -453,6 +454,11 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       {/* Overview cards */}
       {loading ? spinner : <OverviewCards stats={stats} />}
 
+      {/* Provider breakdown */}
+      {loading ? spinner : (stats.byProvider && Object.keys(stats.byProvider).length > 0 ? (
+        <ProviderBreakdownTable byProvider={stats.byProvider} />
+      ) : null)}
+
       {/* Provider topology + Recent Requests */}
       {loading ? spinner : (
         <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
@@ -465,9 +471,6 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           <RecentRequests requests={stats.recentRequests || []} />
         </div>
       )}
-
-      {/* Token / Cost chart - sync period */}
-      {loading ? spinner : <UsageChart period={period} />}
 
       {/* Table with dropdown selector */}
       <div className="flex flex-col gap-3">

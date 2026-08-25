@@ -56,6 +56,24 @@ impl AppDb {
             }
         }
 
+        // Strip empty providerFilters/favoriteModels from extra so that
+        // export → from_json_value round-trips stay equal (empty scopes are
+        // stored as 0 KV rows and should not appear as `"providerFilters": {}`
+        // in the in-memory model). Also normalize legacy empty arrays.
+        for key in ["providerFilters", "favoriteModels"] {
+            if matches!(self.extra.get(key), Some(Value::Object(m)) if m.is_empty()) {
+                self.extra.remove(key);
+            }
+        }
+        if matches!(self.extra.get("disabledModels"), Some(Value::Array(a)) if a.is_empty()) {
+            self.extra.remove("disabledModels");
+        }
+        if let Some(Value::Object(obj)) = self.extra.get("disabledModels") {
+            if obj.is_empty() {
+                self.extra.remove("disabledModels");
+            }
+        }
+
         // Rebuild the HashMap index for O(1) API key lookup.
         self.api_key_map = self
             .api_keys
@@ -803,6 +821,14 @@ pub struct UsageEntry {
     pub cost: Option<f64>,
     #[serde(default)]
     pub status: Option<String>,
+    #[serde(default)]
+    pub bytes_before: u64,
+    #[serde(default)]
+    pub bytes_after: u64,
+    #[serde(default)]
+    pub bytes_saved: u64,
+    #[serde(default)]
+    pub image_prompts: u64,
     #[serde(flatten)]
     pub extra: BTreeMap<String, Value>,
 }

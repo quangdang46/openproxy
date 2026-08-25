@@ -136,6 +136,10 @@ fn usage_db_round_trips_through_serde() {
             endpoint: Some("/v1/chat/completions".into()),
             cost: Some(0.42),
             status: Some("ok".into()),
+            bytes_before: 0,
+            bytes_after: 0,
+            bytes_saved: 0,
+            image_prompts: 0,
             extra: BTreeMap::new(),
         }],
         total_requests_lifetime: 1,
@@ -418,6 +422,10 @@ async fn usage_updates_persist_and_migrate_daily_summary() {
             endpoint: Some("/v1/chat/completions".into()),
             cost: Some(0.21),
             status: Some("ok".into()),
+            bytes_before: 0,
+            bytes_after: 0,
+            bytes_saved: 0,
+            image_prompts: 0,
             extra: BTreeMap::new(),
         });
     })
