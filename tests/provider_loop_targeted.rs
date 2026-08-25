@@ -56,12 +56,24 @@ fn targeted_providers_have_configs_and_urls() {
     let expectations: &[(&str, &str)] = &[
         ("opencode-go", "https://opencode.ai/zen/go/v1"),
         ("openai", "https://api.openai.com/v1/chat/completions"),
-        ("nvidia", "https://integrate.api.nvidia.com/v1/chat/completions"),
-        ("openrouter", "https://openrouter.ai/api/v1/chat/completions"),
-        ("kilocode", "https://api.kilo.ai/api/openrouter/chat/completions"),
+        (
+            "nvidia",
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+        ),
+        (
+            "openrouter",
+            "https://openrouter.ai/api/v1/chat/completions",
+        ),
+        (
+            "kilocode",
+            "https://api.kilo.ai/api/openrouter/chat/completions",
+        ),
         ("ollama-cloud", "https://ollama.com/v1/chat/completions"),
         ("ollama", "https://ollama.com/v1/chat/completions"),
-        ("gemini", "https://generativelanguage.googleapis.com/v1beta/models"),
+        (
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/models",
+        ),
         ("llm7", "https://api.llm7.io/v1/chat/completions"),
     ];
 
@@ -80,11 +92,21 @@ fn targeted_providers_have_configs_and_urls() {
             .unwrap_or_else(|e| panic!("build_url failed for {provider}: {e:?}"));
         // For gemini the URL includes model; just check prefix
         if *provider == "gemini" {
-            assert!(url.starts_with(expected_base), "gemini url prefix mismatch: {url}");
-            assert!(url.contains("test-model:generateContent"), "gemini url missing model action: {url}");
+            assert!(
+                url.starts_with(expected_base),
+                "gemini url prefix mismatch: {url}"
+            );
+            assert!(
+                url.contains("test-model:generateContent"),
+                "gemini url missing model action: {url}"
+            );
         } else if *provider == "opencode-go" {
             // opencode-go base is .../v1, URL appends /chat/completions
-            assert_eq!(url, format!("{expected_base}/chat/completions"), "opencode-go url mismatch: {url}");
+            assert_eq!(
+                url,
+                format!("{expected_base}/chat/completions"),
+                "opencode-go url mismatch: {url}"
+            );
         } else {
             assert_eq!(&url, expected_base, "url mismatch for {provider}");
         }
@@ -97,42 +119,58 @@ fn targeted_providers_headers_are_correct() {
 
     // openrouter must have Referer + X-Title
     let exec = DefaultExecutor::new("openrouter", pool.clone(), None).unwrap();
-    let headers = exec.build_headers("gpt-4o", &conn("openrouter"), false).unwrap();
+    let headers = exec
+        .build_headers("gpt-4o", &conn("openrouter"), false)
+        .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
     assert_eq!(headers["http-referer"], "https://endpoint-proxy.local");
     assert_eq!(headers["x-title"], "Endpoint Proxy");
 
     // nvidia is bare openai Bearer, no extra headers
     let exec = DefaultExecutor::new("nvidia", pool.clone(), None).unwrap();
-    let headers = exec.build_headers("meta/llama-3.1-8b-instruct", &conn("nvidia"), false).unwrap();
+    let headers = exec
+        .build_headers("meta/llama-3.1-8b-instruct", &conn("nvidia"), false)
+        .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
-    assert!(headers.get("http-referer").is_none(), "nvidia should not have Referer");
+    assert!(
+        headers.get("http-referer").is_none(),
+        "nvidia should not have Referer"
+    );
 
     // llm7 same as nvidia — Bearer (OmniRoute says use 'unused' as key)
     let exec = DefaultExecutor::new("llm7", pool.clone(), None).unwrap();
-    let headers = exec.build_headers("gemini-2.5-flash", &conn("llm7"), false).unwrap();
+    let headers = exec
+        .build_headers("gemini-2.5-flash", &conn("llm7"), false)
+        .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
 
     // ollama-cloud Bearer
     let exec = DefaultExecutor::new("ollama-cloud", pool.clone(), None).unwrap();
-    let headers = exec.build_headers("llama3", &conn("ollama-cloud"), false).unwrap();
+    let headers = exec
+        .build_headers("llama3", &conn("ollama-cloud"), false)
+        .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
 
     // gemini uses x-goog-api-key
     let exec = DefaultExecutor::new("gemini", pool.clone(), None).unwrap();
-    let headers = exec.build_headers("gemini-2.5-flash", &conn("gemini"), false).unwrap();
+    let headers = exec
+        .build_headers("gemini-2.5-flash", &conn("gemini"), false)
+        .unwrap();
     assert_eq!(headers["x-goog-api-key"], "sk-test-loop");
     assert!(headers.get("authorization").is_none());
 
     // opencode-go (opencode zen) Bearer
     let exec = DefaultExecutor::new("opencode-go", pool.clone(), None).unwrap();
-    let headers = exec.build_headers("kimi-k2.6", &conn("opencode-go"), false).unwrap();
+    let headers = exec
+        .build_headers("kimi-k2.6", &conn("opencode-go"), false)
+        .unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
 
     // kilocode Bearer + optional org header
     let exec = DefaultExecutor::new("kilocode", pool.clone(), None).unwrap();
     let mut c = conn("kilocode");
-    c.provider_specific_data.insert("orgId".into(), serde_json::Value::String("org-123".into()));
+    c.provider_specific_data
+        .insert("orgId".into(), serde_json::Value::String("org-123".into()));
     let headers = exec.build_headers("openai/gpt-4o", &c, false).unwrap();
     assert_eq!(headers["authorization"], "Bearer sk-test-loop");
     assert_eq!(headers["x-kilocode-organizationid"], "org-123");
@@ -144,11 +182,13 @@ fn zen_alias_opencode_go_message_routing() {
     let pool = Arc::new(ClientPool::new());
     let exec = DefaultExecutor::new("opencode-go", pool, None).unwrap();
     assert_eq!(
-        exec.build_url("minimax-m2.5", false, &conn("opencode-go")).unwrap(),
+        exec.build_url("minimax-m2.5", false, &conn("opencode-go"))
+            .unwrap(),
         "https://opencode.ai/zen/go/v1/messages"
     );
     assert_eq!(
-        exec.build_url("gpt-4o", false, &conn("opencode-go")).unwrap(),
+        exec.build_url("gpt-4o", false, &conn("opencode-go"))
+            .unwrap(),
         "https://opencode.ai/zen/go/v1/chat/completions"
     );
 }
@@ -157,8 +197,13 @@ fn zen_alias_opencode_go_message_routing() {
 fn gemini_stream_url_contains_alt_sse() {
     let pool = Arc::new(ClientPool::new());
     let exec = DefaultExecutor::new("gemini", pool, None).unwrap();
-    let url = exec.build_url("gemini-2.5-flash", true, &conn("gemini")).unwrap();
-    assert!(url.contains("streamGenerateContent?alt=sse"), "gemini stream url missing alt=sse: {url}");
+    let url = exec
+        .build_url("gemini-2.5-flash", true, &conn("gemini"))
+        .unwrap();
+    assert!(
+        url.contains("streamGenerateContent?alt=sse"),
+        "gemini stream url missing alt=sse: {url}"
+    );
 }
 
 #[test]
@@ -168,7 +213,10 @@ fn kiro_executor_exists_and_not_default() {
     // We verify DefaultExecutor does NOT have a static entry for 'kiro' — it should fail
     let pool = Arc::new(ClientPool::new());
     let result = DefaultExecutor::new("kiro", pool, None);
-    assert!(result.is_err(), "kiro should not be in DefaultExecutor PROVIDER_CONFIGS (has dedicated executor)");
+    assert!(
+        result.is_err(),
+        "kiro should not be in DefaultExecutor PROVIDER_CONFIGS (has dedicated executor)"
+    );
     if let Err(e) = result {
         assert!(format!("{e:?}").contains("UnsupportedProvider"));
     }
@@ -179,6 +227,11 @@ fn kiro_executor_exists_and_not_default() {
 fn nvidia_url_is_nim_integrate_host() {
     let pool = Arc::new(ClientPool::new());
     let exec = DefaultExecutor::new("nvidia", pool, None).unwrap();
-    let url = exec.build_url("meta/llama-3.1-8b-instruct", false, &conn("nvidia")).unwrap();
-    assert!(url.starts_with("https://integrate.api.nvidia.com/"), "nvidia host mismatch: {url}");
+    let url = exec
+        .build_url("meta/llama-3.1-8b-instruct", false, &conn("nvidia"))
+        .unwrap();
+    assert!(
+        url.starts_with("https://integrate.api.nvidia.com/"),
+        "nvidia host mismatch: {url}"
+    );
 }
