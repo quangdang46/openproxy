@@ -192,6 +192,7 @@ export async function getConsoleLogs(): Promise<ConsoleLog[]> {
 export async function getMitmConfig(): Promise<MitmConfig> {
   const response = await apiFetch("/api/mitm-config");
   if (!response.ok) {
+    if (response.status === 401) return { enabled: false };
     throw new Error(`Failed to get MITM config: ${response.statusText}`);
   }
   return await response.json();
