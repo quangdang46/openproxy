@@ -1598,20 +1598,12 @@ fn codebuddy_quota_rows_from_accounts(accounts: Vec<Value>) -> Value {
 
     let mut refills: Vec<&Value> = accounts
         .iter()
-        .filter(|a| {
-            a.as_object()
-                .map(|o| codebuddy_is_refill(o))
-                .unwrap_or(false)
-        })
+        .filter(|a| a.as_object().map(codebuddy_is_refill).unwrap_or(false))
         .collect();
     refills.sort_by_key(|a| expiry_ms(a));
     let mut bonuses: Vec<&Value> = accounts
         .iter()
-        .filter(|a| {
-            !a.as_object()
-                .map(|o| codebuddy_is_refill(o))
-                .unwrap_or(false)
-        })
+        .filter(|a| !a.as_object().map(codebuddy_is_refill).unwrap_or(false))
         .collect();
     bonuses.sort_by_key(|a| expiry_ms(a));
 
@@ -1638,7 +1630,7 @@ fn codebuddy_quota_rows_from_accounts(accounts: Vec<Value>) -> Value {
     }
 
     // Plan from the first refill (or first account), like JS basePkg.
-    let plan_source: Option<&Value> = refills.first().map(|v| *v).or_else(|| accounts.first());
+    let plan_source: Option<&Value> = refills.first().copied().or_else(|| accounts.first());
     let mut plan = "CodeBuddy".to_string();
     if let Some(src) = plan_source {
         let base = codebuddy_base_package(src.as_object().unwrap_or(&serde_json::Map::new()));
@@ -2377,7 +2369,7 @@ pub async fn fetch_grok_cli_credits_config(access_token: &str) -> Option<Value> 
     let bytes = response.bytes().await.ok()?;
     let decoded = crate::core::usage::grok_cli_quota_frame::decode_grok_credits_frame(&bytes)?;
     // Round for bar display (fixed32 ratio * 100 can be 34.999… for 0.35).
-    let used = (decoded.percent_used.max(0.0).min(100.0)).round();
+    let used = decoded.percent_used.clamp(0.0, 100.0).round();
     Some(json!({
         "used": used,
         "total": 100.0,
@@ -2454,7 +2446,7 @@ fn resolve_grok_cli_plan(user: &Value, config: &Value) -> String {
         .filter(|s| !s.is_empty())
         .map(|s| {
             // Title Case: split on [_-]+ and uppercase each word start.
-            s.split(|c| c == '-' || c == '_')
+            s.split(['-', '_'])
                 .filter(|w| !w.is_empty())
                 .map(|w| {
                     let mut chars = w.chars();
@@ -2834,10 +2826,7 @@ pub async fn fetch_kimi_oauth_usage(
         }
     };
     let status = response.status().as_u16();
-    let response_text = match response.text().await {
-        Ok(t) => t,
-        Err(_) => String::new(),
-    };
+    let response_text = response.text().await.unwrap_or_default();
     if status != 200 {
         return json!({
             "plan": "Kimi Coding",
@@ -2857,13 +2846,13 @@ pub async fn fetch_kimi_oauth_usage(
     let mut quotas = serde_json::Map::new();
     let usage_obj = data.get("usage").filter(|v| v.is_object());
     let usage_limit = to_finite_number(
-        &usage_obj
+        usage_obj
             .and_then(|u| u.get("limit"))
             .unwrap_or(&Value::Null),
         0.0,
     );
     let usage_used = to_finite_number(
-        &usage_obj
+        usage_obj
             .and_then(|u| u.get("used"))
             .unwrap_or(&Value::Null),
         0.0,
@@ -2882,7 +2871,7 @@ pub async fn fetch_kimi_oauth_usage(
                 usage_used,
                 usage_limit,
                 usage_remaining,
-                parse_reset_time(&usage_reset.unwrap_or(&Value::Null)),
+                parse_reset_time(usage_reset.unwrap_or(&Value::Null)),
             ),
         );
     }
@@ -2890,11 +2879,11 @@ pub async fn fetch_kimi_oauth_usage(
         for item in limits {
             let detail = item.get("detail").filter(|v| v.is_object());
             let limit = to_finite_number(
-                &detail.and_then(|d| d.get("limit")).unwrap_or(&Value::Null),
+                detail.and_then(|d| d.get("limit")).unwrap_or(&Value::Null),
                 0.0,
             );
             let remaining = to_finite_number(
-                &detail
+                detail
                     .and_then(|d| d.get("remaining"))
                     .unwrap_or(&Value::Null),
                 f64::NAN,
@@ -2914,7 +2903,7 @@ pub async fn fetch_kimi_oauth_usage(
                         (limit - rem).max(0.0),
                         limit,
                         Some(rem),
-                        parse_reset_time(&reset_time.unwrap_or(&Value::Null)),
+                        parse_reset_time(reset_time.unwrap_or(&Value::Null)),
                     ),
                 );
             }
@@ -2956,10 +2945,7 @@ pub async fn fetch_kimi_usage(api_key: &str) -> Value {
         }
     };
     let status = response.status().as_u16();
-    let response_text = match response.text().await {
-        Ok(t) => t,
-        Err(_) => String::new(),
-    };
+    let response_text = response.text().await.unwrap_or_default();
 
     if status != 200 {
         return json!({
@@ -2980,13 +2966,13 @@ pub async fn fetch_kimi_usage(api_key: &str) -> Value {
     let mut quotas = serde_json::Map::new();
     let usage_obj = data.get("usage").filter(|v| v.is_object());
     let usage_limit = to_finite_number(
-        &usage_obj
+        usage_obj
             .and_then(|u| u.get("limit"))
             .unwrap_or(&Value::Null),
         0.0,
     );
     let usage_used = to_finite_number(
-        &usage_obj
+        usage_obj
             .and_then(|u| u.get("used"))
             .unwrap_or(&Value::Null),
         0.0,
@@ -3008,7 +2994,7 @@ pub async fn fetch_kimi_usage(api_key: &str) -> Value {
                 usage_used,
                 usage_limit,
                 usage_remaining,
-                parse_reset_time(&usage_reset.unwrap_or(&Value::Null)),
+                parse_reset_time(usage_reset.unwrap_or(&Value::Null)),
             ),
         );
     }
@@ -3017,11 +3003,11 @@ pub async fn fetch_kimi_usage(api_key: &str) -> Value {
         for item in limits {
             let detail = item.get("detail").filter(|v| v.is_object());
             let limit = to_finite_number(
-                &detail.and_then(|d| d.get("limit")).unwrap_or(&Value::Null),
+                detail.and_then(|d| d.get("limit")).unwrap_or(&Value::Null),
                 0.0,
             );
             let remaining = to_finite_number(
-                &detail
+                detail
                     .and_then(|d| d.get("remaining"))
                     .unwrap_or(&Value::Null),
                 f64::NAN,
@@ -3041,7 +3027,7 @@ pub async fn fetch_kimi_usage(api_key: &str) -> Value {
                         (limit - rem).max(0.0),
                         limit,
                         Some(rem),
-                        parse_reset_time(&reset_time.unwrap_or(&Value::Null)),
+                        parse_reset_time(reset_time.unwrap_or(&Value::Null)),
                     ),
                 );
             }
@@ -3089,10 +3075,7 @@ pub async fn fetch_deepseek_usage(api_key: &str) -> Value {
             "message": "DeepSeek authentication failed. Check the API key.",
         });
     }
-    let response_text = match response.text().await {
-        Ok(t) => t,
-        Err(_) => String::new(),
-    };
+    let response_text = response.text().await.unwrap_or_default();
     if status != 200 {
         let snippet: String = response_text.chars().take(120).collect();
         return json!({
@@ -3134,7 +3117,7 @@ pub async fn fetch_deepseek_usage(api_key: &str) -> Value {
         if currency.is_empty() {
             continue;
         }
-        let total = to_finite_number(&b.get("total_balance").unwrap_or(&Value::Null), 0.0).max(0.0);
+        let total = to_finite_number(b.get("total_balance").unwrap_or(&Value::Null), 0.0).max(0.0);
         quotas.insert(
             format!("Balance ({currency})"),
             json!({

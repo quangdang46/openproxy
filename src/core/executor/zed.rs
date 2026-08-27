@@ -228,10 +228,11 @@ impl ZedExecutor {
             let status = parsed.get("status").cloned().unwrap_or(Value::Null);
             let status_type = if status.is_string() {
                 status.as_str().unwrap_or("").to_string()
-            } else if let Some(key) = status.as_object().and_then(|o| o.keys().next().cloned()) {
-                key
             } else {
-                String::new()
+                status
+                    .as_object()
+                    .and_then(|o| o.keys().next().cloned())
+                    .unwrap_or_default()
             };
             if status_type == "failed" {
                 let failed = status.get("failed").cloned().unwrap_or(status.clone());

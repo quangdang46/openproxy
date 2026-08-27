@@ -400,7 +400,7 @@ mod tests {
         };
         let inputs = ImageHandlerInputs {
             client: &client,
-            adapter: adapter,
+            adapter,
             request: req,
             binary_output: false,
             stream_to_client: false,
@@ -425,7 +425,7 @@ mod tests {
         };
         let inputs2 = ImageHandlerInputs {
             client: &client,
-            adapter: adapter,
+            adapter,
             request: req2,
             binary_output: false,
             stream_to_client: false,

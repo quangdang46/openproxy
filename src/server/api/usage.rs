@@ -195,10 +195,8 @@ async fn compression_stats(State(state): State<AppState>, _query: Query<StatsQue
         })
     });
 
-    let (total, saved, before_total, prompt, completion, image_prompts) = match aggregates {
-        Ok(t) => t,
-        Err(_) => (0, 0, 0, 0, 0, 0),
-    };
+    let (total, saved, before_total, prompt, completion, image_prompts) =
+        aggregates.unwrap_or_default();
 
     let total = total as u64;
     let saved = saved as u64;
@@ -1038,23 +1036,20 @@ async fn get_connection_codex_reset_credits(
                 .is_some_and(|s| !s.is_empty())
         {
             if let Some(refresh_token) = connection.refresh_token.clone() {
-                match refresh_codex_token(&refresh_token).await {
-                    Ok(refreshed) => {
-                        let _ = persist_codex_tokens(
-                            &state,
-                            &connection_id,
-                            &refreshed.access_token,
-                            refreshed.refresh_token.as_deref(),
-                            refreshed.expires_in,
-                        )
-                        .await;
-                        result = get_codex_rate_limit_reset_credits(
-                            &refreshed.access_token,
-                            account_id.as_deref(),
-                        )
-                        .await;
-                    }
-                    Err(_) => {}
+                if let Ok(refreshed) = refresh_codex_token(&refresh_token).await {
+                    let _ = persist_codex_tokens(
+                        &state,
+                        &connection_id,
+                        &refreshed.access_token,
+                        refreshed.refresh_token.as_deref(),
+                        refreshed.expires_in,
+                    )
+                    .await;
+                    result = get_codex_rate_limit_reset_credits(
+                        &refreshed.access_token,
+                        account_id.as_deref(),
+                    )
+                    .await;
                 }
             }
         }

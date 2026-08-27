@@ -8,16 +8,16 @@
 //! - Crash recovery (kill mid-write doesn't corrupt)
 //! - Integrity check on startup
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tempfile::TempDir;
 
 // These tests mutate the process-global DATA_DIR env var; serialize them.
-static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ENV_MUTEX: LazyLock<tokio::sync::Mutex<()>> = LazyLock::new(|| tokio::sync::Mutex::new(()));
 
 /// End-to-end: load Db, write connection, reload, verify SQLite has the data.
 #[tokio::test]
 async fn e2e_write_then_reload() {
-    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let _env_guard = ENV_MUTEX.lock().await;
     let tmp = TempDir::new().unwrap();
     std::env::set_var("DATA_DIR", tmp.path());
 
@@ -61,7 +61,7 @@ async fn e2e_write_then_reload() {
 /// Auto-import legacy db.json into SQLite on first load.
 #[tokio::test]
 async fn e2e_auto_import_legacy_json() {
-    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let _env_guard = ENV_MUTEX.lock().await;
     let tmp = TempDir::new().unwrap();
     std::env::set_var("DATA_DIR", tmp.path());
 
@@ -124,7 +124,7 @@ async fn e2e_auto_import_legacy_json() {
 /// Integrity check runs on startup and returns "ok" on a fresh DB.
 #[tokio::test]
 async fn e2e_integrity_check_on_startup() {
-    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let _env_guard = ENV_MUTEX.lock().await;
     let tmp = TempDir::new().unwrap();
     std::env::set_var("DATA_DIR", tmp.path());
 
@@ -136,7 +136,7 @@ async fn e2e_integrity_check_on_startup() {
 /// Concurrent writes from N tokio tasks all land in SQLite.
 #[tokio::test]
 async fn e2e_concurrent_writes() {
-    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let _env_guard = ENV_MUTEX.lock().await;
     let tmp = TempDir::new().unwrap();
     std::env::set_var("DATA_DIR", tmp.path());
 
@@ -187,7 +187,7 @@ async fn e2e_concurrent_writes() {
 /// Round-trip: export → wipe → import → export again → byte-equal (modulo timestamps).
 #[tokio::test]
 async fn e2e_export_import_roundtrip() {
-    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let _env_guard = ENV_MUTEX.lock().await;
     let tmp = TempDir::new().unwrap();
     std::env::set_var("DATA_DIR", tmp.path());
 
@@ -208,6 +208,7 @@ async fn e2e_export_import_roundtrip() {
             name: "test".into(),
             is_active: Some(true),
             created_at: Some("2026-01-01T00:00:00Z".into()),
+            monthly_budget_usd: None,
             ..Default::default()
         });
     })
@@ -255,7 +256,7 @@ async fn e2e_export_import_roundtrip() {
 /// Usage DB writes persist via dual-write.
 #[tokio::test]
 async fn e2e_usage_persists_to_sqlite() {
-    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let _env_guard = ENV_MUTEX.lock().await;
     let tmp = TempDir::new().unwrap();
     std::env::set_var("DATA_DIR", tmp.path());
 
@@ -289,7 +290,7 @@ async fn e2e_usage_persists_to_sqlite() {
 /// Concurrent stress: 50 tasks × 20 inserts = 1000 rows. Verifies WAL.
 #[tokio::test]
 async fn e2e_high_concurrency_stress() {
-    let _env_guard = ENV_MUTEX.lock().unwrap();
+    let _env_guard = ENV_MUTEX.lock().await;
     let tmp = TempDir::new().unwrap();
     std::env::set_var("DATA_DIR", tmp.path());
 

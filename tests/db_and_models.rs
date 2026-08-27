@@ -440,7 +440,7 @@ async fn usage_updates_persist_and_migrate_daily_summary() {
         usage.history.len(),
         usage.daily_summary.keys().collect::<Vec<_>>()
     );
-    if usage.daily_summary.get("2026-02-02").is_none() {
+    if !usage.daily_summary.contains_key("2026-02-02") {
         panic!(
             "DBG missing day; lifetime={}",
             usage.total_requests_lifetime

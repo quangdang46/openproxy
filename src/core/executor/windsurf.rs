@@ -668,7 +668,7 @@ impl WindsurfExecutor {
             });
         }
 
-        let proto_payload = build_get_chat_message_request(&api_key, &ws_model, &ws_messages);
+        let proto_payload = build_get_chat_message_request(api_key, &ws_model, &ws_messages);
         let framed_payload = grpc_web_frame(&proto_payload);
         let url = self.build_url();
         let headers = self.build_headers(&request.credentials)?;
@@ -959,11 +959,7 @@ mod tests {
         assert_eq!(
             decode_completion_chunk(&buf),
             CompletionChunk::Content {
-                text: text
-                    .to_vec()
-                    .into_iter()
-                    .map(|b| b as char)
-                    .collect::<String>()
+                text: text.iter().map(|&b| b as char).collect::<String>()
             }
         );
     }
@@ -972,9 +968,9 @@ mod tests {
     fn decode_completion_done_chunk() {
         // DoneChunk: field 3 = DoneChunk { field 1: UsageStats { field1: prompt, field2: completion } }
         let mut usage = Vec::new();
-        encode_varint((1 << 3) | 0, &mut usage); // field 1 varint
+        encode_varint(1 << 3, &mut usage); // field 1 varint
         encode_varint(12, &mut usage); // prompt_tokens = 12
-        encode_varint((2 << 3) | 0, &mut usage); // field 2 varint
+        encode_varint(2 << 3, &mut usage); // field 2 varint
         encode_varint(34, &mut usage); // completion_tokens = 34
 
         let mut done = Vec::new();

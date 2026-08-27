@@ -68,7 +68,7 @@ fn cert_not_after(cert_pem: &[u8]) -> Option<time::OffsetDateTime> {
     let cert = rustls_pemfile::certs(&mut rd).next()?.ok()?;
     let (_, der) = x509_parser::prelude::X509Certificate::from_der(&cert).ok()?;
     let validity = der.validity();
-    let not_after = validity.not_after.timestamp() as i64;
+    let not_after = validity.not_after.timestamp();
     time::OffsetDateTime::from_unix_timestamp(not_after).ok()
 }
 

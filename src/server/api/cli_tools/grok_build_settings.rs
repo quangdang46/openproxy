@@ -752,12 +752,10 @@ model = "x"
 
     #[test]
     fn subagent_mappings_parsed() {
-        let toml = format!(
-            "[models]\ndefault = \"grok-build\"\n\n\
+        let toml = "[models]\ndefault = \"grok-build\"\n\n\
              [model.openproxy]\nmodel = \"gcli/grok-build\"\nbase_url = \"http://127.0.0.1:4623/v1\"\n\n\
              [model.openproxy-general-purpose]\nmodel = \"gcli/grok-4\"\nbase_url = \"http://127.0.0.1:4623/v1\"\n\n\
-             [subagents.models]\ngeneral-purpose = \"openproxy-general-purpose\"\nexplore = \"x\"\n"
-        );
+             [subagents.models]\ngeneral-purpose = \"openproxy-general-purpose\"\nexplore = \"x\"\n".to_string();
         let sub = parse_subagent_mappings(&toml);
         // general-purpose mapped to our slot → model parsed.
         let gp = &sub["general-purpose"];

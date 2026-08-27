@@ -250,10 +250,7 @@ impl SearchProvider for PerplexityProvider {
         "perplexity"
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url(
-            "https://api.perplexity.ai/search",
-            request,
-        )?)
+        resolve_base_url("https://api.perplexity.ai/search", request)
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "perplexity")?;
@@ -332,7 +329,7 @@ impl SearchProvider for ExaProvider {
         Some(10_000)
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url("https://api.exa.ai/search", request)?)
+        resolve_base_url("https://api.exa.ai/search", request)
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "exa")?;
@@ -429,7 +426,7 @@ impl SearchProvider for TavilyProvider {
         20
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url("https://api.tavily.com/search", request)?)
+        resolve_base_url("https://api.tavily.com/search", request)
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "tavily")?;
@@ -631,10 +628,7 @@ impl SearchProvider for LinkupProvider {
         50
     }
     fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
-        Ok(resolve_base_url(
-            "https://api.linkup.so/v1/search",
-            request,
-        )?)
+        resolve_base_url("https://api.linkup.so/v1/search", request)
     }
     fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
         let token = require_token(request, "linkup")?;
@@ -1216,7 +1210,7 @@ mod tests {
     fn youcom_url_uses_ydc_index() {
         // 9router registry/youcom.js:20 baseUrl — NOT api.you.com.
         let mut r = req("test", 5);
-        r.token = Some("tok".into());
+        r.token = Some("tok");
         let url = YOUCOM.build_url(&r).unwrap();
         assert!(
             url.starts_with("https://ydc-index.io/v1/search?"),
@@ -1254,7 +1248,7 @@ mod tests {
         // 9router callers.js buildYouComRequest (289-295): full_page →
         // livecrawl=web|news + livecrawl_formats=markdown|html.
         let mut r = req("test", 5);
-        r.token = Some("tok".into());
+        r.token = Some("tok");
         r.content_options = Some(serde_json::json!({
             "full_page": true,
             "format": "markdown",
@@ -1271,7 +1265,7 @@ mod tests {
 
         // Non-markdown format defaults to html.
         let mut r2 = req("test", 5);
-        r2.token = Some("tok".into());
+        r2.token = Some("tok");
         r2.content_options = Some(serde_json::json!({
             "full_page": true,
             "format": "json",
@@ -1284,7 +1278,7 @@ mod tests {
 
         // full_page false → no livecrawl.
         let mut r3 = req("test", 5);
-        r3.token = Some("tok".into());
+        r3.token = Some("tok");
         r3.content_options = Some(serde_json::json!({
             "full_page": false,
             "format": "markdown",

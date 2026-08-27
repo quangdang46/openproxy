@@ -156,6 +156,10 @@ mod tests {
             }),
             cost: Some(cost),
             status: None,
+            bytes_before: 0,
+            bytes_after: 0,
+            bytes_saved: 0,
+            image_prompts: 0,
             endpoint: None,
             extra: Default::default(),
         }

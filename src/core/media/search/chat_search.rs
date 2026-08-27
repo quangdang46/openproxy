@@ -517,23 +517,18 @@ async fn perplexity_chat_search(
     let text = message_content(&data);
 
     let mut citations: Vec<(String, String)> = Vec::new();
-    if let Some(raw) = data.get("citations") {
-        match raw {
-            Value::Array(arr) => {
-                for c in arr {
-                    match c {
-                        Value::String(url) => citations.push((url.clone(), String::new())),
-                        Value::Object(o) => {
-                            if let Some(url) = o.get("url").and_then(Value::as_str) {
-                                let title = o.get("title").and_then(Value::as_str).unwrap_or("");
-                                citations.push((url.to_string(), title.to_string()));
-                            }
-                        }
-                        _ => {}
+    if let Some(Value::Array(arr)) = data.get("citations") {
+        for c in arr {
+            match c {
+                Value::String(url) => citations.push((url.clone(), String::new())),
+                Value::Object(o) => {
+                    if let Some(url) = o.get("url").and_then(Value::as_str) {
+                        let title = o.get("title").and_then(Value::as_str).unwrap_or("");
+                        citations.push((url.to_string(), title.to_string()));
                     }
                 }
+                _ => {}
             }
-            _ => {}
         }
     }
 

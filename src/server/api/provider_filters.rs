@@ -27,7 +27,7 @@ struct FilterQuery {
 #[serde(rename_all = "camelCase")]
 struct FilterUpsertRequest {
     alias: String,
-    freeOnly: bool,
+    free_only: bool,
 }
 
 /// Read the provider-filters map out of `AppDb.extra["providerFilters"]`.
@@ -99,7 +99,7 @@ async fn upsert_provider_filter(
         .db
         .update(move |db| {
             let mut filters = filters_from_db(db);
-            filters.insert(alias.clone(), json!({ "freeOnly": req.freeOnly }));
+            filters.insert(alias.clone(), json!({ "freeOnly": req.free_only }));
             set_filters(db, &filters);
         })
         .await;

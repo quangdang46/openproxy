@@ -198,10 +198,11 @@ pub fn augment_models_with_capacity_adapter(
             continue;
         }
         for model in get_capacity_adapter_config(cap, settings).models {
-            if !models.iter().any(|m| m == &model) && model_satisfies(&model, required) {
-                if !adapter_models.iter().any(|m| m == &model) {
-                    adapter_models.push(model);
-                }
+            if !models.iter().any(|m| m == &model)
+                && model_satisfies(&model, required)
+                && !adapter_models.iter().any(|m| m == &model)
+            {
+                adapter_models.push(model);
             }
         }
     }

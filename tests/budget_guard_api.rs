@@ -57,6 +57,10 @@ fn usage_entry(api_key: &str, cost: f64) -> UsageEntry {
         cost: Some(cost),
         status: None,
         endpoint: None,
+        bytes_before: 0,
+        bytes_after: 0,
+        bytes_saved: 0,
+        image_prompts: 0,
         extra: BTreeMap::new(),
     }
 }

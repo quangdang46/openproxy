@@ -8,8 +8,7 @@
 //!    opaque `zed-rsa-pkcs1:<base64url>` verifier.
 //! 2. Zed redirects back to the local proxy with
 //!    `?user_id=…&access_token=<RSA-encrypted>`; `parse_callback_payload()`
-//!    + `decrypt_access_token()` (OAEP-SHA256, PKCS1-v1.5 fallback) recover
-//!    the plaintext access token.
+//!    + `decrypt_access_token()` (OAEP-SHA256, PKCS1-v1.5 fallback) recover the plaintext access token.
 //! 3. `fetch_llm_token()` POSTs `{organization_id}` to
 //!    `cloud.zed.dev/client/llm_tokens` with `${userId} ${accessToken}` auth
 //!    to mint a 50-minute LLM bearer used by the executor.

@@ -15,7 +15,7 @@ fn resolve(name: &str, fallback: &'static str) -> &'static str {
         Lazy::new(|| Mutex::new(std::collections::HashMap::new()));
     let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(v) = cache.get(name) {
-        return *v;
+        return v;
     }
     let value = std::env::var(name).unwrap_or_else(|_| fallback.to_string());
     let leaked: &'static str = Box::leak(value.into_boxed_str());

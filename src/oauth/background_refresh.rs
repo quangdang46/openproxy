@@ -131,7 +131,7 @@ async fn persist_refresh(
 ) {
     let expires_at = result
         .expires_in
-        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs as i64)).to_rfc3339());
+        .map(|secs| (chrono::Utc::now() + chrono::Duration::seconds(secs)).to_rfc3339());
     let id = connection_id.to_string();
     let access = result.access_token.clone();
     let refresh = result.refresh_token.clone();

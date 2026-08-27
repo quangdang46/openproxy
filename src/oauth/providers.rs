@@ -553,7 +553,7 @@ mod tests {
         assert!(cfg.token_url.is_empty(), "zed has no token_url");
         assert!(cfg.client_id.is_empty(), "zed has no client_id");
         assert_eq!(cfg.authorize_url, "https://zed.dev/native_app_signin");
-        assert_eq!(cfg.uses_pkce, false);
+        assert!(!cfg.uses_pkce);
         assert_eq!(cfg.get_param("rsaKeyExchange"), Some("true"));
         // Dispatcher resolves it.
         assert!(get_config("zed").is_some());

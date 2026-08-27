@@ -176,7 +176,7 @@ mod tests {
         // credentials must outlive the request; use a static ProviderConnection.
         static CREDS: std::sync::OnceLock<crate::types::ProviderConnection> =
             std::sync::OnceLock::new();
-        let creds = CREDS.get_or_init(|| crate::types::ProviderConnection::default());
+        let creds = CREDS.get_or_init(crate::types::ProviderConnection::default);
         ImageRequest {
             body: Box::leak(Box::new(body)),
             model: "nanobanana",

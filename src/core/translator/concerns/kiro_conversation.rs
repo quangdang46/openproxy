@@ -439,7 +439,7 @@ fn normalize_turns(
             })
         };
 
-        let can_merge = turns.last().map_or(false, |prev| {
+        let can_merge = turns.last().is_some_and(|prev| {
             if is_user {
                 prev.get("userInputMessage").is_some_and(|v| !is_falsy(v))
             } else {
@@ -500,7 +500,7 @@ fn normalize_turns(
             };
             let obj = user.as_object_mut().unwrap();
             obj.insert("content".to_string(), Value::String(content));
-            if !obj.get("modelId").is_some_and(|m| !is_falsy(m)) {
+            if obj.get("modelId").is_none_or(is_falsy) {
                 obj.insert("modelId".to_string(), Value::String(model_id.to_string()));
             }
             if let Some(ctx) = obj.get_mut("userInputMessageContext") {
@@ -618,10 +618,10 @@ fn reconcile_tool_pair(
     let mut call_records: Vec<CallRecord> = Vec::new();
     for (call_index, call) in calls.iter().enumerate() {
         let key = raw_id(call.get("toolUseId").unwrap_or(&Value::Null));
-        let mapped_name = match call.get("name").and_then(|n| n.as_str()) {
-            Some(n) => Some(name_map.get(n).cloned().unwrap_or_else(|| n.to_string())),
-            None => None,
-        };
+        let mapped_name = call
+            .get("name")
+            .and_then(|n| n.as_str())
+            .map(|n| name_map.get(n).cloned().unwrap_or_else(|| n.to_string()));
         let input = match call.get("input") {
             Some(v) => normalize_tool_input(v),
             None => Some(json!({})),

@@ -60,7 +60,7 @@ impl KimchiExecutor {
         // 9router kimchi.js:92 regex fallback (case-insensitive): "claude" or
         // "anthropic" as a whole segment delimited by start/end, '-', '_', or '/'.
         model
-            .split(|c| c == '-' || c == '_' || c == '/')
+            .split(['-', '_', '/'])
             .any(|seg| seg.eq_ignore_ascii_case("claude") || seg.eq_ignore_ascii_case("anthropic"))
     }
 
@@ -164,10 +164,10 @@ fn merge_top_level_system(body: &mut Value) {
     if obj.get("system").is_none() {
         return;
     }
-    if !obj
+    if obj
         .get("messages")
         .and_then(Value::as_array)
-        .is_some_and(|m| !m.is_empty())
+        .is_none_or(|m| m.is_empty())
     {
         return;
     }

@@ -1,6 +1,5 @@
 //! Targeted loop for the 9 providers requested in ultrawork.
-//! Covers: opencode zen (opencode-go), nvidia, openrouter, kilo code, kiro, ollama cloud, gemini, llm7.io
-//! + ollama (local) and openai as control.
+//! Covers: opencode zen (opencode-go), nvidia, openrouter, kilo code, kiro, ollama cloud, gemini, llm7.io, ollama (local) and openai as control.
 //! Verifies: URL building, header building (Bearer/x-api-key/x-goog-api-key), and that OmniRoute parity base URLs match.
 //! No live network calls; uses wiremock-style unit checks via DefaultExecutor + ClientPool.
 

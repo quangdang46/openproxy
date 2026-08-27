@@ -349,7 +349,7 @@ pub async fn compress_with_headroom_diag(
     let stats = parse_stats(&data);
     write_compressed_messages(body, key, &data)?;
 
-    if let Some(d) = diagnostics.as_deref_mut() {
+    if let Some(d) = diagnostics {
         d.after = Some(capture_size_snapshot(body));
     }
     if let Some(h) = hooks {
@@ -575,7 +575,7 @@ async fn compress_responses_body(
         }
     }
 
-    if let Some(d) = diagnostics.as_deref_mut() {
+    if let Some(d) = diagnostics {
         d.after = Some(capture_size_snapshot(body));
     }
     if let Some(h) = hooks {
@@ -809,7 +809,7 @@ async fn compress_kiro_body(
         return None;
     }
 
-    if let Some(d) = diagnostics.as_deref_mut() {
+    if let Some(d) = diagnostics {
         d.after = Some(capture_size_snapshot(body));
     }
     if let Some(h) = hooks {

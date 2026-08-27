@@ -327,13 +327,11 @@ pub fn assert_public_url(raw_url: &str) -> Result<(), String> {
 
     // Check for IPv4-mapped IPv6 (::ffff:x.x.x.x) — is_private_ip handles this,
     // but also check the cloud metadata address (169.254.169.254).
-    if let Ok(ip) = ip_str.parse::<std::net::IpAddr>() {
-        if let std::net::IpAddr::V4(v4) = ip {
-            let o = v4.octets();
-            // 169.254.0.0/16 — link-local / cloud metadata
-            if o[0] == 169 && o[1] == 254 {
-                return Err("Blocked URL: link-local/metadata IP".to_string());
-            }
+    if let Ok(std::net::IpAddr::V4(v4)) = ip_str.parse::<std::net::IpAddr>() {
+        let o = v4.octets();
+        // 169.254.0.0/16 — link-local / cloud metadata
+        if o[0] == 169 && o[1] == 254 {
+            return Err("Blocked URL: link-local/metadata IP".to_string());
         }
     }
 

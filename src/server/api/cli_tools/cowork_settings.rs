@@ -558,7 +558,7 @@ async fn load_cowork_status() -> AnyhowResult<Value> {
             let name = m.get("name").and_then(Value::as_str).unwrap_or("");
             let url = m.get("url").and_then(Value::as_str).unwrap_or("");
             let is_custom = m.get("custom").and_then(Value::as_bool).unwrap_or(false);
-            !is_custom && !(stdio_names.contains(name) && url.contains("/api/mcp/"))
+            !is_custom && (!stdio_names.contains(name) || !url.contains("/api/mcp/"))
         })
         .map(|m| {
             let name = m.get("name").and_then(Value::as_str).unwrap_or("");

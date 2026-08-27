@@ -59,8 +59,7 @@ fn persist_secret_to(path: PathBuf, secret: &str) {
 ///    (or `~/.openproxy/api_key_secret`). Generated on first use so there is
 ///    never a well-known fallback; the persisted value keeps existing API
 ///    keys valid across restarts.
-/// Pure resolution: env var wins, then persisted file, then a fresh random
-/// secret. Testable without the process-wide cache.
+///    Pure resolution: env var wins, then persisted file, then a fresh random secret. Testable without the process-wide cache.
 fn resolve_api_key_secret(env: Option<&str>, path: &std::path::Path) -> String {
     if let Some(v) = env {
         if !v.trim().is_empty() {
@@ -110,8 +109,7 @@ fn generate_random_password() -> String {
 ///    Generated on first use so there is never a well-known default; the
 ///    persisted value keeps the same password valid across restarts until
 ///    the operator sets a real one or runs `openproxy auth reset-password`.
-/// Pure resolution: env var wins, then the persisted generated password,
-/// then a fresh random one.
+///    Pure resolution: env var wins, then the persisted generated password, then a fresh random one.
 fn resolve_dashboard_initial_password(env: Option<&str>, path: &std::path::Path) -> String {
     if let Some(v) = env {
         if !v.trim().is_empty() {

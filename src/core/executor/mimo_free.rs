@@ -249,12 +249,10 @@ impl MimoFreeExecutor {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.subsec_nanos())
                 .unwrap_or(0)
-                ^ u32::from(
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_nanos() as u32)
-                        .unwrap_or(0),
-                ))
+                ^ std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos() as u32)
+                    .unwrap_or(0))
                 % CHARSET.len() as u32;
             *b = CHARSET[idx as usize];
         }

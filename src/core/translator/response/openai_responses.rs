@@ -31,10 +31,10 @@ pub fn chat_to_responses_response(
     chunk: &Value,
     state: &mut serde_json::Map<String, Value>,
 ) -> Vec<Value> {
-    if !chunk
+    if chunk
         .get("choices")
         .and_then(|v| v.as_array())
-        .is_some_and(|a| !a.is_empty())
+        .is_none_or(|a| a.is_empty())
     {
         return vec![];
     }

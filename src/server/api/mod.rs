@@ -810,17 +810,11 @@ struct ListProvidersQuery {
 }
 
 fn is_usage_eligible_connection(connection: &ProviderConnection) -> bool {
-    if !USAGE_SUPPORTED_PROVIDERS
-        .iter()
-        .any(|provider| *provider == connection.provider.as_str())
-    {
+    if !USAGE_SUPPORTED_PROVIDERS.contains(&connection.provider.as_str()) {
         return false;
     }
     let auth_type = connection.auth_type.as_str();
-    auth_type == "oauth"
-        || USAGE_APIKEY_PROVIDERS
-            .iter()
-            .any(|provider| *provider == connection.provider.as_str())
+    auth_type == "oauth" || USAGE_APIKEY_PROVIDERS.contains(&connection.provider.as_str())
 }
 
 fn connection_to_list_value(connection: &ProviderConnection) -> Value {

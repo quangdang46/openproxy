@@ -1215,7 +1215,7 @@ async fn video_create_handler(
     let mut last_error: Option<Response> = None;
 
     for connection in &connections {
-        let mut upstream_headers = match build_media_headers(&provider, &connection) {
+        let mut upstream_headers = match build_media_headers(&provider, connection) {
             Ok(h) => h,
             Err(e) => {
                 last_error = Some(json_error_response(
@@ -1240,7 +1240,7 @@ async fn video_create_handler(
             }
         }
 
-        let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+        let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
         let client = match state.client_pool.get(&provider, proxy.as_ref()) {
             Ok(c) => c,
             Err(e) => {
@@ -1306,35 +1306,30 @@ async fn video_create_handler(
                 // Rebuild headers with the fresh token and retry once.
                 let mut refreshed = connection.clone();
                 refreshed.access_token = Some(new_access);
-                match build_media_headers(&provider, &refreshed) {
-                    Ok(retry_headers) => {
-                        let retry = client
-                            .post(&url)
-                            .headers(retry_headers.clone())
-                            .body(body_bytes.clone())
-                            .send()
-                            .await;
-                        if let Ok(retry_resp) = retry {
-                            let retry_status = retry_resp.status().as_u16();
-                            if !create_rotation_statuses.contains(&retry_status) {
-                                let mut proxied =
-                                    proxy_video_response(retry_resp, retry_headers, connection)
-                                        .await;
-                                if let Ok(val) = HeaderValue::from_str(&connection.id) {
-                                    proxied
-                                        .headers_mut()
-                                        .insert("x-openproxy-connection-id", val);
-                                }
-                                return proxied;
+                if let Ok(retry_headers) = build_media_headers(&provider, &refreshed) {
+                    let retry = client
+                        .post(&url)
+                        .headers(retry_headers.clone())
+                        .body(body_bytes.clone())
+                        .send()
+                        .await;
+                    if let Ok(retry_resp) = retry {
+                        let retry_status = retry_resp.status().as_u16();
+                        if !create_rotation_statuses.contains(&retry_status) {
+                            let mut proxied =
+                                proxy_video_response(retry_resp, retry_headers, connection).await;
+                            if let Ok(val) = HeaderValue::from_str(&connection.id) {
+                                proxied
+                                    .headers_mut()
+                                    .insert("x-openproxy-connection-id", val);
                             }
-                            // Retry also 401/403/429 → fall through to rotation.
-                            last_error = Some(
-                                proxy_video_response(retry_resp, retry_headers, connection).await,
-                            );
-                            continue;
+                            return proxied;
                         }
+                        // Retry also 401/403/429 → fall through to rotation.
+                        last_error =
+                            Some(proxy_video_response(retry_resp, retry_headers, connection).await);
+                        continue;
                     }
-                    Err(_) => {}
                 }
             }
         }

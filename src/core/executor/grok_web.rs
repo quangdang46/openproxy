@@ -430,7 +430,7 @@ impl GrokWebExecutor {
         // exactly like buildStreamingResponse / buildNonStreamingResponse.
         let cid = format!(
             "chatcmpl-grok-{}",
-            uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
         );
         let created = chrono::Utc::now().timestamp();
         let converted = convert_grok_response(
@@ -679,7 +679,7 @@ impl std::fmt::Debug for PerplexityWebExecutorResponse {
 const PPLX_SSE_ENDPOINT: &str = "https://www.perplexity.ai/rest/sse/perplexity_ask";
 const PPLX_API_VERSION: &str = "2.18";
 const PPLX_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-const SESSION_MAX_AGE_MS: u64 = 3600_000;
+const SESSION_MAX_AGE_MS: u64 = 3_600_000;
 const SESSION_MAX_ENTRIES: usize = 200;
 const QUERY_MAX_LEN: usize = 96000;
 
@@ -830,7 +830,7 @@ fn clean_response(text: &str, strip: bool) -> String {
         } else {
             let after_digits = &after[digits.len()..];
             if after_digits.starts_with(']') {
-                rest = &after_digits[1..];
+                rest = after_digits.strip_prefix(']').unwrap_or(after_digits);
             } else {
                 without_citations.push('[');
                 without_citations.push_str(&after[..digits.len()]);
@@ -880,7 +880,7 @@ fn clean_response(text: &str, strip: bool) -> String {
         without_response.push_str(&rest[..start]);
         let after = &rest[start + 1..];
         let (tag_after, is_closing) = if after.starts_with('/') {
-            (&after[1..], true)
+            (after.strip_prefix('/').unwrap_or(after), true)
         } else {
             (after, false)
         };

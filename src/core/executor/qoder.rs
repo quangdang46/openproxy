@@ -1225,7 +1225,7 @@ impl QoderExecutor {
                 if inner == "[DONE]" {
                     return Some("data: [DONE]\n\n".to_string());
                 }
-                let stripped = inner.replace('\n', "").replace('\r', "");
+                let stripped = inner.replace(['\n', '\r'], "");
                 Some(format!("data: {stripped}\n\n"))
             }
         }

@@ -244,10 +244,7 @@ pub fn resolve_kiro_effort_path(model: &str) -> Option<&'static str> {
         .collect();
 
     // GPT-5.6 family: "gpt" plus a "5" and a "6" version token.
-    if tokens.iter().any(|t| *t == "gpt")
-        && tokens.iter().any(|t| *t == "5")
-        && tokens.iter().any(|t| *t == "6")
-    {
+    if tokens.contains(&"gpt") && tokens.contains(&"5") && tokens.contains(&"6") {
         return Some("reasoning");
     }
 

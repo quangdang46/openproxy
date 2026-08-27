@@ -192,7 +192,7 @@ fn get_or_create_salt() -> [u8; SALT_LEN] {
     if let Some(dir) = crypto_salt_path().parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&crypto_salt_path(), salt);
+    let _ = std::fs::write(crypto_salt_path(), salt);
     salt
 }
 
@@ -344,8 +344,7 @@ fn encrypt_opt(field: &mut Option<String>, key: &str) {
     }
     // Legacy v1 ciphertext — lazy migrate to v2 (write-triggered; opxenc1
     // stays decryptable forever, this just upgrades on next write).
-    if plain.starts_with(ENC_PREFIX) {
-        let payload = &plain[ENC_PREFIX.len()..];
+    if let Some(payload) = plain.strip_prefix(ENC_PREFIX) {
         if let Ok(decoded) = decrypt_value(key, payload) {
             *field = Some(format!(
                 "{ENC_PREFIX_V2}{}",

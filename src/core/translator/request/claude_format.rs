@@ -192,10 +192,13 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
                 let new_max = (budget_tokens + 1024).min(ceiling);
                 obj.insert("max_tokens".to_string(), json!(new_max));
                 if budget_tokens >= new_max {
-                    obj.get_mut("thinking")
+                    if let Some(v) = obj
+                        .get_mut("thinking")
                         .and_then(Value::as_object_mut)
                         .and_then(|t| t.get_mut("budget_tokens"))
-                        .map(|v| *v = json!(1024u64.max(new_max - 1024)));
+                    {
+                        *v = json!(1024u64.max(new_max - 1024));
+                    }
                 }
             }
         }

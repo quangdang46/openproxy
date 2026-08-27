@@ -4883,7 +4883,7 @@ pub async fn refresh_token(
 
     let token_response = TokenResponse {
         access_token: refreshed.access_token,
-        expires_in: refreshed.expires_in.map(|s| s as i64),
+        expires_in: refreshed.expires_in,
         refresh_token: refreshed.refresh_token,
         id_token: None,
         token_type: None,

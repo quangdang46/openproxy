@@ -298,18 +298,19 @@ impl DevinCliExecutor {
 
         // Simple sequential state machine mirroring the JS reader loop.
         let mut id_counter: u64 = 1;
-        let mut rpc = |stdin: &mut tokio::process::ChildStdin, method: &str, params: Value| {
-            let msg = json!({
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params,
-                "id": id_counter,
-            });
-            id_counter += 1;
-            let line = format!("{}\n", serde_json::to_string(&msg).unwrap_or_default());
-            let _ = stdin.write_all(line.as_bytes());
-            let _ = stdin.flush();
-        };
+        let mut rpc =
+            async |stdin: &mut tokio::process::ChildStdin, method: &str, params: Value| {
+                let msg = json!({
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params,
+                    "id": id_counter,
+                });
+                id_counter += 1;
+                let line = format!("{}\n", serde_json::to_string(&msg).unwrap_or_default());
+                let _ = stdin.write_all(line.as_bytes()).await;
+                let _ = stdin.flush().await;
+            };
 
         let response_id = format!("chatcmpl-devin-{}", chrono::Utc::now().timestamp_millis());
         let created = chrono::Utc::now().timestamp();
@@ -350,7 +351,8 @@ impl DevinCliExecutor {
                 "clientInfo": {"name": "openproxy", "version": "1.0"},
                 "capabilities": {},
             }),
-        );
+        )
+        .await;
 
         let mut init_done = false;
         let mut session_created = false;
@@ -417,7 +419,8 @@ impl DevinCliExecutor {
                             "mcpServers": [],
                             "model": model,
                         }),
-                    );
+                    )
+                    .await;
                     continue;
                 }
                 if !session_created {
@@ -445,7 +448,8 @@ impl DevinCliExecutor {
                             "sessionId": session_id,
                             "prompt": [{"type": "text", "text": prompt_text}],
                         }),
-                    );
+                    )
+                    .await;
                     continue;
                 }
                 // session/prompt final result when nothing streamed.

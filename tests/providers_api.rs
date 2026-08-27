@@ -1296,7 +1296,7 @@ async fn import_catalog_skips_pre_existing_models() {
         .expect("pre-seeded model should still exist");
     assert_eq!(seeded.provider_alias, alias);
     assert!(
-        seeded.extra.get("source").is_none(),
+        !seeded.extra.contains_key("source"),
         "pre-seeded entry must not be retagged"
     );
 }

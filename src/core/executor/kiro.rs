@@ -808,7 +808,7 @@ impl KiroExecutor {
                                     let retry_bytes = retry_response
                                         .bytes()
                                         .await
-                                        .map_err(|e| KiroExecutorError::Request(e))?;
+                                        .map_err(KiroExecutorError::Request)?;
                                     let retry_kind = classify_buffered_body(&retry_bytes);
                                     if retry_kind == KiroRepairKind::None {
                                         // Complete: return the retry response.

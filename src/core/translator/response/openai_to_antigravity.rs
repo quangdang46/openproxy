@@ -61,7 +61,7 @@ pub fn openai_to_antigravity_response(
         for tc in tool_calls {
             let idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
             let accum_key = idx.to_string();
-            if !state["_toolCallAccum"].get(&accum_key).is_some() {
+            if state["_toolCallAccum"].get(&accum_key).is_none() {
                 state["_toolCallAccum"][&accum_key] =
                     serde_json::json!({"id": "", "name": "", "arguments": ""});
             }

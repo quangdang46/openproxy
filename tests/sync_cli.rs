@@ -149,7 +149,7 @@ fn sync_apply_then_reapply_is_idempotent() {
 
     // Persistence proof: the second apply reports all-unchanged, which is
     // only possible if the first apply persisted to SQLite.
-    if !fs::metadata(dir.path().join("openproxy.sqlite")).is_ok() {
+    if fs::metadata(dir.path().join("openproxy.sqlite")).is_err() {
         panic!("SQLite store should exist after apply");
     }
 
