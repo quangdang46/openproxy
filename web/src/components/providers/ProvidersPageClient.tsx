@@ -19,6 +19,7 @@ import {
   OPENAI_COMPATIBLE_PREFIX,
   ANTHROPIC_COMPATIBLE_PREFIX,
   AI_PROVIDERS,
+  isFreeTierProvider,
 } from "@/shared/constants/providers";
 // import Link from "next/link";  // ported: next.js -> Astro+React
 import { getErrorBadgeLabel, getErrorCode, getRelativeTime } from "@/shared/utils";
@@ -107,10 +108,11 @@ export default function ProvidersPageClient() {
   const APIKEY_INITIAL_VISIBLE = 20;
   const [showAddAnthropicCompatibleModal, setShowAddAnthropicCompatibleModal] =
     useState(false);
-  const [testingMode, setTestingMode] = useState(null);
-  const [testResults, setTestResults] = useState(null);
   const [showAddApiKeyModal, setShowAddApiKeyModal] = useState(false);
   const [addProviderId, setAddProviderId] = useState(null);
+  const [testingMode, setTestingMode] = useState(null);
+  const [testResults, setTestResults] = useState(null);
+  const [filterFreeOnly, setFilterFreeOnly] = useState(false);
   const [proxyPools, setProxyPools] = useState([]);
   const notify = useNotificationStore();
   const searchQuery = useHeaderSearchStore((s) => s.query);
@@ -483,12 +485,24 @@ export default function ProvidersPageClient() {
       if (ca !== cb) return ca - cb;
       return (a.name || "").localeCompare(b.name || "");
     });
+  const filteredFreeEntries = filterFreeOnly
+    ? []
+    : freeEntries;
+  const filteredFreeTierEntries = filterFreeOnly
+    ? []
+    : freeTierEntries;
+  const filteredApikeyEntries = filterFreeOnly
+    ? apikeyEntries.filter(([key]) => isFreeTierProvider(key))
+    : apikeyEntries;
+  const filteredOAuthEntries = filterFreeOnly
+    ? oauthEntries.filter(([key]) => isFreeTierProvider(key))
+    : oauthEntries;
   const isApikeySearching = !!searchQuery.trim();
   const visibleApikeyEntries =
     isApikeySearching || showAllApikey
-      ? apikeyEntries
-      : apikeyEntries.slice(0, APIKEY_INITIAL_VISIBLE);
-  const hiddenApikeyCount = apikeyEntries.length - APIKEY_INITIAL_VISIBLE;
+      ? filteredApikeyEntries
+      : filteredApikeyEntries.slice(0, APIKEY_INITIAL_VISIBLE);
+  const hiddenApikeyCount = filteredApikeyEntries.length - APIKEY_INITIAL_VISIBLE;
 
   if (loading) {
     return (
@@ -507,7 +521,7 @@ export default function ProvidersPageClient() {
     oauthEntries.length > 0 ||
     freeEntries.length > 0 ||
     freeTierEntries.length > 0 ||
-    apikeyEntries.length > 0 ||
+    filteredApikeyEntries.length > 0 ||
     compatibleProviders.length > 0 ||
     anthropicCompatibleProviders.length > 0 ||
     pluginAndCookieSectionCount > 0;
@@ -584,7 +598,7 @@ export default function ProvidersPageClient() {
       )}
 
       {/* OAuth Providers */}
-      {oauthEntries.length > 0 && (
+      {filteredOAuthEntries.length > 0 && (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
@@ -613,7 +627,7 @@ export default function ProvidersPageClient() {
           </div>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-          {oauthEntries.map(([key, info]) => (
+          {filteredOAuthEntries.map(([key, info]) => (
             <ProviderCard
               key={key}
               providerId={key}
@@ -628,33 +642,44 @@ export default function ProvidersPageClient() {
       )}
 
       {/* Free Tier Providers */}
-      {(freeEntries.length > 0 || freeTierEntries.length > 0) && (
+      {(filteredFreeEntries.length > 0 || filteredFreeTierEntries.length > 0) && (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
             Free Tier Providers
           </h2>
-          <button
-            onClick={() => handleBatchTest("free")}
-            disabled={!!testingMode}
-            title="Test all Free connections"
-            className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
-              testingMode === "free" || testingMode === "all"
-                ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
-                : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
-            }`}
-            aria-label="Test all Free provider connections"
-          >
-            <span
-              className={`material-symbols-outlined text-[14px]${testingMode === "free" || testingMode === "all" ? " animate-spin" : ""}`}
+          <div className="flex items-center gap-4">
+            <label className="flex items-center gap-2 text-sm cursor-pointer">
+              <input
+                type="checkbox"
+                checked={filterFreeOnly}
+                onChange={(e) => setFilterFreeOnly(e.target.checked)}
+                className="w-4 h-4 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500"
+              />
+              <span>Show only free tier</span>
+            </label>
+            <button
+              onClick={() => handleBatchTest("free")}
+              disabled={!!testingMode}
+              title="Test all Free connections"
+              className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 disabled:cursor-not-allowed disabled:opacity-50 ${
+                testingMode === "free" || testingMode === "all"
+                  ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
+                  : "bg-bg border-border text-text-muted hover:text-text-main hover:border-primary/40"
+              }`}
+              aria-label="Test all Free provider connections"
             >
-              play_arrow
-            </span>
-            {testingMode === "free" || testingMode === "all" ? "Testing..." : "Test All"}
-          </button>
+              <span
+                className={`material-symbols-outlined text-[14px]${testingMode === "free" || testingMode === "all" ? " animate-spin" : ""}`}
+              >
+                play_arrow
+              </span>
+              {testingMode === "free" || testingMode === "all" ? "Testing..." : "Test All"}
+            </button>
+          </div>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-          {freeEntries.map(([key, info]) => {
+          {filteredFreeEntries.map(([key, info]) => {
             // Kiro accepts both OAuth and api-key connections; count/toggle both
             // so the card total matches the provider detail page (#kiro-apikey).
             // Kiro's headless api-key flow persists authType "api_key" (underscore),
@@ -674,7 +699,7 @@ export default function ProvidersPageClient() {
               />
             );
           })}
-          {freeTierEntries.map(([key, info]) => (
+          {filteredFreeTierEntries.map(([key, info]) => (
             <ApiKeyProviderCard
               key={key}
               providerId={key}
@@ -689,7 +714,7 @@ export default function ProvidersPageClient() {
       )}
 
       {/* API Key Providers — fixed list */}
-      {apikeyEntries.length > 0 && (
+      {filteredApikeyEntries.length > 0 && (
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
@@ -732,7 +757,7 @@ export default function ProvidersPageClient() {
             className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-primary/40 px-3 py-2.5 text-sm font-medium text-primary transition-colors hover:border-primary hover:bg-primary/5"
           >
             <span className="material-symbols-outlined text-[16px]">expand_more</span>
-            Show all {apikeyEntries.length} providers
+            Show all {filteredApikeyEntries.length} providers
           </button>
         )}
       </div>
@@ -889,6 +914,11 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
             </div>
             <div className="min-w-0">
               <h3 className="truncate font-semibold">{provider.name}</h3>
+              {AI_PROVIDERS[providerId]?.freeTierInfo?.rateLimit && (
+                <p className="truncate text-[11px] text-green-600 dark:text-green-400">
+                  {AI_PROVIDERS[providerId].freeTierInfo.rateLimit}
+                </p>
+              )}
               <div className="flex min-w-0 items-center gap-1.5 text-xs flex-wrap">
                 {allDisabled ? (
                   <Badge variant="default" size="sm">
@@ -908,6 +938,14 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
                       <span className="text-text-muted">{errorTime}</span>
                     )}
                   </>
+                )}
+                {isFreeTierProvider(providerId) && (
+                  <Badge variant="success" size="sm" dot>
+                    <span className="flex items-center gap-1">
+                      <span className="size-2 bg-green-500 rounded-full inline-block" />
+                      Free
+                    </span>
+                  </Badge>
                 )}
               </div>
             </div>
@@ -1019,6 +1057,11 @@ function ApiKeyProviderCard({
             </div>
             <div className="min-w-0">
               <h3 className="truncate font-semibold">{provider.name}</h3>
+              {AI_PROVIDERS[providerId]?.freeTierInfo?.rateLimit && (
+                <p className="truncate text-[11px] text-green-600 dark:text-green-400">
+                  {AI_PROVIDERS[providerId].freeTierInfo.rateLimit}
+                </p>
+              )}
               <div className="flex min-w-0 items-center gap-1.5 text-xs flex-wrap">
                 {allDisabled ? (
                   <Badge variant="default" size="sm">
@@ -1048,6 +1091,14 @@ function ApiKeyProviderCard({
                       <span className="text-text-muted">{errorTime}</span>
                     )}
                   </>
+                )}
+                {isFreeTierProvider(providerId) && (
+                  <Badge variant="success" size="sm" dot>
+                    <span className="flex items-center gap-1">
+                      <span className="size-2 bg-green-500 rounded-full inline-block" />
+                      Free
+                    </span>
+                  </Badge>
                 )}
               </div>
             </div>

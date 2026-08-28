@@ -2,10 +2,10 @@ import { useState, useEffect, useCallback, useRef } from "react";
 // import { useParams, useRouter } from "next/navigation";  // ported: next.js -> Astro+React
 // import Link from "next/link";  // ported: next.js -> Astro+React
 // import Image from "next/image";  // ported: next.js -> Astro+React
-import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard } from "@/shared/components";
+import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, FreeTierLimits } from "@/shared/components";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
-import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, THINKING_CONFIG, SUPPORTS_MODELS_DISCOVERY } from "@/shared/constants/providers";
+import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, THINKING_CONFIG } from "@/shared/constants/providers";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { useAvailableModels } from "@/shared/models/availableModels";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
@@ -92,7 +92,7 @@ export default function ProviderDetailPageClient() {
   const [oneByOneResults, setOneByOneResults] = useState<Record<string, { state: string; error: string | null }>>({});
   const [oneByOneSummary, setOneByOneSummary] = useState<null | { total: number; completed: number; passed: number; failed: number; stopped: boolean }>(null);
   const stopOneByOneRef = useRef(false);
-  const [importingCatalog, setImportingCatalog] = useState(false);
+  const [importingQoderModels, setImportingQoderModels] = useState(false);
   const { copied, copy } = useCopyToClipboard();
   const notify = useNotificationStore();
   const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
@@ -438,38 +438,64 @@ export default function ProviderDetailPageClient() {
     openOAuthConnection();
   };
 
-  const handleImportCatalog = async () => {
-    if (importingCatalog) return;
+  const handleImportQoderModels = async () => {
+    if (importingQoderModels) return;
     const activeConnection = connections.find((conn: any) => conn.isActive !== false);
     if (!activeConnection) {
-      notify.error("Please add an active connection first");
+      notify.error("Please add an active Qoder connection first");
       return;
     }
 
-    setImportingCatalog(true);
+    setImportingQoderModels(true);
     try {
-      const res = await fetch(`/api/providers/${activeConnection.id}/import-models`, {
-        method: "POST",
-      });
+      const res = await fetch(`/api/providers/${activeConnection.id}/models`);
       const data = await res.json();
       if (!res.ok) {
-        notify.error(data.error || "Failed to import models");
+        notify.error(data.error || "Failed to fetch models");
         return;
       }
-      if (data.imported === 0) {
+      const fetched = data.models || [];
+      if (fetched.length === 0) {
+        notify.error("No models returned");
+        return;
+      }
+
+      let importedCount = 0;
+      for (const model of fetched) {
+        const modelId = model.id || model.name;
+        if (!modelId) continue;
+        // Qoder model ID format may be "qoder/auto" or "auto"
+        const cleanModelId = String(modelId).replace(/^qoder\//, "");
+        const alreadyExists =
+          customModels.some(
+            (entry: any) =>
+              entry.providerAlias === providerStorageAlias &&
+              entry.id === cleanModelId &&
+              (entry.kind || entry.type || "llm") === "llm",
+          ) ||
+          Object.values(modelAliases).includes(
+            `${providerStorageAlias}/${cleanModelId}`,
+          );
+        if (alreadyExists) continue;
+        // 9router parity: store under custom models, not aliases.
+        await handleAddCustomModel(cleanModelId, "llm", providerStorageAlias);
+        importedCount += 1;
+      }
+
+      if (importedCount === 0) {
         notify.success("All models already exist, no new models added");
       } else {
-        notify.success(`Imported ${data.imported} model(s)`);
+        notify.success(`Successfully added ${importedCount} models`);
         await fetchCustomModels();
         if (typeof window !== "undefined") {
           window.dispatchEvent(new CustomEvent("customModelChanged"));
         }
       }
     } catch (error: any) {
-      console.log("Error importing catalog:", error);
+      console.log("Error importing Qoder models:", error);
       notify.error(`Error fetching models: ${error?.message || "unknown"}`);
     } finally {
-      setImportingCatalog(false);
+      setImportingQoderModels(false);
     }
   };
 
@@ -1133,18 +1159,17 @@ export default function ProviderDetailPageClient() {
         </button>
 
 
-        {/* Import catalog button — visible for providers supporting live discovery */}
-        {SUPPORTS_MODELS_DISCOVERY.includes(providerId) &&
-          connections.some((conn: any) => conn.isActive !== false) && (
+        {/* Import Qoder models button — only show for qoder provider */}
+        {providerId === "qoder" && connections.some((conn: any) => conn.isActive !== false) && (
           <button
-            onClick={handleImportCatalog}
-            disabled={importingCatalog}
+            onClick={handleImportQoderModels}
+            disabled={importingQoderModels}
             className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <span className="material-symbols-outlined text-sm" style={importingCatalog ? { animation: "spin 1s linear infinite" } : undefined}>
-              {importingCatalog ? "progress_activity" : "download"}
+            <span className="material-symbols-outlined text-sm" style={importingQoderModels ? { animation: "spin 1s linear infinite" } : undefined}>
+              {importingQoderModels ? "progress_activity" : "download"}
             </span>
-            {importingCatalog ? "Importing..." : "Import Catalog"}
+            {importingQoderModels ? "Fetching..." : "Fetch Qoder Models"}
           </button>
         )}
 
@@ -1311,6 +1336,10 @@ export default function ProviderDetailPageClient() {
             </a>
           )}
         </div>
+      )}
+
+      {AI_PROVIDERS[providerId]?.freeTierInfo && (
+        <FreeTierLimits info={AI_PROVIDERS[providerId].freeTierInfo} />
       )}
 
       {isCompatible && providerNode && (
