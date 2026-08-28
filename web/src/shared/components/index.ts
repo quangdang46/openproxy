@@ -35,6 +35,7 @@ export { default as NoAuthProxyCard } from "./NoAuthProxyCard";
 export { default as SegmentedControl } from "./SegmentedControl";
 export { default as Tooltip } from "./Tooltip";
 export { default as ProviderInfoCard } from "./ProviderInfoCard";
+export { default as FreeTierLimits } from "./FreeTierLimits";
 export { default as AnthropicSpike } from "./AnthropicSpike";
 export { default as McpMarketplaceModal } from "./McpMarketplaceModal";
 

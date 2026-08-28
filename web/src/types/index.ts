@@ -65,10 +65,41 @@ export interface Provider {
   authHint?: string;
   /** True when the provider is part of the free-tier set (see FREE_TIER_PROVIDER_IDS). */
   freeTier?: boolean;
+  /**
+   * Structured free-tier limitations shown on the provider page. Populated for
+   * free-tier providers so users can see rate limits, caps, and caveats before
+   * configuring a connection. Data sourced from awesome-freellm-apis / freellmapi.
+   */
+  freeTierInfo?: FreeTierInfo;
   searchConfig?: SearchConfig;
   fetchConfig?: FetchConfig;
   imageConfig?: ImageConfig;
   videoConfig?: VideoConfig;
+}
+
+// Free-tier provider limitations shown on the provider page. Data is sourced
+// from awesome-freellm-apis (github.com/open-free-llm-api) and freellmapi.co,
+// refreshed 2026-08-27. Rate limits are kept free-form because units differ
+// across providers (RPM / RPD / TPD / tokens-per-month).
+export interface FreeTierInfo {
+  /** How the free access works, e.g. "Permanent free tier" or "Renewable credits". */
+  accessModel: string;
+  /** What signup requires to obtain a key. */
+  creditCard: "none" | "registration" | "phone" | "required";
+  /** Free-form rate limit summary (e.g. "30 RPM, 14,400 RPD"). */
+  rateLimit?: string;
+  /** Max context window of free models (e.g. "1M tokens"). */
+  maxContext?: string;
+  /** Number of models available on the free tier (if known). */
+  freeModels?: number;
+  /** Whether production use is allowed under the free-tier ToS. */
+  productionAllowed?: boolean;
+  /** Caveats / quirks worth surfacing (eval-only ToS, session limits, etc.). */
+  caveats?: string[];
+  /** ISO date the data was last verified. */
+  lastVerified?: string;
+  /** Source URL for the data. */
+  source?: string;
 }
 
 export type ServiceKind = "llm" | "tts" | "stt" | "embedding" | "image" | "imageToText" | "webSearch" | "webFetch" | "video" | "music";
