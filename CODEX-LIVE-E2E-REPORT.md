@@ -12,6 +12,21 @@ Scope requested: (1) prove openproxy works end-to-end with a real free-tier LLM 
 4. `openproxy server start` against a throwaway `--data-dir`.
 5. Wired real `codex exec` at the model-provider config (`model_providers.openproxy.base_url = http://127.0.0.1:<port>/v1`, `wire_api = "responses"`), matching README's documented `OPENAI_BASE_URL` integration pattern.
 
+## 1a. ✅ Final result: real `codex exec` succeeded end-to-end
+
+After the fix in §2 and isolating the remaining upstream quirk (§2, "vision" item), a real `codex exec` call was run with Codex's built-in `multi_agent` feature disabled (`--disable multi_agent` — this feature injects `spawn_agent`/`send_input` tools that trip llm7's own vision-classifier, see below; unrelated to openproxy):
+
+```
+codex exec -c model_providers.openproxy='{ name="openproxy", base_url="http://127.0.0.1:4699/v1", env_key="OPENPROXY_KEY", wire_api="responses" }' \
+  -c model_provider="openproxy" -c model="llm7/gpt-oss" --disable multi_agent \
+  "Reply with exactly the word: PARITY_OK"
+
+→ codex
+  PARITY_OK
+```
+
+Confirmed against the running server's own log (not just the client's stdout): `POST /v1/responses` → `200 (445ms)`. This satisfies the original success criterion — a real `codex exec` call, through openproxy, against a real free-tier provider, with a correct model response.
+
 ## 2. Bugs found (real, reproduced, 2 fixed)
 
 ### 🔴 FIXED — `prompt_cache_key` (and other Responses-only fields) leaked into the Chat Completions body sent upstream
@@ -31,9 +46,10 @@ Scope requested: (1) prove openproxy works end-to-end with a real free-tier LLM 
 - **Repro:** `openproxy provider test llm7-free` → `FAIL llm7 (0ms) — Base URL required`, even though `PROVIDER_CONFIGS` in `default.rs` has a built-in default URL for `llm7` and real chat requests work fine.
 - **Impact:** cosmetic/confusing for any of the ~20+ providers in `PROVIDER_CONFIGS` that ship a hardcoded URL and aren't in the connectivity-test's small hardcoded `match` (openai/anthropic/openrouter/...). Doesn't block actual traffic.
 
-### ⚪ INVESTIGATED, NOT AN OPENPROXY BUG — llm7 free tier misclassifies Codex's real tool payload as "vision"
-- Real `codex exec` against openproxy→llm7 still fails end-to-end: llm7 returns `400 Model 'gpt-oss' does not support vision input.` for Codex's actual ~13-tool / ~124 KB payload (shell, MCP resource tools, `view_image`, `spawn_agent`, ...), even after removing `view_image` specifically. Confirmed by replaying the **exact captured Codex request** directly against `api.llm7.io` (bypassing openproxy entirely) — same error. This is llm7's own (buggy) request classifier, not an openproxy translation defect. 9router would hit the identical failure against the identical upstream. Not actionable on the openproxy side; recorded here so it isn't mistaken for a router bug later.
-- **Net result:** direct chat (`/v1/chat/completions`) and hand-built Responses-API calls (`/v1/responses`) through openproxy→llm7 **succeeded end-to-end** (streaming and non-streaming, verified with real HTTP round trips). The one remaining blocker for a clean full `codex exec` transcript is upstream-provider-side, not openproxy-side.
+### ⚪ INVESTIGATED, NOT AN OPENPROXY BUG — llm7 free tier misclassifies specific tool names as "vision"
+- `codex exec` against openproxy→llm7 initially failed end-to-end: llm7 returned `400 Model 'gpt-oss' does not support vision input.` for Codex's real tool payload. Root-caused by per-tool bisection (isolating each of the 11 real function-tool schemas and calling llm7 directly, bypassing openproxy) down to exactly **two** tools: `spawn_agent` and `send_input` — both injected by Codex's `multi_agent` feature (stable, on by default). Every other tool (`shell`, `list_mcp_resources`, `update_plan`, `view_image`, etc.) was fine individually and in combination.
+- This is llm7's own (buggy) request classifier false-triggering on those two tool schemas/descriptions, not an openproxy translation defect — confirmed by replaying hand-built payloads directly against `api.llm7.io`, openproxy not involved at all.
+- **Workaround (client-side, not an openproxy change):** `codex exec --disable multi_agent` stops Codex from sending `spawn_agent`/`send_input`, which fully unblocks the flow — see §1a for the successful transcript. 9router would hit the identical upstream failure with `multi_agent` tools enabled against llm7; this is a `llm7 ⨯ Codex-multi-agent-tools` upstream incompatibility, not a router bug on either side.
 
 ### ⚪ INVESTIGATED, REVERTED — `opencode-zen` is not actually a no-auth provider live
 - Code has an `is_no_auth_provider()` allowlist (`chat.rs:2605`) covering `opencode`/`opencode-go` but not `opencode-zen`. Initially looked like a missing-entry bug matching the user's "opencode free" ask. Live-checked `https://opencode.ai/zen/v1/chat/completions` directly: it now returns `401 Missing API key` — it requires a real key today, so leaving it out of the no-auth allowlist is **correct**, not a bug. Change was reverted after verification.
