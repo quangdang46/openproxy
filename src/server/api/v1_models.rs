@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 
 use crate::core::model::catalog::provider_catalog;
 use crate::core::model::resolve_provider_alias;
-use crate::server::auth::require_api_key;
+use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 use crate::types::{AppDb, ModelAliasTarget, ProviderConnection};
 
@@ -79,7 +79,7 @@ async fn list_models_for_kinds(
 ) -> Response {
     let snapshot = state.db.snapshot();
     if snapshot.settings.require_login {
-        if let Err(error) = require_api_key(&headers, &state.db) {
+        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return with_cors_response(super::auth_error_response(error));
         }
     }

@@ -33,7 +33,7 @@ use crate::oauth::device_code;
 use crate::oauth::pending::PendingOAuthFlow;
 use crate::oauth::providers;
 use crate::oauth::{OAuthProviderConfig, TokenResponse};
-use crate::server::auth::{extract_api_key, require_api_key};
+use crate::server::auth::{extract_api_key, require_api_key_with_reload};
 use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
@@ -4275,7 +4275,7 @@ pub async fn start_oauth_flow(
     Query(query): Query<StartQuery>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let api_key = match require_api_key(&headers, &state.db) {
+    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
@@ -4462,7 +4462,7 @@ pub async fn start_device_code(
     Query(_query): Query<DeviceCodeBody>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let api_key = match require_api_key(&headers, &state.db) {
+    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
@@ -4619,7 +4619,7 @@ pub async fn poll_device_code(
         return poll_kiro_device_code_compat(&state, body).await;
     }
 
-    let api_key = match require_api_key(&headers, &state.db) {
+    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
@@ -4790,7 +4790,7 @@ pub async fn refresh_token(
     request: axum::extract::Request,
 ) -> Response {
     let headers = request.headers();
-    let api_key = match require_api_key(headers, &state.db) {
+    let api_key = match require_api_key_with_reload(headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
@@ -4925,7 +4925,7 @@ pub async fn oauth_status(
     Path(provider): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let api_key = match require_api_key(&headers, &state.db) {
+    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };

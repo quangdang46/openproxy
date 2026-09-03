@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 
 use crate::core::model::{get_model_info, ModelRouteKind};
 use crate::core::proxy::resolve_proxy_target;
-use crate::server::auth::require_api_key;
+use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 use crate::types::AppDb;
 
@@ -117,7 +117,7 @@ pub async fn audio_voices(
     let db = state.db.clone();
     let settings = db.snapshot().settings.require_login;
     if settings {
-        if let Err(e) = require_api_key(&headers, &state.db) {
+        if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(e);
         }
     }
@@ -434,7 +434,7 @@ async fn generic_media_handler(
     route_kind: &'static str,
 ) -> Response {
     if state.db.snapshot().settings.require_login {
-        if let Err(error) = require_api_key(&headers, &state.db) {
+        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
         }
     }
@@ -1153,7 +1153,7 @@ async fn video_create_handler(
     action: &'static str,
 ) -> Response {
     if state.db.snapshot().settings.require_login {
-        if let Err(error) = require_api_key(&headers, &state.db) {
+        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
         }
     }
@@ -1362,7 +1362,7 @@ async fn video_create_handler(
 /// `x-connection-id` (returned on create as `x-openproxy-connection-id`).
 async fn video_get_handler(state: AppState, headers: HeaderMap, request_id: String) -> Response {
     if state.db.snapshot().settings.require_login {
-        if let Err(error) = require_api_key(&headers, &state.db) {
+        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
         }
     }

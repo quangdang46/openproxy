@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 use tracing::debug;
 
 use crate::core::model::{get_model_info, ModelRouteKind};
-use crate::server::auth::require_api_key;
+use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 use crate::types::{AppDb, ProviderConnection};
 
@@ -178,7 +178,7 @@ pub async fn audio_transcriptions(State(state): State<AppState>, request: Reques
     let headers = parts.headers.clone();
 
     if state.db.snapshot().settings.require_login {
-        if let Err(error) = require_api_key(&headers, &state.db) {
+        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return with_cors_response(auth_error_response(error));
         }
     }

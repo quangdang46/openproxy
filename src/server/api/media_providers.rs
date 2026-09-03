@@ -10,7 +10,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-use crate::server::auth::require_api_key;
+use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 use crate::types::ProviderConnection;
 
@@ -144,7 +144,7 @@ async fn list_media_providers(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return crate::server::api::auth_error_response(e);
     }
 
@@ -186,7 +186,7 @@ async fn add_media_provider(
     headers: axum::http::HeaderMap,
     Json(body): Json<AddMediaProviderRequest>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return crate::server::api::auth_error_response(e);
     }
 
@@ -269,7 +269,7 @@ async fn delete_media_provider(
     Path(id): Path<String>,
     headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return crate::server::api::auth_error_response(e);
     }
 
@@ -321,7 +321,7 @@ async fn get_deepgram_voices(
     headers: axum::http::HeaderMap,
     Query(query): Query<TtsVoicesQuery>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return crate::server::api::auth_error_response(e);
     }
     let snapshot = state.db.snapshot();
@@ -442,7 +442,7 @@ async fn get_inworld_voices(
     headers: axum::http::HeaderMap,
     Query(query): Query<TtsVoicesQuery>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return crate::server::api::auth_error_response(e);
     }
     let snapshot = state.db.snapshot();
@@ -695,7 +695,7 @@ async fn get_minimax_voices(
     headers: axum::http::HeaderMap,
     Query(query): Query<MinimaxVoicesQuery>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return crate::server::api::auth_error_response(e);
     }
 
@@ -830,7 +830,7 @@ async fn get_tts_voices(
     headers: axum::http::HeaderMap,
     Query(query): Query<TtsVoiceQuery>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return crate::server::api::auth_error_response(e);
     }
     let provider = query.provider.as_deref().unwrap_or("edge-tts");
@@ -941,7 +941,7 @@ async fn get_elevenlabs_voices(
     // Reads the stored ElevenLabs API key from the DB — require auth like the
     // sibling voice handlers (get_tts_voices / get_minimax_voices /
     // get_inworld_voices). Previously unauthenticated (audit H13).
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return crate::server::api::auth_error_response(e);
     }
     let snapshot = state.db.snapshot();
