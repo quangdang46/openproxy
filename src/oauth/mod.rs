@@ -113,13 +113,18 @@ pub mod device_code {
         _provider_config: &OAuthProviderConfig,
         client_id: &str,
     ) -> Result<DeviceCodeResponse, OAuthError> {
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .user_agent("GitHubCopilotChat/0.38.0")
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap();
         let params = [
             ("client_id", client_id),
             ("scope", &_provider_config.scopes.join(" ")),
         ];
         let response = client
             .post(_provider_config.authorize_url)
+            .header("Accept", "application/json")
             .form(&params)
             .send()
             .await
@@ -129,9 +134,18 @@ pub mod device_code {
             })?;
 
         if !response.status().is_success() {
-            let error: OAuthError = response.json().await.unwrap_or(OAuthError {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                target: "openproxy::oauth",
+                provider = _provider_config.id,
+                "device code request failed: HTTP {} body={}",
+                status,
+                text
+            );
+            let error: OAuthError = serde_json::from_str(&text).unwrap_or(OAuthError {
                 error: "unknown_error".to_string(),
-                error_description: None,
+                error_description: Some(format!("HTTP {} body={}", status, text)),
             });
             return Err(error);
         }
@@ -154,13 +168,18 @@ pub mod device_code {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(current_interval)).await;
 
+            let client_id = provider_config
+                .get_param("client_id")
+                .unwrap_or(provider_config.client_id);
             let params = [
                 ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
                 (
                     "client_id",
-                    provider_config
-                        .get_param("client_id")
-                        .unwrap_or("openproxy"),
+                    if client_id.is_empty() {
+                        "openproxy"
+                    } else {
+                        client_id
+                    },
                 ),
                 ("device_code", device_code),
             ];

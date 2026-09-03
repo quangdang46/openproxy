@@ -10,6 +10,7 @@ pub mod mcp;
 pub mod media;
 pub mod mitm;
 pub mod model;
+pub mod performance;
 pub mod proxy;
 pub mod rtk;
 pub mod translator;

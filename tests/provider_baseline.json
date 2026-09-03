@@ -1345,6 +1345,8 @@
     "models": [
       "anthropic/claude-4-sonnet",
       "google/gemini-2.5-pro",
+      "minimax/minimax-m2.7-free",
+      "minimax/minimax-m3-free",
       "moonshotai/kimi-k2",
       "openai/gpt-4.1",
       "vercel/v0-1.5-md"

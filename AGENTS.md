@@ -50,6 +50,17 @@ curl -s http://127.0.0.1:4623/health
 open http://127.0.0.1:4623/dashboard/providers
 ```
 
+**After ANY backend change, you MUST rebuild the binary and restart the server so the user can test it directly.** The running server does not hot-reload Rust. A common failure is leaving a stale binary running (an earlier build predating your fix) while reporting "done" — the user then tests the old behavior. The mandatory loop for a Rust change:
+
+```bash
+./scripts/dev.sh build                 # compile the new binary
+pkill -f 'target/.*/openproxy' || true # stop the stale server
+./scripts/dev.sh detach                # start the freshly built binary
+curl -s http://127.0.0.1:4623/health   # confirm it is up
+```
+
+If the change also touched `web/src`, run `pnpm build` before restarting so the dashboard reflects it. Never report a fix as "done" or "ready to test" without completing this rebuild+restart.
+
 ## Contributing & Git Hygiene
 
 Systematic, not arbitrary — all contributions follow two documents linked from the intelligence brief:

@@ -80,6 +80,10 @@ impl ProviderCatalog {
             .map(String::as_str)
     }
 
+    pub fn provider_ids(&self) -> impl Iterator<Item = &str> + '_ {
+        self.provider_id_to_alias.keys().map(|s| s.as_str())
+    }
+
     pub fn iter_provider_models(&self) -> impl Iterator<Item = &ProviderModelsEntry> {
         self.provider_models.iter()
     }

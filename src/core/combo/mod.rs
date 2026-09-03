@@ -699,7 +699,7 @@ pub fn combo_quarantine_for(combo_name: &str) -> Vec<(String, Instant)> {
         .collect()
 }
 
-fn quarantined_members(combo_name: &str) -> HashSet<String> {
+pub fn quarantined_members(combo_name: &str) -> HashSet<String> {
     let now = Instant::now();
     let mut guard = COMBO_MEMBER_QUARANTINE.lock();
     guard.retain(|_, until| *until > now);

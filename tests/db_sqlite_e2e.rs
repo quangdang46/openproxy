@@ -267,6 +267,10 @@ async fn e2e_usage_persists_to_sqlite() {
             provider: Some("openai".into()),
             timestamp: Some("2026-01-01T00:00:00Z".into()),
             cost: Some(0.01),
+            bytes_before: 0,
+            bytes_after: 0,
+            bytes_saved: 0,
+            image_prompts: 0,
             ..Default::default()
         });
     })

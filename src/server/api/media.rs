@@ -640,6 +640,10 @@ async fn execute_media_provider(
                         Some(&api_key),
                         Some(url.as_str()),
                         None,
+                        None, // latency_ms
+                        None, // ttft_ms
+                        None, // status
+                        None, // error_class
                     )
                     .await;
             }

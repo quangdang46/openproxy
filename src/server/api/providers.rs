@@ -1191,4 +1191,9 @@ pub fn routes() -> Router<AppState> {
         .route("/api/provider-nodes/validate", post(validate_provider_node))
         // Model test - POST /api/models/test
         .route("/api/models/test", post(test_model))
+        // Provider import catalog - POST /api/providers/{id}/import-models
+        .route(
+            "/api/providers/{id}/import-models",
+            post(super::provider_models::import_provider_models),
+        )
 }

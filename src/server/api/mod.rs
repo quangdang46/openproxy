@@ -24,6 +24,7 @@ pub mod models_custom;
 pub mod models_disabled;
 pub mod oauth;
 pub mod observability;
+pub mod performance;
 pub mod pricing;
 mod provider_connection_test;
 pub mod provider_filters;
@@ -334,6 +335,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(translator::routes())
         .merge(oauth::routes())
         .merge(admin_local_only)
+        .merge(performance::routes())
         .route(
             "/api/dashboard/chat/completions",
             post(chat::dashboard_chat_completions),

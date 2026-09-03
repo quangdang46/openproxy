@@ -5,6 +5,37 @@ import { Modal, Button, Input } from "@/shared/components";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 
 /**
+ * Extract a human-readable error message from an OAuth response body.
+ *
+ * The backend `make_error`/`OAuthError` envelope is `{ error: { message, code, provider } }`,
+ * but some endpoints return `{ error: "...", error_description: "..." }`. Coercing a nested
+ * object directly into `new Error(obj)` renders as "[object Object]" in the modal, so we
+ * resolve the deepest available string here.
+ */
+function extractErrorMessage(data: unknown): string {
+  if (data == null || typeof data !== "object") {
+    return typeof data === "string" ? data : "Unknown error";
+  }
+  const obj = data as Record<string, unknown>;
+  // Nested OAuthError envelope: { error: { message } }
+  const inner = obj.error;
+  if (inner && typeof inner === "object") {
+    const innerObj = inner as Record<string, unknown>;
+    const msg = innerObj.message ?? innerObj.error;
+    if (typeof msg === "string" && msg.length > 0) return msg;
+  }
+  if (typeof obj.error === "string" && obj.error.length > 0) return obj.error;
+  if (typeof obj.message === "string" && obj.message.length > 0) return obj.message;
+  if (typeof obj.error_description === "string" && obj.error_description.length > 0) {
+    return obj.error_description;
+  }
+  if (typeof obj.errorDescription === "string" && obj.errorDescription.length > 0) {
+    return obj.errorDescription;
+  }
+  return "Unknown error";
+}
+
+/**
  * OAuth Modal Component
  * - Localhost: Auto callback via popup message
  * - Remote: Manual paste callback URL
@@ -93,7 +124,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      if (!res.ok) throw new Error(extractErrorMessage(data));
 
       setStep("success");
       onSuccess?.();
@@ -112,7 +143,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         body: JSON.stringify({ code, state: authData.state }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      if (!res.ok) throw new Error(extractErrorMessage(data));
 
       setStep("success");
       onSuccess?.();
@@ -167,7 +198,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         }
 
         if (data.error === "expired_token" || data.error === "access_denied") {
-          throw new Error(data.errorDescription || data.error);
+          throw new Error(data.errorDescription || data.error || "Authentication failed");
         }
 
         if (data.error === "slow_down") {
@@ -219,7 +250,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         }
         const res = await fetch(deviceCodeUrl.toString());
         const data = await res.json();
-        if (!res.ok) throw new Error(data.error);
+        if (!res.ok) throw new Error(extractErrorMessage(data));
 
         setDeviceData(data);
 
@@ -270,7 +301,7 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
       }
       const res = await fetch(authorizeUrl.toString());
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error);
+      if (!res.ok) throw new Error(extractErrorMessage(data));
 
       let codexProxyActive = false;
       let codexServerSide = false;

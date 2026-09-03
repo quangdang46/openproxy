@@ -2427,6 +2427,10 @@ async fn proxy_dashboard_sse_with_usage_tracking(
                 api_key,
                 endpoint,
                 compression,
+                None, // latency_ms
+                None, // ttft_ms
+                None, // status
+                None, // error_class
             )
             .await;
         state.usage_live.notify_update();
@@ -2914,6 +2918,10 @@ async fn proxy_sse_to_json_response(
                 api_key,
                 endpoint,
                 compression,
+                None, // latency_ms
+                None, // ttft_ms
+                None, // status
+                None, // error_class
             )
             .await;
     }
@@ -2986,6 +2994,10 @@ async fn proxy_response_with_usage_tracking(
                 api_key,
                 endpoint,
                 compression,
+                None, // latency_ms
+                None, // ttft_ms
+                None, // status
+                None, // error_class
             )
             .await;
         state.usage_live.notify_update();
@@ -3498,6 +3510,10 @@ async fn record_streaming_usage(
             api_key,
             endpoint,
             compression,
+            None, // latency_ms
+            None, // ttft_ms
+            None, // status
+            None, // error_class
         )
         .await;
 }

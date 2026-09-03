@@ -8788,6 +8788,16 @@
           "id": "vercel/v0-1.5-md",
           "name": "vercel/v0-1.5-md",
           "kind": "llm"
+        },
+        {
+          "id": "minimax/minimax-m3-free",
+          "name": "minimax/minimax-m3-free",
+          "kind": "llm"
+        },
+        {
+          "id": "minimax/minimax-m2.7-free",
+          "name": "minimax/minimax-m2.7-free",
+          "kind": "llm"
         }
       ]
     },

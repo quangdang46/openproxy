@@ -26,7 +26,7 @@ fn key_dependencies_present_with_correct_versions() {
         ("anyhow", "1"),
         ("aws-sigv4", "1.4"),
         ("url", "2"),
-        ("tower-http", "0.6"),
+        ("tower-http", "0.7"),
         ("tracing-subscriber", "0.3"),
         ("sha2", "0.11"),
         ("simd-json", "0.14"),

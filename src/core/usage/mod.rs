@@ -20,7 +20,7 @@
 pub mod grok_cli_quota_frame;
 mod pricing;
 pub mod quota_fetcher;
-mod tracker;
+pub mod tracker;
 
 pub(crate) use pricing::parse_model_pricing;
 pub use pricing::{CostModel, ModelPricing, Pricing};

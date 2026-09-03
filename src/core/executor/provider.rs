@@ -13,18 +13,40 @@ use crate::types::ProviderConnection;
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
 /// Log severity level for per-request log messages.
+///
+/// Used to categorize log entries attached to provider execution requests
+/// for debugging and monitoring purposes.
 #[derive(Debug, Clone)]
 pub enum LogLevel {
+    /// Detailed diagnostic information for troubleshooting.
     Debug,
+    /// General operational information about request flow.
     Info,
+    /// Potential issues that don't prevent request completion.
     Warn,
+    /// Errors that may affect request outcome but don't halt execution.
     Error,
 }
 
 /// A single log entry attached to a request.
+///
+/// Log entries provide structured, request-scoped logging that travels with
+/// the execution request through the provider executor. This enables detailed
+/// per-request debugging without relying on global log correlation.
+///
+/// # Example
+///
+/// ```rust
+/// let log_entry = LogEntry {
+///     level: LogLevel::Info,
+///     message: "Sending request to OpenAI with model gpt-4o".to_string(),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct LogEntry {
+    /// The severity level of this log entry.
     pub level: LogLevel,
+    /// Human-readable log message describing the event.
     pub message: String,
 }
 
@@ -35,38 +57,89 @@ pub struct ProxyOptions {
     pub url_index: Option<usize>,
 }
 
+/// Request to execute against a single provider/model.
+///
+/// Contains all the information needed to execute a single request against
+/// a specific provider and model. This is the primary input type for all
+/// provider executors.
+///
+/// # Fields
+///
+/// * `model` - The model identifier string (e.g., "gpt-4o", "claude-3-haiku")
+/// * `body` - The JSON request body to send to the provider
+/// * `stream` - Whether to use SSE streaming for the response
+/// * `credentials` - Provider connection details including API key, etc.
+/// * `proxy` - Optional proxy target for routing the request
+/// * `signal` - Optional cancellation signal for aborting in-flight requests
+/// * `log` - Optional request-scoped log entries for debugging
+/// * `proxy_options` - Optional options controlling proxy/retry behavior
 pub struct ProviderExecutionRequest {
+    /// The model identifier string (e.g., "gpt-4o", "claude-3-haiku")
     pub model: String,
+    /// The JSON request body to send to the provider
     pub body: Value,
+    /// Whether to use SSE streaming for the response
     pub stream: bool,
+    /// Provider connection details including API key, access token, etc.
     pub credentials: ProviderConnection,
+    /// Optional proxy target for routing the request through a proxy
     pub proxy: Option<ProxyTarget>,
     /// Signal for aborting an in-flight request.
     pub signal: Option<CancellationToken>,
-    /// Request-scoped log entries.
+    /// Request-scoped log entries for debugging and monitoring.
     pub log: Option<Vec<LogEntry>>,
     /// Options controlling proxy/retry behaviour.
     pub proxy_options: Option<ProxyOptions>,
 }
 
+/// Response from a single provider execution.
+///
+/// Contains the upstream response along with metadata about how the request
+/// was handled. This is the primary output type for all provider executors.
+///
+/// # Fields
+///
+/// * `response` - The upstream HTTP response (reqwest or hyper response)
+/// * `url` - The actual URL the request was sent to
+/// * `headers` - HTTP response headers from the upstream provider
+/// * `transformed_body` - The request body after format transformation
+/// * `transport` - The transport mechanism used (reqwest, hyper, etc.)
 pub struct ProviderExecutionResponse {
+    /// The upstream HTTP response (reqwest or hyper response)
     pub response: UpstreamResponse,
+    /// The actual URL the request was sent to
     pub url: String,
+    /// HTTP response headers from the upstream provider
     pub headers: HeaderMap,
+    /// The request body after format transformation
     pub transformed_body: Value,
+    /// The transport mechanism used (reqwest, hyper, etc.)
     pub transport: TransportKind,
 }
 
+/// Error type for provider execution failures.
+///
+/// Covers all possible errors that can occur when executing a request against
+/// a provider, from unsupported providers to network errors.
 #[derive(Debug)]
 pub enum ProviderExecutorError {
+    /// The requested provider is not supported by this proxy.
     UnsupportedProvider(String),
+    /// Required credentials are missing or invalid for the provider.
     MissingCredentials(String),
+    /// An HTTP header value is invalid.
     InvalidHeader(String),
+    /// The request URI is malformed.
     InvalidUri(hyper::http::uri::InvalidUri),
+    /// The HTTP request could not be constructed.
     InvalidRequest(hyper::http::Error),
+    /// JSON serialization failed.
     Serialize(serde_json::Error),
+    /// Failed to initialize the HTTP client.
     HyperClientInit(std::io::Error),
+    /// HTTP transport layer error (hyper).
     Hyper(hyper_util::client::legacy::Error),
+    /// Network-level error from reqwest.
     Request(reqwest::Error),
 }
 
@@ -153,13 +226,33 @@ impl ProviderFormat {
     }
 }
 
+/// Configuration for a provider executor.
+///
+/// Contains all the information needed to configure how requests are sent to
+/// a specific provider, including endpoint URLs, authentication method, and
+/// protocol-specific settings.
+///
+/// # Fields
+///
+/// * `base_url` - The base URL for the provider's API (e.g., "https://api.openai.com")
+/// * `format` - The protocol format this provider uses (OpenAI, Anthropic, etc.)
+/// * `api_key_header` - The HTTP header name used for API key authentication
+/// * `default_headers` - Default headers to include with every request
+/// * `stream_path` - Path appended to base_url for streaming endpoints
+/// * `chat_path` - Path appended to base_url for chat/completion endpoints
 #[derive(Debug, Clone)]
 pub struct ProviderExecutorConfig {
+    /// The base URL for the provider's API (e.g., "https://api.openai.com")
     pub base_url: String,
+    /// The protocol format this provider uses (OpenAI, Anthropic, etc.)
     pub format: ProviderFormat,
+    /// The HTTP header name used for API key authentication
     pub api_key_header: &'static str,
+    /// Default headers to include with every request
     pub default_headers: Vec<(String, String)>,
+    /// Path appended to base_url for streaming endpoints
     pub stream_path: String,
+    /// Path appended to base_url for chat/completion endpoints
     pub chat_path: String,
 }
 
@@ -249,15 +342,70 @@ impl ProviderExecutorConfig {
     }
 }
 
+/// Core trait that all provider executors must implement.
+///
+/// This trait defines the interface for executing requests against various
+/// AI providers (OpenAI, Anthropic, Gemini, etc.). Each provider type
+/// implements this trait to handle protocol-specific request/response
+/// transformation, authentication, and error handling.
+///
+/// # Type Requirements
+///
+/// * `Send` - Safe to transfer between threads
+/// * `Sync` - Safe to share references between threads
+///
+/// # Implementations
+///
+/// See the executors/ directory for specific implementations:
+/// * `default::UnifiedExecutor` - Handles most OpenAI-compatible providers
+/// * `anthropic::AzureExecutor` - Special handling for Azure OpenAI
+/// * `gemini_cli::GeminiCliExecutor` - Gemini via CLI tool
+/// * And many others in the executors/ directory
 #[async_trait]
 pub trait ProviderExecutor: Send + Sync {
+    /// Returns the name of the provider this executor handles.
+    ///
+    /// This should match the provider identifier used in configuration
+    /// and model strings (e.g., "openai", "anthropic", "gemini").
     fn provider_name(&self) -> &str;
 
+    /// Execute a request against the provider.
+    ///
+    /// This is the main entry point for provider execution. It handles:
+    /// * Building the request URL and headers
+    /// * Transforming the request body according to provider format
+    /// * Sending the HTTP request
+    /// * Receiving and transforming the response
+    /// * Handling provider-specific error cases
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - Contains all information needed for the execution
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(ProviderExecutionResponse)` - Successful execution with response
+    /// * `Err(ProviderExecutorError)` - Execution failed with specific error
     async fn execute(
         &self,
         request: ProviderExecutionRequest,
     ) -> Result<ProviderExecutionResponse, ProviderExecutorError>;
 
+    /// Build the URL for a request to this provider.
+    ///
+    /// Constructs the full endpoint URL based on the provider's base URL,
+    /// model name, and whether streaming is requested.
+    ///
+    /// # Arguments
+    ///
+    /// * `model` - The model identifier (e.g., "gpt-4o")
+    /// * `stream` - Whether this is a streaming request
+    /// * `url_index` - Index for round-robin URL selection (if multiple URLs)
+    /// * `credentials` - Optional credentials for authentication
+    ///
+    /// # Returns
+    ///
+    /// * String - The complete URL to request
     fn build_url(
         &self,
         model: &str,
@@ -266,12 +414,42 @@ pub trait ProviderExecutor: Send + Sync {
         credentials: Option<&ProviderConnection>,
     ) -> String;
 
+    /// Build HTTP headers for a request to this provider.
+    ///
+    /// Constructs the appropriate headers including authentication,
+    /// content type, and provider-specific headers.
+    ///
+    /// # Arguments
+    ///
+    /// * `credentials` - Provider connection containing API key/token
+    /// * `stream` - Whether this is a streaming request (affects Accept header)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(HeaderMap)` - Successfully built headers
+    /// * `Err(ProviderExecutorError)` - Failed to build headers (invalid credentials, etc.)
     fn build_headers(
         &self,
         credentials: &ProviderConnection,
         stream: bool,
     ) -> Result<HeaderMap, ProviderExecutorError>;
 
+    /// Transform the request body before sending to the provider.
+    ///
+    /// Performs provider-specific transformation of the request body,
+    /// such as converting between OpenAI and Anthropic message formats,
+    /// handling developer roles, or applying JSON schema fallbacks.
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - The original request body
+    /// * `_model` - The model identifier (unused in base implementation)
+    /// * `_stream` - Whether this is a streaming request (unused in base)
+    /// * `_credentials` - Provider credentials (unused in base implementation)
+    ///
+    /// # Returns
+    ///
+    /// * Value - The transformed request body ready to send
     fn transform_request(
         &self,
         body: &Value,
@@ -286,6 +464,15 @@ pub trait ProviderExecutor: Send + Sync {
     ///
     /// Returns `Some(updated_connection)` on success, or `None` if the
     /// provider does not support credential refresh or the refresh failed.
+    ///
+    /// # Arguments
+    ///
+    /// * `credentials` - Current credentials that need refreshing
+    ///
+    /// # Returns
+    ///
+    /// * `Some(ProviderConnection)` - Updated credentials with fresh token
+    /// * `None` - Provider doesn't support refresh or refresh failed
     async fn refresh_credentials(
         &self,
         credentials: &ProviderConnection,
@@ -296,15 +483,37 @@ pub trait ProviderExecutor: Send + Sync {
 
     /// Returns `true` if the credentials are expired (or close to expiring)
     /// and should be refreshed before the next request.
+    ///
+    /// # Arguments
+    ///
+    /// * `credentials` - Credentials to check for expiration
+    ///
+    /// # Returns
+    ///
+    /// * `bool` - True if credentials need refresh, false otherwise
     fn needs_refresh(&self, credentials: &ProviderConnection) -> bool {
         let _ = credentials;
         false
     }
 }
 
+/// Unified executor that handles most OpenAI-compatible providers.
+///
+/// This is the default executor implementation that can handle any provider
+/// using OpenAI-compatible, Anthropic, Gemini, or similar APIs. It uses
+/// a configuration-driven approach rather than provider-specific code.
+///
+/// # Fields
+///
+/// * `provider` - The provider name (e.g., "openai", "anthropic")
+/// * `config` - The provider configuration (URLs, format, headers)
+/// * `pool` - Shared HTTP client pool for connection reuse
 pub struct UnifiedExecutor {
+    /// The provider name (e.g., "openai", "anthropic")
     provider: String,
+    /// The provider configuration (URLs, format, headers)
     config: ProviderExecutorConfig,
+    /// Shared HTTP client pool for connection reuse
     pool: Arc<ClientPool>,
 }
 

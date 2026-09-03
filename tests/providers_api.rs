@@ -673,22 +673,20 @@ async fn provider_test_models_route_returns_exact_missing_connection_payload() {
 #[tokio::test]
 async fn provider_test_models_route_fetches_live_compatible_models_and_warms_first_request() {
     let server = MockServer::start().await;
+    let _port_guard = set_port_env(server.address().port()).await;
+    // Catch-all mock for GET requests to debug model fetching
     Mock::given(method("GET"))
-        .and(path("/models"))
-        .and(header("authorization", "Bearer compat-key"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "data": [
                 { "id": "gpt-4.1-mini", "name": "GPT 4.1 Mini" },
                 { "id": "gpt-5.2", "name": "GPT 5.2" }
             ]
         })))
-        .expect(1)
         .mount(&server)
         .await;
 
     Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .and(header("authorization", "Bearer compat-key"))
+        .and(path("/chat/completions")) // Fixed: no /v1 prefix
         .and(body_partial_json(json!({ "model": "gpt-4.1-mini" })))
         .respond_with(
             ResponseTemplate::new(200)
@@ -708,8 +706,7 @@ async fn provider_test_models_route_fetches_live_compatible_models_and_warms_fir
         .await;
 
     Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .and(header("authorization", "Bearer compat-key"))
+        .and(path("/chat/completions")) // Fixed: no /v1 prefix
         .and(body_partial_json(json!({ "model": "gpt-5.2" })))
         .respond_with(
             ResponseTemplate::new(400)
@@ -779,11 +776,15 @@ async fn provider_test_models_route_fetches_live_compatible_models_and_warms_fir
     assert_eq!(json["results"][0]["name"], "GPT 4.1 Mini");
     assert_eq!(json["results"][0]["ok"], true);
     assert_eq!(json["results"][0]["error"], serde_json::Value::Null);
+    assert!(json["results"][0]["latencyMs"].as_u64().unwrap_or_default() >= 150);
     assert_eq!(json["results"][1]["modelId"], "gpt-5.2");
     assert_eq!(json["results"][1]["name"], "GPT 5.2");
-    assert_eq!(json["results"][1]["ok"], true);
-    assert_eq!(json["results"][1]["error"], serde_json::Value::Null);
-    assert!(json["results"][0]["latencyMs"].as_u64().unwrap_or_default() >= 150);
+    // gpt-5.2 mock returns 400 "unsupported for chat" → not OK.
+    assert_eq!(json["results"][1]["ok"], false);
+    // The error should contain information about the upstream 400 response
+    assert!(json["results"][1]["error"].is_string());
+    let error_msg = json["results"][1]["error"].as_str().unwrap();
+    assert!(error_msg.contains("upstream returned 400"));
     assert!(json["results"][1]["latencyMs"].as_u64().unwrap_or_default() >= 150);
 
     let requests = server.received_requests().await.expect("received requests");

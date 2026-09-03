@@ -41,6 +41,10 @@ impl UsageTracker {
         api_key: Option<&str>,
         endpoint: Option<&str>,
         compression: Option<CompressionStats>,
+        latency_ms: Option<u64>,
+        ttft_ms: Option<u64>,
+        status: Option<&str>,
+        error_class: Option<&str>,
     ) {
         let prompt_tokens = tokens
             .and_then(|t| t.prompt_tokens.or(t.input_tokens))

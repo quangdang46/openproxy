@@ -161,6 +161,10 @@ mod tests {
             bytes_saved: 0,
             image_prompts: 0,
             endpoint: None,
+            bytes_before: 0,
+            bytes_after: 0,
+            bytes_saved: 0,
+            image_prompts: 0,
             extra: Default::default(),
         }
     }
