@@ -1838,6 +1838,30 @@ fn normalize_body(mut body: Value, mode: CompatMode) -> Value {
 
             normalize_tools(fields);
             normalize_tool_choice(fields);
+
+            // Responses-API-only fields that plain OpenAI Chat Completions
+            // backends reject outright (observed: llm7 400s on an unknown
+            // `prompt_cache_key`). Codex sends `prompt_cache_key` on every
+            // request, so leaving these in place breaks every non-OpenAI
+            // Chat-compatible provider reached via /v1/responses. Mirrors the
+            // removals already done by the openai_responses request
+            // translator (src/core/translator/request/openai_responses.rs)
+            // for the same responses→chat conversion.
+            if let Some(r) = fields.get("reasoning") {
+                if let Some(e) = r.get("effort").and_then(Value::as_str) {
+                    let effort = e.to_string();
+                    fields.insert("reasoning_effort".to_string(), Value::String(effort));
+                }
+            }
+            fields.remove("reasoning");
+            fields.remove("prompt_cache_key");
+            fields.remove("store");
+            fields.remove("include");
+            fields.remove("parallel_tool_calls");
+            fields.remove("background");
+            fields.remove("previous_response_id");
+            fields.remove("text");
+            fields.remove("client_metadata");
         }
     }
 
