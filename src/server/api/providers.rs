@@ -764,7 +764,13 @@ pub(crate) async fn test_provider_api(
         }
         // Custom/OpenAI compatible providers with base_url
         _ => {
-            if let Some(url) = base_url {
+            // Fall back to the built-in default URL from PROVIDER_CONFIGS
+            // when the user didn't supply one (e.g. `openproxy provider test llm7`).
+            let resolved_url = base_url
+                .map(|s| s.to_string())
+                .or_else(|| crate::core::executor::provider_config_base_url(provider));
+
+            if let Some(url) = resolved_url {
                 let test_url = format!("{}/models", url.trim_end_matches('/'));
                 let mut request = client.get(&test_url);
                 if let Some(key) = api_key {

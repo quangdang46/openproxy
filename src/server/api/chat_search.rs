@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::core::media::search::{dispatch as search_dispatch, is_search_provider};
 use crate::core::proxy::resolve_proxy_target;
-use crate::server::auth::require_api_key;
+use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 
 use super::auth_error_response;
@@ -129,7 +129,7 @@ pub async fn handle_search_completions(
     body: Result<Json<Value>, JsonRejection>,
 ) -> Response {
     // -- Authentication --
-    if let Err(e) = require_api_key(&headers, &state.db) {
+    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
         return auth_error_response(e);
     }
 

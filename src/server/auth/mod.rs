@@ -351,6 +351,27 @@ pub fn require_api_key(headers: &HeaderMap, db: &Db) -> Result<ApiKey, AuthError
     Ok(api_key)
 }
 
+/// Like [`require_api_key`] but reloads the snapshot once on `AuthError::Invalid`
+/// before giving up. Handles the case where the CLI added a key while the
+/// server was already running and the in-memory snapshot is stale.
+pub async fn require_api_key_with_reload(
+    headers: &HeaderMap,
+    db: &Db,
+) -> Result<ApiKey, AuthError> {
+    match require_api_key(headers, db) {
+        Err(AuthError::Invalid) => {
+            // Snapshot may be stale: the CLI wrote a new key via SQLite
+            // but the server hasn't seen it yet. Reload once and retry.
+            if db.reload_snapshot().await.is_ok() {
+                require_api_key(headers, db)
+            } else {
+                Err(AuthError::Invalid)
+            }
+        }
+        other => other,
+    }
+}
+
 fn validate_cli_token(token: &str, api_key: &ApiKey) -> Result<(), AuthError> {
     let Some(expected_machine_id) = api_key
         .machine_id

@@ -46,7 +46,7 @@ use crate::core::utils::client_detector::{detect_client_tool, is_native_passthro
 use crate::core::utils::stream_flags::resolve_stream_flags;
 use crate::core::utils::tool_deduper::dedupe_tools;
 use crate::payload_rules::{apply_request_rules, apply_system_prompt};
-use crate::server::auth::{extract_api_key, require_api_key};
+use crate::server::auth::{extract_api_key, require_api_key, require_api_key_with_reload};
 use crate::server::state::AppState;
 use crate::types::{AppDb, ProviderConnection, TokenUsage};
 
@@ -263,7 +263,7 @@ async fn chat_completions_impl(
 
     let presented_api_key = extract_api_key(&headers);
     if require_api_key_auth && state.db.snapshot().settings.require_login {
-        if let Err(error) = require_api_key(&headers, &state.db) {
+        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
         }
     }
@@ -1255,6 +1255,7 @@ async fn forward_with_provider_fallback(
 ) -> Result<Response, ComboAttemptError> {
     let mut excluded = HashSet::new();
     let mut last_error: Option<ComboAttemptError> = None;
+    let mut reloaded = false;
     let registry = &state.account_registry;
 
     // Per-key monthly budget kill-switch (free-tier Feature 3): block the
@@ -1282,6 +1283,16 @@ async fn forward_with_provider_fallback(
                     error.retry_after = retry_after;
                 }
                 return Err(error);
+            }
+
+            // Stale-snapshot recovery: if the CLI added a provider
+            // connection while the server was running, the in-memory
+            // snapshot won't have it. Reload from SQLite once and retry.
+            if !reloaded && retry_after.is_none() {
+                reloaded = true;
+                if state.db.reload_snapshot().await.is_ok() {
+                    continue;
+                }
             }
 
             return Err(ComboAttemptError {

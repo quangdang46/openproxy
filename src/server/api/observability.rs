@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::time;
 
-use crate::server::auth::require_api_key;
+use crate::server::auth::require_api_key_with_reload;
 use crate::server::console_logs::ConsoleLogEvent;
 use crate::server::state::AppState;
 
@@ -38,7 +38,7 @@ pub fn routes() -> Router<AppState> {
 }
 
 async fn get_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key(&headers, &state.db) {
+    if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
         return auth_error_response(error);
     }
 
@@ -52,7 +52,7 @@ async fn get_logs(State(state): State<AppState>, headers: HeaderMap) -> Response
 }
 
 async fn stream_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key(&headers, &state.db) {
+    if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
         return auth_error_response(error);
     }
 
@@ -109,7 +109,7 @@ async fn stream_logs(State(state): State<AppState>, headers: HeaderMap) -> Respo
 }
 
 async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key(&headers, &state.db) {
+    if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
         return auth_error_response(error);
     }
 
@@ -126,7 +126,7 @@ async fn get_stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
 }
 
 async fn clear_logs(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(error) = require_api_key(&headers, &state.db) {
+    if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
         return auth_error_response(error);
     }
 

@@ -18,7 +18,7 @@ use crate::server::auth::login_limiter::LockoutError;
 use crate::server::auth::oidc::{
     code_challenge_from_verifier, generate_code_verifier, generate_state_token,
 };
-use crate::server::auth::{increment_token_epoch, jwt_secret, require_api_key, revoke_jti};
+use crate::server::auth::{increment_token_epoch, jwt_secret, require_api_key, require_api_key_with_reload, revoke_jti};
 
 use crate::server::state::AppState;
 use crate::types::Settings;
@@ -537,7 +537,7 @@ pub async fn logout(
         return response;
     }
 
-    let api_key = match require_api_key(&headers, &state.db) {
+    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
@@ -592,7 +592,7 @@ pub async fn get_session(
     Path(session_id): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let _api_key = match require_api_key(&headers, &state.db) {
+    let _api_key = match require_api_key_with_reload(&headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
@@ -625,7 +625,7 @@ pub async fn get_session(
 /// GET /api/auth/sessions
 /// List all sessions for the current API key
 pub async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let api_key = match require_api_key(&headers, &state.db) {
+    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
@@ -658,7 +658,7 @@ pub async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) ->
 /// DELETE /api/auth/sessions
 /// Invalidate all sessions for the current API key
 pub async fn delete_all_sessions(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let api_key = match require_api_key(&headers, &state.db) {
+    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
         Ok(key) => key,
         Err(e) => return crate::server::api::auth_error_response(e),
     };
