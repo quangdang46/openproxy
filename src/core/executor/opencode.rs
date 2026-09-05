@@ -14,6 +14,15 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 const OPENCODE_BASE: &str = "https://opencode.ai";
 const OPENCODE_PICKLE_PATH: &str = "/zen/v1/messages";
 const OPENCODE_DEFAULT_PATH: &str = "/zen/v1/chat/completions";
+const OPENCODE_RESPONSES_PATH: &str = "/zen/v1/responses";
+
+/// Check if a model should be routed through the Responses API instead of chat.
+/// Muse Spark models use `/zen/v1/responses`.
+/// Mirrors `isResponsesModel` in `open-sse/executors/opencode.js:29-32`.
+fn is_responses_model(model: &str) -> bool {
+    let base = model.split([':', '@']).next().unwrap_or(model);
+    base.contains("muse") && base.contains("spark")
+}
 
 #[derive(Clone)]
 pub struct OpenCodeExecutor {
@@ -95,7 +104,9 @@ impl OpenCodeExecutor {
     }
 
     fn build_url(&self, model: &str) -> String {
-        let path = if model == "big-pickle" {
+        let path = if is_responses_model(model) {
+            OPENCODE_RESPONSES_PATH
+        } else if model == "big-pickle" {
             OPENCODE_PICKLE_PATH
         } else {
             OPENCODE_DEFAULT_PATH
@@ -200,6 +211,21 @@ impl OpenCodeExecutor {
     ) -> Result<OpenCodeExecutorResponse, OpenCodeExecutorError> {
         // Normalize developer→system role (many providers reject role:developer)
         normalize_developer_role(&mut request.body);
+
+        // Responses API models need max_tokens → max_output_tokens normalization.
+        // Mirrors opencode.js:76-86 (transformRequest for isResponsesModel).
+        let is_responses = is_responses_model(&request.model);
+        if is_responses {
+            if let Some(body_obj) = request.body.as_object_mut() {
+                // Read the value first to avoid borrow conflicts
+                let max_val = body_obj
+                    .remove("max_tokens")
+                    .or_else(|| body_obj.remove("max_completion_tokens"));
+                if let Some(val) = max_val {
+                    body_obj.insert("max_output_tokens".to_string(), val);
+                }
+            }
+        }
 
         let url = self.build_url(&request.model);
         let headers = self.build_headers(

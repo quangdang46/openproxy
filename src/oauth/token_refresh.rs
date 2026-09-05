@@ -899,6 +899,155 @@ pub async fn refresh_qoder_token(_refresh_token: &str) -> Result<RefreshResult, 
     Err("Qoder does not support token refresh".to_string())
 }
 
+/// Refresh a Trae (ByteDance marscode) access token.
+///
+/// 9router parity: `open-sse/services/tokenRefresh/providers.js:619-688`.
+/// POST ExchangeToken with JSON body `{ClientID, RefreshToken, ClientSecret, UserID}`.
+/// Response: `{Result: {AccessToken, RefreshToken, TokenType, ExpiresAt}}`.
+pub async fn refresh_trae_token(refresh_token: &str) -> Result<RefreshResult, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://api.marscode.com/cloudide/api/v3/trae/oauth/ExchangeToken")
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json")
+        .header("User-Agent", "Trae/1.0.0 antigravity-cockpit-tools")
+        .json(&serde_json::json!({
+            "ClientID": "ono9krqynydwx5",
+            "RefreshToken": refresh_token,
+            "ClientSecret": "-",
+            "UserID": "",
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Trae refresh request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!("Trae refresh returned HTTP {status}: {text}"));
+    }
+
+    let payload: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("Trae refresh parse failed: {e}"))?;
+
+    // Response may nest under `Result` (PascalCase) or `result` (camelCase).
+    let result = payload
+        .get("Result")
+        .or_else(|| payload.get("result"))
+        .unwrap_or(&payload);
+
+    let access = result
+        .get("AccessToken")
+        .or_else(|| result.get("accessToken"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "Trae refresh missing AccessToken".to_string())?;
+
+    let new_refresh = result
+        .get("RefreshToken")
+        .or_else(|| result.get("refreshToken"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // ExpiresAt may be a Unix timestamp (number) or RFC3339 string.
+    let expires_in = result
+        .get("ExpiresAt")
+        .or_else(|| result.get("expiresAt"))
+        .and_then(|v| {
+            if let Some(ts) = v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)) {
+                let now = chrono::Utc::now().timestamp();
+                Some((ts - now).max(1))
+            } else if let Some(s) = v.as_str() {
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .ok()
+                    .map(|dt| (dt.timestamp() - chrono::Utc::now().timestamp()).max(1))
+            } else {
+                None
+            }
+        });
+
+    Ok(RefreshResult {
+        access_token: access.to_string(),
+        refresh_token: new_refresh,
+        expires_in,
+    })
+}
+
+/// Refresh a CodeBuddy Intl access token.
+///
+/// 9router parity: `open-sse/services/tokenRefresh/providers.js:566-615`.
+/// Same wire format as codebuddy-cn but with `X-Domain: "www.codebuddy.ai"`.
+pub async fn refresh_codebuddy_intl_token(refresh_token: &str) -> Result<RefreshResult, String> {
+    let client = reqwest::Client::new();
+    let resp = client
+        .post("https://www.codebuddy.ai/v2/plugin/auth/token/refresh")
+        .header(CONTENT_TYPE, "application/json")
+        .header(ACCEPT, "application/json")
+        .header("User-Agent", "IDE/2.63.2 CodeBuddy/2.63.2")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("X-Domain", "www.codebuddy.ai")
+        .header("X-Refresh-Token", refresh_token)
+        .header("X-Auth-Refresh-Source", "plugin")
+        .header("X-Product", "SaaS")
+        .body("{}")
+        .send()
+        .await
+        .map_err(|e| format!("CodeBuddy Intl refresh request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "CodeBuddy Intl refresh returned HTTP {status}: {text}"
+        ));
+    }
+
+    let payload: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("CodeBuddy Intl refresh parse failed: {e}"))?;
+
+    let code = payload.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code != 0 {
+        return Err(format!(
+            "CodeBuddy Intl refresh code={code} msg={:?}",
+            payload.get("msg")
+        ));
+    }
+
+    let data = payload
+        .get("data")
+        .ok_or_else(|| "CodeBuddy Intl refresh missing data".to_string())?;
+
+    let access = data
+        .get("accessToken")
+        .or_else(|| data.get("access_token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "CodeBuddy Intl refresh missing accessToken".to_string())?;
+
+    let new_refresh = data
+        .get("refreshToken")
+        .or_else(|| data.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    let expires_in = data
+        .get("expiresIn")
+        .or_else(|| data.get("expires_in"))
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)));
+
+    Ok(RefreshResult {
+        access_token: access.to_string(),
+        refresh_token: new_refresh,
+        expires_in,
+    })
+}
+
 /// Dispatch to the correct per-provider token refresh function.
 ///
 /// Matches on `provider` name and calls the appropriate `dedup_refresh` wrapper.
@@ -1053,6 +1202,22 @@ pub async fn dispatch_oauth_refresh(
             dedup_refresh(provider, refresh_token, move || {
                 let rt = rt.clone();
                 async move { refresh_xai_token(&rt).await }
+            })
+            .await
+        }
+        "trae" | "marscode" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_trae_token(&rt).await }
+            })
+            .await
+        }
+        "codebuddy-intl" | "cbai" => {
+            let rt = refresh_token.to_string();
+            dedup_refresh(provider, refresh_token, move || {
+                let rt = rt.clone();
+                async move { refresh_codebuddy_intl_token(&rt).await }
             })
             .await
         }

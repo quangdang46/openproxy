@@ -219,7 +219,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "tokenrouter",
-            ProviderConfig::openai("https://tokenrouter.com/chat/completions"),
+            ProviderConfig::openai("https://api.tokenrouter.com/v1/chat/completions"),
         ),
         (
             "venice",
@@ -287,7 +287,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "grok-web",
-            ProviderConfig::openai("https://grok.com/app-chat/conversations/new"),
+            ProviderConfig::openai("https://grok.com/rest/app-chat/conversations/new"),
         ),
         (
             "perplexity-web",

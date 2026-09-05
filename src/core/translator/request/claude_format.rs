@@ -32,6 +32,8 @@ fn has_valid_content(msg: &Value) -> bool {
                     .unwrap_or(false)
                 || t == "tool_use"
                 || t == "tool_result"
+                || t == "image"
+                || t == "document"
         }),
         _ => false,
     }
@@ -45,6 +47,53 @@ fn is_adaptive_thinking_unsupported(model: &str) -> bool {
 /// Providers whose quirks include dropping `output_config`.
 fn provider_drops_output_config(provider: &str) -> bool {
     matches!(provider, "minimax" | "minimax-cn")
+}
+
+/// Find the index of the last tool that does NOT have `defer_loading: true`.
+///
+/// Anthropic rejects tools carrying both `defer_loading:true` and `cache_control`
+/// ("Tools defer_loading cannot use prompt caching", #3567). MCP clients put
+/// `defer_loading` on tools that should not anchor a cache breakpoint.
+/// Mirrors `lastCacheableToolIndex` in `open-sse/translator/formats/claude.js:19-25`.
+fn last_cacheable_tool_index(tools: &[Value]) -> Option<usize> {
+    tools.iter().rposition(|tool| {
+        !tool
+            .get("defer_loading")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    })
+}
+
+/// Strip the `[1m]` context marker from a model name if present.
+///
+/// When the 1M-context beta is toggled on, Claude Code marks requests as
+/// `claude-opus-5[1m]`. The marker is a client-side annotation, not a valid
+/// model id — requests carrying it fail at model resolution. The actual 1M
+/// capability travels via the `anthropic-beta` header, which is forwarded untouched.
+/// Mirrors `CONTEXT_MARKER` in `open-sse/utils/modelMarkers.js:11`.
+pub fn strip_model_context_marker(model: &str) -> (String, Option<&'static str>) {
+    // Simple suffix check — avoids pulling in regex crate for a single pattern.
+    if let Some(stripped) = model.strip_suffix("[1m]") {
+        (stripped.to_string(), Some("1m"))
+    } else if let Some(stripped) = model.strip_suffix("[1M]") {
+        (stripped.to_string(), Some("1m"))
+    } else {
+        (model.to_string(), None)
+    }
+}
+
+/// Regex pattern for valid Claude server_tool_use ids.
+/// Must start with `srvtoolu_` followed by alphanumeric/underscore characters.
+/// Anything else is considered a foreign id (from a non-Claude provider) and
+/// must be dropped before sending to Claude to avoid 400 errors.
+/// Mirrors `CLAUDE_SERVER_TOOL_USE_ID` in `open-sse/translator/formats/claude.js:124`.
+fn is_valid_srvtoolu_id(id: &str) -> bool {
+    // Mirrors CLAUDE_SERVER_TOOL_USE_ID = /^srvtoolu_[a-zA-Z0-9_]+$/ (+ requires ≥1 char after prefix)
+    id.starts_with("srvtoolu_")
+        && id.len() > 9
+        && id[9..]
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 // ─── normalizeClaudePassthrough ─────────────────────────────────────
@@ -127,6 +176,64 @@ pub fn normalize_claude_passthrough(body: &mut Value, model: &str) {
         }
 
         obj.insert("messages".to_string(), Value::Array(kept));
+    }
+
+    // 4. Drop server_tool_use blocks with foreign ids + orphaned tool_result cleanup.
+    // When combo/fallback routes through non-Claude providers first, the conversation
+    // history may contain server_tool_use blocks with ids that don't match the
+    // Claude `srvtoolu_*` prefix. Claude rejects these with 400, and any
+    // tool_result referencing a dropped id must also be removed.
+    // Mirrors claude.js:123-234 (hasForeignServerToolUseId + cleanup).
+    let mut dropped_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+        // Pass 1: detect and drop foreign server_tool_use in assistant messages
+        for msg in messages.iter_mut() {
+            if msg.get("role").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
+            let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) else {
+                continue;
+            };
+            let mut kept_blocks = Vec::with_capacity(content.len());
+            for block in content.drain(..) {
+                if block.get("type").and_then(Value::as_str) == Some("server_tool_use") {
+                    let id = block.get("id").and_then(Value::as_str).unwrap_or("");
+                    if !is_valid_srvtoolu_id(id) {
+                        dropped_ids.insert(id.to_string());
+                        continue; // drop this block
+                    }
+                }
+                kept_blocks.push(block);
+            }
+            *content = kept_blocks;
+        }
+
+        // Pass 2: remove orphaned tool_result / web_search_tool_result blocks
+        if !dropped_ids.is_empty() {
+            for msg in messages.iter_mut() {
+                let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) else {
+                    continue;
+                };
+                let mut kept = Vec::with_capacity(content.len());
+                for block in content.drain(..) {
+                    let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+                    let is_result =
+                        block_type == "tool_result" || block_type == "web_search_tool_result";
+                    if is_result {
+                        let ref_id = block
+                            .get("tool_use_id")
+                            .and_then(Value::as_str)
+                            .unwrap_or("");
+                        if dropped_ids.contains(ref_id) {
+                            continue; // drop orphaned result
+                        }
+                    }
+                    kept.push(block);
+                }
+                *content = kept;
+            }
+        }
     }
 }
 
@@ -394,14 +501,16 @@ pub fn prepare_claude_request(body: &mut Value, provider: &str, api_key: Option<
                 .collect();
         }
 
-        // Rebuild tools with cache_control on last
-        let len = tools.len();
-        let mut rebuilt: Vec<Value> = Vec::with_capacity(len);
+        // Rebuild tools with cache_control on the last cacheable one.
+        // Skip tools with `defer_loading: true` — Anthropic rejects cache_control
+        // on deferred tools (#3567). Mirrors lastCacheableToolIndex in claude.js:19-25.
+        let cacheable_idx = last_cacheable_tool_index(tools);
+        let mut rebuilt: Vec<Value> = Vec::with_capacity(tools.len());
         for (i, tool) in tools.drain(..).enumerate() {
             let mut t = tool;
             if let Some(t_obj) = t.as_object_mut() {
                 t_obj.remove("cache_control");
-                if i == len - 1 {
+                if Some(i) == cacheable_idx {
                     t_obj.insert(
                         "cache_control".to_string(),
                         json!({"type": "ephemeral", "ttl": "1h"}),
@@ -892,5 +1001,133 @@ mod tests {
         ];
         let result = fix_tool_use_ordering(msgs);
         assert_eq!(result.len(), 2);
+    }
+
+    // ─── defer_loading cache breakpoint ─────────────────────────────
+
+    #[test]
+    fn last_cacheable_tool_index_skips_deferred() {
+        let tools = vec![
+            json!({"name": "a", "defer_loading": true}),
+            json!({"name": "b"}),
+            json!({"name": "c", "defer_loading": true}),
+        ];
+        assert_eq!(last_cacheable_tool_index(&tools), Some(1));
+    }
+
+    #[test]
+    fn last_cacheable_tool_index_all_deferred() {
+        let tools = vec![
+            json!({"name": "a", "defer_loading": true}),
+            json!({"name": "b", "defer_loading": true}),
+        ];
+        assert_eq!(last_cacheable_tool_index(&tools), None);
+    }
+
+    #[test]
+    fn prepare_skips_deferred_tool_for_cache_control() {
+        let mut body = json!({
+            "tools": [
+                {"name": "a", "description": "x", "input_schema": {"type": "object"}},
+                {"name": "b", "description": "y", "input_schema": {"type": "object"}, "defer_loading": true}
+            ],
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        prepare_claude_request(&mut body, "claude", None);
+        let tools = body["tools"].as_array().unwrap();
+        // tool "a" (index 0) is last cacheable → gets cache_control
+        assert!(
+            tools[0].get("cache_control").is_some(),
+            "first tool gets cache_control"
+        );
+        // tool "b" (index 1) has defer_loading → no cache_control
+        assert!(
+            tools[1].get("cache_control").is_none(),
+            "deferred tool skips cache_control"
+        );
+    }
+
+    // ─── [1m] context marker ────────────────────────────────────────
+
+    #[test]
+    fn strip_model_context_marker_basic() {
+        assert_eq!(
+            strip_model_context_marker("claude-opus-5[1m]"),
+            ("claude-opus-5".to_string(), Some("1m"))
+        );
+        assert_eq!(
+            strip_model_context_marker("claude-opus-5[1M]"),
+            ("claude-opus-5".to_string(), Some("1m"))
+        );
+        assert_eq!(
+            strip_model_context_marker("claude-sonnet-4"),
+            ("claude-sonnet-4".to_string(), None)
+        );
+    }
+
+    // ─── server_tool_use foreign id drop ────────────────────────────
+
+    #[test]
+    fn is_valid_srvtoolu_id_valid() {
+        assert!(is_valid_srvtoolu_id("srvtoolu_abc123"));
+        assert!(is_valid_srvtoolu_id("srvtoolu_1"));
+    }
+
+    #[test]
+    fn is_valid_srvtoolu_id_invalid() {
+        assert!(!is_valid_srvtoolu_id("srvtoolu_"));
+        assert!(!is_valid_srvtoolu_id("foreign_tool_xyz"));
+        assert!(!is_valid_srvtoolu_id(""));
+    }
+
+    #[test]
+    fn passthrough_drops_foreign_server_tool_use() {
+        let mut body = json!({
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": [
+                    {"type": "server_tool_use", "id": "srvtoolu_valid1"},
+                    {"type": "server_tool_use", "id": "foreign_xyz"}
+                ]},
+                {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "srvtoolu_valid1", "content": "ok"},
+                    {"type": "tool_result", "tool_use_id": "foreign_xyz", "content": "orphaned"}
+                ]}
+            ]
+        });
+        normalize_claude_passthrough(&mut body, "claude-sonnet-4");
+        let assistant = &body["messages"][1];
+        let content = assistant["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1, "foreign server_tool_use dropped");
+        assert_eq!(content[0]["id"], "srvtoolu_valid1");
+
+        let user = &body["messages"][2];
+        let user_content = user["content"].as_array().unwrap();
+        assert_eq!(user_content.len(), 1, "orphaned tool_result dropped");
+        assert_eq!(user_content[0]["tool_use_id"], "srvtoolu_valid1");
+    }
+
+    // ─── has_valid_content IMAGE/DOCUMENT ────────────────────────────
+
+    #[test]
+    fn has_valid_content_image_block() {
+        let msg = json!({"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "data": "abc"}}
+        ]});
+        assert!(
+            has_valid_content(&msg),
+            "image block should be valid content"
+        );
+    }
+
+    #[test]
+    fn has_valid_content_document_block() {
+        let msg = json!({"role": "user", "content": [
+            {"type": "document", "source": {"type": "base64", "data": "abc"}, "media_type": "application/pdf"}
+        ]});
+        assert!(
+            has_valid_content(&msg),
+            "document block should be valid content"
+        );
     }
 }

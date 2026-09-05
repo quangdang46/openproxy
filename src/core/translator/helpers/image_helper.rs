@@ -18,6 +18,9 @@ use url::Url;
 /// Maximum payload we are willing to download (10 MiB).
 const MAX_DOWNLOAD_BYTES: usize = 10 * 1024 * 1024;
 
+/// Maximum number of redirect hops before aborting (matches JS `maxRedirects`).
+const MAX_REDIRECT_HOPS: usize = 5;
+
 /// Known image magic-byte prefixes for validation.
 const IMAGE_MAGIC_BYTES: &[&[u8]] = &[
     b"\xff\xd8\xff",            // JPEG
@@ -103,6 +106,10 @@ async fn resolve_public_ip(host: &str) -> Option<IpAddr> {
 /// Fetch `image_url` and return its data-URI + content-type. Returns
 /// `None` on any error, including SSRF-blocked destinations (matches the
 /// JS contract — never throws).
+///
+/// Redirects are followed manually (up to `MAX_REDIRECT_HOPS`) with SSRF
+/// re-validation on every hop, so a validated public URL cannot 302 its way
+/// to an internal target like `169.254.169.254`.
 pub async fn fetch_image_as_base64(client: &Client, image_url: &str) -> Option<FetchedImage> {
     // 1. Reject non-HTTP/HTTPS URLs.
     if !image_url.starts_with("http://") && !image_url.starts_with("https://") {
@@ -116,18 +123,72 @@ pub async fn fetch_image_as_base64(client: &Client, image_url: &str) -> Option<F
     // 3. DNS pinning: resolve the hostname and reject private IPs.
     let _pinned_ip = resolve_public_ip(host).await?;
 
-    // 4. Perform the HTTP GET with a short timeout.
-    let res = client
-        .get(image_url)
+    // 4. Build a no-redirect client so we can follow redirects manually with
+    //    SSRF re-validation on each hop (matches JS `fetchPublic` with
+    //    `maxRedirects = 5`).
+    let no_redirect_client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
-        .send()
-        .await
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
         .ok()?;
+
+    let mut current_url = image_url.to_string();
+    let mut hop: usize = 0;
+    let res = loop {
+        let response = no_redirect_client.get(&current_url).send().await.ok()?;
+
+        let status = response.status();
+        let is_redirect = status.is_redirection(); // 3xx
+        let location = if is_redirect {
+            response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .and_then(|v| v.to_str().ok())
+        } else {
+            None
+        };
+
+        let location = match location {
+            Some(loc) => loc.to_string(),
+            None => break response, // not a redirect — use this response
+        };
+
+        // Enforce the hop limit (matches JS: `hop >= maxRedirects`).
+        if hop >= MAX_REDIRECT_HOPS {
+            return None;
+        }
+
+        // Resolve the redirect target relative to the current URL.
+        let next_url = match Url::parse(&location) {
+            Ok(absolute) => absolute.to_string(),
+            Err(_) => {
+                // Relative URL — resolve against current_url.
+                let base = Url::parse(&current_url).ok()?;
+                match base.join(&location) {
+                    Ok(joined) => joined.to_string(),
+                    Err(_) => return None,
+                }
+            }
+        };
+
+        // 5. Re-validate the redirect target: must still resolve to a public IP.
+        let next_parsed = Url::parse(&next_url).ok()?;
+        let next_host = next_parsed.host_str()?;
+        if resolve_public_ip(next_host).await.is_none() {
+            // Redirect target resolves to a private/reserved IP — abort.
+            return None;
+        }
+
+        hop += 1;
+        current_url = next_url;
+    };
+
+    // 7. At this point `res` is the final (non-redirect) response.
     if !res.status().is_success() {
         return None;
     }
 
-    // 5. Check Content-Type header hints early (reject non-image early).
+    // 8. Check Content-Type header hints early (reject non-image early).
     //    Clone to an owned String before consuming `res` via `.bytes()`.
     let content_type = res
         .headers()
@@ -141,19 +202,19 @@ pub async fn fetch_image_as_base64(client: &Client, image_url: &str) -> Option<F
         return None;
     }
 
-    // 6. Read body with a 10 MiB cap.
+    // 9. Read body with a 10 MiB cap.
     let bytes = res.bytes().await.ok()?;
     if bytes.len() > MAX_DOWNLOAD_BYTES {
         return None;
     }
 
-    // 7. Magic-byte validation: the body must look like an image.
+    // 10. Magic-byte validation: the body must look like an image.
     if !is_valid_image_body(&bytes) {
         return None;
     }
 
-    // 8. Determine final mime type — prefer the content-type from the server
-    //    but fall back to a magic-byte-based guess.
+    // 11. Determine final mime type — prefer the content-type from the server
+    //     but fall back to a magic-byte-based guess.
     let mime = if content_type.starts_with("image/") {
         content_type
     } else {

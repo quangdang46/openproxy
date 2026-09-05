@@ -403,6 +403,25 @@ pub fn codebuddy_intl() -> OAuthProviderConfig {
     }
 }
 
+/// Trae (ByteDance marscode) — custom JSON-body refresh flow.
+/// 9router parity: `open-sse/providers/registry/trae.js:48-62`.
+pub fn trae() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "trae",
+        client_id: "ono9krqynydwx5",
+        authorize_url: "https://api.marscode.com/cloudide/api/v3/trae/GetLoginGuidance",
+        token_url: "https://api.marscode.com/cloudide/api/v3/trae/oauth/ExchangeToken",
+        scopes: &[],
+        uses_pkce: false,
+        extra_params: &[
+            ("client_secret", "-"),
+            ("platform", "trae"),
+            ("poll_interval", "1500"),
+        ],
+        refresh_lead_ms: 4 * 60 * 60 * 1000,
+    }
+}
+
 /// Cursor IDE — import-token flow (reads from local SQLite DB).
 /// OAuth endpoints are empty; authentication happens via the cursor_import module.
 pub fn cursor() -> OAuthProviderConfig {
@@ -537,6 +556,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "antigravity" => Some(antigravity()),
         "codebuddy-cn" => Some(codebuddy_cn()),
         "codebuddy-intl" => Some(codebuddy_intl()),
+        "trae" => Some(trae()),
         _ => None,
     }
 }
