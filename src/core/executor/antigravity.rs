@@ -584,10 +584,24 @@ impl AntigravityExecutor {
                     for part in parts.iter_mut() {
                         if let Some(obj) = part.as_object_mut() {
                             if let Some(Value::String(text)) = obj.get_mut("text") {
+                                // Rule 1: Remove Claude agent branding (9router v0.5.55)
                                 *text = text.replace(
                                     "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
                                     "",
                                 );
+                                // Rule 2: Replace opencode branding with antigravity
+                                // (case-preserving, 9router appConstants.js:176-179).
+                                // Antigravity's backend flags competing-client branding in system
+                                // prompts and returns 429 Quota Exhausted.
+                                if text.contains("opencode")
+                                    || text.contains("OpenCode")
+                                    || text.contains("OPENCODE")
+                                {
+                                    *text = text
+                                        .replace("OpenCode", "Antigravity")
+                                        .replace("OPENCODE", "ANTIGRAVITY")
+                                        .replace("opencode", "antigravity");
+                                }
                             }
                         }
                     }

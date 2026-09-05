@@ -75,7 +75,8 @@ async fn handle_web_fetch(
 
     // ── 2. Auth: conditional on settings.require_login (baseline parity) ───
     if state.db.snapshot().settings.require_login {
-        if let Err(e) = crate::server::auth::require_api_key_with_reload(&headers, &state.db).await {
+        if let Err(e) = crate::server::auth::require_api_key_with_reload(&headers, &state.db).await
+        {
             return auth_error_response(e);
         }
     }

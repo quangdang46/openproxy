@@ -81,12 +81,18 @@ async fn run_logs(rt: &Runtime, ctx: OutputCtx, limit: Option<usize>) -> anyhow:
 
 fn print_json_value(ctx: OutputCtx, value: &Value) {
     if ctx.is_robot() {
-        let _ = emit_robot("openproxy.v1.pxpipe", json!({
-            "ok": true,
-            "data": value,
-            "error": null,
-        }));
+        let _ = emit_robot(
+            "openproxy.v1.pxpipe",
+            json!({
+                "ok": true,
+                "data": value,
+                "error": null,
+            }),
+        );
     } else {
-        humanln(ctx, &serde_json::to_string_pretty(value).unwrap_or_default());
+        humanln(
+            ctx,
+            &serde_json::to_string_pretty(value).unwrap_or_default(),
+        );
     }
 }

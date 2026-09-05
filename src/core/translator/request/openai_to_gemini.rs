@@ -2,7 +2,7 @@
 //!
 //! Converts OpenAI Chat Completions format to Gemini API format.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use crate::core::config::app_constants::ANTIGRAVITY_DEFAULT_SYSTEM;
@@ -124,6 +124,9 @@ const UNSUPPORTED_SCHEMA_CONSTRAINTS: &[&str] = &[
     "minItems",
     "maxItems",
     "format",
+    "multipleOf",
+    "uniqueItems",
+    "contains",
     // Claude rejects these in VALIDATED mode
     "default",
     "examples",
@@ -140,6 +143,7 @@ const UNSUPPORTED_SCHEMA_CONSTRAINTS: &[&str] = &[
     "writeOnly",
     // Object validation keywords (not supported)
     "additionalProperties",
+    "additionalItems",
     "propertyNames",
     "patternProperties",
     "enumDescriptions",
@@ -148,6 +152,9 @@ const UNSUPPORTED_SCHEMA_CONSTRAINTS: &[&str] = &[
     "oneOf",
     "allOf",
     "not",
+    // Unevaluated keywords (not supported by Gemini)
+    "unevaluatedProperties",
+    "unevaluatedItems",
     // Dependency keywords (not supported)
     "dependencies",
     "dependentSchemas",
@@ -161,6 +168,9 @@ const UNSUPPORTED_SCHEMA_CONSTRAINTS: &[&str] = &[
     "else",
     "contentMediaType",
     "contentEncoding",
+    "contentSchema",
+    // Tuple validation (handled by convertPrefixItems before this phase)
+    "prefixItems",
     // UI/Styling properties (from Cursor tools - NOT JSON Schema standard)
     "cornerRadius",
     "fillColor",
@@ -561,6 +571,69 @@ fn add_placeholders(obj: &mut Value) {
     }
 }
 
+/// Convert `prefixItems` (tuple validation) to `items` — Gemini cannot express tuples,
+/// and a `type:"array"` schema without `items` is rejected with "missing field".
+/// Mirrors `convertPrefixItems` in `open-sse/translator/formats/gemini.js:315-333`.
+fn convert_prefix_items(obj: &mut Value) {
+    if let Value::Object(map) = obj {
+        // Convert prefixItems → items (only if items is not already set)
+        if let Some(Value::Array(prefix_arr)) = map.get("prefixItems").cloned() {
+            if !prefix_arr.is_empty() {
+                let has_items = map.get("items").is_some();
+                if !has_items {
+                    let variants: Vec<Value> = prefix_arr
+                        .into_iter()
+                        .filter(|s| {
+                            s.get("type")
+                                .and_then(Value::as_str)
+                                .map(|t| t != "null")
+                                .unwrap_or(true)
+                        })
+                        .collect();
+                    if variants.len() == 1 {
+                        map.insert("items".to_string(), variants.into_iter().next().unwrap());
+                    } else if variants.len() > 1 {
+                        map.insert("items".to_string(), json!({"anyOf": variants}));
+                    }
+                }
+                map.remove("prefixItems");
+            }
+        }
+
+        // Recurse into child values
+        let keys: Vec<String> = map.keys().cloned().collect();
+        for key in keys {
+            if let Some(val) = map.get_mut(&key) {
+                convert_prefix_items(val);
+            }
+        }
+    } else if let Value::Array(arr) = obj {
+        for item in arr.iter_mut() {
+            convert_prefix_items(item);
+        }
+    }
+}
+
+/// Gemini requires `items` on every `type:"array"` schema — fill a permissive placeholder.
+/// Mirrors `ensureArrayItems` in `open-sse/translator/formats/gemini.js:336-342`.
+fn ensure_array_items(obj: &mut Value) {
+    if let Value::Object(map) = obj {
+        if map.get("type").and_then(Value::as_str) == Some("array") && !map.contains_key("items") {
+            map.insert("items".to_string(), json!({"type": "string"}));
+        }
+        let keys: Vec<String> = map.keys().cloned().collect();
+        for key in keys {
+            if let Some(val) = map.get_mut(&key) {
+                ensure_array_items(val);
+            }
+        }
+    } else if let Value::Array(arr) = obj {
+        for item in arr.iter_mut() {
+            ensure_array_items(item);
+        }
+    }
+}
+
 /// Clean JSON Schema for Antigravity API compatibility - removes unsupported keywords recursively.
 /// Mirrors cleanJSONSchemaForAntigravity in open-sse/translator/formats/gemini.js.
 pub fn clean_json_schema_for_antigravity(schema: &mut Value) {
@@ -574,11 +647,13 @@ pub fn clean_json_schema_for_antigravity(schema: &mut Value) {
 
     // Phase 2: Flatten complex structures
     merge_allof(schema);
+    convert_prefix_items(schema);
     flatten_anyof_oneof(schema);
     flatten_type_arrays(schema);
 
     // Phase 2.5: Infer missing type=object when properties exist (Gemini requirement)
     ensure_object_type(schema);
+    ensure_array_items(schema);
 
     // Phase 3: Remove all unsupported keywords at ALL levels
     remove_unsupported_keywords(schema, UNSUPPORTED_SCHEMA_CONSTRAINTS);

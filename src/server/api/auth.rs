@@ -18,7 +18,9 @@ use crate::server::auth::login_limiter::LockoutError;
 use crate::server::auth::oidc::{
     code_challenge_from_verifier, generate_code_verifier, generate_state_token,
 };
-use crate::server::auth::{increment_token_epoch, jwt_secret, require_api_key, require_api_key_with_reload, revoke_jti};
+use crate::server::auth::{
+    increment_token_epoch, jwt_secret, require_api_key, require_api_key_with_reload, revoke_jti,
+};
 
 use crate::server::state::AppState;
 use crate::types::Settings;

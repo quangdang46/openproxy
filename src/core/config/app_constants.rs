@@ -94,9 +94,10 @@ pub fn current_platform() -> AgPlatform {
 }
 
 /// Antigravity advertised User-Agent for chat / stream requests.
+/// Mirrors ANTAGRAVITY_IDE_VERSION in `open-sse/providers/shared.js:81-83`.
 pub fn ag_chat_user_agent() -> String {
     format!(
-        "antigravity/1.107.0 {}/{}",
+        "antigravity/2.11.0 {}/{}",
         std::env::consts::OS,
         std::env::consts::ARCH
     )

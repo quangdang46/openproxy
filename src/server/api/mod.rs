@@ -149,6 +149,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
             post(compat::responses).options(compat::cors_options),
         )
         .route(
+            "/responses",
+            post(compat::responses).options(compat::cors_options),
+        )
+        .route(
             "/v1/responses/compact",
             post(compat::responses_compact).options(compat::cors_options),
         )
