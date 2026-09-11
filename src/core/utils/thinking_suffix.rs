@@ -429,7 +429,11 @@ pub fn apply_thinking_level(
                 }
                 return;
             }
-            let effort = if level == "xhigh" || level == "max" {
+            // 9router parity (#3792): an adaptive request without an explicit
+            // effort resolves to the literal level `auto`, which Anthropic
+            // rejects with HTTP 400. Fold `auto` (and `xhigh`/`max`) down to a
+            // supported level before writing output_config.effort.
+            let effort = if level == "xhigh" || level == "max" || level == "auto" {
                 "high"
             } else {
                 level.as_str()

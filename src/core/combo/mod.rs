@@ -589,9 +589,14 @@ pub fn check_fallback_error(status: u16, error_text: &str, backoff_level: u32) -
             cooldown: TRANSIENT_COOLDOWN,
             new_backoff_level: None,
         },
+        // 9router parity: checkFallbackError ALWAYS returns shouldFallback:
+        // true — even for 400/401/402/403. A "permanent" error on one combo
+        // member (e.g. cache_control budget exceeded on Claude) should still
+        // try the next member. Use a long cooldown so we don't spam a
+        // misconfigured or unauthorized provider.
         ErrorClassification::Permanent => FallbackDecision {
-            should_fallback: false,
-            cooldown: Duration::ZERO,
+            should_fallback: true,
+            cooldown: LONG_COOLDOWN,
             new_backoff_level: None,
         },
     }

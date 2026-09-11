@@ -273,6 +273,26 @@ async fn chat_completions_impl(
         Err(_) => return json_error_response(StatusCode::BAD_REQUEST, "Invalid JSON body"),
     };
 
+    // Claude Code marks a 1M-context request as `<model>[1m]`. The marker is a
+    // client-side annotation that matches no combo, alias or `provider/model`
+    // pair, so it must not reach model resolution or the request dies with an
+    // invalid-model error. The actual 1M capability travels in the
+    // `anthropic-beta` header, which is forwarded untouched.
+    // Mirrors `stripModelContextMarker` in 9router's
+    // `open-sse/utils/modelMarkers.js`, called at the top of
+    // `src/sse/handlers/chat.js`.
+    if let Some(model) = body.get("model").and_then(Value::as_str) {
+        let (stripped, marker) =
+            crate::core::translator::request::claude_format::strip_model_context_marker(
+                model.trim(),
+            );
+        if marker.is_some() {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("model".to_string(), Value::String(stripped));
+            }
+        }
+    }
+
     let Some(model_str) = body
         .get("model")
         .and_then(Value::as_str)

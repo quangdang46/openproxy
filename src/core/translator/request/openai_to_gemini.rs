@@ -979,7 +979,7 @@ pub fn openai_to_gemini_cli_request(
         };
         gemini["generationConfig"]["thinkingConfig"] = serde_json::json!({
             "thinkingBudget": budget,
-            "include_thoughts": true
+            "includeThoughts": true
         });
     }
 
@@ -989,7 +989,7 @@ pub fn openai_to_gemini_cli_request(
             if let Some(budget) = thinking.get("budget_tokens").and_then(|v| v.as_u64()) {
                 gemini["generationConfig"]["thinkingConfig"] = serde_json::json!({
                     "thinkingBudget": budget,
-                    "include_thoughts": true
+                    "includeThoughts": true
                 });
             }
         }
@@ -1041,7 +1041,7 @@ pub fn openai_to_antigravity_request(
         };
         gemini["generationConfig"]["thinkingConfig"] = serde_json::json!({
             "thinkingBudget": budget,
-            "include_thoughts": true
+            "includeThoughts": true
         });
     }
 
@@ -1051,7 +1051,7 @@ pub fn openai_to_antigravity_request(
             if let Some(budget) = thinking.get("budget_tokens").and_then(|v| v.as_u64()) {
                 gemini["generationConfig"]["thinkingConfig"] = serde_json::json!({
                     "thinkingBudget": budget,
-                    "include_thoughts": true
+                    "includeThoughts": true
                 });
             }
         }

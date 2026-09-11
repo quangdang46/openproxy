@@ -14,6 +14,137 @@ use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
+/// Codex tool JSON Schema pattern strip: Codex's `/responses` validator
+/// rejects Unicode property escapes (`\p{...}`) with HTTP 400 — even
+/// though they're valid ECMAScript. The JS does a copy-on-write walk
+/// removing only `pattern` values containing `\p{...}`; see
+/// `open-sse/utils/codexToolSchema.js` (#3922).
+///
+/// Port of `stripCodexUnsupportedPatterns`: recursively walks tool
+/// parameter schemas, removing `pattern` fields that contain Unicode
+/// property escapes. Returns the (possibly mutated) schema node.
+fn has_unicode_property_escape(pattern: &str) -> bool {
+    // `\p{...}` / `\P{...}` with an odd number of preceding backslashes —
+    // an even count means the backslash itself is escaped, so `\\p{Cc}`
+    // is a literal "p". Mirrors UNICODE_PROPERTY_ESCAPE in codexToolSchema.js.
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        let mut backslashes = 0;
+        while i < bytes.len() && bytes[i] == b'\\' {
+            backslashes += 1;
+            i += 1;
+        }
+        if backslashes % 2 == 1
+            && i + 1 < bytes.len()
+            && (bytes[i] == b'p' || bytes[i] == b'P')
+            && bytes[i + 1] == b'{'
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn strip_codex_tool_patterns(node: &mut Value) {
+    match node {
+        Value::Object(map) => {
+            // `properties` is special-cased: its keys are arbitrary property
+            // *names* (which may themselves be "pattern" or "properties") and
+            // must never be read as schema keywords — but each property's
+            // *value* is a schema node and must still be walked.
+            // Mirrors stripNode in codexToolSchema.js.
+            let mut property_names: Vec<String> = Vec::new();
+            if let Some(Value::Object(props)) = map.get("properties") {
+                property_names = props.keys().cloned().collect();
+            }
+            let other_keys: Vec<String> = map
+                .keys()
+                .filter(|k| k.as_str() != "properties" && k.as_str() != "pattern")
+                .cloned()
+                .collect();
+
+            if node
+                .get("pattern")
+                .and_then(Value::as_str)
+                .is_some_and(has_unicode_property_escape)
+            {
+                node.as_object_mut()
+                    .expect("node is an object")
+                    .remove("pattern");
+            }
+
+            for key in other_keys {
+                if let Some(val) = node.get_mut(&key) {
+                    strip_codex_tool_patterns(val);
+                }
+            }
+            if let Some(Value::Object(props)) = node
+                .as_object_mut()
+                .and_then(|obj| obj.get_mut("properties"))
+            {
+                for name in property_names {
+                    if let Some(prop_schema) = props.get_mut(&name) {
+                        strip_codex_tool_patterns(prop_schema);
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                strip_codex_tool_patterns(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod codex_tool_pattern_tests {
+    use super::strip_codex_tool_patterns;
+    use serde_json::json;
+
+    #[test]
+    fn strips_unicode_property_pattern() {
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "name": { "type": "string", "pattern": "^[^\\p{Cc}]{1,200}$" },
+                "safe": { "type": "string", "pattern": "^[a-z]+$" }
+            }
+        });
+        strip_codex_tool_patterns(&mut schema);
+        assert!(schema["properties"]["name"].get("pattern").is_none());
+        assert_eq!(schema["properties"]["safe"]["pattern"], "^[a-z]+$");
+    }
+
+    #[test]
+    fn keeps_escaped_literal_backslash_p() {
+        // `\\p{Cc}` is a literal "p" — must not be stripped.
+        let mut schema = json!({ "type": "string", "pattern": "^\\\\p{Cc}$" });
+        strip_codex_tool_patterns(&mut schema);
+        assert_eq!(schema["pattern"], "^\\\\p{Cc}$");
+    }
+
+    #[test]
+    fn property_named_pattern_is_not_a_keyword() {
+        // A field literally called "pattern" must not be read as the schema keyword:
+        // its value does not get its own "pattern" stripped.
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "pattern": { "type": "string" }
+            }
+        });
+        strip_codex_tool_patterns(&mut schema);
+        assert!(schema["properties"]["pattern"].get("type").is_some());
+    }
+}
+
 const CODEX_RESPONSES_URL: &str = "https://chatgpt.com/backend-api/codex/responses";
 
 /// SSE peek size (256 KiB) — ported from JS `CODEX_SSE_PEEK_BYTES`.
@@ -314,8 +445,18 @@ impl CodexExecutor {
             "reasoning": { "effort": effort, "summary": "auto" },
         });
 
+        // Codex's /responses validator rejects tool schemas carrying Unicode
+        // property escapes (\p{...}) with HTTP 400 — valid ECMA regex but not
+        // supported by Codex's schema validator (#3922). Strip patterns before
+        // dispatch; 9router applies the same strip in normalizeCodexTools.
         if let Some(tools) = body.get("tools") {
-            request_body["tools"] = tools.clone();
+            let mut cleaned = tools.clone();
+            if let Some(arr) = cleaned.as_array_mut() {
+                for tool in arr.iter_mut() {
+                    strip_codex_tool_patterns(tool);
+                }
+            }
+            request_body["tools"] = cleaned;
         }
         if let Some(tool_choice) = body.get("tool_choice") {
             request_body["tool_choice"] = tool_choice.clone();
