@@ -1201,7 +1201,22 @@ async fn video_create_handler(
     // OpenRouter posts verbatim to the collection root (no action suffix);
     // Vertex translates both directions (predictLongRunning /
     // fetchPredictOperation).
-    let canonical_provider = canonical_video_provider(&provider).to_string();
+    // OpenRouter requires an application/json body (9router `openrouter.js`
+    // returns "OpenRouter video requires an application/json body" before
+    // any upstream call) — the JSON extractor already guarantees this, so
+    // check the original content-type header.
+    if provider == "openrouter"
+        && !headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("application/json"))
+    {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "OpenRouter video requires an application/json body",
+        );
+    }
+    let canonical_provider = provider.clone();
     // Strip provider prefix (e.g. "xai/grok-imagine-video" → "grok-imagine-video")
     // before forwarding so upstream receives the bare model id. Vertex keeps
     // its own `model` field (predictLongRunning derives the URL from it).
@@ -1380,7 +1395,7 @@ async fn video_create_handler(
 
         // Vertex tokens are freshly minted per connection above, so the
         // OAuth refresh-and-retry below is xAI/OpenRouter only.
-        let is_vertex = canonical_video_provider(&provider) == "vertex";
+        let is_vertex = provider == "vertex";
         // 9router parity (videoCore.js:120-146): on 401/403 with a refresh
         // token, refresh the connection and re-fire the POST exactly once.
         if (status == 401 || status == 403)
@@ -1499,7 +1514,7 @@ async fn video_get_handler_with_query(
     }
 
     let provider = resolve_video_get_provider(&state, &headers, raw_query.as_deref());
-    let canonical_provider = canonical_video_provider(&provider).to_string();
+    let canonical_provider = provider.clone();
     let mut connection = match select_video_connection(&state, &provider, &headers) {
         Ok(conn) => conn,
         Err(resp) => return resp,
@@ -1672,19 +1687,11 @@ fn resolve_video_provider_model(
 }
 
 fn video_provider_supported(provider: &str) -> bool {
-    // 9router `videoCore.js getVideoConfig` — only providers with a registry
-    // videoConfig fail open. Adapters live in `videoProviders/` (openrouter,
-    // vertex); everything else keeps the xAI default shape.
-    matches!(provider, "xai" | "openrouter" | "vertex" | "vertex-partner")
-}
-
-/// Canonical video provider id: `vertex-partner` shares the Veo adapter.
-fn canonical_video_provider(provider: &str) -> &str {
-    if provider == "vertex-partner" {
-        "vertex"
-    } else {
-        provider
-    }
+    // 9router `open-sse/handlers/videoProviders/index.js` ADAPTERS =
+    // { openrouter, vertex } — everything else keeps the xAI default shape.
+    // `vertex-partner` has no videoConfig key (only transport.baseUrl), so
+    // getVideoConfig returns null and videoGeneration.js rejects it.
+    matches!(provider, "xai" | "openrouter" | "vertex")
 }
 
 /// Video request headers: registry `headers` merged over the bearer auth
@@ -1696,7 +1703,7 @@ fn build_video_headers(
     vertex_token: Option<&str>,
 ) -> Result<HeaderMap, String> {
     use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
-    if canonical_video_provider(provider) == "vertex" {
+    if provider == "vertex" {
         // Vertex speaks Bearer OAuth only — the stored api_key holds Service
         // Account JSON, never a usable token, so build from scratch.
         let token = vertex_token.ok_or_else(|| "Missing Vertex token".to_string())?;
@@ -1710,7 +1717,7 @@ fn build_video_headers(
         return Ok(headers);
     }
     let mut headers = build_media_headers(provider, connection)?;
-    if canonical_video_provider(provider) == "openrouter" {
+    if provider == "openrouter" {
         // Registry `openrouter.js` videoConfig headers.
         headers.insert(
             reqwest::header::HeaderName::from_static("http-referer"),
@@ -2168,7 +2175,18 @@ fn transform_vertex_operation(body: &Value) -> Value {
         return body.clone();
     };
     let id = encode_vertex_job_id(name);
-    if body.get("error").is_some_and(|e| !e.is_null()) {
+    // 9router `vertex.js:93` is `if (json.error)` (truthy) — falsy non-null
+    // error values (false, 0, "") do NOT mark the operation failed.
+    let is_error = |v: &Value| -> bool {
+        match v {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+            Value::String(s) => !s.is_empty(),
+            _ => true,
+        }
+    };
+    if body.get("error").is_some_and(is_error) {
         return json!({
             "id": id,
             "request_id": id,
@@ -2189,25 +2207,26 @@ fn transform_vertex_operation(body: &Value) -> Value {
                 .map(|a| a.iter().collect())
         })
         .unwrap_or_default();
+    // 9router `vertex.js:103-107` uses `||` chains, so empty-string
+    // gcsUri/mimeType fall through to the next source / "video/mp4" default.
+    fn non_empty(v: Option<&str>) -> Option<&str> {
+        v.filter(|s| !s.is_empty())
+    }
     let videos: Vec<Value> = samples
         .iter()
         .map(|s| {
-            let url = s
-                .get("gcsUri")
-                .and_then(Value::as_str)
-                .or_else(|| s.pointer("/video/uri").and_then(Value::as_str))
-                .or_else(|| s.get("uri").and_then(Value::as_str));
-            let b64 = s
-                .get("bytesBase64Encoded")
-                .and_then(Value::as_str)
-                .or_else(|| {
-                    s.pointer("/video/bytesBase64Encoded")
-                        .and_then(Value::as_str)
+            let url = non_empty(s.get("gcsUri").and_then(Value::as_str))
+                .or_else(|| non_empty(s.pointer("/video/uri").and_then(Value::as_str)))
+                .or_else(|| non_empty(s.get("uri").and_then(Value::as_str)));
+            let b64 =
+                non_empty(s.get("bytesBase64Encoded").and_then(Value::as_str)).or_else(|| {
+                    non_empty(
+                        s.pointer("/video/bytesBase64Encoded")
+                            .and_then(Value::as_str),
+                    )
                 });
-            let mime = s
-                .get("mimeType")
-                .and_then(Value::as_str)
-                .or_else(|| s.pointer("/video/mimeType").and_then(Value::as_str))
+            let mime = non_empty(s.get("mimeType").and_then(Value::as_str))
+                .or_else(|| non_empty(s.pointer("/video/mimeType").and_then(Value::as_str)))
                 .unwrap_or("video/mp4");
             json!({ "url": url, "b64_json": b64, "mime_type": mime })
         })
@@ -2412,13 +2431,14 @@ mod tests {
 
     #[test]
     fn video_supported_providers_matches_9router() {
-        // 9router videoCore.js getVideoConfig: xai + openrouter + vertex (+partner alias).
-        for provider in ["xai", "openrouter", "vertex", "vertex-partner"] {
+        // 9router `videoProviders/index.js` ADAPTERS = { openrouter, vertex };
+        // `vertex-partner` has no videoConfig key so getVideoConfig returns
+        // null and videoGeneration.js rejects it.
+        for provider in ["xai", "openrouter", "vertex"] {
             assert!(video_provider_supported(provider), "got: {provider}");
         }
+        assert!(!video_provider_supported("vertex-partner"));
         assert!(!video_provider_supported("openai"));
-        assert_eq!(canonical_video_provider("vertex-partner"), "vertex");
-        assert_eq!(canonical_video_provider("openrouter"), "openrouter");
     }
 
     #[test]
