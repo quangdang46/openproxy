@@ -798,6 +798,35 @@ fn kiro_auth_service_base_url() -> String {
         .to_string()
 }
 
+/// Reject any region that is not a valid AWS region before interpolating it
+/// into a URL (mirrors `assertValidAwsRegion` in 9router oauth constants).
+fn kiro_oidc_token_endpoint(region: &str) -> Option<String> {
+    let region = region.trim();
+    if !is_valid_aws_region(region) {
+        return None;
+    }
+    Some(format!("https://oidc.{region}.amazonaws.com/token"))
+}
+
+fn is_valid_aws_region(region: &str) -> bool {
+    let mut parts = region.split('-');
+    let (Some(a), Some(_b), Some(c)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    if a.len() != 2 || !a.bytes().all(|b| b.is_ascii_lowercase()) {
+        return false;
+    }
+    if c.len() > 2 || c.is_empty() || !c.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    // Middle segment: lowercase alpha (covers us-east, eu-central, etc.)
+    let mid = &region[a.len() + 1..region.len() - c.len() - 1];
+    !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_lowercase())
+}
+
 fn kiro_oidc_base_url(region: &str) -> String {
     std::env::var("OPENPROXY_KIRO_OIDC_BASE_URL")
         .ok()
@@ -2313,19 +2342,120 @@ async fn kiro_auto_import_route() -> Response {
         }
     }
 
-    match refresh_token {
-        Some(refresh_token) => Json(json!({
-            "found": true,
-            "refreshToken": refresh_token,
-            "source": found_file
-        }))
-        .into_response(),
-        None => Json(json!({
+    let Some(refresh_token) = refresh_token else {
+        return Json(json!({
             "found": false,
             "error": "Kiro token not found in AWS SSO cache. Please login to Kiro IDE first."
         }))
-        .into_response(),
+        .into_response();
+    };
+
+    // Re-read the token file for IDC fields (region, authMethod, clientIdHash).
+    let token_data: Option<Value> = found_file
+        .as_deref()
+        .map(|file| cache_path.join(file))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|content| serde_json::from_str(&content).ok());
+
+    let region = token_data
+        .as_ref()
+        .and_then(|data| data.get("region"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let auth_method = token_data
+        .as_ref()
+        .and_then(|data| data.get("authMethod"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // For IDC/organization tokens, resolve clientId and clientSecret from
+    // the linked client registration file (referenced by clientIdHash).
+    let (mut client_id, mut client_secret): (Option<String>, Option<String>) = (None, None);
+    if let Some(client_id_hash) = token_data
+        .as_ref()
+        .and_then(|data| data.get("clientIdHash"))
+        .and_then(Value::as_str)
+    {
+        let client_file = format!("{client_id_hash}.json");
+        if let Ok(client_content) = std::fs::read_to_string(cache_path.join(&client_file)) {
+            if let Ok(client_data) = serde_json::from_str::<Value>(&client_content) {
+                if let (Some(id), Some(secret)) = (
+                    client_data.get("clientId").and_then(Value::as_str),
+                    client_data.get("clientSecret").and_then(Value::as_str),
+                ) {
+                    client_id = Some(id.to_string());
+                    client_secret = Some(secret.to_string());
+                }
+            }
+        }
+        // Client registration file not found - continue without it
     }
+
+    // Read profileArn from Kiro IDE's profile.json.
+    // Important: the runtime gateway requires us-east-1 in the ARN regardless
+    // of the IDC region, so we normalize the region in the ARN to us-east-1.
+    let mut profile_arn: Option<String> = None;
+    let kiro_profile_paths = [
+        kiro_profile_path_windows(),
+        cursor_home_dir()
+            .join(".config")
+            .join("Kiro")
+            .join("User")
+            .join("globalStorage")
+            .join("kiro.kiroagent")
+            .join("profile.json"),
+    ];
+    for profile_path in &kiro_profile_paths {
+        let Ok(profile_content) = std::fs::read_to_string(profile_path) else {
+            continue;
+        };
+        let Ok(profile_data) = serde_json::from_str::<Value>(&profile_content) else {
+            continue;
+        };
+        if let Some(arn) = profile_data.get("arn").and_then(Value::as_str) {
+            profile_arn = Some(normalize_kiro_profile_arn(arn));
+            break;
+        }
+    }
+
+    Json(json!({
+        "found": true,
+        "refreshToken": refresh_token,
+        "source": found_file,
+        "clientId": client_id,
+        "clientSecret": client_secret,
+        "region": region,
+        "authMethod": auth_method,
+        "profileArn": profile_arn
+    }))
+    .into_response()
+}
+
+/// Kiro IDE profile.json path on Windows:
+/// `%APPDATA%/Kiro/User/globalStorage/kiro.kiroagent/profile.json`.
+fn kiro_profile_path_windows() -> PathBuf {
+    let home = cursor_home_dir();
+    let app_data = std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join("AppData").join("Roaming"));
+    app_data
+        .join("Kiro")
+        .join("User")
+        .join("globalStorage")
+        .join("kiro.kiroagent")
+        .join("profile.json")
+}
+
+/// Normalize the region segment of a CodeWhisperer profile ARN to us-east-1,
+/// matching the JS `arn.replace(/arn:aws:codewhisperer:[^:]+:/, ...)` behavior.
+fn normalize_kiro_profile_arn(arn: &str) -> String {
+    let prefix = "arn:aws:codewhisperer:";
+    if let Some(rest) = arn.strip_prefix(prefix) {
+        if let Some(idx) = rest.find(':') {
+            return format!("{prefix}us-east-1:{}", &rest[idx + 1..]);
+        }
+    }
+    arn.to_string()
 }
 
 async fn kiro_import_auth(
@@ -2364,62 +2494,165 @@ async fn kiro_import_auth(
         );
     }
 
-    let response = match reqwest::Client::new()
-        .post(format!("{}/refreshToken", kiro_auth_service_base_url()))
-        .header("Content-Type", "application/json")
-        .json(&json!({ "refreshToken": refresh_token }))
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            return internal_error_response(format!("Token validation failed: {}", error))
-        }
-    };
-
-    if !response.status().is_success() {
-        let error = response.text().await.unwrap_or_default();
-        return internal_error_response(format!(
-            "Token validation failed: Token refresh failed: {}",
-            error
-        ));
-    }
-
-    let payload: Value = match response.json().await {
-        Ok(value) => value,
-        Err(error) => return internal_error_response(error.to_string()),
-    };
-
-    let Some(access_token) = payload
-        .get("accessToken")
-        .or_else(|| payload.get("access_token"))
+    let client_id = body
+        .get("clientId")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|token| !token.is_empty())
-    else {
-        return internal_error_response(
-            "Token validation failed: Kiro refresh response did not include access token"
-                .to_string(),
-        );
-    };
-
-    let saved_refresh_token = payload
-        .get("refreshToken")
-        .or_else(|| payload.get("refresh_token"))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let client_secret = body
+        .get("clientSecret")
         .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| refresh_token.to_string());
-    let profile_arn = payload
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let region = body
+        .get("region")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(KIRO_DEFAULT_REGION)
+        .to_string();
+    let caller_profile_arn = body
         .get("profileArn")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let expires_in = payload
-        .get("expiresIn")
-        .or_else(|| payload.get("expires_in"))
-        .and_then(Value::as_i64)
-        .unwrap_or(3600);
+    let is_idc = client_id.is_some() && client_secret.is_some();
 
-    let claims = decode_jwt_claims(access_token);
+    // For IDC tokens, refresh via the regional OIDC endpoint with client credentials.
+    // For social/builder-id tokens, use the standard social refresh endpoint.
+    let refreshed: Result<(String, Option<String>, Option<String>, i64), String> = if is_idc {
+        let client_id = client_id.clone().unwrap_or_default();
+        let client_secret = client_secret.clone().unwrap_or_default();
+        let endpoint = match kiro_oidc_token_endpoint(&region) {
+            Some(endpoint) => endpoint,
+            None => {
+                return internal_error_response(format!(
+                    "Token validation failed: invalid AWS region: {region}"
+                ));
+            }
+        };
+        let response = match reqwest::Client::new()
+            .post(endpoint)
+            .header("Content-Type", "application/json")
+            .json(&json!({
+                "clientId": client_id,
+                "clientSecret": client_secret,
+                "refreshToken": refresh_token,
+                "grantType": "refresh_token",
+            }))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return internal_error_response(format!("Token validation failed: {error}"));
+            }
+        };
+        if !response.status().is_success() {
+            let error = response.text().await.unwrap_or_default();
+            return internal_error_response(format!(
+                "Token validation failed: Token refresh failed: {error}"
+            ));
+        }
+        let payload: Value = match response.json().await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error.to_string()),
+        };
+        let access_token = payload
+            .get("accessToken")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string);
+        match access_token {
+            Some(access_token) => {
+                let saved_refresh = payload
+                    .get("refreshToken")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| refresh_token.to_string());
+                let profile_arn = payload
+                    .get("profileArn")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let expires_in = payload
+                    .get("expiresIn")
+                    .and_then(Value::as_i64)
+                    .unwrap_or(3600);
+                Ok((access_token, Some(saved_refresh), profile_arn, expires_in))
+            }
+            None => Err(
+                "Token validation failed: Kiro refresh response did not include access token"
+                    .to_string(),
+            ),
+        }
+    } else {
+        let response = match reqwest::Client::new()
+            .post(format!("{}/refreshToken", kiro_auth_service_base_url()))
+            .header("Content-Type", "application/json")
+            .json(&json!({ "refreshToken": refresh_token }))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return internal_error_response(format!("Token validation failed: {error}"))
+            }
+        };
+
+        if !response.status().is_success() {
+            let error = response.text().await.unwrap_or_default();
+            return internal_error_response(format!(
+                "Token validation failed: Token refresh failed: {error}"
+            ));
+        }
+
+        let payload: Value = match response.json().await {
+            Ok(value) => value,
+            Err(error) => return internal_error_response(error.to_string()),
+        };
+
+        let access_token = payload
+            .get("accessToken")
+            .or_else(|| payload.get("access_token"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string);
+        match access_token {
+            Some(access_token) => {
+                let saved_refresh = payload
+                    .get("refreshToken")
+                    .or_else(|| payload.get("refresh_token"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| refresh_token.to_string());
+                let profile_arn = payload
+                    .get("profileArn")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let expires_in = payload
+                    .get("expiresIn")
+                    .or_else(|| payload.get("expires_in"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(3600);
+                Ok((access_token, Some(saved_refresh), profile_arn, expires_in))
+            }
+            None => Err(
+                "Token validation failed: Kiro refresh response did not include access token"
+                    .to_string(),
+            ),
+        }
+    };
+
+    let (access_token, saved_refresh_token, refreshed_profile_arn, expires_in) = match refreshed {
+        Ok(values) => values,
+        Err(error) => return internal_error_response(error),
+    };
+    let saved_refresh_token = saved_refresh_token.unwrap_or_else(|| refresh_token.to_string());
+
+    let claims = decode_jwt_claims(&access_token);
     let email = claims
         .as_ref()
         .and_then(|value| value.get("email"))
@@ -2432,18 +2665,31 @@ async fn kiro_import_auth(
         .and_then(Value::as_str)
         .map(str::to_string);
 
+    let resolved_auth_method = if is_idc { "idc" } else { "imported" };
+    let provider_label = if is_idc { "Enterprise" } else { "Imported" };
+    let resolved_profile_arn = caller_profile_arn.or(refreshed_profile_arn);
+
     let mut provider_specific_data = std::collections::BTreeMap::from([
         (
             "authMethod".to_string(),
-            Value::String("imported".to_string()),
+            Value::String(resolved_auth_method.to_string()),
         ),
         (
             "provider".to_string(),
-            Value::String("Imported".to_string()),
+            Value::String(provider_label.to_string()),
         ),
     ]);
-    if let Some(profile_arn) = profile_arn {
+    if let Some(profile_arn) = resolved_profile_arn {
         provider_specific_data.insert("profileArn".to_string(), Value::String(profile_arn));
+    }
+    if is_idc {
+        if let Some(client_id) = client_id {
+            provider_specific_data.insert("clientId".to_string(), Value::String(client_id));
+        }
+        if let Some(client_secret) = client_secret {
+            provider_specific_data.insert("clientSecret".to_string(), Value::String(client_secret));
+        }
+        provider_specific_data.insert("region".to_string(), Value::String(region));
     }
 
     let connection = ProviderConnection {
@@ -4963,8 +5209,17 @@ pub async fn oauth_status(
 }
 
 /// POST /api/oauth/codex/bulk-import
-/// Accepts `{ accounts: [{ accessToken, refreshToken?, idToken?, machineId? }] }`
-/// Imports each as a "codex" provider connection.
+/// Bulk import multiple codex (OAuth) account JSON objects in one call.
+///
+/// Body accepts any of:
+///   - Array:    [{...}, {...}]
+///   - Single:   {...}
+///   - Wrapped:  { accounts: [{...}, ...] }
+///
+/// Each item must contain at least `accessToken`. Missing email / chatgpt
+/// account info is best-effort backfilled from the JWT (idToken or accessToken).
+///
+/// Tokens are NEVER echoed back in the response.
 async fn codex_bulk_import(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -4975,86 +5230,143 @@ async fn codex_bulk_import(
     };
     let body: Value = match serde_json::from_slice(&body) {
         Ok(value) => value,
-        Err(error) => return internal_error_response(error.to_string()),
-    };
-    let accounts = match body.get("accounts").and_then(Value::as_array) {
-        Some(arr) => arr,
-        None => {
+        Err(error) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "\"accounts\" array is required" })),
+                Json(json!({ "error": format!("Invalid JSON body: {error}") })),
             )
                 .into_response();
         }
     };
+
+    // Normalize to array
+    let accounts: Option<Vec<Value>> = if let Some(arr) = body.as_array() {
+        Some(arr.clone())
+    } else if let Some(arr) = body.get("accounts").and_then(Value::as_array) {
+        Some(arr.clone())
+    } else if body.is_object() {
+        Some(vec![body.clone()])
+    } else {
+        None
+    };
+    let Some(accounts) = accounts else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "No accounts provided" })),
+        )
+            .into_response();
+    };
     if accounts.is_empty() {
-        return Json(json!({ "success": 0, "failed": 0, "results": [] })).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "No accounts provided" })),
+        )
+            .into_response();
     }
 
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(accounts.len());
     let mut success = 0usize;
     let mut failed = 0usize;
 
-    for (idx, account) in accounts.iter().enumerate() {
-        let access_token = match account.get("accessToken").and_then(Value::as_str) {
-            Some(t) if !t.is_empty() => t.to_string(),
-            _ => {
-                failed += 1;
-                results.push(json!({ "index": idx, "ok": false, "error": "Missing accessToken" }));
-                continue;
-            }
+    // SERIAL loop — createProviderConnection reads max(priority) and reorders
+    // inside a transaction. Parallel calls would race on priority assignment.
+    for (idx, raw) in accounts.iter().enumerate() {
+        // Strip server-controlled fields
+        let Some(raw_obj) = raw.as_object() else {
+            failed += 1;
+            results.push(json!({ "index": idx, "ok": false, "error": "Item is not an object" }));
+            continue;
         };
-        let refresh_token = account
-            .get("refreshToken")
+        let mut item = raw_obj.clone();
+        for key in ["id", "provider", "authType", "createdAt", "updatedAt"] {
+            item.remove(key);
+        }
+        let normalized = Value::Object(item);
+        let access_token = normalized
+            .get("accessToken")
             .and_then(Value::as_str)
-            .map(str::to_string);
-        let id_token = account
-            .get("idToken")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        let machine_id = account
-            .get("machineId")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+            .unwrap_or("")
+            .to_string();
+        if access_token.is_empty() {
+            failed += 1;
+            results.push(json!({ "index": idx, "ok": false, "error": "Missing accessToken" }));
+            continue;
+        }
 
-        let email = account
+        // Backfill missing identity fields from JWT claims (idToken or accessToken).
+        let mut psd_map: std::collections::BTreeMap<String, Value> = normalized
+            .get("providerSpecificData")
+            .and_then(Value::as_object)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        let email = normalized
             .get("email")
             .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let needs_backfill = email.is_none()
+            || !psd_map.contains_key("chatgptAccountId")
+            || !psd_map.contains_key("chatgptPlanType");
+        let email = if needs_backfill {
+            let source = normalized
+                .get("idToken")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(&access_token);
+            let (back_email, back_psd) = extract_codex_account_info(Some(source));
+            // Merge caller PSD: backfill only fills gaps, caller keys win.
+            for (k, v) in back_psd {
+                psd_map.entry(k).or_insert(v);
+            }
+            email.or(back_email)
+        } else {
+            email
+        };
+
+        // Compute expiresAt from expiresIn if absent
+        let expires_at = normalized
+            .get("expiresAt")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
             .map(str::to_string)
             .or_else(|| {
-                // Try to extract email from decoded JWT
-                let claims = decode_jwt_claims(&access_token);
-                claims
-                    .as_ref()
-                    .and_then(|v| v.get("email"))
-                    .or_else(|| claims.as_ref().and_then(|v| v.get("sub")))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
+                normalized
+                    .get("expiresIn")
+                    .and_then(Value::as_i64)
+                    .filter(|n| *n > 0)
+                    .map(|n| (chrono::Utc::now() + chrono::Duration::seconds(n)).to_rfc3339())
             });
-
-        let mut provider_specific_data = std::collections::BTreeMap::new();
-        provider_specific_data.insert(
-            "authMethod".to_string(),
-            Value::String("bulk-import".to_string()),
-        );
-        provider_specific_data.insert(
-            "provider".to_string(),
-            Value::String("Imported".to_string()),
-        );
-        if let Some(mid) = &machine_id {
-            provider_specific_data.insert("machineId".to_string(), Value::String(mid.clone()));
-        }
 
         let connection = ProviderConnection {
             provider: "codex".to_string(),
             auth_type: "oauth".to_string(),
             email: email.clone(),
             access_token: Some(access_token),
-            refresh_token,
-            id_token,
-            expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(86_400)).to_rfc3339()),
-            test_status: Some("active".to_string()),
-            provider_specific_data,
+            refresh_token: normalized
+                .get("refreshToken")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            id_token: normalized
+                .get("idToken")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            expires_at: expires_at.or_else(|| {
+                Some((chrono::Utc::now() + chrono::Duration::seconds(86_400)).to_rfc3339())
+            }),
+            test_status: Some(
+                normalized
+                    .get("testStatus")
+                    .and_then(Value::as_str)
+                    .unwrap_or("active")
+                    .to_string(),
+            ),
+            is_active: Some(
+                normalized
+                    .get("isActive")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true),
+            ),
+            provider_specific_data: psd_map,
             ..Default::default()
         };
 
@@ -5074,7 +5386,10 @@ async fn codex_bulk_import(
 }
 
 /// POST /api/oauth/codex/import-token
-/// Imports a Codex access/refresh token pair as a provider connection.
+/// Import a ChatGPT access token (created from chatgpt.com settings)
+/// as a provider connection, bypassing OAuth refresh flow.
+///
+/// Body: { accessToken: string, name?: string }
 async fn codex_import_token(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -5092,63 +5407,796 @@ async fn codex_import_token(
     let Some(access_token) = body.get("accessToken").and_then(Value::as_str) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "accessToken is required" })),
+            Json(json!({ "error": "Access token is required" })),
         )
             .into_response();
     };
     if access_token.trim().is_empty() {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "accessToken is required" })),
+            Json(json!({ "error": "Access token is required" })),
         )
             .into_response();
     }
 
-    let access_token = access_token.trim();
-    let refresh_token = body
-        .get("refreshToken")
-        .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let email = body
-        .get("email")
-        .and_then(Value::as_str)
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let token = access_token.trim().to_string();
 
+    // Extract account info from the JWT (email, workspace, plan)
+    let mut email: Option<String> = None;
+    let mut provider_specific_data: std::collections::BTreeMap<String, Value> =
+        std::collections::BTreeMap::from([(
+            "authMethod".to_string(),
+            Value::String("access_token".to_string()),
+        )]);
+
+    // Try decoding as JWT to extract email + workspace
+    if let Some(payload) = decode_jwt_claims(&token) {
+        let auth = payload
+            .get("https://api.openai.com/auth")
+            .and_then(Value::as_object);
+        let profile = payload
+            .get("https://api.openai.com/profile")
+            .and_then(Value::as_object);
+        email = profile
+            .and_then(|p| p.get("email"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                payload
+                    .get("email")
+                    .or_else(|| payload.get("preferred_username"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            });
+
+        if let Some(account_id) = auth
+            .and_then(|a| a.get("chatgpt_account_id"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            provider_specific_data.insert(
+                "chatgptAccountId".to_string(),
+                Value::String(account_id.to_string()),
+            );
+        }
+        if let Some(plan_type) = auth
+            .and_then(|a| a.get("chatgpt_plan_type"))
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            provider_specific_data.insert(
+                "chatgptPlanType".to_string(),
+                Value::String(plan_type.to_string()),
+            );
+        }
+        // Store expiry info from JWT if available
+        if let Some(exp) = payload.get("exp") {
+            provider_specific_data.insert("jwtExp".to_string(), exp.clone());
+        }
+    }
+
+    // Also try extractCodexAccountInfo via id_token-style extraction
+    // (the access token itself may contain the same claims)
+    if email.is_none() {
+        let (back_email, back_psd) = extract_codex_account_info(Some(&token));
+        if let Some(back_email) = back_email {
+            email = Some(back_email);
+        }
+        for (k, v) in back_psd {
+            provider_specific_data.entry(k).or_insert(v);
+        }
+    }
+
+    let name = body
+        .get("name")
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            email
+                .clone()
+                .unwrap_or_else(|| "ChatGPT Access Token".to_string())
+        });
+
+    // Save to database as access_token authType (no refresh token)
     let connection = ProviderConnection {
         provider: "codex".to_string(),
-        auth_type: "oauth".to_string(),
+        auth_type: "access_token".to_string(),
+        name: Some(name.clone()),
         email: email.clone(),
-        access_token: Some(access_token.to_string()),
-        refresh_token,
+        access_token: Some(token),
         expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(86_400)).to_rfc3339()),
         test_status: Some("active".to_string()),
-        provider_specific_data: std::collections::BTreeMap::from([
-            (
-                "authMethod".to_string(),
-                Value::String("import-token".to_string()),
-            ),
-            (
-                "provider".to_string(),
-                Value::String("Imported".to_string()),
-            ),
-        ]),
+        provider_specific_data,
+        ..Default::default()
+    };
+
+    match create_imported_oauth_connection(&state.db, connection).await {
+        Ok(connection) => {
+            let workspace = connection
+                .provider_specific_data
+                .get("chatgptAccountId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let plan = connection
+                .provider_specific_data
+                .get("chatgptPlanType")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Json(json!({
+                "success": true,
+                "connection": {
+                    "id": connection.id,
+                    "provider": connection.provider,
+                    "email": connection.email,
+                    "name": connection.name,
+                    "workspace": if workspace.is_empty() { Value::Null } else { Value::String(workspace) },
+                    "plan": if plan.is_empty() { Value::Null } else { Value::String(plan) }
+                }
+            }))
+            .into_response()
+        }
+        Err(error) => internal_error_response(error.to_string()),
+    }
+}
+
+/// POST /api/oauth/grok-cli/bulk-import
+/// Bulk import multiple Grok CLI (OAuth/Device) account JSON objects in one call.
+///
+/// Body accepts any of:
+///   - Array:    [{...}, {...}]
+///   - Single:   {...}
+///   - Wrapped:  { accounts: [{...}, ...] }
+///
+/// Each item accepts snake_case or camelCase:
+///   access_token / accessToken
+///   refresh_token / refreshToken
+///   id_token / idToken
+///   email
+///   expires_in / expiresIn / expires_at / expiresAt
+async fn grok_cli_bulk_import(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 512 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("Invalid JSON body: {error}") })),
+            )
+                .into_response();
+        }
+    };
+
+    let accounts: Option<Vec<Value>> = if let Some(arr) = body.as_array() {
+        Some(arr.clone())
+    } else if let Some(arr) = body.get("accounts").and_then(Value::as_array) {
+        Some(arr.clone())
+    } else if body.is_object() {
+        Some(vec![body.clone()])
+    } else {
+        None
+    };
+    let Some(accounts) = accounts else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "No accounts provided" })),
+        )
+            .into_response();
+    };
+    if accounts.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "No accounts provided" })),
+        )
+            .into_response();
+    }
+
+    let mut results: Vec<serde_json::Value> = Vec::with_capacity(accounts.len());
+    let mut success = 0usize;
+    let mut failed = 0usize;
+
+    for (idx, raw) in accounts.iter().enumerate() {
+        let outcome: Result<ProviderConnection, String> = (|| {
+            let raw = raw.as_object().ok_or("Item is not an object")?;
+
+            let access_token = raw
+                .get("access_token")
+                .or_else(|| raw.get("accessToken"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .ok_or("Missing access_token / accessToken")?
+                .to_string();
+            let refresh_token = raw
+                .get("refresh_token")
+                .or_else(|| raw.get("refreshToken"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let id_token = raw
+                .get("id_token")
+                .or_else(|| raw.get("idToken"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let mut email = raw.get("email").and_then(Value::as_str).map(str::to_string);
+
+            if email.is_none() {
+                email = id_token
+                    .as_deref()
+                    .and_then(|token| decode_xai_id_token_email(Some(token)))
+                    .or_else(|| extract_email_from_access_token(&access_token));
+            }
+
+            let expires_at = raw
+                .get("expires_at")
+                .or_else(|| raw.get("expiresAt"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    raw.get("expires_in")
+                        .or_else(|| raw.get("expiresIn"))
+                        .and_then(Value::as_i64)
+                        .filter(|n| *n > 0)
+                        .map(|n| (chrono::Utc::now() + chrono::Duration::seconds(n)).to_rfc3339())
+                });
+
+            let mut psd: std::collections::BTreeMap<String, Value> =
+                std::collections::BTreeMap::from([(
+                    "authMethod".to_string(),
+                    Value::String("device_code".to_string()),
+                )]);
+            if let Some(id_token) = &id_token {
+                psd.insert("idToken".to_string(), Value::String(id_token.clone()));
+            }
+            if let Some(email) = &email {
+                psd.insert("email".to_string(), Value::String(email.clone()));
+            }
+            if let Some(caller_psd) = raw.get("providerSpecificData").and_then(Value::as_object) {
+                for (k, v) in caller_psd {
+                    psd.insert(k.clone(), v.clone());
+                }
+            }
+
+            Ok(ProviderConnection {
+                provider: "grok-cli".to_string(),
+                auth_type: "oauth".to_string(),
+                email: email.clone(),
+                display_name: raw
+                    .get("displayName")
+                    .or_else(|| raw.get("name"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                access_token: Some(access_token),
+                refresh_token,
+                id_token,
+                expires_at,
+                test_status: Some("active".to_string()),
+                provider_specific_data: psd,
+                ..Default::default()
+            })
+        })();
+
+        match outcome {
+            Err(err) => {
+                failed += 1;
+                results.push(json!({ "index": idx, "ok": false, "error": err }));
+            }
+            Ok(connection) => match create_imported_oauth_connection(&state.db, connection).await {
+                Ok(created) => {
+                    success += 1;
+                    results.push(
+                        json!({ "index": idx, "ok": true, "id": created.id, "email": created.email }),
+                    );
+                }
+                Err(err) => {
+                    failed += 1;
+                    results.push(json!({ "index": idx, "ok": false, "error": err.to_string() }));
+                }
+            },
+        }
+    }
+
+    Json(json!({
+        "total": accounts.len(),
+        "success": success,
+        "failed": failed,
+        "results": results
+    }))
+    .into_response()
+}
+
+/// Decode an xAI id token to an email (email | preferred_username | sub).
+fn decode_xai_id_token_email(id_token: Option<&str>) -> Option<String> {
+    let claims = decode_jwt_claims(id_token?)?;
+    claims
+        .get("email")
+        .or_else(|| claims.get("preferred_username"))
+        .or_else(|| claims.get("sub"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Extract an email from an access-token JWT payload (best effort).
+fn extract_email_from_access_token(access_token: &str) -> Option<String> {
+    decode_xai_id_token_email(Some(access_token))
+}
+
+/// POST /api/oauth/xiaomi-mimo/api-key
+/// Import a Xiaomi MiMo API key manually (or from auto-import).
+/// The key is validated against the models endpoint, then stored.
+///
+/// Body: { apiKey, uid?, baseUrl? }
+async fn xiaomi_mimo_api_key_import(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Response {
+    let body = match axum::body::to_bytes(request.into_body(), 64 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+    let body: Value = match serde_json::from_slice(&body) {
+        Ok(value) => value,
+        Err(error) => return internal_error_response(error.to_string()),
+    };
+
+    let api_key = body
+        .get("apiKey")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(api_key) = api_key else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "API key is required" })),
+        )
+            .into_response();
+    };
+    if !api_key.starts_with("sk-") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid key format — expected sk- prefix" })),
+        )
+            .into_response();
+    }
+    let key = api_key.to_string();
+
+    let uid = body
+        .get("uid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let effective_base_url = body
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://api.xiaomimimo.com/v1")
+        .trim_end_matches('/')
+        .to_string();
+    let mimo_pass_token = body
+        .get("mimoPassToken")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mimo_user_id = body
+        .get("mimoUserId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let mimo_c_user_id = body
+        .get("mimoCUserId")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+
+    // Validate the key against the models endpoint
+    let mut validated = false;
+    let mut model_count: i64 = 0;
+    match tokio::time::timeout(
+        Duration::from_secs(10),
+        reqwest::Client::new()
+            .get(format!("{effective_base_url}/models"))
+            .header("Authorization", format!("Bearer {key}"))
+            .header("X-Mimo-Source", "mimocode-cli")
+            .send(),
+    )
+    .await
+    {
+        Ok(Ok(resp)) if resp.status().is_success() => {
+            if let Ok(data) = resp.json::<Value>().await {
+                model_count = data
+                    .get("data")
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.len() as i64)
+                    .unwrap_or(0);
+                validated = true;
+            }
+        }
+        // Network error — still allow import (key may be valid but network blocked)
+        _ => {
+            tracing::info!("[xiaomi-mimo] key validation failed, storing as untested");
+        }
+    }
+
+    let expected_email = uid.as_deref().map(|uid| format!("{uid}@xiaomi"));
+
+    // Dedup: if a connection with the same uid or same key already exists, update it
+    let existing_id: Option<String> = state
+        .db
+        .snapshot()
+        .provider_connections
+        .iter()
+        .find(|c| {
+            c.provider == "xiaomi-mimo"
+                && (expected_email
+                    .as_deref()
+                    .is_some_and(|email| c.email.as_deref() == Some(email))
+                    || c.access_token.as_deref() == Some(key.as_str()))
+        })
+        .map(|c| c.id.clone());
+    if let Some(existing_id) = existing_id {
+        let update_result = state
+            .db
+            .update({
+                let key = key.clone();
+                let uid = uid.clone();
+                let effective_base_url = effective_base_url.clone();
+                let mimo_pass_token = mimo_pass_token.clone();
+                let mimo_user_id = mimo_user_id.clone();
+                let mimo_c_user_id = mimo_c_user_id.clone();
+                let existing_id = existing_id.clone();
+                move |db| {
+                    if let Some(target) = db
+                        .provider_connections
+                        .iter_mut()
+                        .find(|c| c.id == existing_id)
+                    {
+                        target.access_token = Some(key.clone());
+                        let psd = &mut target.provider_specific_data;
+                        if let Some(uid) = &uid {
+                            psd.insert("uid".to_string(), Value::String(uid.clone()));
+                        } else if !psd.contains_key("uid") {
+                            psd.insert("uid".to_string(), Value::Null);
+                        }
+                        psd.insert(
+                            "baseUrl".to_string(),
+                            Value::String(effective_base_url.clone()),
+                        );
+                        // Per-account session credential — enables multi-account rotation.
+                        if let Some(v) = &mimo_pass_token {
+                            psd.insert("mimoPassToken".to_string(), Value::String(v.clone()));
+                        } else if !psd.contains_key("mimoPassToken") {
+                            psd.insert("mimoPassToken".to_string(), Value::Null);
+                        }
+                        if let Some(v) = &mimo_user_id {
+                            psd.insert("mimoUserId".to_string(), Value::String(v.clone()));
+                        } else if !psd.contains_key("mimoUserId") {
+                            psd.insert("mimoUserId".to_string(), Value::Null);
+                        }
+                        if let Some(v) = &mimo_c_user_id {
+                            psd.insert("mimoCUserId".to_string(), Value::String(v.clone()));
+                        } else if !psd.contains_key("mimoCUserId") {
+                            psd.insert("mimoCUserId".to_string(), Value::Null);
+                        }
+                        psd.insert("modelCount".to_string(), Value::Number(model_count.into()));
+                        if validated {
+                            target.test_status = Some("active".to_string());
+                        }
+                    }
+                }
+            })
+            .await;
+        if let Err(error) = update_result {
+            return internal_error_response(error.to_string());
+        }
+        let updated = state
+            .db
+            .snapshot()
+            .provider_connections
+            .iter()
+            .find(|c| c.id == existing_id)
+            .cloned();
+        if let Some(updated) = updated {
+            return Json(json!({
+                "success": true,
+                "validated": validated,
+                "modelCount": model_count,
+                "updated": true,
+                "connection": {
+                    "id": updated.id,
+                    "provider": updated.provider,
+                    "email": updated.email,
+                    "displayName": updated.display_name
+                }
+            }))
+            .into_response();
+        }
+        return internal_error_response("Failed to update provider connection".to_string());
+    }
+
+    let mut psd = std::collections::BTreeMap::new();
+    psd.insert(
+        "uid".to_string(),
+        uid.clone().map(Value::String).unwrap_or(Value::Null),
+    );
+    psd.insert(
+        "baseUrl".to_string(),
+        Value::String(effective_base_url.clone()),
+    );
+    psd.insert(
+        "authMethod".to_string(),
+        Value::String("api_key".to_string()),
+    );
+    psd.insert("provider".to_string(), Value::String("API Key".to_string()));
+    psd.insert("modelCount".to_string(), Value::Number(model_count.into()));
+    // Per-account session credential — enables multi-account rotation.
+    psd.insert(
+        "mimoPassToken".to_string(),
+        mimo_pass_token.map(Value::String).unwrap_or(Value::Null),
+    );
+    psd.insert(
+        "mimoUserId".to_string(),
+        mimo_user_id.map(Value::String).unwrap_or(Value::Null),
+    );
+    psd.insert(
+        "mimoCUserId".to_string(),
+        mimo_c_user_id.map(Value::String).unwrap_or(Value::Null),
+    );
+
+    let connection = ProviderConnection {
+        provider: "xiaomi-mimo".to_string(),
+        auth_type: "api_key".to_string(),
+        access_token: Some(key),
+        refresh_token: None,
+        // API keys don't expire on a fixed schedule; use a long horizon
+        expires_at: Some((chrono::Utc::now() + chrono::Duration::days(365)).to_rfc3339()),
+        email: expected_email.clone(),
+        display_name: Some(
+            uid.map(|uid| format!("Xiaomi {uid}"))
+                .unwrap_or_else(|| "Xiaomi MiMo".to_string()),
+        ),
+        test_status: Some(if validated {
+            "active".to_string()
+        } else {
+            "untested".to_string()
+        }),
+        provider_specific_data: psd,
         ..Default::default()
     };
 
     match create_imported_oauth_connection(&state.db, connection).await {
         Ok(connection) => Json(json!({
             "success": true,
+            "validated": validated,
+            "modelCount": model_count,
             "connection": {
                 "id": connection.id,
                 "provider": connection.provider,
-                "email": connection.email
+                "email": connection.email,
+                "displayName": connection.display_name
             }
         }))
         .into_response(),
-        Err(error) => internal_error_response(error.to_string()),
+        Err(error) => internal_error_response(format!("API key import failed: {error}")),
     }
+}
+
+/// Candidate paths for the Xiaomi MiMo Desktop auth.json
+/// (MiMoCode / MiMo Desktop shared data dir, cross-platform XDG).
+fn xiaomi_mimo_auth_candidates() -> Vec<PathBuf> {
+    let home = cursor_home_dir();
+    let mut paths = vec![home
+        .join(".local")
+        .join("share")
+        .join("mimocode")
+        .join("auth.json")];
+
+    // Windows: also check USERPROFILE-based XDG
+    if std::env::consts::OS == "windows" {
+        let app_data = std::env::var_os("APPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData").join("Roaming"));
+        // Desktop's own storage (may have separate credentials in the future)
+        paths.push(app_data.join("Xiaomi MiMo").join("auth.json"));
+    }
+
+    // macOS
+    if std::env::consts::OS == "macos" {
+        paths.push(
+            home.join("Library")
+                .join("Application Support")
+                .join("mimocode")
+                .join("auth.json"),
+        );
+    }
+
+    paths
+}
+
+/// Read just the passToken + identity cookies from MiMo Desktop's cookie store.
+///
+/// Mirrors `readDesktopPassToken` in open-sse/shared/mimoAccount.js: copies the
+/// Chromium cookie DB (exclusively locked while Desktop runs, so a copy failure
+/// means null) and reads the `passToken`/`userId`/`cUserId` cookies for
+/// `account.xiaomi.com`.
+fn read_mimo_desktop_pass_token() -> Option<(String, Option<String>, Option<String>)> {
+    let home = cursor_home_dir();
+    let cookie_src = match std::env::consts::OS {
+        "windows" => home
+            .join("AppData")
+            .join("Roaming")
+            .join("Xiaomi MiMo")
+            .join("Partitions")
+            .join("xiaomi-account")
+            .join("Network")
+            .join("Cookies"),
+        "macos" => home
+            .join("Library")
+            .join("Application Support")
+            .join("Xiaomi MiMo")
+            .join("Partitions")
+            .join("xiaomi-account")
+            .join("Network")
+            .join("Cookies"),
+        _ => home
+            .join(".config")
+            .join("Xiaomi MiMo")
+            .join("Partitions")
+            .join("xiaomi-account")
+            .join("Network")
+            .join("Cookies"),
+    };
+    if !cookie_src.is_file() {
+        return None;
+    }
+    let tmp = std::env::temp_dir().join(format!(
+        "openproxy-mimo-cookies-{}-{}.db",
+        std::process::id(),
+        uuid::Uuid::new_v4().to_string()[..8].to_string()
+    ));
+    // Locked by a running Desktop — non-fatal, return null.
+    if std::fs::copy(&cookie_src, &tmp).is_err() {
+        return None;
+    }
+    let result = (|| {
+        let conn =
+            rusqlite::Connection::open_with_flags(&tmp, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .ok()?;
+        let mut stmt = conn
+            .prepare("SELECT name, value FROM cookies WHERE host_key = '.account.xiaomi.com'")
+            .ok()?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .ok()?
+            .filter_map(|r| r.ok())
+            .collect();
+        let get = |name: &str| {
+            rows.iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .filter(|v| !v.is_empty())
+        };
+        let pass_token = get("passToken")?;
+        Some((pass_token, get("userId"), get("cUserId")))
+    })();
+    let _ = std::fs::remove_file(&tmp);
+    result
+}
+
+/// GET /api/oauth/xiaomi-mimo/auto-import
+/// Auto-detect Xiaomi MiMo credentials from local auth.json.
+///
+/// Sources (in priority order):
+///   1. ~/.local/share/mimocode/auth.json  → xiaomi field
+///   2. %APPDATA%/Xiaomi MiMo/...          → (future: Desktop keychain)
+///
+/// auth.json shape:
+/// {
+///   "xiaomi": {
+///     "type": "api",
+///     "key": "sk-xxxx",
+///     "metadata": { "uid": "...", "base_url": "https://api.xiaomimimo.com/v1" }
+///   }
+/// }
+async fn xiaomi_mimo_auto_import() -> Response {
+    let candidates = xiaomi_mimo_auth_candidates();
+    let mut auth_path: Option<PathBuf> = None;
+    for candidate in &candidates {
+        if std::fs::File::open(candidate).is_ok() {
+            auth_path = Some(candidate.clone());
+            break;
+        }
+    }
+    let Some(auth_path) = auth_path else {
+        let checked = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Json(json!({
+            "found": false,
+            "error": format!(
+                "Xiaomi MiMo Desktop auth file not found. Checked:\n{checked}\n\nMake sure Xiaomi MiMo Desktop is installed and you are signed in."
+            )
+        }))
+        .into_response();
+    };
+
+    let raw = match std::fs::read_to_string(&auth_path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            return Json(json!({ "found": false, "error": error.to_string() })).into_response();
+        }
+    };
+    let auth: Value = match serde_json::from_slice(raw.as_bytes()) {
+        Ok(auth) => auth,
+        Err(_) => {
+            return Json(json!({
+                "found": false,
+                "error": "auth.json is not valid JSON. Please sign in to Xiaomi MiMo Desktop again."
+            }))
+            .into_response();
+        }
+    };
+
+    let xiaomi = auth.get("xiaomi");
+    let key = xiaomi
+        .and_then(|x| x.get("key"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(key) = key else {
+        return Json(json!({
+            "found": false,
+            "error": "No Xiaomi credentials found in auth.json. Please sign in to Xiaomi MiMo Desktop."
+        }))
+        .into_response();
+    };
+    if !key.starts_with("sk-") {
+        return Json(json!({
+            "found": false,
+            "error": "Xiaomi key does not appear to be a valid API key (expected sk- prefix)."
+        }))
+        .into_response();
+    }
+
+    let metadata = xiaomi.and_then(|x| x.get("metadata"));
+    let uid = metadata
+        .and_then(|m| m.get("uid"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let base_url = metadata
+        .and_then(|m| m.get("base_url"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://api.xiaomimimo.com/v1")
+        .to_string();
+
+    // Account-session passToken from Desktop's cookie store. Persisting it per
+    // connection is what lets multiple Xiaomi accounts rotate independently.
+    // (null while Desktop is running — its cookie DB is exclusively locked.)
+    let (mimo_pass_token, mimo_user_id, mimo_c_user_id) = match read_mimo_desktop_pass_token() {
+        Some((pass_token, user_id, c_user_id)) => (Some(pass_token), user_id, c_user_id),
+        None => (None, None, None),
+    };
+
+    Json(json!({
+        "found": true,
+        "apiKey": key,
+        "uid": uid,
+        "baseUrl": base_url,
+        "source": auth_path.to_string_lossy().to_string(),
+        "mimoPassToken": mimo_pass_token,
+        "mimoUserId": mimo_user_id,
+        "mimoCUserId": mimo_c_user_id
+    }))
+    .into_response()
 }
 
 /// POST /api/oauth/kiro/api-key
@@ -5487,6 +6535,18 @@ pub fn routes() -> Router<AppState> {
             post(kiro_import_cli_proxy),
         )
         .route("/api/oauth/xai/manual-code", post(xai_manual_code))
+        .route(
+            "/api/oauth/grok-cli/bulk-import",
+            post(grok_cli_bulk_import),
+        )
+        .route(
+            "/api/oauth/xiaomi-mimo/api-key",
+            post(xiaomi_mimo_api_key_import),
+        )
+        .route(
+            "/api/oauth/xiaomi-mimo/auto-import",
+            get(xiaomi_mimo_auto_import),
+        )
         .route(
             "/api/oauth/kiro/social-authorize",
             get(kiro_social_authorize),
@@ -5865,5 +6925,111 @@ async fn handle_zed_proxy_connection(
             )
             .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn jwt_with_payload(payload: &serde_json::Value) -> String {
+        let encode = |bytes: &[u8]| {
+            let mut encoded = URL_SAFE_NO_PAD.encode(bytes);
+            while encoded.len() % 4 != 0 {
+                encoded.push('=');
+            }
+            encoded
+                .trim_end_matches('=')
+                .replace('+', "-")
+                .replace('/', "_")
+        };
+        format!(
+            "{}.{}.sig",
+            encode(br#"{"alg":"none"}"#),
+            encode(payload.to_string().as_bytes())
+        )
+    }
+
+    #[test]
+    fn test_normalize_kiro_profile_arn_to_us_east_1() {
+        assert_eq!(
+            normalize_kiro_profile_arn("arn:aws:codewhisperer:eu-west-1:123:profile/p"),
+            "arn:aws:codewhisperer:us-east-1:123:profile/p"
+        );
+        // Non-matching input passes through unchanged.
+        assert_eq!(normalize_kiro_profile_arn("other"), "other");
+    }
+
+    #[test]
+    fn test_kiro_oidc_token_endpoint_rejects_bad_region() {
+        assert_eq!(
+            kiro_oidc_token_endpoint("us-east-1"),
+            Some("https://oidc.us-east-1.amazonaws.com/token".to_string())
+        );
+        assert_eq!(kiro_oidc_token_endpoint("not a region"), None);
+        assert_eq!(kiro_oidc_token_endpoint("https://evil.example"), None);
+    }
+
+    #[test]
+    fn test_is_valid_aws_region() {
+        assert!(is_valid_aws_region("us-east-1"));
+        assert!(is_valid_aws_region("eu-central-1"));
+        assert!(!is_valid_aws_region("US-EAST-1"));
+        assert!(!is_valid_aws_region("us-east-1;evil"));
+        assert!(!is_valid_aws_region(""));
+    }
+
+    #[test]
+    fn test_decode_xai_id_token_email_prefers_email() {
+        let token = jwt_with_payload(&serde_json::json!({ "email": "a@x.ai" }));
+        assert_eq!(
+            decode_xai_id_token_email(Some(&token)),
+            Some("a@x.ai".to_string())
+        );
+        assert_eq!(
+            extract_email_from_access_token(&token),
+            Some("a@x.ai".to_string())
+        );
+        assert_eq!(decode_xai_id_token_email(None), None);
+        assert_eq!(decode_xai_id_token_email(Some("not-a-jwt")), None);
+    }
+
+    #[test]
+    fn test_decode_xai_id_token_email_falls_back_to_sub() {
+        let token = jwt_with_payload(&serde_json::json!({ "sub": "user-1" }));
+        assert_eq!(
+            decode_xai_id_token_email(Some(&token)),
+            Some("user-1".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_codex_account_info_reads_openai_auth_claims() {
+        let token = jwt_with_payload(&serde_json::json!({
+            "email": "c@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acc-1",
+                "chatgpt_plan_type": "plus"
+            }
+        }));
+        let (email, psd) = extract_codex_account_info(Some(&token));
+        assert_eq!(email, Some("c@example.com".to_string()));
+        assert_eq!(
+            psd.get("chatgptAccountId"),
+            Some(&serde_json::Value::String("acc-1".to_string()))
+        );
+        assert_eq!(
+            psd.get("chatgptPlanType"),
+            Some(&serde_json::Value::String("plus".to_string()))
+        );
+    }
+
+    #[test]
+    fn test_xiaomi_mimo_auth_candidates_include_mimocode_path() {
+        let paths: Vec<String> = xiaomi_mimo_auth_candidates()
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(paths.iter().any(|p| p.contains("mimocode")));
     }
 }
