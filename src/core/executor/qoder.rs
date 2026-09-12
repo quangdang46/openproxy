@@ -277,13 +277,19 @@ fn stub_model_config(qoder_key: &str) -> Value {
 }
 
 /// Billing/quota error codes that should trigger combo fallback.
-/// Matched as string OR number: upstream sends `{"code":"112"}` (string) in
-/// `isBillingBlock` test vectors, and `{"code":112}` (number) live.
+/// 9router `isBillingBlock` (qoder.js) matches string codes only via
+/// `/"code"\s*:\s*"(112|10605)"/` (whitespace-tolerant, strings only).
+/// Rust additionally accepts numeric `{"code":112}` — a benign superset for
+/// live traffic that sends numbers. Both shapes are gated behind the
+/// `statusCodeValue != 200` check in `detect_qoder_billing_block` (9router
+/// qoder.js:376 `statusVal !== 200 && isBillingBlock(inner)`), so a normal
+/// 200 chunk merely mentioning `"code":"112"` never fires.
 const QODER_BILLING_CODES: &[&str] = &["112", "10605"];
 
 /// Extract the `code` field of a Qoder inner-body JSON object as a string,
-/// accepting both `"112"` and `112` shapes (9router `isBillingBlock` matches
-/// string codes; live traffic may send numbers).
+/// accepting both `"112"` and `112` shapes. 9router `isBillingBlock` matches
+/// strings only; the numeric shape is a benign Rust-side superset (see
+/// `QODER_BILLING_CODES`), gated behind the status != 200 check.
 pub fn qoder_billing_code(obj: &Value) -> Option<String> {
     match obj.get("code") {
         Some(Value::String(s)) => Some(s.clone()),
@@ -297,9 +303,22 @@ pub fn qoder_billing_code(obj: &Value) -> Option<String> {
 /// Returns `Some(error_message)` if the body is a billing/quota error that
 /// should be surfaced as a synthetic 403 to trigger combo/account fallback.
 /// Returns `None` if the body is normal (should be piped to the client).
+///
+/// Mirrors 9router qoder.js:376 — only a frame whose envelope
+/// `statusCodeValue !== 200` AND whose inner body is a billing block counts.
+/// A normal 200 chunk that merely mentions `"code":"112"` (e.g. model output
+/// text) must NOT fire. A missing/non-numeric `statusCodeValue` defaults to
+/// 200, exactly like the JS (`typeof ... === "number" ? ... : 200`).
 pub fn detect_qoder_billing_block(body: &str) -> Option<String> {
     let envelope: Value = serde_json::from_str(body).ok()?;
     let inner = envelope.get("body").and_then(Value::as_str)?;
+    let status_val = envelope
+        .get("statusCodeValue")
+        .and_then(Value::as_u64)
+        .unwrap_or(200);
+    if status_val == 200 {
+        return None;
+    }
 
     // Parse the inner body as JSON (it may be a stringified JSON).
     let inner_json: Option<Value> = serde_json::from_str(inner).ok();
@@ -315,15 +334,21 @@ pub fn detect_qoder_billing_block(body: &str) -> Option<String> {
                 return Some(format!("qoder billing block (code {code}): {msg}"));
             }
         }
-        // Check for pricingUrl field (indicates billing required).
+        // Check for pricingUrl field (indicates billing required). 9router
+        // lowercases the inner body first (`lowerMsg.includes("pricingurl")`),
+        // so match case-insensitively here too.
         if obj.get("pricingUrl").is_some() {
             return Some("qoder billing block: pricingUrl present".to_string());
         }
     }
 
     // Also check the raw string for billing indicators (both `"112"` and
-    // `112` shapes, optional whitespace — mirrors the JS regex).
-    if inner.contains("pricingUrl") {
+    // `112` shapes, optional whitespace — the JS regex tolerates whitespace
+    // but matches strings only; the numeric shapes are the benign Rust-side
+    // superset documented on `QODER_BILLING_CODES`).
+    // 9router checks `lowerMsg.includes("pricingurl")` (case-insensitive).
+    let lower = inner.to_lowercase();
+    if lower.contains("pricingurl") {
         return Some("qoder billing block detected in raw body".to_string());
     }
     let compact: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1174,27 +1199,43 @@ pub fn resolve_qoder_context_tier(
 }
 
 /// Write the chosen tier into a Qoder chat payload (9router
-/// `applyQoderContextTier`): parameters.context_length,
+/// `applyQoderContextTier` in contextTier.js): parameters.context_length,
 /// chat_context.extra.ideModelConfigOverride, model_config.
+///
+/// Mirrors the JS spread-defaults: `parameters` and `chat_context`/`extra`
+/// are created when absent. `model_config` is only touched when already
+/// present and an object — the JS guards with `typeof ... === "object"`.
 pub fn apply_qoder_context_tier(payload: &mut Value, tier: &(String, u64, String)) {
     let count = tier.1;
-    if let Some(params) = payload.get_mut("parameters") {
-        if let Some(obj) = params.as_object_mut() {
-            obj.insert("context_length".to_string(), Value::from(count));
-        }
+    if !payload.is_object() {
+        return;
     }
-    if let Some(extra) = payload
-        .get_mut("chat_context")
-        .and_then(|c| c.get_mut("extra"))
-        .and_then(|e| e.as_object_mut())
-    {
-        let mut over = extra
-            .get("ideModelConfigOverride")
-            .and_then(|v| v.as_object())
-            .cloned()
-            .unwrap_or_default();
-        over.insert("max_input_tokens".to_string(), Value::from(count));
-        extra.insert("ideModelConfigOverride".to_string(), Value::Object(over));
+    let params = payload
+        .as_object_mut()
+        .expect("checked is_object")
+        .entry("parameters")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(obj) = params.as_object_mut() {
+        obj.insert("context_length".to_string(), Value::from(count));
+    }
+    let chat_ctx = payload
+        .as_object_mut()
+        .expect("checked is_object")
+        .entry("chat_context")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(ctx_obj) = chat_ctx.as_object_mut() {
+        let extra = ctx_obj
+            .entry("extra")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(extra_obj) = extra.as_object_mut() {
+            let mut over = extra_obj
+                .get("ideModelConfigOverride")
+                .and_then(|v| v.as_object())
+                .cloned()
+                .unwrap_or_default();
+            over.insert("max_input_tokens".to_string(), Value::from(count));
+            extra_obj.insert("ideModelConfigOverride".to_string(), Value::Object(over));
+        }
     }
     if let Some(mc) = payload.get_mut("model_config") {
         if let Some(obj) = mc.as_object_mut() {
@@ -1869,8 +1910,9 @@ impl QoderExecutor {
 
     /// Fetch the live model catalog and resolve the full entry for `qoder_key`
     /// (9router getQoderModelConfig / fetchQoderCatalogRaw). The API returns
-    /// `body.chat` (array of full model_config blocks); `data`/`models` are
-    /// only a legacy fallback. Returns the full catalog entry (cloned) so the
+    /// `body.chat` (array of full model_config blocks); the `data`/`models`
+    /// keys are a benign Rust-side extension beyond the JS (which requires
+    /// `Array.isArray(body.chat)`). Returns the full catalog entry (cloned) so the
     /// chat payload can send the complete server-published `model_config`
     /// instead of a 3-field stub — sending the wrong block silently downgrades
     /// to a different model upstream. Hard error when the model is unknown
@@ -1878,8 +1920,11 @@ impl QoderExecutor {
     /// catalog access) falls back to a minimal stub so the chat path does not
     /// break.
     /// Parse a catalog response into `(models summary, raw configs)`.
-    /// 9router `fetchQoderCatalogRaw`: the API returns `body.chat`; `data` /
-    /// `models` are only a legacy fallback. Hidden entries (`enable: false`)
+    /// 9router `fetchQoderCatalogRaw` requires `Array.isArray(body.chat)` and
+    /// returns null otherwise; the `data` / `models` keys checked here are a
+    /// benign Rust-side extension beyond the JS (harmless: upstream sends
+    /// `chat`, and the fallbacks only matter for nonstandard shapes).
+    /// Hidden entries (`enable: false`)
     /// are still cached — upstream accepts chat for these keys.
     pub fn parse_qoder_catalog(catalog: &Value) -> (Vec<Value>, HashMap<String, Value>) {
         let arr = catalog
@@ -3091,8 +3136,9 @@ mod tests {
 
     #[test]
     fn test_detect_billing_block_code_112() {
+        // 9router qoder.js:376 requires statusCodeValue !== 200.
         let body =
-            r#"{"statusCodeValue":200,"body":"{\"code\":112,\"message\":\"Quota exhausted\"}"}"#;
+            r#"{"statusCodeValue":403,"body":"{\"code\":112,\"message\":\"Quota exhausted\"}"}"#;
         let result = detect_qoder_billing_block(body);
         assert!(
             result.is_some(),
@@ -3104,7 +3150,7 @@ mod tests {
     #[test]
     fn test_detect_billing_block_code_10605() {
         let body =
-            r#"{"statusCodeValue":200,"body":"{\"code\":10605,\"message\":\"Queue throttle\"}"}"#;
+            r#"{"statusCodeValue":429,"body":"{\"code\":10605,\"message\":\"Queue throttle\"}"}"#;
         let result = detect_qoder_billing_block(body);
         assert!(
             result.is_some(),
@@ -3114,13 +3160,38 @@ mod tests {
 
     #[test]
     fn test_detect_billing_block_pricing_url() {
-        let body = r#"{"statusCodeValue":200,"body":"{\"pricingUrl\":\"https://qoder.sh/pricing\",\"message\":\"Upgrade required\"}"}"#;
+        let body = r#"{"statusCodeValue":403,"body":"{\"pricingUrl\":\"https://qoder.sh/pricing\",\"message\":\"Upgrade required\"}"}"#;
         let result = detect_qoder_billing_block(body);
         assert!(
             result.is_some(),
             "pricingUrl should be detected as billing block"
         );
         assert!(result.unwrap().contains("pricingUrl"));
+    }
+
+    #[test]
+    fn test_detect_billing_block_pricing_url_case_insensitive() {
+        // 9router checks lowerMsg.includes("pricingurl") — mixed case must fire.
+        let body =
+            r#"{"statusCodeValue":403,"body":"{\"PricingURL\":\"https://qoder.sh/pricing\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(
+            result.is_some(),
+            "mixed-case PricingURL should be detected as billing block"
+        );
+    }
+
+    #[test]
+    fn test_detect_billing_block_200_with_billing_code_is_not_billing() {
+        // A normal 200 chunk merely mentioning "code":"112" (e.g. model
+        // output text echoed in the inner body) must NOT be flagged —
+        // 9router qoder.js:376 gates on statusVal !== 200.
+        let body = r#"{"statusCodeValue":200,"body":"{\"code\":\"112\",\"message\":\"Quota exhausted\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(
+            result.is_none(),
+            "200-status frame with billing code must not be flagged"
+        );
     }
 
     #[test]
@@ -3143,7 +3214,7 @@ mod tests {
 
     #[test]
     fn test_check_billing_in_sse_line_billing() {
-        let line = r#"data: {"statusCodeValue":200,"body":"{\"code\":112,\"message\":\"Quota exhausted\"}"}"#;
+        let line = r#"data: {"statusCodeValue":403,"body":"{\"code\":112,\"message\":\"Quota exhausted\"}"}"#;
         let result = check_billing_in_sse_line(line);
         assert!(result.is_some(), "billing SSE line should be detected");
         let err_frame = result.unwrap();
@@ -3151,6 +3222,18 @@ mod tests {
         assert!(
             err_frame.contains("billing"),
             "error frame should mention billing"
+        );
+    }
+
+    #[test]
+    fn test_check_billing_in_sse_line_200_with_code_is_not_billing() {
+        // 200-status frame containing "code":"112" must NOT be flagged.
+        let line =
+            r#"data: {"statusCodeValue":200,"body":"{\"code\":\"112\",\"message\":\"hi\"}"}"#;
+        let result = check_billing_in_sse_line(line);
+        assert!(
+            result.is_none(),
+            "200-status SSE line must not trigger billing"
         );
     }
 
@@ -3256,6 +3339,51 @@ mod tests {
             Some("10605".to_string())
         );
         assert_eq!(qoder_billing_code(&serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn test_detect_billing_block_numeric_code_gated_by_status() {
+        // Numeric {"code":112} is a benign Rust-side superset (JS matches
+        // strings only), but it is still gated behind status != 200.
+        let ok = r#"{"statusCodeValue":403,"body":"{\"code\":112}"}"#;
+        assert!(detect_qoder_billing_block(ok).is_some());
+        let gated = r#"{"statusCodeValue":200,"body":"{\"code\":112}"}"#;
+        assert!(
+            detect_qoder_billing_block(gated).is_none(),
+            "numeric code on a 200 frame must not fire"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Review fix: apply_qoder_context_tier creates objects when absent.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_context_tier_creates_missing_objects() {
+        // Minimal payload with none of parameters/chat_context/model_config —
+        // mirrors JS spread-defaults (`payload.parameters = {...}` etc.).
+        let mut payload = serde_json::json!({"messages": []});
+        let tier = ("large".to_string(), 200_000u64, "auto:fits".to_string());
+        apply_qoder_context_tier(&mut payload, &tier);
+        assert_eq!(payload["parameters"]["context_length"], 200_000);
+        assert_eq!(
+            payload["chat_context"]["extra"]["ideModelConfigOverride"]["max_input_tokens"],
+            200_000
+        );
+        // model_config stays absent — JS only touches it when already an object.
+        assert!(payload.get("model_config").is_none());
+        // Existing model_config object gets the tier written in.
+        let mut payload2 = serde_json::json!({
+            "parameters": {"context_length": 32_000},
+            "model_config": {"max_input_tokens": 32_000}
+        });
+        apply_qoder_context_tier(&mut payload2, &tier);
+        assert_eq!(payload2["parameters"]["context_length"], 200_000);
+        assert_eq!(payload2["model_config"]["max_input_tokens"], 200_000);
+        assert_eq!(
+            payload2["chat_context"]["extra"]["ideModelConfigOverride"]["max_input_tokens"],
+            200_000
+        );
     }
 
     // -----------------------------------------------------------------------
