@@ -11,6 +11,51 @@ fn next_seq(state: &mut serde_json::Map<String, Value>) -> u64 {
 
 /// Emit an SSE event into `events`, stamping `data.sequence_number` with the
 /// next value from `state`.
+
+/// Look up a Responses item key (item.id / data.item_id) in the
+/// item_id → chat tool_calls index map, returning the mapped index.
+fn resp_tool_index(state: &serde_json::Map<String, Value>, key: Option<&str>) -> Option<u64> {
+    let key = key.filter(|k| !k.is_empty())?;
+    state
+        .get("respToolChatIndex")
+        .and_then(Value::as_object)
+        .and_then(|map| map.get(key))
+        .and_then(Value::as_u64)
+}
+
+/// Record an item key → chat tool_calls index mapping.
+fn set_resp_tool_index(state: &mut serde_json::Map<String, Value>, key: &str, idx: u64) {
+    if key.is_empty() {
+        return;
+    }
+    let map = state
+        .entry("respToolChatIndex".to_string())
+        .or_insert_with(|| Value::Object(Default::default()));
+    if let Some(obj) = map.as_object_mut() {
+        obj.insert(key.to_string(), Value::Number(idx.into()));
+    }
+}
+
+/// Mark a chat tool_calls index as having received argument deltas.
+fn mark_resp_tool_args(state: &mut serde_json::Map<String, Value>, idx: u64) {
+    let arr = state
+        .entry("respToolArgsEmitted".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if let Some(list) = arr.as_array_mut() {
+        if !list.iter().any(|v| v.as_u64() == Some(idx)) {
+            list.push(Value::Number(idx.into()));
+        }
+    }
+}
+
+/// Check whether a chat tool_calls index already received argument deltas.
+fn resp_tool_args_emitted(state: &serde_json::Map<String, Value>, idx: u64) -> bool {
+    state
+        .get("respToolArgsEmitted")
+        .and_then(Value::as_array)
+        .is_some_and(|list| list.iter().any(|v| v.as_u64() == Some(idx)))
+}
+
 fn emit(
     events: &mut Vec<Value>,
     state: &mut serde_json::Map<String, Value>,
@@ -349,8 +394,14 @@ pub fn chat_to_responses_response(
         state.insert("funcNames".to_string(), func_names);
     }
 
-    // Handle finish_reason
-    if choice.get("finish_reason").is_some() {
+    // Handle finish_reason — JS parity (openai-responses.js:111
+    // `if (choice.finish_reason)`): explicit null is falsy, so only a
+    // non-null string closes the message / sends response.completed.
+    if choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .is_some()
+    {
         let mut msg_item_added = state
             .get("msgItemAdded")
             .cloned()
@@ -636,6 +687,15 @@ pub fn responses_to_chat_response(
         );
         state.insert("toolCallIndex".to_string(), Value::Number(0.into()));
         state.insert("currentToolCallId".to_string(), Value::Null);
+        // JS parity (openai-responses.js:449-455): item_id → chat
+        // tool_calls index plus the set of indices that already received
+        // argument deltas. Lazily created as plain JSON (object / array)
+        // since the state map only holds serde Values.
+        state.insert(
+            "respToolChatIndex".to_string(),
+            Value::Object(Default::default()),
+        );
+        state.insert("respToolArgsEmitted".to_string(), Value::Array(Vec::new()));
     }
 
     let chat_id = state
@@ -686,10 +746,27 @@ pub fn responses_to_chat_response(
                     Value::String(call_id.clone()),
                 );
 
-                let tool_idx = state
-                    .get("toolCallIndex")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
+                // JS parity (openai-responses.js:479-490): index is assigned
+                // here (not on done) keyed by the server item id so parallel
+                // calls stay separate; duplicate added reuses the mapping.
+                let item_id = item
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| data.get("item_id").and_then(|v| v.as_str()));
+                let tool_idx = match resp_tool_index(state, item_id) {
+                    Some(idx) => idx,
+                    None => {
+                        let idx = state
+                            .get("toolCallIndex")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        state.insert("toolCallIndex".to_string(), Value::Number((idx + 1).into()));
+                        if let Some(key) = item_id {
+                            set_resp_tool_index(state, key, idx);
+                        }
+                        idx
+                    }
+                };
                 vec![serde_json::json!({
                     "id": chat_id,
                     "object": "chat.completion.chunk",
@@ -721,10 +798,17 @@ pub fn responses_to_chat_response(
             if delta.is_empty() {
                 return vec![];
             }
-            let tool_idx = state
-                .get("toolCallIndex")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
+            // JS parity (openai-responses.js:505-519): route by item_id so
+            // interleaved parallel fragments stay on their own call.
+            let item_id = data.get("item_id").and_then(|v| v.as_str());
+            let tool_idx = resp_tool_index(state, item_id).unwrap_or_else(|| {
+                state
+                    .get("toolCallIndex")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(1)
+                    .saturating_sub(1)
+            });
+            mark_resp_tool_args(state, tool_idx);
             vec![serde_json::json!({
                 "id": chat_id,
                 "object": "chat.completion.chunk",
@@ -748,14 +832,45 @@ pub fn responses_to_chat_response(
                 .and_then(|i| i.get("type"))
                 .and_then(|v| v.as_str());
             if item_type == Some("function_call") || item_type == Some("custom_tool_call") {
-                let tool_idx = state
-                    .get("toolCallIndex")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0);
-                state.insert(
-                    "toolCallIndex".to_string(),
-                    Value::Number((tool_idx + 1).into()),
-                );
+                // JS parity (openai-responses.js:521-539): index was assigned
+                // at added-time; nothing to advance. Some upstreams send
+                // complete arguments only here (no deltas) — emit them once.
+                let key = data
+                    .get("item")
+                    .and_then(|i| i.get("id"))
+                    .and_then(|v| v.as_str())
+                    .or_else(|| data.get("item_id").and_then(|v| v.as_str()));
+                let tool_idx = resp_tool_index(state, key).unwrap_or_else(|| {
+                    state
+                        .get("toolCallIndex")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(1)
+                        .saturating_sub(1)
+                });
+                let full_args = data
+                    .get("item")
+                    .and_then(|i| i.get("arguments"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if !full_args.is_empty() && !resp_tool_args_emitted(state, tool_idx) {
+                    mark_resp_tool_args(state, tool_idx);
+                    return vec![serde_json::json!({
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {
+                                "tool_calls": [{
+                                    "index": tool_idx,
+                                    "function": {"arguments": full_args}
+                                }]
+                            },
+                            "finish_reason": null
+                        }]
+                    })];
+                }
             }
             vec![]
         }
@@ -1079,6 +1194,59 @@ mod tests {
             has_function_call,
             "non-empty tool_calls should produce function_call events, got: {:?}",
             events
+        );
+    }
+
+    #[test]
+    fn parallel_tool_calls_keep_separate_indices() {
+        // JS parity (openai-responses.js:449-539): item_id → index map keeps
+        // parallel calls separate when upstream emits all addeds before
+        // any delta; done-with-args emits only when no deltas were seen.
+        let mut state = serde_json::Map::new();
+        let added = |id: &str, call_id: &str, name: &str| {
+            json!({
+                "type": "response.output_item.added",
+                "item": {"id": id, "type": "function_call", "call_id": call_id, "name": name}
+            })
+        };
+        let c1 = responses_to_chat_response(&added("item_a", "call_a", "fa"), &mut state);
+        let c2 = responses_to_chat_response(&added("item_b", "call_b", "fb"), &mut state);
+        let idx = |chunks: &[Value]| {
+            chunks[0]["choices"][0]["delta"]["tool_calls"][0]["index"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(idx(&c1), 0);
+        assert_eq!(idx(&c2), 1);
+
+        // Deltas routed by item_id — interleaved fragments stay separate.
+        let d1 = responses_to_chat_response(
+            &json!({"type": "response.function_call_arguments.delta", "item_id": "item_b", "delta": "{\"x\":1}"}),
+            &mut state,
+        );
+        assert_eq!(idx(&d1), 1);
+
+        // Done with full args but deltas already emitted → nothing.
+        let done_b = responses_to_chat_response(
+            &json!({"type": "response.output_item.done", "item": {"id": "item_b", "type": "function_call", "arguments": "{\"x\":1}"}}),
+            &mut state,
+        );
+        assert!(done_b.is_empty());
+
+        // Done with full args and no deltas → emits once on its own index.
+        let mut state2 = serde_json::Map::new();
+        let _ = responses_to_chat_response(&added("item_c", "call_c", "fc"), &mut state2);
+        let done_c = responses_to_chat_response(
+            &json!({"type": "response.output_item.done", "item": {"id": "item_c", "type": "function_call", "arguments": "{\"y\":2}"}}),
+            &mut state2,
+        );
+        assert_eq!(done_c.len(), 1);
+        assert_eq!(idx(&done_c), 0);
+        assert!(
+            done_c[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap()
+                .contains("\"y\"")
         );
     }
 }

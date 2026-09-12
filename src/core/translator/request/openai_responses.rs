@@ -150,10 +150,32 @@ pub fn openai_responses_to_chat_request(
         }
     }
 
-    let input_items = if let Some(arr) = input.and_then(|v| v.as_array()) {
-        arr.clone()
-    } else {
-        return true;
+    // JS parity (responsesApi.js normalizeResponsesInput): a string input
+    // becomes a single user message (empty/blank → "..." placeholder), and
+    // an empty array gets the same placeholder so providers never see an
+    // empty messages[] (#389).
+    let input_items = match input {
+        Some(Value::String(text)) => {
+            let text = if text.trim().is_empty() {
+                "...".to_string()
+            } else {
+                text.clone()
+            };
+            vec![serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": text }]
+            })]
+        }
+        Some(Value::Array(arr)) if arr.is_empty() => {
+            vec![serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "..." }]
+            })]
+        }
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => return true,
     };
 
     let mut current_assistant_msg: Option<Value> = None;
@@ -220,7 +242,10 @@ pub fn openai_responses_to_chat_request(
                     result["messages"].as_array_mut().unwrap().push(msg);
                 }
             }
-            Some("function_call") => {
+            // JS parity (openai-responses.js:104-128): function_call and
+            // custom_tool_call accumulate into one assistant message; custom
+            // tools carry freeform `input` instead of `arguments`.
+            Some("function_call") | Some("custom_tool_call") => {
                 let name = item.get("name").and_then(|v| v.as_str());
                 if name.is_none() || name.map(|s| s.trim().is_empty()).unwrap_or(true) {
                     continue;
@@ -240,18 +265,39 @@ pub fn openai_responses_to_chat_request(
                     }
                     current_assistant_msg = Some(msg);
                 }
+                let arguments = if item_type == Some("custom_tool_call") {
+                    match item.get("input") {
+                        Some(Value::String(s)) => Value::String(s.clone()),
+                        Some(other) => Value::String(
+                            serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+                        ),
+                        None => item
+                            .get("arguments")
+                            .cloned()
+                            .unwrap_or(Value::String("{}".to_string())),
+                    }
+                } else {
+                    item.get("arguments")
+                        .cloned()
+                        .unwrap_or(Value::String("{}".to_string()))
+                };
                 if let Some(ref mut msg) = current_assistant_msg {
-                    msg["tool_calls"].as_array_mut().unwrap().push(serde_json::json!({
-                        "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
-                        "type": "function",
-                        "function": {
-                            "name": name.unwrap_or(""),
-                            "arguments": item.get("arguments").cloned().unwrap_or(Value::String("{}".to_string()))
-                        }
-                    }));
+                    msg["tool_calls"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "type": "function",
+                            "function": {
+                                "name": name.unwrap_or(""),
+                                "arguments": arguments
+                            }
+                        }));
                 }
             }
-            Some("function_call_output") => {
+            // JS parity (openai-responses.js:129-148): both output variants
+            // flush the assistant message, then any pending tool results.
+            Some("function_call_output") | Some("custom_tool_call_output") => {
                 if let Some(msg) = current_assistant_msg.take() {
                     result["messages"].as_array_mut().unwrap().push(msg);
                 }
@@ -766,5 +812,47 @@ mod tests {
         let input = body.get("input").unwrap().as_array().unwrap();
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "message");
+    }
+
+    #[test]
+    fn responses_string_and_empty_input_normalized() {
+        // JS parity (responsesApi.js normalizeResponsesInput): string input →
+        // one user message; blank string and empty array → "..." placeholder.
+        let mut body: Value = serde_json::json!({"input": "hello", "model": "gpt-4"});
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+
+        let mut body: Value = serde_json::json!({"input": "   ", "model": "gpt-4"});
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages[0]["role"], "user");
+
+        let mut body: Value = serde_json::json!({"input": [], "model": "gpt-4"});
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn responses_custom_tool_items_convert() {
+        // JS parity (openai-responses.js:104-148): custom_tool_call uses
+        // `input` for arguments; custom_tool_call_output → tool message.
+        let mut body: Value = serde_json::json!({
+            "input": [
+                {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "call_1", "output": "ok"}
+            ],
+            "model": "gpt-4"
+        });
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["function"]["arguments"], "ls");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["content"], "ok");
     }
 }

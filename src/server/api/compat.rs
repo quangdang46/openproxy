@@ -2052,6 +2052,25 @@ fn normalize_content(content: Value) -> Value {
                             .is_some_and(|kind| matches!(kind, "input_text" | "output_text"))
                         {
                             map.insert("type".to_string(), Value::String("text".to_string()));
+                        } else if map.get("type").and_then(Value::as_str) == Some("input_image") {
+                            // JS parity (responsesApi.js convertResponsesApiFormat):
+                            // input_image → image_url { url, detail }.
+                            let url = map
+                                .get("image_url")
+                                .and_then(Value::as_str)
+                                .or_else(|| map.get("file_id").and_then(Value::as_str))
+                                .unwrap_or("")
+                                .to_string();
+                            let detail = map
+                                .get("detail")
+                                .and_then(Value::as_str)
+                                .unwrap_or("auto")
+                                .to_string();
+                            map.insert("type".to_string(), Value::String("text".to_string()));
+                            return Some(json!({
+                                "type": "image_url",
+                                "image_url": { "url": url, "detail": detail },
+                            }));
                         }
                         Some(Value::Object(map))
                     }
@@ -2081,9 +2100,24 @@ fn input_to_messages(input: Value) -> Value {
         })]),
         Value::Array(items) => {
             let mut messages = Vec::new();
+            // Group items by conversation turn, mirroring JS
+            // convertResponsesApiFormat (responsesApi.js:96-183): consecutive
+            // function_call items accumulate into one assistant message;
+            // function_call_output items flush pending state first.
+            let mut current_assistant: Option<Value> = None;
+            let mut pending_tool_results: Vec<Value> = Vec::new();
             for item in items {
-                push_input_item(&mut messages, item);
+                push_input_item_grouped(
+                    &mut messages,
+                    &mut current_assistant,
+                    &mut pending_tool_results,
+                    item,
+                );
             }
+            if let Some(msg) = current_assistant.take() {
+                messages.push(msg);
+            }
+            messages.extend(pending_tool_results.drain(..));
             Value::Array(messages)
         }
         Value::Object(map) => {
@@ -2092,6 +2126,95 @@ fn input_to_messages(input: Value) -> Value {
             Value::Array(messages)
         }
         _ => Value::Array(Vec::new()),
+    }
+}
+
+/// Grouped variant of [`push_input_item`] carrying the in-progress assistant
+/// message and pending tool results across items (JS parity: responsesApi.js
+/// convertResponsesApiFormat). Falls back to [`push_input_item`] for plain
+/// message/text items.
+fn push_input_item_grouped(
+    messages: &mut Vec<Value>,
+    current_assistant: &mut Option<Value>,
+    pending_tool_results: &mut Vec<Value>,
+    item: Value,
+) {
+    let item_type = item.get("type").and_then(Value::as_str).or_else(|| {
+        if item.get("role").is_some() {
+            Some("message")
+        } else {
+            None
+        }
+    });
+    match item_type {
+        Some("function_call") | Some("custom_tool_call") => {
+            // Skip nameless calls — strict upstreams reject them (#444).
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            if name.trim().is_empty() {
+                return;
+            }
+            if current_assistant.is_none() {
+                *current_assistant = Some(json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "tool_calls": [],
+                }));
+            }
+            // Custom tools carry freeform `input`; expose it as the
+            // arguments payload so the tool id/name still round-trips.
+            let arguments = if item_type == Some("custom_tool_call") {
+                match item.get("input") {
+                    Some(Value::String(s)) => Value::String(s.clone()),
+                    Some(other) => Value::String(
+                        serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+                    ),
+                    None => item
+                        .get("arguments")
+                        .cloned()
+                        .unwrap_or(Value::String("{}".to_string())),
+                }
+            } else {
+                item.get("arguments")
+                    .cloned()
+                    .unwrap_or(Value::String("{}".to_string()))
+            };
+            if let Some(msg) = current_assistant.as_mut() {
+                if let Some(calls) = msg.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                    calls.push(json!({
+                        "id": item.get("call_id").and_then(Value::as_str).unwrap_or(""),
+                        "type": "function",
+                        "function": { "name": name, "arguments": arguments },
+                    }));
+                }
+            }
+        }
+        Some("function_call_output") | Some("custom_tool_call_output") => {
+            // JS parity (openai-responses.js:129-148): flush the assistant
+            // message, then any pending tool results, then push the tool
+            // result immediately.
+            if let Some(msg) = current_assistant.take() {
+                messages.push(msg);
+            }
+            messages.extend(pending_tool_results.drain(..));
+            let output = match item.get("output") {
+                Some(Value::String(s)) => Value::String(s.clone()),
+                Some(other) => Value::String(serde_json::to_string(other).unwrap_or_default()),
+                None => Value::String(String::new()),
+            };
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": item.get("call_id").and_then(Value::as_str).unwrap_or(""),
+                "content": output,
+            }));
+        }
+        Some("reasoning") => {
+            // Reasoning items are display-only — skip (JS parity).
+        }
+        Some("additional_tools") => {
+            // Tool-list item, not a message — nothing to append here.
+            // (Body-level `tools` arrays are normalized by normalize_tools.)
+        }
+        _ => push_input_item(messages, item),
     }
 }
 
@@ -2363,6 +2486,68 @@ mod tests {
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "Stay concise");
         assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn responses_input_groups_function_calls_and_outputs() {
+        // JS parity (responsesApi.js convertResponsesApiFormat): consecutive
+        // function_call items share one assistant message; outputs flush it.
+        let body = json!({
+            "model": "openai/gpt-4o-mini",
+            "input": [
+                { "type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}" },
+                { "type": "function_call", "call_id": "call_2", "name": "get_time", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "sunny" },
+                { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "thinking" }] },
+                { "type": "custom_tool_call", "call_id": "call_3", "name": "shell", "input": "ls" },
+                { "type": "custom_tool_call_output", "call_id": "call_3", "output": "ok" },
+                { "type": "input_text", "text": "Hello" },
+                { "role": "user", "content": [{ "type": "input_image", "image_url": "https://x/y.png", "detail": "high" }] }
+            ]
+        });
+
+        let normalized = normalize_body(body, CompatMode::Responses { compact: false });
+        let messages = normalized["messages"].as_array().expect("messages array");
+
+        // Two function_calls grouped into one assistant message.
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 2);
+        // Output flushes the assistant message, then the tool result.
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["content"], "sunny");
+        // Reasoning skipped; custom_tool_call → assistant, output → tool.
+        assert_eq!(messages[2]["role"], "assistant");
+        assert_eq!(messages[2]["tool_calls"][0]["function"]["arguments"], "ls");
+        assert_eq!(messages[3]["role"], "tool");
+        // input_text item → user message; input_image → image_url part.
+        assert_eq!(messages[4]["content"], "Hello");
+        assert_eq!(
+            messages[5]["content"][0]["image_url"]["url"],
+            "https://x/y.png"
+        );
+    }
+
+    #[test]
+    fn null_finish_reason_does_not_close_message() {
+        // JS parity (openai-responses.js:111 `if (choice.finish_reason)`):
+        // explicit null must not close the message.
+        let mut state = serde_json::Map::new();
+        let chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": { "content": "Hi" },
+                "finish_reason": null
+            }]
+        });
+        let events =
+            crate::core::translator::response::openai_responses::chat_to_responses_response(
+                &chunk, &mut state,
+            );
+        let sse = serde_json::to_string(&events).unwrap_or_default();
+        assert!(
+            !sse.contains("response.completed"),
+            "null finish_reason must not emit completed, got: {sse}"
+        );
     }
 
     #[test]
