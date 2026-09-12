@@ -1102,6 +1102,17 @@ async fn execute_single_model(
             }
         }
         let strip_refs: Vec<&str> = plan.strip_list.iter().map(String::as_str).collect();
+        // Snapshot _customToolNames BEFORE translate_request_with_strip
+        // strips it (translator-only metadata for the response path).
+        let custom_tool_names = body
+            .get("_customToolNames")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         registry::global_registry().translate_request_with_strip(
             plan.source_format,
             plan.target_format,
@@ -1115,6 +1126,14 @@ async fn execute_single_model(
                 Some(&strip_refs)
             },
         );
+        // Thread custom-tool names through to the response path (9router
+        // chatCore.js:198 + streamingHandler customToolNames).
+        if !custom_tool_names.is_empty() {
+            let joined = custom_tool_names.join(",");
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("_customToolNames".into(), Value::String(joined));
+            }
+        }
     }
 
     // 3b. Re-apply model(level) thinking onto provider-native fields
@@ -1215,6 +1234,13 @@ async fn execute_single_model(
         }
     }
 
+    // 7b. Pin cache breakpoints LAST on Claude passthrough (9router
+    // chatCore.js:306): every saver above can reshape system/tools/messages,
+    // and a stale anchor costs a full prefix rewrite.
+    if plan.passthrough && client_tool == Some(ClientTool::Claude) {
+        crate::core::translator::request::claude_format::anchor_claude_cache(&mut body);
+    }
+
     // 8. TTS models: strip tool messages + tools (9router chatCore.js:185-189)
     let model_lower = plan.model.to_lowercase();
     if model_lower.contains("tts")
@@ -1291,6 +1317,27 @@ async fn forward_with_provider_fallback(
         .as_object_mut()
         .and_then(|obj| obj.remove("_toolNameMap"))
         .and_then(|v| serde_json::from_value(v).ok());
+
+    // Extract custom-tool names (OpenAI Responses translator metadata).
+    // Kept for the streaming response path; stripped from the body below.
+    let custom_tool_names: Option<String> = request_body
+        .as_object_mut()
+        .and_then(|obj| obj.remove("_customToolNames"))
+        .and_then(|v| match v {
+            Value::String(s) if !s.is_empty() => Some(s),
+            Value::Array(a) => {
+                let names: Vec<String> = a
+                    .iter()
+                    .filter_map(|n| n.as_str().map(str::to_string))
+                    .collect();
+                if names.is_empty() {
+                    None
+                } else {
+                    Some(names.join(","))
+                }
+            }
+            _ => None,
+        });
 
     loop {
         let snapshot = state.db.snapshot();
@@ -2257,6 +2304,7 @@ async fn forward_with_provider_fallback(
                         plan,
                         tool_name_map.as_ref(),
                         compression.clone(),
+                        custom_tool_names.clone(),
                     )
                     .await;
                     return Ok(crate::server::api::budget_guard::with_budget_header(
@@ -3197,6 +3245,7 @@ async fn proxy_response_with_pending_tracking(
     plan: &RequestPlan,
     tool_name_map: Option<&std::collections::BTreeMap<String, String>>,
     compression: Option<CompressionStats>,
+    custom_tool_names: Option<String>,
 ) -> Response {
     // Capture an owned copy of api_key for usage recording inside the stream
     // (the SSE stream requires 'static lifetimes; &str borrows can't escape).
@@ -3273,11 +3322,24 @@ async fn proxy_response_with_pending_tracking(
             let compression = compression.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
+            let custom_tool_names = custom_tool_names.clone();
             let stream = async_stream::stream! {
                 let mut upstream = response.bytes_stream();
                 // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
                 let mut t_state = if needs_stream_translation {
-                    Some(crate::core::translator::registry::ResponseTransformState::default())
+                    let mut s = crate::core::translator::registry::ResponseTransformState::default();
+                    // Thread custom-tool names into streaming state so
+                    // function_call vs custom_tool_call branching survives
+                    // (9router chatCore customToolNames → stream handler).
+                    if let Some(ref names) = custom_tool_names {
+                        if !names.is_empty() {
+                            s.responses.state.insert(
+                                "customToolNames".to_string(),
+                                Value::String(names.clone()),
+                            );
+                        }
+                    }
+                    Some(s)
                 } else {
                     None
                 };
@@ -3402,10 +3464,20 @@ async fn proxy_response_with_pending_tracking(
             let compression = compression.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
+            let custom_tool_names2 = custom_tool_names.clone();
             let stream = async_stream::stream! {
                 // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
                 let mut t_state = if needs_stream_translation {
-                    Some(crate::core::translator::registry::ResponseTransformState::default())
+                    let mut s = crate::core::translator::registry::ResponseTransformState::default();
+                    if let Some(ref names) = custom_tool_names2 {
+                        if !names.is_empty() {
+                            s.responses.state.insert(
+                                "customToolNames".to_string(),
+                                Value::String(names.clone()),
+                            );
+                        }
+                    }
+                    Some(s)
                 } else {
                     None
                 };

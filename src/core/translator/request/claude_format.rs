@@ -8,6 +8,8 @@
 
 use serde_json::{json, Value};
 
+use base64::Engine as _;
+
 use crate::core::config::runtime_config::DEFAULT_MAX_TOKENS;
 use crate::core::utils::claude_cloaking::apply_cloaking;
 use crate::core::utils::claude_header_cache::get_cached_claude_headers;
@@ -87,6 +89,56 @@ pub fn strip_model_context_marker(model: &str) -> (String, Option<&'static str>)
 /// Anything else is considered a foreign id (from a non-Claude provider) and
 /// must be dropped before sending to Claude to avoid 400 errors.
 /// Mirrors `CLAUDE_SERVER_TOOL_USE_ID` in `open-sse/translator/formats/claude.js:124`.
+/// Claude thinking-signature validation, ported from
+/// `open-sse/utils/claudeSignature.js` (itself from CLIProxyAPI).
+/// E-form: single-layer base64, decoded[0] == 0x12. R-form: double-layer
+/// base64, outer decoded[0] == 'E', inner decoded[0] == 0x12.
+/// Cache prefix `...#sig` is stripped before validation.
+fn strip_cache_prefix(raw: &str) -> &str {
+    let sig = raw.trim();
+    if sig.is_empty() {
+        return "";
+    }
+    match sig.find('#') {
+        Some(i) => sig[i + 1..].trim(),
+        None => sig,
+    }
+}
+
+fn is_valid_claude_signature(raw: Option<&str>) -> bool {
+    const MAX_LEN: usize = 32 * 1024 * 1024;
+    const MARKER: u8 = 0x12;
+    let sig = strip_cache_prefix(raw.unwrap_or(""));
+    if sig.is_empty() || sig.len() > MAX_LEN {
+        return false;
+    }
+    let bytes = sig.as_bytes();
+    if bytes[0] == b'E' {
+        match base64::engine::general_purpose::STANDARD.decode(sig) {
+            Ok(d) => !d.is_empty() && d[0] == MARKER,
+            Err(_) => false,
+        }
+    } else if bytes[0] == b'R' {
+        let outer = match base64::engine::general_purpose::STANDARD.decode(sig) {
+            Ok(d) => d,
+            Err(_) => return false,
+        };
+        if outer.is_empty() || outer[0] != 0x45 {
+            return false;
+        }
+        let inner_str = match String::from_utf8(outer) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        match base64::engine::general_purpose::STANDARD.decode(inner_str.trim()) {
+            Ok(d) => !d.is_empty() && d[0] == MARKER,
+            Err(_) => false,
+        }
+    } else {
+        false
+    }
+}
+
 fn is_valid_srvtoolu_id(id: &str) -> bool {
     // Mirrors CLAUDE_SERVER_TOOL_USE_ID = /^srvtoolu_[a-zA-Z0-9_]+$/ (+ requires ≥1 char after prefix)
     id.starts_with("srvtoolu_")
@@ -135,59 +187,98 @@ pub fn normalize_claude_passthrough(body: &mut Value, model: &str) {
         }
     }
 
-    // 3. Hoist mid-conversation system messages into top-level system
+    // 3. Wrap bare content-block objects as one-element arrays before folding
+    // (JS claude.js:222-224). Some clients send content: {block} instead of
+    // [{block}]; the fold below assumes the array shape. A bare-object marker
+    // must never survive normalization — strip client cache_control here.
     if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
-        let mut system_blocks: Vec<Value> = Vec::new();
-        let mut kept = Vec::new();
-
-        for msg in messages.drain(..) {
-            if msg.get("role").and_then(Value::as_str) == Some("system") {
-                let text = match msg.get("content") {
-                    Some(Value::String(s)) => s.clone(),
-                    Some(Value::Array(arr)) => arr
-                        .iter()
-                        .filter_map(|b| match b {
-                            Value::String(s) => Some(s.clone()),
-                            _ => b.get("text").and_then(Value::as_str).map(String::from),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    _ => String::new(),
-                };
-                if !text.trim().is_empty() {
-                    system_blocks.push(json!({"type": "text", "text": text}));
+        for msg in messages.iter_mut() {
+            let is_bare_object = msg
+                .get("content")
+                .is_some_and(|c| c.is_object() && !c.is_array());
+            if is_bare_object {
+                if let Some(content) = msg.get_mut("content") {
+                    if let Some(block) = content.as_object_mut() {
+                        block.remove("cache_control");
+                        let wrapped = Value::Object(block.clone());
+                        *content = Value::Array(vec![wrapped]);
+                    }
                 }
-            } else {
-                kept.push(msg);
             }
         }
-
-        if !system_blocks.is_empty() {
-            // Prepend existing system if any
-            let existing = match obj.remove("system") {
-                Some(Value::Array(arr)) => arr,
-                Some(Value::String(s)) if !s.trim().is_empty() => {
-                    vec![json!({"type": "text", "text": s})]
-                }
-                _ => Vec::new(),
-            };
-            let merged: Vec<Value> = existing.into_iter().chain(system_blocks).collect();
-            obj.insert("system".to_string(), Value::Array(merged));
-        }
-
-        obj.insert("messages".to_string(), Value::Array(kept));
     }
 
-    // 4. Drop server_tool_use blocks with foreign ids + orphaned tool_result cleanup.
-    // When combo/fallback routes through non-Claude providers first, the conversation
-    // history may contain server_tool_use blocks with ids that don't match the
-    // Claude `srvtoolu_*` prefix. Claude rejects these with 400, and any
-    // tool_result referencing a dropped id must also be removed.
-    // Mirrors claude.js:123-234 (hasForeignServerToolUseId + cleanup).
+    // 4. Fold mid-conversation system messages into the neighbouring turn
+    // (JS claude.js:230-258). Hoisting into body.system would insert volatile
+    // content ahead of the whole conversation and invalidate the prefix cache,
+    // so fold in place: append to the previous user turn, else push a new one.
+    // NOTE: step 3 (bare-object wrap) already normalized string content to
+    // blocks, so the string arm below only fires for defensiveness.
+    if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+        let mut folded: Vec<Value> = Vec::with_capacity(messages.len());
+        for msg in messages.drain(..) {
+            if msg.get("role").and_then(Value::as_str) != Some("system") {
+                folded.push(msg);
+                continue;
+            }
+            let text = match msg.get("content") {
+                Some(Value::String(s)) => s.clone(),
+                Some(Value::Array(arr)) => arr
+                    .iter()
+                    .map(|b| match b {
+                        Value::String(s) => s.clone(),
+                        _ => b
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                _ => String::new(),
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            let block = json!({"type": "text", "text": text});
+            let prev_is_user = folded
+                .last()
+                .and_then(|m| m.get("role"))
+                .and_then(Value::as_str)
+                == Some("user");
+            if prev_is_user {
+                // Copy-on-write: the caller body is reused across
+                // account-fallback attempts, so rebuild, never mutate.
+                let prev = folded.pop().unwrap();
+                let mut content: Vec<Value> = match prev.get("content") {
+                    Some(Value::String(s)) => vec![json!({"type": "text", "text": s})],
+                    Some(Value::Array(arr)) => arr.clone(),
+                    _ => Vec::new(),
+                };
+                content.push(block);
+                let mut merged = prev.as_object().cloned().unwrap_or_default();
+                merged.insert("content".to_string(), Value::Array(content));
+                folded.push(Value::Object(merged));
+                continue;
+            }
+            folded.push(json!({"role": "user", "content": [block]}));
+        }
+        obj.insert("messages".to_string(), Value::Array(folded));
+    }
+
+    // 5. Drop thinking blocks whose signature is not Claude's (combo mixes
+    // models, so foreign signatures leak into history and Anthropic rejects
+    // them), drop foreign server_tool_use ids + orphaned results, and inject
+    // a placeholder thinking block when thinking is enabled but none survived
+    // (JS claude.js:260-305).
+    let thinking_enabled = obj
+        .get("thinking")
+        .and_then(|t| t.get("type"))
+        .and_then(Value::as_str)
+        == Some("enabled");
     let mut dropped_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
-        // Pass 1: detect and drop foreign server_tool_use in assistant messages
         for msg in messages.iter_mut() {
             if msg.get("role").and_then(Value::as_str) != Some("assistant") {
                 continue;
@@ -195,21 +286,46 @@ pub fn normalize_claude_passthrough(body: &mut Value, model: &str) {
             let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) else {
                 continue;
             };
+            let mut has_tool_use = false;
+            let mut has_kept_thinking = false;
             let mut kept_blocks = Vec::with_capacity(content.len());
             for block in content.drain(..) {
-                if block.get("type").and_then(Value::as_str) == Some("server_tool_use") {
-                    let id = block.get("id").and_then(Value::as_str).unwrap_or("");
-                    if !is_valid_srvtoolu_id(id) {
-                        dropped_ids.insert(id.to_string());
-                        continue; // drop this block
+                let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
+                if block_type == "thinking" || block_type == "redacted_thinking" {
+                    if is_valid_claude_signature(block.get("signature").and_then(Value::as_str)) {
+                        has_kept_thinking = true;
+                        kept_blocks.push(block);
                     }
+                    continue;
+                }
+                if block_type == "server_tool_use"
+                    && !is_valid_srvtoolu_id(block.get("id").and_then(Value::as_str).unwrap_or(""))
+                {
+                    if let Some(id) = block.get("id").and_then(Value::as_str) {
+                        dropped_ids.insert(id.to_string());
+                    }
+                    continue;
+                }
+                if block_type == "tool_use" {
+                    has_tool_use = true;
                 }
                 kept_blocks.push(block);
+            }
+            if thinking_enabled && !has_kept_thinking && has_tool_use {
+                kept_blocks.insert(
+                    0,
+                    json!({
+                        "type": "thinking",
+                        "thinking": ".",
+                        "signature": DEFAULT_THINKING_CLAUDE_SIGNATURE,
+                    }),
+                );
             }
             *content = kept_blocks;
         }
 
-        // Pass 2: remove orphaned tool_result / web_search_tool_result blocks
+        // A dropped server_tool_use leaves its result behind; Anthropic rejects
+        // a tool_result referencing an undeclared id, so both halves must go.
         if !dropped_ids.is_empty() {
             for msg in messages.iter_mut() {
                 let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) else {
@@ -220,18 +336,313 @@ pub fn normalize_claude_passthrough(body: &mut Value, model: &str) {
                     let block_type = block.get("type").and_then(Value::as_str).unwrap_or("");
                     let is_result =
                         block_type == "tool_result" || block_type == "web_search_tool_result";
-                    if is_result {
-                        let ref_id = block
-                            .get("tool_use_id")
-                            .and_then(Value::as_str)
-                            .unwrap_or("");
-                        if dropped_ids.contains(ref_id) {
-                            continue; // drop orphaned result
-                        }
+                    if is_result
+                        && dropped_ids.contains(
+                            block
+                                .get("tool_use_id")
+                                .and_then(Value::as_str)
+                                .unwrap_or(""),
+                        )
+                    {
+                        continue; // drop orphaned result
                     }
                     kept.push(block);
                 }
                 *content = kept;
+            }
+        }
+    }
+
+    // 6. Drop empty text blocks and any message left with no content at all
+    // (JS claude.js:311-319). Anthropic rejects empty text blocks (400); a
+    // message stripped bare must be dropped, not padded.
+    if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+        let mut kept_msgs = Vec::with_capacity(messages.len());
+        for msg in messages.drain(..) {
+            let mut msg = msg;
+            match msg.get("content") {
+                Some(Value::String(s)) => {
+                    if s.trim().is_empty() {
+                        continue;
+                    }
+                }
+                Some(Value::Array(_)) => {
+                    if let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) {
+                        content.retain(|block| {
+                            !(block.get("type").and_then(Value::as_str) == Some("text")
+                                && block
+                                    .get("text")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or("")
+                                    .trim()
+                                    .is_empty())
+                        });
+                        if content.is_empty() {
+                            continue;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            kept_msgs.push(msg);
+        }
+        obj.insert("messages".to_string(), Value::Array(kept_msgs));
+    }
+}
+
+// ─── anchorClaudeCache ──────────────────────────────────────────────
+
+const CACHE_CONTROL_5M: &str = "ephemeral";
+const CACHE_CONTROL_1H_TTL: &str = "1h";
+
+/// Total blocks carrying cache_control across system, tools, and messages.
+/// The upstream Messages API allows at most 4 markers per request.
+/// Mirrors `countCacheControlBlocks` in claude.js:64-76.
+fn count_cache_control_blocks(body: &Value) -> usize {
+    let mut n = 0;
+    if let Some(system) = body.get("system").and_then(Value::as_array) {
+        n += system
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+    }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        n += tools
+            .iter()
+            .filter(|t| t.get("cache_control").is_some())
+            .count();
+    }
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        for m in messages {
+            if let Some(arr) = m.get("content").and_then(Value::as_array) {
+                n += arr
+                    .iter()
+                    .filter(|b| b.get("cache_control").is_some())
+                    .count();
+            } else if m
+                .get("content")
+                .and_then(|c| c.get("cache_control"))
+                .is_some()
+            {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+/// Trim every marker past the 4-marker budget (JS claude.js:82-102). Head
+/// anchors (last system block, last cacheable tool) are held; remaining slots
+/// go to the tail-most of the other markers in document order.
+fn cap_cache_control_blocks(body: &mut Value) {
+    // Snapshot head-anchor identity: last system block + last cacheable tool.
+    let last_system_idx = body
+        .get("system")
+        .and_then(Value::as_array)
+        .map(|s| s.len().wrapping_sub(1));
+    let last_tool_idx = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|t| t.as_slice())
+        .and_then(last_cacheable_tool_index);
+    // Collect marker coordinates in document order: system, tools, messages.
+    let mut marked: Vec<(char, usize, usize)> = Vec::new();
+    if let Some(system) = body.get("system").and_then(Value::as_array) {
+        for (i, b) in system.iter().enumerate() {
+            if b.get("cache_control").is_some() {
+                marked.push(('s', i, 0));
+            }
+        }
+    }
+    if let Some(tools) = body.get("tools").and_then(Value::as_array) {
+        for (i, t) in tools.iter().enumerate() {
+            if t.get("cache_control").is_some() {
+                marked.push(('t', i, 0));
+            }
+        }
+    }
+    if let Some(messages) = body.get("messages").and_then(Value::as_array) {
+        for (mi, m) in messages.iter().enumerate() {
+            if let Some(arr) = m.get("content").and_then(Value::as_array) {
+                for (bi, b) in arr.iter().enumerate() {
+                    if b.get("cache_control").is_some() {
+                        marked.push(('m', mi, bi));
+                    }
+                }
+            }
+        }
+    }
+    let is_head = |(kind, i, _): &(char, usize, usize)| {
+        (*kind == 's' && Some(*i) == last_system_idx) || (*kind == 't' && Some(*i) == last_tool_idx)
+    };
+    let head_count = marked.iter().filter(|m| is_head(m)).count();
+    let keep = 4usize.saturating_sub(head_count);
+    let rest: Vec<(char, usize, usize)> = marked.into_iter().filter(|m| !is_head(m)).collect();
+    let drop_n = rest.len().saturating_sub(keep);
+    for (kind, i, j) in rest.into_iter().take(drop_n) {
+        match kind {
+            's' => {
+                if let Some(b) = body
+                    .get_mut("system")
+                    .and_then(Value::as_array_mut)
+                    .and_then(|s| s.get_mut(i))
+                {
+                    if let Some(o) = b.as_object_mut() {
+                        o.remove("cache_control");
+                    }
+                }
+            }
+            't' => {
+                if let Some(t) = body
+                    .get_mut("tools")
+                    .and_then(Value::as_array_mut)
+                    .and_then(|t| t.get_mut(i))
+                {
+                    if let Some(o) = t.as_object_mut() {
+                        o.remove("cache_control");
+                    }
+                }
+            }
+            _ => {
+                if let Some(b) = body
+                    .get_mut("messages")
+                    .and_then(Value::as_array_mut)
+                    .and_then(|m| m.get_mut(i))
+                    .and_then(|m| m.get_mut("content"))
+                    .and_then(Value::as_array_mut)
+                    .and_then(|c| c.get_mut(j))
+                {
+                    if let Some(o) = b.as_object_mut() {
+                        o.remove("cache_control");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Put a 5m breakpoint on the last cache-eligible block of a message.
+/// thinking/redacted_thinking blocks do not accept cache_control.
+/// Mirrors `markLastCacheableBlock` in claude.js:326-335.
+fn mark_last_cacheable_block(msg: &mut Value) -> bool {
+    let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    for block in content.iter_mut().rev() {
+        let Some(block_obj) = block.as_object_mut() else {
+            continue;
+        };
+        let t = block_obj.get("type").and_then(Value::as_str).unwrap_or("");
+        if t == "thinking" || t == "redacted_thinking" {
+            continue;
+        }
+        block_obj.insert(
+            "cache_control".to_string(),
+            json!({"type": CACHE_CONTROL_5M}),
+        );
+        return true;
+    }
+    false
+}
+
+/// Re-anchor cache breakpoints on a Claude passthrough body (same policy as
+/// prepareClaudeRequest): last tool + last system block at 1h, last assistant
+/// at 5m. Client markers point at pre-normalization offsets, so they are
+/// dropped. Must run LAST, after every step that reshapes system/tools/
+/// messages. Mirrors `anchorClaudeCache` in claude.js:343-410.
+pub fn anchor_claude_cache(body: &mut Value) {
+    if body.as_object().is_none() {
+        return;
+    }
+
+    // Invalid markers first, whatever the budget: Anthropic rejects a tool
+    // carrying BOTH defer_loading and cache_control (#3567).
+    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        for t in tools.iter_mut() {
+            if t.get("defer_loading").and_then(Value::as_bool) == Some(true) {
+                if let Some(o) = t.as_object_mut() {
+                    o.remove("cache_control");
+                }
+            }
+        }
+    }
+
+    // Head anchors first, before any budget guard: the 1h TTL on
+    // system/tools is the point of re-anchoring.
+    if let Some(system) = body.get_mut("system").and_then(Value::as_array_mut) {
+        let last = system.len().wrapping_sub(1);
+        for (i, block) in system.iter_mut().enumerate() {
+            let Some(block_obj) = block.as_object_mut() else {
+                continue;
+            };
+            if i == last {
+                block_obj.insert(
+                    "cache_control".to_string(),
+                    json!({"type": CACHE_CONTROL_5M, "ttl": CACHE_CONTROL_1H_TTL}),
+                );
+            } else {
+                block_obj.remove("cache_control");
+            }
+        }
+    }
+
+    let last_tool = body
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|t| t.as_slice())
+        .and_then(last_cacheable_tool_index);
+    if let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) {
+        let last = last_tool;
+        for (i, tool) in tools.iter_mut().enumerate() {
+            let Some(tool_obj) = tool.as_object_mut() else {
+                continue;
+            };
+            if Some(i) == last {
+                tool_obj.insert(
+                    "cache_control".to_string(),
+                    json!({"type": CACHE_CONTROL_5M, "ttl": CACHE_CONTROL_1H_TTL}),
+                );
+            } else {
+                tool_obj.remove("cache_control");
+            }
+        }
+    }
+
+    // Budget guard AFTER the head anchors: at >= 4 markers the client spent
+    // the rest of the budget — trim instead of re-anchoring the tail.
+    if count_cache_control_blocks(&*body) >= 4 {
+        cap_cache_control_blocks(body);
+        return;
+    }
+
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        let mut anchored = false;
+        for msg in messages.iter_mut().rev() {
+            let is_array = msg.get("content").and_then(Value::as_array).is_some();
+            if !is_array {
+                continue;
+            }
+            // Strip stale client markers on every message content block.
+            if let Some(content) = msg.get_mut("content").and_then(Value::as_array_mut) {
+                for block in content.iter_mut() {
+                    if let Some(o) = block.as_object_mut() {
+                        o.remove("cache_control");
+                    }
+                }
+            }
+            // Prefer the last assistant turn: it ends a completed exchange.
+            if anchored || msg.get("role").and_then(Value::as_str) != Some("assistant") {
+                continue;
+            }
+            anchored = mark_last_cacheable_block(msg);
+        }
+
+        // First turn has no assistant yet — anchor the final message instead.
+        if !anchored {
+            for msg in messages.iter_mut().rev() {
+                if mark_last_cacheable_block(msg) {
+                    break;
+                }
             }
         }
     }
@@ -751,34 +1162,87 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_hoists_system_messages() {
+    fn passthrough_folds_system_message_into_prev_user_turn() {
+        // 9router claude.js:230-258 folds mid-conversation system messages
+        // into the neighbouring turn (prefix-cache stable), not body.system.
+        // Array content avoids the step-3 string→block normalization.
         let mut body = json!({
             "messages": [
-                {"role": "system", "content": "You are Claude."},
-                {"role": "user", "content": "hi"}
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "system", "content": "reminder"},
+                {"role": "user", "content": [{"type": "text", "text": "yo"}]}
             ]
         });
         normalize_claude_passthrough(&mut body, "claude-sonnet-4");
-        assert!(body.get("system").is_some(), "system field should exist");
-        assert_eq!(body["system"][0]["text"], "You are Claude.");
-        assert_eq!(body["messages"].as_array().unwrap().len(), 1);
-        assert_eq!(body["messages"][0]["role"], "user");
+        assert!(body.get("system").is_none());
+        let msgs = body["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        let blocks = msgs[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2, "folded: {blocks:?}");
+        assert_eq!(blocks[1]["text"], "reminder");
     }
 
     #[test]
-    fn passthrough_hoists_system_messages_with_existing() {
+    fn passthrough_drops_invalid_signature_thinking_blocks() {
+        // JS step 5 (claude.js:260-290): thinking with a non-Claude signature
+        // is dropped; with thinking enabled + tool_use a placeholder is added.
         let mut body = json!({
-            "system": [{"type": "text", "text": "Pre-existing."}],
-            "messages": [
-                {"role": "system", "content": "Inline system."},
-                {"role": "user", "content": "hi"}
-            ]
+            "thinking": {"type": "enabled", "budget_tokens": 1000},
+            "messages": [{
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "x", "signature": "bogus"},
+                    {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {}}
+                ]
+            }]
         });
         normalize_claude_passthrough(&mut body, "claude-sonnet-4");
-        let sys = body["system"].as_array().unwrap();
-        assert_eq!(sys.len(), 2);
-        assert_eq!(sys[0]["text"], "Pre-existing.");
-        assert_eq!(sys[1]["text"], "Inline system.");
+        let content = body["messages"][0]["content"].as_array().unwrap();
+        assert!(
+            content
+                .iter()
+                .all(|b| b.get("signature").and_then(Value::as_str) != Some("bogus")),
+            "foreign signature dropped: {content:?}"
+        );
+        assert!(
+            content.iter().any(|b| b["type"] == "thinking"),
+            "placeholder thinking injected: {content:?}"
+        );
+    }
+
+    #[test]
+    fn anchor_claude_cache_pins_head_and_caps_at_four() {
+        // anchorClaudeCache (claude.js:343-410): last system + last tool at
+        // 1h; over-budget (>=4) trims instead of re-anchoring the tail.
+        let mut body = json!({
+            "system": [
+                {"type": "text", "text": "a", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "b"}
+            ],
+            "tools": [{"name": "f", "cache_control": {"type": "ephemeral"}}],
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "r1", "cache_control": {"type": "ephemeral"}},
+                    {"type": "text", "text": "r2", "cache_control": {"type": "ephemeral"}}
+                ]}
+            ]
+        });
+        anchor_claude_cache(&mut body);
+        assert_eq!(body["system"][1]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
+        let total = count_cache_control_blocks(&body);
+        assert!(total <= 4, "budget capped at 4, got {total}");
+    }
+
+    #[test]
+    fn select_anthropic_beta_gates_heavy_flags() {
+        let base = crate::core::executor::select_anthropic_beta("claude-haiku-4-5");
+        assert!(base.contains("claude-code-20250219"));
+        assert!(!base.contains("advanced-tool-use-2025-11-20"));
+        let heavy = crate::core::executor::select_anthropic_beta("claude-sonnet-4-6");
+        assert!(heavy.contains("advanced-tool-use-2025-11-20"));
+        assert!(heavy.contains("effort-2025-11-24"));
     }
 
     // ─── prepare_claude_request ────────────────────────────────────

@@ -19,11 +19,66 @@ fn normalize_tool_parameters(params: Option<&Value>) -> Value {
     }
 }
 
-fn clamp_call_id(id: &str) -> String {
-    if id.len() > 64 {
-        id[..64].to_string()
-    } else {
-        id.to_string()
+/// Strict Responses upstreams reject overlong call_ids with
+/// InputValidationError (#393). Mirrors `clampResponsesCallId` in
+/// `open-sse/translator/formats/responsesApi.js:27-37`: non-string/empty ids
+/// get a unique `call_<ms>_<seq>` fallback; overlong ids are truncated.
+fn clamp_call_id(id: Option<&str>) -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    match id {
+        Some(s) if !s.is_empty() => {
+            if s.len() > 64 {
+                s[..64].to_string()
+            } else {
+                s.to_string()
+            }
+        }
+        _ => {
+            let n = SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+            format!("call_{}_{}", chrono::Utc::now().timestamp_millis(), n)
+        }
+    }
+}
+
+/// Single-stringify: objects → JSON once; valid JSON strings pass through
+/// untouched; anything else falls back to "{}". Mirrors
+/// `coerceResponsesArguments` in responsesApi.js:42-57.
+fn coerce_arguments(value: Option<&Value>) -> String {
+    match value {
+        None => "{}".to_string(),
+        Some(Value::Null) => "{}".to_string(),
+        Some(Value::String(s)) => {
+            if s.is_empty() {
+                return "{}".to_string();
+            }
+            match serde_json::from_str::<Value>(s) {
+                Ok(_) => s.clone(),
+                Err(_) => "{}".to_string(),
+            }
+        }
+        Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
+/// function_call_output.output must be a string — never null/object.
+/// Mirrors `coerceResponsesOutput` in responsesApi.js:60-77.
+fn coerce_output(content: Option<&Value>) -> String {
+    match content {
+        None => String::new(),
+        Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .map(|c| {
+                if let Some(t) = c.get("text").and_then(Value::as_str) {
+                    t.to_string()
+                } else {
+                    serde_json::to_string(c).unwrap_or_else(|_| c.to_string())
+                }
+            })
+            .collect::<String>(),
+        Some(v) => serde_json::to_string(v).unwrap_or_else(|_| v.to_string()),
     }
 }
 
@@ -381,6 +436,9 @@ pub fn openai_responses_to_chat_request(
                     }
                     current_assistant_msg = Some(msg);
                 }
+                // custom_tool_call carries `input` (string or freeform) —
+                // wrap as {"input": ...} JSON so chat providers accept it
+                // (JS openai-responses.js:117-119).
                 let arguments = if item_type == Some("custom_tool_call") {
                     if item.get("input").is_some() {
                         custom_tool_arguments(item)
@@ -399,7 +457,7 @@ pub fn openai_responses_to_chat_request(
                         .as_array_mut()
                         .unwrap()
                         .push(serde_json::json!({
-                            "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "id": clamp_call_id(item.get("call_id").and_then(|v| v.as_str())),
                             "type": "function",
                             "function": {
                                 "name": name.unwrap_or(""),
@@ -423,7 +481,7 @@ pub fn openai_responses_to_chat_request(
                     .unwrap()
                     .push(serde_json::json!({
                         "role": "tool",
-                        "tool_call_id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "tool_call_id": clamp_call_id(item.get("call_id").and_then(|v| v.as_str())),
                         "content": output
                     }));
             }
@@ -637,33 +695,38 @@ pub fn chat_to_openai_responses_request(
         if role == "assistant" {
             if let Some(tool_calls) = msg.get("tool_calls").and_then(|v| v.as_array()) {
                 for tc in tool_calls {
+                    // Skip nameless calls — strict Responses upstreams reject
+                    // them (#444). Names are clamped to 128 chars (JS 406-408).
+                    let raw_name = tc
+                        .get("function")
+                        .and_then(|f| f.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if raw_name.is_empty() {
+                        continue;
+                    }
+                    let name: String = raw_name.chars().take(128).collect();
                     result["input"].as_array_mut().unwrap().push(serde_json::json!({
                         "type": "function_call",
-                        "call_id": clamp_call_id(tc.get("id").and_then(|v| v.as_str()).unwrap_or("")),
-                        "name": tc.get("function").and_then(|f| f.get("name")).and_then(|v| v.as_str()).unwrap_or("_unknown"),
-                        "arguments": tc.get("function").and_then(|f| f.get("arguments")).cloned().unwrap_or(Value::String("{}".to_string()))
+                        "call_id": clamp_call_id(tc.get("id").and_then(|v| v.as_str())),
+                        "name": name,
+                        "arguments": coerce_arguments(tc.get("function").and_then(|f| f.get("arguments")))
                     }));
                 }
             }
         }
 
         if role == "tool" {
-            let output = if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
-                s.to_string()
-            } else if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
-                arr.iter()
-                    .filter_map(|c| c.get("text").and_then(|v| v.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("")
-            } else {
-                serde_json::to_string(&msg.get("content").cloned().unwrap_or(Value::Null))
-                    .unwrap_or_default()
-            };
-            result["input"].as_array_mut().unwrap().push(serde_json::json!({
-                "type": "function_call_output",
-                "call_id": clamp_call_id(msg.get("tool_call_id").and_then(|v| v.as_str()).unwrap_or("")),
-                "output": output
-            }));
+            let output = coerce_output(msg.get("content"));
+            result["input"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": clamp_call_id(msg.get("tool_call_id").and_then(|v| v.as_str())),
+                    "output": output
+                }));
         }
     }
 
@@ -991,6 +1054,8 @@ mod tests {
         let messages = body.get("messages").unwrap().as_array().unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "assistant");
+        // (batch2's responses_coerces_call_ids_and_outputs assertions live on
+        // in the dedicated clamp/coerce tests below; this test covers custom input.)
         let args: Value = serde_json::from_str(
             messages[0]["tool_calls"][0]["function"]["arguments"]
                 .as_str()
@@ -1081,5 +1146,99 @@ mod tests {
             "ab"
         );
         assert_eq!(coerce_responses_output(&Value::Null), "");
+    }
+
+    #[test]
+    fn responses_coerces_call_ids_and_outputs() {
+        // clampResponsesCallId: overlong ids truncated to 64; missing ids
+        // get a call_ fallback. coerceResponsesArguments: valid JSON passes
+        // through, objects stringify once, garbage → "{}".
+        // coerceResponsesOutput: objects stringify, null → "".
+        let long_id = "x".repeat(100);
+        let mut body: Value = serde_json::json!({
+            "input": [
+                {"type": "function_call", "call_id": long_id, "name": "f", "arguments": {"a": 1}},
+                {"type": "function_call_output", "call_id": long_id, "output": {"ok": true}},
+                {"type": "function_call", "name": "g", "arguments": "not-json{{{"
+                },
+                {"type": "function_call_output", "output": null}
+            ],
+            "model": "gpt-4"
+        });
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(
+            messages[0]["tool_calls"][0]["id"].as_str().unwrap().len(),
+            64
+        );
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            "{\"a\":1}"
+        );
+        assert_eq!(messages[1]["content"], "{\"ok\":true}");
+        assert_eq!(messages[2]["tool_calls"][0]["function"]["arguments"], "{}");
+        let fallback = messages[2]["tool_calls"][0]["id"].as_str().unwrap();
+        assert!(fallback.starts_with("call_"), "fallback id: {fallback}");
+        assert_eq!(messages[3]["content"], "");
+    }
+
+    #[test]
+    fn responses_custom_tools_become_input_functions_with_names() {
+        // {type:"custom"} tools → functions with one raw `input` param and
+        // names retained in _customToolNames (JS 196-198, 232); hosted tools
+        // without names are dropped (JS 179-180).
+        let mut body: Value = serde_json::json!({
+            "input": [
+                {"type": "custom_tool_call", "call_id": "c1", "name": "exec", "input": "ls"}
+            ],
+            "tools": [
+                {"type": "custom", "name": "exec", "description": "run"},
+                {"type": "request_user_input"},
+                {"type": "function", "name": "f", "description": "", "parameters": {"type": "object"}}
+            ],
+            "model": "gpt-4"
+        });
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["arguments"],
+            "{\"input\":\"ls\"}"
+        );
+        let tools = body.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools.len(), 2, "hosted tool dropped: {tools:?}");
+        assert_eq!(tools[0]["function"]["name"], "exec");
+        assert_eq!(
+            tools[0]["function"]["parameters"]["properties"]["input"]["type"],
+            "string"
+        );
+        let names = body.get("_customToolNames").unwrap().as_array().unwrap();
+        assert!(names.iter().any(|n| n == "exec"));
+    }
+
+    #[test]
+    fn chat_to_responses_clamps_call_id_and_coerces_arguments() {
+        // JS 406-408: call_id clamped, nameless calls skipped, name sliced
+        // to 128; arguments coerced.
+        let long_name = "n".repeat(200);
+        let mut body: Value = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [
+                {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "y".repeat(100), "type": "function",
+                     "function": {"name": long_name, "arguments": {"a": 1}}},
+                    {"id": "z", "type": "function",
+                     "function": {"name": "  ", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "t1", "content": {"ok": true}}
+            ]
+        });
+        chat_to_openai_responses_request("gpt-4", &mut body, false, None);
+        let input = body.get("input").unwrap().as_array().unwrap();
+        assert_eq!(input[0]["call_id"].as_str().unwrap().len(), 64);
+        assert_eq!(input[0]["name"].as_str().unwrap().len(), 128);
+        assert_eq!(input[0]["arguments"], "{\"a\":1}");
+        // Nameless call skipped: only 1 function_call + 1 output.
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[1]["output"], "{\"ok\":true}");
     }
 }

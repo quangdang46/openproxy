@@ -72,6 +72,563 @@ fn emit(
     events.push(serde_json::json!({"event": event_type, "data": d}));
 }
 
+/// Whether a tool name is a custom (freeform) tool, per translator-only
+/// `_customToolNames` metadata threaded through streaming state (JS
+/// `isCustomTool` in open-sse/translator/response/openai-responses.js:261).
+fn is_custom_tool(state: &serde_json::Map<String, Value>, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let in_list = |key: &str| {
+        state.get(key).and_then(|v| match v {
+            Value::String(s) => Some(s.split(',').any(|n| n.trim() == name)),
+            Value::Array(a) => Some(
+                a.iter()
+                    .filter_map(|n| n.as_str())
+                    .any(|n| n.trim() == name),
+            ),
+            _ => None,
+        })
+    };
+    in_list("customToolNames").unwrap_or(false)
+}
+
+/// Unwrap the Chat JSON wrapper Codex puts around custom-tool input:
+/// `{"input":"..."}` → the freeform program. Falls back to the raw text for
+/// incomplete fragments (JS `extractCustomToolInput`, same file:265-272).
+fn extract_custom_tool_input(arguments_text: &str) -> String {
+    if arguments_text.is_empty() {
+        return String::new();
+    }
+    match serde_json::from_str::<Value>(arguments_text) {
+        Ok(Value::Object(map)) => match map.get("input") {
+            Some(Value::String(s)) => s.clone(),
+            Some(_) => arguments_text.to_string(),
+            None => arguments_text.to_string(),
+        },
+        _ => arguments_text.to_string(),
+    }
+}
+
+fn start_reasoning(state: &mut serde_json::Map<String, Value>, events: &mut Vec<Value>, idx: u64) {
+    if state.get("reasoningId").is_none() || state["reasoningId"].is_null() {
+        let reasoning_id = format!("rs_{}_{}", state["responseId"].as_str().unwrap_or(""), idx);
+        state.insert(
+            "reasoningId".to_string(),
+            Value::String(reasoning_id.clone()),
+        );
+        state.insert("reasoningIndex".to_string(), Value::Number(idx.into()));
+        emit(
+            events,
+            state,
+            "response.output_item.added",
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": idx,
+                "item": {"id": reasoning_id, "type": "reasoning", "summary": []}
+            }),
+        );
+        emit(
+            events,
+            state,
+            "response.reasoning_summary_part.added",
+            serde_json::json!({
+                "type": "response.reasoning_summary_part.added",
+                "item_id": reasoning_id,
+                "output_index": idx,
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": ""}
+            }),
+        );
+        state.insert("reasoningPartAdded".to_string(), Value::Bool(true));
+    }
+}
+
+fn emit_reasoning_delta(
+    state: &mut serde_json::Map<String, Value>,
+    events: &mut Vec<Value>,
+    text: &str,
+) {
+    if text.is_empty() {
+        return;
+    }
+    state["reasoningBuf"] = Value::String(format!(
+        "{}{}",
+        state["reasoningBuf"].as_str().unwrap_or(""),
+        text
+    ));
+    let reasoning_id = state["reasoningId"].as_str().unwrap_or("").to_string();
+    let reasoning_idx = state
+        .get("reasoningIndex")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    emit(
+        events,
+        state,
+        "response.reasoning_summary_text.delta",
+        serde_json::json!({
+            "type": "response.reasoning_summary_text.delta",
+            "item_id": reasoning_id,
+            "output_index": reasoning_idx,
+            "summary_index": 0,
+            "delta": text
+        }),
+    );
+}
+
+fn close_reasoning(state: &mut serde_json::Map<String, Value>, events: &mut Vec<Value>) {
+    if state.get("reasoningId").and_then(|v| v.as_str()).is_some()
+        && state.get("reasoningDone").and_then(|v| v.as_bool()) == Some(false)
+    {
+        state.insert("reasoningDone".to_string(), Value::Bool(true));
+        let reasoning_id = state["reasoningId"].as_str().unwrap_or("").to_string();
+        let reasoning_idx = state
+            .get("reasoningIndex")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let reasoning_buf = state["reasoningBuf"].as_str().unwrap_or("").to_string();
+        emit(
+            events,
+            state,
+            "response.reasoning_summary_text.done",
+            serde_json::json!({
+                "type": "response.reasoning_summary_text.done",
+                "item_id": reasoning_id,
+                "output_index": reasoning_idx,
+                "summary_index": 0,
+                "text": reasoning_buf
+            }),
+        );
+        emit(
+            events,
+            state,
+            "response.reasoning_summary_part.done",
+            serde_json::json!({
+                "type": "response.reasoning_summary_part.done",
+                "item_id": reasoning_id,
+                "output_index": reasoning_idx,
+                "summary_index": 0,
+                "part": {"type": "summary_text", "text": reasoning_buf}
+            }),
+        );
+        emit(
+            events,
+            state,
+            "response.output_item.done",
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": reasoning_idx,
+                "item": {
+                    "id": reasoning_id,
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": reasoning_buf}]
+                }
+            }),
+        );
+    }
+}
+
+fn close_message(
+    state: &mut serde_json::Map<String, Value>,
+    events: &mut Vec<Value>,
+    idx_key: &str,
+) {
+    let done = state
+        .get("msgItemDone")
+        .and_then(|v| v.get(idx_key))
+        .is_some();
+    let added = state
+        .get("msgItemAdded")
+        .and_then(|v| v.get(idx_key))
+        .is_some();
+    if !added || done {
+        return;
+    }
+    if let Some(done_map) = state.get_mut("msgItemDone").and_then(|v| v.as_object_mut()) {
+        done_map.insert(idx_key.to_string(), Value::Bool(true));
+    }
+    let msg_id = state
+        .get(&format!("msgId_{}", idx_key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let full_text = state
+        .get("msgTextBuf")
+        .and_then(|v| v.get(idx_key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let idx_num: u64 = idx_key.parse().unwrap_or(0);
+    emit(
+        events,
+        state,
+        "response.output_text.done",
+        serde_json::json!({
+            "type": "response.output_text.done",
+            "item_id": msg_id,
+            "output_index": idx_num,
+            "content_index": 0,
+            "text": full_text,
+            "logprobs": []
+        }),
+    );
+    emit(
+        events,
+        state,
+        "response.content_part.done",
+        serde_json::json!({
+            "type": "response.content_part.done",
+            "item_id": msg_id,
+            "output_index": idx_num,
+            "content_index": 0,
+            "part": {"type": "output_text", "annotations": [], "logprobs": [], "text": full_text}
+        }),
+    );
+    emit(
+        events,
+        state,
+        "response.output_item.done",
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": idx_num,
+            "item": {
+                "id": msg_id,
+                "type": "message",
+                "content": [{"type": "output_text", "annotations": [], "logprobs": [], "text": full_text}],
+                "role": "assistant"
+            }
+        }),
+    );
+}
+
+fn close_tool_call(
+    state: &mut serde_json::Map<String, Value>,
+    events: &mut Vec<Value>,
+    idx_key: &str,
+) {
+    let call_id = state
+        .get("funcCallIds")
+        .and_then(|v| v.get(idx_key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if call_id.is_empty() {
+        return;
+    }
+    let done = state
+        .get("funcItemDone")
+        .and_then(|v| v.get(idx_key))
+        .is_some();
+    if done {
+        return;
+    }
+    if let Some(done_map) = state
+        .get_mut("funcItemDone")
+        .and_then(|v| v.as_object_mut())
+    {
+        done_map.insert(idx_key.to_string(), Value::Bool(true));
+    }
+    if let Some(done_map) = state
+        .get_mut("funcArgsDone")
+        .and_then(|v| v.as_object_mut())
+    {
+        done_map.insert(idx_key.to_string(), Value::Bool(true));
+    }
+    let args = state
+        .get("funcArgsBuf")
+        .and_then(|v| v.get(idx_key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("{}")
+        .to_string();
+    let name = state
+        .get("funcNames")
+        .and_then(|v| v.get(idx_key))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let custom = is_custom_tool(state, &name);
+    let idx_num: u64 = idx_key.parse().unwrap_or(0);
+    if custom {
+        let input = extract_custom_tool_input(&args);
+        emit(
+            events,
+            state,
+            "response.custom_tool_call_input.delta",
+            serde_json::json!({
+                "type": "response.custom_tool_call_input.delta",
+                "item_id": format!("ctc_{}", call_id),
+                "output_index": idx_num,
+                "delta": input
+            }),
+        );
+        emit(
+            events,
+            state,
+            "response.custom_tool_call_input.done",
+            serde_json::json!({
+                "type": "response.custom_tool_call_input.done",
+                "item_id": format!("ctc_{}", call_id),
+                "output_index": idx_num,
+                "input": input
+            }),
+        );
+    } else {
+        emit(
+            events,
+            state,
+            "response.function_call_arguments.done",
+            serde_json::json!({
+                "type": "response.function_call_arguments.done",
+                "item_id": format!("fc_{}", call_id),
+                "output_index": idx_num,
+                "arguments": args
+            }),
+        );
+    }
+    emit(
+        events,
+        state,
+        "response.output_item.done",
+        serde_json::json!({
+            "type": "response.output_item.done",
+            "output_index": idx_num,
+            "item": if custom {
+                serde_json::json!({
+                    "id": format!("ctc_{}", call_id),
+                    "type": "custom_tool_call",
+                    "input": extract_custom_tool_input(&args),
+                    "call_id": call_id,
+                    "name": name
+                })
+            } else {
+                serde_json::json!({
+                    "id": format!("fc_{}", call_id),
+                    "type": "function_call",
+                    "arguments": args,
+                    "call_id": call_id,
+                    "name": name
+                })
+            }
+        }),
+    );
+}
+
+fn send_completed(state: &mut serde_json::Map<String, Value>, events: &mut Vec<Value>) {
+    if state.get("completedSent").and_then(|v| v.as_bool()) != Some(true) {
+        state.insert("completedSent".to_string(), Value::Bool(true));
+        emit(
+            events,
+            state,
+            "response.completed",
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": state.get("responseId").and_then(|v| v.as_str()).unwrap_or(""),
+                    "object": "response",
+                    "created_at": state.get("created").and_then(|v| v.as_i64()).unwrap_or(0),
+                    "status": "completed",
+                    "background": false,
+                    "error": null
+                }
+            }),
+        );
+    }
+}
+
+/// Tool-call + finish_reason tail of `chat_to_responses_response`, shared by
+/// the normal path and the <think>-consumed early return (JS 102-116).
+fn emit_tool_calls_and_finish(
+    chunk: &Value,
+    state: &mut serde_json::Map<String, Value>,
+    events: &mut Vec<Value>,
+    idx: u64,
+    idx_str: &str,
+    delta: &Value,
+) -> Vec<Value> {
+    let _ = (idx, idx_str);
+    if let Some(tool_calls) = delta
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .filter(|tc| !tc.is_empty())
+    {
+        emit_tool_calls_block(state, events, tool_calls);
+    }
+    if chunk
+        .get("choices")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|c| c.get("finish_reason"))
+        .is_some()
+    {
+        emit_finish_block(state, events);
+    }
+    std::mem::take(events)
+}
+
+/// Tool-call arm of `chat_to_responses_response` (JS 102-108): close any open
+/// message, then emit/accumulate per tool call. Custom tools wait for both
+/// call id AND function name before announcing, and stream no argument deltas
+/// (input is emitted once at close after unwrapping the Chat JSON wrapper).
+fn emit_tool_calls_block(
+    state: &mut serde_json::Map<String, Value>,
+    events: &mut Vec<Value>,
+    tool_calls: &[Value],
+) {
+    let mut func_call_ids = state
+        .get("funcCallIds")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let mut func_args_buf = state
+        .get("funcArgsBuf")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let mut func_names = state
+        .get("funcNames")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let mut func_item_added = state
+        .get("funcItemAdded")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    for tc in tool_calls.iter() {
+        let tc_idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+        let tc_idx_str = tc_idx.to_string();
+        let new_call_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let func_name = tc
+            .get("function")
+            .and_then(|f| f.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !func_name.is_empty() {
+            func_names[&tc_idx_str] = Value::String(func_name.to_string());
+        }
+        if !new_call_id.is_empty() {
+            func_call_ids[&tc_idx_str] = Value::String(new_call_id.to_string());
+        }
+
+        // Wait for both id and name before deciding custom vs function;
+        // otherwise a split-chunk call can be irreversibly announced wrong.
+        let call_id = func_call_ids
+            .get(&tc_idx_str)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = func_names
+            .get(&tc_idx_str)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if func_item_added.get(&tc_idx_str).is_none() && !call_id.is_empty() && !name.is_empty() {
+            func_item_added[&tc_idx_str] = Value::Bool(true);
+            let custom = is_custom_tool(state, &name);
+            // Close any open text message first (JS 104: closeMessage).
+            close_message(state, events, &tc_idx_str);
+            emit(
+                events,
+                state,
+                "response.output_item.added",
+                serde_json::json!({
+                    "type": "response.output_item.added",
+                    "output_index": tc_idx,
+                    "item": if custom {
+                        serde_json::json!({
+                            "id": format!("ctc_{}", call_id),
+                            "type": "custom_tool_call",
+                            "input": "",
+                            "call_id": call_id,
+                            "name": name
+                        })
+                    } else {
+                        serde_json::json!({
+                            "id": format!("fc_{}", call_id),
+                            "type": "function_call",
+                            "arguments": "",
+                            "call_id": call_id,
+                            "name": func_names.get(&tc_idx_str).and_then(|v| v.as_str()).unwrap_or("")
+                        })
+                    },
+                }),
+            );
+
+            if let Some(args) = tc
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|v| v.as_str())
+            {
+                if !args.is_empty() {
+                    let ref_call_id = func_call_ids
+                        .get(&tc_idx_str)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&call_id);
+                    // Custom input is emitted once at close, after the Chat JSON
+                    // wrapper can be parsed. Streaming raw fragments would expose
+                    // {"input":"..."} instead of the freeform program.
+                    let is_custom_now = is_custom_tool(
+                        state,
+                        func_names
+                            .get(&tc_idx_str)
+                            .and_then(|v| v.as_str())
+                            .unwrap_or(""),
+                    );
+                    if func_item_added.get(&tc_idx_str).is_some()
+                        && !ref_call_id.is_empty()
+                        && !is_custom_now
+                    {
+                        emit(
+                            events,
+                            state,
+                            "response.function_call_arguments.delta",
+                            serde_json::json!({
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": format!("fc_{}", ref_call_id),
+                                "output_index": tc_idx,
+                                "delta": args
+                            }),
+                        );
+                    }
+                    let existing = func_args_buf
+                        .get(&tc_idx_str)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    func_args_buf[&tc_idx_str] = Value::String(format!("{}{}", existing, args));
+                }
+            }
+        }
+    }
+
+    state.insert("funcCallIds".to_string(), func_call_ids);
+    state.insert("funcArgsBuf".to_string(), func_args_buf);
+    state.insert("funcNames".to_string(), func_names);
+    state.insert("funcItemAdded".to_string(), func_item_added);
+}
+
+/// finish_reason arm of `chat_to_responses_response` (JS 110-116): close
+/// every open message, reasoning, and tool call, then send completed.
+fn emit_finish_block(state: &mut serde_json::Map<String, Value>, events: &mut Vec<Value>) {
+    let msg_keys: Vec<String> = state
+        .get("msgItemAdded")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    for k in &msg_keys {
+        close_message(state, events, k);
+    }
+
+    close_reasoning(state, events);
+    let func_keys: Vec<String> = state
+        .get("funcCallIds")
+        .and_then(|v| v.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    for k in &func_keys {
+        close_tool_call(state, events, k);
+    }
+    send_completed(state, events);
+}
+
 pub fn chat_to_responses_response(
     chunk: &Value,
     state: &mut serde_json::Map<String, Value>,
@@ -158,73 +715,109 @@ pub fn chat_to_responses_response(
         .cloned()
         .unwrap_or(Value::Object(serde_json::Map::new()));
 
-    // Handle reasoning_content
-    if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-        if !reasoning.is_empty() {
-            if state.get("reasoningId").is_none() || state["reasoningId"].is_null() {
-                let reasoning_id =
-                    format!("rs_{}_{}", state["responseId"].as_str().unwrap_or(""), idx);
-                state.insert(
-                    "reasoningId".to_string(),
-                    Value::String(reasoning_id.clone()),
-                );
-                state.insert("reasoningIndex".to_string(), Value::Number(idx.into()));
-
-                emit(
-                    &mut events,
-                    state,
-                    "response.output_item.added",
-                    serde_json::json!({
-                        "type": "response.output_item.added",
-                        "output_index": idx,
-                        "item": {"id": reasoning_id, "type": "reasoning", "summary": []}
-                    }),
-                );
-
-                emit(
-                    &mut events,
-                    state,
-                    "response.reasoning_summary_part.added",
-                    serde_json::json!({
-                        "type": "response.reasoning_summary_part.added",
-                        "item_id": reasoning_id,
-                        "output_index": idx,
-                        "summary_index": 0,
-                        "part": {"type": "summary_text", "text": ""}
-                    }),
-                );
-                state.insert("reasoningPartAdded".to_string(), Value::Bool(true));
-            }
-
-            let reasoning_id = state["reasoningId"].as_str().unwrap_or("").to_string();
-            let reasoning_idx = state
-                .get("reasoningIndex")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            state["reasoningBuf"] = Value::String(format!(
-                "{}{}",
-                state["reasoningBuf"].as_str().unwrap_or(""),
-                reasoning
-            ));
-
-            emit(
-                &mut events,
-                state,
-                "response.reasoning_summary_text.delta",
-                serde_json::json!({
-                    "type": "response.reasoning_summary_text.delta",
-                    "item_id": reasoning_id,
-                    "output_index": reasoning_idx,
-                    "summary_index": 0,
-                    "delta": reasoning
-                }),
-            );
-        }
+    // Handle reasoning across vendor shapes (JS concerns/reasoning.js
+    // extractReasoningText): reasoning_content (GLM/Qwen/DeepSeek/Kimi) →
+    // reasoning (compat layers) → reasoning_details[] (MiniMax
+    // reasoning_split=true: [{text|content}]).
+    let reasoning_text = delta
+        .get("reasoning_content")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            delta
+                .get("reasoning")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            delta.get("reasoning_details").and_then(|d| {
+                if let Some(arr) = d.as_array() {
+                    let joined = arr
+                        .iter()
+                        .map(|e| match e {
+                            Value::String(s) => s.clone(),
+                            _ => e
+                                .get("text")
+                                .or_else(|| e.get("content"))
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                        })
+                        .collect::<String>();
+                    if joined.is_empty() {
+                        None
+                    } else {
+                        Some(joined)
+                    }
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_default();
+    if !reasoning_text.is_empty() {
+        start_reasoning(state, &mut events, idx);
+        emit_reasoning_delta(state, &mut events, &reasoning_text);
     }
 
-    // Handle text content
-    if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-        if !content.is_empty() {
+    // Handle text content, including the <think> state machine (JS
+    // openai-responses.js:76-100): <think> routes content into reasoning,
+    // </think> splits buffered thinking from resumed text.
+    if let Some(raw_content) = delta.get("content").and_then(|v| v.as_str()) {
+        if !raw_content.is_empty() {
+            let mut content = raw_content.to_string();
+            let in_thinking = state
+                .get("inThinking")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let mut return_after_thinking = false;
+
+            if content.contains("<think>") {
+                state.insert("inThinking".to_string(), Value::Bool(true));
+                content = content.replacen("<think>", "", 1);
+                start_reasoning(state, &mut events, idx);
+            }
+
+            if content.contains("</think>") {
+                let parts: Vec<&str> = content.splitn(2, "</think>").collect();
+                let think_part = parts.first().copied().unwrap_or("");
+                let text_part = parts.get(1).copied().unwrap_or("");
+                if !think_part.is_empty() {
+                    emit_reasoning_delta(state, &mut events, think_part);
+                }
+                close_reasoning(state, &mut events);
+                state.insert("inThinking".to_string(), Value::Bool(false));
+                content = text_part.to_string();
+            } else if in_thinking
+                || state
+                    .get("inThinking")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            {
+                if !content.is_empty() {
+                    emit_reasoning_delta(state, &mut events, &content);
+                }
+                return_after_thinking = true;
+            }
+
+            if return_after_thinking {
+                return events;
+            }
+            if content.is_empty() {
+                // All consumed by the think machine — fall through to
+                // tool_calls / finish_reason handling below.
+                return emit_tool_calls_and_finish(
+                    chunk,
+                    state,
+                    &mut events,
+                    idx,
+                    &idx_str,
+                    &delta,
+                );
+            }
+            let content: &str = &content;
             let mut msg_item_added = state
                 .get("msgItemAdded")
                 .cloned()
@@ -308,90 +901,7 @@ pub fn chat_to_responses_response(
         .and_then(|v| v.as_array())
         .filter(|tc| !tc.is_empty())
     {
-        let mut func_call_ids = state
-            .get("funcCallIds")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let mut func_args_buf = state
-            .get("funcArgsBuf")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let mut func_names = state
-            .get("funcNames")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-
-        for tc in tool_calls {
-            let tc_idx = tc.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
-            let tc_idx_str = tc_idx.to_string();
-            let call_id = tc.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let func_name = tc
-                .get("function")
-                .and_then(|f| f.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if !func_name.is_empty() {
-                func_names[&tc_idx_str] = Value::String(func_name.to_string());
-            }
-
-            if func_call_ids.get(&tc_idx_str).is_none() && !call_id.is_empty() {
-                func_call_ids[&tc_idx_str] = Value::String(call_id.to_string());
-
-                emit(
-                    &mut events,
-                    state,
-                    "response.output_item.added",
-                    serde_json::json!({
-                        "type": "response.output_item.added",
-                        "output_index": tc_idx,
-                        "item": {
-                            "id": format!("fc_{}", call_id),
-                            "type": "function_call",
-                            "arguments": "",
-                            "call_id": call_id,
-                            "name": func_names.get(&tc_idx_str).and_then(|v| v.as_str()).unwrap_or("")
-                        }
-                    }),
-                );
-            }
-
-            if let Some(args) = tc
-                .get("function")
-                .and_then(|f| f.get("arguments"))
-                .and_then(|v| v.as_str())
-            {
-                if !args.is_empty() {
-                    let ref_call_id = func_call_ids
-                        .get(&tc_idx_str)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(call_id);
-                    if !ref_call_id.is_empty() {
-                        emit(
-                            &mut events,
-                            state,
-                            "response.function_call_arguments.delta",
-                            serde_json::json!({
-                                "type": "response.function_call_arguments.delta",
-                                "item_id": format!("fc_{}", ref_call_id),
-                                "output_index": tc_idx,
-                                "delta": args
-                            }),
-                        );
-                    }
-                    let existing = func_args_buf
-                        .get(&tc_idx_str)
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    func_args_buf[&tc_idx_str] = Value::String(format!("{}{}", existing, args));
-                }
-            }
-        }
-
-        state.insert("funcCallIds".to_string(), func_call_ids);
-        state.insert("funcArgsBuf".to_string(), func_args_buf);
-        state.insert("funcNames".to_string(), func_names);
+        emit_tool_calls_block(state, &mut events, tool_calls);
     }
 
     // Handle finish_reason — JS parity (openai-responses.js:111
@@ -402,216 +912,7 @@ pub fn chat_to_responses_response(
         .and_then(Value::as_str)
         .is_some_and(|s| !s.is_empty())
     {
-        let mut msg_item_added = state
-            .get("msgItemAdded")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let mut msg_text_buf = state
-            .get("msgTextBuf")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let mut msg_item_done = state
-            .get("msgItemDone")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let func_call_ids = state
-            .get("funcCallIds")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let func_args_buf = state
-            .get("funcArgsBuf")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let func_names = state
-            .get("funcNames")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-        let mut func_item_done = state
-            .get("funcItemDone")
-            .cloned()
-            .unwrap_or(serde_json::json!({}));
-
-        for (k, _) in msg_item_added
-            .as_object()
-            .unwrap_or(&serde_json::Map::new())
-        {
-            if msg_item_done.get(k).is_none() {
-                msg_item_done[k] = Value::Bool(true);
-                let msg_id = state
-                    .get(&format!("msgId_{}", k))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let full_text = msg_text_buf
-                    .get(k)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
-                emit(
-                    &mut events,
-                    state,
-                    "response.output_text.done",
-                    serde_json::json!({
-                        "type": "response.output_text.done",
-                        "item_id": msg_id,
-                        "output_index": k.parse::<u64>().unwrap_or(0),
-                        "content_index": 0,
-                        "text": full_text,
-                        "logprobs": []
-                    }),
-                );
-
-                emit(
-                    &mut events,
-                    state,
-                    "response.content_part.done",
-                    serde_json::json!({
-                        "type": "response.content_part.done",
-                        "item_id": msg_id,
-                        "output_index": k.parse::<u64>().unwrap_or(0),
-                        "content_index": 0,
-                        "part": {"type": "output_text", "annotations": [], "logprobs": [], "text": full_text}
-                    }),
-                );
-
-                emit(
-                    &mut events,
-                    state,
-                    "response.output_item.done",
-                    serde_json::json!({
-                        "type": "response.output_item.done",
-                        "output_index": k.parse::<u64>().unwrap_or(0),
-                        "item": {
-                            "id": msg_id,
-                            "type": "message",
-                            "content": [{"type": "output_text", "annotations": [], "logprobs": [], "text": full_text}],
-                            "role": "assistant"
-                        }
-                    }),
-                );
-            }
-        }
-
-        // Close reasoning
-        if state.get("reasoningId").and_then(|v| v.as_str()).is_some()
-            && state.get("reasoningDone").and_then(|v| v.as_bool()) == Some(false)
-        {
-            state.insert("reasoningDone".to_string(), Value::Bool(true));
-            let reasoning_id = state["reasoningId"].as_str().unwrap_or("").to_string();
-            let reasoning_idx = state
-                .get("reasoningIndex")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let reasoning_buf = state["reasoningBuf"].as_str().unwrap_or("").to_string();
-
-            emit(
-                &mut events,
-                state,
-                "response.reasoning_summary_text.done",
-                serde_json::json!({
-                    "type": "response.reasoning_summary_text.done",
-                    "item_id": reasoning_id,
-                    "output_index": reasoning_idx,
-                    "summary_index": 0,
-                    "text": reasoning_buf
-                }),
-            );
-
-            emit(
-                &mut events,
-                state,
-                "response.reasoning_summary_part.done",
-                serde_json::json!({
-                    "type": "response.reasoning_summary_part.done",
-                    "item_id": reasoning_id,
-                    "output_index": reasoning_idx,
-                    "summary_index": 0,
-                    "part": {"type": "summary_text", "text": reasoning_buf}
-                }),
-            );
-
-            emit(
-                &mut events,
-                state,
-                "response.output_item.done",
-                serde_json::json!({
-                    "type": "response.output_item.done",
-                    "output_index": reasoning_idx,
-                    "item": {
-                        "id": reasoning_id,
-                        "type": "reasoning",
-                        "summary": [{"type": "summary_text", "text": reasoning_buf}]
-                    }
-                }),
-            );
-        }
-
-        // Close tool calls
-        for (k, v) in func_call_ids.as_object().unwrap_or(&serde_json::Map::new()) {
-            if func_item_done.get(k).is_none() {
-                func_item_done[k] = Value::Bool(true);
-                let call_id = v.as_str().unwrap_or("");
-                let args = func_args_buf
-                    .get(k)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}");
-                let name = func_names.get(k).and_then(|v| v.as_str()).unwrap_or("");
-
-                emit(
-                    &mut events,
-                    state,
-                    "response.function_call_arguments.done",
-                    serde_json::json!({
-                        "type": "response.function_call_arguments.done",
-                        "item_id": format!("fc_{}", call_id),
-                        "output_index": k.parse::<u64>().unwrap_or(0),
-                        "arguments": args
-                    }),
-                );
-
-                emit(
-                    &mut events,
-                    state,
-                    "response.output_item.done",
-                    serde_json::json!({
-                        "type": "response.output_item.done",
-                        "output_index": k.parse::<u64>().unwrap_or(0),
-                        "item": {
-                            "id": format!("fc_{}", call_id),
-                            "type": "function_call",
-                            "arguments": args,
-                            "call_id": call_id,
-                            "name": name
-                        }
-                    }),
-                );
-            }
-        }
-
-        // Send completed
-        if state.get("completedSent").and_then(|v| v.as_bool()) != Some(true) {
-            state.insert("completedSent".to_string(), Value::Bool(true));
-            emit(
-                &mut events,
-                state,
-                "response.completed",
-                serde_json::json!({
-                    "type": "response.completed",
-                    "response": {
-                        "id": state.get("responseId").and_then(|v| v.as_str()).unwrap_or(""),
-                        "object": "response",
-                        "created_at": state.get("created").and_then(|v| v.as_i64()).unwrap_or(0),
-                        "status": "completed",
-                        "background": false,
-                        "error": null
-                    }
-                }),
-            );
-        }
-
-        state.insert("msgItemDone".to_string(), msg_item_done);
-        state.insert("funcItemDone".to_string(), func_item_done);
+        emit_finish_block(state, &mut events);
     }
 
     events
@@ -1307,5 +1608,95 @@ mod tests {
             0,
             "duplicate added must reuse the call_id-keyed index"
         );
+    }
+
+    #[test]
+    fn reasoning_vendor_shapes_fall_back() {
+        // JS concerns/reasoning.js extractReasoningText: reasoning_content →
+        // reasoning → reasoning_details[].
+        for (delta, expect) in [
+            (
+                serde_json::json!({"reasoning": "compat-text"}),
+                "compat-text",
+            ),
+            (
+                serde_json::json!({"reasoning_details": [{"text": "a"}, {"content": "b"}]}),
+                "ab",
+            ),
+        ] {
+            let mut state = ResponseTransformState::default();
+            let chunk = serde_json::json!({
+                "id": "x", "choices": [{"index": 0, "delta": delta, "finish_reason": null}]
+            });
+            let events = chat_to_responses_response(&chunk, &mut state.responses.state);
+            let found = events.iter().any(|e| {
+                serde_json::to_string(e)
+                    .unwrap_or_default()
+                    .contains(expect)
+            });
+            assert!(found, "expected {expect} in {events:?}");
+        }
+    }
+
+    #[test]
+    fn think_tags_route_into_reasoning() {
+        // JS 76-100 <think> state machine: <think> content → reasoning
+        // deltas, </think> closes reasoning and resumes text.
+        let mut state = ResponseTransformState::default();
+        let chunk = serde_json::json!({
+            "id": "x",
+            "choices": [{"index": 0,
+                "delta": {"content": "<think>hmm</think>hi"},
+                "finish_reason": null}]
+        });
+        let events = chat_to_responses_response(&chunk, &mut state.responses.state);
+        let s = serde_json::to_string(&events).unwrap_or_default();
+        assert!(
+            s.contains("reasoning_summary_text.delta"),
+            "think → reasoning: {s}"
+        );
+        assert!(
+            s.contains("reasoning_summary_text.done"),
+            "think closed: {s}"
+        );
+        assert!(s.contains("output_text.delta"), "resumed text: {s}");
+    }
+
+    #[test]
+    fn custom_tool_calls_emit_custom_events() {
+        // JS 261-366: custom tools announce custom_tool_call and close with
+        // unwrapped input ({"input":"..."} → freeform).
+        let mut state = ResponseTransformState::default();
+        state
+            .responses
+            .state
+            .insert("customToolNames".to_string(), serde_json::json!("exec"));
+        let chunk = serde_json::json!({
+            "id": "x",
+            "choices": [{"index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": "exec", "arguments": "{\"input\":\"ls\"}"}
+                }]},
+                "finish_reason": null}]
+        });
+        let events = chat_to_responses_response(&chunk, &mut state.responses.state);
+        let s = serde_json::to_string(&events).unwrap_or_default();
+        assert!(s.contains("custom_tool_call"), "custom announce: {s}");
+        assert!(
+            !s.contains("function_call_arguments.delta"),
+            "no streamed JSON fragments for custom: {s}"
+        );
+        // Close path: finish_reason flushes custom input unwrapped.
+        let done = serde_json::json!({
+            "id": "x", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]
+        });
+        let events2 = chat_to_responses_response(&done, &mut state.responses.state);
+        let s2 = serde_json::to_string(&events2).unwrap_or_default();
+        assert!(
+            s2.contains("custom_tool_call_input.done"),
+            "custom close: {s2}"
+        );
+        assert!(s2.contains("\"input\":\"ls\""), "unwrapped input: {s2}");
     }
 }

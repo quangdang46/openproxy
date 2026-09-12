@@ -427,6 +427,25 @@ impl TranslationRegistry {
         self.translate_request_with_strip(source, target, model, body, stream, credentials, None)
     }
 
+    /// Seed Responses→OpenAI streaming state from a request body that
+    /// carried translator-only `_customToolNames` metadata (9router chatCore
+    /// threads `customToolNames` into the response path).
+    pub fn seed_custom_tool_names(state: &mut ResponseTransformState, body: &Value) {
+        if let Some(names) = body.get("_customToolNames").and_then(Value::as_array) {
+            let joined = names
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !joined.is_empty() {
+                state
+                    .responses
+                    .state
+                    .insert("customToolNames".to_string(), Value::String(joined));
+            }
+        }
+    }
+
     /// Like [`translate_request`] but applies optional content-type strip list
     /// (9router `stripList`) before normalization.
     pub fn translate_request_with_strip(
@@ -470,6 +489,14 @@ impl TranslationRegistry {
                         let _ = transform(model, body, stream, credentials);
                     }
                 }
+            }
+            // 9router chatCore.js:198-199: _customToolNames is translator-only
+            // metadata for the response conversion — strip it from the
+            // translated OUTPUT, not the caller's input. Passthrough
+            // (source==target) leaves the body untouched so non-translated
+            // paths keep the metadata.
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("_customToolNames");
             }
         }
 
@@ -1279,5 +1306,52 @@ mod parity_tests {
         assert!(content
             .iter()
             .any(|b| b.get("type").and_then(Value::as_str) == Some("text")));
+    }
+
+    #[test]
+    fn custom_tool_names_survive_passthrough_but_strip_on_translate() {
+        let reg = global_registry();
+        // Passthrough (source==target): caller input keeps the metadata so
+        // non-translated paths can thread it to the response conversion.
+        let mut passthrough = json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "_customToolNames": ["web_search", "code_exec"]
+        });
+        reg.translate_request_with_strip(
+            Format::OpenAi,
+            Format::OpenAi,
+            "gpt-4",
+            &mut passthrough,
+            false,
+            None,
+            None,
+        );
+        assert!(
+            passthrough.get("_customToolNames").is_some(),
+            "passthrough must not strip _customToolNames from caller input"
+        );
+        // Translated path (Claude→Kiro has a direct request transform):
+        // _customToolNames is stripped from the translated output (9router
+        // chatCore.js:198-199 deletes it from translatedBody, not the input).
+        let mut translated = json!({
+            "model": "claude-sonnet-4-5",
+            "system": "helpful",
+            "messages": [{"role": "user", "content": "hi"}],
+            "_customToolNames": ["web_search"]
+        });
+        reg.translate_request_with_strip(
+            Format::Claude,
+            Format::Kiro,
+            "claude-sonnet-4-5",
+            &mut translated,
+            false,
+            None,
+            None,
+        );
+        assert!(
+            translated.get("_customToolNames").is_none(),
+            "translated output must not leak _customToolNames upstream"
+        );
     }
 }

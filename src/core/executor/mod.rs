@@ -60,8 +60,8 @@ pub use cursor::{
     CursorExecutorResponse, SseEvent,
 };
 pub use default::{
-    provider_config_base_url, DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError,
-    ProviderConfig, TransportKind, UpstreamResponse,
+    provider_config_base_url, select_anthropic_beta, DefaultExecutor, ExecutionRequest,
+    ExecutionResponse, ExecutorError, ProviderConfig, TransportKind, UpstreamResponse,
 };
 pub use devin_cli::{DevinCliExecutor, DevinExecutionRequest, DevinExecutorResponse};
 pub use gemini_cli::{
