@@ -1909,13 +1909,13 @@ fn cline_headers(token: &str, extra_headers: Vec<(String, String)>) -> Vec<(Stri
     headers
 }
 
+/// 9router parity (open-sse/shared/clineAuth.js getClineAccessToken, v0.5.75
+/// incl. commit f6e7cabe): only WorkOS JWTs (`eyJ…`) get the `workos:` prefix.
+/// ClinePass API keys (e.g. `clp_…`) are sent verbatim — prefixing them makes
+/// api.cline.bot reject the request with HTTP 401. An existing `workos:`
+/// prefix is never doubled.
 fn cline_access_token(token: &str) -> String {
-    let trimmed = token.trim();
-    if trimmed.starts_with("workos:") {
-        trimmed.to_string()
-    } else {
-        format!("workos:{trimmed}")
-    }
+    crate::core::auth::cline_auth::get_cline_access_token(token)
 }
 
 fn random_hex(len_bytes: usize) -> String {
