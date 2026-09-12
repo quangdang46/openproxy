@@ -427,6 +427,25 @@ impl TranslationRegistry {
         self.translate_request_with_strip(source, target, model, body, stream, credentials, None)
     }
 
+    /// Seed Responses→OpenAI streaming state from a request body that
+    /// carried translator-only `_customToolNames` metadata (9router chatCore
+    /// threads `customToolNames` into the response path).
+    pub fn seed_custom_tool_names(state: &mut ResponseTransformState, body: &Value) {
+        if let Some(names) = body.get("_customToolNames").and_then(Value::as_array) {
+            let joined = names
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            if !joined.is_empty() {
+                state
+                    .responses
+                    .state
+                    .insert("customToolNames".to_string(), Value::String(joined));
+            }
+        }
+    }
+
     /// Like [`translate_request`] but applies optional content-type strip list
     /// (9router `stripList`) before normalization.
     pub fn translate_request_with_strip(
@@ -439,6 +458,12 @@ impl TranslationRegistry {
         credentials: Option<&Value>,
         strip_list: Option<&[&str]>,
     ) -> bool {
+        // 9router chatCore.js:198-199: _customToolNames is translator-only
+        // metadata for the response conversion — strip it before dispatch so
+        // it never leaks upstream.
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("_customToolNames");
+        }
         if source != target {
             // Direct route: exact source→target pair (lossless for claude→kiro etc.)
             if let Some(transform) = self.request_transforms.get(&(source, target)) {

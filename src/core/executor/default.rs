@@ -521,12 +521,7 @@ impl ProviderConfig {
     }
 
     fn anthropic(base_url: &str) -> Self {
-        Self::openai(base_url)
-            .with_header("anthropic-version", "2023-06-01")
-            .with_header(
-                "anthropic-beta",
-                "claude-code-20250219,interleaved-thinking-2025-05-14",
-            )
+        Self::openai(base_url).with_header("anthropic-version", "2023-06-01")
     }
 
     fn claude_compatible(base_url: &str) -> Self {
@@ -543,6 +538,20 @@ impl ProviderConfig {
     fn with_fallback(mut self, url: &str) -> Self {
         self.fallback_urls.push(url.to_string());
         self
+    }
+}
+
+/// Anthropic beta flags, ported from `selectAnthropicBeta` in
+/// `open-sse/providers/shared.js:51-69`. Heavy-agent flags are gated to
+/// opus/sonnet — cheaper models don't need them.
+const ANTHROPIC_BETA_BASE: &str = "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,context-management-2025-06-27,prompt-caching-scope-2026-01-05,structured-outputs-2025-12-15,fast-mode-2026-02-01,redact-thinking-2026-02-12,token-efficient-tools-2026-03-28";
+const ANTHROPIC_BETA_HEAVY_AGENT: &str = "advanced-tool-use-2025-11-20,effort-2025-11-24";
+
+pub fn select_anthropic_beta(model: &str) -> String {
+    if model.starts_with("claude-opus") || model.starts_with("claude-sonnet") {
+        format!("{ANTHROPIC_BETA_BASE},{ANTHROPIC_BETA_HEAVY_AGENT}")
+    } else {
+        ANTHROPIC_BETA_BASE.to_string()
     }
 }
 
@@ -1091,6 +1100,20 @@ impl DefaultExecutor {
             }
             if self.provider == "cline" || self.provider == "clinepass" {
                 // Cline often needs workos: prefix handled elsewhere; keep Bearer
+            }
+            // Per-model Anthropic-Beta flags (9router default.js:167-170 +
+            // shared.js selectAnthropicBeta). anthropic-compatible nodes
+            // serving a real Claude model sit in front of Anthropic itself,
+            // so they need the same flags; the model id gates it so gateways
+            // fronting other models are left untouched. Overwrites the
+            // static default (which only had 2 flags).
+            let is_claude_model = model.starts_with("claude-");
+            if self.provider == "claude"
+                || (self.provider.starts_with("anthropic-compatible") && is_claude_model)
+            {
+                if let Ok(val) = HeaderValue::from_str(&select_anthropic_beta(model)) {
+                    headers.insert("anthropic-beta", val);
+                }
             }
             // Claude header cache overlay for anthropic/claude providers
             if matches!(self.provider.as_str(), "claude" | "anthropic") {
