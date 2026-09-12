@@ -521,7 +521,12 @@ impl ProviderConfig {
     }
 
     fn anthropic(base_url: &str) -> Self {
-        Self::openai(base_url).with_header("anthropic-version", "2023-06-01")
+        Self::openai(base_url)
+            .with_header("anthropic-version", "2023-06-01")
+            .with_header(
+                "anthropic-beta",
+                "claude-code-20250219,interleaved-thinking-2025-05-14",
+            )
     }
 
     fn claude_compatible(base_url: &str) -> Self {
