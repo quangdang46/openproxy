@@ -1090,7 +1090,27 @@ impl DefaultExecutor {
                 );
             }
             if self.provider == "cline" || self.provider == "clinepass" {
-                // Cline often needs workos: prefix handled elsewhere; keep Bearer
+                // 9router parity (open-sse/executors/default.js HEADER_HOOKS.clineHeaders
+                // + open-sse/shared/clineAuth.js buildClineHeaders): the hook overlays
+                // the Cline client headers. Hooks run BEFORE auth in JS, so the
+                // generic Bearer Authorization above stands (verbatim token); only
+                // the client-identifying headers are overlaid here.
+                headers.insert(
+                    "User-Agent",
+                    HeaderValue::from_str(&format!("OpenProxy/{}", env!("CARGO_PKG_VERSION")))?,
+                );
+                headers.insert("X-PLATFORM", HeaderValue::from_static(std::env::consts::OS));
+                headers.insert("X-PLATFORM-VERSION", HeaderValue::from_static("rust"));
+                headers.insert("X-CLIENT-TYPE", HeaderValue::from_static("openproxy"));
+                headers.insert(
+                    "X-CLIENT-VERSION",
+                    HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+                );
+                headers.insert(
+                    "X-CORE-VERSION",
+                    HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+                );
+                headers.insert("X-IS-MULTIROOT", HeaderValue::from_static("false"));
             }
             // Claude header cache overlay for anthropic/claude providers
             if matches!(self.provider.as_str(), "claude" | "anthropic") {

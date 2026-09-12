@@ -2964,29 +2964,36 @@ async fn proxy_response_with_usage_tracking(
     let headers = response.headers().clone();
     let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
 
+    // 9router parity (open-sse/handlers/chatCore/nonStreamingHandler.js +
+    // open-sse/shared/clineEnvelope.js unwrapClineEnvelope): unwrap before any
+    // consumer reads choices/usage so non-stream clients get a bare OpenAI
+    // body and usage tracking sees data.usage. No-op unless the provider opts
+    // in via transport.quirks.clineEnvelope (cline/clinepass).
+    let unenveloped_body = unwrap_cline_envelope(&body_bytes, provider);
+
     // 9router parity: decloak tool names when Claude cloaking was applied.
     let decloaked_body = if let Some(map) = tool_name_map {
         if !map.is_empty() {
             let body_val: serde_json::Value =
-                serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+                serde_json::from_slice(&unenveloped_body).unwrap_or(serde_json::Value::Null);
             if !body_val.is_null() {
                 let decloaked =
                     crate::core::utils::claude_cloaking::decloak_tool_names(&body_val, map);
                 serde_json::to_vec(&decloaked)
                     .map(Bytes::from)
-                    .unwrap_or(body_bytes.clone())
+                    .unwrap_or_else(|_| unenveloped_body.clone())
             } else {
-                body_bytes.clone()
+                unenveloped_body.clone()
             }
         } else {
-            body_bytes.clone()
+            unenveloped_body.clone()
         }
     } else {
-        body_bytes.clone()
+        unenveloped_body.clone()
     };
 
     let final_body = if body_complete {
-        let token_usage = extract_token_usage_from_bytes(&body_bytes);
+        let token_usage = extract_token_usage_from_bytes(decloaked_body.as_ref());
         state
             .usage_tracker()
             .track_request(
@@ -3067,6 +3074,32 @@ async fn proxy_response_with_usage_tracking(
     };
 
     build_proxied_response(status, &headers, final_body)
+}
+
+/// Unwrap Cline's non-stream envelope: {"success":true,"data":{...choices...}}.
+///
+/// Port of 9router `open-sse/shared/clineEnvelope.js` `unwrapClineEnvelope`
+/// (v0.5.75): scoped to providers opting in via `transport.quirks.clineEnvelope`
+/// (cline/clinepass) so no other provider's body is ever rewritten. The error
+/// envelope ({"success":false,...}) never matches and passes through untouched.
+fn unwrap_cline_envelope(body: &[u8], provider: &str) -> Bytes {
+    if !matches!(provider, "cline" | "clinepass") {
+        return Bytes::copy_from_slice(body);
+    }
+    let Ok(val) = serde_json::from_slice::<Value>(body) else {
+        return Bytes::copy_from_slice(body);
+    };
+    let Some(success) = val.get("success") else {
+        return Bytes::copy_from_slice(body);
+    };
+    if success != &Value::Bool(true) {
+        return Bytes::copy_from_slice(body);
+    }
+    let data = match val.get("data") {
+        Some(Value::Object(_)) => val.get("data").unwrap().clone(),
+        _ => return Bytes::copy_from_slice(body),
+    };
+    serde_json::to_vec(&data).map_or_else(|_| Bytes::copy_from_slice(body), Bytes::from)
 }
 
 /// Translate a non-streaming Codex/Responses API response into standard Chat Completions format.
@@ -4724,6 +4757,55 @@ mod tests {
             .get("x-9router-token-saver")
             .map(|v| !v.eq_ignore_ascii_case("off"))
             .unwrap_or(true)
+    }
+
+    /// 9router parity (open-sse/shared/clineEnvelope.js unwrapClineEnvelope +
+    /// tests/unit/cline-free-models-envelope.test.js): non-stream Cline/ClinePass
+    /// responses wrapped in {"success":true,"data":...} unwrap to data before
+    /// usage extraction/translation; the error envelope passes through untouched.
+    #[test]
+    fn unwrap_cline_envelope_success_unwraps_to_data() {
+        let body = br#"{"success":true,"data":{"choices":[{"message":{"content":"Hi"}}],"usage":{"prompt_tokens":5,"completion_tokens":2}}}"#;
+        for provider in ["cline", "clinepass"] {
+            let out = super::unwrap_cline_envelope(body, provider);
+            let val: Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(val["choices"][0]["message"]["content"], "Hi");
+            assert!(val.get("success").is_none());
+        }
+    }
+
+    #[test]
+    fn unwrap_cline_envelope_error_passes_through() {
+        let body = br#"{"success":false,"error":"empty response content"}"#;
+        for provider in ["cline", "clinepass"] {
+            let out = super::unwrap_cline_envelope(body, provider);
+            let val: Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(val["success"], false);
+            assert_eq!(val["error"], "empty response content");
+        }
+    }
+
+    #[test]
+    fn unwrap_cline_envelope_non_opt_in_provider_untouched() {
+        // The unwrap is opt-in via transport.quirks.clineEnvelope so it can
+        // never rewrite another provider's body — including one that happens
+        // to return {"success":true,"data":...} for its own reasons.
+        let body = br#"{"success":true,"data":{"choices":[{"message":{"content":"Hi"}}]}}"#;
+        let out = super::unwrap_cline_envelope(body, "openai");
+        let val: Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(val["success"], true);
+        assert_eq!(val["data"]["choices"][0]["message"]["content"], "Hi");
+        assert!(val.get("choices").is_none());
+    }
+
+    #[test]
+    fn unwrap_cline_envelope_bare_body_unchanged() {
+        let body = br#"{"choices":[{"message":{"content":"Hi"}}]}"#;
+        for provider in ["cline", "clinepass"] {
+            let out = super::unwrap_cline_envelope(body, provider);
+            let val: Value = serde_json::from_slice(&out).unwrap();
+            assert_eq!(val["choices"][0]["message"]["content"], "Hi");
+        }
     }
 
     #[test]
