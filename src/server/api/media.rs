@@ -18,12 +18,34 @@ use crate::types::AppDb;
 use super::auth_error_response;
 
 /// Default provider for video routes when the request model has no `provider/` prefix.
-/// Video generation is xAI-only today (Grok Imagine).
+/// Video generation is xAI-first (Grok Imagine); OpenRouter and Vertex expose
+/// it through adapters (9router `videoProviders/`).
 const DEFAULT_VIDEO_PROVIDER: &str = "xai";
 
 /// Upstream base for async xAI video jobs (POST action / GET by request id).
 /// Docs: https://docs.x.ai/developers/rest-api-reference/inference/videos
 const XAI_VIDEO_BASE_URL: &str = "https://api.x.ai/v1/videos";
+
+/// Async OpenRouter video jobs (POST collection root → { id, status },
+/// GET /videos/{id} polls). Creation POSTs to the collection root with no
+/// `/generations` suffix.
+/// Docs: https://openrouter.ai/docs/api/api-reference/videos
+const OPENROUTER_VIDEO_BASE_URL: &str = "https://openrouter.ai/api/v1/videos";
+
+/// Vertex AI (Veo) video jobs. Vertex does NOT speak the OpenAI-ish
+/// /v1/videos shape: create → POST {model}:predictLongRunning, poll →
+/// POST {model}:fetchPredictOperation (adapter: 9router
+/// `open-sse/handlers/videoProviders/vertex.js`).
+/// Docs: https://cloud.google.com/vertex-ai/generative-ai/docs/model-reference/veo-video-generation
+const VERTEX_VIDEO_BASE_URL: &str = "https://aiplatform.googleapis.com";
+
+/// Default Vertex location when the connection carries none
+/// (9router `videoProviders/vertex.js` DEFAULT_LOCATION).
+const VERTEX_DEFAULT_LOCATION: &str = "us-central1";
+
+/// Google OAuth2 token endpoint used to mint Vertex access tokens from
+/// service-account JWTs (9router `tokenRefresh.js` OAUTH_ENDPOINTS.google.token).
+const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 
 pub async fn cors_options() -> Response {
     cors_preflight_response("POST, OPTIONS")
@@ -383,12 +405,18 @@ async fn video_forward_raw(
 }
 
 /// GET /v1/videos/{id} — poll async video job status (xAI Grok Imagine).
+/// Poll requests carry no model, so the provider resolves from the pinned
+/// connection (`x-connection-id`) or `?provider=` (9router
+/// `videoGeneration.js resolveGetProvider`).
 pub async fn video_get(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(request_id): Path<String>,
+    axum::extract::RawQuery(raw_query): axum::extract::RawQuery,
 ) -> Response {
-    with_cors_get_response(video_get_handler(state, headers, request_id).await)
+    with_cors_get_response(
+        video_get_handler_with_query(state, headers, request_id, raw_query).await,
+    )
 }
 
 pub async fn cors_options_get() -> Response {
@@ -1168,17 +1196,74 @@ async fn video_create_handler(
         Err(resp) => return resp,
     };
 
+    // Adapter dispatch (9router `videoProviders/index.js getVideoAdapter`):
+    // the default (xAI) shape forwards the raw body to {base}/{action};
+    // OpenRouter posts verbatim to the collection root (no action suffix);
+    // Vertex translates both directions (predictLongRunning /
+    // fetchPredictOperation).
+    // OpenRouter requires an application/json body (9router `openrouter.js`
+    // returns "OpenRouter video requires an application/json body" before
+    // any upstream call) — the JSON extractor already guarantees this, so
+    // check the original content-type header.
+    if provider == "openrouter"
+        && !headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("application/json"))
+    {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            "OpenRouter video requires an application/json body",
+        );
+    }
+    let canonical_provider = provider.clone();
     // Strip provider prefix (e.g. "xai/grok-imagine-video" → "grok-imagine-video")
-    // before forwarding so upstream receives the bare model id.
-    if let Some(obj) = body.as_object_mut() {
-        if let Some(model_str) = model.as_deref() {
-            obj.insert("model".to_string(), json!(model_str));
+    // before forwarding so upstream receives the bare model id. Vertex keeps
+    // its own `model` field (predictLongRunning derives the URL from it).
+    if canonical_provider != "vertex" {
+        if let Some(obj) = body.as_object_mut() {
+            if let Some(model_str) = model.as_deref() {
+                obj.insert("model".to_string(), json!(model_str));
+            }
+        }
+    }
+    if canonical_provider == "openrouter" && action != "generations" {
+        // ponytail: generations only — OpenRouter has no edits/extensions endpoint.
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("OpenRouter video supports 'generations' only (got '{action}')"),
+        );
+    }
+    if canonical_provider == "vertex" {
+        if action != "generations" {
+            // ponytail: Veo extend/edit go through generations with `video`/`image` in the body.
+            return json_error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Vertex video supports 'generations' only (got '{action}')"),
+            );
+        }
+        if let Err(resp) = validate_vertex_create_body(&body) {
+            return resp;
         }
     }
 
-    let url = format!("{}/{}", XAI_VIDEO_BASE_URL.trim_end_matches('/'), action);
+    let vertex_model_id: Option<String> = if canonical_provider == "vertex" {
+        body.get("model")
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+    } else {
+        None
+    };
 
-    let body_bytes = match serde_json::to_vec(&body) {
+    // Vertex translates the OpenAI-ish body to predictLongRunning shape once —
+    // per-connection auth only changes the URL/token, not the body.
+    let forward_body: Value = if canonical_provider == "vertex" {
+        to_vertex_body(&body)
+    } else {
+        body
+    };
+
+    let body_bytes = match serde_json::to_vec(&forward_body) {
         Ok(b) => b,
         Err(e) => {
             return json_error_response(
@@ -1215,13 +1300,45 @@ async fn video_create_handler(
     let mut last_error: Option<Response> = None;
 
     for connection in &connections {
-        let mut upstream_headers = match build_media_headers(&provider, connection) {
-            Ok(h) => h,
-            Err(e) => {
-                last_error = Some(json_error_response(
-                    StatusCode::BAD_REQUEST,
-                    &format!("Header error: {}", e),
-                ));
+        // Vertex resolves auth (SA mint or access token) per connection before
+        // any upstream call — raw API keys are not supported (vertex.js resolveAuth).
+        let vertex_token: Option<String> = if canonical_provider == "vertex" {
+            match resolve_vertex_token(connection).await {
+                Ok(token) => Some(token),
+                Err(message) => {
+                    last_error = Some(json_error_response(StatusCode::BAD_REQUEST, &message));
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut upstream_headers =
+            match build_video_headers(&provider, connection, vertex_token.as_deref()) {
+                Ok(h) => h,
+                Err(e) => {
+                    last_error = Some(json_error_response(
+                        StatusCode::BAD_REQUEST,
+                        &format!("Header error: {}", e),
+                    ));
+                    continue;
+                }
+            };
+
+        // Per-connection create URL (9router adapter buildRequest):
+        // xAI → {base}/{action}; OpenRouter → collection root (verbatim body);
+        // Vertex → {base}/v1/projects/{p}/locations/{l}/publishers/google/models/{m}:predictLongRunning.
+        let url = match video_create_url(
+            &provider,
+            &canonical_provider,
+            action,
+            connection,
+            vertex_model_id.as_deref(),
+        ) {
+            Ok(url) => url,
+            Err(message) => {
+                last_error = Some(json_error_response(StatusCode::BAD_REQUEST, &message));
                 continue;
             }
         };
@@ -1276,10 +1393,13 @@ async fn video_create_handler(
         let status = response.status().as_u16();
         let is_rotation_status = create_rotation_statuses.contains(&status);
 
+        // Vertex tokens are freshly minted per connection above, so the
+        // OAuth refresh-and-retry below is xAI/OpenRouter only.
+        let is_vertex = provider == "vertex";
         // 9router parity (videoCore.js:120-146): on 401/403 with a refresh
         // token, refresh the connection and re-fire the POST exactly once.
-        // xAI is the only video provider and refresh is supported.
         if (status == 401 || status == 403)
+            && !is_vertex
             && connection
                 .refresh_token
                 .as_deref()
@@ -1306,7 +1426,9 @@ async fn video_create_handler(
                 // Rebuild headers with the fresh token and retry once.
                 let mut refreshed = connection.clone();
                 refreshed.access_token = Some(new_access);
-                if let Ok(retry_headers) = build_media_headers(&provider, &refreshed) {
+                // The refresh path is xAI/OpenRouter only (Vertex mints fresh
+                // tokens per connection above), so no Vertex token applies here.
+                if let Ok(retry_headers) = build_video_headers(&provider, &refreshed, None) {
                     let retry = client
                         .post(&url)
                         .headers(retry_headers.clone())
@@ -1340,6 +1462,12 @@ async fn video_create_handler(
             continue;
         }
 
+        // Vertex success bodies carry operations, not async-job JSON — map them
+        // onto the client-polled shape (vertex.js transformResponse).
+        if is_vertex && response.status().is_success() {
+            return proxy_vertex_response(response, upstream_headers, connection).await;
+        }
+
         let mut proxied = proxy_video_response(response, upstream_headers, connection).await;
         // Video jobs are account-bound — clients echo this back as `x-connection-id`
         // on GET polls so the same account is used.
@@ -1360,7 +1488,21 @@ async fn video_create_handler(
 /// Poll async video job status. Jobs are account-bound upstream, so no
 /// cross-account rotation: the caller pins the creating account via
 /// `x-connection-id` (returned on create as `x-openproxy-connection-id`).
+/// Poll requests carry no model, so the provider resolves from the pinned
+/// connection or an explicit `?provider=` — falling back to the historical
+/// xAI default (9router `videoGeneration.js resolveGetProvider`).
 async fn video_get_handler(state: AppState, headers: HeaderMap, request_id: String) -> Response {
+    video_get_handler_with_query(state, headers, request_id, None).await
+}
+
+/// Poll handler with the raw query string so `?provider=` resolves without
+/// changing the axum route signature.
+async fn video_get_handler_with_query(
+    state: AppState,
+    headers: HeaderMap,
+    request_id: String,
+    raw_query: Option<String>,
+) -> Response {
     if state.db.snapshot().settings.require_login {
         if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
@@ -1371,19 +1513,32 @@ async fn video_get_handler(state: AppState, headers: HeaderMap, request_id: Stri
         return json_error_response(StatusCode::BAD_REQUEST, "Missing video request id");
     }
 
-    let provider = DEFAULT_VIDEO_PROVIDER.to_string();
+    let provider = resolve_video_get_provider(&state, &headers, raw_query.as_deref());
+    let canonical_provider = provider.clone();
     let mut connection = match select_video_connection(&state, &provider, &headers) {
         Ok(conn) => conn,
         Err(resp) => return resp,
     };
 
-    let url = format!(
-        "{}/{}",
-        XAI_VIDEO_BASE_URL.trim_end_matches('/'),
-        urlencoding::encode(&request_id)
-    );
+    // Vertex polls with POST { operationName } (fetchPredictOperation), not GET.
+    if canonical_provider == "vertex" {
+        return video_vertex_poll(state, request_id, connection).await;
+    }
 
-    let mut upstream_headers = match build_media_headers(&provider, &connection) {
+    let url = match canonical_provider.as_str() {
+        "openrouter" => format!(
+            "{}/{}",
+            OPENROUTER_VIDEO_BASE_URL.trim_end_matches('/'),
+            urlencoding::encode(request_id.trim())
+        ),
+        _ => format!(
+            "{}/{}",
+            XAI_VIDEO_BASE_URL.trim_end_matches('/'),
+            urlencoding::encode(&request_id)
+        ),
+    };
+
+    let mut upstream_headers = match build_video_headers(&provider, &connection, None) {
         Ok(h) => h,
         Err(e) => {
             return json_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
@@ -1442,7 +1597,7 @@ async fn video_get_handler(state: AppState, headers: HeaderMap, request_id: Stri
                     })
                     .await;
                 connection.access_token = Some(new_access);
-                if let Ok(retry_headers) = build_media_headers(&provider, &connection) {
+                if let Ok(retry_headers) = build_video_headers(&provider, &connection, None) {
                     upstream_headers = retry_headers;
                 }
                 match client
@@ -1532,9 +1687,647 @@ fn resolve_video_provider_model(
 }
 
 fn video_provider_supported(provider: &str) -> bool {
-    // Today only xAI exposes videoConfig. Keep this narrow so unsupported
-    // providers fail closed rather than forwarding to a nonexistent endpoint.
-    provider == "xai"
+    // 9router `open-sse/handlers/videoProviders/index.js` ADAPTERS =
+    // { openrouter, vertex } — everything else keeps the xAI default shape.
+    // `vertex-partner` has no videoConfig key (only transport.baseUrl), so
+    // getVideoConfig returns null and videoGeneration.js rejects it.
+    matches!(provider, "xai" | "openrouter" | "vertex")
+}
+
+/// Video request headers: registry `headers` merged over the bearer auth
+/// (9router `videoProviders/openrouter.js headers()` spreads
+/// `config.headers` under the `Authorization` token).
+fn build_video_headers(
+    provider: &str,
+    connection: &crate::types::ProviderConnection,
+    vertex_token: Option<&str>,
+) -> Result<HeaderMap, String> {
+    use reqwest::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE};
+    if provider == "vertex" {
+        // Vertex speaks Bearer OAuth only — the stored api_key holds Service
+        // Account JSON, never a usable token, so build from scratch.
+        let token = vertex_token.ok_or_else(|| "Missing Vertex token".to_string())?;
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| e.to_string())?,
+        );
+        return Ok(headers);
+    }
+    let mut headers = build_media_headers(provider, connection)?;
+    if provider == "openrouter" {
+        // Registry `openrouter.js` videoConfig headers.
+        headers.insert(
+            reqwest::header::HeaderName::from_static("http-referer"),
+            HeaderValue::from_static("https://endpoint-proxy.local"),
+        );
+        headers.insert(
+            reqwest::header::HeaderName::from_static("x-title"),
+            HeaderValue::from_static("Endpoint Proxy"),
+        );
+    }
+    Ok(headers)
+}
+
+/// Per-connection create URL (9router adapter `buildRequest`): xAI posts to
+/// `{base}/{action}`, OpenRouter posts verbatim to the collection root (no
+/// action suffix), Vertex posts to `{model}:predictLongRunning`.
+fn video_create_url(
+    provider: &str,
+    canonical_provider: &str,
+    action: &str,
+    connection: &crate::types::ProviderConnection,
+    vertex_model: Option<&str>,
+) -> Result<String, String> {
+    match canonical_provider {
+        "openrouter" => Ok(OPENROUTER_VIDEO_BASE_URL.trim_end_matches('/').to_string()),
+        "vertex" => {
+            let model = vertex_model
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .ok_or_else(|| {
+                    "Vertex video requires a model (e.g. vertex/veo-3.1-generate-preview)"
+                        .to_string()
+                })?;
+            if !is_safe_vertex_model_id(model) {
+                return Err("Invalid Vertex video model id".to_string());
+            }
+            let project = vertex_project_id(connection).ok_or_else(|| {
+                "Vertex video requires a project_id — use Service Account JSON or set providerSpecificData.projectId"
+                    .to_string()
+            })?;
+            let location = vertex_location(connection);
+            let base = connection
+                .provider_specific_data
+                .get("baseUrl")
+                .and_then(Value::as_str)
+                .unwrap_or(VERTEX_VIDEO_BASE_URL);
+            let _ = provider;
+            Ok(format!(
+                "{}/v1/projects/{}/locations/{}/publishers/google/models/{}:predictLongRunning",
+                base.trim_end_matches('/'),
+                project,
+                location,
+                model
+            ))
+        }
+        _ => Ok(format!(
+            "{}/{}",
+            XAI_VIDEO_BASE_URL.trim_end_matches('/'),
+            action
+        )),
+    }
+}
+
+/// Resolve the poll provider: pinned connection first, then `?provider=`,
+/// else the historical xAI default
+/// (9router `videoGeneration.js resolveGetProvider`).
+fn resolve_video_get_provider(
+    state: &AppState,
+    headers: &HeaderMap,
+    raw_query: Option<&str>,
+) -> String {
+    let snapshot = state.db.snapshot();
+    if let Some(preferred_id) = headers
+        .get("x-connection-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if let Some(conn) = snapshot
+            .provider_connections
+            .iter()
+            .find(|c| c.id == preferred_id)
+        {
+            if video_provider_supported(&conn.provider) {
+                return conn.provider.clone();
+            }
+        }
+    }
+    if let Some(query) = raw_query {
+        for pair in query.split('&') {
+            let mut parts = pair.splitn(2, '=');
+            if parts.next() == Some("provider") {
+                if let Some(raw) = parts.next() {
+                    let decoded = urlencoding::decode(raw)
+                        .map(|s| s.into_owned())
+                        .unwrap_or_else(|_| raw.to_string());
+                    if video_provider_supported(&decoded) {
+                        return decoded;
+                    }
+                }
+            }
+        }
+    }
+    DEFAULT_VIDEO_PROVIDER.to_string()
+}
+
+/// Plain model id only — a model carrying "/" or ".." would rewrite the
+/// request URL (9router `vertex.js` model check).
+fn is_safe_vertex_model_id(model: &str) -> bool {
+    !model.is_empty()
+        && model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+/// Validate the Vertex create body before any billable upstream call
+/// (9router `vertex.js buildRequest` create branch).
+fn validate_vertex_create_body(body: &Value) -> Result<(), Response> {
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|m| !m.is_empty());
+    let Some(model) = model else {
+        return Err(json_error_response(
+            StatusCode::BAD_REQUEST,
+            "Vertex video requires a model (e.g. vertex/veo-3.1-generate-preview)",
+        ));
+    };
+    if !is_safe_vertex_model_id(model) {
+        return Err(json_error_response(
+            StatusCode::BAD_REQUEST,
+            "Invalid Vertex video model id",
+        ));
+    }
+    let has_prompt = body
+        .get("prompt")
+        .and_then(Value::as_str)
+        .is_some_and(|p| !p.trim().is_empty());
+    let has_image = body.get("image").is_some() || body.get("image_url").is_some();
+    if !has_prompt && !has_image {
+        return Err(json_error_response(
+            StatusCode::BAD_REQUEST,
+            "Vertex video requires a prompt or an image",
+        ));
+    }
+    Ok(())
+}
+
+/// Project id: Service Account `project_id` first, then the connection's
+/// `project_id`, then `providerSpecificData.projectId`
+/// (9router `vertex.js resolveAuth`).
+fn vertex_project_id(connection: &crate::types::ProviderConnection) -> Option<String> {
+    if let Some(sa) = connection.api_key.as_deref().and_then(parse_vertex_sa_json) {
+        if let Some(project) = sa.project_id.clone() {
+            return Some(project);
+        }
+    }
+    if let Some(project) = connection.project_id.clone() {
+        if !project.trim().is_empty() {
+            return Some(project);
+        }
+    }
+    connection
+        .provider_specific_data
+        .get("projectId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+}
+
+/// Location override from `providerSpecificData.location`, else the adapter
+/// default (9router `vertex.js` DEFAULT_LOCATION).
+fn vertex_location(connection: &crate::types::ProviderConnection) -> String {
+    connection
+        .provider_specific_data
+        .get("location")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| VERTEX_DEFAULT_LOCATION.to_string())
+}
+
+#[derive(Debug, Clone)]
+struct VertexServiceAccount {
+    client_email: String,
+    private_key: String,
+    project_id: Option<String>,
+}
+
+/// Parse Service Account JSON from the connection api_key
+/// (9router `tokenRefresh.js parseVertexSaJson`).
+fn parse_vertex_sa_json(api_key: &str) -> Option<VertexServiceAccount> {
+    let parsed: Value = serde_json::from_str(api_key).ok()?;
+    let obj = parsed.as_object()?;
+    if obj.get("type").and_then(Value::as_str) != Some("service_account") {
+        return None;
+    }
+    let client_email = obj
+        .get("client_email")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let private_key = obj
+        .get("private_key")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let project_id = obj
+        .get("project_id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if project_id.is_none() {
+        return None;
+    }
+    Some(VertexServiceAccount {
+        client_email,
+        private_key,
+        project_id,
+    })
+}
+
+/// Mint a Vertex access token from Service Account JSON via a self-signed
+/// RS256 JWT exchanged at the Google OAuth2 token endpoint
+/// (9router `tokenRefresh.js refreshVertexToken`).
+async fn mint_vertex_token(sa: &VertexServiceAccount) -> Option<String> {
+    let now = chrono::Utc::now().timestamp();
+    let claims = json!({
+        "iss": sa.client_email,
+        "scope": "https://www.googleapis.com/auth/cloud-platform",
+        "aud": GOOGLE_TOKEN_URL,
+        "iat": now,
+        "exp": now + 3600,
+    });
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+    let pem = sa.private_key.replace("\\n", "\n");
+    let encoding_key = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).ok()?;
+    let jwt = jsonwebtoken::encode(&header, &claims, &encoding_key).ok()?;
+    let client = reqwest::Client::new();
+    let response = client
+        .post(GOOGLE_TOKEN_URL)
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"),
+            ("assertion", jwt.as_str()),
+        ])
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body: Value = response.json().await.ok()?;
+    body.get("access_token")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Resolve Vertex auth for one connection: SA mint first, else the stored
+/// OAuth access token. Raw API keys are not supported
+/// (9router `vertex.js resolveAuth`).
+async fn resolve_vertex_auth(
+    connection: &crate::types::ProviderConnection,
+) -> Result<(String, String, String), String> {
+    let project = vertex_project_id(connection).ok_or_else(|| {
+        "Vertex video requires a project_id — use Service Account JSON or set providerSpecificData.projectId"
+            .to_string()
+    })?;
+    let location = vertex_location(connection);
+    if let Some(sa) = connection.api_key.as_deref().and_then(parse_vertex_sa_json) {
+        match mint_vertex_token(&sa).await {
+            Some(token) => return Ok((token, project, location)),
+            None => {
+                return Err(
+                    "Vertex video: failed to mint access token from service account JSON"
+                        .to_string(),
+                )
+            }
+        }
+    }
+    if let Some(token) = connection
+        .access_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        return Ok((token.to_string(), project, location));
+    }
+    Err(
+        "Vertex video requires Service Account JSON or an OAuth access token (raw API keys are not supported)"
+            .to_string(),
+    )
+}
+
+/// Convenience wrapper returning just the token for the create loop.
+async fn resolve_vertex_token(
+    connection: &crate::types::ProviderConnection,
+) -> Result<String, String> {
+    resolve_vertex_auth(connection)
+        .await
+        .map(|(token, _, _)| token)
+}
+
+/// OpenAI-ish video body → Vertex predictLongRunning body
+/// (9router `vertex.js toVertexBody`).
+fn to_vertex_body(body: &Value) -> Value {
+    let mut instance = serde_json::Map::new();
+    if let Some(prompt) = body.get("prompt") {
+        instance.insert("prompt".to_string(), prompt.clone());
+    }
+    // Image-to-video: the Vertex-native shape or a bare data URL / base64 string.
+    let image = body.get("image").or_else(|| body.get("image_url"));
+    if let Some(img) = image {
+        if img.is_object() {
+            instance.insert("image".to_string(), img.clone());
+        } else if let Some(s) = img.as_str() {
+            if let Some(rest) = s.strip_prefix("data:") {
+                match rest.split_once(";base64,") {
+                    Some((mime, b64)) => {
+                        instance.insert(
+                            "image".to_string(),
+                            json!({ "bytesBase64Encoded": b64, "mimeType": mime }),
+                        );
+                    }
+                    None => {
+                        instance.insert("image".to_string(), json!({ "gcsUri": s }));
+                    }
+                }
+            } else {
+                instance.insert("image".to_string(), json!({ "gcsUri": s }));
+            }
+        }
+    }
+    if body.get("video").is_some_and(|v| v.is_object()) {
+        instance.insert(
+            "video".to_string(),
+            body.get("video").cloned().unwrap_or(Value::Null),
+        );
+    }
+
+    let num = |v: &Value| -> Option<f64> {
+        v.as_f64()
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+    };
+    let truthy = |v: &Value| -> bool {
+        match v {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+            Value::String(s) => !s.is_empty(),
+            _ => true,
+        }
+    };
+    let mut parameters = serde_json::Map::new();
+    if let Some(n) = body.get("n").and_then(num) {
+        parameters.insert("sampleCount".to_string(), json!(n as i64));
+    }
+    if let Some(duration) = body.get("duration").and_then(num) {
+        parameters.insert("durationSeconds".to_string(), json!(duration));
+    }
+    if let Some(aspect) = body.get("aspect_ratio") {
+        parameters.insert("aspectRatio".to_string(), aspect.clone());
+    }
+    if let Some(resolution) = body.get("resolution") {
+        parameters.insert("resolution".to_string(), resolution.clone());
+    }
+    if let Some(seed) = body.get("seed") {
+        parameters.insert("seed".to_string(), seed.clone());
+    }
+    if let Some(negative) = body.get("negative_prompt") {
+        parameters.insert("negativePrompt".to_string(), negative.clone());
+    }
+    // Without storageUri Vertex returns inline base64 bytes; a GCS bucket keeps
+    // the poll response small and is what production callers want.
+    if let Some(storage_uri) = body.get("storage_uri") {
+        parameters.insert("storageUri".to_string(), storage_uri.clone());
+    }
+    if let Some(generate_audio) = body.get("generate_audio") {
+        parameters.insert("generateAudio".to_string(), json!(truthy(generate_audio)));
+    }
+
+    let mut out = json!({ "instances": [Value::Object(instance)] });
+    if !parameters.is_empty() {
+        out["parameters"] = Value::Object(parameters);
+    }
+    out
+}
+
+/// Base64url-encode the operation name into the job id returned to the
+/// client — GET /v1/videos/{id} stays a flat path
+/// (9router `vertex.js encodeJobId`).
+fn encode_vertex_job_id(operation_name: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(operation_name.as_bytes())
+}
+
+/// Decode + validate a Vertex job id. Only ids that re-encode byte-for-byte
+/// and match the anchored `projects/…/operations/` shape are accepted, so a
+/// crafted id can never splice `..` or a host-changing prefix into the
+/// request URL (9router `vertex.js decodeJobId` + OPERATION_NAME_RE).
+fn decode_vertex_job_id(id: &str) -> Option<String> {
+    use base64::Engine;
+    if id.is_empty()
+        || id.len() > 1024
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(id)
+        .ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    if base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text.as_bytes()) != id {
+        return None;
+    }
+    is_valid_operation_name(&text).then_some(text)
+}
+
+/// Operation name shape:
+/// projects/{p}/locations/{l}/publishers/{pub}/models/{m}/operations/{op}.
+/// Anchored and single-segment-per-field; dot-segments are additionally
+/// rejected so a decoded path can never traverse out of the resource URL.
+fn is_valid_operation_name(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('/').collect();
+    if parts.len() != 10
+        || parts[0] != "projects"
+        || parts[2] != "locations"
+        || parts[4] != "publishers"
+        || parts[6] != "models"
+        || parts[8] != "operations"
+    {
+        return false;
+    }
+    [parts[1], parts[3], parts[5], parts[7], parts[9]]
+        .iter()
+        .all(|s| !s.is_empty() && *s != "." && *s != "..")
+}
+
+/// Model path prefix of an operation name (everything before `/operations/`).
+fn operation_model_path(operation_name: &str) -> &str {
+    match operation_name.find("/operations/") {
+        Some(idx) => &operation_name[..idx],
+        None => operation_name,
+    }
+}
+
+/// Vertex operation → the async-job shape clients already poll for
+/// (9router `vertex.js fromVertexOperation`).
+fn transform_vertex_operation(body: &Value) -> Value {
+    let Some(name) = body.get("name").and_then(Value::as_str) else {
+        return body.clone();
+    };
+    let id = encode_vertex_job_id(name);
+    // 9router `vertex.js:93` is `if (json.error)` (truthy) — falsy non-null
+    // error values (false, 0, "") do NOT mark the operation failed.
+    let is_error = |v: &Value| -> bool {
+        match v {
+            Value::Null => false,
+            Value::Bool(b) => *b,
+            Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+            Value::String(s) => !s.is_empty(),
+            _ => true,
+        }
+    };
+    if body.get("error").is_some_and(is_error) {
+        return json!({
+            "id": id,
+            "request_id": id,
+            "status": "failed",
+            "error": body.get("error").cloned().unwrap_or(Value::Null),
+        });
+    }
+    if body.get("done").and_then(Value::as_bool) != Some(true) {
+        return json!({ "id": id, "request_id": id, "status": "pending" });
+    }
+    let samples: Vec<&Value> = body
+        .pointer("/response/videos")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().collect())
+        .or_else(|| {
+            body.pointer("/response/generateVideoResponse/generatedSamples")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().collect())
+        })
+        .unwrap_or_default();
+    // 9router `vertex.js:103-107` uses `||` chains, so empty-string
+    // gcsUri/mimeType fall through to the next source / "video/mp4" default.
+    fn non_empty(v: Option<&str>) -> Option<&str> {
+        v.filter(|s| !s.is_empty())
+    }
+    let videos: Vec<Value> = samples
+        .iter()
+        .map(|s| {
+            let url = non_empty(s.get("gcsUri").and_then(Value::as_str))
+                .or_else(|| non_empty(s.pointer("/video/uri").and_then(Value::as_str)))
+                .or_else(|| non_empty(s.get("uri").and_then(Value::as_str)));
+            let b64 =
+                non_empty(s.get("bytesBase64Encoded").and_then(Value::as_str)).or_else(|| {
+                    non_empty(
+                        s.pointer("/video/bytesBase64Encoded")
+                            .and_then(Value::as_str),
+                    )
+                });
+            let mime = non_empty(s.get("mimeType").and_then(Value::as_str))
+                .or_else(|| non_empty(s.pointer("/video/mimeType").and_then(Value::as_str)))
+                .unwrap_or("video/mp4");
+            json!({ "url": url, "b64_json": b64, "mime_type": mime })
+        })
+        .collect();
+    let first = videos.first().cloned().unwrap_or(Value::Null);
+    json!({
+        "id": id,
+        "request_id": id,
+        "status": "completed",
+        "video": first,
+        "videos": videos,
+    })
+}
+
+/// Proxy a successful Vertex response through the operation → async-job
+/// mapping; error responses keep the sanitizing proxy path.
+async fn proxy_vertex_response(
+    response: reqwest::Response,
+    headers: HeaderMap,
+    connection: &crate::types::ProviderConnection,
+) -> Response {
+    if !response.status().is_success() {
+        return proxy_video_response(response, headers, connection).await;
+    }
+    let text = response.text().await.unwrap_or_default();
+    let out = serde_json::from_str::<Value>(&text)
+        .map(|v| transform_vertex_operation(&v).to_string())
+        .unwrap_or(text);
+    // Non-JSON or unexpected shape — fall back to the raw upstream body.
+    let mut proxied = Response::new(Body::from(out));
+    *proxied.status_mut() = StatusCode::OK;
+    proxied.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    proxied.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    if let Ok(val) = HeaderValue::from_str(&connection.id) {
+        proxied
+            .headers_mut()
+            .insert("x-openproxy-connection-id", val);
+    }
+    proxied
+}
+
+/// Vertex poll: POST { operationName } to `:fetchPredictOperation`
+/// (9router `vertex.js buildRequest` poll branch — Vertex polls with POST,
+/// not GET).
+async fn video_vertex_poll(
+    state: AppState,
+    request_id: String,
+    connection: crate::types::ProviderConnection,
+) -> Response {
+    let operation_name = match decode_vertex_job_id(&request_id) {
+        Some(name) => name,
+        None => return json_error_response(StatusCode::BAD_REQUEST, "Invalid Vertex video job id"),
+    };
+    let (token, _project, _location) = match resolve_vertex_auth(&connection).await {
+        Ok(auth) => auth,
+        Err(message) => return json_error_response(StatusCode::BAD_REQUEST, &message),
+    };
+    let base = connection
+        .provider_specific_data
+        .get("baseUrl")
+        .and_then(Value::as_str)
+        .unwrap_or(VERTEX_VIDEO_BASE_URL);
+    let url = format!(
+        "{}/v1/{}:fetchPredictOperation",
+        base.trim_end_matches('/'),
+        operation_model_path(&operation_name)
+    );
+    let headers = match build_video_headers(&connection.provider, &connection, Some(&token)) {
+        Ok(h) => h,
+        Err(e) => {
+            return json_error_response(StatusCode::BAD_REQUEST, &format!("Header error: {}", e))
+        }
+    };
+    let snapshot = state.db.snapshot();
+    let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+    let client = match state.client_pool.get(&connection.provider, proxy.as_ref()) {
+        Ok(c) => c,
+        Err(e) => {
+            return json_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Client error: {:?}", e),
+            )
+        }
+    };
+    let body = json!({ "operationName": operation_name }).to_string();
+    match client
+        .post(&url)
+        .headers(headers.clone())
+        .body(body)
+        .send()
+        .await
+    {
+        Ok(response) => proxy_vertex_response(response, headers, &connection).await,
+        Err(e) => json_error_response(StatusCode::BAD_GATEWAY, &format!("Request failed: {}", e)),
+    }
 }
 
 fn select_video_connection(
@@ -1634,5 +2427,131 @@ mod tests {
             "Bearer token must be redacted: {sanitized}"
         );
         assert!(sanitized.contains("Bearer [redacted]"), "got: {sanitized}");
+    }
+
+    #[test]
+    fn video_supported_providers_matches_9router() {
+        // 9router `videoProviders/index.js` ADAPTERS = { openrouter, vertex };
+        // `vertex-partner` has no videoConfig key so getVideoConfig returns
+        // null and videoGeneration.js rejects it.
+        for provider in ["xai", "openrouter", "vertex"] {
+            assert!(video_provider_supported(provider), "got: {provider}");
+        }
+        assert!(!video_provider_supported("vertex-partner"));
+        assert!(!video_provider_supported("openai"));
+    }
+
+    #[test]
+    fn openrouter_video_create_url_is_collection_root() {
+        // 9router `openrouter.js buildRequest`: creation POSTs to the collection
+        // root — no `/generations` suffix.
+        let conn = crate::types::ProviderConnection::default();
+        let url =
+            video_create_url("openrouter", "openrouter", "generations", &conn, None).expect("url");
+        assert_eq!(url, "https://openrouter.ai/api/v1/videos");
+    }
+
+    #[test]
+    fn vertex_video_create_url_uses_predict_long_running() {
+        // 9router `vertex.js buildRequest` create branch.
+        let mut conn = crate::types::ProviderConnection::default();
+        conn.provider_specific_data
+            .insert("projectId".to_string(), json!("proj-1"));
+        let url = video_create_url(
+            "vertex",
+            "vertex",
+            "generations",
+            &conn,
+            Some("veo-3.1-generate-preview"),
+        )
+        .expect("url");
+        assert_eq!(
+            url,
+            "https://aiplatform.googleapis.com/v1/projects/proj-1/locations/us-central1/publishers/google/models/veo-3.1-generate-preview:predictLongRunning"
+        );
+    }
+
+    #[test]
+    fn vertex_video_rejects_path_traversal_model_id() {
+        let mut conn = crate::types::ProviderConnection::default();
+        conn.provider_specific_data
+            .insert("projectId".to_string(), json!("proj-1"));
+        for bad in ["../../evil", "a/b", "m/operations/x"] {
+            assert!(
+                video_create_url("vertex", "vertex", "generations", &conn, Some(bad)).is_err(),
+                "got: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn vertex_job_id_round_trips_operation_name() {
+        // 9router `vertex.js`: operation name base64url-encodes into the job id.
+        let name = "projects/proj-1/locations/us-central1/publishers/google/models/veo-3.1-generate-preview/operations/op-abc";
+        let id = encode_vertex_job_id(name);
+        assert_eq!(decode_vertex_job_id(&id).as_deref(), Some(name));
+    }
+
+    #[test]
+    fn vertex_job_id_rejects_ssrf_shapes() {
+        // 9router `video-providers.test.js`: crafted ids must 400 before upstream.
+        use base64::Engine;
+        let jid = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s.as_bytes());
+        let valid_name = "projects/proj-1/locations/us-central1/publishers/google/models/veo-3.1-generate-preview/operations/op-abc";
+        let valid = encode_vertex_job_id(valid_name);
+        for bad in [
+            jid("../../evil"),
+            jid("projects/p/locations/l/publishers/google/models/m/operations/../../x"),
+            jid("../../evil/operations/op"),
+            "!!!not-base64!!!".to_string(),
+            format!("{valid}="),
+            format!("{valid}\n"),
+            "x".repeat(1025),
+        ] {
+            assert!(decode_vertex_job_id(&bad).is_none(), "got: {bad}");
+        }
+    }
+
+    #[test]
+    fn vertex_operation_maps_to_async_job_shape() {
+        // 9router `vertex.js fromVertexOperation`: pending / failed / completed.
+        let name = "projects/proj-1/locations/us-central1/publishers/google/models/veo-3.1-generate-preview/operations/op-abc";
+        let pending = transform_vertex_operation(&json!({ "name": name }));
+        assert_eq!(pending["status"], json!("pending"));
+        let failed = transform_vertex_operation(
+            &json!({ "name": name, "done": true, "error": { "code": 3, "message": "bad prompt" } }),
+        );
+        assert_eq!(failed["status"], json!("failed"));
+        assert_eq!(failed["error"]["message"], json!("bad prompt"));
+        let completed = transform_vertex_operation(&json!({
+            "name": name,
+            "done": true,
+            "response": { "videos": [{ "gcsUri": "gs://bucket/v.mp4", "mimeType": "video/mp4" }] },
+        }));
+        assert_eq!(completed["status"], json!("completed"));
+        assert_eq!(completed["video"]["url"], json!("gs://bucket/v.mp4"));
+        assert_eq!(completed["videos"][0]["mime_type"], json!("video/mp4"));
+    }
+
+    #[test]
+    fn vertex_body_translates_openai_shape() {
+        // 9router `vertex.js toVertexBody`: prompt/duration/aspect/n + data-URL image.
+        let body = json!({
+            "model": "veo-3.1-generate-preview",
+            "prompt": "a neon city",
+            "duration": 8,
+            "aspect_ratio": "16:9",
+            "resolution": "720p",
+            "n": 1,
+            "image": "data:image/png;base64,AAAB",
+        });
+        let out = to_vertex_body(&body);
+        assert_eq!(
+            out,
+            json!({
+                "instances": [{ "prompt": "a neon city", "image": { "bytesBase64Encoded": "AAAB", "mimeType": "image/png" } }],
+                "parameters": { "sampleCount": 1, "durationSeconds": 8.0, "aspectRatio": "16:9", "resolution": "720p" },
+            })
+        );
     }
 }
