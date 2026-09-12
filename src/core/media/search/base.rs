@@ -119,6 +119,12 @@ pub trait SearchProvider: Send + Sync {
     /// Normalise the upstream JSON to [`SearchResultSet`].
     fn normalize(&self, body: &Value, request: &SearchRequest<'_>) -> SearchResultSet;
 
+    /// Extra top-level envelope fields to merge into the `/v1/search`
+    /// response (e.g. xquik `pagination`). Defaults to none.
+    fn extra_envelope(&self, _body: &Value) -> Option<Vec<(String, Value)>> {
+        None
+    }
+
     /// Per-provider upstream timeout in ms (9router registry `timeoutMs`).
     /// `None` → the global 15s timeout applies.
     fn timeout_ms(&self) -> Option<u64> {

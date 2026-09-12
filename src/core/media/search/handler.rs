@@ -37,6 +37,41 @@ pub async fn handle_search(
     provider: &dyn SearchProvider,
     request: &SearchRequest<'_>,
 ) -> Result<SearchResultSet, SearchHandlerError> {
+    let (body, fallback) = fetch_upstream_body(client, provider, request).await?;
+    if let Some(set) = fallback {
+        return Ok(set);
+    }
+    Ok(provider.normalize(&body, request))
+}
+
+/// Same pipeline as [`handle_search`], but keeps provider-specific extra
+/// envelope fields (xquik `pagination`) in the returned JSON value.
+pub async fn handle_search_value(
+    client: &Client,
+    provider: &dyn SearchProvider,
+    request: &SearchRequest<'_>,
+) -> Result<serde_json::Value, SearchHandlerError> {
+    let (body, fallback) = fetch_upstream_body(client, provider, request).await?;
+    let mut out = match fallback {
+        Some(set) => serde_json::to_value(&set).unwrap_or(serde_json::Value::Null),
+        None => serde_json::to_value(provider.normalize(&body, request))
+            .unwrap_or(serde_json::Value::Null),
+    };
+    if let Some(extra) = provider.extra_envelope(&body) {
+        if let Some(obj) = out.as_object_mut() {
+            for (k, v) in extra {
+                obj.insert(k, v);
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn fetch_upstream_body(
+    client: &Client,
+    provider: &dyn SearchProvider,
+    request: &SearchRequest<'_>,
+) -> Result<(serde_json::Value, Option<SearchResultSet>), SearchHandlerError> {
     let started = std::time::Instant::now();
     if request.query.is_empty() {
         return Err(SearchHandlerError::Validation("Query is empty".into()));
@@ -88,7 +123,7 @@ pub async fn handle_search(
             if let Some(fallback_set) =
                 super::chat_search::handle_chat_search(client, provider.id(), request).await
             {
-                return Ok(fallback_set);
+                return Ok((serde_json::Value::Null, Some(fallback_set)));
             }
         }
         return Err(SearchHandlerError::Http(status, text));
@@ -97,7 +132,7 @@ pub async fn handle_search(
         .json()
         .await
         .map_err(|e| SearchHandlerError::Upstream(format!("parse json: {e}")))?;
-    Ok(provider.normalize(&body, request))
+    Ok((body, None))
 }
 
 #[cfg(test)]

@@ -22,6 +22,26 @@ const CHAT_SEARCH_TIMEOUT: Duration = Duration::from_secs(15);
 /// provider has no chat fallback, or the fallback itself fails. The upstream
 /// base URL may be overridden via `request.provider_options["baseUrl"]` (used
 /// by tests / self-hosted endpoints).
+/// Whether `provider_id` supports a chat-completions grounding search
+/// (port of `CHAT_SEARCH_CONFIG` keys in chatSearch.js + the registry
+/// `searchViaChat` entries: gemini, antigravity, openai, xai, kimi,
+/// minimax, perplexity).
+pub fn has_chat_search(provider_id: &str) -> bool {
+    matches!(
+        provider_id,
+        "gemini"
+            | "antigravity"
+            | "openai"
+            | "xai"
+            | "kimi"
+            | "kimi-coding"
+            | "minimax"
+            | "minimax-cn"
+            | "perplexity"
+            | "perplexity-agent"
+    )
+}
+
 pub async fn handle_chat_search(
     client: &Client,
     provider_id: &str,
@@ -32,6 +52,7 @@ pub async fn handle_chat_search(
     let token = request.token?;
     match provider_id {
         "gemini" => gemini_chat_search(client, query, max_results, token, request).await,
+        "antigravity" => antigravity_chat_search(client, query, max_results, token, request).await,
         "openai" => openai_chat_search(client, query, max_results, token, request).await,
         "xai" => xai_chat_search(client, query, max_results, token, request).await,
         "kimi" | "kimi-coding" => {
@@ -215,6 +236,228 @@ async fn openai_chat_search(
     ))
 }
 
+/// Antigravity Google Search grounding request. Port of JS
+/// `CHAT_SEARCH_CONFIG.antigravity` (chatSearch.js:104-167): POST
+/// `{ANTIGRAVITY_IDE_BASE_URL}/v1internal:generateContent` with
+/// `{ project, model, userAgent: "antigravity", requestType: "search",
+/// request: { contents, tools: [{ googleSearch }], generationConfig } }`.
+/// The project id is required — upstream 403s on a missing value.
+async fn antigravity_chat_search(
+    client: &Client,
+    query: &str,
+    max_results: u32,
+    token: &str,
+    request: &SearchRequest<'_>,
+) -> Option<SearchResultSet> {
+    const MODEL: &str = "gemini-2.5-flash";
+    // JS `requireCredentials`: the account must carry a projectId
+    // (stored in provider_specific_data). Missing → no fallback.
+    let project_id =
+        super::base::get_provider_setting(request, "projectId").filter(|p| !p.is_empty())?;
+    let base = resolve_base_url("https://daily-cloudcode-pa.googleapis.com", request).ok()?;
+    let body = json!({
+        "project": project_id,
+        "model": MODEL,
+        "userAgent": "antigravity",
+        "requestType": "search",
+        "request": {
+            "contents": [{ "role": "user", "parts": [{ "text": query }] }],
+            "tools": [{ "googleSearch": {} }],
+            "generationConfig": { "temperature": 1.0, "maxOutputTokens": 8192 },
+        },
+    });
+    let resp = client
+        .post(format!("{base}/v1internal:generateContent"))
+        .bearer_auth(token)
+        .header("User-Agent", "antigravity/ide/2.11.0 darwin/arm64")
+        .json(&body)
+        .timeout(CHAT_SEARCH_TIMEOUT)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: Value = resp.json().await.ok()?;
+
+    // Antigravity wraps the Gemini payload in { response: {...} }.
+    let response = data.get("response").unwrap_or(&data);
+    let candidate = response.get("candidates").and_then(|c| c.get(0))?;
+    let parts = candidate
+        .get("content")
+        .and_then(|c| c.get("parts"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let text: String = parts
+        .iter()
+        .filter_map(|p| p.get("text").and_then(Value::as_str))
+        .collect();
+
+    let grounding = candidate.get("groundingMetadata");
+    let chunks = grounding
+        .and_then(|g| g.get("groundingChunks"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let supports = grounding
+        .and_then(|g| g.get("groundingSupports"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    // Upstream repeats the same source across chunks — key by URL so it stays
+    // one citation. Index URLs first, then attribute supports to them.
+    let mut sources: Vec<(String, String, Vec<String>, Vec<String>)> = Vec::new();
+    let mut by_index: Vec<Option<usize>> = Vec::new();
+    for ch in &chunks {
+        let web = ch.get("web");
+        let url = web
+            .and_then(|w| w.get("uri").or_else(|| w.get("url")))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if url.is_empty() {
+            by_index.push(None);
+            continue;
+        }
+        let title = web
+            .and_then(|w| w.get("title"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let pos = match sources.iter().position(|(u, _, _, _)| u == url) {
+            Some(i) => i,
+            None => {
+                sources.push((url.to_string(), title.to_string(), Vec::new(), Vec::new()));
+                sources.len() - 1
+            }
+        };
+        by_index.push(Some(pos));
+    }
+    for s in &supports {
+        let segment = s.get("segment");
+        let grounded = segment
+            .and_then(|g| g.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let expanded = expand_segment(&text, segment).filter(|e| !e.is_empty());
+        let expanded = expanded.as_deref().unwrap_or(grounded);
+        let indices = s
+            .get("groundingChunkIndices")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for idx in indices {
+            let pos = idx
+                .as_u64()
+                .and_then(|i| by_index.get(i as usize))
+                .copied()
+                .flatten();
+            let Some(pos) = pos else { continue };
+            let entry = &mut sources[pos];
+            if !grounded.is_empty() && !entry.2.contains(&grounded.to_string()) {
+                entry.2.push(grounded.to_string());
+            }
+            if !expanded.is_empty() && !entry.3.contains(&expanded.to_string()) {
+                entry.3.push(expanded.to_string());
+            }
+        }
+    }
+
+    let now = now_iso();
+    let results: Vec<crate::core::media::search::SearchResult> = sources
+        .iter()
+        .take(max_results.max(1) as usize)
+        .enumerate()
+        .map(|(i, (url, title, snippets, contexts))| {
+            let snippet = snippets
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            let snippet = if snippet.is_empty() {
+                title.clone()
+            } else {
+                snippet
+            };
+            let context = contexts
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            let content = if context.is_empty() {
+                snippet.clone()
+            } else {
+                context
+            };
+            make_result(
+                "antigravity",
+                Some(title),
+                Some(url),
+                Some(&snippet),
+                None,
+                None,
+                None,
+                Some(&content),
+                None,
+                None,
+                None,
+                None,
+                i as u32,
+                &now,
+            )
+        })
+        .collect();
+    Some(SearchResultSet {
+        results,
+        total_results: Some(sources.len() as u64),
+    })
+}
+
+/// Widen a grounded segment to its surrounding sentence(s) in the answer
+/// text (chatSearch.js:46-57 `expandSegment`).
+fn expand_segment(text: &str, segment: Option<&Value>) -> Option<String> {
+    const BEFORE: usize = 150;
+    const AFTER: usize = 250;
+    let segment = segment?;
+    let start_idx = segment.get("startIndex").and_then(Value::as_u64)? as usize;
+    let end_idx = segment.get("endIndex").and_then(Value::as_u64)? as usize;
+    if text.is_empty() {
+        return Some(String::new());
+    }
+    let len = text.len();
+    let start = start_idx.saturating_sub(BEFORE).min(len);
+    let end = end_idx.saturating_add(AFTER).min(len);
+    if start >= end {
+        return Some(String::new());
+    }
+    let mut out = text[start..end].trim().to_string();
+    // Drop the partial words the window cut off at either edge.
+    if start > 0 {
+        out = format!("...{}", trim_leading_partial_word(&out));
+    }
+    if end < len {
+        out = format!("{}...", trim_trailing_partial_word(&out));
+    }
+    Some(out.trim().to_string())
+}
+
+fn trim_leading_partial_word(s: &str) -> String {
+    match s.find(char::is_whitespace) {
+        Some(i) => s[i..].to_string(),
+        None => String::new(),
+    }
+}
+
+fn trim_trailing_partial_word(s: &str) -> String {
+    let trimmed_end = s.trim_end();
+    match trimmed_end.rfind(char::is_whitespace) {
+        Some(i) => trimmed_end[..i].to_string(),
+        None => String::new(),
+    }
+}
+
 fn provider_for_citation(provider: &str) -> &'static str {
     // The citation provider id reflects the fallback LLM provider
     // (9router chatSearch success payload: citation.provider = real id).
@@ -225,6 +468,7 @@ fn provider_for_citation(provider: &str) -> &'static str {
         "kimi" | "kimi-coding" => "kimi",
         "minimax" | "minimax-cn" => "minimax",
         "perplexity" | "perplexity-agent" => "perplexity",
+        "antigravity" => "antigravity",
         _ => "chat_search",
     }
 }
@@ -572,5 +816,27 @@ mod extended_tests {
             message_content(&json!({"choices":[{"message":{"content":"hey"}}]})),
             "hey"
         );
+    }
+
+    #[test]
+    fn antigravity_is_chat_search_capable() {
+        // P0 #7: antigravity must be reachable via searchViaChat after the
+        // dedicated lookup misses.
+        assert!(has_chat_search("antigravity"));
+        assert!(!has_chat_search("serper"));
+    }
+
+    #[test]
+    fn expand_segment_widens_context() {
+        let text = "aaa bbb grounded sentence ccc ddd";
+        let seg = json!({"startIndex": 8, "endIndex": 24, "text": "grounded sentence"});
+        let out = expand_segment(text, Some(&seg)).unwrap();
+        assert!(out.contains("grounded sentence"), "got: {out}");
+    }
+
+    #[test]
+    fn expand_segment_handles_missing_indices() {
+        assert!(expand_segment("text", None).is_none());
+        assert!(expand_segment("text", Some(&json!({}))).is_none());
     }
 }
