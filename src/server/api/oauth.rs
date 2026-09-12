@@ -809,6 +809,9 @@ fn kiro_oidc_token_endpoint(region: &str) -> Option<String> {
 }
 
 fn is_valid_aws_region(region: &str) -> bool {
+    if !region.is_ascii() {
+        return false;
+    }
     let mut parts = region.split('-');
     let (Some(a), Some(_b), Some(c)) = (parts.next(), parts.next(), parts.next()) else {
         return false;
@@ -825,6 +828,14 @@ fn is_valid_aws_region(region: &str) -> bool {
     // Middle segment: lowercase alpha (covers us-east, eu-central, etc.)
     let mid = &region[a.len() + 1..region.len() - c.len() - 1];
     !mid.is_empty() && mid.bytes().all(|b| b.is_ascii_lowercase())
+}
+
+/// Whether a kiro refresh token has the expected `aorAAAAAG` prefix.
+/// JS import route accepts any non-empty refreshToken (the prefix check lives
+/// only in validateImportToken, which the import route does not call), so a
+/// missing prefix is warn-only, never a rejection.
+fn kiro_refresh_token_has_expected_prefix(token: &str) -> bool {
+    token.starts_with("aorAAAAAG")
 }
 
 fn kiro_oidc_base_url(region: &str) -> String {
@@ -2488,9 +2499,12 @@ async fn kiro_import_auth(
     }
 
     let refresh_token = refresh_token_raw.trim();
-    if !refresh_token.starts_with("aorAAAAAG") {
-        return internal_error_response(
-            "Invalid token format. Token should start with aorAAAAAG...".to_string(),
+    // JS import route accepts any non-empty refreshToken (the aorAAAAAG prefix
+    // check lives only in validateImportToken, which the import route does not
+    // call). Soft validation: accept, warn.
+    if !kiro_refresh_token_has_expected_prefix(refresh_token) {
+        tracing::warn!(
+            "kiro/import: refresh token does not start with aorAAAAAG prefix; attempting import anyway"
         );
     }
 
@@ -2528,7 +2542,7 @@ async fn kiro_import_auth(
             Some(endpoint) => endpoint,
             None => {
                 return internal_error_response(format!(
-                    "Token validation failed: invalid AWS region: {region}"
+                    "Token validation failed: Invalid region: {region}"
                 ));
             }
         };
@@ -3653,6 +3667,13 @@ fn extract_codex_account_info(
         .and_then(|value| value.get("chatgpt_account_id"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            claims
+                .as_ref()
+                .and_then(|value| value.get("account_id"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        })
     {
         provider_specific_data.insert(
             "chatgptAccountId".to_string(),
@@ -3663,6 +3684,13 @@ fn extract_codex_account_info(
         .and_then(|value| value.get("chatgpt_plan_type"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            claims
+                .as_ref()
+                .and_then(|value| value.get("plan_type"))
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        })
     {
         provider_specific_data.insert(
             "chatgptPlanType".to_string(),
@@ -5337,7 +5365,7 @@ async fn codex_bulk_import(
                     .map(|n| (chrono::Utc::now() + chrono::Duration::seconds(n)).to_rfc3339())
             });
 
-        let connection = ProviderConnection {
+        let mut connection = ProviderConnection {
             provider: "codex".to_string(),
             auth_type: "oauth".to_string(),
             email: email.clone(),
@@ -5350,9 +5378,7 @@ async fn codex_bulk_import(
                 .get("idToken")
                 .and_then(Value::as_str)
                 .map(str::to_string),
-            expires_at: expires_at.or_else(|| {
-                Some((chrono::Utc::now() + chrono::Duration::seconds(86_400)).to_rfc3339())
-            }),
+            expires_at,
             test_status: Some(
                 normalized
                     .get("testStatus")
@@ -5369,6 +5395,18 @@ async fn codex_bulk_import(
             provider_specific_data: psd_map,
             ..Default::default()
         };
+        // JS bulk-import sets item.lastRefreshAt = now when absent.
+        if !connection.extra.contains_key("lastRefreshAt")
+            && !normalized
+                .get("lastRefreshAt")
+                .and_then(Value::as_str)
+                .is_some_and(|s| !s.is_empty())
+        {
+            connection.extra.insert(
+                "lastRefreshAt".to_string(),
+                Value::String(chrono::Utc::now().to_rfc3339()),
+            );
+        }
 
         match create_imported_oauth_connection(&state.db, connection).await {
             Ok(conn) => {
@@ -6127,10 +6165,15 @@ async fn xiaomi_mimo_auto_import() -> Response {
         .into_response();
     };
 
+    // JS: file-read errors fall to the outer catch → HTTP 500.
     let raw = match std::fs::read_to_string(&auth_path) {
         Ok(raw) => raw,
         Err(error) => {
-            return Json(json!({ "found": false, "error": error.to_string() })).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "found": false, "error": error.to_string() })),
+            )
+                .into_response();
         }
     };
     let auth: Value = match serde_json::from_slice(raw.as_bytes()) {
@@ -6977,6 +7020,43 @@ mod tests {
         assert!(!is_valid_aws_region("US-EAST-1"));
         assert!(!is_valid_aws_region("us-east-1;evil"));
         assert!(!is_valid_aws_region(""));
+    }
+
+    #[test]
+    fn test_is_valid_aws_region_non_ascii_no_panic() {
+        // Regression: byte-slicing before ASCII validation panicked on
+        // multi-byte input. Must return false, not panic.
+        assert!(!is_valid_aws_region("us-éast-1"));
+        assert!(!is_valid_aws_region("日本語リージョン"));
+        assert!(!is_valid_aws_region("us-east-１２"));
+    }
+
+    #[test]
+    fn test_kiro_import_accepts_non_prefixed_token() {
+        // Regression: the JS import route accepts any non-empty refreshToken
+        // (the aorAAAAAG prefix check lives only in validateImportToken, which
+        // the import route does not call). The Rust gate must be warn-only.
+        assert!(!kiro_refresh_token_has_expected_prefix(
+            "some-non-prefixed-token"
+        ));
+        assert!(kiro_refresh_token_has_expected_prefix("aorAAAAAGxyz"));
+    }
+
+    #[test]
+    fn test_extract_codex_account_info_top_level_fallbacks() {
+        // JS: chatgpt_account_id || payload.account_id, chatgpt_plan_type || payload.plan_type.
+        let token =
+            jwt_with_payload(&serde_json::json!({ "account_id": "acc-1", "plan_type": "plus" }));
+        let (email, psd) = extract_codex_account_info(Some(&token));
+        assert_eq!(email, None);
+        assert_eq!(
+            psd.get("chatgptAccountId"),
+            Some(&serde_json::Value::String("acc-1".to_string()))
+        );
+        assert_eq!(
+            psd.get("chatgptPlanType"),
+            Some(&serde_json::Value::String("plus".to_string()))
+        );
     }
 
     #[test]
