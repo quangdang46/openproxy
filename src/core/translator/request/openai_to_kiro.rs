@@ -533,9 +533,9 @@ pub fn openai_to_kiro_request(
         "agentMode": "vibe"
     });
 
-    if !system_prompt.is_empty() {
-        payload["systemPrompt"] = Value::String(system_prompt);
-    }
+    // JS parity (openai-to-kiro.js:343-345): NEVER send top-level
+    // `systemPrompt` — the CodeWhisperer surface rejects it with 400
+    // REQUEST_BODY_INVALID. `system_prompt` above is only a replay cache key.
 
     // Native effort fields for supported models (9router
     // buildKiroAdditionalModelRequestFieldsForModel).
@@ -642,22 +642,30 @@ mod tests {
     /// reasoning_effort low for claude-sonnet-4.6 emits
     /// `<max_thinking_length>1024</max_thinking_length>` AND
     /// additionalModelRequestFields with the adaptive-thinking shape.
+    /// JS parity (openai-to-kiro.js:343-345): the tags travel inside the
+    /// first user turn content — top-level `systemPrompt` is NEVER sent.
     #[test]
     fn reasoning_effort_low_emits_max_thinking_length_1024() {
+        crate::core::utils::kiro_session_replay::clear_kiro_session_replay_store();
         let mut body = json!({
             "model": "claude-sonnet-4.6",
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning_effort": "low"
         });
         openai_to_kiro_request("claude-sonnet-4.6", &mut body, false, None);
-        let system_prompt = body["systemPrompt"].as_str().unwrap_or("");
         assert!(
-            system_prompt.contains("<max_thinking_length>1024</max_thinking_length>"),
-            "systemPrompt should carry <max_thinking_length>1024</max_thinking_length>, got: {system_prompt}"
+            body.get("systemPrompt").is_none(),
+            "top-level systemPrompt must never be sent, got: {}",
+            body
+        );
+        let content = current_message_content(&body);
+        assert!(
+            content.contains("<max_thinking_length>1024</max_thinking_length>"),
+            "current user turn should carry <max_thinking_length>1024</max_thinking_length>, got: {content}"
         );
         assert!(
-            system_prompt.contains("<thinking_mode>enabled</thinking_mode>"),
-            "systemPrompt should carry <thinking_mode>enabled</thinking_mode>, got: {system_prompt}"
+            content.contains("<thinking_mode>enabled</thinking_mode>"),
+            "current user turn should carry <thinking_mode>enabled</thinking_mode>, got: {content}"
         );
         assert_eq!(
             body["additionalModelRequestFields"],
@@ -672,20 +680,22 @@ mod tests {
     /// no legacy prompt tags and no additionalModelRequestFields.
     #[test]
     fn reasoning_effort_none_emits_nothing() {
+        crate::core::utils::kiro_session_replay::clear_kiro_session_replay_store();
         let mut body = json!({
             "model": "claude-sonnet-4.6",
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning_effort": "none"
         });
         openai_to_kiro_request("claude-sonnet-4.6", &mut body, false, None);
-        let system_prompt = body["systemPrompt"].as_str().unwrap_or("");
+        assert!(body.get("systemPrompt").is_none());
+        let content = current_message_content(&body);
         assert!(
-            !system_prompt.contains("<thinking_mode>"),
-            "systemPrompt should not contain <thinking_mode>, got: {system_prompt}"
+            !content.contains("<thinking_mode>"),
+            "current user turn should not contain <thinking_mode>, got: {content}"
         );
         assert!(
-            !system_prompt.contains("<max_thinking_length>"),
-            "systemPrompt should not contain <max_thinking_length>, got: {system_prompt}"
+            !content.contains("<max_thinking_length>"),
+            "current user turn should not contain <max_thinking_length>, got: {content}"
         );
         assert!(
             body.get("additionalModelRequestFields").is_none(),
@@ -699,16 +709,18 @@ mod tests {
     /// legacy prompt tags.
     #[test]
     fn gpt56_reasoning_effort_maps_to_reasoning_fields() {
+        crate::core::utils::kiro_session_replay::clear_kiro_session_replay_store();
         let mut body = json!({
             "model": "gpt-5.6-sol",
             "messages": [{"role": "user", "content": "hi"}],
             "reasoning": {"effort": "high"}
         });
         openai_to_kiro_request("gpt-5.6-sol", &mut body, false, None);
-        let system_prompt = body["systemPrompt"].as_str().unwrap_or("");
+        assert!(body.get("systemPrompt").is_none());
+        let content = current_message_content(&body);
         assert!(
-            !system_prompt.contains("<thinking_mode>"),
-            "systemPrompt should not contain <thinking_mode>, got: {system_prompt}"
+            !content.contains("<thinking_mode>"),
+            "current user turn should not contain <thinking_mode>, got: {content}"
         );
         assert_eq!(
             body["additionalModelRequestFields"],
@@ -723,20 +735,22 @@ mod tests {
     #[test]
     fn unsupported_effort_falls_back_to_legacy_tags() {
         for effort in ["auto", "minimal", "ultra"] {
+            crate::core::utils::kiro_session_replay::clear_kiro_session_replay_store();
             let mut body = json!({
                 "model": "claude-sonnet-4.6",
                 "messages": [{"role": "user", "content": "hi"}],
                 "reasoning_effort": effort
             });
             openai_to_kiro_request("claude-sonnet-4.6", &mut body, false, None);
-            let system_prompt = body["systemPrompt"].as_str().unwrap_or("");
+            assert!(body.get("systemPrompt").is_none());
+            let content = current_message_content(&body);
             assert!(
-                system_prompt.contains("<thinking_mode>enabled</thinking_mode>"),
-                "effort {effort}: expected legacy <thinking_mode> tag, got: {system_prompt}"
+                content.contains("<thinking_mode>enabled</thinking_mode>"),
+                "effort {effort}: expected legacy <thinking_mode> tag, got: {content}"
             );
             assert!(
-                system_prompt.contains("<max_thinking_length>"),
-                "effort {effort}: expected legacy <max_thinking_length>, got: {system_prompt}"
+                content.contains("<max_thinking_length>"),
+                "effort {effort}: expected legacy <max_thinking_length>, got: {content}"
             );
             assert!(
                 body.get("additionalModelRequestFields").is_none(),
