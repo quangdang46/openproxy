@@ -1,4 +1,4 @@
-//! Concrete `SearchProvider` impls for the 10 supported providers.
+//! Concrete `SearchProvider` impls for the 13 supported providers.
 //!
 //! Builder + normalizer pairs from `open-sse/handlers/search/{callers,normalizers}.js`.
 
@@ -23,6 +23,9 @@ pub fn lookup(id: &str) -> Option<&'static dyn SearchProvider> {
         "searchapi" => &SEARCH_API,
         "youcom" => &YOUCOM,
         "searxng" => &SEARXNG,
+        "xquik" => &XQUIK,
+        "ollama-search" => &OLLAMA_SEARCH,
+        "glm" => &GLM,
         _ => return None,
     })
 }
@@ -1067,6 +1070,377 @@ impl SearchProvider for SearxngProvider {
     }
 }
 
+// ─── xquik ───────────────────────────────────────────────────────────────
+// Port of `open-sse/handlers/search/callers.js buildXquikRequest` (350-375)
+// + `normalizers.js normalizeXquik` (202-241).
+
+/// Extra fields in the Xquik unified shape that don't fit `SearchResult`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct XquikSearchResultSet {
+    pub results: Vec<SearchResult>,
+    pub total_results: Option<u64>,
+    pub pagination: Value,
+}
+
+pub struct XquikProvider;
+pub static XQUIK: XquikProvider = XquikProvider;
+impl SearchProvider for XquikProvider {
+    fn id(&self) -> &'static str {
+        "xquik"
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry xquik.js searchConfig timeoutMs = 10000.
+        Some(10_000)
+    }
+    fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
+        let _ = require_token(request, "Xquik")?;
+        let query_type = get_provider_setting(request, "queryType");
+        if let Some(ref qt) = query_type {
+            if qt != "Latest" && qt != "Top" {
+                return Err("Xquik queryType must be Latest or Top".to_string());
+            }
+        }
+        let mut qp = vec![
+            ("q", request.query.clone()),
+            ("limit", request.max_results.to_string()),
+        ];
+        if let Some(cursor) = get_provider_setting(request, "cursor") {
+            qp.push(("cursor", cursor));
+        }
+        if let Some(qt) = query_type {
+            qp.push(("queryType", qt));
+        }
+        if let Some(l) = &request.language {
+            qp.push(("language", l.clone()));
+        }
+        Ok(format!(
+            "{}?{}",
+            resolve_base_url("https://xquik.com/api/v1/x/tweets/search", request)?,
+            serde_urlencoded::to_string(&qp).unwrap_or_default()
+        ))
+    }
+    fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
+        let token = require_token(request, "Xquik")?;
+        let mut h = accept_json();
+        h.insert(
+            "x-api-key",
+            HeaderValue::from_str(token).map_err(|e| e.to_string())?,
+        );
+        Ok(h)
+    }
+    fn normalize(&self, body: &Value, _request: &SearchRequest<'_>) -> SearchResultSet {
+        normalize_xquik(body)
+    }
+    fn extra_envelope(&self, body: &Value) -> Option<Vec<(String, Value)>> {
+        Some(vec![(
+            "pagination".to_string(),
+            normalize_xquik_with_pagination(body).pagination,
+        )])
+    }
+}
+
+/// Shared Xquik normalizer (also feeds the pagination-carrying variant).
+fn normalize_xquik(body: &Value) -> SearchResultSet {
+    let now = now_iso();
+    let items = body
+        .get("tweets")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let results: Vec<SearchResult> = items
+        .iter()
+        .enumerate()
+        .map(|(idx, item)| {
+            let username = item
+                .get("author")
+                .and_then(|a| a.get("username"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let author_name = item
+                .get("author")
+                .and_then(|a| a.get("name"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let tweet_id = item
+                .get("id")
+                .and_then(|v| v.as_str().map(str::to_string))
+                .or_else(|| {
+                    item.get("id")
+                        .and_then(|v| v.as_u64())
+                        .map(|n| n.to_string())
+                })
+                .unwrap_or_default();
+            let url = if !username.is_empty() && !tweet_id.is_empty() {
+                format!(
+                    "https://x.com/{}/status/{}",
+                    urlencoding::encode(username),
+                    urlencoding::encode(&tweet_id)
+                )
+            } else if !tweet_id.is_empty() {
+                format!(
+                    "https://x.com/i/web/status/{}",
+                    urlencoding::encode(&tweet_id)
+                )
+            } else {
+                String::new()
+            };
+            let author = if !username.is_empty() {
+                Some(format!("@{username}"))
+            } else if !author_name.is_empty() {
+                Some(author_name.to_string())
+            } else {
+                None
+            };
+            let title = match &author {
+                Some(a) => format!("{a} on X"),
+                None => "X post".to_string(),
+            };
+            let image_url = item
+                .get("media")
+                .and_then(|v| v.as_array())
+                .and_then(|arr| {
+                    arr.iter().find_map(|m| {
+                        m.get("mediaUrl")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                });
+            let text = item.get("text").and_then(|v| v.as_str());
+            make_result(
+                "xquik",
+                Some(&title),
+                Some(&url),
+                text,
+                None,
+                item.get("createdAt").and_then(|v| v.as_str()),
+                None,
+                text,
+                Some("text"),
+                image_url.as_deref(),
+                author.as_deref(),
+                Some("x_post"),
+                idx as u32,
+                &now,
+            )
+        })
+        .collect();
+    SearchResultSet {
+        results,
+        total_results: None,
+    }
+}
+
+/// Xquik normalizer including `has_next_page` cursor pagination
+/// (normalizers.js:232-240). The unified `SearchResultSet` has no
+/// pagination slot, so this companion returns it alongside.
+pub fn normalize_xquik_with_pagination(body: &Value) -> XquikSearchResultSet {
+    let set = normalize_xquik(body);
+    let next_cursor = body
+        .get("next_cursor")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    XquikSearchResultSet {
+        results: set.results,
+        total_results: None,
+        pagination: json!({
+            "has_more": body.get("has_next_page").and_then(|v| v.as_bool()).unwrap_or(false),
+            "next_cursor": next_cursor,
+        }),
+    }
+}
+
+// ─── ollama-search ───────────────────────────────────────────────────────
+// Port of `open-sse/handlers/search/callers.js buildOllamaSearchRequest`
+// (380-395) + `normalizers.js normalizeOllamaSearch` (243-258).
+
+pub struct OllamaSearchProvider;
+pub static OLLAMA_SEARCH: OllamaSearchProvider = OllamaSearchProvider;
+impl SearchProvider for OllamaSearchProvider {
+    fn id(&self) -> &'static str {
+        "ollama-search"
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry ollama-search.js searchConfig timeoutMs = 10000.
+        Some(10_000)
+    }
+    fn max_max_results(&self) -> u32 {
+        // 9router registry ollama-search.js maxMaxResults = 10.
+        10
+    }
+    fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
+        resolve_base_url("https://ollama.com/api/web_search", request)
+    }
+    fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
+        let mut h = json_headers();
+        if let Some(token) = request.token {
+            h.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(h)
+    }
+    fn method(&self) -> Method {
+        Method::POST
+    }
+    fn build_body(&self, request: &SearchRequest<'_>) -> Option<Value> {
+        let mut body = json!({"query": request.query, "max_results": request.max_results});
+        if let Some(c) = &request.country {
+            body["country"] = json!(c);
+        }
+        if let Some(l) = &request.language {
+            body["language"] = json!(l);
+        }
+        Some(body)
+    }
+    fn normalize(&self, body: &Value, _request: &SearchRequest<'_>) -> SearchResultSet {
+        let now = now_iso();
+        let items: Vec<Value> = if let Some(arr) = body.get("results").and_then(|v| v.as_array()) {
+            arr.clone()
+        } else if let Some(arr) = body.as_array() {
+            arr.clone()
+        } else {
+            Vec::new()
+        };
+        let results: Vec<SearchResult> = items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                let content = item.get("content").and_then(|v| v.as_str());
+                make_result(
+                    "ollama-search",
+                    item.get("title").and_then(|v| v.as_str()),
+                    item.get("url").and_then(|v| v.as_str()),
+                    content.or_else(|| item.get("snippet").and_then(|v| v.as_str())),
+                    None,
+                    item.get("published_at").and_then(|v| v.as_str()),
+                    None,
+                    content,
+                    Some("text"),
+                    None,
+                    None,
+                    item.get("source").and_then(|v| v.as_str()),
+                    idx as u32,
+                    &now,
+                )
+            })
+            .collect();
+        let total = results.len() as u64;
+        SearchResultSet {
+            results,
+            total_results: Some(total),
+        }
+    }
+}
+
+// ─── glm ─────────────────────────────────────────────────────────────────
+// Port of `open-sse/handlers/search/callers.js buildGlmSearchRequest`
+// (402-423) + `normalizers.js normalizeGlmSearch` (260-283).
+
+pub struct GlmSearchProvider;
+pub static GLM: GlmSearchProvider = GlmSearchProvider;
+impl SearchProvider for GlmSearchProvider {
+    fn id(&self) -> &'static str {
+        "glm"
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        // 9router registry glm.js searchConfig timeoutMs = 10000.
+        Some(10_000)
+    }
+    fn max_max_results(&self) -> u32 {
+        // 9router registry glm.js searchConfig maxMaxResults = 50.
+        50
+    }
+    fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
+        resolve_base_url("https://api.z.ai/api/mcp/web_search_prime/mcp", request)
+    }
+    fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
+        let mut h = json_headers();
+        if let Some(token) = request.token {
+            h.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).map_err(|e| e.to_string())?,
+            );
+        }
+        Ok(h)
+    }
+    fn method(&self) -> Method {
+        Method::POST
+    }
+    fn build_body(&self, request: &SearchRequest<'_>) -> Option<Value> {
+        Some(json!({
+            "jsonrpc": "2.0",
+            "id": format!("9r-{}", chrono::Utc::now().timestamp_millis()),
+            "method": "tools/call",
+            "params": {
+                "name": "web_search_prime",
+                "arguments": {
+                    "search_query": request.query,
+                    "count": request.max_results,
+                },
+            },
+        }))
+    }
+    fn normalize(&self, body: &Value, _request: &SearchRequest<'_>) -> SearchResultSet {
+        let now = now_iso();
+        // MCP envelope: { result: { content: [{ type: "text", text: "<json>" }] } }.
+        // The nested text is itself stringified JSON carrying results/news/array.
+        let mut payload: Value = body.clone();
+        if let Some(text) = body
+            .pointer("/result/content/0/text")
+            .and_then(|v| v.as_str())
+        {
+            if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                payload = parsed;
+            } else {
+                payload = json!({});
+            }
+        }
+        let items: Vec<Value> = if let Some(arr) = payload.get("results").and_then(|v| v.as_array())
+        {
+            arr.clone()
+        } else if let Some(arr) = payload.get("news").and_then(|v| v.as_array()) {
+            arr.clone()
+        } else if let Some(arr) = payload.as_array() {
+            arr.clone()
+        } else {
+            Vec::new()
+        };
+        let results: Vec<SearchResult> = items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                make_result(
+                    "glm",
+                    item.get("title").and_then(|v| v.as_str()),
+                    item.get("link")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("url").and_then(|v| v.as_str())),
+                    item.get("content").and_then(|v| v.as_str()),
+                    None,
+                    item.get("publish_date")
+                        .and_then(|v| v.as_str())
+                        .or_else(|| item.get("published_at").and_then(|v| v.as_str())),
+                    item.get("icon").and_then(|v| v.as_str()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    item.get("media").and_then(|v| v.as_str()),
+                    idx as u32,
+                    &now,
+                )
+            })
+            .collect();
+        let total = results.len() as u64;
+        SearchResultSet {
+            results,
+            total_results: Some(total),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1288,5 +1662,175 @@ mod tests {
             !url3.contains("livecrawl"),
             "no livecrawl when full_page false: {url3}"
         );
+    }
+
+    #[test]
+    fn registry_finds_new_search_providers() {
+        // P0 #15: xquik/ollama-search/glm must be in lookup so
+        // POST /v1/search no longer returns 400 for them.
+        for id in ["xquik", "ollama-search", "glm"] {
+            assert!(lookup(id).is_some(), "missing provider {id}");
+        }
+    }
+
+    #[test]
+    fn xquik_builds_documented_get_request() {
+        // 9router tests/unit/xquik-search-provider.test.js: builds the
+        // documented GET request without putting the key in the URL.
+        let mut r = req("from:github release notes", 10);
+        r.token = Some("xq_test_key");
+        r.language = Some("en".to_string());
+        r.provider_options
+            .insert("queryType".to_string(), serde_json::json!("Latest"));
+        r.provider_options
+            .insert("cursor".to_string(), serde_json::json!("next page"));
+        let url = XQUIK.build_url(&r).unwrap();
+        assert!(
+            url.starts_with("https://xquik.com/api/v1/x/tweets/search?"),
+            "got: {url}"
+        );
+        assert!(url.contains("q=from%3Agithub+release+notes") || url.contains("q=from"));
+        assert!(url.contains("limit=10"));
+        assert!(url.contains("queryType=Latest"));
+        assert!(url.contains("language=en"));
+        assert!(!url.contains("xq_test_key"), "key must not be in URL");
+        let headers = XQUIK.build_headers(&r).unwrap();
+        assert_eq!(
+            headers.get("x-api-key").and_then(|v| v.to_str().ok()),
+            Some("xq_test_key")
+        );
+    }
+
+    #[test]
+    fn xquik_rejects_bad_query_type() {
+        let mut r = req("hi", 5);
+        r.token = Some("k");
+        r.provider_options
+            .insert("queryType".to_string(), serde_json::json!("Popular"));
+        let err = XQUIK.build_url(&r).unwrap_err();
+        assert!(err.contains("Xquik queryType must be Latest or Top"));
+    }
+
+    #[test]
+    fn xquik_normalizes_posts_and_pagination() {
+        // Mirrors tests/unit/xquik-search-provider.test.js "normalizes posts
+        // and preserves cursor pagination".
+        let body = json!({
+            "tweets": [{
+                "id": "1234567890",
+                "text": "Release notes are live.",
+                "createdAt": "2026-08-25T12:00:00Z",
+                "author": {"username": "github", "name": "GitHub"},
+                "media": [{"mediaUrl": "https://pbs.twimg.com/media/example.jpg", "type": "photo"}],
+            }],
+            "has_next_page": true,
+            "next_cursor": "cursor-2",
+        });
+        let r = req("hi", 5);
+        let set = XQUIK.normalize(&body, &r);
+        assert_eq!(set.results.len(), 1);
+        assert_eq!(set.results[0].title, "@github on X");
+        assert_eq!(set.results[0].url, "https://x.com/github/status/1234567890");
+        assert_eq!(set.results[0].snippet, "Release notes are live.");
+        assert!(set.total_results.is_none());
+        let paged = normalize_xquik_with_pagination(&body);
+        assert_eq!(
+            paged.pagination,
+            json!({"has_more": true, "next_cursor": "cursor-2"})
+        );
+    }
+
+    #[test]
+    fn xquik_stable_url_without_author() {
+        let body = json!({
+            "tweets": [{"id": "9876543210", "text": "Author data is unavailable."}],
+            "has_next_page": false,
+        });
+        let r = req("hi", 5);
+        let set = XQUIK.normalize(&body, &r);
+        assert_eq!(set.results[0].url, "https://x.com/i/web/status/9876543210");
+    }
+
+    #[test]
+    fn ollama_search_posts_query_body() {
+        // 9router callers.js buildOllamaSearchRequest: POST
+        // https://ollama.com/api/web_search { query, max_results }.
+        let mut r = req("hello", 5);
+        r.token = Some("ollama-key");
+        let url = OLLAMA_SEARCH.build_url(&r).unwrap();
+        assert_eq!(url, "https://ollama.com/api/web_search");
+        assert_eq!(OLLAMA_SEARCH.method(), reqwest::Method::POST);
+        let body = OLLAMA_SEARCH.build_body(&r).unwrap();
+        assert_eq!(body["query"], json!("hello"));
+        assert_eq!(body["max_results"], json!(5));
+        let headers = OLLAMA_SEARCH.build_headers(&r).unwrap();
+        assert_eq!(
+            headers
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer ollama-key")
+        );
+        // Token optional — no-auth header set still builds.
+        let r2 = req("hello", 5);
+        assert!(OLLAMA_SEARCH.build_headers(&r2).is_ok());
+    }
+
+    #[test]
+    fn ollama_search_normalizer_falls_back_to_bare_array() {
+        // normalizers.js normalizeOllamaSearch: data.results first,
+        // fall back to a bare array.
+        let r = req("hi", 5);
+        let wrapped = json!({"results": [
+            {"title": "T", "url": "https://x.com", "content": "body text"}
+        ]});
+        let set = OLLAMA_SEARCH.normalize(&wrapped, &r);
+        assert_eq!(set.results.len(), 1);
+        assert_eq!(set.results[0].snippet, "body text");
+        let bare = json!([
+            {"title": "T2", "url": "https://y.com", "snippet": "snip"}
+        ]);
+        let set2 = OLLAMA_SEARCH.normalize(&bare, &r);
+        assert_eq!(set2.results.len(), 1);
+        assert_eq!(set2.results[0].title, "T2");
+    }
+
+    #[test]
+    fn glm_posts_jsonrpc_envelope() {
+        // 9router callers.js buildGlmSearchRequest: POST
+        // https://api.z.ai/api/mcp/web_search_prime/mcp with the
+        // { jsonrpc, method: "tools/call", params: { name:
+        // "web_search_prime", arguments: { search_query, count } } }
+        // MCP envelope.
+        let mut r = req("hello", 7);
+        r.token = Some("glm-key");
+        let url = GLM.build_url(&r).unwrap();
+        assert_eq!(url, "https://api.z.ai/api/mcp/web_search_prime/mcp");
+        assert_eq!(GLM.method(), reqwest::Method::POST);
+        let body = GLM.build_body(&r).unwrap();
+        assert_eq!(body["jsonrpc"], json!("2.0"));
+        assert_eq!(body["method"], json!("tools/call"));
+        assert_eq!(body["params"]["name"], json!("web_search_prime"));
+        assert_eq!(body["params"]["arguments"]["search_query"], json!("hello"));
+        assert_eq!(body["params"]["arguments"]["count"], json!(7));
+        assert_eq!(GLM.max_max_results(), 50);
+    }
+
+    #[test]
+    fn glm_normalizer_unwraps_mcp_text_envelope() {
+        // normalizers.js normalizeGlmSearch: unwrap
+        // data.result.content[0].text, then parse nested stringified JSON.
+        let inner = serde_json::to_string(&json!({
+            "results": [{
+                "title": "T", "link": "https://x.com",
+                "content": "body", "publish_date": "2026-01-01",
+            }]
+        }))
+        .unwrap();
+        let body = json!({"result": {"content": [{"type": "text", "text": inner}]}});
+        let r = req("hi", 5);
+        let set = GLM.normalize(&body, &r);
+        assert_eq!(set.results.len(), 1);
+        assert_eq!(set.results[0].url, "https://x.com");
+        assert_eq!(set.results[0].snippet, "body");
     }
 }

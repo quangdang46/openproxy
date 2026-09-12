@@ -37,6 +37,13 @@ fn resolve_search_provider(alias: &str) -> Option<&'static str> {
         "searchapi" | "sa" => "searchapi",
         "youcom" | "you" => "youcom",
         "searxng" | "searx" => "searxng",
+        "xquik" => "xquik",
+        // Only explicit search aliases map here — bare "ollama" is the chat
+        // provider and has no JS mapping (credentialFallback goes the other
+        // direction: ollama-search.js:21 reuses the ollama chat key).
+        "ollama-search" | "ollama_search" => "ollama-search",
+        "glm" => "glm",
+        "antigravity" | "ag" => "antigravity",
         _ => return None,
     };
     Some(static_id)
@@ -86,25 +93,55 @@ fn extract_query(body: &Value) -> Option<String> {
     None
 }
 
+/// Credential fallback owner for search providers that reuse a related
+/// chat provider's key (port of `credentialFallback` in the 9router
+/// registry: ollama-search → ollama).
+fn credential_fallback_provider(provider: &str) -> Option<&'static str> {
+    match provider {
+        "ollama-search" => Some("ollama"),
+        _ => None,
+    }
+}
+
+fn connection_has_key(c: &crate::types::ProviderConnection) -> bool {
+    c.api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .is_some()
+        || c.access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_some()
+}
+
 /// Select the best active provider connection for a given search provider.
+///
+/// Port of `src/sse/handlers/search.js` credential loop: when the search
+/// provider has no own connection, fall back to the linked provider's
+/// credentials (`credentialFallback`, e.g. ollama-search → ollama).
 fn select_search_connection(
     snapshot: &crate::types::AppDb,
     provider: &str,
 ) -> Option<crate::types::ProviderConnection> {
-    snapshot
+    let own = snapshot
         .provider_connections
         .iter()
-        .filter(|c| {
-            c.provider == provider
-                && c.is_active()
-                && c.api_key
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|v| !v.is_empty())
-                    .is_some()
-        })
+        .filter(|c| c.provider == provider && c.is_active() && connection_has_key(c))
         .min_by_key(|c| c.priority.unwrap_or(999))
-        .cloned()
+        .cloned();
+    if own.is_some() {
+        return own;
+    }
+    credential_fallback_provider(provider).and_then(|fallback| {
+        snapshot
+            .provider_connections
+            .iter()
+            .filter(|c| c.provider == fallback && c.is_active() && connection_has_key(c))
+            .min_by_key(|c| c.priority.unwrap_or(999))
+            .cloned()
+    })
 }
 
 pub fn routes() -> Router<AppState> {
