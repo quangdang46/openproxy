@@ -6,12 +6,12 @@ use std::sync::Mutex;
 
 use aes::cipher::{block_padding::Pkcs7, BlockEncryptMut, KeyIvInit};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use hyper::http;
 use md5::{Digest, Md5};
 use rand::Rng;
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
-use rsa::{pkcs1::DecodeRsaPublicKey, Oaep, RsaPublicKey};
+use rsa::{pkcs8::DecodePublicKey, Pkcs1v15Encrypt, RsaPublicKey};
 use serde_json::Value;
-use sha1::Sha1;
 use uuid::Uuid;
 
 use crate::core::proxy::ProxyTarget;
@@ -147,12 +147,15 @@ const QODER_MACHINE_TYPE: &str = "5";
 
 // RSA public key for COSY encryption (extracted from Qoder IDE v0.9).
 // Matches the CLIProxyAPIPlus branch and live qodercli traffic.
-const QODER_RSA_PUBLIC_KEY_PEM: &str = "-----BEGIN RSA PUBLIC KEY-----
+// SPKI ("BEGIN PUBLIC KEY") + RSA_PKCS1_PADDING, matching JS
+// crypto.publicEncrypt({ key: QODER_RSA_PUBLIC_KEY, padding: RSA_PKCS1_PADDING })
+// in cosy.js (verified against tests/unit/qoder.test.js cosy vectors).
+const QODER_RSA_PUBLIC_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
 4k6Pz1EaDicBMpdpxKduSZu5OANqUq8er4GM95omAGIOPOh+Nx0spthYA2BqGz+l
 6HRkPJ7S236FZz73In/KVuLnwI8JJ2CbuJap8kvheCCZpmAWpb/cPx/3Vr/J6I17
 XcW+ML9FoCI6AOvOzwIDAQAB
------END RSA PUBLIC KEY-----";
+-----END PUBLIC KEY-----";
 
 // Qoder WAF-bypass encoding alphabets
 const QODER_STD_ALPHABET: &[u8; 64] =
@@ -261,8 +264,33 @@ pub struct QoderExecutor {
 // Billing block detection (ported from 9router v0.5.55 qoder.js)
 // ---------------------------------------------------------------------------
 
+/// Fallback `model_config` when the live catalog cannot be reached (network
+/// error / non-2xx). Chat still proceeds; a missing entry after a successful
+/// fetch is a hard error instead.
+fn stub_model_config(qoder_key: &str) -> Value {
+    serde_json::json!({
+        "key": qoder_key,
+        "is_reasoning": false,
+        "max_output_tokens": 32768,
+        "source": "system",
+    })
+}
+
 /// Billing/quota error codes that should trigger combo fallback.
-const QODER_BILLING_CODES: &[u64] = &[112, 10605];
+/// Matched as string OR number: upstream sends `{"code":"112"}` (string) in
+/// `isBillingBlock` test vectors, and `{"code":112}` (number) live.
+const QODER_BILLING_CODES: &[&str] = &["112", "10605"];
+
+/// Extract the `code` field of a Qoder inner-body JSON object as a string,
+/// accepting both `"112"` and `112` shapes (9router `isBillingBlock` matches
+/// string codes; live traffic may send numbers).
+pub fn qoder_billing_code(obj: &Value) -> Option<String> {
+    match obj.get("code") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Number(n)) => Some(n.to_string()),
+        _ => None,
+    }
+}
 
 /// Detect a billing block in a Qoder SSE envelope body.
 ///
@@ -276,10 +304,10 @@ pub fn detect_qoder_billing_block(body: &str) -> Option<String> {
     // Parse the inner body as JSON (it may be a stringified JSON).
     let inner_json: Option<Value> = serde_json::from_str(inner).ok();
 
-    // Check for billing error codes in the inner JSON.
+    // Check for billing error codes in the inner JSON (string or number).
     if let Some(ref obj) = inner_json {
-        if let Some(code) = obj.get("code").and_then(Value::as_u64) {
-            if QODER_BILLING_CODES.contains(&code) {
+        if let Some(code) = qoder_billing_code(obj) {
+            if QODER_BILLING_CODES.contains(&code.as_str()) {
                 let msg = obj
                     .get("message")
                     .and_then(Value::as_str)
@@ -293,10 +321,16 @@ pub fn detect_qoder_billing_block(body: &str) -> Option<String> {
         }
     }
 
-    // Also check the raw string for billing indicators.
-    if inner.contains("pricingUrl")
-        || inner.contains("\"code\":112")
-        || inner.contains("\"code\":10605")
+    // Also check the raw string for billing indicators (both `"112"` and
+    // `112` shapes, optional whitespace — mirrors the JS regex).
+    if inner.contains("pricingUrl") {
+        return Some("qoder billing block detected in raw body".to_string());
+    }
+    let compact: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.contains("\"code\":\"112\"")
+        || compact.contains("\"code\":112")
+        || compact.contains("\"code\":\"10605\"")
+        || compact.contains("\"code\":10605")
     {
         return Some("qoder billing block detected in raw body".to_string());
     }
@@ -319,6 +353,896 @@ pub fn check_billing_in_sse_line(line: &str) -> Option<String> {
         // Return a synthetic 403 error frame that the chat handler can detect.
         format!("{{\"error\":true,\"status\":403,\"message\":\"{err_msg}\"}}")
     })
+}
+
+// ---------------------------------------------------------------------------
+// Image upload + attachment rewrite (ported from attachments.js)
+// ---------------------------------------------------------------------------
+
+/// COSY-signed multipart upload endpoint (sig path; full URL adds `/algo`).
+const QODER_IMAGE_UPLOAD_SIG_PATH: &str = "/api/v2/image/upload";
+/// Images larger than this are never uploaded — they become stubs.
+const QODER_MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+/// When the upload fails, data-URIs at or under this size stay inline.
+const QODER_INLINE_FALLBACK_MAX_BYTES: usize = 512 * 1024;
+/// After rewriting, remaining data-URIs are stripped above this payload size.
+const QODER_MAX_PAYLOAD_BYTES: usize = 6 * 1024 * 1024;
+
+/// Parse a base64 data URI into `(mime, base64)`. Returns `None` when the
+/// input is not a data URI (9router `parseDataUri`).
+pub fn parse_qoder_data_uri(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("data:")?;
+    let (mime, b64) = rest.split_once(";base64,")?;
+    if mime.is_empty() || b64.is_empty() {
+        return None;
+    }
+    Some((mime.to_string(), b64.to_string()))
+}
+
+/// Estimated decoded byte length of a base64 payload (whitespace-tolerant).
+pub fn qoder_decoded_bytes(b64: &str) -> usize {
+    let compact_len = b64.chars().filter(|c| !c.is_whitespace()).count();
+    compact_len * 3 / 4
+}
+
+fn qoder_mime_ext(mime: &str) -> &'static str {
+    let m = mime.to_lowercase();
+    if m.contains("png") {
+        "png"
+    } else if m.contains("jpeg") || m.contains("jpg") {
+        "jpg"
+    } else if m.contains("gif") {
+        "gif"
+    } else if m.contains("webp") {
+        "webp"
+    } else if m.contains("bmp") {
+        "bmp"
+    } else if m.contains("pdf") {
+        "pdf"
+    } else {
+        "bin"
+    }
+}
+
+fn qoder_stub_text(name: &str, mime: &str, bytes: usize, reason: &str) -> String {
+    let label = if !name.is_empty() {
+        name.to_string()
+    } else if !mime.is_empty() {
+        mime.to_string()
+    } else {
+        "attachment".to_string()
+    };
+    let size = if bytes > 0 {
+        format!(", {bytes} bytes")
+    } else {
+        String::new()
+    };
+    format!("[file omitted: {label}{size} — {reason}]")
+}
+
+/// Build a multipart/form-data body for one file field (9router
+/// `buildMultipartFile`). Returns `(boundary, body)`.
+pub fn build_qoder_multipart_file(
+    buffer: &[u8],
+    file_name: &str,
+    media_type: &str,
+) -> (String, Vec<u8>) {
+    let boundary = format!(
+        "----9routerQoder{:x}{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        rand::thread_rng().gen::<u32>()
+    );
+    let mut body = Vec::new();
+    body.extend_from_slice(
+        format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{file_name}\"\r\nContent-Type: {media_type}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body.extend_from_slice(buffer);
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    (boundary, body)
+}
+
+/// Pull the uploaded file URL out of the upload response JSON, accepting the
+/// same key variants as JS `extractUrlFromUploadResponse`.
+pub fn extract_qoder_upload_url(json: &Value) -> Option<String> {
+    if !json.is_object() {
+        return None;
+    }
+    let result = match json.get("result") {
+        Some(r) if r.is_object() => r,
+        _ => json,
+    };
+    for key in ["imageUrls", "image_urls"] {
+        for holder in [result, json] {
+            if let Some(arr) = holder.get(key).and_then(Value::as_array) {
+                if let Some(first) = arr.first().and_then(Value::as_str) {
+                    if !first.is_empty() {
+                        return Some(first.to_string());
+                    }
+                }
+            }
+        }
+    }
+    for key in [
+        "imageUrl",
+        "image_url",
+        "url",
+        "ossUrl",
+        "oss_url",
+        "originalUrl",
+        "originUrl",
+        "link",
+        "image",
+    ] {
+        for holder in [result, json] {
+            if let Some(v) = holder.get(key).and_then(Value::as_str) {
+                if !v.is_empty() {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    if let Some(body) = json.get("body").and_then(Value::as_str) {
+        if let Ok(nested) = serde_json::from_str::<Value>(body) {
+            return extract_qoder_upload_url(&nested);
+        }
+    }
+    None
+}
+
+/// PUT one image buffer to the Qoder file API (COSY-signed multipart, field
+/// "file"). Returns the OSS URL. `inference_base` is api3 (or api2 for jt-).
+async fn upload_qoder_image(
+    client: &reqwest::Client,
+    inference_base: &str,
+    buffer: &[u8],
+    media_type: &str,
+    creds: &QoderCreds,
+) -> Result<String, String> {
+    let request_id = Uuid::new_v4().to_string();
+    let ext = qoder_mime_ext(media_type);
+    let url = format!("{inference_base}/algo{QODER_IMAGE_UPLOAD_SIG_PATH}?request_id={request_id}");
+    let (boundary, body) = build_qoder_multipart_file(buffer, &format!("image.{ext}"), media_type);
+    let cosy = QoderExecutor::build_cosy_headers(body.as_slice(), &url, creds)
+        .map_err(|e| e.to_string())?;
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+    let mut headers = HeaderMap::new();
+    headers.insert("Accept", HeaderValue::from_static("application/json"));
+    headers.insert(
+        "Content-Type",
+        HeaderValue::from_str(&format!("multipart/form-data; boundary={boundary}"))
+            .map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        "Content-Length",
+        HeaderValue::from_str(&body.len().to_string()).map_err(|e| e.to_string())?,
+    );
+    headers.insert(
+        "AI-CLIENT-TIMESTAMP",
+        HeaderValue::from_str(&timestamp).map_err(|e| e.to_string())?,
+    );
+    headers.insert("Accept-Encoding", HeaderValue::from_static("identity"));
+    for (name, value) in [
+        ("Authorization", &cosy.authorization),
+        ("Cosy-Key", &cosy.cosy_key),
+        ("Cosy-User", &cosy.cosy_user),
+        ("Cosy-Date", &cosy.cosy_date),
+        ("Cosy-Version", &cosy.cosy_version),
+        ("Cosy-Machineid", &cosy.cosy_machineid),
+        ("Cosy-Machinetoken", &cosy.cosy_machinetoken),
+        ("Cosy-Machinetype", &cosy.cosy_machinetype),
+        ("Cosy-Machineos", &cosy.cosy_machineos),
+        ("Cosy-Clienttype", &cosy.cosy_clienttype),
+        ("Cosy-Clientip", &cosy.cosy_clientip),
+        ("Cosy-Bodyhash", &cosy.cosy_bodyhash),
+        ("Cosy-Bodylength", &cosy.cosy_bodylength),
+        ("Cosy-Sigpath", &cosy.cosy_sigpath),
+        ("Cosy-Data-Policy", &cosy.cosy_data_policy),
+        ("Cosy-Organization-Id", &cosy.cosy_organization_id),
+        ("Cosy-Organization-Tags", &cosy.cosy_organization_tags),
+        ("Login-Version", &cosy.login_version),
+        ("X-Request-Id", &cosy.x_request_id),
+    ] {
+        headers.insert(
+            name,
+            HeaderValue::from_str(value).unwrap_or_else(|_| HeaderValue::from_static("")),
+        );
+    }
+    let res = client
+        .put(&url)
+        .headers(headers)
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HTTP {status} {}",
+            text.chars().take(180).collect::<String>()
+        ));
+    }
+    let json: Value = res.json().await.map_err(|e| e.to_string())?;
+    extract_qoder_upload_url(&json).ok_or_else(|| "upload response missing url".to_string())
+}
+
+fn is_qoder_image_mime(mime: &str) -> bool {
+    mime.to_lowercase().starts_with("image/")
+}
+
+/// Outcome of resolving one image payload: upload it (cached by sha256),
+/// keep it inline when tiny, or stub it.
+async fn resolve_qoder_image(
+    client: &reqwest::Client,
+    inference_base: &str,
+    base64_data: &str,
+    media_type: &str,
+    creds: &QoderCreds,
+    cache: &mut HashMap<String, String>,
+) -> QoderImageOutcome {
+    let compact: String = base64_data.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.is_empty() {
+        return QoderImageOutcome::Stub {
+            bytes: 0,
+            mime: media_type.to_string(),
+        };
+    }
+    let bytes = qoder_decoded_bytes(&compact);
+    if bytes > QODER_MAX_IMAGE_BYTES {
+        tracing::warn!(target: "openproxy::executor", "qoder image {bytes} bytes exceeds upload cap, stubbing");
+        return QoderImageOutcome::Stub {
+            bytes,
+            mime: media_type.to_string(),
+        };
+    }
+    let buffer = match B64.decode(&compact) {
+        Ok(b) => b,
+        Err(_) => {
+            return QoderImageOutcome::Stub {
+                bytes,
+                mime: media_type.to_string(),
+            }
+        }
+    };
+    let digest = {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(&buffer))
+    };
+    if let Some(url) = cache.get(&digest) {
+        return QoderImageOutcome::Url {
+            url: url.clone(),
+            bytes,
+        };
+    }
+    match upload_qoder_image(client, inference_base, &buffer, media_type, creds).await {
+        Ok(url) => {
+            cache.insert(digest, url.clone());
+            QoderImageOutcome::Url { url, bytes }
+        }
+        Err(e) => {
+            tracing::warn!(target: "openproxy::executor", "qoder image upload failed ({e})");
+            if bytes <= QODER_INLINE_FALLBACK_MAX_BYTES {
+                QoderImageOutcome::Keep { bytes }
+            } else {
+                QoderImageOutcome::Stub {
+                    bytes,
+                    mime: media_type.to_string(),
+                }
+            }
+        }
+    }
+}
+
+enum QoderImageOutcome {
+    Url { url: String, bytes: usize },
+    Keep { bytes: usize },
+    Stub { bytes: usize, mime: String },
+}
+
+fn qoder_image_url_block(url: &str) -> Value {
+    serde_json::json!({ "type": "image_url", "image_url": { "url": url } })
+}
+
+/// Rewrite one content block: upload inlined images, stub huge files (9router
+/// `rewriteBlock`). Returns `None` to drop the block.
+async fn rewrite_qoder_block(block: &Value, ctx: &mut QoderRewriteCtx<'_>) -> Option<Value> {
+    let obj = block.as_object()?;
+    let block_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
+
+    if block_type == "image_url" {
+        let raw = match obj.get("image_url") {
+            Some(Value::String(s)) => s.clone(),
+            Some(v) => v
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            None => String::new(),
+        };
+        if raw.is_empty() {
+            return None;
+        }
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            return Some(qoder_image_url_block(&raw));
+        }
+        let (mime, b64) = match parse_qoder_data_uri(&raw) {
+            Some(p) => p,
+            None => {
+                return Some(
+                    serde_json::json!({ "type": "text", "text": qoder_stub_text("attachment", "", 0, "unreadable data URI") }),
+                );
+            }
+        };
+        if !is_qoder_image_mime(&mime) {
+            return Some(
+                serde_json::json!({ "type": "text", "text": qoder_stub_text("file", &mime, qoder_decoded_bytes(&b64), "non-image bytes are not inlined into Qoder context") }),
+            );
+        }
+        match resolve_qoder_image(
+            ctx.client,
+            ctx.inference_base,
+            &b64,
+            &mime,
+            ctx.creds,
+            ctx.cache,
+        )
+        .await
+        {
+            QoderImageOutcome::Url { url, .. } => Some(qoder_image_url_block(&url)),
+            QoderImageOutcome::Keep { .. } => Some(qoder_image_url_block(&raw)),
+            QoderImageOutcome::Stub { bytes, mime } => Some(
+                serde_json::json!({ "type": "text", "text": qoder_stub_text("image", &mime, bytes, "upload failed; not inlined") }),
+            ),
+        }
+    } else if block_type == "image" {
+        // Claude-style {type:"image", source:{...}} → image_url.
+        let src = obj.get("source")?;
+        if src.get("type").and_then(Value::as_str) == Some("url") {
+            let url = src.get("url").and_then(Value::as_str).unwrap_or("");
+            return Some(qoder_image_url_block(url));
+        }
+        if src.get("type").and_then(Value::as_str) == Some("base64") {
+            let data = src.get("data").and_then(Value::as_str).unwrap_or("");
+            if data.is_empty() {
+                return None;
+            }
+            let mime = src
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("image/png");
+            match resolve_qoder_image(
+                ctx.client,
+                ctx.inference_base,
+                data,
+                mime,
+                ctx.creds,
+                ctx.cache,
+            )
+            .await
+            {
+                QoderImageOutcome::Url { url, .. } => Some(qoder_image_url_block(&url)),
+                QoderImageOutcome::Keep { .. } => {
+                    Some(qoder_image_url_block(&format!("data:{mime};base64,{data}")))
+                }
+                QoderImageOutcome::Stub { bytes, mime } => Some(
+                    serde_json::json!({ "type": "text", "text": qoder_stub_text("image", &mime, bytes, "upload failed; not inlined") }),
+                ),
+            }
+        } else {
+            None
+        }
+    } else if block_type == "file" {
+        let file = obj.get("file")?;
+        let name = file
+            .get("filename")
+            .or_else(|| file.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("file");
+        let file_data = file.get("file_data").and_then(Value::as_str).unwrap_or("");
+        let (b64, mime) = match parse_qoder_data_uri(file_data) {
+            Some((m, b)) => (b, m),
+            None => (
+                if file_data.starts_with("data:") {
+                    String::new()
+                } else {
+                    file_data.to_string()
+                },
+                file.get("format")
+                    .and_then(Value::as_str)
+                    .unwrap_or("application/octet-stream")
+                    .to_string(),
+            ),
+        };
+        if !b64.is_empty() && is_qoder_image_mime(&mime) {
+            if let QoderImageOutcome::Url { url, .. } = resolve_qoder_image(
+                ctx.client,
+                ctx.inference_base,
+                &b64,
+                &mime,
+                ctx.creds,
+                ctx.cache,
+            )
+            .await
+            {
+                return Some(qoder_image_url_block(&url));
+            }
+        }
+        Some(
+            serde_json::json!({ "type": "text", "text": qoder_stub_text(name, &mime, qoder_decoded_bytes(&b64), "Qoder reads documents via its file API, not inlined bytes") }),
+        )
+    } else if block_type == "document" {
+        // Claude document block.
+        let name = obj
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("document");
+        let src = obj.get("source")?;
+        if src.get("type").and_then(Value::as_str) == Some("base64") {
+            let data = src.get("data").and_then(Value::as_str).unwrap_or("");
+            let mime = src
+                .get("media_type")
+                .and_then(Value::as_str)
+                .unwrap_or("application/pdf");
+            if is_qoder_image_mime(mime) {
+                if let QoderImageOutcome::Url { url, .. } = resolve_qoder_image(
+                    ctx.client,
+                    ctx.inference_base,
+                    data,
+                    mime,
+                    ctx.creds,
+                    ctx.cache,
+                )
+                .await
+                {
+                    return Some(qoder_image_url_block(url.as_str()));
+                }
+            }
+            return Some(
+                serde_json::json!({ "type": "text", "text": qoder_stub_text(name, mime, qoder_decoded_bytes(data), "Qoder reads documents via its file API, not inlined bytes") }),
+            );
+        }
+        Some(block.clone())
+    } else if let Some(text) = obj.get("text").and_then(Value::as_str) {
+        if text.contains("data:") && text.len() > 8192 {
+            return Some(
+                serde_json::json!({ "type": obj.get("type").cloned().unwrap_or(Value::String("text".to_string())), "text": strip_qoder_data_uris(text) }),
+            );
+        }
+        Some(block.clone())
+    } else {
+        Some(block.clone())
+    }
+}
+
+/// Replace oversized inlined data-URIs in free text with stubs (9router
+/// `rewriteContent` string path). Small ones stay inline.
+fn strip_qoder_data_uris(text: &str) -> String {
+    // Scan for data: URIs terminated by whitespace/quote; replace those whose
+    // decoded size exceeds the inline fallback budget.
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("data:") {
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let end = tail
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == ')')
+            .unwrap_or(tail.len());
+        let candidate = &tail[..end];
+        let replacement = match parse_qoder_data_uri(candidate) {
+            Some((mime, b64)) if qoder_decoded_bytes(&b64) > QODER_INLINE_FALLBACK_MAX_BYTES => {
+                qoder_stub_text(
+                    "",
+                    &mime,
+                    qoder_decoded_bytes(&b64),
+                    "inlined data URI stripped from Qoder context",
+                )
+            }
+            _ => candidate.to_string(),
+        };
+        out.push_str(&replacement);
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+struct QoderRewriteCtx<'a> {
+    client: &'a reqwest::Client,
+    inference_base: &'a str,
+    creds: &'a QoderCreds,
+    cache: &'a mut HashMap<String, String>,
+}
+
+/// Rewrite OpenAI-shaped messages in place: upload images, stub huge files.
+/// Returns `(uploaded_urls, stubbed_count)` (9router
+/// `rewriteQoderMessageAttachments`).
+pub async fn rewrite_qoder_message_attachments(
+    messages: &mut [Value],
+    client: &reqwest::Client,
+    inference_base: &str,
+    creds: &QoderCreds,
+) -> (Vec<String>, usize) {
+    let mut cache: HashMap<String, String> = HashMap::new();
+    let mut ctx = QoderRewriteCtx {
+        client,
+        inference_base,
+        creds,
+        cache: &mut cache,
+    };
+    for msg in messages.iter_mut() {
+        let obj = match msg.as_object_mut() {
+            Some(o) => o,
+            None => continue,
+        };
+        // Ollama-style sidecar images: fold into content.
+        if let Some(images) = obj.remove("images") {
+            if let Some(arr) = images.as_array() {
+                let extras: Vec<Value> = arr
+                    .iter()
+                    .filter_map(|u| u.as_str())
+                    .map(|u| qoder_image_url_block(u))
+                    .collect();
+                if !extras.is_empty() {
+                    let content = obj
+                        .remove("content")
+                        .unwrap_or(Value::String(String::new()));
+                    let mut blocks = match content {
+                        Value::Array(a) => a,
+                        Value::String(s) => vec![serde_json::json!({ "type": "text", "text": s })],
+                        _ => vec![serde_json::json!({ "type": "text", "text": "" })],
+                    };
+                    blocks.extend(extras);
+                    obj.insert("content".to_string(), Value::Array(blocks));
+                }
+            }
+        }
+        let content = obj.remove("content").unwrap_or(Value::Null);
+        let rewritten = match content {
+            Value::String(s) => {
+                if s.contains("data:") && s.len() > 8192 {
+                    Value::String(strip_qoder_data_uris(&s))
+                } else {
+                    Value::String(s)
+                }
+            }
+            Value::Array(blocks) => {
+                let mut out = Vec::new();
+                for block in &blocks {
+                    if let Some(next) = rewrite_qoder_block(block, &mut ctx).await {
+                        out.push(next);
+                    }
+                }
+                if out.is_empty() {
+                    Value::String(String::new())
+                } else {
+                    Value::Array(out)
+                }
+            }
+            other => other,
+        };
+        obj.insert("content".to_string(), rewritten);
+    }
+    let mut image_urls = Vec::new();
+    let mut stubbed = 0usize;
+    for msg in messages.iter() {
+        let Some(blocks) = msg.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for block in blocks {
+            let url = block
+                .get("type")
+                .and_then(Value::as_str)
+                .filter(|t| *t == "image_url")
+                .and_then(|_| block.get("image_url"))
+                .and_then(|v| match v {
+                    Value::String(s) => Some(s.as_str()),
+                    _ => v.get("url").and_then(Value::as_str),
+                });
+            if let Some(u) = url {
+                if u.starts_with("http://") || u.starts_with("https://") {
+                    image_urls.push(u.to_string());
+                } else if u.starts_with("data:") {
+                    image_urls.push(u.to_string());
+                }
+            }
+            if block.get("type").and_then(Value::as_str) == Some("text") {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    if t.starts_with("[file omitted:") {
+                        stubbed += 1;
+                    }
+                }
+            }
+        }
+    }
+    // Drop remaining inlined binaries when the payload still exceeds budget.
+    let payload_bytes = serde_json::to_vec(&messages).map(|v| v.len()).unwrap_or(0);
+    if payload_bytes > QODER_MAX_PAYLOAD_BYTES {
+        tracing::warn!(target: "openproxy::executor", "qoder request still {payload_bytes} bytes after rewrite; stripping leftover data URIs");
+        for msg in messages.iter_mut() {
+            strip_qoder_message_data_uris(msg);
+        }
+    }
+    (image_urls, stubbed)
+}
+
+// ---------------------------------------------------------------------------
+// Context-window tiers (ported from contextTier.js, pure functions, no I/O)
+// ---------------------------------------------------------------------------
+
+/// Context-window tier modes (`QODER_CONTEXT_TIER` env: auto|max|default|<name>).
+const QODER_CONTEXT_TIER_HEADROOM: f64 = 0.15;
+
+/// Tier the headroom estimate, in tokens, of a char class.
+fn is_qoder_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{11ff}'
+        | '\u{2e80}'..='\u{9fff}'
+        | '\u{ac00}'..='\u{d7af}'
+        | '\u{f900}'..='\u{faff}'
+        | '\u{ff00}'..='\u{ffef}')
+}
+
+/// "200K" | "1M" | "204800" | 204800 → token count, 0 when unparseable.
+pub fn parse_qoder_tier_tokens(value: &Value) -> u64 {
+    match value {
+        Value::Number(n) => n.as_u64().unwrap_or(0),
+        Value::String(s) => {
+            let t = s.trim().to_uppercase();
+            let (num_part, mult) = if let Some(stripped) = t.strip_suffix('K') {
+                (stripped, 1_000u64)
+            } else if let Some(stripped) = t.strip_suffix('M') {
+                (stripped, 1_000_000u64)
+            } else {
+                (t.as_str(), 1u64)
+            };
+            match num_part.trim().parse::<f64>() {
+                Ok(n) if n.is_finite() && n > 0.0 => (n * mult as f64).floor() as u64,
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
+struct QoderTier {
+    name: String,
+    token_count: u64,
+    is_default: bool,
+}
+
+/// Normalize a model_config into sorted tiers (9router `getQoderContextTiers`).
+pub fn qoder_context_tiers(model_config: &Value) -> Vec<(String, u64, bool)> {
+    let list = model_config
+        .get("context_config")
+        .or_else(|| model_config.get("contextConfig"))
+        .and_then(Value::as_array);
+    let Some(list) = list else {
+        return Vec::new();
+    };
+    let mut by_count: HashMap<u64, QoderTier> = HashMap::new();
+    for entry in list {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        let count = [
+            "tokenCount",
+            "token_count",
+            "max_input_tokens",
+            "maxInputTokens",
+            "contextLength",
+            "context_length",
+        ]
+        .iter()
+        .filter_map(|k| obj.get(*k))
+        .map(parse_qoder_tier_tokens)
+        .find(|n| *n > 0)
+        .unwrap_or(0);
+        if count == 0 {
+            continue;
+        }
+        let name = ["name", "label", "display_name", "displayName", "key", "id"]
+            .iter()
+            .filter_map(|k| obj.get(*k).and_then(Value::as_str))
+            .map(str::trim)
+            .find(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(|| {
+                if count >= 1_000_000 && count % 1_000_000 == 0 {
+                    format!("{}M", count / 1_000_000)
+                } else if count >= 1_000 && count % 1_000 == 0 {
+                    format!("{}K", count / 1_000)
+                } else {
+                    count.to_string()
+                }
+            });
+        let is_default = ["isDefault", "is_default", "default"]
+            .iter()
+            .any(|k| obj.get(*k).and_then(Value::as_bool) == Some(true));
+        by_count
+            .entry(count)
+            .and_modify(|t| t.is_default = t.is_default || is_default)
+            .or_insert(QoderTier {
+                name,
+                token_count: count,
+                is_default,
+            });
+    }
+    let mut tiers: Vec<QoderTier> = by_count.into_values().collect();
+    tiers.sort_by_key(|t| t.token_count);
+    tiers
+        .into_iter()
+        .map(|t| (t.name, t.token_count, t.is_default))
+        .collect()
+}
+
+/// Rough prompt-size estimate in tokens: CJK chars ~1 token each, everything
+/// else ~4 chars/token (9router `estimateQoderPromptTokens`).
+pub fn estimate_qoder_prompt_tokens(system: &str, messages: &Value, tools: Option<&Value>) -> u64 {
+    let text = serde_json::json!({
+        "system": system,
+        "messages": messages,
+        "tools": tools.cloned().unwrap_or(Value::Array(vec![])),
+    })
+    .to_string();
+    let cjk = text.chars().filter(|c| is_qoder_cjk(*c)).count() as u64;
+    let rest = text.chars().count() as u64 - cjk;
+    (cjk * 4 + rest).div_ceil(4)
+}
+
+/// Decide which tier a request should run under (9router
+/// `resolveQoderContextTier`). Returns `(name, token_count, reason)` or `None`
+/// to leave the payload untouched. Reads `QODER_CONTEXT_TIER` env.
+pub fn resolve_qoder_context_tier(
+    model_config: &Value,
+    system: &str,
+    messages: &Value,
+    tools: Option<&Value>,
+) -> Option<(String, u64, String)> {
+    let tiers = qoder_context_tiers(model_config);
+    if tiers.is_empty() {
+        return None;
+    }
+    let mode = std::env::var("QODER_CONTEXT_TIER")
+        .unwrap_or_else(|_| "auto".to_string())
+        .trim()
+        .to_string();
+    let mode_lower = mode.to_lowercase();
+    let largest = tiers.last().unwrap();
+    let default_tier = tiers.iter().find(|t| t.2).unwrap_or(&tiers[0]);
+    let estimated = estimate_qoder_prompt_tokens(system, messages, tools);
+    let need = (estimated as f64 * (1.0 + QODER_CONTEXT_TIER_HEADROOM)).ceil() as u64;
+
+    if mode_lower == "max" {
+        return Some((largest.0.clone(), largest.1, "forced:max".to_string()));
+    }
+    if mode_lower == "default" {
+        return Some((
+            default_tier.0.clone(),
+            default_tier.1,
+            "forced:default".to_string(),
+        ));
+    }
+    if mode_lower != "auto" {
+        let wanted = mode.replace(char::is_whitespace, "").to_uppercase();
+        let as_count = parse_qoder_tier_tokens(&Value::String(wanted.clone()));
+        if let Some(found) = tiers.iter().find(|t| {
+            t.0.replace(char::is_whitespace, "").to_uppercase() == wanted
+                || (as_count > 0 && t.1 == as_count)
+        }) {
+            return Some((found.0.clone(), found.1, format!("forced:{}", found.0)));
+        }
+        // Unknown tier name → fall through to auto.
+    }
+
+    let current_max = model_config
+        .get("max_input_tokens")
+        .or_else(|| model_config.get("maxInputTokens"))
+        .map(parse_qoder_tier_tokens)
+        .unwrap_or(0);
+    let current_limit = if current_max > 0 {
+        current_max
+    } else {
+        default_tier.1
+    };
+    if need <= current_limit {
+        return None;
+    }
+    let fits = tiers.iter().find(|t| t.1 >= need && t.1 > current_limit);
+    let tier = fits.unwrap_or(largest);
+    if tier.1 <= current_limit {
+        return None;
+    }
+    Some((
+        tier.0.clone(),
+        tier.1,
+        if fits.is_some() {
+            "auto:fits".to_string()
+        } else {
+            "auto:largest".to_string()
+        },
+    ))
+}
+
+/// Write the chosen tier into a Qoder chat payload (9router
+/// `applyQoderContextTier`): parameters.context_length,
+/// chat_context.extra.ideModelConfigOverride, model_config.
+pub fn apply_qoder_context_tier(payload: &mut Value, tier: &(String, u64, String)) {
+    let count = tier.1;
+    if let Some(params) = payload.get_mut("parameters") {
+        if let Some(obj) = params.as_object_mut() {
+            obj.insert("context_length".to_string(), Value::from(count));
+        }
+    }
+    if let Some(extra) = payload
+        .get_mut("chat_context")
+        .and_then(|c| c.get_mut("extra"))
+        .and_then(|e| e.as_object_mut())
+    {
+        let mut over = extra
+            .get("ideModelConfigOverride")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        over.insert("max_input_tokens".to_string(), Value::from(count));
+        extra.insert("ideModelConfigOverride".to_string(), Value::Object(over));
+    }
+    if let Some(mc) = payload.get_mut("model_config") {
+        if let Some(obj) = mc.as_object_mut() {
+            obj.insert("max_input_tokens".to_string(), Value::from(count));
+        }
+    }
+}
+
+/// Final budget pass: replace leftover data-URIs with stubs (9router
+/// `stripRemainingDataUris`).
+fn strip_qoder_message_data_uris(msg: &mut Value) {
+    let Some(obj) = msg.as_object_mut() else {
+        return;
+    };
+    let Some(content) = obj.get_mut("content") else {
+        return;
+    };
+    if let Some(s) = content.as_str() {
+        if s.contains("data:") {
+            *content = Value::String(strip_qoder_data_uris(s));
+        }
+        return;
+    }
+    if let Some(blocks) = content.as_array_mut() {
+        for block in blocks.iter_mut() {
+            let is_image_url = block.get("type").and_then(Value::as_str) == Some("image_url");
+            if is_image_url {
+                let raw = match block.get("image_url") {
+                    Some(Value::String(s)) => Some(s.clone()),
+                    Some(v) => v.get("url").and_then(Value::as_str).map(String::from),
+                    None => None,
+                };
+                if let Some(u) = raw {
+                    if u.starts_with("data:") {
+                        *block = serde_json::json!({ "type": "text", "text": qoder_stub_text("image", "", 0, "payload over Qoder size budget") });
+                        continue;
+                    }
+                }
+            }
+            if let Some(t) = block.get("text").and_then(Value::as_str).map(String::from) {
+                if t.contains("data:") {
+                    if let Some(o) = block.as_object_mut() {
+                        o.insert("text".to_string(), Value::String(strip_qoder_data_uris(&t)));
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl QoderExecutor {
@@ -379,16 +1303,16 @@ impl QoderExecutor {
         Ok(B64.encode(encrypted))
     }
 
-    /// RSA-OAEP (SHA-1) encrypt the AES key with the hardcoded public key,
-    /// returns base64.
+    /// RSA PKCS#1 v1.5 encrypt the AES key with the hardcoded SPKI public
+    /// key, returns base64. Matches JS `crypto.publicEncrypt({ padding:
+    /// RSA_PKCS1_PADDING })` in cosy.js.
     fn rsa_encrypt_base64(data: &str) -> Result<String, QoderExecutorError> {
-        let public_key = RsaPublicKey::from_pkcs1_pem(QODER_RSA_PUBLIC_KEY_PEM)
+        let public_key = RsaPublicKey::from_public_key_pem(QODER_RSA_PUBLIC_KEY_PEM)
             .map_err(|e| QoderExecutorError::CryptoError(format!("RSA key parse error: {e}")))?;
 
         let mut rng = rand::thread_rng();
-        let padding = Oaep::new::<Sha1>();
         let encrypted = public_key
-            .encrypt(&mut rng, padding, data.as_bytes())
+            .encrypt(&mut rng, Pkcs1v15Encrypt, data.as_bytes())
             .map_err(|e| QoderExecutorError::CryptoError(format!("RSA encrypt error: {e}")))?;
 
         Ok(B64.encode(&encrypted))
@@ -750,7 +1674,11 @@ impl QoderExecutor {
     }
 
     /// Hoist role:"system" messages out of the messages array (Qoder rejects
-    /// system in messages) and flatten any multipart content arrays.
+    /// system in messages). Text-only content flattens to a plain string;
+    /// when images are present the content stays an array and `image_url`
+    /// blocks are preserved (9router `normalizeContent`). Claude
+    /// `{type:"image", source:{...}}` blocks convert to `image_url`;
+    /// surviving file/document blocks become short stubs.
     fn normalize_messages(messages: &[Value]) -> (Vec<Value>, String) {
         let mut system_parts = Vec::new();
         let mut out = Vec::new();
@@ -760,10 +1688,10 @@ impl QoderExecutor {
                 Some(o) => o,
                 None => continue,
             };
-            let text = Self::extract_text(msg.get("content").unwrap_or(&Value::Null));
             let role = obj.get("role").and_then(|v| v.as_str()).unwrap_or("");
 
             if role == "system" || role == "developer" {
+                let text = Self::extract_text(msg.get("content").unwrap_or(&Value::Null));
                 if !text.is_empty() {
                     system_parts.push(text);
                 }
@@ -772,12 +1700,133 @@ impl QoderExecutor {
 
             let mut cloned = msg.clone();
             if let Some(obj) = cloned.as_object_mut() {
-                obj.insert("content".to_string(), Value::String(text));
+                obj.insert(
+                    "content".to_string(),
+                    Self::normalize_content(msg.get("content").unwrap_or(&Value::Null)),
+                );
             }
             out.push(cloned);
         }
 
         (out, system_parts.join("\n\n"))
+    }
+
+    /// Normalize one message's content (9router `normalizeContent`).
+    fn normalize_content(content: &Value) -> Value {
+        if let Some(s) = content.as_str() {
+            return Value::String(s.to_string());
+        }
+        if content.is_null() {
+            return Value::String(String::new());
+        }
+        let Some(blocks) = content.as_array() else {
+            return Value::String(content.to_string());
+        };
+
+        let mut out_blocks: Vec<Value> = Vec::new();
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut has_image = false;
+        // Inline helper instead of a closure: the loop also pushes to
+        // out_blocks / sets has_image, which a capturing closure forbids.
+        macro_rules! push_text {
+            ($text:expr) => {
+                if !$text.is_empty() {
+                    if has_image || !out_blocks.is_empty() {
+                        out_blocks.push(serde_json::json!({ "type": "text", "text": $text }));
+                    } else {
+                        text_parts.push($text.to_string());
+                    }
+                }
+            };
+        }
+
+        for item in blocks {
+            let Some(obj) = item.as_object() else {
+                continue;
+            };
+            let item_type = obj.get("type").and_then(Value::as_str).unwrap_or("");
+            if item_type == "image_url" {
+                let url = match obj.get("image_url") {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(v) => v
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string(),
+                    None => String::new(),
+                };
+                if !url.is_empty() {
+                    out_blocks.push(qoder_image_url_block(&url));
+                    has_image = true;
+                    continue;
+                }
+            } else if item_type == "image" {
+                // Claude base64/url image → OpenAI image_url equivalent.
+                let url = obj.get("source").and_then(|src| {
+                    if src.get("type").and_then(Value::as_str) == Some("base64") {
+                        src.get("data").and_then(Value::as_str).map(|data| {
+                            let mime = src
+                                .get("media_type")
+                                .and_then(Value::as_str)
+                                .unwrap_or("image/png");
+                            format!("data:{mime};base64,{data}")
+                        })
+                    } else {
+                        src.get("url").and_then(Value::as_str).map(String::from)
+                    }
+                });
+                if let Some(u) = url {
+                    if !u.is_empty() {
+                        out_blocks.push(qoder_image_url_block(&u));
+                        has_image = true;
+                        continue;
+                    }
+                }
+            } else if item_type == "file" {
+                let name = obj
+                    .get("file")
+                    .and_then(|f| f.get("filename").or_else(|| f.get("name")))
+                    .and_then(Value::as_str)
+                    .unwrap_or("file");
+                let stub = qoder_stub_text(
+                    name,
+                    "",
+                    0,
+                    "Qoder reads documents via its file API, not inlined bytes",
+                );
+                push_text!(stub.as_str());
+                continue;
+            } else if item_type == "document" {
+                let name = obj
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("document");
+                let stub = qoder_stub_text(
+                    name,
+                    "",
+                    0,
+                    "Qoder reads documents via its file API, not inlined bytes",
+                );
+                push_text!(stub.as_str());
+                continue;
+            }
+            if let Some(text) = obj.get("text").and_then(Value::as_str) {
+                if !text.is_empty() {
+                    push_text!(text);
+                }
+            }
+        }
+
+        if !has_image {
+            return Value::String(text_parts.join("\n"));
+        }
+        if !text_parts.is_empty() {
+            out_blocks.insert(
+                0,
+                serde_json::json!({ "type": "text", "text": text_parts.join("\n") }),
+            );
+        }
+        Value::Array(out_blocks)
     }
 
     /// Get the last user message text (for chat_context).
@@ -818,17 +1867,68 @@ impl QoderExecutor {
         hex::encode(hasher.finalize())[..16].to_string()
     }
 
-    /// Fetch the live model catalog and resolve the entry for `qoder_key`
-    /// (9router getQoderModelConfig). Returns `(is_reasoning, max_output_tokens,
-    /// source)`. Hard error when the model is unknown after a forced refresh —
-    /// silently downgrading the upstream model would be wrong. A network/
-    /// HTTP failure on the catalog (no catalog access) falls back to defaults
-    /// so the chat path does not break.
+    /// Fetch the live model catalog and resolve the full entry for `qoder_key`
+    /// (9router getQoderModelConfig / fetchQoderCatalogRaw). The API returns
+    /// `body.chat` (array of full model_config blocks); `data`/`models` are
+    /// only a legacy fallback. Returns the full catalog entry (cloned) so the
+    /// chat payload can send the complete server-published `model_config`
+    /// instead of a 3-field stub — sending the wrong block silently downgrades
+    /// to a different model upstream. Hard error when the model is unknown
+    /// after a forced refresh. A network/HTTP failure on the catalog (no
+    /// catalog access) falls back to a minimal stub so the chat path does not
+    /// break.
+    /// Parse a catalog response into `(models summary, raw configs)`.
+    /// 9router `fetchQoderCatalogRaw`: the API returns `body.chat`; `data` /
+    /// `models` are only a legacy fallback. Hidden entries (`enable: false`)
+    /// are still cached — upstream accepts chat for these keys.
+    pub fn parse_qoder_catalog(catalog: &Value) -> (Vec<Value>, HashMap<String, Value>) {
+        let arr = catalog
+            .get("chat")
+            .or_else(|| catalog.get("data"))
+            .or_else(|| catalog.get("models"))
+            .and_then(Value::as_array);
+        let mut models = Vec::new();
+        let mut raw: HashMap<String, Value> = HashMap::new();
+        for entry in arr.cloned().unwrap_or_default() {
+            let key = entry
+                .get("key")
+                .and_then(Value::as_str)
+                .or_else(|| entry.get("model").and_then(Value::as_str))
+                .unwrap_or("")
+                .to_string();
+            if key.is_empty() {
+                continue;
+            }
+            raw.insert(key.clone(), entry.clone());
+            if entry.get("enable").and_then(Value::as_bool) == Some(false) {
+                continue;
+            }
+            let display = entry
+                .get("display_name")
+                .and_then(Value::as_str)
+                .unwrap_or(&key);
+            let ctx = entry
+                .get("max_input_tokens")
+                .and_then(Value::as_u64)
+                .unwrap_or(131_072);
+            models.push(serde_json::json!({
+                "id": key,
+                "name": display,
+                "contextLength": ctx,
+                "isVL": entry.get("is_vl").and_then(Value::as_bool).unwrap_or(false),
+                "isReasoning": entry.get("is_reasoning").and_then(Value::as_bool).unwrap_or(false),
+                "maxOutputTokens": entry.get("max_output_tokens").and_then(Value::as_u64).unwrap_or(0),
+                "description": entry.get("description").and_then(Value::as_str).unwrap_or(""),
+            }));
+        }
+        (models, raw)
+    }
+
     async fn fetch_model_config(
         &self,
         qoder_key: &str,
         creds: &QoderCreds,
-    ) -> Result<(bool, u64, String), QoderExecutorError> {
+    ) -> Result<Value, QoderExecutorError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(20))
             .build()
@@ -873,7 +1973,7 @@ impl QoderExecutor {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(target: "openproxy::executor", "qoder model/list fetch failed: {e}");
-                return Ok((false, 32768, "system".to_string()));
+                return Ok(stub_model_config(qoder_key));
             }
         };
         if !response.status().is_success() {
@@ -882,55 +1982,31 @@ impl QoderExecutor {
                 "qoder model/list returned HTTP {}",
                 response.status().as_u16()
             );
-            return Ok((false, 32768, "system".to_string()));
+            return Ok(stub_model_config(qoder_key));
         }
         let catalog: Value = response.json().await.map_err(|e| {
             QoderExecutorError::MissingCredentials(format!("qoder model/list JSON error: {e}"))
         })?;
-        // Catalog shape: { data: [...] } or { models: [...] } — find the entry
-        // whose key/model matches.
-        let entries = catalog
-            .get("data")
-            .or_else(|| catalog.get("models"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let entry = entries.iter().find(|e| {
-            e.get("key").and_then(Value::as_str) == Some(qoder_key)
-                || e.get("model").and_then(Value::as_str) == Some(qoder_key)
-        });
-        let Some(entry) = entry else {
-            return Err(QoderExecutorError::MissingCredentials(format!(
+        let (_, raw) = Self::parse_qoder_catalog(&catalog);
+        match raw.get(qoder_key) {
+            Some(entry) => Ok(entry.clone()),
+            None => Err(QoderExecutorError::MissingCredentials(format!(
                 "qoder: model_config for \"{qoder_key}\" not yet known"
-            )));
-        };
-        let is_reasoning = entry
-            .get("is_reasoning")
-            .or_else(|| entry.get("reasoning"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let max_output_tokens = entry
-            .get("max_output_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(32768);
-        let source = entry
-            .get("source")
-            .and_then(Value::as_str)
-            .unwrap_or("system")
-            .to_string();
-        Ok((is_reasoning, max_output_tokens, source))
+            ))),
+        }
     }
 
     /// Map the OpenAI-style request body into the exact shape Qoder expects.
-    /// `is_reasoning`/`source` come from the live model config (9router embeds
-    /// `model_config` and `chat_context.extra.modelConfig.is_reasoning`).
+    /// `model_entry` is the FULL live catalog entry (9router sends the whole
+    /// `model_config` block — a 3-field stub silently downgrades the upstream
+    /// model). `max_tokens` prefers the caller's cap like JS
+    /// (`Math.min(body.max_tokens, modelConfig.max_output_tokens)`).
     fn transform_request(
         &self,
         body: &Value,
         model: &str,
         credentials: &ProviderConnection,
-        is_reasoning: bool,
-        model_source: &str,
+        model_entry: &Value,
     ) -> Result<Value, QoderExecutorError> {
         // Strip "qoder/" prefix if present
         let qoder_key = model.strip_prefix("qoder/").unwrap_or(model);
@@ -979,22 +2055,41 @@ impl QoderExecutor {
             hex::encode(hasher.finalize())[..16].to_string()
         };
 
-        let max_tokens = body
-            .get("max_tokens")
-            .or_else(|| body.get("max_completion_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(32768);
+        // Max output tokens: model default, capped by the caller's request.
+        let max_output = model_entry
+            .get("max_output_tokens")
+            .and_then(Value::as_u64)
+            .filter(|n| *n > 0)
+            .unwrap_or(32_768);
+        let mut max_tokens = max_output;
+        for key in ["max_tokens", "max_completion_tokens"] {
+            if let Some(want) = body.get(key).and_then(Value::as_u64) {
+                if want > 0 && want < max_tokens {
+                    max_tokens = want;
+                }
+            }
+        }
 
         let tools = body.get("tools").cloned().unwrap_or(Value::Array(vec![]));
 
-        // 9router: embed model_config + chat_context.extra.modelConfig.is_reasoning.
-        let model_config = serde_json::json!({
-            "key": qoder_key,
-            "is_reasoning": is_reasoning,
-            "source": model_source,
-        });
+        // 9router: send the FULL catalog entry as model_config (+ key aligned
+        // to the requested alias), not a 3-field stub.
+        let mut model_config = model_entry.clone();
+        if let Some(obj) = model_config.as_object_mut() {
+            obj.insert("key".to_string(), Value::String(qoder_key.to_string()));
+        }
+        let is_reasoning = model_entry
+            .get("is_reasoning")
+            .or_else(|| model_entry.get("reasoning"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let model_source = model_entry
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("system")
+            .to_string();
 
-        Ok(serde_json::json!({
+        let mut payload = serde_json::json!({
             "request_id": Uuid::new_v4().to_string(),
             "request_set_id": record_id,
             "chat_record_id": record_id,
@@ -1045,7 +2140,18 @@ impl QoderExecutor {
                     .unwrap_or_default()
                     .as_millis() as u64
             }
-        }))
+        });
+        // Context-window tier escalation (9router contextTier.js): applied
+        // between payload build and encode. Pure + in-process (no I/O).
+        if let Some(tier) = resolve_qoder_context_tier(
+            &model_config,
+            &system_text,
+            &payload["messages"],
+            payload.get("tools"),
+        ) {
+            apply_qoder_context_tier(&mut payload, &tier);
+        }
+        Ok(payload)
     }
 
     // -----------------------------------------------------------------------
@@ -1136,23 +2242,40 @@ impl QoderExecutor {
             .unwrap_or(&request.model)
             .to_string();
 
-        // Live model config → is_reasoning + source (9router getQoderModelConfig).
-        let (is_reasoning, _, model_source) =
-            match self.fetch_model_config(&qoder_key, &creds).await {
-                Ok(cfg) => cfg,
-                Err(e) => {
-                    // Unknown model after refresh is a hard error (JS throws).
-                    return Err(e);
-                }
-            };
+        // Live model config → FULL catalog entry (9router getQoderModelConfig).
+        let model_entry = match self.fetch_model_config(&qoder_key, &creds).await {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // Unknown model after refresh is a hard error (JS throws).
+                return Err(e);
+            }
+        };
+        let model_source = model_entry
+            .get("source")
+            .and_then(Value::as_str)
+            .unwrap_or("system")
+            .to_string();
+
+        let client = self.pool.get("qoder", request.proxy.as_ref())?;
+        let inference_base = Self::inference_base(&request.credentials);
+
+        // Attachment rewrite BEFORE payload build (9router
+        // rewriteQoderMessageAttachments in buildQoderRequestBody): upload
+        // images, stub huge files. Best-effort — failures keep going.
+        let mut openai_body = request.body.clone();
+        if let Some(msgs) = openai_body
+            .get_mut("messages")
+            .and_then(|v| v.as_array_mut())
+        {
+            let _ = rewrite_qoder_message_attachments(msgs, &client, &inference_base, &creds).await;
+        }
 
         // Transform the OpenAI-compatible body into Qoder's format
         let transformed_body = self.transform_request(
-            &request.body,
+            &openai_body,
             &request.model,
             &request.credentials,
-            is_reasoning,
-            &model_source,
+            &model_entry,
         )?;
 
         // Encode body with Qoder's WAF-bypass scheme
@@ -1163,13 +2286,39 @@ impl QoderExecutor {
         // Build COSY-signed headers from the *encoded* body
         let headers = self.build_headers(encoded_body, &url, &creds, &qoder_key, &model_source)?;
 
-        let client = self.pool.get("qoder", request.proxy.as_ref())?;
         let response = client
             .post(&url)
             .headers(headers.clone())
             .body(encoded_body.to_vec())
             .send()
             .await?;
+
+        // Peek the first SSE frame for billing blocks (9router
+        // peekFirstQoderFrame): return a real 403 before streaming so the
+        // combo dispatcher marks the connection unavailable and falls over.
+        // Normal frames are re-attached so nothing is dropped.
+        if response.status().is_success() {
+            match Self::peek_first_frame(response, &url).await {
+                QoderPeek::Billing { response } => {
+                    return Ok(QoderExecutorResponse {
+                        response: UpstreamResponse::Reqwest(response),
+                        url,
+                        headers,
+                        transformed_body,
+                        transport: TransportKind::Reqwest,
+                    });
+                }
+                QoderPeek::Passthrough { response } => {
+                    return Ok(QoderExecutorResponse {
+                        response: UpstreamResponse::Reqwest(response),
+                        url,
+                        headers,
+                        transformed_body,
+                        transport: TransportKind::Reqwest,
+                    });
+                }
+            }
+        }
 
         Ok(QoderExecutorResponse {
             response: UpstreamResponse::Reqwest(response),
@@ -1178,6 +2327,220 @@ impl QoderExecutor {
             transformed_body,
             transport: TransportKind::Reqwest,
         })
+    }
+
+    /// Inference host for this credential (api2 for jt-, api3 otherwise).
+    fn inference_base(credentials: &ProviderConnection) -> String {
+        let raw = credentials
+            .api_key
+            .as_deref()
+            .or(credentials.access_token.as_deref())
+            .unwrap_or("");
+        if !raw.starts_with("pt-")
+            && (raw.starts_with("jt-")
+                || credentials
+                    .access_token
+                    .as_deref()
+                    .unwrap_or("")
+                    .starts_with("jt-"))
+        {
+            "https://api2.qoder.sh".to_string()
+        } else {
+            "https://api3.qoder.sh".to_string()
+        }
+    }
+
+    /// Peek the first SSE `data:` line of a successful chat response.
+    /// Billing block → synthetic 403 JSON response (combo fallback).
+    /// Anything else → the original response rebuilt with the consumed bytes
+    /// prepended so the stream loses nothing (9router `consumed` re-process).
+    async fn peek_first_frame(response: reqwest::Response, url: &str) -> QoderPeek {
+        use futures_util::StreamExt;
+        let status = response.status();
+        let resp_headers = response.headers().clone();
+        let _ = url;
+        let mut stream = response.bytes_stream();
+        let mut buffered: Vec<u8> = Vec::new();
+        // Read until the first full line (or EOF / timeout).
+        let first_line: Option<String> = loop {
+            if let Some(nl) = buffered.iter().position(|&b| b == b'\n') {
+                let line = String::from_utf8_lossy(&buffered[..nl]).to_string();
+                break Some(line);
+            }
+            let next =
+                tokio::time::timeout(std::time::Duration::from_secs(30), stream.next()).await;
+            match next {
+                Ok(Some(Ok(chunk))) => buffered.extend_from_slice(&chunk),
+                _ => break None,
+            }
+        };
+        // Rebuild the stream: buffered bytes first, then the remainder.
+        let rebuild = |prefix: Vec<u8>,
+                       rest: futures_util::stream::BoxStream<
+            'static,
+            Result<bytes::Bytes, reqwest::Error>,
+        >| {
+            let prefix_stream = futures_util::stream::once(async move {
+                Ok::<bytes::Bytes, reqwest::Error>(bytes::Bytes::from(prefix))
+            });
+            let combined = prefix_stream.chain(rest);
+            let body = reqwest::Body::wrap_stream(combined);
+            let mut builder = http::Response::builder().status(status);
+            for (k, v) in resp_headers.iter() {
+                builder = builder.header(k, v);
+            }
+            let http_resp = builder.body(body).unwrap();
+            reqwest::Response::from(http_resp)
+        };
+        if let Some(line) = first_line {
+            let trimmed = line.trim_end_matches('\r').trim().to_string();
+            if trimmed.starts_with("data:") {
+                if let Some(err_msg) = check_billing_in_sse_line(&trimmed)
+                    .and_then(|f| serde_json::from_str::<Value>(&f["data: ".len()..]).ok())
+                    .and_then(|v| v.get("message").and_then(Value::as_str).map(String::from))
+                {
+                    let body = serde_json::json!({ "error": { "message": err_msg, "code": 403 } })
+                        .to_string();
+                    let http_resp = http::Response::builder()
+                        .status(403)
+                        .header("Content-Type", "application/json")
+                        .body(reqwest::Body::from(body))
+                        .unwrap();
+                    return QoderPeek::Billing {
+                        response: reqwest::Response::from(http_resp),
+                    };
+                }
+                // Also detect via the raw envelope when the helper shape differs.
+                let payload = trimmed["data:".len()..].trim();
+                if payload != "[DONE]" {
+                    if let Ok(envelope) = serde_json::from_str::<Value>(payload) {
+                        let status_val = envelope
+                            .get("statusCodeValue")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(200);
+                        let inner = envelope.get("body").and_then(Value::as_str).unwrap_or("");
+                        if status_val != 200 && detect_qoder_billing_block(payload).is_some() {
+                            let body = serde_json::json!({ "error": { "message": inner, "code": status_val } }).to_string();
+                            let http_resp = http::Response::builder()
+                                .status(403)
+                                .header("Content-Type", "application/json")
+                                .body(reqwest::Body::from(body))
+                                .unwrap();
+                            return QoderPeek::Billing {
+                                response: reqwest::Response::from(http_resp),
+                            };
+                        }
+                    }
+                }
+            }
+            let rest = stream.boxed();
+            return QoderPeek::Passthrough {
+                response: rebuild(buffered, rest),
+            };
+        }
+        let rest = stream.boxed();
+        QoderPeek::Passthrough {
+            response: rebuild(buffered, rest),
+        }
+    }
+
+    /// Normalize Qoder/OpenAI usage into the shape stream consumers
+    /// understand (9router `canonicalizeQoderUsage` in sse.js).
+    pub fn canonicalize_qoder_usage(usage: &Value) -> Option<Value> {
+        let obj = usage.as_object()?;
+        let num = |v: Option<&Value>| v.and_then(Value::as_f64).filter(|n| n.is_finite());
+        let prompt = num(obj.get("prompt_tokens")).or_else(|| num(obj.get("input_tokens")));
+        let completion =
+            num(obj.get("completion_tokens")).or_else(|| num(obj.get("output_tokens")));
+        if prompt.is_none() && completion.is_none() {
+            return None;
+        }
+        let mut details = obj
+            .get("prompt_tokens_details")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let cached = num(details.get("cached_tokens"))
+            .or_else(|| num(obj.get("cached_tokens")))
+            .or_else(|| num(obj.get("prompt_cache_hit_tokens")))
+            .or_else(|| num(obj.get("cache_read_input_tokens")));
+        let cache_creation = num(details.get("cache_creation_tokens"))
+            .or_else(|| num(obj.get("cache_creation_input_tokens")));
+        let prompt_tokens = prompt.unwrap_or(0.0) as u64;
+        let completion_tokens = completion.unwrap_or(0.0) as u64;
+        let total = num(obj.get("total_tokens"))
+            .map(|n| n as u64)
+            .unwrap_or(prompt_tokens + completion_tokens);
+        let mut out = serde_json::json!({
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total,
+        });
+        if let Some(c) = cached {
+            out["cached_tokens"] = Value::from(c as u64);
+            details.insert("cached_tokens".to_string(), Value::from(c as u64));
+        }
+        if let Some(cc) = cache_creation {
+            details.insert("cache_creation_tokens".to_string(), Value::from(cc as u64));
+        }
+        if !details.is_empty() {
+            out["prompt_tokens_details"] = Value::Object(details);
+        }
+        if let Some(ctd) = obj.get("completion_tokens_details") {
+            if ctd.is_object() {
+                out["completion_tokens_details"] = ctd.clone();
+            }
+        }
+        let reasoning = num(obj.get("reasoning_tokens")).or_else(|| {
+            obj.get("completion_tokens_details")
+                .and_then(|d| num(d.get("reasoning_tokens")))
+        });
+        if let Some(r) = reasoning {
+            out["reasoning_tokens"] = Value::from(r as u64);
+        }
+        Some(out)
+    }
+
+    /// Unwrap one SSE line's `{statusCodeValue, body}` envelope into the inner
+    /// body string (9router wrapQoderSSE line handling, without the coalescer).
+    /// Returns `None` for non-`data:` lines; `Some("[DONE]")` for terminal
+    /// frames; `Some(inner)` otherwise (embedded newlines stripped). Non-200
+    /// statuses become the `\n[qoder error {status}: ...]` marker text.
+    pub fn unwrap_qoder_envelope(line: &str) -> Option<String> {
+        let line = line.trim_end();
+        if !line.starts_with("data:") {
+            return None;
+        }
+        let payload = line.trim_start_matches("data:").trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            return Some(payload.to_string());
+        }
+        let envelope: Value = serde_json::from_str(payload).ok()?;
+        let status = envelope.get("statusCodeValue").and_then(Value::as_u64);
+        let inner = envelope
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        match status {
+            Some(s) if s != 200 => {
+                let msg: String = inner
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                Some(format!("\n[qoder error {s}: {msg}]"))
+            }
+            _ => {
+                if inner == "[DONE]" {
+                    return Some("[DONE]".to_string());
+                }
+                Some(inner.replace(['\n', '\r'], ""))
+            }
+        }
     }
 
     /// Unwrap Qoder's `{statusCodeValue, body}` SSE envelope into OpenAI-style
@@ -1230,6 +2593,230 @@ impl QoderExecutor {
             }
         }
     }
+}
+
+/// SSE usage coalescer state machine (9router `createQoderSseCoalescer` in
+/// sse.js). Qoder sends usage on a later `choices: []` frame — after
+/// finish_reason, which often lives on `delta.finish_reason`. Hold empty
+/// finish + usage-only frames, then emit one OpenAI include_usage-style
+/// chunk `{choices:[{delta:{}, finish_reason}], usage}`.
+pub struct QoderSseCoalescer {
+    model: String,
+    pending_finish: Option<String>,
+    pending_usage: Option<Value>,
+    last_id: Option<String>,
+    last_created: Option<u64>,
+    last_model: Option<String>,
+    done_emitted: bool,
+    finish_forwarded: bool,
+}
+
+impl QoderSseCoalescer {
+    pub fn new(model: &str) -> Self {
+        Self {
+            model: model.to_string(),
+            pending_finish: None,
+            pending_usage: None,
+            last_id: None,
+            last_created: None,
+            last_model: None,
+            done_emitted: false,
+            finish_forwarded: false,
+        }
+    }
+
+    pub fn done_emitted(&self) -> bool {
+        self.done_emitted
+    }
+
+    fn finish_reason_of(parsed: &Value) -> Option<String> {
+        if let Some(choice) = parsed
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+        {
+            if let Some(f) = choice.get("finish_reason").and_then(Value::as_str) {
+                return Some(f.to_string());
+            }
+            if let Some(f) = choice
+                .get("delta")
+                .and_then(|d| d.get("finish_reason"))
+                .and_then(Value::as_str)
+            {
+                return Some(f.to_string());
+            }
+        }
+        parsed
+            .get("finish_reason")
+            .and_then(Value::as_str)
+            .map(String::from)
+    }
+
+    fn has_valuable_delta(parsed: &Value) -> bool {
+        let Some(delta) = parsed
+            .get("choices")
+            .and_then(|c| c.as_array())
+            .and_then(|a| a.first())
+            .and_then(|c| c.get("delta"))
+        else {
+            return false;
+        };
+        if delta
+            .get("content")
+            .and_then(Value::as_str)
+            .map(|s| !s.is_empty())
+            == Some(true)
+        {
+            return true;
+        }
+        if delta
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .map(|s| !s.is_empty())
+            == Some(true)
+        {
+            return true;
+        }
+        if delta
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|a| !a.is_empty())
+            == Some(true)
+        {
+            return true;
+        }
+        if delta.get("role").is_some() {
+            return true;
+        }
+        false
+    }
+
+    fn terminal_frame(&mut self) -> Option<String> {
+        if self.pending_finish.is_none() && self.pending_usage.is_none() {
+            return None;
+        }
+        let finish = self
+            .pending_finish
+            .clone()
+            .unwrap_or_else(|| "stop".to_string());
+        let mut obj = serde_json::json!({
+            "id": self.last_id.clone().unwrap_or_else(|| format!("qoder-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis())),
+            "object": "chat.completion.chunk",
+            "created": self.last_created.unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()),
+            "model": self.last_model.clone().unwrap_or_else(|| self.model.clone()),
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": finish }],
+        });
+        if let Some(usage) = self.pending_usage.clone() {
+            obj["usage"] = usage;
+        }
+        self.pending_finish = None;
+        self.pending_usage = None;
+        Some(format!(
+            "data: {}\n\n",
+            obj.to_string().replace(['\n', '\r'], "")
+        ))
+    }
+
+    /// Feed one unwrapped inner body (already extracted from the envelope).
+    /// Returns frames to emit; `terminal` signals the caller to close with
+    /// `data: [DONE]` and stop reading upstream (keepalive drop).
+    pub fn handle_inner(&mut self, inner: &str) -> (Vec<String>, bool) {
+        if self.done_emitted {
+            return (vec![], true);
+        }
+        if inner == "[DONE]" {
+            let mut out = Vec::new();
+            if self.pending_usage.is_some()
+                || (self.pending_finish.is_some() && !self.finish_forwarded)
+            {
+                if let Some(t) = self.terminal_frame() {
+                    out.push(t);
+                }
+            }
+            self.done_emitted = true;
+            return (out, true);
+        }
+        let parsed: Value = match serde_json::from_str(inner) {
+            Ok(v) => v,
+            Err(_) => return (vec![inner.replace(['\n', '\r'], "")], false),
+        };
+        if !parsed.is_object() {
+            return (vec![], false);
+        }
+        if let Some(id) = parsed.get("id").and_then(Value::as_str) {
+            if !id.is_empty() {
+                self.last_id = Some(id.to_string());
+            }
+        }
+        if let Some(c) = parsed.get("created").and_then(Value::as_u64) {
+            self.last_created = Some(c);
+        }
+        if let Some(m) = parsed.get("model").and_then(Value::as_str) {
+            if !m.is_empty() {
+                self.last_model = Some(m.to_string());
+            }
+        }
+        if let Some(usage) = parsed.get("usage") {
+            if let Some(canonical) = QoderExecutor::canonicalize_qoder_usage(usage) {
+                self.pending_usage = Some(canonical);
+            }
+        }
+        let finish = Self::finish_reason_of(&parsed);
+        if Self::has_valuable_delta(&parsed) {
+            let mut out = vec![format!("data: {}\n\n", inner.replace(['\n', '\r'], ""))];
+            if let Some(f) = finish {
+                self.finish_forwarded = true;
+                self.pending_finish = if self.pending_usage.is_some() {
+                    Some(f)
+                } else {
+                    None
+                };
+            }
+            if self.pending_finish.is_some() && self.pending_usage.is_some() {
+                if let Some(t) = self.terminal_frame() {
+                    out.push(t);
+                }
+                self.done_emitted = true;
+                return (out, true);
+            }
+            return (out, false);
+        }
+        if let Some(f) = finish.clone() {
+            self.pending_finish = Some(f);
+        }
+        if (self.pending_finish.is_some() || self.finish_forwarded) && self.pending_usage.is_some()
+        {
+            if self.pending_finish.is_none() {
+                self.pending_finish = Some("stop".to_string());
+            }
+            if let Some(t) = self.terminal_frame() {
+                self.done_emitted = true;
+                return (vec![t], true);
+            }
+        }
+        (vec![], false)
+    }
+
+    /// Flush at end-of-stream: terminal frame if usage/finish is still held.
+    pub fn flush(&mut self) -> Option<String> {
+        if self.done_emitted {
+            return None;
+        }
+        if self.pending_usage.is_some() || (self.pending_finish.is_some() && !self.finish_forwarded)
+        {
+            self.terminal_frame()
+        } else {
+            None
+        }
+    }
+}
+
+/// Outcome of peeking the first SSE frame of a Qoder response.
+enum QoderPeek {
+    /// Billing block → synthetic 403 JSON response (combo fallback).
+    Billing { response: reqwest::Response },
+    /// Normal → original response rebuilt with consumed bytes prepended.
+    Passthrough { response: reqwest::Response },
 }
 
 // ---------------------------------------------------------------------------
@@ -1582,5 +3169,284 @@ mod tests {
         let line = ": keepalive";
         let result = check_billing_in_sse_line(line);
         assert!(result.is_none(), "non-data line should be ignored");
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 1: COSY RSA is SPKI + PKCS#1 v1.5 (JS cosy.js RSA_PKCS1_PADDING).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_cosy_key_is_spki_pkcs1v15() {
+        // The hardcoded key must parse as SPKI ("BEGIN PUBLIC KEY").
+        let key = RsaPublicKey::from_public_key_pem(QODER_RSA_PUBLIC_KEY_PEM);
+        assert!(key.is_ok(), "SPKI key must parse");
+        // PKCS#1 v1.5 encrypts to exactly the 128-byte modulus size.
+        let ct = QoderExecutor::rsa_encrypt_base64("0123456789abcdef").unwrap();
+        let raw = B64.decode(&ct).unwrap();
+        assert_eq!(
+            raw.len(),
+            128,
+            "1024-bit PKCS#1 v1.5 ciphertext is 128 bytes"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 2: catalog parses body.chat first (JS fetchQoderCatalogRaw).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_catalog_prefers_chat_array() {
+        let catalog = serde_json::json!({
+            "chat": [
+                {"key": "qmodel", "display_name": "Q", "max_input_tokens": 200000, "enable": true}
+            ],
+            "data": [
+                {"key": "stale", "display_name": "S"}
+            ]
+        });
+        let (models, raw) = QoderExecutor::parse_qoder_catalog(&catalog);
+        assert!(raw.contains_key("qmodel"));
+        assert!(
+            !raw.contains_key("stale"),
+            "data fallback must not win over chat"
+        );
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0]["id"], "qmodel");
+    }
+
+    #[test]
+    fn test_parse_catalog_keeps_hidden_models() {
+        // enable:false entries are cached but hidden from the UI list.
+        let catalog = serde_json::json!({
+            "chat": [
+                {"key": "hidden", "display_name": "H", "enable": false}
+            ]
+        });
+        let (models, raw) = QoderExecutor::parse_qoder_catalog(&catalog);
+        assert!(raw.contains_key("hidden"));
+        assert!(models.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 3: billing codes match as string OR number (JS regex on "112").
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_detect_billing_block_string_code() {
+        let body = r#"{"statusCodeValue":403,"body":"{\"code\":\"112\",\"message\":\"Quota exhausted\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(result.is_some(), "string code \"112\" must be detected");
+    }
+
+    #[test]
+    fn test_detect_billing_block_number_code_10605() {
+        let body = r#"{"statusCodeValue":429,"body":"{\"code\":10605,\"message\":\"throttle\"}"}"#;
+        let result = detect_qoder_billing_block(body);
+        assert!(result.is_some(), "numeric code 10605 must be detected");
+    }
+
+    #[test]
+    fn test_billing_code_helper_accepts_both_shapes() {
+        assert_eq!(
+            qoder_billing_code(&serde_json::json!({"code": "112"})),
+            Some("112".to_string())
+        );
+        assert_eq!(
+            qoder_billing_code(&serde_json::json!({"code": 10605})),
+            Some("10605".to_string())
+        );
+        assert_eq!(qoder_billing_code(&serde_json::json!({})), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 5: attachments — data-URI parse, stubs, multipart shape.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_data_uri_roundtrip() {
+        let (mime, b64) = parse_qoder_data_uri("data:image/png;base64,iVBORw0KGgo=").unwrap();
+        assert_eq!(mime, "image/png");
+        assert_eq!(b64, "iVBORw0KGgo=");
+        assert!(parse_qoder_data_uri("https://example.com/a.png").is_none());
+        assert!(parse_qoder_data_uri("not-a-uri").is_none());
+    }
+
+    #[test]
+    fn test_normalize_content_preserves_image_url() {
+        let content = serde_json::json!([
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}}
+        ]);
+        let out = QoderExecutor::normalize_content(&content);
+        assert!(out.is_array(), "image content stays an array, got: {out}");
+        let arr = out.as_array().unwrap();
+        assert!(arr.iter().any(|b| b["type"] == "image_url"));
+    }
+
+    #[test]
+    fn test_normalize_content_stubs_file_blocks() {
+        let content = serde_json::json!([
+            {"type": "text", "text": "see"},
+            {"type": "file", "file": {"filename": "big.pdf", "file_data": "data:application/pdf;base64,AAA"}}
+        ]);
+        let out = QoderExecutor::normalize_content(&content);
+        let s = out.as_str().unwrap_or("");
+        assert!(s.contains("big.pdf"), "stub keeps the filename, got: {s}");
+        assert!(!s.contains("AAA"), "stub drops the bytes");
+    }
+
+    #[test]
+    fn test_extract_upload_url_variants() {
+        let v = serde_json::json!({"result": {"imageUrls": ["https://oss/x.png"]}});
+        assert_eq!(
+            extract_qoder_upload_url(&v).as_deref(),
+            Some("https://oss/x.png")
+        );
+        let v = serde_json::json!({"url": "https://oss/y.png"});
+        assert_eq!(
+            extract_qoder_upload_url(&v).as_deref(),
+            Some("https://oss/y.png")
+        );
+        assert!(extract_qoder_upload_url(&serde_json::json!({"ok": true})).is_none());
+    }
+
+    #[test]
+    fn test_multipart_body_shape() {
+        let (boundary, body) = build_qoder_multipart_file(b"bytes", "image.png", "image/png");
+        let text = String::from_utf8_lossy(&body);
+        assert!(text.contains("name=\"file\""));
+        assert!(text.contains("filename=\"image.png\""));
+        assert!(text.contains("image/png"));
+        assert!(text.starts_with(&format!("--{boundary}")));
+        assert!(text.ends_with(&format!("--{boundary}--\r\n")));
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 6: context tiers (JS contextTier.js vectors).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tier_tokens_parse() {
+        assert_eq!(parse_qoder_tier_tokens(&serde_json::json!(204800)), 204800);
+        assert_eq!(parse_qoder_tier_tokens(&serde_json::json!("200K")), 200_000);
+        assert_eq!(parse_qoder_tier_tokens(&serde_json::json!("1M")), 1_000_000);
+        assert_eq!(parse_qoder_tier_tokens(&serde_json::json!("big")), 0);
+    }
+
+    #[test]
+    fn test_tier_escalation_auto() {
+        let cfg = serde_json::json!({
+            "max_input_tokens": 180_000,
+            "context_config": [
+                {"name": "200K", "tokenCount": 200_000, "isDefault": true},
+                {"name": "400K", "tokenCount": 400_000},
+                {"name": "1M", "tokenCount": 1_000_000}
+            ]
+        });
+        // Small prompt → no escalation.
+        assert!(resolve_qoder_context_tier(&cfg, "", &serde_json::json!([]), None).is_none());
+        // ~300k-token prompt → 400K tier.
+        let big = serde_json::json!([{"role": "user", "content": "abcd".repeat(300_000)}]);
+        let choice = resolve_qoder_context_tier(&cfg, "", &big, None).unwrap();
+        assert_eq!(choice.1, 400_000, "got: {choice:?}");
+    }
+
+    #[test]
+    fn test_apply_tier_writes_three_places() {
+        let mut payload = serde_json::json!({
+            "parameters": {},
+            "chat_context": {"extra": {}},
+            "model_config": {"key": "qmodel_38max", "max_input_tokens": 180_000}
+        });
+        apply_qoder_context_tier(
+            &mut payload,
+            &("400K".to_string(), 400_000, "auto:fits".to_string()),
+        );
+        assert_eq!(payload["parameters"]["context_length"], 400_000);
+        assert_eq!(
+            payload["chat_context"]["extra"]["ideModelConfigOverride"]["max_input_tokens"],
+            400_000
+        );
+        assert_eq!(payload["model_config"]["max_input_tokens"], 400_000);
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 7: SSE coalescer (JS sse.js vectors).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_canonicalize_usage() {
+        let u =
+            serde_json::json!({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15});
+        let out = QoderExecutor::canonicalize_qoder_usage(&u).unwrap();
+        assert_eq!(out["prompt_tokens"], 10);
+        assert_eq!(out["total_tokens"], 15);
+        assert!(QoderExecutor::canonicalize_qoder_usage(&serde_json::json!({"foo": 1})).is_none());
+    }
+
+    #[test]
+    fn test_coalescer_holds_finish_until_usage() {
+        let mut coal = QoderSseCoalescer::new("qoder/qmodel");
+        // Empty finish frame → held, nothing emitted.
+        let (frames, terminal) =
+            coal.handle_inner(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#);
+        assert!(frames.is_empty());
+        assert!(!terminal);
+        // Usage-only frame → terminal chunk with usage.
+        let (frames, terminal) = coal.handle_inner(
+            r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}"#,
+        );
+        assert!(terminal);
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("\"usage\""), "got: {}", frames[0]);
+        assert!(frames[0].contains("stop"), "got: {}", frames[0]);
+    }
+
+    #[test]
+    fn test_coalescer_streams_content() {
+        let mut coal = QoderSseCoalescer::new("qoder/qmodel");
+        let (frames, terminal) = coal.handle_inner(r#"{"choices":[{"delta":{"content":"hi"}}]}"#);
+        assert!(!terminal);
+        assert_eq!(frames.len(), 1);
+        assert!(frames[0].contains("hi"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Gap 8: full catalog entry sent as model_config.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_transform_sends_full_catalog_entry() {
+        let exec = QoderExecutor::new(Arc::new(ClientPool::new()), None).unwrap();
+        let entry = serde_json::json!({
+            "key": "qmodel_38max",
+            "display_name": "Qwen3.8-Max",
+            "is_reasoning": true,
+            "max_input_tokens": 180_000,
+            "max_output_tokens": 32_768,
+            "context_config": [{"name": "200K", "tokenCount": 200_000}],
+            "source": "system",
+            "custom_field": "kept",
+        });
+        let mut creds = ProviderConnection::default();
+        creds
+            .provider_specific_data
+            .insert("userId".to_string(), serde_json::json!("u1"));
+        let body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        let payload = exec
+            .transform_request(&body, "qoder/qmodel_38max", &creds, &entry)
+            .unwrap();
+        assert_eq!(payload["model_config"]["custom_field"], "kept");
+        assert_eq!(payload["model_config"]["display_name"], "Qwen3.8-Max");
+        assert_eq!(payload["model_config"]["max_input_tokens"], 180_000);
+        // Caller cap respected: model default 32768, body asks 100.
+        let body2 = serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 100
+        });
+        let payload2 = exec
+            .transform_request(&body2, "qoder/qmodel_38max", &creds, &entry)
+            .unwrap();
+        assert_eq!(payload2["parameters"]["max_tokens"], 100);
     }
 }
