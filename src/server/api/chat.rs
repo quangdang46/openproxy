@@ -3308,10 +3308,21 @@ async fn proxy_response_with_pending_tracking(
         .flatten();
     // Qoder wraps every SSE chunk in a {statusCodeValue, body} envelope that
     // must be unwrapped before downstream consumers see it (9router wrapQoderSSE).
+    // Usage arrives on a later `choices: []` frame, so a coalescer merges the
+    // held finish + usage frames into one terminal chunk (9router sse.js).
+    // Billing blocks arrive pre-detected as a real 403 by the executor's
+    // first-frame peek — but the flag is still re-checked here so the
+    // non-peeked dashboard path also short-circuits.
     let qoder_sse_unwrap = provider == "qoder";
     // Billing block detection state (9router v0.5.55 peekFirstQoderFrame).
     let mut qoder_seen_first_frame = false;
     let mut qoder_billing_block = false;
+    let mut qoder_coalescer: Option<crate::core::executor::qoder::QoderSseCoalescer> =
+        if qoder_sse_unwrap {
+            Some(crate::core::executor::qoder::QoderSseCoalescer::new(&model))
+        } else {
+            None
+        };
     let body = match response {
         UpstreamResponse::Reqwest(response) => {
             let state = state.clone();
@@ -3379,8 +3390,23 @@ async fn proxy_response_with_pending_tracking(
                                     &mut pending_text,
                                     &mut qoder_seen_first_frame,
                                     &mut qoder_billing_block,
+                                    qoder_coalescer.as_mut(),
                                 ) {
                                     yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
+                                }
+                                if qoder_billing_block {
+                                    // Billing block: close the stream now so the
+                                    // client sees the 403-shaped error frame.
+                                    // (Combo fallback itself happens in the
+                                    // executor's pre-stream peek; this flag is
+                                    // the backstop for already-open streams.)
+                                    record_streaming_usage(&state, &provider, &model,
+                                        connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
+                                    state
+                                        .usage_live
+                                        .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                        .await;
+                                    return;
                                 }
                             } else if let Some(transformer) = transformer.as_mut() {
                                 for line in transform_dashboard_sse_chunk(&chunk, transformer.as_mut(), &mut pending_text) {
@@ -3430,6 +3456,14 @@ async fn proxy_response_with_pending_tracking(
                         if let Some(frame) = sse_frame_for_dashboard(&line) {
                             yield Ok::<Bytes, std::io::Error>(frame);
                         }
+                    }
+                }
+                // Qoder end-of-stream: flush the usage coalescer (held
+                // finish+usage → terminal chunk). Qoder only uses Reqwest
+                // transport so the Hyper branch needs no equivalent.
+                if qoder_sse_unwrap {
+                    for line in qoder_coalescer_flush(qoder_coalescer.as_mut()) {
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
                     }
                 }
                 // End-of-stream flush: emit the terminal chunk + [DONE] for
@@ -3782,6 +3816,7 @@ fn qoder_unwrap_sse_chunk(
     pending_text: &mut String,
     seen_first_frame: &mut bool,
     billing_block: &mut bool,
+    mut coalescer: Option<&mut crate::core::executor::qoder::QoderSseCoalescer>,
 ) -> Vec<String> {
     pending_text.push_str(&String::from_utf8_lossy(chunk));
     let mut out = Vec::new();
@@ -3808,9 +3843,38 @@ fn qoder_unwrap_sse_chunk(
                 return out;
             }
         }
-        if let Some(frame) = crate::core::executor::qoder::QoderExecutor::wrap_qoder_sse_line(&line)
+        // Unwrap the {statusCodeValue, body} envelope, then run the inner
+        // body through the usage coalescer (9router sse.js).
+        let Some(unwrapped) =
+            crate::core::executor::qoder::QoderExecutor::unwrap_qoder_envelope(&line)
+        else {
+            continue;
+        };
+        if let Some(coal) = coalescer.as_deref_mut() {
+            let (frames, _terminal) = coal.handle_inner(&unwrapped);
+            out.extend(frames);
+            if coal.done_emitted() {
+                out.push("data: [DONE]\n\n".to_string());
+                return out;
+            }
+        } else if let Some(frame) =
+            crate::core::executor::qoder::QoderExecutor::wrap_qoder_sse_line(&line)
         {
             out.push(frame);
+        }
+    }
+    out
+}
+
+/// Flush a Qoder coalescer at end-of-stream: emit any held terminal
+/// finish+usage chunk, then `[DONE]` (9router `coalescer.flush`).
+fn qoder_coalescer_flush(
+    coalescer: Option<&mut crate::core::executor::qoder::QoderSseCoalescer>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(coal) = coalescer {
+        if let Some(t) = coal.flush() {
+            out.push(t);
         }
     }
     out
