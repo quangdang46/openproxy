@@ -400,7 +400,7 @@ pub fn chat_to_responses_response(
     if choice
         .get("finish_reason")
         .and_then(Value::as_str)
-        .is_some()
+        .is_some_and(|s| !s.is_empty())
     {
         let mut msg_item_added = state
             .get("msgItemAdded")
@@ -749,10 +749,23 @@ pub fn responses_to_chat_response(
                 // JS parity (openai-responses.js:479-490): index is assigned
                 // here (not on done) keyed by the server item id so parallel
                 // calls stay separate; duplicate added reuses the mapping.
+                // JS parity (openai-responses.js:~483): key is
+                // item.id || data.item_id || state.currentToolCallId.
+                let fallback_call_id = state
+                    .get("currentToolCallId")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let item_id = item
                     .get("id")
                     .and_then(|v| v.as_str())
-                    .or_else(|| data.get("item_id").and_then(|v| v.as_str()));
+                    .map(str::to_string)
+                    .or_else(|| {
+                        data.get("item_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .or(fallback_call_id);
+                let item_id = item_id.as_deref();
                 let tool_idx = match resp_tool_index(state, item_id) {
                     Some(idx) => idx,
                     None => {
@@ -1247,6 +1260,52 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("\"y\"")
+        );
+    }
+
+    #[test]
+    fn empty_finish_reason_does_not_close_message() {
+        // JS parity (openai-responses.js:111 `if (choice.finish_reason)`):
+        // "" is falsy and must not close the message / emit completed.
+        let mut state = serde_json::Map::new();
+        let chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": { "content": "Hi" },
+                "finish_reason": ""
+            }]
+        });
+        let events = chat_to_responses_response(&chunk, &mut state);
+        let sse = serde_json::to_string(&events).unwrap_or_default();
+        assert!(
+            !sse.contains("response.completed"),
+            "empty finish_reason must not emit completed, got: {sse}"
+        );
+    }
+
+    #[test]
+    fn added_time_key_falls_back_to_current_tool_call_id() {
+        // JS parity (openai-responses.js:~483): the added-time map key is
+        // item.id || data.item_id || state.currentToolCallId. An added event
+        // with no id/item_id still keys on the call_id, so a later duplicate
+        // added reuses the same index instead of advancing.
+        let mut state = serde_json::Map::new();
+        let added_no_id = json!({
+            "type": "response.output_item.added",
+            "item": {"type": "function_call", "call_id": "call_x", "name": "fx"}
+        });
+        let c1 = responses_to_chat_response(&added_no_id, &mut state);
+        let c2 = responses_to_chat_response(&added_no_id, &mut state);
+        let idx = |chunks: &[Value]| {
+            chunks[0]["choices"][0]["delta"]["tool_calls"][0]["index"]
+                .as_u64()
+                .unwrap()
+        };
+        assert_eq!(idx(&c1), 0);
+        assert_eq!(
+            idx(&c2),
+            0,
+            "duplicate added must reuse the call_id-keyed index"
         );
     }
 }
