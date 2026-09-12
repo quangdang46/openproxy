@@ -512,9 +512,9 @@ pub fn claude_to_kiro_request(
         "agentMode": "vibe"
     });
 
-    if !system_prompt.is_empty() {
-        payload["systemPrompt"] = Value::String(system_prompt);
-    }
+    // JS parity (claude-to-kiro.js:245-247): NEVER send top-level
+    // `systemPrompt` — the CodeWhisperer surface rejects it with 400
+    // REQUEST_BODY_INVALID. `system_prompt` above is only a replay cache key.
 
     // Native effort fields for supported models (9router
     // buildKiroAdditionalModelRequestFieldsForModel).
@@ -615,6 +615,23 @@ mod tests {
         claude_to_kiro_request("kiro-model", &mut body, false, None);
         let content = current_message_content(&body);
         assert!(content.contains("[Tool result: ok]"));
+    }
+
+    /// JS parity (claude-to-kiro.js:245-247): NEVER send top-level
+    /// `systemPrompt` — the CodeWhisperer surface rejects it with 400
+    /// REQUEST_BODY_INVALID; the value is only a replay cache key.
+    #[test]
+    fn never_emits_top_level_system_prompt() {
+        crate::core::utils::kiro_session_replay::clear_kiro_session_replay_store();
+        let mut body = json!({
+            "model": "claude-sonnet-4",
+            "system": "you are helpful",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        claude_to_kiro_request("claude-sonnet-4", &mut body, false, None);
+        assert!(body.get("systemPrompt").is_none());
+        let content = current_message_content(&body);
+        assert!(content.contains("you are helpful"), "got: {content}");
     }
 
     /// JS parity (claude-to-kiro.js:222, 323-328): inferenceConfig is always

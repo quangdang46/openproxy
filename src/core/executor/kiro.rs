@@ -35,6 +35,10 @@ const KIRO_BASE_URLS: &[&str] = &[
     "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
     "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
 ];
+
+/// 9router `KIRO_CODEWHISPERER_TARGET` (config/kiroConstants.js).
+const KIRO_CODEWHISPERER_TARGET: &str =
+    "AmazonCodeWhispererStreamingService.GenerateAssistantResponse";
 const KIRO_REGION: &str = "us-east-1";
 const KIRO_SERVICE: &str = "codewhisperer";
 
@@ -68,8 +72,8 @@ fn normalize_kiro_model(model: &str) -> String {
 //
 // When the first attempt ends with a retryable disposition — an ellipsis-only
 // answer, a "short future action" final, or an invalid tool_call wrapper — the
-// JS executor retries ONCE with a repair instruction appended to the system
-// prompt (kiro.js runIntegrityRecovery, 411-479). The repair is gated by the
+// JS executor retries ONCE with a repair instruction appended to the current
+// user turn (kiro.js runIntegrityRecovery, 411-479). The repair is gated by the
 // per-account `kiroToolCallRepair` flag (default on). A second non-complete
 // attempt surfaces as an SSE error with the `kiro_*` code.
 
@@ -169,7 +173,7 @@ kiro_re!(
     r"(?i)(?:顯示|發現|因此|成功|失敗|正常|無錯誤|沒有錯誤|\b(?:found|shows?|showed|because|therefore|succeeded|failed|healthy|green|no errors?)\b)"
 );
 
-/// The repair instruction appended to the system prompt for a given kind
+/// The repair instruction appended to the current user turn for a given kind
 /// (9router REPAIR_INSTRUCTIONS, kiro.js 41-45).
 pub fn repair_instruction(kind: KiroRepairKind) -> &'static str {
     match kind {
@@ -180,22 +184,27 @@ pub fn repair_instruction(kind: KiroRepairKind) -> &'static str {
     }
 }
 
-/// Append the repair instruction to `systemPrompt` (9router
-/// appendRepairInstruction, kiro.js 130-135). Returns a cloned body.
+/// Append the repair instruction to the current user turn, never to a
+/// top-level `systemPrompt` (9router appendRepairInstruction, kiro.js
+/// 130-143: kiro.dev answers any body carrying that field with 400
+/// REQUEST_BODY_INVALID). Returns a cloned body.
 pub fn append_repair_instruction(body: &Value, kind: KiroRepairKind) -> Value {
     let mut repaired = body.clone();
     let instruction = repair_instruction(kind);
-    let existing = repaired
-        .get("systemPrompt")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let joined = if existing.is_empty() {
-        instruction.to_string()
-    } else {
-        format!("{existing}\n\n{instruction}")
-    };
-    if let Some(obj) = repaired.as_object_mut() {
-        obj.insert("systemPrompt".to_string(), Value::String(joined));
+    if let Some(msg) = repaired
+        .get_mut("conversationState")
+        .and_then(|s| s.get_mut("currentMessage"))
+        .and_then(|m| m.get_mut("userInputMessage"))
+    {
+        let existing = msg.get("content").and_then(Value::as_str).unwrap_or("");
+        let joined = if existing.is_empty() {
+            instruction.to_string()
+        } else {
+            format!("{existing}\n\n{instruction}")
+        };
+        if let Some(obj) = msg.as_object_mut() {
+            obj.insert("content".to_string(), Value::String(joined));
+        }
     }
     repaired
 }
@@ -477,29 +486,20 @@ impl KiroExecutor {
         Ok(credentials)
     }
 
-    /// Auth-aware URL order (9router getOrderedBaseUrls).
-    /// api_key / external_idp / idc → amazonaws.com hosts first, regionalized
-    /// to the token's region when the account specifies one (default us-east-1).
+    /// Auth-aware URL order (9router getOrderedBaseUrls, kiro.js 299-328).
+    /// kiro.dev must never be first for any auth method (the legacy path
+    /// gateway answers valid modern payloads with terminal 400
+    /// REQUEST_BODY_INVALID). Amazon surfaces reject foreign tokens with
+    /// 401/403, which DO fall through, so q → codewhisperer → others is safe
+    /// for every auth method (CLIRO parity). amazonaws.com hosts are
+    /// regionalized to the token's region when the account specifies one.
     pub fn build_url(
         &self,
         _model: &str,
         _stream: bool,
         credentials: &ProviderConnection,
     ) -> Vec<String> {
-        let auth_method = credentials
-            .provider_specific_data
-            .get("authMethod")
-            .or_else(|| credentials.provider_specific_data.get("auth_method"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let is_cw_surface =
-            auth_method == "api_key" || auth_method == "external_idp" || auth_method == "idc";
-
         let base_urls: Vec<String> = KIRO_BASE_URLS.iter().map(|s| (*s).to_string()).collect();
-        if !is_cw_surface {
-            return base_urls;
-        }
 
         // 9router getOrderedBaseUrls regionalization: rewrite the AWS region
         // segment of every amazonaws.com host to the token's region.
@@ -530,41 +530,45 @@ impl KiroExecutor {
             .cloned()
             .collect();
 
-        // API-key accounts must try the q.* surface FIRST: the legacy
-        // codewhisperer.* GenerateAssistantResponse endpoint authenticates
-        // the key but rejects the same valid payload with
-        // REQUEST_BODY_INVALID (a terminal 400). Ported from 9router
-        // v0.5.45 fix(kiro): route API keys correctly.
-        if auth_method == "api_key" {
-            let q: Vec<String> = amazon
-                .iter()
-                .filter(|u| u.contains("://q."))
-                .cloned()
-                .collect();
-            let remaining: Vec<String> = amazon
-                .iter()
-                .filter(|u| !u.contains("://q."))
-                .cloned()
-                .collect();
-            if !q.is_empty() {
-                return q.into_iter().chain(remaining).chain(others).collect();
-            }
-        }
-        if amazon.is_empty() {
-            return others;
+        let q: Vec<String> = amazon
+            .iter()
+            .filter(|u| u.contains("://q."))
+            .cloned()
+            .collect();
+        let remaining: Vec<String> = amazon
+            .iter()
+            .filter(|u| !u.contains("://q."))
+            .cloned()
+            .collect();
+        if !q.is_empty() {
+            return q.into_iter().chain(remaining).chain(others).collect();
         }
         amazon.into_iter().chain(others).collect()
     }
 
+    /// Port of 9router buildHeaders verbatim (kiro.js 235-282): registry
+    /// headers + Amz-Sdk-Request/Invocation-Id, conditional X-Amz-Target on
+    /// the codewhisperer surface, api_key/external_idp TokenType handling,
+    /// then the runtime-surface headers (x-amz-sso-bearer when accessToken,
+    /// x-amzn-kiro-agent-mode=spec, machine-id, optional profile-arn).
     fn build_bearer_headers(
         &self,
         credentials: &ProviderConnection,
+        url: &str,
     ) -> Result<HeaderMap, KiroExecutorError> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/vnd.amazon.eventstream"),
+        );
+        headers.insert(
+            HeaderName::from_static("user-agent"),
+            HeaderValue::from_static("AWS-SDK-JS/3.0.0 kiro-ide/1.0.0"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-amz-user-agent"),
+            HeaderValue::from_static("aws-sdk-js/3.0.0 kiro-ide/1.0.0"),
         );
         headers.insert(
             HeaderName::from_static("amz-sdk-request"),
@@ -575,6 +579,12 @@ impl KiroExecutor {
             HeaderName::from_static("amz-sdk-invocation-id"),
             HeaderValue::from_str(&inv_id).map_err(KiroExecutorError::InvalidHeader)?,
         );
+        if url.contains("://codewhisperer.") {
+            headers.insert(
+                HeaderName::from_static("x-amz-target"),
+                HeaderValue::from_static(KIRO_CODEWHISPERER_TARGET),
+            );
+        }
 
         let auth_method = credentials
             .provider_specific_data
@@ -621,6 +631,34 @@ impl KiroExecutor {
                 );
             }
         }
+
+        // CLIRO parity for the Amazon surfaces: the Kiro runtime accepts the
+        // SSO bearer header + agent-mode marker (kiro.js 268-279). Without
+        // these the deprecated path gateway answers REQUEST_BODY_INVALID.
+        if let Some(token) = credentials.access_token.as_deref() {
+            headers.insert(
+                HeaderName::from_static("x-amz-sso-bearer"),
+                HeaderValue::from_str(token).map_err(KiroExecutorError::InvalidHeader)?,
+            );
+        }
+        headers.insert(
+            HeaderName::from_static("x-amzn-kiro-agent-mode"),
+            HeaderValue::from_static("spec"),
+        );
+        headers.insert(
+            HeaderName::from_static("x-amzn-codewhisperer-machine-id"),
+            HeaderValue::from_static("kiro-desktop"),
+        );
+        if let Some(profile_arn) = credentials
+            .provider_specific_data
+            .get("profileArn")
+            .and_then(|v| v.as_str())
+        {
+            headers.insert(
+                HeaderName::from_static("x-amzn-codewhisperer-profile-arn"),
+                HeaderValue::from_str(profile_arn).map_err(KiroExecutorError::InvalidHeader)?,
+            );
+        }
         Ok(headers)
     }
 
@@ -656,7 +694,7 @@ impl KiroExecutor {
             self.sign_request(url, &creds, &content_hash, stream)
                 .await?
         } else {
-            self.build_bearer_headers(credentials)?
+            self.build_bearer_headers(credentials, url)?
         };
 
         let client = self.pool.get("kiro", None)?;
@@ -714,7 +752,7 @@ impl KiroExecutor {
                 // runIntegrityRecovery): when enabled (per-account
                 // kiroToolCallRepair, default on) and the response is a
                 // complete SSE body, classify it and retry ONCE with a
-                // repair instruction appended to the system prompt when
+                // repair instruction appended to the current user turn when
                 // the first attempt ended retryably (ellipsis / short
                 // future action). The response is otherwise returned
                 // untouched so the streaming path stays first-class.
@@ -791,7 +829,7 @@ impl KiroExecutor {
                     let kind = classify_buffered_body(&full);
                     if kind != KiroRepairKind::None {
                         // One bounded retry with the repair instruction
-                        // appended to the system prompt (9router
+                        // appended to the current user turn (9router
                         // runIntegrityRecovery). The retry goes through the
                         // same per-URL send so SigV4/bearer auth is rebuilt.
                         let repaired_body = append_repair_instruction(&request.body, kind);
@@ -1552,24 +1590,97 @@ mod tests {
 
     #[test]
     fn test_append_repair_instruction() {
+        // JS parity (kiro.js 130-143): the instruction goes into the current
+        // user turn, never into a top-level `systemPrompt` (400
+        // REQUEST_BODY_INVALID).
         let body = serde_json::json!({
-            "systemPrompt": "You are a helpful assistant.",
-            "messages": [{"role": "user", "content": "hi"}]
+            "conversationState": {
+                "currentMessage": { "userInputMessage": { "content": "hi" } }
+            }
         });
         let repaired = append_repair_instruction(&body, KiroRepairKind::Ellipsis);
-        let prompt = repaired["systemPrompt"].as_str().unwrap();
-        assert!(prompt.starts_with("You are a helpful assistant."));
-        assert!(prompt.contains("ellipsis"));
-        // Original body untouched.
-        assert_eq!(body["systemPrompt"], "You are a helpful assistant.");
-
-        // No existing systemPrompt → instruction becomes the whole prompt.
-        let bare = serde_json::json!({ "messages": [] });
-        let repaired2 = append_repair_instruction(&bare, KiroRepairKind::InvalidTool);
-        assert!(repaired2["systemPrompt"]
+        assert!(repaired.get("systemPrompt").is_none());
+        let content = repaired["conversationState"]["currentMessage"]["userInputMessage"]
+            ["content"]
             .as_str()
-            .unwrap()
-            .contains("tool_call"));
+            .unwrap();
+        assert!(content.starts_with("hi"));
+        assert!(content.contains("ellipsis"));
+        // Original body untouched.
+        assert_eq!(
+            body["conversationState"]["currentMessage"]["userInputMessage"]["content"],
+            "hi"
+        );
+
+        // Empty current content → instruction becomes the whole content.
+        let bare = serde_json::json!({
+            "conversationState": {
+                "currentMessage": { "userInputMessage": { "content": "" } }
+            }
+        });
+        let repaired2 = append_repair_instruction(&bare, KiroRepairKind::InvalidTool);
+        assert!(repaired2.get("systemPrompt").is_none());
+        assert!(
+            repaired2["conversationState"]["currentMessage"]["userInputMessage"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("tool_call")
+        );
+    }
+
+    fn oauth_credentials() -> ProviderConnection {
+        let mut psd = std::collections::BTreeMap::new();
+        psd.insert("authMethod".to_string(), serde_json::json!("oauth"));
+        ProviderConnection {
+            provider_specific_data: psd,
+            access_token: Some("tok".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_build_bearer_headers_runtime_surface() {
+        // JS parity (kiro.js 235-282): x-amz-sso-bearer, agent-mode=spec,
+        // machine-id present; X-Amz-Target only on the codewhisperer surface.
+        let executor = KiroExecutor::new(Arc::new(ClientPool::default()), None).unwrap();
+        let creds = oauth_credentials();
+        let cw = executor
+            .build_bearer_headers(
+                &creds,
+                "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse",
+            )
+            .unwrap();
+        assert_eq!(
+            cw.get("x-amz-target").unwrap(),
+            "AmazonCodeWhispererStreamingService.GenerateAssistantResponse"
+        );
+        assert_eq!(cw.get("x-amz-sso-bearer").unwrap(), "tok");
+        assert_eq!(cw.get("x-amzn-kiro-agent-mode").unwrap(), "spec");
+        assert_eq!(
+            cw.get("x-amzn-codewhisperer-machine-id").unwrap(),
+            "kiro-desktop"
+        );
+
+        let q = executor
+            .build_bearer_headers(
+                &creds,
+                "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
+            )
+            .unwrap();
+        assert!(q.get("x-amz-target").is_none());
+        assert_eq!(q.get("x-amz-sso-bearer").unwrap(), "tok");
+        assert_eq!(q.get("x-amzn-kiro-agent-mode").unwrap(), "spec");
+    }
+
+    #[test]
+    fn test_build_url_oauth_q_first() {
+        // JS parity (kiro.js 299-328): kiro.dev must never be first for any
+        // auth method — q → codewhisperer → others, incl. OAuth/social.
+        let executor = KiroExecutor::new(Arc::new(ClientPool::default()), None).unwrap();
+        let urls = executor.build_url("m", false, &oauth_credentials());
+        assert!(urls[0].contains("://q."));
+        assert!(urls[1].contains("codewhisperer."));
+        assert!(urls[2].contains("kiro.dev"));
     }
 
     #[test]
