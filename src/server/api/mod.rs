@@ -152,6 +152,15 @@ pub fn routes(state: AppState) -> Router<AppState> {
             "/responses",
             post(compat::responses).options(compat::cors_options),
         )
+        // 9router parity (next.config.mjs rewrites): /codex/:path* → /api/v1/responses.
+        .route(
+            "/codex",
+            post(compat::responses).options(compat::cors_options),
+        )
+        .route(
+            "/codex/{*path}",
+            post(compat::responses).options(compat::cors_options),
+        )
         .route(
             "/v1/responses/compact",
             post(compat::responses_compact).options(compat::cors_options),

@@ -13,6 +13,9 @@ use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use serde_json::{json, Map, Value};
 
+use crate::core::translator::request::openai_responses::{
+    coerce_responses_arguments, coerce_responses_output,
+};
 use crate::core::translator::response_transform::{
     AnthropicToOpenAiTransformer, StreamingTransformer,
 };
@@ -1821,7 +1824,19 @@ fn normalize_body(mut body: Value, mode: CompatMode) -> Value {
                 prepend_system_message(fields, normalize_content(instructions));
             }
 
+            // JS parity (openai-responses.js:181-232): additional_tools items
+            // contribute tool declarations merged with body.tools below.
+            let mut additional_tools: Vec<Value> = Vec::new();
             if let Some(input) = fields.remove("input") {
+                if let Some(arr) = input.as_array() {
+                    for item in arr {
+                        if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                            if let Some(tools) = item.get("tools").and_then(Value::as_array) {
+                                additional_tools.extend(tools.iter().cloned());
+                            }
+                        }
+                    }
+                }
                 let converted = input_to_messages(input);
                 if let Some(existing) = fields.get_mut("messages").and_then(Value::as_array_mut) {
                     if let Some(mut converted_items) = converted.as_array().cloned() {
@@ -1830,6 +1845,16 @@ fn normalize_body(mut body: Value, mode: CompatMode) -> Value {
                 } else {
                     fields.insert("messages".to_string(), converted);
                 }
+            }
+
+            if !additional_tools.is_empty() {
+                let mut tools = fields
+                    .get("tools")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                tools.extend(additional_tools);
+                fields.insert("tools".to_string(), Value::Array(tools));
             }
 
             if let Some(messages) = fields.get_mut("messages") {
@@ -1876,20 +1901,74 @@ fn normalize_tools(fields: &mut Map<String, Value>) {
         return;
     };
 
+    // JS parity (openai-responses.js:196-217): Responses `custom` tool
+    // declarations become Chat functions with one raw `input` string;
+    // names are recorded in translator-only `_customToolNames` metadata.
+    let mut custom_tool_names: Vec<String> = Vec::new();
     let converted: Vec<Value> = tools
         .into_iter()
         .filter(|tool| {
-            // Drop non-function tools (e.g. namespace) — DeepSeek rejects unknown types
+            // Drop non-function tools (e.g. namespace) — DeepSeek rejects unknown types.
+            // `custom` tools are converted below, so keep them through the filter.
             let t = tool.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            t.is_empty() || t == "function"
+            t.is_empty() || t == "function" || t == "custom"
         })
-        .map(|tool| {
+        .filter_map(|tool| {
             let has_function_field = tool.get("function").is_some();
             let is_function_type = tool.get("type").and_then(|v| v.as_str()) == Some("function");
 
             // Already proper OpenAI format {type:"function", function:{name,...}}
             if has_function_field {
-                return tool;
+                return Some(tool);
+            }
+
+            // Responses `custom` tool → Chat function with raw `input` string.
+            if tool.get("type").and_then(|v| v.as_str()) == Some("custom") {
+                let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+                if name.trim().is_empty() {
+                    return None;
+                }
+                if !custom_tool_names.iter().any(|n| n == name) {
+                    custom_tool_names.push(name.to_string());
+                }
+                let hint = [
+                    tool.pointer("/format/syntax").and_then(Value::as_str),
+                    tool.pointer("/format/definition").and_then(Value::as_str),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+                let mut description = tool
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                if !hint.is_empty() {
+                    if !description.is_empty() {
+                        description.push_str("\n\n");
+                    }
+                    description.push_str(&hint);
+                }
+                return Some(json!({
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": description,
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "input": {
+                                    "type": "string",
+                                    "description": "Raw freeform input for this custom tool"
+                                }
+                            },
+                            "required": ["input"],
+                            "additionalProperties": false
+                        }
+                    }
+                }));
             }
 
             // type:"function" but missing function:{} (e.g. flat Claude-style)
@@ -1902,20 +1981,20 @@ fn normalize_tools(fields: &mut Map<String, Value>) {
                     .cloned()
                     .or_else(|| tool.get("input_schema").cloned())
                     .unwrap_or(json!({"type":"object","properties":{}}));
-                return json!({
+                return Some(json!({
                     "type": "function",
                     "function": {
                         "name": name,
                         "description": description,
                         "parameters": parameters,
                     }
-                });
+                }));
             }
 
             let has_name = tool.get("name").and_then(|v| v.as_str()).is_some();
             let has_input_schema = tool.get("input_schema").is_some();
             if !has_name || !has_input_schema {
-                return tool;
+                return Some(tool);
             }
 
             let name = tool.get("name").cloned().unwrap_or(Value::Null);
@@ -1928,14 +2007,14 @@ fn normalize_tools(fields: &mut Map<String, Value>) {
                 .cloned()
                 .unwrap_or(Value::Object(Map::new()));
 
-            json!({
+            Some(json!({
                 "type": "function",
                 "function": {
                     "name": name,
                     "description": description,
                     "parameters": parameters,
                 }
-            })
+            }))
         })
         .collect();
 
@@ -1944,6 +2023,12 @@ fn normalize_tools(fields: &mut Map<String, Value>) {
         .any(|t| t.get("type").and_then(|v| v.as_str()) == Some("function"))
     {
         fields.insert("tools".to_string(), Value::Array(converted));
+    }
+    if !custom_tool_names.is_empty() {
+        fields.insert(
+            "_customToolNames".to_string(),
+            Value::Array(custom_tool_names.into_iter().map(Value::String).collect()),
+        );
     }
 }
 
@@ -2052,6 +2137,25 @@ fn normalize_content(content: Value) -> Value {
                             .is_some_and(|kind| matches!(kind, "input_text" | "output_text"))
                         {
                             map.insert("type".to_string(), Value::String("text".to_string()));
+                        } else if map.get("type").and_then(Value::as_str) == Some("input_image") {
+                            // JS parity (responsesApi.js convertResponsesApiFormat):
+                            // input_image → image_url { url, detail }.
+                            let url = map
+                                .get("image_url")
+                                .and_then(Value::as_str)
+                                .or_else(|| map.get("file_id").and_then(Value::as_str))
+                                .unwrap_or("")
+                                .to_string();
+                            let detail = map
+                                .get("detail")
+                                .and_then(Value::as_str)
+                                .unwrap_or("auto")
+                                .to_string();
+                            map.insert("type".to_string(), Value::String("text".to_string()));
+                            return Some(json!({
+                                "type": "image_url",
+                                "image_url": { "url": url, "detail": detail },
+                            }));
                         }
                         Some(Value::Object(map))
                     }
@@ -2081,9 +2185,29 @@ fn input_to_messages(input: Value) -> Value {
         })]),
         Value::Array(items) => {
             let mut messages = Vec::new();
+            // Group items by conversation turn, mirroring JS
+            // convertResponsesApiFormat (responsesApi.js:96-183): consecutive
+            // function_call items accumulate into one assistant message;
+            // function_call_output items flush pending state first.
+            let mut current_assistant: Option<Value> = None;
+            let mut pending_tool_results: Vec<Value> = Vec::new();
             for item in items {
-                push_input_item(&mut messages, item);
+                // additional_tools items are tool declarations, not messages —
+                // their promotion into body.tools happens in normalize_body.
+                if item.get("type").and_then(Value::as_str) == Some("additional_tools") {
+                    continue;
+                }
+                push_input_item_grouped(
+                    &mut messages,
+                    &mut current_assistant,
+                    &mut pending_tool_results,
+                    item,
+                );
             }
+            if let Some(msg) = current_assistant.take() {
+                messages.push(msg);
+            }
+            messages.extend(pending_tool_results.drain(..));
             Value::Array(messages)
         }
         Value::Object(map) => {
@@ -2092,6 +2216,114 @@ fn input_to_messages(input: Value) -> Value {
             Value::Array(messages)
         }
         _ => Value::Array(Vec::new()),
+    }
+}
+
+/// Grouped variant of [`push_input_item`] carrying the in-progress assistant
+/// message and pending tool results across items (JS parity: responsesApi.js
+/// convertResponsesApiFormat). Falls back to [`push_input_item`] for plain
+/// message/text items.
+fn push_input_item_grouped(
+    messages: &mut Vec<Value>,
+    current_assistant: &mut Option<Value>,
+    pending_tool_results: &mut Vec<Value>,
+    item: Value,
+) {
+    let item_type = item.get("type").and_then(Value::as_str).or_else(|| {
+        if item.get("role").is_some() {
+            Some("message")
+        } else {
+            None
+        }
+    });
+    match item_type {
+        Some("function_call") | Some("custom_tool_call") => {
+            // Skip nameless calls — strict upstreams reject them (#444).
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("");
+            if name.trim().is_empty() {
+                return;
+            }
+            if current_assistant.is_none() {
+                *current_assistant = Some(json!({
+                    "role": "assistant",
+                    "content": Value::Null,
+                    "tool_calls": [],
+                }));
+            }
+            // JS parity (openai-responses.js:117-127): custom tools carry
+            // freeform `input`; arguments = JSON.stringify({ input }).
+            // Non-string arguments objects are JSON-stringified; invalid-JSON
+            // strings fall back to "{}" (coerceResponsesArguments).
+            let arguments = if item_type == Some("custom_tool_call") {
+                if item.get("input").is_some() {
+                    let raw = item.get("input").cloned().unwrap_or(Value::Null);
+                    let inner = match &raw {
+                        Value::String(s) => s.clone(),
+                        other => {
+                            serde_json::to_string(other).unwrap_or_else(|_| "\"\"".to_string())
+                        }
+                    };
+                    let tool_input = json!({ "input": inner });
+                    Value::String(
+                        serde_json::to_string(&tool_input).unwrap_or_else(|_| "{}".to_string()),
+                    )
+                } else {
+                    Value::String(coerce_responses_arguments(
+                        item.get("arguments").unwrap_or(&Value::Null),
+                    ))
+                }
+            } else {
+                Value::String(coerce_responses_arguments(
+                    item.get("arguments").unwrap_or(&Value::Null),
+                ))
+            };
+            if let Some(msg) = current_assistant.as_mut() {
+                if let Some(calls) = msg.get_mut("tool_calls").and_then(Value::as_array_mut) {
+                    calls.push(json!({
+                        "id": item.get("call_id").and_then(Value::as_str).unwrap_or(""),
+                        "type": "function",
+                        "function": { "name": name, "arguments": arguments },
+                    }));
+                }
+            }
+        }
+        Some("function_call_output") | Some("custom_tool_call_output") => {
+            // JS parity (openai-responses.js:129-148): flush the assistant
+            // message, then any pending tool results, then push the tool
+            // result immediately.
+            if let Some(msg) = current_assistant.take() {
+                messages.push(msg);
+            }
+            messages.extend(pending_tool_results.drain(..));
+            let output = Value::String(coerce_responses_output(
+                item.get("output").unwrap_or(&Value::Null),
+            ));
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": item.get("call_id").and_then(Value::as_str).unwrap_or(""),
+                "content": output,
+            }));
+        }
+        Some("reasoning") => {
+            // Reasoning items are display-only — skip (JS parity).
+        }
+        Some("additional_tools") => {
+            // Tool-list item, not a message — nothing to append here.
+            // (Body-level `tools` arrays are normalized by normalize_tools.)
+        }
+        _ => {
+            // JS parity (responsesApi.js:108-120): the MESSAGE branch
+            // (explicit type or role-bearing item) flushes the pending
+            // assistant message, then pending tool results, BEFORE pushing
+            // the message. Other item types keep the old direct push.
+            if item_type == Some("message") {
+                if let Some(msg) = current_assistant.take() {
+                    messages.push(msg);
+                }
+                messages.extend(pending_tool_results.drain(..));
+            }
+            push_input_item(messages, item);
+        }
     }
 }
 
@@ -2363,6 +2595,126 @@ mod tests {
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "Stay concise");
         assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn responses_input_groups_function_calls_and_outputs() {
+        // JS parity (responsesApi.js convertResponsesApiFormat): consecutive
+        // function_call items share one assistant message; outputs flush it.
+        let body = json!({
+            "model": "openai/gpt-4o-mini",
+            "input": [
+                { "type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}" },
+                { "type": "function_call", "call_id": "call_2", "name": "get_time", "arguments": "{}" },
+                { "type": "function_call_output", "call_id": "call_1", "output": "sunny" },
+                { "type": "reasoning", "summary": [{ "type": "summary_text", "text": "thinking" }] },
+                { "type": "custom_tool_call", "call_id": "call_3", "name": "shell", "input": "ls" },
+                { "type": "custom_tool_call_output", "call_id": "call_3", "output": "ok" },
+                { "type": "input_text", "text": "Hello" },
+                { "role": "user", "content": [{ "type": "input_image", "image_url": "https://x/y.png", "detail": "high" }] }
+            ]
+        });
+
+        let normalized = normalize_body(body, CompatMode::Responses { compact: false });
+        let messages = normalized["messages"].as_array().expect("messages array");
+
+        // Two function_calls grouped into one assistant message.
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"].as_array().unwrap().len(), 2);
+        // Output flushes the assistant message, then the tool result.
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["content"], "sunny");
+        // Reasoning skipped; custom_tool_call → assistant (arguments wrapped
+        // as {"input": ...} per openai-responses.js:117-127), output → tool.
+        assert_eq!(messages[2]["role"], "assistant");
+        let args: Value = serde_json::from_str(
+            messages[2]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args, json!({"input": "ls"}));
+        assert_eq!(messages[3]["role"], "tool");
+        // input_text item → user message; input_image → image_url part.
+        assert_eq!(messages[4]["content"], "Hello");
+        assert_eq!(
+            messages[5]["content"][0]["image_url"]["url"],
+            "https://x/y.png"
+        );
+    }
+
+    #[test]
+    fn responses_message_flushes_pending_tool_state() {
+        // JS parity (responsesApi.js:108-120): a MESSAGE item flushes the
+        // pending assistant message AND pending tool results BEFORE pushing
+        // itself — a function_call followed by a user message must order
+        // assistant, then user (not user, then assistant).
+        let body = json!({
+            "model": "openai/gpt-4o-mini",
+            "input": [
+                { "type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{}" },
+                { "type": "message", "role": "user", "content": [{ "type": "input_text", "text": "after" }] }
+            ]
+        });
+        let normalized = normalize_body(body, CompatMode::Responses { compact: false });
+        let messages = normalized["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[1]["role"], "user");
+
+        // additional_tools promotion: custom declarations merge with
+        // body.tools and record _customToolNames (openai-responses.js:181-232).
+        let body = json!({
+            "model": "openai/gpt-4o-mini",
+            "input": [
+                { "type": "additional_tools", "role": "developer", "tools": [
+                    {"type": "custom", "name": "exec", "description": "Run code",
+                     "format": {"syntax": "lark", "definition": "start: /.+/"}}
+                ]},
+                { "type": "message", "role": "user", "content": "hi" }
+            ],
+            "tools": [{"type": "function", "name": "search", "parameters": {"type": "object", "properties": {}}}]
+        });
+        let normalized = normalize_body(body, CompatMode::Responses { compact: false });
+        let tools = normalized["tools"].as_array().expect("tools array");
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[1]["function"]["name"], "exec");
+        assert_eq!(
+            tools[1]["function"]["parameters"]["required"],
+            json!(["input"])
+        );
+        assert_eq!(normalized["_customToolNames"], json!(["exec"]));
+        // No developer message leaks from the additional_tools item.
+        let messages = normalized["messages"].as_array().expect("messages array");
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.get("role").and_then(Value::as_str) == Some("developer")),
+            "additional_tools must not leak a developer message"
+        );
+    }
+
+    #[test]
+    fn null_finish_reason_does_not_close_message() {
+        // JS parity (openai-responses.js:111 `if (choice.finish_reason)`):
+        // explicit null must not close the message.
+        let mut state = serde_json::Map::new();
+        let chunk = json!({
+            "choices": [{
+                "index": 0,
+                "delta": { "content": "Hi" },
+                "finish_reason": null
+            }]
+        });
+        let events =
+            crate::core::translator::response::openai_responses::chat_to_responses_response(
+                &chunk, &mut state,
+            );
+        let sse = serde_json::to_string(&events).unwrap_or_default();
+        assert!(
+            !sse.contains("response.completed"),
+            "null finish_reason must not emit completed, got: {sse}"
+        );
     }
 
     #[test]

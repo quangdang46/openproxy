@@ -27,6 +27,111 @@ fn clamp_call_id(id: &str) -> String {
     }
 }
 
+/// JS parity (responsesApi.js coerceResponsesArguments): objects → JSON once;
+/// valid JSON strings pass through; anything else falls back to "{}".
+pub fn coerce_responses_arguments(value: &Value) -> String {
+    match value {
+        Value::Null => "{}".to_string(),
+        Value::String(s) => {
+            if s.is_empty() {
+                return "{}".to_string();
+            }
+            match serde_json::from_str::<Value>(s) {
+                Ok(_) => s.clone(),
+                Err(_) => "{}".to_string(),
+            }
+        }
+        other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
+/// JS parity (responsesApi.js coerceResponsesOutput): output must be a string;
+/// arrays join c.text (fallback: stringify each element).
+pub fn coerce_responses_output(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        Value::Array(arr) => arr
+            .iter()
+            .map(|c| {
+                if let Some(t) = c.get("text").and_then(Value::as_str) {
+                    t.to_string()
+                } else {
+                    serde_json::to_string(c).unwrap_or_else(|_| c.to_string())
+                }
+            })
+            .collect::<String>(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+    }
+}
+
+/// JS parity (openai-responses.js:117-118): custom tools carry freeform
+/// `input`; the Chat arguments payload is `JSON.stringify({ input })` where
+/// a non-string input is first JSON-stringified.
+fn custom_tool_arguments(item: &Value) -> Value {
+    let raw = item
+        .get("input")
+        .cloned()
+        .unwrap_or(Value::String(String::new()));
+    let inner = match &raw {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| "\"\"".to_string()),
+    };
+    let tool_input = serde_json::json!({ "input": inner });
+    Value::String(serde_json::to_string(&tool_input).unwrap_or_else(|_| "{}".to_string()))
+}
+
+/// JS parity (openai-responses.js:196-217): expose a Responses `custom` tool
+/// declaration as a Chat function with one raw `input` string. Returns None
+/// for nameless tools. Records the name in `custom_names`.
+fn convert_custom_tool_declaration(tool: &Value, custom_names: &mut Vec<String>) -> Option<Value> {
+    let name = tool.get("name").and_then(Value::as_str)?;
+    if name.trim().is_empty() {
+        return None;
+    }
+    if !custom_names.iter().any(|n| n == name) {
+        custom_names.push(name.to_string());
+    }
+    let hint = [
+        tool.pointer("/format/syntax").and_then(Value::as_str),
+        tool.pointer("/format/definition").and_then(Value::as_str),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .collect::<Vec<_>>()
+    .join("\n");
+    let mut description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if !hint.is_empty() {
+        if !description.is_empty() {
+            description.push_str("\n\n");
+        }
+        description.push_str(&hint);
+    }
+    Some(serde_json::json!({
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "Raw freeform input for this custom tool"
+                    }
+                },
+                "required": ["input"],
+                "additionalProperties": false
+            }
+        }
+    }))
+}
+
 /// Extract reasoning text from a Responses reasoning item, mirroring the
 /// upstream JS `extractReasoningText` (openai-responses.js:42-52): join
 /// `item.summary[].text` with "\n"; fall back to `item.content[].text`
@@ -150,10 +255,32 @@ pub fn openai_responses_to_chat_request(
         }
     }
 
-    let input_items = if let Some(arr) = input.and_then(|v| v.as_array()) {
-        arr.clone()
-    } else {
-        return true;
+    // JS parity (responsesApi.js normalizeResponsesInput): a string input
+    // becomes a single user message (empty/blank → "..." placeholder), and
+    // an empty array gets the same placeholder so providers never see an
+    // empty messages[] (#389).
+    let input_items = match input {
+        Some(Value::String(text)) => {
+            let text = if text.trim().is_empty() {
+                "...".to_string()
+            } else {
+                text.clone()
+            };
+            vec![serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": text }]
+            })]
+        }
+        Some(Value::Array(arr)) if arr.is_empty() => {
+            vec![serde_json::json!({
+                "type": "message",
+                "role": "user",
+                "content": [{ "type": "input_text", "text": "..." }]
+            })]
+        }
+        Some(Value::Array(arr)) => arr.clone(),
+        _ => return true,
     };
 
     let mut current_assistant_msg: Option<Value> = None;
@@ -161,6 +288,10 @@ pub fn openai_responses_to_chat_request(
     // input items and attach to the next assistant message (JS 33-34, 149-160).
     let mut pending_reasoning = String::new();
     let mut pending_reasoning_encrypted = String::new();
+    // JS parity (openai-responses.js:38-39, 149-151): additional_tools items
+    // contribute tool declarations; custom tool names are tracked in metadata.
+    let mut additional_tools: Vec<Value> = Vec::new();
+    let mut custom_tool_names: Vec<String> = Vec::new();
 
     let default_msg_type = Value::String("message".to_string());
     for item in &input_items {
@@ -220,10 +351,20 @@ pub fn openai_responses_to_chat_request(
                     result["messages"].as_array_mut().unwrap().push(msg);
                 }
             }
-            Some("function_call") => {
+            // JS parity (openai-responses.js:104-128): function_call and
+            // custom_tool_call accumulate into one assistant message; custom
+            // tools carry freeform `input` instead of `arguments`.
+            Some("function_call") | Some("custom_tool_call") => {
                 let name = item.get("name").and_then(|v| v.as_str());
                 if name.is_none() || name.map(|s| s.trim().is_empty()).unwrap_or(true) {
                     continue;
+                }
+                if item_type == Some("custom_tool_call") {
+                    if let Some(n) = item.get("name").and_then(Value::as_str) {
+                        if !n.trim().is_empty() && !custom_tool_names.iter().any(|x| x == n) {
+                            custom_tool_names.push(n.to_string());
+                        }
+                    }
                 }
                 if current_assistant_msg.is_none() {
                     let mut msg = serde_json::json!({
@@ -240,30 +381,43 @@ pub fn openai_responses_to_chat_request(
                     }
                     current_assistant_msg = Some(msg);
                 }
+                let arguments = if item_type == Some("custom_tool_call") {
+                    if item.get("input").is_some() {
+                        custom_tool_arguments(item)
+                    } else {
+                        Value::String(coerce_responses_arguments(
+                            item.get("arguments").unwrap_or(&Value::Null),
+                        ))
+                    }
+                } else {
+                    Value::String(coerce_responses_arguments(
+                        item.get("arguments").unwrap_or(&Value::Null),
+                    ))
+                };
                 if let Some(ref mut msg) = current_assistant_msg {
-                    msg["tool_calls"].as_array_mut().unwrap().push(serde_json::json!({
-                        "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
-                        "type": "function",
-                        "function": {
-                            "name": name.unwrap_or(""),
-                            "arguments": item.get("arguments").cloned().unwrap_or(Value::String("{}".to_string()))
-                        }
-                    }));
+                    msg["tool_calls"]
+                        .as_array_mut()
+                        .unwrap()
+                        .push(serde_json::json!({
+                            "id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "type": "function",
+                            "function": {
+                                "name": name.unwrap_or(""),
+                                "arguments": arguments
+                            }
+                        }));
                 }
             }
-            Some("function_call_output") => {
+            // JS parity (openai-responses.js:129-148): both output variants
+            // flush the assistant message, then any pending tool results.
+            Some("function_call_output") | Some("custom_tool_call_output") => {
                 if let Some(msg) = current_assistant_msg.take() {
                     result["messages"].as_array_mut().unwrap().push(msg);
                 }
                 // Non-assistant items clear the pending reasoning buffers (JS 95-98).
                 pending_reasoning.clear();
                 pending_reasoning_encrypted.clear();
-                let output = if let Some(s) = item.get("output").and_then(|v| v.as_str()) {
-                    s.to_string()
-                } else {
-                    serde_json::to_string(&item.get("output").cloned().unwrap_or(Value::Null))
-                        .unwrap_or_default()
-                };
+                let output = coerce_responses_output(item.get("output").unwrap_or(&Value::Null));
                 result["messages"]
                     .as_array_mut()
                     .unwrap()
@@ -272,6 +426,12 @@ pub fn openai_responses_to_chat_request(
                         "tool_call_id": item.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
                         "content": output
                     }));
+            }
+            Some("additional_tools") => {
+                if let Some(tools) = item.get("tools").and_then(Value::as_array) {
+                    additional_tools.extend(tools.iter().cloned());
+                }
+                continue;
             }
             Some("reasoning") => {
                 let txt = extract_reasoning_text(item);
@@ -298,27 +458,51 @@ pub fn openai_responses_to_chat_request(
         result["messages"].as_array_mut().unwrap().push(msg);
     }
 
-    if let Some(tools) = body.get("tools").and_then(|v| v.as_array()) {
-        let converted: Vec<Value> = tools.iter().filter_map(|tool| {
-            if tool.get("function").is_some() {
-                Some(tool.clone())
-            } else {
+    // JS parity (openai-responses.js:181-232): body.tools plus items-level
+    // additional_tools[].tools, exposed as Chat functions; `custom` tools
+    // get a single raw `input` string declaration and their names recorded
+    // in translator-only `_customToolNames` metadata.
+    let mut response_tools: Vec<Value> = body
+        .get("tools")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    response_tools.extend(additional_tools);
+    if !response_tools.is_empty() {
+        let converted: Vec<Value> = response_tools
+            .iter()
+            .filter_map(|tool| {
+                if tool.get("function").is_some() {
+                    return Some(tool.clone());
+                }
                 let name = tool.get("name").and_then(|v| v.as_str());
                 if name.is_none() || name.map(|s| s.trim().is_empty()).unwrap_or(true) {
                     return None;
                 }
-                Some(serde_json::json!({
-                    "type": "function",
-                    "function": {
-                        "name": name.unwrap_or(""),
-                        "description": tool.get("description").and_then(|v| v.as_str()).unwrap_or(""),
-                        "parameters": normalize_tool_parameters(tool.get("parameters")),
-                        "strict": tool.get("strict").cloned()
-                    }
-                }))
-            }
-        }).collect();
+                // Hosted tools carry no name and cannot be Chat functions — skip.
+                let tool_type = tool.get("type").and_then(|v| v.as_str());
+                if tool_type == Some("custom") {
+                    return convert_custom_tool_declaration(tool, &mut custom_tool_names);
+                }
+                if name.is_some() {
+                    return Some(serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": name.unwrap_or(""),
+                            "description": tool.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                            "parameters": normalize_tool_parameters(tool.get("parameters")),
+                            "strict": tool.get("strict").cloned()
+                        }
+                    }));
+                }
+                None
+            })
+            .collect();
         result["tools"] = Value::Array(converted);
+    }
+    if !custom_tool_names.is_empty() {
+        result["_customToolNames"] =
+            Value::Array(custom_tool_names.into_iter().map(Value::String).collect());
     }
 
     let obj = result.as_object_mut().unwrap();
@@ -766,5 +950,136 @@ mod tests {
         let input = body.get("input").unwrap().as_array().unwrap();
         assert_eq!(input.len(), 1);
         assert_eq!(input[0]["type"], "message");
+    }
+
+    #[test]
+    fn responses_string_and_empty_input_normalized() {
+        // JS parity (responsesApi.js normalizeResponsesInput): string input →
+        // one user message; blank string and empty array → "..." placeholder.
+        let mut body: Value = serde_json::json!({"input": "hello", "model": "gpt-4"});
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+
+        let mut body: Value = serde_json::json!({"input": "   ", "model": "gpt-4"});
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages[0]["role"], "user");
+
+        let mut body: Value = serde_json::json!({"input": [], "model": "gpt-4"});
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+    }
+
+    #[test]
+    fn responses_custom_tool_items_convert() {
+        // JS parity (openai-responses.js:117-127, confirmed by
+        // tests/unit/openai-responses-custom-tools.test.js:63):
+        // custom_tool_call `input` is wrapped as JSON {"input": ...} in
+        // Chat arguments; custom_tool_call_output → tool message.
+        let mut body: Value = serde_json::json!({
+            "input": [
+                {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": "ls"},
+                {"type": "custom_tool_call_output", "call_id": "call_1", "output": "ok"}
+            ],
+            "model": "gpt-4"
+        });
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "assistant");
+        let args: Value = serde_json::from_str(
+            messages[0]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args, serde_json::json!({"input": "ls"}));
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["content"], "ok");
+    }
+
+    #[test]
+    fn responses_custom_tool_object_input_stringified_inside_wrapper() {
+        // Non-string `input` is first JSON-stringified, then wrapped:
+        // input {"cmd":"ls"} → '{"input":"{\"cmd\":\"ls\"}"}'.
+        let mut body: Value = serde_json::json!({
+            "input": [
+                {"type": "custom_tool_call", "call_id": "call_1", "name": "shell", "input": {"cmd": "ls"}}
+            ],
+            "model": "gpt-4"
+        });
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        let args: Value = serde_json::from_str(
+            messages[0]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(args, serde_json::json!({"input": "{\"cmd\":\"ls\"}"}));
+    }
+
+    #[test]
+    fn responses_additional_tools_promoted_to_chat_tools() {
+        // JS parity (openai-responses.js:181-232, confirmed by
+        // openai-responses-custom-tools.test.js:21-44): additional_tools
+        // custom declarations merge with body.tools as Chat functions.
+        let mut body: Value = serde_json::json!({
+            "input": [
+                {"type": "additional_tools", "role": "developer", "tools": [
+                    {"type": "custom", "name": "exec", "description": "Run code",
+                     "format": {"syntax": "lark", "definition": "start: /.+/"}}
+                ]},
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Run pwd"}]}
+            ],
+            "tools": [{"type": "function", "name": "search", "parameters": {"type": "object", "properties": {}}}],
+            "model": "gpt-4"
+        });
+        openai_responses_to_chat_request("gpt-4", &mut body, false, None);
+        let tools = body.get("tools").unwrap().as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(tools[0]["function"]["name"], "search");
+        assert_eq!(tools[1]["function"]["name"], "exec");
+        assert_eq!(
+            tools[1]["function"]["parameters"]["required"],
+            serde_json::json!(["input"])
+        );
+        let names = body.get("_customToolNames").unwrap().as_array().unwrap();
+        assert!(names.iter().any(|n| n == "exec"));
+        // additional_tools items are declarations, not messages.
+        let messages = body.get("messages").unwrap().as_array().unwrap();
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.get("role").and_then(Value::as_str) == Some("developer")),
+            "additional_tools must not leak a developer message"
+        );
+    }
+
+    #[test]
+    fn coerce_helpers_match_js() {
+        // coerceResponsesArguments: object → JSON once; invalid-JSON string → "{}".
+        assert_eq!(
+            coerce_responses_arguments(&serde_json::json!({"q": "x"})),
+            "{\"q\":\"x\"}"
+        );
+        assert_eq!(
+            coerce_responses_arguments(&Value::String("{\"q\":\"x\"}".to_string())),
+            "{\"q\":\"x\"}"
+        );
+        assert_eq!(
+            coerce_responses_arguments(&Value::String("{bad".to_string())),
+            "{}"
+        );
+        // coerceResponsesOutput: array joins c.text.
+        assert_eq!(
+            coerce_responses_output(&serde_json::json!([{"text": "a"}, {"text": "b"}])),
+            "ab"
+        );
+        assert_eq!(coerce_responses_output(&Value::Null), "");
     }
 }
