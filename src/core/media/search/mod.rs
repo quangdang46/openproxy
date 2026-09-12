@@ -18,7 +18,7 @@ mod chat_search;
 pub mod handler;
 mod providers;
 
-pub use base::{SearchProvider, SearchRequest, SearchResult, SearchResultSet};
+pub use base::{ChatSearchResult, SearchProvider, SearchRequest, SearchResult, SearchResultSet};
 pub use chat_search::{handle_chat_search, has_chat_search};
 pub use handler::{handle_search, handle_search_value, SearchHandlerError};
 
@@ -69,12 +69,14 @@ async fn dispatch_chat_search(
         Ok(r) => r,
         Err(msg) => return Some(Err(super::MediaError::Validation(msg))),
     };
-    let Some(set) = handle_chat_search(client, provider, &request).await else {
+    let Some(chat) = handle_chat_search(client, provider, &request).await else {
         return Some(Err(super::MediaError::Validation(format!(
             "Provider {provider} does not support web search"
         ))));
     };
-    let mut out = serde_json::to_value(&set).unwrap_or(serde_json::Value::Null);
+    // Port of `handleChatSearch` success payload (chatSearch.js:534-549):
+    // data: { provider, query, results, answer, usage, metrics, errors }.
+    let mut out = serde_json::to_value(&chat.set).unwrap_or(serde_json::Value::Null);
     if let Some(obj) = out.as_object_mut() {
         obj.insert(
             "provider".to_string(),
@@ -84,6 +86,31 @@ async fn dispatch_chat_search(
             "query".to_string(),
             serde_json::Value::String(request.query.clone()),
         );
+        obj.insert(
+            "answer".to_string(),
+            serde_json::json!({
+                "source": provider,
+                "text": chat.answer_text,
+                "model": chat.model,
+            }),
+        );
+        obj.insert(
+            "usage".to_string(),
+            serde_json::json!({
+                "queries_used": 1,
+                "search_cost_usd": 0,
+                "llm_tokens": chat.llm_tokens,
+            }),
+        );
+        obj.insert(
+            "metrics".to_string(),
+            serde_json::json!({
+                "response_time_ms": serde_json::Value::Null,
+                "upstream_latency_ms": serde_json::Value::Null,
+                "total_results_available": serde_json::Value::Null,
+            }),
+        );
+        obj.insert("errors".to_string(), serde_json::json!([]));
     }
     Some(Ok(out))
 }

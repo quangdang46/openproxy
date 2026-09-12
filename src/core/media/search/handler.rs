@@ -52,11 +52,17 @@ pub async fn handle_search_value(
     request: &SearchRequest<'_>,
 ) -> Result<serde_json::Value, SearchHandlerError> {
     let (body, fallback) = fetch_upstream_body(client, provider, request).await?;
+    // Chat-fallback path: body is Value::Null and JS routes it through
+    // handleChatSearch with no pagination envelope — skip extra_envelope.
+    let on_fallback = fallback.is_some();
     let mut out = match fallback {
         Some(set) => serde_json::to_value(&set).unwrap_or(serde_json::Value::Null),
         None => serde_json::to_value(provider.normalize(&body, request))
             .unwrap_or(serde_json::Value::Null),
     };
+    if on_fallback {
+        return Ok(out);
+    }
     if let Some(extra) = provider.extra_envelope(&body) {
         if let Some(obj) = out.as_object_mut() {
             for (k, v) in extra {
@@ -120,10 +126,10 @@ async fn fetch_upstream_body(
             && provider.chat_fallback().is_some()
             && request.token.is_some()
         {
-            if let Some(fallback_set) =
+            if let Some(fallback_chat) =
                 super::chat_search::handle_chat_search(client, provider.id(), request).await
             {
-                return Ok((serde_json::Value::Null, Some(fallback_set)));
+                return Ok((serde_json::Value::Null, Some(fallback_chat.set)));
             }
         }
         return Err(SearchHandlerError::Http(status, text));

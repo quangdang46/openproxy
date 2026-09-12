@@ -32,6 +32,9 @@ pub struct SearchRequest<'a> {
 pub enum SearchType {
     Web,
     News,
+    /// Tweet-search type for the xquik adapter (registry `searchTypes: ["x"]`).
+    /// Behaves like `Web` everywhere except `as_str` round-trips `"x"`.
+    X,
 }
 
 impl SearchType {
@@ -39,11 +42,13 @@ impl SearchType {
         match self {
             SearchType::Web => "web",
             SearchType::News => "news",
+            SearchType::X => "x",
         }
     }
     pub fn parse(s: Option<&str>) -> Self {
         match s {
             Some("news") => SearchType::News,
+            Some("x") => SearchType::X,
             _ => SearchType::Web,
         }
     }
@@ -72,6 +77,30 @@ pub struct SearchResult {
 pub struct SearchResultSet {
     pub results: Vec<SearchResult>,
     pub total_results: Option<u64>,
+}
+
+/// Chat-search outcome: the unified result set plus the LLM answer text and
+/// token count that JS `handleChatSearch` returns as `data.answer` /
+/// `data.usage` alongside `results` (chatSearch.js:534-549). Dedicated
+/// adapters return a bare [`SearchResultSet`]; only the chat fallback path
+/// produces this.
+#[derive(Debug, Clone)]
+pub struct ChatSearchResult {
+    pub set: SearchResultSet,
+    pub answer_text: String,
+    pub model: String,
+    pub llm_tokens: u64,
+}
+
+impl ChatSearchResult {
+    pub fn new(set: SearchResultSet, answer_text: &str, model: &str, llm_tokens: u64) -> Self {
+        Self {
+            set,
+            answer_text: answer_text.to_string(),
+            model: model.to_string(),
+            llm_tokens,
+        }
+    }
 }
 
 /// 9router `searchViaChat` fallback config: when the dedicated search

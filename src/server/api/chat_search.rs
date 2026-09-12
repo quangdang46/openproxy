@@ -38,7 +38,10 @@ fn resolve_search_provider(alias: &str) -> Option<&'static str> {
         "youcom" | "you" => "youcom",
         "searxng" | "searx" => "searxng",
         "xquik" => "xquik",
-        "ollama-search" | "ollama_search" | "ollama" => "ollama-search",
+        // Only explicit search aliases map here — bare "ollama" is the chat
+        // provider and has no JS mapping (credentialFallback goes the other
+        // direction: ollama-search.js:21 reuses the ollama chat key).
+        "ollama-search" | "ollama_search" => "ollama-search",
         "glm" => "glm",
         "antigravity" | "ag" => "antigravity",
         _ => return None,
