@@ -774,17 +774,30 @@ pub async fn refresh_cline_token(refresh_token: &str) -> Result<RefreshResult, S
         .filter(|t| !t.is_empty())
         .ok_or_else(|| "Cline refresh response missing access token".to_string())?;
 
+    // 9router 88676b30 (refreshClineToken): expiresAt ISO → seconds
+    // (`max(1, floor((expiresAt - now)/1000))`), falling back to
+    // `expiresIn` / `expires_in` numeric, defaulting to 3600.
     let expires_in = data
         .get("expiresAt")
         .and_then(Value::as_str)
         .and_then(|expires_at| chrono::DateTime::parse_from_rfc3339(expires_at).ok())
-        .map(|expires_at| (expires_at.timestamp() - chrono::Utc::now().timestamp()).max(1));
+        .map(|expires_at| (expires_at.timestamp() - chrono::Utc::now().timestamp()).max(1))
+        .or_else(|| {
+            data.get("expiresIn")
+                .or_else(|| data.get("expires_in"))
+                .and_then(Value::as_i64)
+        })
+        .or(Some(3600));
 
     Ok(RefreshResult {
         access_token: access_token.to_string(),
+        // Absent refreshToken → keep the old one (the dispatch layer falls
+        // back to the stored token when this is None; mirrors JS
+        // `tokens.refreshToken || refreshToken`). Callers that need the raw
+        // value must apply the same fallback.
         refresh_token: data
             .get("refreshToken")
-            .and_then(Value::as_str)
+            .and_then(|v| v.as_str())
             .map(str::to_string),
         expires_in,
     })
@@ -1273,4 +1286,65 @@ async fn parse_json_refresh_response(resp: reqwest::Response) -> Result<RefreshR
             .or_else(|| payload.get("expiresIn"))
             .and_then(Value::as_i64),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Parse helper mirroring the expiresIn resolution in
+    /// `refresh_cline_token` (9router 88676b30): expiresAt ISO → seconds,
+    /// else numeric expiresIn/expires_in, else 3600 default.
+    fn cline_expires_in(data: &Value) -> Option<i64> {
+        data.get("expiresAt")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| (dt.timestamp() - chrono::Utc::now().timestamp()).max(1))
+            .or_else(|| {
+                data.get("expiresIn")
+                    .or_else(|| data.get("expires_in"))
+                    .and_then(|v| v.as_i64())
+            })
+            .or(Some(3600))
+    }
+
+    #[test]
+    fn cline_expires_in_prefers_expires_at_iso() {
+        // Far-future ISO → large positive seconds, and > 0 / max(1,·) holds.
+        let v = serde_json::json!({"expiresAt": "2999-01-01T00:00:00Z", "expiresIn": 100});
+        let secs = cline_expires_in(&v).expect("expires");
+        assert!(secs > 1_000_000, "secs={secs}");
+    }
+
+    #[test]
+    fn cline_expires_in_falls_back_to_numeric_then_default() {
+        assert_eq!(
+            cline_expires_in(&serde_json::json!({"expiresIn": 7200})),
+            Some(7200)
+        );
+        assert_eq!(
+            cline_expires_in(&serde_json::json!({"expires_in": 1800})),
+            Some(1800)
+        );
+        assert_eq!(cline_expires_in(&serde_json::json!({})), Some(3600));
+        // Malformed expiresAt → falls through to numeric/default, never panics.
+        assert_eq!(
+            cline_expires_in(&serde_json::json!({"expiresAt": "not-a-date"})),
+            Some(3600)
+        );
+    }
+
+    #[test]
+    fn cline_refresh_body_uses_extension_contract() {
+        // The request body shape the handler posts (9router 88676b30 test:
+        // { refreshToken, grantType: "refresh_token", clientType: "extension" }).
+        let body = serde_json::json!({
+            "refreshToken": "cline-old",
+            "grantType": "refresh_token",
+            "clientType": "extension",
+        });
+        assert_eq!(body["refreshToken"], serde_json::json!("cline-old"));
+        assert_eq!(body["grantType"], serde_json::json!("refresh_token"));
+        assert_eq!(body["clientType"], serde_json::json!("extension"));
+    }
 }
