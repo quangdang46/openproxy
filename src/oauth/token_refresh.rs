@@ -791,14 +791,18 @@ pub async fn refresh_cline_token(refresh_token: &str) -> Result<RefreshResult, S
 
     Ok(RefreshResult {
         access_token: access_token.to_string(),
-        // Absent refreshToken → keep the old one (the dispatch layer falls
-        // back to the stored token when this is None; mirrors JS
-        // `tokens.refreshToken || refreshToken`). Callers that need the raw
-        // value must apply the same fallback.
-        refresh_token: data
-            .get("refreshToken")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
+        // JS `tokens.refreshToken || refreshToken`: when upstream omits the
+        // rotated token, keep using the one we sent. Done HERE (not left to
+        // callers) because not all persist paths fall back: the manual
+        // refresh endpoint (oauth.rs store_connection) overwrites the stored
+        // refresh_token with whatever this returns, so a None would WIPE a
+        // still-valid token. Bead openproxy-weyb verification.
+        refresh_token: Some(
+            data.get("refreshToken")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| refresh_token.to_string()),
+        ),
         expires_in,
     })
 }
