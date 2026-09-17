@@ -727,15 +727,179 @@ pub fn get_capabilities_for_model(provider: &str, model: &str) -> ModelCapabilit
         return ModelCapabilities::from_value(entry);
     }
 
-    // 3. Pattern (first match wins).
+    // 3. Pattern (first match wins), refined by the synced catalog overlay +
+    //    the vision name heuristic (both strictly additive — see `refine`).
     for (pattern, caps) in PATTERN_CAPABILITIES.iter() {
         if match_pattern(pattern, base_model) || match_pattern(pattern, model) {
-            return ModelCapabilities::from_value(caps);
+            return refine_capabilities(ModelCapabilities::from_value(caps), provider, model);
         }
     }
 
-    // 4. Floor.
-    ModelCapabilities::default()
+    // 4. Floor, refined the same way.
+    refine_capabilities(ModelCapabilities::default(), provider, model)
+}
+
+/// Apply the synced models.dev catalog overlay + the vision name heuristic
+/// on top of a table-resolved result. Strictly additive: a capability
+/// already true stays true, and a false one only flips when an outside
+/// source positively declares support. 9router `capabilities.js refine()`
+/// (0532f00d).
+fn refine_capabilities(
+    mut caps: ModelCapabilities,
+    provider: &str,
+    model: &str,
+) -> ModelCapabilities {
+    if let Some(modalities) = crate::core::model::catalog_overlay::catalog_modalities(model) {
+        if modalities.vision {
+            caps.vision = true;
+        }
+        if modalities.pdf {
+            caps.pdf = true;
+        }
+        if modalities.audio_input {
+            caps.audio_input = true;
+        }
+        if modalities.video_input {
+            caps.video_input = true;
+        }
+    }
+    if let Some(limits) = crate::core::model::catalog_overlay::catalog_limits(provider, model) {
+        if limits.context_window > 0 {
+            caps.context_window = limits.context_window;
+        }
+        if limits.max_output > 0 {
+            caps.max_output = limits.max_output;
+        }
+    }
+    if !caps.vision && looks_like_vision_model(model) {
+        caps.vision = true;
+    }
+    caps
+}
+
+/// Name-based vision detection — last resort when neither the catalog file
+/// nor the capability tables know a model. Vendors put the modality in the
+/// id ("qwen3-vl-plus", "glm-4.6v", "deepseek-v4-flash-vision-exp"), so a
+/// custom or freshly released model still gets image input instead of
+/// silently dropping it. Only ever turns vision ON.
+/// 9router `visionPatterns.js looksLikeVisionModel` (0532f00d).
+fn looks_like_vision_model(model_id: &str) -> bool {
+    if model_id.is_empty() {
+        return false;
+    }
+    let id = model_id.to_lowercase();
+    // Image GENERATION, video generation, and non-chat models also carry
+    // these words but take no image input — checked first so they never match.
+    const NOT_VISION: &[&str] = &[
+        "image",
+        "img",
+        "stable-image",
+        "gen",
+        "nanobanana",
+        "imagine",
+        "t2v",
+        "i2v",
+        "flux",
+        "dall",
+        "sdxl",
+        "diffusion",
+        "embed",
+        "rerank",
+        "guard",
+        "moderation",
+        "tts",
+        "stt",
+        "whisper",
+        "voice",
+        "speech",
+        "audio",
+    ];
+    // NOTE: the JS NOT_VISION regex anchors most terms to separator
+    // boundaries (`(^|SEP)(image|img)(SEP|$)` etc.); the substring check
+    // below is deliberately broader (safer direction for a last-resort ON
+    // switch — an over-match only grants vision, never removes it).
+    if NOT_VISION.iter().any(|w| id.contains(w)) {
+        return false;
+    }
+    // Explicit modality words, plus the "<digit>v" suffix vendors use for
+    // vision variants (glm-4.6v, glm-5v-turbo). The digit-v branch requires
+    // a dotted version so the never-shipped `gpt-4v` cannot match.
+    const SEP: &[char] = &['-', '_', '/', ':', '.'];
+    let sep_or_edge = |pos: usize, len: usize| pos == 0 || pos + len == id.len();
+    let has_word = |word: &str| {
+        id.split(SEP).any(|seg| seg == word)
+            || (id.contains(word) && (sep_or_edge(id.find(word).unwrap_or(0), word.len())))
+    };
+    for word in ["vision", "vl", "vlm", "multimodal", "omni", "visual"] {
+        if has_word(word) {
+            return true;
+        }
+    }
+    // `[0-9]\.[0-9]+v(SEP|$)` — dotted-version digit-v.
+    let bytes = id.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let mut j = i + 1;
+            if j < bytes.len() && bytes[j] == b'.' {
+                j += 1;
+                let digits_start = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > digits_start
+                    && j < bytes.len()
+                    && (bytes[j] == b'v' || bytes[j] == b'V')
+                    && (j + 1 == bytes.len() || SEP.contains(&(bytes[j + 1] as char)))
+                {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    // `(^|SEP)glm-[0-9]+v(SEP|$)` — GLM vision variants (glm-4.6v).
+    // Note `glm-4.6v` splits into "glm" + "4.6v" on separators, so match on
+    // the raw id: `glm-` + digits/dots + `v` + separator-or-end.
+    if let Some(pos) = id.find("glm-") {
+        let after = &id[pos + 4..];
+        let mut chars = after.chars().peekable();
+        let mut saw_digit = false;
+        while let Some(&c) = chars.peek() {
+            if c.is_ascii_digit() {
+                saw_digit = true;
+                chars.next();
+            } else if c == '.' && saw_digit {
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        if saw_digit {
+            if let Some(&'v') = chars.peek() {
+                chars.next();
+                if chars.peek().is_none_or(|&c| SEP.contains(&c)) {
+                    return true;
+                }
+            }
+        }
+    }
+    // Known open vision-model families.
+    for fam in [
+        "llava",
+        "pixtral",
+        "internvl",
+        "cogvlm",
+        "minicpm-v",
+        "moondream",
+        "idefics",
+        "fuyu",
+    ] {
+        if id.contains(fam) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
