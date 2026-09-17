@@ -1921,6 +1921,21 @@
      "id": "black-forest-labs/FLUX.1-schnell",
      "name": "FLUX.1 Schnell (via OpenRouter)",
      "kind": "image"
+    },
+    {
+     "id": "google/veo-3.1",
+     "name": "Veo 3.1 (via OpenRouter)",
+     "kind": "video"
+    },
+    {
+     "id": "openai/sora-2-pro",
+     "name": "Sora 2 Pro (via OpenRouter)",
+     "kind": "video"
+    },
+    {
+     "id": "bytedance/seedance-2.0",
+     "name": "Seedance 2.0 (via OpenRouter)",
+     "kind": "video"
     }
    ]
   },
@@ -3066,6 +3081,26 @@
      "id": "gemini-2.5-flash",
      "name": "Gemini 2.5 Flash",
      "kind": "llm"
+    },
+    {
+     "id": "veo-3.1-generate-preview",
+     "name": "Veo 3.1 (Preview)",
+     "kind": "video"
+    },
+    {
+     "id": "veo-3.1-fast-generate-preview",
+     "name": "Veo 3.1 Fast (Preview)",
+     "kind": "video"
+    },
+    {
+     "id": "veo-3.0-generate-001",
+     "name": "Veo 3",
+     "kind": "video"
+    },
+    {
+     "id": "veo-2.0-generate-001",
+     "name": "Veo 2",
+     "kind": "video"
     }
    ]
   },
@@ -5811,7 +5846,8 @@
     "llm",
     "embedding",
     "tts",
-    "imageToText"
+    "imageToText",
+    "video"
    ],
    "ttsModels": [],
    "embeddingModels": [
@@ -5856,7 +5892,8 @@
    "id": "vertex",
    "alias": "vx",
    "serviceKinds": [
-    "llm"
+    "llm",
+    "video"
    ],
    "ttsModels": [],
    "embeddingModels": [],
