@@ -796,6 +796,12 @@ pub fn chat_to_openai_responses_request(
         result["reasoning"] = serde_json::json!({ "effort": e, "summary": "auto" });
     }
 
+    // Passthrough prompt_cache_key (9router 70ba0024 fix(translator):
+    // preserve prompt_cache_key when converting chat to responses).
+    if let Some(k) = body.get("prompt_cache_key") {
+        result["prompt_cache_key"] = k.clone();
+    }
+
     *body = result;
     let _ = stream;
     true
@@ -832,6 +838,21 @@ mod tests {
         let reasoning = body.get("reasoning").unwrap();
         assert_eq!(reasoning["effort"], "high", "reasoning_effort must win");
         assert_eq!(reasoning["summary"], "auto");
+    }
+
+    #[test]
+    fn test_chat_to_responses_preserves_prompt_cache_key() {
+        // 9router 70ba0024: prompt_cache_key must survive chat→responses.
+        let mut body: Value = serde_json::json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "prompt_cache_key": "session-abc"
+        });
+        chat_to_openai_responses_request("gpt-4", &mut body, false, None);
+        assert_eq!(
+            body.get("prompt_cache_key").unwrap().as_str().unwrap(),
+            "session-abc"
+        );
     }
 
     #[test]
