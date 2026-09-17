@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod catalog_overlay;
 
 use std::collections::{BTreeMap, HashMap};
 

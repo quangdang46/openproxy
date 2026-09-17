@@ -425,6 +425,12 @@ async fn main() -> anyhow::Result<()> {
     // within max(provider lead, 30 min) so idle periods don't surface 401s.
     openproxy::oauth::background_refresh::spawn_background_token_refresh(state.clone().into());
 
+    // Daily model-capability refresh from models.dev (9router
+    // src/lib/modelCatalog/sync.js): first run 60s after boot, then every
+    // 24h (30min retry on failure). Strictly additive overlay below the
+    // hand-written capability tables. Disable with MODEL_CATALOG_SYNC=off.
+    openproxy::core::model::catalog_overlay::spawn_model_catalog_sync(state.db.data_dir.clone());
+
     let app = openproxy::build_app(state.clone());
     let addr = format!("{}:{}", cli.host, cli.port);
     info!("Starting openproxy on {}", addr);
