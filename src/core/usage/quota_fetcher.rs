@@ -2291,39 +2291,63 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         .cloned()
         .unwrap_or_default();
 
+    // 9router e3bf94ee (feat(antigravity): add weekly quota tracking and
+    // free-tier handling #3892): detect tier from the loadCodeAssist
+    // subscription info. Free-tier accounts only have weekly quotas (no
+    // separate 5h window) — on free-tier, fetchAvailableModels returns
+    // misleading per-model quota info (missing remainingFraction defaults to
+    // 0, or reflects the weekly limit rather than a 5h window), so the
+    // per-model parse is skipped entirely and the only meaningful quota is
+    // the weekly limit fetched below.
+    let paid_tier_id = load_body
+        .get("paidTier")
+        .and_then(|v| v.get("id"))
+        .and_then(|v| v.as_str());
+    let is_free_tier = paid_tier_id.is_none_or(|id| id == "free-tier");
+
     let mut quotas = serde_json::Map::new();
-    for (model_id, info) in &models_map {
-        if info
-            .get("isInternal")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-        {
-            continue;
+    if !is_free_tier {
+        for (model_id, info) in &models_map {
+            if info
+                .get("isInternal")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if !ANTIGRAVITY_IMPORTANT_MODELS.iter().any(|m| m == model_id) {
+                continue;
+            }
+
+            let quota = match info.get("quotaInfo") {
+                Some(q) => q,
+                None => continue,
+            };
+
+            let reset_at = quota
+                .get("resetTime")
+                .or_else(|| quota.get("reset_at"))
+                .and_then(parse_reset_time);
+
+            let fraction = quota
+                .get("remainingFraction")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0)
+                .clamp(0.0, 1.0);
+            let total = 1000.0;
+            let remaining = (total * fraction).round();
+            let used = (total - remaining).max(0.0);
+
+            quotas.insert(model_id.clone(), build_quota_entry(used, total, reset_at));
         }
-        if !ANTIGRAVITY_IMPORTANT_MODELS.iter().any(|m| m == model_id) {
-            continue;
-        }
+    }
 
-        let quota = match info.get("quotaInfo") {
-            Some(q) => q,
-            None => continue,
-        };
-
-        let reset_at = quota
-            .get("resetTime")
-            .or_else(|| quota.get("reset_at"))
-            .and_then(parse_reset_time);
-
-        let fraction = quota
-            .get("remainingFraction")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0)
-            .clamp(0.0, 1.0);
-        let total = 1000.0;
-        let remaining = (total * fraction).round();
-        let used = (total - remaining).max(0.0);
-
-        quotas.insert(model_id.clone(), build_quota_entry(used, total, reset_at));
+    // Best-effort weekly quota overlay (ported from
+    // open-sse/services/usage/antigravity-weekly.js fetchAntigravityWeeklyQuota
+    // + the reconcile block in google.js) — never blocks or breaks
+    // per-model results: any failure here leaves the per-model quotas intact.
+    if let Some(weekly) = fetch_antigravity_weekly_quota(access_token, &project_id).await {
+        reconcile_weekly_quota(&mut quotas, weekly);
     }
 
     if quotas.is_empty() {
@@ -2332,7 +2356,265 @@ pub async fn fetch_antigravity_quota(access_token: &str, _provider: &str) -> Val
         });
     }
 
-    json!({ "quotas": Value::Object(quotas) })
+    let plan = load_body
+        .get("currentTier")
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    json!({ "plan": plan, "quotas": Value::Object(quotas) })
+}
+
+/// Weekly quota summary endpoint (9router `antigravity.js` registry
+/// `quotaSummaryApiUrl`).
+const ANTIGRAVITY_WEEKLY_URL: &str =
+    "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary";
+
+/// One parsed weekly bucket (mirrors the JS `{ used, total, resetAt,
+/// remainingPercentage, unlimited, displayName }` entry).
+#[derive(Debug, Clone)]
+struct WeeklyQuotaEntry {
+    used: f64,
+    total: f64,
+    reset_at: Option<String>,
+    remaining_percentage: f64,
+}
+
+/// Group-name → stable key mapping (9router `GROUP_MATCHERS`).
+fn weekly_group_key(display_name: &str) -> Option<(&'static str, &'static str)> {
+    let lower = display_name.to_lowercase();
+    if lower.contains("gemini") {
+        Some(("gemini_weekly", "Gemini (Weekly)"))
+    } else if lower.contains("claude") || lower.contains("gpt") {
+        Some(("claude_gpt_weekly", "Claude & GPT (Weekly)"))
+    } else {
+        None
+    }
+}
+
+/// Parse a `retrieveUserQuotaSummary` response into normalized weekly quotas
+/// (ported from `parseWeeklyQuotaSummary`; pure function, unit-testable).
+/// Returns e.g. `{ gemini_weekly: {...}, claude_gpt_weekly: {...} }`.
+fn parse_weekly_quota_summary(data: &Value) -> serde_json::Map<String, Value> {
+    let mut result = serde_json::Map::new();
+    let groups = data.get("groups").and_then(|v| v.as_array()).or_else(|| {
+        data.get("quotaSummary")
+            .and_then(|v| v.get("groups"))
+            .and_then(|v| v.as_array())
+    });
+    let Some(groups) = groups else { return result };
+    for group in groups {
+        let display_name = group
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let Some((key, label)) = weekly_group_key(display_name) else {
+            continue;
+        };
+        let buckets = group
+            .get("buckets")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for bucket in &buckets {
+            // Identify weekly buckets by checking bucketId + displayName for
+            // "weekly".
+            let text = format!(
+                "{} {}",
+                bucket
+                    .get("bucketId")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
+                bucket
+                    .get("displayName")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+            )
+            .to_lowercase();
+            if !text.contains("weekly") {
+                continue;
+            }
+            // Skip disabled buckets.
+            if bucket
+                .get("disabled")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let Some(fraction) = bucket
+                .get("remainingFraction")
+                .and_then(|v| v.as_f64())
+                .filter(|f| f.is_finite())
+            else {
+                continue;
+            };
+            // 9router hardcodes total 1000: `remaining = round(1000 *
+            // remainingFraction)`, `used = max(0, 1000 - remaining)`.
+            let total = 1000.0;
+            let remaining = (total * fraction).round();
+            let used = (total - remaining).max(0.0);
+            result.insert(
+                key.to_string(),
+                json!({
+                    "used": used,
+                    "total": total,
+                    "remaining": remaining,
+                    "resetAt": parse_reset_time(&bucket["resetTime"]),
+                    "remainingPercentage": fraction * 100.0,
+                    "unlimited": false,
+                    "displayName": label,
+                }),
+            );
+            break; // first matching bucket per family wins
+        }
+    }
+    result
+}
+
+/// Fetch the Antigravity weekly quota summary — cached is out of scope for
+/// this port (stateless per-request fetch like the rest of this file); fetch
+/// failures return `None` and the caller keeps the per-model quotas.
+/// 9router wraps this in a 3-minute TTL + in-flight dedup cache
+/// (`weeklyCache`); add caching only if this endpoint shows load problems.
+async fn fetch_antigravity_weekly_quota(
+    access_token: &str,
+    project_id: &str,
+) -> Option<serde_json::Map<String, Value>> {
+    let client = http_client();
+    let user_agent = antigravity_user_agent();
+    let resp = client
+        .post(ANTIGRAVITY_WEEKLY_URL)
+        .bearer_auth(access_token)
+        .header("User-Agent", &user_agent)
+        .header("Content-Type", "application/json")
+        .header("X-Client-Name", "antigravity")
+        .header("X-Client-Version", "1.107.0")
+        .header("x-request-source", "local")
+        .json(&json!({ "project": project_id }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: Value = resp.json().await.ok()?;
+    let parsed = parse_weekly_quota_summary(&data);
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+/// Reconcile the weekly quota against per-model family status (ported from
+/// the JS reconcile block in google.js): if every model in a family is
+/// locked/exhausted (remainingPercentage == 0) until a future reset, the
+/// weekly limit cannot be 100% available. On Google's Free Starter tier,
+/// retrieveUserQuotaSummary buggily reports remainingFraction 1 even after
+/// the starter quota is depleted and all models 429.
+fn reconcile_weekly_quota(
+    quotas: &mut serde_json::Map<String, Value>,
+    weekly: serde_json::Map<String, Value>,
+) {
+    fn entry_of<'a>(
+        weekly: &'a serde_json::Map<String, Value>,
+        key: &str,
+    ) -> Option<WeeklyQuotaEntry> {
+        let v = weekly.get(key)?;
+        Some(WeeklyQuotaEntry {
+            used: v.get("used").and_then(|x| x.as_f64()).unwrap_or(0.0),
+            total: v.get("total").and_then(|x| x.as_f64()).unwrap_or(1000.0),
+            reset_at: v
+                .get("resetAt")
+                .and_then(|x| x.as_str())
+                .map(str::to_string),
+            remaining_percentage: v
+                .get("remainingPercentage")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.0),
+        })
+    }
+    fn family_exhausted(
+        quotas: &serde_json::Map<String, Value>,
+        prefix_ok: impl Fn(&str) -> bool,
+        exclude_image: bool,
+    ) -> (bool, Option<String>) {
+        let members: Vec<(&String, &Value)> = quotas
+            .iter()
+            .filter(|(k, _)| prefix_ok(k) && !(exclude_image && k.contains("image")))
+            .collect();
+        if members.is_empty() {
+            return (false, None);
+        }
+        let all_zero = members.iter().all(|(_, q)| {
+            q.get("remainingPercentage")
+                .and_then(|x| x.as_f64())
+                .unwrap_or(0.0)
+                == 0.0
+        });
+        if !all_zero {
+            return (false, None);
+        }
+        // Latest resetAt across the family.
+        let mut max_reset: Option<String> = None;
+        for (_, q) in &members {
+            if let Some(r) = q.get("resetAt").and_then(|x| x.as_str()) {
+                let take = match &max_reset {
+                    None => true,
+                    Some(cur) => r > cur.as_str(),
+                };
+                if take {
+                    max_reset = Some(r.to_string());
+                }
+            }
+        }
+        (true, max_reset)
+    }
+    for (weekly_key, is_gemini) in [("gemini_weekly", true), ("claude_gpt_weekly", false)] {
+        let Some(mut entry) = entry_of(&weekly, weekly_key) else {
+            continue;
+        };
+        if entry.remaining_percentage <= 0.0 {
+            // Already exhausted — still overlay it as-is below.
+            let total = entry.total;
+            quotas.insert(
+                weekly_key.to_string(),
+                json!({
+                    "used": entry.used,
+                    "total": total,
+                    "remaining": (total - entry.used).max(0.0),
+                    "resetAt": entry.reset_at,
+                    "remainingPercentage": entry.remaining_percentage,
+                    "unlimited": false,
+                }),
+            );
+            continue;
+        }
+        let (exhausted, max_reset) = if is_gemini {
+            family_exhausted(quotas, |k| k.starts_with("gemini-"), true)
+        } else {
+            family_exhausted(quotas, |k| k.starts_with("claude-"), false)
+        };
+        if exhausted {
+            entry.used = entry.total;
+            entry.remaining_percentage = 0.0;
+            if max_reset.is_some() {
+                entry.reset_at = max_reset;
+            }
+        }
+        let total = entry.total;
+        quotas.insert(
+            weekly_key.to_string(),
+            json!({
+                "used": entry.used,
+                "total": total,
+                "remaining": (total - entry.used).max(0.0),
+                "resetAt": entry.reset_at,
+                "remainingPercentage": entry.remaining_percentage,
+                "unlimited": false,
+            }),
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3496,5 +3778,100 @@ mod tests {
         assert_eq!(ollama_ratio_quota(0.5)["total"], json!(100));
         assert!(ollama_ratio_quota(0.5)["resetAt"].is_null());
         assert_eq!(ollama_ratio_quota(0.5)["unlimited"], json!(false));
+    }
+
+    // 9router e3bf94ee (antigravity-weekly.js parseWeeklyQuotaSummary):
+    // groups at data.groups or data.quotaSummary.groups; weekly buckets
+    // only; disabled/non-finite skipped; first matching bucket per family.
+    #[test]
+    fn antigravity_weekly_parses_groups_and_quota_summary_shapes() {
+        let top = json!({
+            "groups": [
+                {"displayName": "Gemini Models", "buckets": [
+                    {"bucketId": "daily-1", "displayName": "Daily", "remainingFraction": 0.1},
+                    {"bucketId": "weekly-1", "displayName": "Weekly Quota", "remainingFraction": 0.75, "resetTime": "2026-09-20T00:00:00Z"},
+                ]},
+                {"displayName": "Claude Models", "buckets": [
+                    {"bucketId": "w", "displayName": "weekly", "remainingFraction": 0.5},
+                ]},
+            ]
+        });
+        let out = parse_weekly_quota_summary(&top);
+        let g = &out["gemini_weekly"];
+        assert_eq!(g["used"], json!(250.0));
+        assert_eq!(g["total"], json!(1000.0));
+        assert_eq!(g["remainingPercentage"], json!(75.0));
+        assert_eq!(g["displayName"], json!("Gemini (Weekly)"));
+        assert_eq!(out["claude_gpt_weekly"]["used"], json!(500.0));
+
+        // quotaSummary.groups shape.
+        let nested = json!({ "quotaSummary": { "groups": [
+            {"displayName": "GPT Models", "buckets": [
+                {"bucketId": "weekly", "displayName": "weekly", "remainingFraction": 1.0},
+            ]}
+        ]}});
+        let out2 = parse_weekly_quota_summary(&nested);
+        assert_eq!(
+            out2["claude_gpt_weekly"]["remainingPercentage"],
+            json!(100.0)
+        );
+
+        // Non-object / no-groups / disabled / non-finite → {}.
+        assert!(parse_weekly_quota_summary(&json!(null)).is_empty());
+        assert!(parse_weekly_quota_summary(&json!({"groups": []})).is_empty());
+        assert!(parse_weekly_quota_summary(&json!({"groups": [
+            {"displayName": "Gemini", "buckets": [
+                {"bucketId": "weekly", "displayName": "weekly", "remainingFraction": 0.5, "disabled": true},
+            ]}
+        ]})).is_empty());
+        assert!(parse_weekly_quota_summary(&json!({"groups": [
+            {"displayName": "Other Family", "buckets": [
+                {"bucketId": "weekly", "displayName": "weekly", "remainingFraction": 0.5},
+            ]}
+        ]}))
+        .is_empty());
+    }
+
+    // 9router google.js reconcile: all models in a family exhausted but
+    // weekly reports available → clamp weekly to 0 with the family's latest
+    // resetAt (the Free Starter tier remainingFraction: 1 bug).
+    #[test]
+    fn antigravity_weekly_reconcile_clamps_buggily_full_weekly() {
+        let mut quotas = serde_json::Map::new();
+        quotas.insert(
+            "gemini-3.8-flash-high".to_string(),
+            json!({"remainingPercentage": 0.0, "resetAt": "2026-09-18T00:00:00Z"}),
+        );
+        quotas.insert(
+            "gemini-3.8-flash-low".to_string(),
+            json!({"remainingPercentage": 0.0, "resetAt": "2026-09-19T00:00:00Z"}),
+        );
+        let mut weekly = serde_json::Map::new();
+        weekly.insert(
+            "gemini_weekly".to_string(),
+            json!({"used": 0.0, "total": 1000.0, "remainingPercentage": 100.0, "resetAt": null}),
+        );
+        reconcile_weekly_quota(&mut quotas, weekly);
+        let g = &quotas["gemini_weekly"];
+        assert_eq!(g["used"], json!(1000.0));
+        assert_eq!(g["remainingPercentage"], json!(0.0));
+        assert_eq!(g["resetAt"], json!("2026-09-19T00:00:00Z"));
+    }
+
+    #[test]
+    fn antigravity_weekly_reconcile_keeps_healthy_family() {
+        let mut quotas = serde_json::Map::new();
+        quotas.insert(
+            "gemini-3.8-flash-high".to_string(),
+            json!({"remainingPercentage": 50.0, "resetAt": null}),
+        );
+        let mut weekly = serde_json::Map::new();
+        weekly.insert(
+            "gemini_weekly".to_string(),
+            json!({"used": 500.0, "total": 1000.0, "remainingPercentage": 50.0, "resetAt": null}),
+        );
+        reconcile_weekly_quota(&mut quotas, weekly);
+        assert_eq!(quotas["gemini_weekly"]["used"], json!(500.0));
+        assert_eq!(quotas["gemini_weekly"]["remainingPercentage"], json!(50.0));
     }
 }
