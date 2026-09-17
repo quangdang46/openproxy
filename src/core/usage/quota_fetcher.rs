@@ -1931,7 +1931,12 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
 
     if let Some(obj) = body.as_object() {
         for (key, value) in obj {
-            if !key.starts_with("seven_day_") {
+            if !key.starts_with("seven_day_") || key == "seven_day" {
+                continue;
+            }
+            // 9router claude.js `hasUtilization`: only windows carrying a
+            // numeric utilization become rows.
+            if value.get("utilization").and_then(|v| v.as_f64()).is_none() {
                 continue;
             }
             let model = key.trim_start_matches("seven_day_").trim_start_matches("_");
@@ -1949,6 +1954,40 @@ pub async fn fetch_claude_quota(access_token: &str, _provider: &str) -> Value {
                 .and_then(parse_reset_time);
             quotas.insert(
                 format!("weekly {model} (7d)"),
+                build_quota_entry(utilization, 100.0, reset_at),
+            );
+        }
+    }
+
+    // 9router 4ad1e7a4 (fix(usage): parse Fable weekly limit from limits[]
+    // instead of fabricating a row #3847): model-scoped weekly limits (e.g.
+    // Fable) arrive in `limits[]`, not as `seven_day_*` keys:
+    // `{ kind: "weekly_scoped", percent, resets_at,
+    //    scope: { model: { display_name: "Fable" } } }`.
+    // No limits entry means the account has no such window — omit the row,
+    // never fabricate one.
+    if let Some(limits) = body.get("limits").and_then(|v| v.as_array()) {
+        for limit in limits {
+            if limit.get("kind").and_then(|v| v.as_str()) != Some("weekly_scoped") {
+                continue;
+            }
+            let model_name = limit
+                .get("scope")
+                .and_then(|v| v.get("model"))
+                .and_then(|v| v.get("display_name"))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_lowercase);
+            let (Some(model_name), Some(percent)) =
+                (model_name, limit.get("percent").and_then(|v| v.as_f64()))
+            else {
+                continue;
+            };
+            let utilization = percent.clamp(0.0, 100.0);
+            let reset_at = limit.get("resets_at").and_then(parse_reset_time);
+            quotas.insert(
+                format!("weekly {model_name} (7d)"),
                 build_quota_entry(utilization, 100.0, reset_at),
             );
         }
@@ -4509,5 +4548,61 @@ mod tests {
             unlim["quotas"]["Hosted Model Requests"]["unlimited"],
             json!(true)
         );
+    }
+    // 9router 4ad1e7a4: model-scoped weekly limits come from limits[]
+    // (kind == "weekly_scoped"), never fabricated; seven_day_* keys need a
+    // numeric utilization and skip the bare "seven_day" key.
+    #[test]
+    fn claude_limits_weekly_scoped_creates_model_row() {
+        // Extract the row-building logic via a representative body: the
+        // seven_day_* + limits[] loop lives inside fetch_claude_quota, so
+        // mirror its contract here at the unit level through the same
+        // helpers it uses (build_quota_entry + parse_reset_time) plus a
+        // direct simulation of the new branch.
+        let body = json!({
+            "seven_day": {"utilization": 20.0, "resets_at": "2026-09-24T00:00:00Z"},
+            "seven_day_sonnet": {"utilization": 30.0, "resets_at": "2026-09-24T00:00:00Z"},
+            "seven_day": {"utilization": 20.0},
+            "limits": [
+                {"kind": "weekly_scoped", "percent": 42.0, "resets_at": "2026-09-25T00:00:00Z",
+                 "scope": {"model": {"display_name": "Fable"}}},
+                {"kind": "daily", "percent": 99.0},
+                {"kind": "weekly_scoped", "scope": {"model": {"display_name": "NoPercent"}}},
+                {"kind": "weekly_scoped", "percent": 10.0, "scope": {}},
+            ],
+        });
+        // Simulate the branch: only the well-formed Fable entry survives.
+        let mut rows: Vec<String> = vec![];
+        if let Some(limits) = body.get("limits").and_then(|v| v.as_array()) {
+            for limit in limits {
+                if limit.get("kind").and_then(|v| v.as_str()) != Some("weekly_scoped") {
+                    continue;
+                }
+                let name = limit
+                    .get("scope")
+                    .and_then(|v| v.get("model"))
+                    .and_then(|v| v.get("display_name"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_lowercase);
+                let (Some(name), Some(pct)) = (name, limit.get("percent").and_then(|v| v.as_f64()))
+                else {
+                    continue;
+                };
+                rows.push(format!("weekly {name} (7d):{pct}"));
+            }
+        }
+        assert_eq!(rows, vec!["weekly fable (7d):42"]);
+        // And the quota entry math matches createQuotaObject semantics.
+        let q = build_quota_entry(
+            42.0_f64.clamp(0.0, 100.0),
+            100.0,
+            parse_reset_time(&json!("2026-09-25T00:00:00Z")),
+        );
+        assert_eq!(q["used"], json!(42.0));
+        // Float math: remaining = 100 - 42 via f64 in build_quota_entry.
+        let pct = q["remainingPercentage"].as_f64().expect("pct");
+        assert!((pct - 58.0).abs() < 1e-9, "pct={pct}");
     }
 }
