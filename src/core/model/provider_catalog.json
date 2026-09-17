@@ -6027,7 +6027,8 @@
    "id": "glm",
    "alias": "glm",
    "serviceKinds": [
-    "llm"
+    "llm",
+    "webSearch"
    ],
    "ttsModels": [],
    "embeddingModels": [],

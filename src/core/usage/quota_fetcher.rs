@@ -786,8 +786,9 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
         append_codex_quota_windows(&mut quotas, "", snapshot);
     }
 
-    if let Some(review) = get_codex_review_rate_limit(&body) {
-        append_codex_quota_windows(&mut quotas, "review", &review);
+    let review_rl = get_codex_review_rate_limit(&body);
+    if let Some(review) = &review_rl {
+        append_codex_quota_windows(&mut quotas, "review", review);
     }
 
     // 9router 40eed186 (feat(usage): track GPT-5.3-Codex-Spark quota
@@ -834,10 +835,22 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
                 .unwrap_or(false)
         })
         .unwrap_or(false);
+    // Pre-existing parity gap (flagged during d2q6 review): JS also emits
+    // reviewLimitReached for the review windows — the Rust port never did.
+    let review_limit_reached = review_rl
+        .as_ref()
+        .map(|snapshot| {
+            codex_rate_limit_body(snapshot)
+                .get("limit_reached")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
 
     json!({
         "plan": plan.unwrap_or_else(|| "unknown".to_string()),
         "limitReached": limit_reached,
+        "reviewLimitReached": review_limit_reached,
         "sparkLimitReached": spark_limit_reached,
         "resetCredits": { "availableCount": available_reset_credits },
         "quotas": Value::Object(quotas),
