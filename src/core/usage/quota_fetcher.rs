@@ -1436,6 +1436,113 @@ pub async fn fetch_qoder_quota(access_token: &str, _provider: &str) -> Value {
 /// GET https://ai-gateway.vercel.sh/v1/credits with Bearer auth; returns
 /// { balance, total_used } as USD decimal strings. Plan rows mirror JS
 /// exactly (MONTHLY_CREDIT = 5; remainingPercentage may exceed 100).
+/// OpenCode Go usage endpoint (9router `opencode-go.js` registry
+/// `transport.usage.url`).
+const OPENCODE_GO_USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
+
+/// Coerce a percent value (number or numeric string) to f64; `None` when
+/// neither parses finite. 9router `opencode-go.js parsePercent`.
+fn opencode_go_percent(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64().filter(|f| f.is_finite()),
+        Value::String(s) if !s.trim().is_empty() => {
+            s.trim().parse::<f64>().ok().filter(|f| f.is_finite())
+        }
+        _ => None,
+    }
+}
+
+/// Build the OpenCode Go Rolling/Weekly/Monthly quota rows from a parsed
+/// `data.usage` object. Pure fn for testability.
+/// 9router `opencode-go.js` quota loop: `used = clamp(percent)`,
+/// `total = 100`, `resetAt = parseResetTime(quota.resetsAt)`.
+fn opencode_go_quota_rows(usage: &Value) -> Value {
+    let mut quotas = serde_json::Map::new();
+    for (period, name) in [
+        ("rolling", "Rolling"),
+        ("weekly", "Weekly"),
+        ("monthly", "Monthly"),
+    ] {
+        let quota = usage.get(period).unwrap_or(&Value::Null);
+        if !quota.is_object() {
+            continue;
+        }
+        let Some(percent) = opencode_go_percent(&quota["percent"]) else {
+            continue;
+        };
+        let used = percent.clamp(0.0, 100.0);
+        quotas.insert(
+            name.to_string(),
+            json!({
+                "used": used,
+                "total": 100,
+                "remaining": 100.0 - used,
+                "remainingPercentage": 100.0 - used,
+                "resetAt": parse_reset_time(&quota["resetsAt"]),
+                "unlimited": false,
+            }),
+        );
+    }
+    if quotas.is_empty() {
+        return json!({
+            "plan": "OpenCode Go",
+            "message": "OpenCode Go usage response did not contain valid quota data.",
+        });
+    }
+    json!({ "plan": "OpenCode Go", "quotas": Value::Object(quotas) })
+}
+
+/// Fetch OpenCode Go subscription usage: rolling, weekly, and monthly
+/// windows via GET on the usage endpoint with the API key.
+/// 9router `opencode-go.js getOpenCodeGoUsage` (#3791).
+pub async fn fetch_opencode_go_quota(api_key: &str) -> Value {
+    let token = api_key.trim();
+    if token.is_empty() {
+        return json!({ "message": "OpenCode Go API key not available. Add a key to view usage." });
+    }
+    let client = http_client();
+    let resp = match client
+        .get(OPENCODE_GO_USAGE_URL)
+        .bearer_auth(token)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("OpenCode Go error: {e}") }),
+    };
+    let status = resp.status().as_u16();
+    if status == 401 {
+        return json!({ "plan": "OpenCode Go", "message": "OpenCode Go authentication failed. Check the API key." });
+    }
+    if status == 403 {
+        // 9router distinguishes EntitlementError (subscription required)
+        // from other 403s via `error.error.type`.
+        let err_body: Value = resp.json().await.unwrap_or(Value::Null);
+        let subscription_required = err_body
+            .get("error")
+            .and_then(|e| e.get("type"))
+            .and_then(|v| v.as_str())
+            == Some("EntitlementError");
+        return json!({
+            "plan": "OpenCode Go",
+            "message": if subscription_required {
+                "OpenCode Go subscription required for this API key."
+            } else {
+                "OpenCode Go access forbidden for this API key."
+            },
+        });
+    }
+    if !(200..300).contains(&status) {
+        return json!({ "plan": "OpenCode Go", "message": format!("OpenCode Go usage API error ({status}).") });
+    }
+    let data: Value = resp.json().await.unwrap_or(Value::Null);
+    let Some(usage) = data.get("usage").filter(|v| v.is_object()) else {
+        return json!({ "plan": "OpenCode Go", "message": "OpenCode Go usage response did not contain quota data." });
+    };
+    opencode_go_quota_rows(usage)
+}
+
 pub async fn fetch_vercel_ai_gateway_quota(api_key: &str) -> Value {
     if api_key.trim().is_empty() {
         return json!({ "message": "Vercel AI Gateway API key not available." });
@@ -4604,5 +4711,35 @@ mod tests {
         // Float math: remaining = 100 - 42 via f64 in build_quota_entry.
         let pct = q["remainingPercentage"].as_f64().expect("pct");
         assert!((pct - 58.0).abs() < 1e-9, "pct={pct}");
+    }
+    // 9router 0da803ee (opencode-go.js): percent coercion + Rolling /
+    // Weekly / Monthly rows + empty/invalid usage handling.
+    #[test]
+    fn opencode_go_percent_coerces_number_and_string() {
+        assert_eq!(opencode_go_percent(&json!(42.5)), Some(42.5));
+        assert_eq!(opencode_go_percent(&json!("75")), Some(75.0));
+        assert_eq!(opencode_go_percent(&json!("  ")), None);
+        assert_eq!(opencode_go_percent(&json!(null)), None);
+        assert_eq!(opencode_go_percent(&json!("abc")), None);
+    }
+
+    #[test]
+    fn opencode_go_rows_cover_all_periods_and_skip_invalid() {
+        let out = opencode_go_quota_rows(&json!({
+            "rolling": {"percent": 10, "resetsAt": "2026-09-18T00:00:00Z"},
+            "weekly": {"percent": "55.5"},
+            "monthly": {"percent": 150},
+        }));
+        assert_eq!(out["plan"], json!("OpenCode Go"));
+        assert_eq!(out["quotas"]["Rolling"]["used"], json!(10.0));
+        assert_eq!(out["quotas"]["Weekly"]["used"], json!(55.5));
+        // Clamped at 100.
+        assert_eq!(out["quotas"]["Monthly"]["used"], json!(100.0));
+        assert_eq!(out["quotas"]["Monthly"]["remainingPercentage"], json!(0.0));
+        // Missing/invalid periods skipped, not fabricated.
+        let out2 = opencode_go_quota_rows(&json!({"rolling": {"percent": "nan"}}));
+        assert!(out2.get("message").is_some());
+        let out3 = opencode_go_quota_rows(&json!({}));
+        assert!(out3.get("message").is_some());
     }
 }
