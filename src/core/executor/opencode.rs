@@ -24,6 +24,88 @@ fn is_responses_model(model: &str) -> bool {
     base.contains("muse") && base.contains("spark")
 }
 
+/// Valid thinking levels per thinking format.
+/// Mirrors `FORMAT_LEVELS` in `open-sse/providers/thinkingLevels.js`
+/// (only the formats relevant to the opencode executor path are listed;
+/// unknown formats fall back to the openai set, matching Muse Spark's
+/// `thinkingFormat: "openai"` capabilities entry).
+fn thinking_levels_for_format(format: Option<&str>) -> Option<&'static [&'static str]> {
+    match format {
+        Some("openai") | None => Some(&["none", "minimal", "low", "medium", "high", "xhigh"]),
+        Some("claude-adaptive") | Some("kimi") => Some(&["none", "low", "medium", "high", "max"]),
+        Some("claude-budget") => Some(&["none", "low", "medium", "high", "xhigh", "max"]),
+        Some("gemini-level") => Some(&["minimal", "low", "medium", "high"]),
+        Some("gemini-budget") | Some("qwen") | Some("hunyuan") | Some("step") => {
+            Some(&["none", "low", "medium", "high"])
+        }
+        Some("zai") | Some("minimax") => Some(&["none", "thinking"]),
+        Some("deepseek") => Some(&["none", "high", "max"]),
+        _ => None,
+    }
+}
+
+/// Normalize Chat thinking fields into the Responses `reasoning` object.
+///
+/// Mirrors `normalizeOpencodeReasoning` in `open-sse/executors/opencode.js`
+/// (JS ab044e6d): `reasoning_effort` (or an existing `reasoning.effort`)
+/// becomes `reasoning: { effort, summary: "auto" }`, and `max`/`ultra`
+/// clamp down to the highest level the model accepts (`xhigh` for Muse
+/// Spark, whose openai level set has no `max`). No string effort → no-op.
+fn normalize_opencode_reasoning(model: &str, body: &mut Value) {
+    let Some(body_obj) = body.as_object_mut() else {
+        return;
+    };
+    let current_reasoning = body_obj.get("reasoning").filter(|v| v.is_object()).cloned();
+    let requested_effort = body_obj
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            current_reasoning
+                .as_ref()
+                .and_then(|r| r.get("effort"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    let Some(requested) = requested_effort else {
+        return;
+    };
+    // Strip a trailing thinking suffix so capability lookup hits the base id
+    // (JS `baseModelId`).
+    let (clean_model, _) = crate::core::utils::thinking_suffix::strip_thinking_suffix(model);
+    let clean_model = if clean_model.is_empty() {
+        model
+    } else {
+        clean_model
+    };
+    let format =
+        crate::core::combo::capabilities::get_capabilities_for_model("opencode", clean_model)
+            .thinking_format;
+    let supported_levels = thinking_levels_for_format(format);
+    let mut effort = requested.to_lowercase();
+    effort = effort.trim().to_string();
+    if (effort == "max" || effort == "ultra")
+        && supported_levels
+            .is_some_and(|levels| !levels.is_empty() && !levels.contains(&effort.as_str()))
+    {
+        let levels = supported_levels.unwrap_or(&[]);
+        if effort == "ultra" && levels.contains(&"max") {
+            effort = "max".to_string();
+        } else if levels.contains(&"xhigh") {
+            effort = "xhigh".to_string();
+        }
+    }
+    let mut reasoning = current_reasoning
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    reasoning.insert("effort".to_string(), Value::String(effort));
+    reasoning
+        .entry("summary".to_string())
+        .or_insert(Value::String("auto".to_string()));
+    body_obj.insert("reasoning".to_string(), Value::Object(reasoning));
+    body_obj.remove("reasoning_effort");
+}
+
 #[derive(Clone)]
 pub struct OpenCodeExecutor {
     pool: Arc<ClientPool>,
@@ -212,7 +294,8 @@ impl OpenCodeExecutor {
         // Normalize developer→system role (many providers reject role:developer)
         normalize_developer_role(&mut request.body);
 
-        // Responses API models need max_tokens → max_output_tokens normalization.
+        // Responses API models need max_tokens → max_output_tokens normalization
+        // plus reasoning_effort → reasoning{effort,summary} normalization.
         // Mirrors opencode.js:76-86 (transformRequest for isResponsesModel).
         let is_responses = is_responses_model(&request.model);
         if is_responses {
@@ -225,6 +308,7 @@ impl OpenCodeExecutor {
                     body_obj.insert("max_output_tokens".to_string(), val);
                 }
             }
+            normalize_opencode_reasoning(&request.model, &mut request.body);
         }
 
         let url = self.build_url(&request.model);
@@ -250,5 +334,57 @@ impl OpenCodeExecutor {
             transformed_body: request.body,
             transport: TransportKind::Reqwest,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reasoning_effort_becomes_reasoning_object_with_summary_auto() {
+        let mut body = json!({"model": "muse-spark-1.2", "reasoning_effort": "high"});
+        normalize_opencode_reasoning("muse-spark-1.2-contributor-free", &mut body);
+        assert_eq!(body["reasoning"]["effort"], json!("high"));
+        assert_eq!(body["reasoning"]["summary"], json!("auto"));
+        assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn max_and_ultra_clamp_to_xhigh_for_muse_spark() {
+        // Muse Spark's openai level set has no max/ultra — clamp to xhigh.
+        for level in ["max", "ultra", "MAX", " Ultra "] {
+            let mut body = json!({"reasoning_effort": level});
+            normalize_opencode_reasoning("muse-spark-1.2-contributor-free", &mut body);
+            assert_eq!(body["reasoning"]["effort"], json!("xhigh"), "level={level}");
+        }
+    }
+
+    #[test]
+    fn existing_reasoning_effort_preserved_and_summary_kept() {
+        // Effort falls back to reasoning.effort when reasoning_effort absent.
+        let mut body = json!({"reasoning": {"effort": "medium", "summary": "detailed"}});
+        normalize_opencode_reasoning("muse-spark-1.2-contributor-free", &mut body);
+        assert_eq!(body["reasoning"]["effort"], json!("medium"));
+        assert_eq!(body["reasoning"]["summary"], json!("detailed"));
+    }
+
+    #[test]
+    fn no_effort_string_is_noop() {
+        let mut body = json!({"model": "muse-spark-1.2"});
+        normalize_opencode_reasoning("muse-spark-1.2-contributor-free", &mut body);
+        assert!(body.get("reasoning").is_none());
+        // Non-object reasoning + no effort string → no-op.
+        let mut body = json!({"reasoning": "high"});
+        normalize_opencode_reasoning("muse-spark-1.2-contributor-free", &mut body);
+        assert_eq!(body["reasoning"], json!("high"));
+    }
+
+    #[test]
+    fn thinking_suffix_stripped_for_capability_lookup() {
+        let mut body = json!({"reasoning_effort": "ultra"});
+        normalize_opencode_reasoning("muse-spark-1.2-contributor-free(xhigh)", &mut body);
+        assert_eq!(body["reasoning"]["effort"], json!("xhigh"));
     }
 }
