@@ -2599,6 +2599,14 @@ fn select_connection(
         // No stored connection. Inject a virtual one for noAuth free providers
         // (matches 9router's getProviderCredentials behavior). Lets OpenCode Free,
         // edge-tts, google-tts, etc. route requests without manual setup.
+        //
+        // 9router parity guard (bead openproxy-sewn): `opencode` (Free) is
+        // `noAuth: true` in the registry, but `opencode-go` (paid Go
+        // subscription, `category: "apikey"`, NO noAuth flag) is NOT — a
+        // stored API-key connection is mandatory. The virtual "public"
+        // connection must never shadow this: without it, a valid stored key
+        // is ignored and upstream answers `AuthError Missing API key.`
+        // (note the trailing period — upstream's text, not ours).
         if is_no_auth_provider(provider) && !excluded.contains("noauth") {
             return Some(virtual_no_auth_connection(provider));
         }
@@ -2682,10 +2690,14 @@ fn select_connection(
 }
 
 fn is_no_auth_provider(provider: &str) -> bool {
+    // 9router parity (bead openproxy-sewn): only `opencode` (Free) carries
+    // `noAuth: true` in the registry. `opencode-go` is a paid apikey
+    // provider with NO noAuth flag — it must never get the virtual "public"
+    // connection, or a valid stored key is bypassed and upstream returns
+    // `AuthError Missing API key.` for every model on the provider.
     matches!(
         provider,
         "opencode"
-            | "opencode-go"
             | "edge-tts"
             | "google-tts"
             | "local-device"
@@ -4515,7 +4527,7 @@ mod tests {
 
     use super::{
         build_dashboard_sse_response, build_proxied_response, earliest_retry_after,
-        select_connection,
+        is_no_auth_provider, select_connection,
     };
     use crate::types::{AppDb, ProviderConnection};
 
@@ -4980,5 +4992,49 @@ mod tests {
         assert!(token_saver_gate(&empty));
         let yes = HashMap::from([("x-9router-token-saver".to_string(), "yes".to_string())]);
         assert!(token_saver_gate(&yes));
+    }
+
+    // Bead openproxy-sewn: opencode-go must never resolve to the virtual
+    // no-auth connection.
+    #[test]
+    fn select_connection_never_returns_virtual_noauth_for_opencode_go() {
+        // No stored connections at all: opencode-go → None (NOT virtual).
+        let snapshot = AppDb {
+            provider_connections: vec![],
+            ..AppDb::default()
+        };
+        assert!(
+            select_connection(&snapshot, "opencode-go", "glm-5.1", &HashSet::new(), None).is_none(),
+            "opencode-go without stored key must yield None, never the virtual public connection"
+        );
+        // Meanwhile opencode (Free, noAuth) still gets the virtual fallback.
+        let fallback =
+            select_connection(&snapshot, "opencode", "big-pickle", &HashSet::new(), None)
+                .expect("opencode free must keep the virtual no-auth fallback");
+        assert_eq!(fallback.id, "noauth");
+    }
+
+    #[test]
+    fn select_connection_prefers_stored_key_over_anything_for_opencode_go() {
+        let mut stored = connection("ocg-stored", 1);
+        stored.provider = "opencode-go".to_string();
+        stored.default_model = None;
+        let snapshot = AppDb {
+            provider_connections: vec![stored.clone()],
+            ..AppDb::default()
+        };
+        let selected =
+            select_connection(&snapshot, "opencode-go", "glm-5.1", &HashSet::new(), None)
+                .expect("stored opencode-go key must be selected");
+        assert_eq!(selected.id, "ocg-stored");
+        assert_eq!(selected.api_key.as_deref(), Some("sk-ocg-stored"));
+    }
+
+    #[test]
+    fn is_no_auth_provider_matches_registry_flags() {
+        // 9router registry: opencode has noAuth:true; opencode-go does not.
+        assert!(is_no_auth_provider("opencode"));
+        assert!(!is_no_auth_provider("opencode-go"));
+        assert!(!is_no_auth_provider("ocg"));
     }
 }
