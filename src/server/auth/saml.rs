@@ -587,7 +587,31 @@ pub fn rsa_public_key_from_cert_pem(pem: &str) -> Result<RsaPublicKey, String> {
     let (_, cert) =
         X509Certificate::from_der(&der).map_err(|e| format!("parse X.509 certificate: {e}"))?;
     let spki = cert.tbs_certificate.subject_pki;
-    let rsa_key = rsa::pkcs1::RsaPublicKey::try_from(spki.raw)
+    // subject_pki.raw is the full SubjectPublicKeyInfo DER (algorithm +
+    // BIT STRING). Unwrap the BIT STRING to the inner PKCS#1 RSAPublicKey.
+    let spki_der: &[u8] = spki.raw;
+    let pubkey_der = {
+        use x509_parser::der_parser::ber::BerObjectContent;
+        use x509_parser::der_parser::der::parse_der_sequence;
+        let (_, seq) =
+            parse_der_sequence(spki_der).map_err(|e| format!("parse SPKI sequence: {e}"))?;
+        // SPKI = SEQ { AlgorithmIdentifier, BIT STRING }; take 2nd child.
+        let children: Vec<_> = seq.ref_iter().collect();
+        let bitstring = children
+            .get(1)
+            .ok_or_else(|| "SPKI has no subjectPublicKey BIT STRING".to_string())?;
+        match &bitstring.content {
+            BerObjectContent::BitString(_, bytes) => bytes.data.to_vec(),
+            other => {
+                return Err(format!(
+                    "SPKI subjectPublicKey is not a BIT STRING: {other:?}"
+                ));
+            }
+        }
+    };
+    // Prepended unused-bits byte is already stripped by the parser's
+    // BitString view (it returns the raw content bytes).
+    let rsa_key = rsa::pkcs1::RsaPublicKey::try_from(pubkey_der.as_slice())
         .map_err(|e| format!("extract RSA public key from certificate: {e}"))?;
     let n = BigUint::from_bytes_be(rsa_key.modulus.as_bytes());
     let e = BigUint::from_bytes_be(rsa_key.public_exponent.as_bytes());
