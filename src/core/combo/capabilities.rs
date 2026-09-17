@@ -326,6 +326,16 @@ static MODEL_CAPABILITIES: LazyLock<HashMap<&'static str, Value>> = LazyLock::ne
             "kimi-k2.7-code-highspeed",
             serde_json::json!({ "vision": true, "videoInput": true, "reasoning": true, "thinkingFormat": "kimi", "thinkingCanDisable": false, "contextWindow": 262144, "maxOutput": 65536 }),
         ),
+        // OpenCode Free Muse Spark — multimodal (text+image) via OpenAI
+        // Responses input_image; reasoning up to xhigh. 9router acb5c34c.
+        (
+            "muse-spark-1.2-contributor-free",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
+        (
+            "muse-spark-1.3-contributor-free",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 131072 }),
+        ),
     ])
 });
 
@@ -653,6 +663,13 @@ static PATTERN_CAPABILITIES: LazyLock<Vec<(&'static str, Value)>> = LazyLock::ne
         (
             "*hunyuan*",
             serde_json::json!({ "reasoning": true, "thinkingFormat": "hunyuan", "contextWindow": 262144, "maxOutput": 262144 }),
+        ),
+        // OpenCode Free Muse Spark (multimodal text+image per models.dev
+        // meta/muse-spark, via OpenAI Responses input_image; reasoning up to
+        // xhigh). 9router acb5c34c.
+        (
+            "*muse*spark*",
+            serde_json::json!({ "vision": true, "reasoning": true, "thinkingFormat": "openai", "contextWindow": 1048576, "maxOutput": 131072 }),
         ),
         (
             "hy3*",
