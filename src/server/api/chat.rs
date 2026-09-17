@@ -2317,8 +2317,8 @@ async fn forward_with_provider_fallback(
                 // OR the error JSON body (errorBody.retryAfter). Header wins; the
                 // body is the fallback when a provider returns it only in JSON.
                 let header_retry_after = retry_after_from_headers(result.response.headers());
-                let (message, body_retry_after) =
-                    extract_error_message_and_retry_after(result.response).await;
+                let (message, raw_body, body_retry_after) =
+                    extract_error_message_and_retry_after_with_body(result.response).await;
                 let retry_after = header_retry_after.or(body_retry_after);
                 state
                     .usage_live
@@ -2333,7 +2333,12 @@ async fn forward_with_provider_fallback(
                     status: status.as_u16(),
                     message: message.clone(),
                     retry_after,
-                    upstream_body: None,
+                    // H23 (bead openproxy-i7yt): preserve the raw upstream
+                    // error body so attempt_error_response can return it
+                    // verbatim instead of a generic 500. Without this the
+                    // FreeTierError/insufficient_quota text is lost and the
+                    // client sees only "Internal server error".
+                    upstream_body: raw_body,
                 });
 
                 // 404 (model not found) should set a model-specific lock without
@@ -4192,6 +4197,18 @@ async fn extract_upstream_error_with_body(response: UpstreamResponse) -> (String
 async fn extract_error_message_and_retry_after(
     response: UpstreamResponse,
 ) -> (String, Option<DateTime<Utc>>) {
+    let (message, _, retry_after) = extract_error_message_and_retry_after_with_body(response).await;
+    (message, retry_after)
+}
+
+/// Same as [`extract_error_message_and_retry_after`] but additionally
+/// returns the raw upstream body bytes so the caller can preserve them on
+/// `ComboAttemptError::upstream_body` for verbatim passthrough (H23, bead
+/// openproxy-i7yt). Split out rather than changing the existing signature
+/// because the other call sites only need message + retryAfter.
+async fn extract_error_message_and_retry_after_with_body(
+    response: UpstreamResponse,
+) -> (String, Option<Vec<u8>>, Option<DateTime<Utc>>) {
     let status = response.status();
     let text = match response {
         UpstreamResponse::Reqwest(response) => response.text().await.unwrap_or_default(),
@@ -4202,6 +4219,11 @@ async fn extract_error_message_and_retry_after(
                 .map(|collected| String::from_utf8_lossy(&collected.to_bytes()).into_owned())
                 .unwrap_or_default()
         }
+    };
+    let raw_body = if text.is_empty() {
+        None
+    } else {
+        Some(text.clone().into_bytes())
     };
     let retry_after = crate::core::combo::parse_retry_after_from_body(text.as_bytes());
     let message = {
@@ -4228,7 +4250,7 @@ async fn extract_error_message_and_retry_after(
             fallback_error_text(status, &text)
         }
     };
-    (message, retry_after)
+    (message, raw_body, retry_after)
 }
 
 fn fallback_error_text(status: StatusCode, text: &str) -> String {
@@ -5036,5 +5058,61 @@ mod tests {
         assert!(is_no_auth_provider("opencode"));
         assert!(!is_no_auth_provider("opencode-go"));
         assert!(!is_no_auth_provider("ocg"));
+    }
+    // Bead openproxy-i7yt: upstream error bodies must survive to the
+    // client verbatim (H23) instead of collapsing to generic 500.
+    #[test]
+    fn upstream_body_preserved_verbatim_in_error_response() {
+        use super::attempt_error_response;
+        use crate::core::combo::ComboAttemptError;
+        // JSON upstream body (e.g. FreeTierError/insufficient_quota).
+        let raw = br#"{"error":{"message":"OpenCode's free tier can only be used from within OpenCode","type":"permission_error"}}"#;
+        let err = ComboAttemptError {
+            status: 403,
+            message: "OpenCode's free tier can only be used from within OpenCode".to_string(),
+            retry_after: None,
+            upstream_body: Some(raw.to_vec()),
+        };
+        let resp = attempt_error_response(err);
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+        // Non-JSON upstream body (e.g. Cloudflare "error code: 1010").
+        let raw2 = b"error code: 1010";
+        let err2 = ComboAttemptError {
+            status: 403,
+            message: "error code: 1010".to_string(),
+            retry_after: None,
+            upstream_body: Some(raw2.to_vec()),
+        };
+        let resp2 = attempt_error_response(err2);
+        assert_eq!(resp2.status(), axum::http::StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn extractor_returns_raw_body_bytes() {
+        use super::extract_error_message_and_retry_after_with_body;
+        use crate::core::executor::UpstreamResponse;
+        fn upstream(status: u16, body: &'static str) -> UpstreamResponse {
+            let http_resp = axum::http::Response::builder()
+                .status(status)
+                .body(body)
+                .unwrap();
+            UpstreamResponse::Reqwest(reqwest::Response::from(http_resp))
+        }
+        // JSON body round-trips as raw bytes.
+        let raw = r#"{"error":{"message":"quota hit"}}"#;
+        let (msg, body, _) =
+            extract_error_message_and_retry_after_with_body(upstream(403, raw)).await;
+        assert_eq!(msg, "quota hit");
+        assert_eq!(body, Some(raw.as_bytes().to_vec()));
+        // Plain-text body (Cloudflare-style) also preserved.
+        let (msg2, body2, _) =
+            extract_error_message_and_retry_after_with_body(upstream(403, "error code: 1010"))
+                .await;
+        assert_eq!(msg2, "error code: 1010");
+        assert_eq!(body2, Some(b"error code: 1010".to_vec()));
+        // Empty body → None (no verbatim passthrough to preserve).
+        let (_, body3, _) =
+            extract_error_message_and_retry_after_with_body(upstream(500, "")).await;
+        assert_eq!(body3, None);
     }
 }
