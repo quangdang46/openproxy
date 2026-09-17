@@ -333,6 +333,41 @@ mod tests {
         assert!(catalog
             .models_for_alias("selfhosted-tts")
             .is_some_and(|ms| { ms.len() == 1 && ms[0].id == "kokoro" && ms[0].kind == "tts" }));
+
+        // 9router 3288bbc4: OpenRouter + Vertex gain videoConfig, the video
+        // serviceKind, and video-kind models (Veo 3.1 / 3 / 2, Sora 2 Pro,
+        // Seedance 2.0).
+        let or_provider = catalog
+            .provider_info("openrouter")
+            .expect("openrouter provider");
+        assert!(or_provider.service_kinds.contains(&"video".to_string()));
+        let or_models = catalog
+            .models_for_alias("openrouter")
+            .expect("openrouter models");
+        for id in [
+            "google/veo-3.1",
+            "openai/sora-2-pro",
+            "bytedance/seedance-2.0",
+        ] {
+            assert!(
+                or_models.iter().any(|m| m.id == id && m.kind == "video"),
+                "{id} should be a video-kind model"
+            );
+        }
+        let vx_provider = catalog.provider_info("vertex").expect("vertex provider");
+        assert!(vx_provider.service_kinds.contains(&"video".to_string()));
+        let vx_models = catalog.models_for_alias("vertex").expect("vertex models");
+        for id in [
+            "veo-3.1-generate-preview",
+            "veo-3.1-fast-generate-preview",
+            "veo-3.0-generate-001",
+            "veo-2.0-generate-001",
+        ] {
+            assert!(
+                vx_models.iter().any(|m| m.id == id && m.kind == "video"),
+                "{id} should be a video-kind model"
+            );
+        }
     }
 
     // providerIdToAlias must resolve provider ids to the JS aliases, and
