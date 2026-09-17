@@ -735,23 +735,35 @@ pub fn chat_to_openai_responses_request(
     }
 
     if let Some(tools) = body.get("tools").and_then(|v| v.as_array()) {
-        let converted: Vec<Value> = tools.iter().map(|tool| {
-            if tool.get("type").and_then(|v| v.as_str()) == Some("function") {
-                if let Some(fn_obj) = tool.get("function") {
-                    serde_json::json!({
-                        "type": "function",
-                        "name": fn_obj.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                        "description": fn_obj.get("description").and_then(|v| v.as_str()).unwrap_or(""),
-                        "parameters": normalize_tool_parameters(fn_obj.get("parameters")),
-                        "strict": fn_obj.get("strict").cloned()
-                    })
-                } else {
-                    tool.clone()
+        // Strict upstreams reject nameless/overlong tool declarations
+        // (JS e74db4d0 openaiToOpenAIResponsesRequest tools[] mapping +
+        // `.filter(Boolean)`; mirrors the tool_calls path above, #444).
+        let converted: Vec<Value> = tools
+            .iter()
+            .filter_map(|tool| {
+                if tool.get("type").and_then(|v| v.as_str()) == Some("function") {
+                    if let Some(fn_obj) = tool.get("function") {
+                        let raw_name = fn_obj
+                            .get("name")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .trim();
+                        if raw_name.is_empty() {
+                            return None;
+                        }
+                        let name: String = raw_name.chars().take(128).collect();
+                        return Some(serde_json::json!({
+                            "type": "function",
+                            "name": name,
+                            "description": fn_obj.get("description").and_then(|v| v.as_str()).unwrap_or(""),
+                            "parameters": normalize_tool_parameters(fn_obj.get("parameters")),
+                            "strict": fn_obj.get("strict").cloned()
+                        }));
+                    }
                 }
-            } else {
-                tool.clone()
-            }
-        }).collect();
+                Some(tool.clone())
+            })
+            .collect();
         result["tools"] = Value::Array(converted);
     }
 
@@ -1240,5 +1252,50 @@ mod tests {
         // Nameless call skipped: only 1 function_call + 1 output.
         assert_eq!(input.len(), 2);
         assert_eq!(input[1]["output"], "{\"ok\":true}");
+    }
+}
+
+#[cfg(test)]
+mod tools_mapping_tests {
+    use super::chat_to_openai_responses_request;
+    use serde_json::{json, Value};
+
+    fn run_tools(body: Value) -> Vec<Value> {
+        let mut b = body;
+        chat_to_openai_responses_request("m", &mut b, false, None);
+        b.get("tools")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn nameless_tools_skipped() {
+        let out = run_tools(json!({"messages": [], "tools": [
+            {"type": "function", "function": {"name": "  ", "description": "x"}},
+            {"type": "function", "function": {"description": "no-name"}},
+            {"type": "function", "function": {"name": "ok"}},
+        ]}));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], json!("ok"));
+    }
+
+    #[test]
+    fn long_names_clamped_to_128() {
+        let long = "n".repeat(200);
+        let out = run_tools(json!({"messages": [], "tools": [
+            {"type": "function", "function": {"name": long}},
+        ]}));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"].as_str().unwrap().chars().count(), 128);
+    }
+
+    #[test]
+    fn non_function_tools_pass_through() {
+        let out = run_tools(json!({"messages": [], "tools": [
+            {"type": "custom", "name": "keep-me"},
+        ]}));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["name"], json!("keep-me"));
     }
 }
