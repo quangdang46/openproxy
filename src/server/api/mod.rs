@@ -2244,6 +2244,33 @@ async fn update_settings_api(
                     )
                         .into_response();
                 }
+                // Reject malformed certs before persisting (issues #457/#460):
+                // a garbage cert breaks ACS while password login stays
+                // blocked (SSO lockout, manual DB fix to recover).
+                {
+                    use crate::server::auth::saml::{
+                        format_x509_certificate, rsa_public_key_from_cert_pem,
+                    };
+                    let pem = format_x509_certificate(cert);
+                    if pem.is_empty() {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": "Invalid IdP X.509 Certificate format."
+                            })),
+                        )
+                            .into_response();
+                    }
+                    if let Err(e) = rsa_public_key_from_cert_pem(&pem) {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({
+                                "error": format!("IdP X.509 Certificate is not a valid RSA certificate: {e}")
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
             }
         }
         if matches!(next_mode, "oidc" | "both") {
