@@ -998,4 +998,103 @@ mod tests {
             .await
             .is_ok());
     }
+
+    // Debt bead openproxy-dvqi.1: the unit tests above only cover the
+    // internal helpers because assert_public_url(_resolved) are stubbed to
+    // Ok under cfg(test). These wiremock tests prove the REAL redirect
+    // behavior of fetch_public end-to-end. NOTE: wiremock serves on
+    // 127.0.0.1, which the PRODUCTION guard would block — but the
+    // #[cfg(test)] stubs bypass both assert_* checks, so what these tests
+    // actually exercise is the manual-redirect loop itself: hop following,
+    // Location resolution, and the MAX_REDIRECTS bound. DNS-revalidation
+    // per hop is covered by construction (same stubbed fn in prod and
+    // test); the pure helpers it delegates to are covered above.
+    #[tokio::test]
+    async fn fetch_public_follows_redirect_chain_to_final_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/start"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/middle", server.uri()).as_str()),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/middle"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/final"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/final"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let res = fetch_public(
+            &client,
+            reqwest::Method::GET,
+            &format!("{}/start", server.uri()),
+            reqwest::header::HeaderMap::new(),
+            None,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("redirect chain should resolve");
+        assert_eq!(res.status().as_u16(), 200);
+        let body: serde_json::Value = res.json().await.expect("json body");
+        assert_eq!(body, serde_json::json!({"ok": true}));
+    }
+
+    #[tokio::test]
+    async fn fetch_public_returns_non_redirect_as_is() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/direct"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hello"))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let res = fetch_public(
+            &client,
+            reqwest::Method::GET,
+            &format!("{}/direct", server.uri()),
+            reqwest::header::HeaderMap::new(),
+            None,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect("direct fetch should succeed");
+        assert_eq!(res.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn fetch_public_errors_after_too_many_redirects() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // Infinite loop: /loop always redirects to itself. MAX_REDIRECTS (5)
+        // hops must bound it with the too-many-redirects error.
+        Mock::given(method("GET"))
+            .and(path("/loop"))
+            .respond_with(ResponseTemplate::new(302).insert_header("location", "/loop"))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        let err = fetch_public(
+            &client,
+            reqwest::Method::GET,
+            &format!("{}/loop", server.uri()),
+            reqwest::header::HeaderMap::new(),
+            None,
+            std::time::Duration::from_secs(10),
+        )
+        .await
+        .expect_err("self-redirect loop must error");
+        assert!(err.contains("too many redirects"), "got: {err}");
+    }
 }
