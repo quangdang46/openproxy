@@ -119,6 +119,7 @@ pub fn provider_generic_format(provider: &str) -> Option<GenericFormat> {
         "playht" => GenericFormat::Playht,
         "coqui" => GenericFormat::Coqui,
         "tortoise" => GenericFormat::Tortoise,
+        "fish-audio" | "fish" => GenericFormat::FishAudio,
         "selfhosted-tts" => GenericFormat::OpenaiCompat,
         _ => return None,
     })
@@ -175,6 +176,7 @@ fn default_generic_base_url(provider: &str) -> &'static str {
         "playht" => "https://api.play.ht/api/v2/tts/stream",
         "coqui" => "http://localhost:5002/api/tts",
         "tortoise" => "http://localhost:5000/api/tts",
+        "fish-audio" | "fish" => "https://api.fish.audio/v1/tts",
         "selfhosted-tts" => "http://localhost:8880",
         _ => "",
     }
@@ -218,6 +220,8 @@ mod tests {
             "nvidia",
             "huggingface",
             "xiaomi-mimo",
+            "fish-audio",
+            "fish",
         ] {
             assert!(is_tts_provider(p), "{p} should be a TTS provider");
         }
@@ -237,6 +241,29 @@ mod tests {
         );
         assert_eq!(provider_generic_format("openai"), None);
         assert_eq!(provider_generic_format("not-real"), None);
+    }
+
+    #[test]
+    fn fish_audio_format_and_base_url_parity() {
+        // 9router 8af5e752: format "fish-audio", base https://api.fish.audio/v1/tts.
+        assert_eq!(
+            GenericFormat::parse("fish-audio"),
+            Some(GenericFormat::FishAudio)
+        );
+        assert_eq!(
+            provider_generic_format("fish-audio"),
+            Some(GenericFormat::FishAudio)
+        );
+        assert_eq!(
+            provider_generic_format("fish"),
+            Some(GenericFormat::FishAudio)
+        );
+        assert_eq!(
+            default_generic_base_url("fish-audio"),
+            "https://api.fish.audio/v1/tts"
+        );
+        assert!(is_tts_provider("fish-audio"));
+        assert!(is_tts_provider("fish"));
     }
 
     #[test]

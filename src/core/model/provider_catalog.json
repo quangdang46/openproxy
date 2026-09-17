@@ -5,6 +5,7 @@
   "gemini-cli": "gc",
   "codex": "cx",
   "qwen": "qw",
+ "fish-audio": "fish",
   "iflow": "if",
   "qoder": "qoder",
   "antigravity": "ag",
@@ -6505,6 +6506,22 @@
    ],
    "ttsModels": [
     "tts_models/en/ljspeech/tacotron2-DDC"
+   ],
+   "embeddingModels": [],
+   "hasSearch": false,
+   "hasFetch": false
+  },
+  {
+   "id": "fish-audio",
+   "alias": "fish",
+   "serviceKinds": [
+    "tts"
+   ],
+   "ttsModels": [
+    "s2.1-pro-free",
+    "s2.1-pro",
+    "s2-pro",
+    "s1"
    ],
    "embeddingModels": [],
    "hasSearch": false,
