@@ -169,6 +169,20 @@ impl OpenCodeGoExecutor {
         &self,
         mut request: OpenCodeGoExecutionRequest,
     ) -> Result<OpenCodeGoExecutorResponse, OpenCodeGoExecutorError> {
+        // DECISION (bead openproxy-dgzj, JS e74db4d0): no
+        // `normalizeResponsesTools` equivalent is ported here, deliberately.
+        // The JS helper flattens Chat tool declarations into the Responses
+        // flat shape because the JS opencode-go executor POSTs Muse Spark
+        // bodies to `/zen/go/v1/responses`. This executor instead converts
+        // Responses `input` back to Chat `messages` (see below) and always
+        // POSTs to the Chat endpoints (`/messages` or `/chat/completions`),
+        // so a Chat→Responses tool flattening would be dead code on this
+        // path — the request never carries a Responses-shaped body upstream.
+        // The Chat→Responses tools[] mapping itself (nameless-skip +
+        // 128-char clamp) lives in the translator
+        // (`chat_to_openai_responses_request` in
+        // `core/translator/request/openai_responses.rs`, bead
+        // openproxy-ybo0) and is covered by its unit tests.
         let url = self.build_url(&request.model);
         let headers = self.build_headers(&request.credentials, request.stream, &request.model);
 
