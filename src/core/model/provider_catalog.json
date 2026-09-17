@@ -5893,6 +5893,7 @@
    "alias": "vx",
    "serviceKinds": [
     "llm",
+    "imageToText",
     "video"
    ],
    "ttsModels": [],
