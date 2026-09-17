@@ -724,10 +724,11 @@ pub(crate) fn safe_settings_payload_with_db_path(
         fields.insert("oidcConfigured".to_string(), Value::Bool(oidc_configured));
 
         // Prefer the first-class auth_mode field; fall back to legacy extra.authMode /
-        // oidc_enabled for older DB payloads.
+        // oidc_enabled for older DB payloads. Accepts sso/saml (9router
+        // 65197ad1 unified authMode/ssoType model).
         let auth_mode = {
             let mode = settings.auth_mode.trim();
-            if matches!(mode, "password" | "oidc" | "both") {
+            if matches!(mode, "password" | "oidc" | "sso" | "saml" | "both") {
                 mode.to_string()
             } else {
                 settings
@@ -735,7 +736,7 @@ pub(crate) fn safe_settings_payload_with_db_path(
                     .get("authMode")
                     .and_then(|value| value.as_str())
                     .map(str::trim)
-                    .filter(|value| matches!(*value, "password" | "oidc" | "both"))
+                    .filter(|value| matches!(*value, "password" | "oidc" | "sso" | "saml" | "both"))
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| {
                         if settings.oidc_enabled {
@@ -772,6 +773,77 @@ pub(crate) fn safe_settings_payload_with_db_path(
         fields.insert(
             "oidcLoginLabel".to_string(),
             Value::String(oidc_login_label),
+        );
+
+        // SAML SSO fields for the profile SSO switcher + login page
+        // (9router settingsRepo 65197ad1: ssoType/samlEntryPoint/samlIssuer/
+        // samlLoginLabel/samlAttributeEmail/samlAttributeName; samlCert is
+        // write-only and stripped above).
+        fields.insert(
+            "ssoType".to_string(),
+            Value::String({
+                let s = settings.sso_type.trim();
+                if s.is_empty() {
+                    "saml".to_string()
+                } else {
+                    s.to_string()
+                }
+            }),
+        );
+        fields.insert(
+            "samlConfigured".to_string(),
+            Value::Bool(crate::server::auth::saml::is_saml_configured(
+                &settings.saml_entry_point,
+                &settings.saml_cert,
+            )),
+        );
+        fields.insert(
+            "samlEntryPoint".to_string(),
+            Value::String(settings.saml_entry_point.clone()),
+        );
+        fields.insert(
+            "samlIssuer".to_string(),
+            Value::String({
+                let s = settings.saml_issuer.trim();
+                if s.is_empty() {
+                    "urn:9router:sp".to_string()
+                } else {
+                    s.to_string()
+                }
+            }),
+        );
+        fields.insert(
+            "samlLoginLabel".to_string(),
+            Value::String({
+                let l = settings.saml_login_label.trim();
+                if l.is_empty() {
+                    "Sign in with SAML SSO".to_string()
+                } else {
+                    l.to_string()
+                }
+            }),
+        );
+        fields.insert(
+            "samlAttributeEmail".to_string(),
+            Value::String({
+                let s = settings.saml_attribute_email.trim();
+                if s.is_empty() {
+                    "email".to_string()
+                } else {
+                    s.to_string()
+                }
+            }),
+        );
+        fields.insert(
+            "samlAttributeName".to_string(),
+            Value::String({
+                let s = settings.saml_attribute_name.trim();
+                if s.is_empty() {
+                    "name".to_string()
+                } else {
+                    s.to_string()
+                }
+            }),
         );
 
         if let Some(path) = db_path {

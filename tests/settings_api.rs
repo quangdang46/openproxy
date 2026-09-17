@@ -232,3 +232,32 @@ async fn settings_database_import_and_require_login_round_trip() {
     assert_eq!(json["tunnelUrl"], "https://demo.example");
     assert_eq!(json["tailscaleUrl"], "https://tail.example");
 }
+
+#[tokio::test]
+async fn get_settings_exposes_saml_sso_fields_with_defaults() {
+    // 9router 65197ad1 settingsRepo parity: /api/settings must carry the
+    // SSO switcher fields (ssoType + saml*) with JS defaults, while the
+    // certificate stays write-only.
+    let app = openproxy::build_app(app_state().await);
+    let res = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/settings")
+                .header("authorization", format!("Bearer {TEST_KEY}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["ssoType"], "saml");
+    assert_eq!(json["samlLoginLabel"], "Sign in with SAML SSO");
+    assert_eq!(json["samlIssuer"], "urn:9router:sp");
+    assert_eq!(json["samlAttributeEmail"], "email");
+    assert_eq!(json["samlAttributeName"], "name");
+    assert_eq!(json["samlConfigured"], false);
+    assert!(json.get("samlCert").is_none(), "cert must stay write-only");
+    assert_eq!(json["authMode"], "password");
+}
