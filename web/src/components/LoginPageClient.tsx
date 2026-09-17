@@ -4,20 +4,31 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Card, Input } from "@/shared/components";
 
 const DEFAULT_OIDC_LABEL = "Sign in with OIDC";
+const DEFAULT_SAML_LABEL = "Sign in with SAML SSO";
 
-type AuthMode = "password" | "oidc" | "both";
+type AuthMode = "password" | "oidc" | "sso" | "saml" | "both";
 
 interface AuthStatus {
   requireLogin?: boolean;
   hasPassword?: boolean;
   authMode?: string;
+  ssoType?: string;
   oidcConfigured?: boolean;
   oidcLoginLabel?: string;
+  samlConfigured?: boolean;
+  samlLoginLabel?: string;
   authenticated?: boolean;
 }
 
 function normalizeAuthMode(value: unknown): AuthMode {
-  if (value === "oidc" || value === "both" || value === "password") return value;
+  if (
+    value === "oidc" ||
+    value === "both" ||
+    value === "password" ||
+    value === "sso" ||
+    value === "saml"
+  )
+    return value;
   return "password";
 }
 
@@ -49,8 +60,11 @@ export default function LoginPageClient() {
   const [statusLoading, setStatusLoading] = useState(true);
   const [hasPassword, setHasPassword] = useState<boolean | null>(null);
   const [authMode, setAuthMode] = useState<AuthMode>("password");
+  const [ssoType, setSsoType] = useState("oidc");
   const [oidcConfigured, setOidcConfigured] = useState(false);
   const [oidcLoginLabel, setOidcLoginLabel] = useState(DEFAULT_OIDC_LABEL);
+  const [samlConfigured, setSamlConfigured] = useState(false);
+  const [samlLoginLabel, setSamlLoginLabel] = useState(DEFAULT_SAML_LABEL);
   const [mustChange, setMustChange] = useState(false);
 
   // Countdown for rate-limit lockouts.
@@ -88,9 +102,16 @@ export default function LoginPageClient() {
 
         setHasPassword(!!data.hasPassword);
         setAuthMode(normalizeAuthMode(data.authMode));
+        setSsoType(
+          typeof data.ssoType === "string" && data.ssoType ? data.ssoType : "oidc",
+        );
         setOidcConfigured(data.oidcConfigured === true);
         setOidcLoginLabel(
           (data.oidcLoginLabel && data.oidcLoginLabel.trim()) || DEFAULT_OIDC_LABEL,
+        );
+        setSamlConfigured(data.samlConfigured === true);
+        setSamlLoginLabel(
+          (data.samlLoginLabel && data.samlLoginLabel.trim()) || DEFAULT_SAML_LABEL,
         );
       } catch {
         if (!cancelled) setHasPassword(true);
@@ -113,26 +134,36 @@ export default function LoginPageClient() {
       const params = new URLSearchParams(window.location.search);
       const oidcError = params.get("error");
       if (oidcError) {
-        setError(`OIDC sign-in failed: ${oidcError}`);
+        setError(`SSO sign-in failed: ${oidcError}`);
       }
     } catch {
       /* ignore */
     }
   }, []);
 
-  const oidcAvailable = oidcConfigured && (authMode === "oidc" || authMode === "both");
-  const passwordAvailable = authMode !== "oidc" || !oidcConfigured;
+  // 9router login/page.js (65197ad1): SSO dispatch by authMode + ssoType.
+  const isSsoEnabled = ["sso", "oidc", "saml", "both"].includes(authMode);
+  const activeSsoType = ssoType || (authMode === "saml" ? "saml" : "oidc");
+
+  const samlAvailable = isSsoEnabled && activeSsoType === "saml" && samlConfigured;
+  const oidcAvailable = isSsoEnabled && activeSsoType === "oidc" && oidcConfigured;
+  const ssoAvailable = samlAvailable || oidcAvailable;
+  const passwordAvailable =
+    authMode === "password" || authMode === "both" || !ssoAvailable;
 
   const subtitle = useMemo(() => {
     if (mustChange) return "Choose a new password before continuing";
-    if (authMode === "oidc" && oidcConfigured) {
+    if (samlAvailable) {
+      return "Sign in with SAML 2.0 Single Sign-On";
+    }
+    if (oidcAvailable) {
       return "Sign in with your OIDC provider to access the dashboard";
     }
-    if (authMode === "both" && oidcConfigured) {
-      return "Sign in with password or OIDC";
+    if (authMode === "both" && ssoAvailable) {
+      return `Sign in with password or ${activeSsoType === "saml" ? "SAML SSO" : "OIDC"}`;
     }
     return "Enter your password to access the dashboard";
-  }, [authMode, mustChange, oidcConfigured]);
+  }, [authMode, mustChange, samlAvailable, oidcAvailable, ssoAvailable, activeSsoType]);
 
   const handleLogin = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -255,6 +286,10 @@ export default function LoginPageClient() {
     window.location.href = "/api/auth/oidc/login";
   };
 
+  const handleSamlLogin = () => {
+    window.location.href = "/api/auth/saml/start";
+  };
+
   if (statusLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-canvas px-4 py-12 relative overflow-hidden">
@@ -337,13 +372,19 @@ export default function LoginPageClient() {
             </form>
           ) : (
             <div className="flex flex-col gap-5">
+              {samlAvailable && (
+                <Button type="button" variant="primary" fullWidth onClick={handleSamlLogin}>
+                  {samlLoginLabel}
+                </Button>
+              )}
+
               {oidcAvailable && (
                 <Button type="button" variant="primary" fullWidth onClick={handleOidcLogin}>
                   {oidcLoginLabel}
                 </Button>
               )}
 
-              {oidcAvailable && passwordAvailable && (
+              {ssoAvailable && passwordAvailable && (
                 <div className="flex items-center gap-3">
                   <div className="h-px flex-1 bg-hairline" />
                   <span className="text-[12px] text-muted">or</span>
@@ -353,16 +394,19 @@ export default function LoginPageClient() {
 
               {passwordAvailable ? (
                 <form onSubmit={handleLogin} className="flex flex-col gap-5">
-                  {authMode !== "password" && !oidcConfigured && (
+                  {isSsoEnabled && !ssoAvailable && (
                     <p className="text-[12px] text-center text-amber-700 dark:text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-mini-md px-3 py-2">
-                      OIDC login is enabled, but the issuer/client fields are not configured
-                      yet. Password login is still available for recovery.
+                      {activeSsoType === "saml" ? "SAML SSO" : "OIDC"} login is
+                      enabled, but configuration is incomplete. Password login is
+                      still available for recovery.
                     </p>
                   )}
 
-                  {authMode === "both" && oidcConfigured && (
+                  {authMode === "both" && ssoAvailable && (
                     <p className="text-[12px] text-center text-muted">
-                      Password and OIDC login are both enabled.
+                      Password and{" "}
+                      {activeSsoType === "saml" ? "SAML SSO" : "OIDC"} login are
+                      both enabled.
                     </p>
                   )}
 
@@ -373,7 +417,7 @@ export default function LoginPageClient() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
-                    autoFocus={!oidcAvailable}
+                    autoFocus={!ssoAvailable}
                     autoComplete="current-password"
                     disabled={retryAfter > 0}
                   />

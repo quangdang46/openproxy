@@ -159,6 +159,17 @@ pub struct DashboardClaims {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// SAML identity claims (embedded by the SAML ACS handler, 9router
+    /// saml/acs/route.js: `setDashboardAuthCookie({ saml: true, samlEmail,
+    /// samlName })`). `saml: true` marks the session; name/email carry the
+    /// picked display claims. Serialized snake_case (saml_name/saml_email)
+    /// because the ACS handler builds the JWT from a serde_json map.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saml: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saml_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saml_email: Option<String>,
 }
 
 impl AuthError {
@@ -201,6 +212,9 @@ pub fn require_dashboard_session(
             jti: None,
             name: None,
             email: None,
+            saml: None,
+            saml_name: None,
+            saml_email: None,
         });
     }
 

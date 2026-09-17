@@ -194,9 +194,9 @@ pub async fn login(
 }
 
 /// GET /api/auth/status — Check if the browser has a dashboard session and
-/// return login-page metadata (auth mode, OIDC readiness, password state)
-/// plus the session identity (displayName/loginMethod/oidcName/oidcEmail)
-/// when logged in — 9router Header.js:192-216 parity for the OIDC chip.
+/// return login-page metadata (auth mode, OIDC/SAML readiness, password state)
+/// plus the session identity (displayName/loginMethod + OIDC/SAML claims)
+/// when logged in — 9router status/route.js (65197ad1) + Header.js parity.
 pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> Response {
     let session = crate::server::auth::require_dashboard_session(&headers, &state.db).ok();
     let logged_in = session.is_some();
@@ -206,22 +206,48 @@ pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> R
     let oidc_configured = is_oidc_configured(&state);
     let auth_mode = resolve_auth_mode(settings);
     let oidc_login_label = resolve_oidc_login_label(settings);
+    let saml_login_label = resolve_saml_login_label(settings);
 
     // When require_login is off, require_dashboard_session returns empty
-    // claims — but a present auth_token cookie may still carry OIDC identity
+    // claims — but a present auth_token cookie may still carry SSO identity
     // (JS always reads the session cookie to derive the chip). Prefer the
     // decoded token identity so the chip works in both modes.
     let claims = decode_dashboard_token(&headers).ok().or(session);
-    let oidc_name = claims.as_ref().and_then(|c| c.name.clone());
-    let oidc_email = claims.as_ref().and_then(|c| c.email.clone());
-    // A session with OIDC identity claims is an OIDC session (JS loginMethod).
-    let login_method = if oidc_name.is_some() || oidc_email.is_some() {
+    let oidc_name = claims
+        .as_ref()
+        .and_then(|c| c.name.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let oidc_email = claims
+        .as_ref()
+        .and_then(|c| c.email.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    // SAML identity claims (embedded by the SAML ACS handler, 9router
+    // saml/acs/route.js) take precedence over OIDC — mirrors the JS
+    // displayName/loginMethod derivation order.
+    let saml_login = claims.as_ref().and_then(|c| c.saml).unwrap_or(false);
+    let saml_name = claims
+        .as_ref()
+        .and_then(|c| c.saml_name.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let saml_email = claims
+        .as_ref()
+        .and_then(|c| c.saml_email.clone())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let login_method = if saml_login {
+        "SAML"
+    } else if oidc_name.is_some() || oidc_email.is_some() {
         "OIDC"
     } else {
         "Password"
     };
-    let display_name = oidc_name
+    let display_name = saml_name
         .clone()
+        .or_else(|| saml_email.clone())
+        .or_else(|| oidc_name.clone())
         .or_else(|| oidc_email.clone())
         .unwrap_or_default();
 
@@ -235,6 +261,7 @@ pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> R
         "oidcLoginLabel": oidc_login_label,
         "oidcEnabled": settings.oidc_enabled,
         "samlConfigured": saml_is_configured,
+        "samlLoginLabel": saml_login_label,
         "ssoType": resolve_sso_type(settings),
     });
     if let Some(obj) = body.as_object_mut() {
@@ -242,6 +269,10 @@ pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> R
         obj.insert("loginMethod".into(), json!(login_method));
         obj.insert("oidcName".into(), json!(oidc_name));
         obj.insert("oidcEmail".into(), json!(oidc_email));
+        obj.insert("oidcLogin".into(), json!(login_method == "OIDC"));
+        obj.insert("samlName".into(), json!(saml_name));
+        obj.insert("samlEmail".into(), json!(saml_email));
+        obj.insert("samlLogin".into(), json!(saml_login));
     }
     Json(body).into_response()
 }
@@ -477,7 +508,9 @@ pub async fn oidc_callback(
         .to_string();
 
     let now = Utc::now().timestamp();
-    let exp = (Utc::now() + ChronoDuration::days(7)).timestamp();
+    // 9router dashboardSession SESSION_MAX_AGE_SEC = 24h for every login
+    // incl. SAML/OIDC ACS — not 7 days.
+    let exp = (Utc::now() + ChronoDuration::days(1)).timestamp();
     let jti = crate::server::auth::generate_jti();
     let token_claims = json!({
         "sub": email,
@@ -511,7 +544,7 @@ pub async fn oidc_callback(
             .unwrap_or(false);
 
     let mut response = Redirect::to("/").into_response();
-    let cookie = build_auth_cookie(&token, 7 * 24 * 60 * 60, secure_cookie);
+    let cookie = build_auth_cookie(&token, 24 * 60 * 60, secure_cookie);
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -1214,7 +1247,9 @@ pub async fn saml_acs(State(state): State<AppState>, headers: HeaderMap, body: S
     }
     let _ = state.login_limiter.check_and_record(client_ip, true).await;
     let now_ts = now_secs();
-    let exp = (Utc::now() + ChronoDuration::days(7)).timestamp();
+    // 9router dashboardSession SESSION_MAX_AGE_SEC = 24h for every login
+    // incl. SAML/OIDC ACS — not 7 days.
+    let exp = (Utc::now() + ChronoDuration::days(1)).timestamp();
     let jti = crate::server::auth::generate_jti();
     let sub = if email.is_empty() {
         name.clone()
@@ -1226,6 +1261,11 @@ pub async fn saml_acs(State(state): State<AppState>, headers: HeaderMap, body: S
         "email": email,
         "name": name,
         "authenticated": true,
+        // 9router saml/acs/route.js: setDashboardAuthCookie({ saml: true,
+        // samlEmail, samlName }) — the `saml` flag drives loginMethod.
+        "saml": true,
+        "saml_email": email,
+        "saml_name": name,
         "iat": now_ts,
         "exp": exp as usize,
         "jti": jti,
@@ -1248,7 +1288,7 @@ pub async fn saml_acs(State(state): State<AppState>, headers: HeaderMap, body: S
             .unwrap_or(false);
     let origin = saml_origin(&headers, &settings);
     let mut response = Redirect::to(&format!("{origin}/dashboard")).into_response();
-    let cookie = build_auth_cookie(&token, 7 * 24 * 60 * 60, secure_cookie);
+    let cookie = build_auth_cookie(&token, 24 * 60 * 60, secure_cookie);
     if let Ok(value) = HeaderValue::from_str(&cookie) {
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -1576,6 +1616,31 @@ fn resolve_oidc_login_label(settings: &Settings) -> String {
         }
     }
     "Sign in with OIDC".to_string()
+}
+
+/// Resolve the SAML sign-in button label — 9router status/route.js
+/// (65197ad1): `(settings.samlLoginLabel || "Sign in with SAML SSO")`.
+fn resolve_saml_login_label(settings: &Settings) -> String {
+    let label = settings.saml_login_label.trim();
+    if !label.is_empty() {
+        return label.to_string();
+    }
+    if let Some(label) = settings
+        .extra
+        .get("samlLoginLabel")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return label.to_string();
+    }
+    if let Ok(label) = std::env::var("SAML_LOGIN_LABEL") {
+        let trimmed = label.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    "Sign in with SAML SSO".to_string()
 }
 
 fn is_oidc_configured(state: &AppState) -> bool {

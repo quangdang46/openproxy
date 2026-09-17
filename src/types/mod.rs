@@ -667,6 +667,13 @@ pub struct Settings {
     /// client secret).
     #[serde(default, skip_serializing)]
     pub saml_cert: String,
+    /// SAML sign-in button label. 9router settingsRepo `samlLoginLabel`
+    /// (commit 65197ad1, default "Sign in with SAML SSO").
+    #[serde(
+        default = "default_saml_login_label",
+        deserialize_with = "deserialize_null_default"
+    )]
+    pub saml_login_label: String,
     /// Optional custom attribute name for the email claim.
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub saml_attribute_email: String,
@@ -745,6 +752,7 @@ impl Default for Settings {
             saml_entry_point: String::new(),
             saml_issuer: String::new(),
             saml_cert: String::new(),
+            saml_login_label: default_saml_login_label(),
             saml_attribute_email: String::new(),
             saml_attribute_name: String::new(),
             client_ping_url: String::new(),
@@ -774,6 +782,9 @@ impl Settings {
         }
         if self.oidc_login_label.trim().is_empty() {
             self.oidc_login_label = default_oidc_login_label();
+        }
+        if self.saml_login_label.trim().is_empty() {
+            self.saml_login_label = default_saml_login_label();
         }
 
         self.caveman_level = normalize_caveman_level_value(&self.caveman_level);
@@ -1027,6 +1038,10 @@ fn default_oidc_scopes() -> String {
 
 fn default_oidc_login_label() -> String {
     "Sign in with OIDC".into()
+}
+
+fn default_saml_login_label() -> String {
+    "Sign in with SAML SSO".into()
 }
 
 fn normalize_fallback_strategy(value: &str) -> String {
