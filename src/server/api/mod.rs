@@ -691,6 +691,9 @@ pub(crate) fn safe_settings_payload_with_db_path(
         fields.remove("password");
         // Never leak the OIDC client secret (also skip_serializing, belt+suspenders).
         fields.remove("oidcClientSecret");
+        // Never leak the SAML IdP certificate (also skip_serializing on the
+        // field itself, belt+suspenders — mirrors the OIDC secret handling).
+        fields.remove("samlCert");
         fields.insert(
             "enableRequestLogs".to_string(),
             Value::Bool(std::env::var("ENABLE_REQUEST_LOGS").ok().as_deref() == Some("true")),
@@ -2153,6 +2156,12 @@ struct UpdateSettingsRequest {
     oidc_client_secret: Option<String>,
     oidc_scopes: Option<String>,
     oidc_login_label: Option<String>,
+    sso_type: Option<String>,
+    saml_entry_point: Option<String>,
+    saml_issuer: Option<String>,
+    saml_cert: Option<String>,
+    saml_attribute_email: Option<String>,
+    saml_attribute_name: Option<String>,
     client_ping_url: Option<String>,
     client_ping_any: Option<bool>,
     headroom_enabled: Option<bool>,
@@ -2205,6 +2214,37 @@ async fn update_settings_api(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(snapshot.settings.auth_mode.as_str());
+        if matches!(next_mode, "sso" | "saml") {
+            let sso = req
+                .sso_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(snapshot.settings.sso_type.as_str());
+            let sso = if sso.is_empty() { "saml" } else { sso };
+            if sso.eq_ignore_ascii_case("saml") {
+                let entry = req
+                    .saml_entry_point
+                    .as_deref()
+                    .unwrap_or(snapshot.settings.saml_entry_point.as_str())
+                    .trim();
+                let cert = req
+                    .saml_cert
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(snapshot.settings.saml_cert.as_str());
+                if entry.is_empty() || cert.is_empty() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({
+                            "error": "SSO URL and IdP certificate are required to enable SAML."
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
         if matches!(next_mode, "oidc" | "both") {
             let issuer = req
                 .oidc_issuer_url
@@ -2336,6 +2376,28 @@ async fn update_settings_api(
             }
             if let Some(v) = req.oidc_login_label {
                 db.settings.oidc_login_label = v;
+            }
+            if let Some(v) = req.sso_type {
+                db.settings.sso_type = v;
+            }
+            if let Some(v) = req.saml_entry_point {
+                db.settings.saml_entry_point = v;
+            }
+            if let Some(v) = req.saml_issuer {
+                db.settings.saml_issuer = v;
+            }
+            // Write-only like the OIDC secret: empty/blank means "keep existing".
+            if let Some(v) = req.saml_cert {
+                let trimmed = v.trim().to_string();
+                if !trimmed.is_empty() {
+                    db.settings.saml_cert = trimmed;
+                }
+            }
+            if let Some(v) = req.saml_attribute_email {
+                db.settings.saml_attribute_email = v;
+            }
+            if let Some(v) = req.saml_attribute_name {
+                db.settings.saml_attribute_name = v;
             }
             if let Some(v) = req.oidc_enabled {
                 // Legacy flag — map onto auth_mode when auth_mode itself was not set.

@@ -26,6 +26,7 @@ pub fn spawn_jti_cleanup() {
 
 pub mod login_limiter;
 pub mod oidc;
+pub mod saml;
 
 pub const API_KEY_HEADER: &str = "x-api-key";
 pub const AUTHORIZATION_HEADER: &str = "authorization";

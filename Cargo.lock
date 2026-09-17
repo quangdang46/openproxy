@@ -2406,6 +2406,7 @@ dependencies = [
  "parking_lot",
  "pkcs8",
  "predicates",
+ "quick-xml",
  "rand 0.8.6",
  "rcgen",
  "regex",
@@ -2672,6 +2673,15 @@ checksum = "6f42ea446cab60335f76979ec15e12619a2165b5ae2c12166bef27d283a9fadf"
 dependencies = [
  "idna",
  "psl-types",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -2997,6 +3007,8 @@ dependencies = [
  "pkcs1",
  "pkcs8",
  "rand_core 0.6.4",
+ "sha1",
+ "sha2 0.10.9",
  "signature",
  "spki",
  "subtle",
