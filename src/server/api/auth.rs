@@ -84,7 +84,26 @@ pub async fn login(
     // do not consume lockout budget.
     let auth_mode = resolve_auth_mode(&snapshot.settings);
     let oidc_configured = is_oidc_configured(&state);
-    if auth_mode == "oidc" && oidc_configured {
+    // 9router parity (login/route.js): authMode sso/saml/oidc dispatches by
+    // ssoType — password login is disabled when the active SSO protocol is
+    // configured.
+    if matches!(auth_mode.as_str(), "sso" | "saml" | "oidc") {
+        let sso = resolve_sso_type(&snapshot.settings);
+        if sso == "saml" && saml_configured(&snapshot.settings) {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "Password login is disabled. Use SAML SSO sign in." })),
+            )
+                .into_response();
+        }
+        if sso == "oidc" && oidc_configured {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "Password login is disabled. Use OIDC sign in." })),
+            )
+                .into_response();
+        }
+    } else if auth_mode == "oidc" && oidc_configured {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({ "error": "Password login is disabled. Use OIDC sign in." })),
@@ -206,6 +225,7 @@ pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> R
         .or_else(|| oidc_email.clone())
         .unwrap_or_default();
 
+    let saml_is_configured = saml_configured(settings);
     let mut body = json!({
         "authenticated": logged_in,
         "requireLogin": settings.require_login,
@@ -214,6 +234,8 @@ pub async fn auth_status(headers: HeaderMap, State(state): State<AppState>) -> R
         "oidcConfigured": oidc_configured,
         "oidcLoginLabel": oidc_login_label,
         "oidcEnabled": settings.oidc_enabled,
+        "samlConfigured": saml_is_configured,
+        "ssoType": resolve_sso_type(settings),
     });
     if let Some(obj) = body.as_object_mut() {
         obj.insert("displayName".into(), json!(display_name));
@@ -1031,9 +1053,337 @@ pub async fn oidc_test(
     .into_response()
 }
 
+/// SAML SSO helpers: settings snapshot to SamlSettings.
+fn saml_settings_from(settings: &Settings) -> crate::server::auth::saml::SamlSettings {
+    crate::server::auth::saml::SamlSettings {
+        entry_point: settings.saml_entry_point.clone(),
+        issuer: settings.saml_issuer.clone(),
+        cert: settings.saml_cert.clone(),
+        attribute_email: settings.saml_attribute_email.clone(),
+        attribute_name: settings.saml_attribute_name.clone(),
+    }
+}
+
+fn saml_configured(settings: &Settings) -> bool {
+    crate::server::auth::saml::is_saml_configured(&settings.saml_entry_point, &settings.saml_cert)
+}
+
+/// Effective SSO protocol: explicit ssoType, else legacy authMode.
+/// Mirrors the JS settings.ssoType || (authMode === saml ? saml : oidc).
+fn resolve_sso_type(settings: &Settings) -> &str {
+    let explicit = settings.sso_type.trim();
+    if explicit.eq_ignore_ascii_case("saml") {
+        return "saml";
+    }
+    if explicit.eq_ignore_ascii_case("oidc") {
+        return "oidc";
+    }
+    if settings.auth_mode.trim().eq_ignore_ascii_case("saml") {
+        "saml"
+    } else {
+        "oidc"
+    }
+}
+
+fn saml_origin(headers: &HeaderMap, settings: &Settings) -> String {
+    use crate::server::auth::saml::saml_base_url;
+    let fwd_proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok());
+    let fwd_host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok());
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    saml_base_url(
+        settings
+            .extra
+            .get("baseUrl")
+            .and_then(|v| v.as_str())
+            .unwrap_or(""),
+        fwd_proto,
+        fwd_host,
+        host,
+        None,
+    )
+}
+
+fn build_saml_cookie(name: &str, value: &str, max_age_seconds: i64) -> String {
+    format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_seconds}")
+}
+
+/// GET /api/auth/saml/start - build AuthnRequest, stash ID in saml_state
+/// cookie, 302 to the IdP. Mirrors start/route.js.
+pub async fn saml_start(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    use crate::server::auth::saml::{build_authorize_url, generate_request_id};
+    let snapshot = state.db.snapshot();
+    if !saml_configured(&snapshot.settings) {
+        return Redirect::to("/login?error=saml_not_configured").into_response();
+    }
+    let client_ip = client_ip_from_headers(&headers);
+    if let Err(LockoutError::Locked { retry_after_secs }) =
+        state.login_limiter.check_and_record(client_ip, false).await
+    {
+        return lockout_response(retry_after_secs);
+    }
+    let settings = saml_settings_from(&snapshot.settings);
+    let origin = saml_origin(&headers, &snapshot.settings);
+    let request_id = generate_request_id();
+    let authorize_url = match build_authorize_url(&settings, &origin, &request_id) {
+        Ok(u) => u,
+        Err(e) => {
+            let _ = state.login_limiter.check_and_record(client_ip, false).await;
+            return Redirect::to(&format!(
+                "/login?error={}",
+                urlencoding::encode(&e.to_string())
+            ))
+            .into_response();
+        }
+    };
+    let mut response = Redirect::to(&authorize_url).into_response();
+    if let Ok(hv) = HeaderValue::from_str(&build_saml_cookie("saml_state", &request_id, 600)) {
+        response.headers_mut().append(header::SET_COOKIE, hv);
+    }
+    response
+}
+
+/// POST /api/auth/saml/acs - IdP assertion callback. Verifies
+/// InResponseTo + XML-DSig + conditions, issues the dashboard session
+/// cookie, 302 to /dashboard. Mirrors acs/route.js.
+pub async fn saml_acs(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
+    use crate::server::auth::saml::{
+        pick_saml_display_name, pick_saml_email, validate_saml_response,
+    };
+    let snapshot = state.db.snapshot();
+    let settings = snapshot.settings.clone();
+    let client_ip = client_ip_from_headers(&headers);
+    if let Err(LockoutError::Locked { retry_after_secs }) =
+        state.login_limiter.check_and_record(client_ip, false).await
+    {
+        let origin = saml_origin(&headers, &settings);
+        return Redirect::to(&format!(
+            "{origin}/login?error={}",
+            urlencoding::encode(&format!(
+                "Too many failed attempts. Try again in {retry_after_secs}s."
+            ))
+        ))
+        .into_response();
+    }
+    let stored_request_id =
+        crate::server::auth::extract_cookie(&headers, "saml_state").unwrap_or_default();
+    let clear_cookie = build_saml_cookie("saml_state", "", 0);
+    let saml_response =
+        serde_urlencoded::from_str::<std::collections::HashMap<String, String>>(&body)
+            .ok()
+            .and_then(|m| m.get("SAMLResponse").cloned())
+            .unwrap_or_default();
+    let fail = |msg: String| {
+        let origin = saml_origin(&headers, &settings);
+        let mut resp = Redirect::to(&format!(
+            "{origin}/login?error={}",
+            urlencoding::encode(&msg)
+        ))
+        .into_response();
+        if let Ok(hv) = HeaderValue::from_str(&clear_cookie) {
+            resp.headers_mut().append(header::SET_COOKIE, hv);
+        }
+        resp
+    };
+    if saml_response.trim().is_empty() {
+        let _ = state.login_limiter.check_and_record(client_ip, false).await;
+        return fail("saml_missing_response".into());
+    }
+    if !saml_configured(&settings) {
+        let _ = state.login_limiter.check_and_record(client_ip, false).await;
+        return fail("saml_not_configured".into());
+    }
+    let saml_settings = saml_settings_from(&settings);
+    let now = Utc::now().timestamp();
+    let profile =
+        match validate_saml_response(&saml_response, &stored_request_id, &saml_settings, now) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("SAML ACS validation failed: {e}");
+                let _ = state.login_limiter.check_and_record(client_ip, false).await;
+                return fail(e.to_string());
+            }
+        };
+    let email = pick_saml_email(&profile, &saml_settings);
+    let mut name = pick_saml_display_name(&profile, &saml_settings);
+    if name.trim().is_empty() {
+        name = "SAML user".to_string();
+    }
+    let _ = state.login_limiter.check_and_record(client_ip, true).await;
+    let now_ts = now_secs();
+    let exp = (Utc::now() + ChronoDuration::days(7)).timestamp();
+    let jti = crate::server::auth::generate_jti();
+    let sub = if email.is_empty() {
+        name.clone()
+    } else {
+        email.clone()
+    };
+    let token_claims = json!({
+        "sub": sub,
+        "email": email,
+        "name": name,
+        "authenticated": true,
+        "iat": now_ts,
+        "exp": exp as usize,
+        "jti": jti,
+    });
+    let token = match encode(
+        &JwtHeader::default(),
+        &token_claims,
+        &EncodingKey::from_secret(jwt_secret().as_bytes()),
+    ) {
+        Ok(t) => t,
+        Err(error) => {
+            return fail(format!("Failed to issue session token: {error}"));
+        }
+    };
+    let secure_cookie = std::env::var("AUTH_COOKIE_SECURE").ok().as_deref() == Some("true")
+        || headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.eq_ignore_ascii_case("https"))
+            .unwrap_or(false);
+    let origin = saml_origin(&headers, &settings);
+    let mut response = Redirect::to(&format!("{origin}/dashboard")).into_response();
+    let cookie = build_auth_cookie(&token, 7 * 24 * 60 * 60, secure_cookie);
+    if let Ok(value) = HeaderValue::from_str(&cookie) {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+    if let Ok(hv) = HeaderValue::from_str(&clear_cookie) {
+        response.headers_mut().append(header::SET_COOKIE, hv);
+    }
+    response
+}
+
+/// GET /api/auth/saml/metadata - export SP XML metadata.
+/// Mirrors metadata/route.js.
+pub async fn saml_metadata(headers: HeaderMap, State(state): State<AppState>) -> Response {
+    use crate::server::auth::saml::generate_saml_metadata;
+    let snapshot = state.db.snapshot();
+    let origin = saml_origin(&headers, &snapshot.settings);
+    let xml = generate_saml_metadata(&origin, &saml_settings_from(&snapshot.settings));
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/xml"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        xml,
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SamlTestRequest {
+    pub saml_entry_point: Option<String>,
+    pub saml_issuer: Option<String>,
+    pub saml_cert: Option<String>,
+}
+
+/// POST /api/auth/saml/test - validate candidate SAML config.
+/// Mirrors test/route.js.
+pub async fn saml_test(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<SamlTestRequest>,
+) -> Response {
+    use crate::server::auth::saml::format_x509_certificate;
+    let snapshot = state.db.snapshot();
+    if snapshot.settings.require_login {
+        if let Err(err) = crate::server::auth::require_dashboard_session(&headers, &state.db) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": err.message() })),
+            )
+                .into_response();
+        }
+    }
+    let entry_point = req
+        .saml_entry_point
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(snapshot.settings.saml_entry_point.as_str())
+        .to_string();
+    let issuer = req
+        .saml_issuer
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            let s = snapshot.settings.saml_issuer.trim();
+            if s.is_empty() {
+                "urn:9router:sp"
+            } else {
+                s
+            }
+        })
+        .to_string();
+    let cert = req
+        .saml_cert
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(snapshot.settings.saml_cert.as_str())
+        .to_string();
+    if entry_point.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Single Sign-On Service URL (samlEntryPoint) is required" })),
+        )
+            .into_response();
+    }
+    if url::Url::parse(&entry_point).is_err() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Single Sign-On Service URL must be a valid URL" })),
+        )
+            .into_response();
+    }
+    if issuer.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "SP Entity ID / Issuer (samlIssuer) is required" })),
+        )
+            .into_response();
+    }
+    if cert.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "IdP X.509 Certificate (samlCert) is required" })),
+        )
+            .into_response();
+    }
+    if format_x509_certificate(&cert).is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "Invalid IdP X.509 Certificate format" })),
+        )
+            .into_response();
+    }
+    let origin = saml_origin(&headers, &snapshot.settings);
+    Json(json!({
+        "ok": true,
+        "samlEntryPoint": entry_point,
+        "samlIssuer": issuer,
+        "certValid": true,
+        "acsUrl": format!("{origin}/api/auth/saml/acs"),
+        "metadataUrl": format!("{origin}/api/auth/saml/metadata"),
+        "message": "SAML 2.0 configuration verified successfully.",
+    }))
+    .into_response()
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/auth/login", post(login))
+        .route("/api/auth/saml/start", get(saml_start))
+        .route("/api/auth/saml/acs", post(saml_acs))
+        .route("/api/auth/saml/metadata", get(saml_metadata))
+        .route("/api/auth/saml/test", post(saml_test))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/password", post(change_password))
         .route("/api/auth/sessions", get(list_sessions))
@@ -1186,7 +1536,7 @@ fn lockout_response(retry_after_secs: u64) -> Response {
 /// 4. Default `"password"`
 fn resolve_auth_mode(settings: &Settings) -> String {
     let mode = settings.auth_mode.trim();
-    if matches!(mode, "password" | "oidc" | "both") {
+    if matches!(mode, "password" | "oidc" | "sso" | "saml" | "both") {
         return mode.to_string();
     }
     if let Some(mode) = settings
@@ -1194,7 +1544,7 @@ fn resolve_auth_mode(settings: &Settings) -> String {
         .get("authMode")
         .and_then(|value| value.as_str())
         .map(str::trim)
-        .filter(|value| matches!(*value, "password" | "oidc" | "both"))
+        .filter(|value| matches!(*value, "password" | "oidc" | "sso" | "saml" | "both"))
     {
         return mode.to_string();
     }

@@ -628,7 +628,7 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub combo_sticky_round_robin_limit: u32,
-    /// Auth mode for dashboard login: "password", "oidc", or "both".
+    /// Auth mode for dashboard login: "password", "oidc", "sso", "saml", or "both".
     #[serde(
         default = "default_auth_mode",
         deserialize_with = "deserialize_null_default"
@@ -652,6 +652,27 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub oidc_login_label: String,
+    /// SSO protocol selector for `auth_mode == "sso"`: "oidc" or "saml".
+    /// 9router settingsRepo `ssoType` (commit 65197ad1).
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub sso_type: String,
+    /// SAML IdP Single Sign-On Service URL (AuthnRequest destination).
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub saml_entry_point: String,
+    /// SAML SP entity ID / issuer.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub saml_issuer: String,
+    /// SAML IdP X.509 certificate (PEM or raw base64). Never serialized to
+    /// API payloads (stripped in `safe_settings_payload`, like the OIDC
+    /// client secret).
+    #[serde(default, skip_serializing)]
+    pub saml_cert: String,
+    /// Optional custom attribute name for the email claim.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub saml_attribute_email: String,
+    /// Optional custom attribute name for the display-name claim.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub saml_attribute_name: String,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub client_ping_url: String,
     #[serde(default, deserialize_with = "deserialize_null_default")]
@@ -720,6 +741,12 @@ impl Default for Settings {
             oidc_client_secret: String::new(),
             oidc_scopes: default_oidc_scopes(),
             oidc_login_label: default_oidc_login_label(),
+            sso_type: String::new(),
+            saml_entry_point: String::new(),
+            saml_issuer: String::new(),
+            saml_cert: String::new(),
+            saml_attribute_email: String::new(),
+            saml_attribute_name: String::new(),
             client_ping_url: String::new(),
             client_ping_any: false,
             capacity_adapter: json!({}),
@@ -739,6 +766,7 @@ impl Settings {
             self.combo_sticky_round_robin_limit = default_combo_sticky_round_robin_limit();
         }
         self.auth_mode = normalize_auth_mode(&self.auth_mode);
+        self.sso_type = normalize_sso_type(&self.sso_type);
         // Keep oidc_enabled in sync with auth_mode for any legacy readers.
         self.oidc_enabled = matches!(self.auth_mode.as_str(), "oidc" | "both");
         if self.oidc_scopes.trim().is_empty() {
@@ -1011,8 +1039,18 @@ fn normalize_fallback_strategy(value: &str) -> String {
 fn normalize_auth_mode(value: &str) -> String {
     match value.trim().to_ascii_lowercase().as_str() {
         "oidc" => "oidc".into(),
+        "sso" => "sso".into(),
+        "saml" => "saml".into(),
         "both" => "both".into(),
         _ => "password".into(),
+    }
+}
+
+fn normalize_sso_type(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "saml" => "saml".into(),
+        "oidc" => "oidc".into(),
+        _ => String::new(),
     }
 }
 
