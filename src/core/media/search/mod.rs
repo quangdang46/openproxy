@@ -18,7 +18,10 @@ mod chat_search;
 pub mod handler;
 mod providers;
 
-pub use base::{ChatSearchResult, SearchProvider, SearchRequest, SearchResult, SearchResultSet};
+pub use base::{
+    assert_public_url, assert_public_url_resolved, fetch_public, ChatSearchResult, SearchProvider,
+    SearchRequest, SearchResult, SearchResultSet,
+};
 pub use chat_search::{handle_chat_search, has_chat_search};
 pub use handler::{handle_search, handle_search_value, SearchHandlerError};
 

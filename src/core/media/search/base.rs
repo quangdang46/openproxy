@@ -304,8 +304,23 @@ pub fn make_display_url(url: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// SSRF guard for client-supplied base URLs (ported from 9router v0.5.55
-// src/shared/utils/ssrfGuard.js + handlers/search/callers.js resolveBaseUrl)
+// SSRF guard for client-supplied base URLs (ported from 9router
+// src/shared/utils/ssrfGuard.js, hardened in v0.5.75 commit b870b5d4 "fix(security):
+// close SSRF guard bypasses in ssrfGuard.js (#3714)").
+//
+// Three layers, mirroring the JS module, each closing a distinct bypass class:
+//   1. `assert_public_url`         - synchronous literal-IP/hostname checks (cheap,
+//                                     for immediate rejection of obviously-bad input
+//                                     at request-build time).
+//   2. `assert_public_url_resolved` - adds DNS resolution so a hostname that merely
+//                                      *resolves* to a private/loopback/metadata
+//                                      address (e.g. a nip.io/sslip.io wildcard-DNS
+//                                      domain, or an attacker's own domain pointed at
+//                                      127.0.0.1) is also rejected.
+//   3. `fetch_public`              - wraps a request with manual redirect handling so
+//                                      a validated public URL can't 30x its way to an
+//                                      internal target without the redirect target
+//                                      being re-validated through layer 2 first.
 // ---------------------------------------------------------------------------
 
 /// Blocked hostname suffixes for SSRF protection.
@@ -314,9 +329,215 @@ const BLOCKED_SUFFIXES: &[&str] = &[".internal", ".local", ".localhost"];
 /// Blocked hostnames for SSRF protection.
 const BLOCKED_HOSTNAMES: &[&str] = &["localhost", "ip6-localhost", "ip6-loopback"];
 
+/// IPv4 CIDR blocks blocked for SSRF protection, as `(base_octets, prefix_bits)`.
+const BLOCKED_V4_RANGES: &[([u8; 4], u32)] = &[
+    ([0, 0, 0, 0], 8),
+    ([10, 0, 0, 0], 8),
+    ([100, 64, 0, 0], 10), // CGNAT — also used by some cloud metadata proxies
+    ([127, 0, 0, 0], 8),
+    ([169, 254, 0, 0], 16), // includes 169.254.169.254 cloud metadata
+    ([172, 16, 0, 0], 12),
+    ([192, 168, 0, 0], 16),
+];
+
+fn ipv4_to_u32(octets: [u8; 4]) -> u32 {
+    u32::from_be_bytes(octets)
+}
+
+/// Numeric range check (mirrors JS `isBlockedIpv4Int`).
+fn is_blocked_ipv4_int(ip: u32) -> bool {
+    BLOCKED_V4_RANGES.iter().any(|(base, bits)| {
+        let mask: u32 = if *bits == 0 {
+            0
+        } else {
+            (0xffff_ffffu32) << (32 - bits)
+        };
+        (ip & mask) == (ipv4_to_u32(*base) & mask)
+    })
+}
+
+fn is_blocked_ipv4(host: &str) -> bool {
+    match host.parse::<std::net::Ipv4Addr>() {
+        Ok(v4) => is_blocked_ipv4_int(u32::from_be_bytes(v4.octets())),
+        Err(_) => false,
+    }
+}
+
+/// Parse any textual IPv6 representation (including an embedded dotted-IPv4
+/// tail, `::` compression in any position, and full/partial forms) into 8
+/// 16-bit groups. Returns `None` if the string isn't a valid IPv6 literal.
+///
+/// Reasoning about the numeric value (groups) rather than pattern-matching the
+/// source string is what makes this immune to "which textual form did the URL
+/// parser pick" bugs: `::ffff:127.0.0.1` and `::ffff:7f00:1` produce identical
+/// groups. Mirrors JS `parseIPv6ToGroups`.
+fn parse_ipv6_to_groups(raw_host: &str) -> Option<[u16; 8]> {
+    let host_lower = raw_host.to_lowercase();
+    let mut host: &str = &host_lower;
+
+    // Extract a trailing dotted-IPv4 tail, if any (e.g. "::ffff:127.0.0.1").
+    let v4_tail_re_match = {
+        // Find the longest trailing run of `[0-9.]` that parses as an IPv4 addr.
+        let bytes = host.as_bytes();
+        let mut start = bytes.len();
+        while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+            start -= 1;
+        }
+        let candidate = &host[start..];
+        candidate.parse::<std::net::Ipv4Addr>().ok()
+    };
+
+    let mut v4_groups: Option<[u16; 2]> = None;
+    if let Some(v4) = v4_tail_re_match {
+        let v4_int = u32::from_be_bytes(v4.octets());
+        v4_groups = Some([((v4_int >> 16) & 0xffff) as u16, (v4_int & 0xffff) as u16]);
+        // Trim the dotted tail off the host string.
+        let bytes = host.as_bytes();
+        let mut start = bytes.len();
+        while start > 0 && (bytes[start - 1].is_ascii_digit() || bytes[start - 1] == b'.') {
+            start -= 1;
+        }
+        host = &host[..start];
+        if let Some(stripped) = host.strip_suffix("::") {
+            // "::" compression marker itself — leave both colons, the removed
+            // IPv4 fills the gap it represents.
+            host = &host[..stripped.len() + 2];
+        } else if let Some(stripped) = host.strip_suffix(':') {
+            // was just the "prevgroup:ipv4" separator
+            host = stripped;
+        }
+    }
+
+    let parse_hextets = |s: &str| -> Option<Vec<u16>> {
+        if s.is_empty() {
+            return Some(Vec::new());
+        }
+        s.split(':')
+            .map(|seg| {
+                if seg.is_empty() || seg.len() > 4 || !seg.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    None
+                } else {
+                    u16::from_str_radix(seg, 16).ok()
+                }
+            })
+            .collect()
+    };
+
+    let double_colon_parts: Vec<&str> = host.splitn(3, "::").collect();
+    let groups: Vec<u16> = if double_colon_parts.len() >= 2 {
+        // splitn(3, "::") on a string with more than one "::" yields 3 parts;
+        // treat that as invalid (mirrors JS `doubleColonParts.length > 2`).
+        if host.matches("::").count() > 1 {
+            return None;
+        }
+        let head = parse_hextets(double_colon_parts[0])?;
+        let tail = parse_hextets(double_colon_parts.get(1).copied().unwrap_or(""))?;
+        let v4_len = v4_groups.map(|_| 2).unwrap_or(0);
+        let missing = 8i32
+            .checked_sub(head.len() as i32)?
+            .checked_sub(tail.len() as i32)?
+            .checked_sub(v4_len)?;
+        if missing < 0 {
+            return None;
+        }
+        let mut out = head;
+        out.extend(std::iter::repeat_n(0u16, missing as usize));
+        out.extend(tail);
+        if let Some(v4) = v4_groups {
+            out.extend(v4);
+        }
+        out
+    } else {
+        let mut all = parse_hextets(host)?;
+        if let Some(v4) = v4_groups {
+            all.extend(v4);
+        }
+        all
+    };
+
+    if groups.len() == 8 {
+        let mut arr = [0u16; 8];
+        arr.copy_from_slice(&groups);
+        Some(arr)
+    } else {
+        None
+    }
+}
+
+/// Mirrors JS `isBlockedIpv6Groups`: loopback, unspecified, link-local,
+/// unique-local, IPv4-mapped (`::ffff:0:0/96`), NAT64 (`64:ff9b::/96`), and
+/// IPv4-compatible (`::a.b.c.d/96`, deprecated but still parseable) forms —
+/// each checked against the same IPv4 blocklist for the embedded address.
+fn is_blocked_ipv6_groups(g: [u16; 8]) -> bool {
+    let is_zero = |n: usize| g[n] == 0;
+    // loopback ::1
+    if (0..=6).all(is_zero) && g[7] == 1 {
+        return true;
+    }
+    // unspecified ::
+    if g.iter().all(|&x| x == 0) {
+        return true;
+    }
+    // link-local fe80::/10
+    if (g[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    // unique local fc00::/7
+    if (g[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    let low32 = ((g[6] as u32) << 16) | (g[7] as u32);
+    // IPv4-mapped ::ffff:0:0/96
+    if (0..=4).all(is_zero) && g[5] == 0xffff {
+        return is_blocked_ipv4_int(low32);
+    }
+    // NAT64 well-known prefix 64:ff9b::/96
+    if g[0] == 0x0064 && g[1] == 0xff9b && (2..=5).all(is_zero) {
+        return is_blocked_ipv4_int(low32);
+    }
+    // IPv4-compatible ::a.b.c.d/96 (deprecated) — excludes :: and ::1 already
+    // matched above.
+    if (0..=5).all(is_zero) && low32 != 0 && low32 != 1 {
+        return is_blocked_ipv4_int(low32);
+    }
+    false
+}
+
+/// A trailing dot marks an FQDN and is semantically insignificant
+/// (`"localhost."` and `"localhost"` are the same host) but was being
+/// compared as a literal character, letting it slip past every string-based
+/// check. Mirrors JS `normalizeHost`.
+fn normalize_host(hostname: &str) -> String {
+    hostname.to_lowercase().trim_end_matches('.').to_string()
+}
+
+/// Mirrors JS `isBlockedHost`: hostname/suffix table, IPv4 literal, and (for
+/// any host containing a `:`) the full numeric-groups IPv6 check.
+fn is_blocked_host(host: &str) -> bool {
+    if BLOCKED_HOSTNAMES.contains(&host) {
+        return true;
+    }
+    if BLOCKED_SUFFIXES.iter().any(|s| host.ends_with(s)) {
+        return true;
+    }
+    if is_blocked_ipv4(host) {
+        return true;
+    }
+    if host.contains(':') {
+        let bracketless = host.trim_start_matches('[').trim_end_matches(']');
+        if let Some(groups) = parse_ipv6_to_groups(bracketless) {
+            if is_blocked_ipv6_groups(groups) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Validate that a URL is a public HTTP(S) address suitable for server-side
-/// fetching. Rejects private IPs, loopback, link-local, cloud metadata, and
-/// internal hostnames.
+/// fetching, by literal hostname/IP alone (no DNS resolution — see
+/// [`assert_public_url_resolved`] for that). Rejects private IPs, loopback,
+/// link-local, cloud metadata, and internal hostnames.
 ///
 /// Returns `Ok(())` if the URL is safe, or `Err(message)` if blocked.
 ///
@@ -332,42 +553,14 @@ pub fn assert_public_url(raw_url: &str) -> Result<(), String> {
         other => return Err(format!("Invalid baseUrl protocol: {other}")),
     }
 
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| "baseUrl has no host".to_string())?
-        .to_lowercase();
+    let host = normalize_host(
+        parsed
+            .host_str()
+            .ok_or_else(|| "baseUrl has no host".to_string())?,
+    );
 
-    // Check blocked hostnames.
-    if BLOCKED_HOSTNAMES.contains(&host.as_str()) {
+    if is_blocked_host(&host) {
         return Err("Blocked URL: internal host".to_string());
-    }
-
-    // Check blocked suffixes.
-    for suffix in BLOCKED_SUFFIXES {
-        if host.ends_with(suffix) {
-            return Err("Blocked URL: internal host".to_string());
-        }
-    }
-
-    // Strip IPv6 brackets for IP checks.
-    let ip_str = host
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(&host);
-
-    // Check if the host is a private/reserved IP.
-    if crate::core::dns::is_private_ip(ip_str) {
-        return Err("Blocked URL: private IP".to_string());
-    }
-
-    // Check for IPv4-mapped IPv6 (::ffff:x.x.x.x) — is_private_ip handles this,
-    // but also check the cloud metadata address (169.254.169.254).
-    if let Ok(std::net::IpAddr::V4(v4)) = ip_str.parse::<std::net::IpAddr>() {
-        let o = v4.octets();
-        // 169.254.0.0/16 — link-local / cloud metadata
-        if o[0] == 169 && o[1] == 254 {
-            return Err("Blocked URL: link-local/metadata IP".to_string());
-        }
     }
 
     Ok(())
@@ -377,6 +570,116 @@ pub fn assert_public_url(raw_url: &str) -> Result<(), String> {
 #[cfg(test)]
 pub fn assert_public_url(_raw_url: &str) -> Result<(), String> {
     Ok(())
+}
+
+/// Async: [`assert_public_url`] plus DNS resolution of non-literal hostnames,
+/// so a domain that merely *resolves* to a private/loopback/metadata address
+/// (wildcard-DNS services like nip.io/sslip.io, or an attacker-controlled
+/// domain with an A/AAAA record pointed at 127.0.0.1) is rejected too, not
+/// just IPs typed directly into the URL. Mirrors JS `assertPublicUrlResolved`.
+///
+/// NOTE: In test mode (`#[cfg(test)]`), this validation is skipped to allow
+/// mock server URLs (localhost/127.0.0.1) to be used in tests.
+#[cfg(not(test))]
+pub async fn assert_public_url_resolved(raw_url: &str) -> Result<(), String> {
+    let parsed = url::Url::parse(raw_url).map_err(|e| format!("Invalid baseUrl: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("Invalid baseUrl protocol: {other}")),
+    }
+    let host = normalize_host(
+        parsed
+            .host_str()
+            .ok_or_else(|| "baseUrl has no host".to_string())?,
+    );
+    if is_blocked_host(&host) {
+        return Err("Blocked URL: internal host".to_string());
+    }
+
+    // Already a literal IPv4/IPv6 address — `is_blocked_host` above already
+    // covered it, no DNS lookup applies.
+    let bracketless = host.trim_start_matches('[').trim_end_matches(']');
+    if bracketless.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    // Resolution failure isn't an SSRF signal by itself — let the subsequent
+    // fetch fail with its own (clearer) network error, matching the JS
+    // `catch { return; }` behavior.
+    let Ok(addrs) = tokio::net::lookup_host((bracketless, 0)).await else {
+        return Ok(());
+    };
+    for addr in addrs {
+        let blocked = match addr.ip() {
+            std::net::IpAddr::V4(v4) => is_blocked_ipv4_int(u32::from_be_bytes(v4.octets())),
+            std::net::IpAddr::V6(v6) => is_blocked_ipv6_groups(v6.segments()),
+        };
+        if blocked {
+            return Err("Blocked URL: hostname resolves to an internal host".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Test-only stub that always allows the URL (for mock server URLs in tests).
+#[cfg(test)]
+pub async fn assert_public_url_resolved(_raw_url: &str) -> Result<(), String> {
+    Ok(())
+}
+
+/// `fetch()` with SSRF-safe manual redirect handling: each hop's target is
+/// re-validated through [`assert_public_url_resolved`] before being followed,
+/// so a validated public URL can't 30x its way to an internal target.
+/// Bounded to `max_redirects` hops. Mirrors JS `fetchPublic`.
+///
+/// Only needed for client-supplied override URLs (`resolve_base_url`); the
+/// provider's own configured base URL is admin-controlled and callers should
+/// send it through the normal `client.request(...).send()` path instead.
+pub async fn fetch_public(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    url: &str,
+    headers: reqwest::header::HeaderMap,
+    body: Option<&serde_json::Value>,
+    timeout: std::time::Duration,
+) -> Result<reqwest::Response, String> {
+    const MAX_REDIRECTS: u32 = 5;
+    assert_public_url_resolved(url).await?;
+    let mut current_url = url.to_string();
+    for hop in 0..=MAX_REDIRECTS {
+        let mut builder = client
+            .request(method.clone(), &current_url)
+            .headers(headers.clone())
+            .timeout(timeout);
+        if let Some(b) = body {
+            builder = builder.json(b);
+        }
+        let res = builder
+            .send()
+            .await
+            .map_err(|e| format!("request failed: {e}"))?;
+        let status = res.status();
+        if !(300..400).contains(&status.as_u16()) {
+            return Ok(res);
+        }
+        let Some(location) = res
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+        else {
+            return Ok(res);
+        };
+        if hop >= MAX_REDIRECTS {
+            return Err("Blocked URL: too many redirects".to_string());
+        }
+        let next_url = url::Url::parse(&current_url)
+            .and_then(|base| base.join(location))
+            .map_err(|e| format!("invalid redirect location: {e}"))?
+            .to_string();
+        assert_public_url_resolved(&next_url).await?;
+        current_url = next_url;
+    }
+    unreachable!("loop always returns before exceeding MAX_REDIRECTS")
 }
 
 /// Resolve the base URL with optional `provider_options.baseUrl` override.
@@ -575,5 +878,110 @@ mod tests {
         );
         let url = resolve_base_url("https://api.example.com/v1", &req).unwrap();
         assert_eq!(url, "https://custom.api.com/search");
+    }
+
+    // -----------------------------------------------------------------------
+    // SSRF hardening (#3714 / 9router b870b5d4): exercised via the internal
+    // helpers since `assert_public_url` is stubbed in test mode.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ssrf_normalize_host_strips_trailing_dots() {
+        assert_eq!(normalize_host("LOCALHOST."), "localhost");
+        assert_eq!(normalize_host("Example.COM..."), "example.com");
+        assert_eq!(normalize_host("8.8.8.8"), "8.8.8.8");
+    }
+
+    #[test]
+    fn ssrf_blocks_internal_hostnames_and_suffixes() {
+        assert!(is_blocked_host("localhost"));
+        // Trailing-dot FQDN bypass: "localhost." must block the same as
+        // "localhost" (see `normalize_host` in the non-test impl).
+        assert!(is_blocked_host(&normalize_host("localhost.")));
+        assert!(is_blocked_host(&normalize_host("LOCALHOST.")));
+        assert!(is_blocked_host("foo.internal"));
+        assert!(is_blocked_host("foo.local"));
+        assert!(is_blocked_host("foo.localhost"));
+        assert!(!is_blocked_host("api.openai.com"));
+        assert!(!is_blocked_host("8.8.8.8"));
+    }
+
+    #[test]
+    fn ssrf_blocks_private_ipv4_ranges() {
+        for host in [
+            "10.0.0.1",
+            "100.64.0.1", // CGNAT (new in #3714)
+            "127.0.0.1",
+            "169.254.169.254", // cloud metadata
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "0.0.0.0",
+        ] {
+            assert!(is_blocked_host(host), "{host} should be blocked");
+        }
+        for host in ["8.8.8.8", "1.1.1.1", "172.32.0.1", "93.184.216.34"] {
+            assert!(!is_blocked_host(host), "{host} should be allowed");
+        }
+    }
+
+    #[test]
+    fn ssrf_blocks_ipv6_mapped_forms_regardless_of_representation() {
+        // `::ffff:127.0.0.1` and `::ffff:7f00:1` are the same address —
+        // the numeric-groups parse must reject both.
+        assert!(is_blocked_host("[::ffff:127.0.0.1]"));
+        assert!(is_blocked_host("[::ffff:7f00:1]"));
+        assert!(is_blocked_host("[0000::ffff:127.0.0.1]"));
+        // Mapped metadata address, dotted and hex forms.
+        assert!(is_blocked_host("[::ffff:169.254.169.254]"));
+        assert!(is_blocked_host("[::ffff:a9fe:a9fe]"));
+        // Loopback / unspecified / link-local / ULA / NAT64 / compat forms.
+        for host in [
+            "[::1]",
+            "[::]",
+            "[::127.0.0.1]",
+            "[fe80::1]",
+            "[fc00::1]",
+            "[fd12:3456::1]",
+            "[64:ff9b::127.0.0.1]",
+        ] {
+            assert!(is_blocked_host(host), "{host} should be blocked");
+        }
+        // Public IPv6 stays allowed.
+        assert!(!is_blocked_host("[2001:4860:4860::8888]"));
+    }
+
+    #[test]
+    fn ssrf_parse_ipv6_to_groups_equivalence() {
+        // Same address, two textual forms → identical groups.
+        let a = parse_ipv6_to_groups("::ffff:127.0.0.1");
+        let b = parse_ipv6_to_groups("::ffff:7f00:1");
+        assert!(a.is_some() && b.is_some());
+        assert_eq!(a.unwrap(), b.unwrap());
+        // Compression in head/tail/only.
+        assert!(parse_ipv6_to_groups("fe80::1").is_some());
+        assert!(parse_ipv6_to_groups("2001:db8::1").is_some());
+        assert!(parse_ipv6_to_groups("::").is_some());
+        // Invalid forms rejected.
+        assert!(parse_ipv6_to_groups(":::").is_none());
+        assert!(parse_ipv6_to_groups("gggg::1").is_none());
+    }
+
+    #[test]
+    fn ssrf_ipv4_int_range_check_matches_blocklist() {
+        assert!(is_blocked_ipv4_int(ipv4_to_u32([127, 0, 0, 1])));
+        assert!(is_blocked_ipv4_int(ipv4_to_u32([169, 254, 169, 254])));
+        assert!(is_blocked_ipv4_int(ipv4_to_u32([100, 64, 0, 1])));
+        assert!(!is_blocked_ipv4_int(ipv4_to_u32([8, 8, 8, 8])));
+    }
+
+    #[tokio::test]
+    async fn ssrf_resolved_stub_always_allows_in_test_mode() {
+        // The test-mode stub must not block normal traffic (DNS is not
+        // exercised in unit tests — see bead openproxy-fp8l acceptance
+        // criteria about DNS-behavior tests requiring a stubbed resolver).
+        assert!(assert_public_url_resolved("http://127.0.0.1/")
+            .await
+            .is_ok());
     }
 }
