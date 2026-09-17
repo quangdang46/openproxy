@@ -635,6 +635,12 @@ pub async fn assert_public_url_resolved(_raw_url: &str) -> Result<(), String> {
 /// Only needed for client-supplied override URLs (`resolve_base_url`); the
 /// provider's own configured base URL is admin-controlled and callers should
 /// send it through the normal `client.request(...).send()` path instead.
+///
+/// IMPORTANT: this builds its redirect logic on a `Policy::none()` client
+/// (mirroring the JS `{ redirect: "manual" }` option). Passing a client whose
+/// redirect policy follows redirects (reqwest's default, 10 hops) would let
+/// the underlying transport follow a 302 to an internal target *before* the
+/// loop below ever sees the 3xx status, silently defeating the whole guard.
 pub async fn fetch_public(
     client: &reqwest::Client,
     method: reqwest::Method,
@@ -645,9 +651,17 @@ pub async fn fetch_public(
 ) -> Result<reqwest::Response, String> {
     const MAX_REDIRECTS: u32 = 5;
     assert_public_url_resolved(url).await?;
+    // Enforce manual redirect handling ourselves (mirrors JS
+    // `{ redirect: "manual" }`) — the pooled/call-site client may follow
+    // redirects by default, which would bypass the per-hop re-validation.
+    let manual_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+        .unwrap_or_else(|_| client.clone());
     let mut current_url = url.to_string();
     for hop in 0..=MAX_REDIRECTS {
-        let mut builder = client
+        let mut builder = manual_client
             .request(method.clone(), &current_url)
             .headers(headers.clone())
             .timeout(timeout);

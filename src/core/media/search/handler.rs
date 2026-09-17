@@ -111,7 +111,12 @@ async fn fetch_upstream_body(
     // literal string passed the sync `assert_public_url` check in
     // `resolve_base_url`) and follow any redirect chain manually so a hop
     // can't land on an internal target. The provider's own configured base
-    // URL is admin-controlled and skips this extra async round-trip.
+    // URL is admin-controlled and intentionally skips this extra check
+    // (9router JS instead validates every fetch, including the default —
+    // widening to that is a follow-up, not required for the #3714 fix since
+    // the admin default was never the bypass). Note the plain path below
+    // inherits the caller's redirect policy — only the client-supplied
+    // override path is redirect-hardened.
     let res = if get_provider_setting(request, "baseUrl").is_some() {
         fetch_public(
             client,
