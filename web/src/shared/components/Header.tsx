@@ -190,17 +190,22 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
     setPathname(window.location.pathname);
   }, []);
 
-  // 9router Header.js:192-216 — load auth status (cache:no-store) to surface
-  // the OIDC identity chip.
+  // 9router Header.js (65197ad1) — load auth status (cache:no-store) to
+  // surface the OIDC/SAML identity chip.
   useEffect(() => {
     if (!mounted) return;
     fetch("/api/auth/status", { cache: "no-store" })
       .then((res) => (res.ok ? res.json() : {}))
-      .then((data) => {
+      .then((data: Record<string, unknown>) => {
+        const str = (v: unknown) => (typeof v === "string" ? v : "");
         setDisplayName(
-          data?.displayName || data?.oidcName || data?.oidcEmail || ""
+          str(data?.displayName) ||
+            str(data?.samlName) ||
+            str(data?.samlEmail) ||
+            str(data?.oidcName) ||
+            str(data?.oidcEmail)
         );
-        setLoginMethod(data?.loginMethod || "");
+        setLoginMethod(str(data?.loginMethod));
       })
       .catch(() => {});
   }, [mounted]);
@@ -302,14 +307,17 @@ export default function Header({ onMenuClick, showMenuButton = true }: HeaderPro
       {/* Right actions */}
       <div className="flex items-center gap-1 shrink-0">
         <HeaderSearchInput />
-        {displayName && loginMethod === "OIDC" && (
-          <div className="hidden sm:flex items-center max-w-[220px] px-3 py-1.5 rounded-full border border-border bg-surface/70 text-xs text-text-muted truncate">
+        {(displayName && (loginMethod === "OIDC" || loginMethod === "SAML")) && (
+          <div
+            className="hidden sm:flex items-center max-w-[220px] px-3 py-1.5 rounded-full border border-border bg-surface/70 text-xs text-text-muted truncate"
+            title={displayName}
+          >
             <span className="material-symbols-outlined text-primary mr-1.5 text-[16px]">
               person
             </span>
             <span className="truncate">{displayName}</span>
             <span className="ml-2 shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-primary">
-              OIDC
+              {loginMethod}
             </span>
           </div>
         )}

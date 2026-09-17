@@ -532,3 +532,63 @@ async fn auth_status_returns_oidc_identity_chip_fields() {
     assert_eq!(json["oidcName"], "OIDC User");
     assert_eq!(json["oidcEmail"], "oidc-user@example.com");
 }
+
+// ---------------------------------------------------------------------------
+// SAML identity chip (9router 65197ad1 status/route.js parity)
+// ---------------------------------------------------------------------------
+
+/// A dashboard JWT minted by the SAML ACS handler (`saml: true` + picked
+/// claims) must surface as loginMethod SAML with samlName/samlEmail on
+/// /api/auth/status — without an OIDC client configured.
+#[tokio::test]
+async fn auth_status_returns_saml_identity_chip_fields() {
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    use openproxy::server::auth::jwt_secret;
+
+    let (_app_router, state) = boot_with_oidc(None).await;
+    let app = openproxy::build_app(state.clone());
+
+    // Mint a SAML session token exactly like saml_acs does.
+    let now = chrono::Utc::now().timestamp();
+    let token = encode(
+        &Header::default(),
+        &json!({
+            "sub": "saml-user@example.com",
+            "email": "saml-user@example.com",
+            "name": "SAML User",
+            "authenticated": true,
+            "saml": true,
+            "saml_email": "saml-user@example.com",
+            "saml_name": "SAML User",
+            "iat": now,
+            "exp": now + 86400,
+            "jti": "0:saml-test-jti",
+        }),
+        &EncodingKey::from_secret(jwt_secret().as_bytes()),
+    )
+    .expect("encode saml session token");
+
+    let status_resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/auth/status")
+                .header(axum::http::header::COOKIE, format!("auth_token={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(status_resp.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["authenticated"], true);
+    assert_eq!(json["loginMethod"], "SAML");
+    assert_eq!(json["displayName"], "SAML User");
+    assert_eq!(json["samlName"], "SAML User");
+    assert_eq!(json["samlEmail"], "saml-user@example.com");
+    assert_eq!(json["samlLogin"], true);
+    assert_eq!(
+        json["samlLoginLabel"], "Sign in with SAML SSO",
+        "default SAML label per 9router settingsRepo"
+    );
+}

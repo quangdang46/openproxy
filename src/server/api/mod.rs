@@ -2162,6 +2162,7 @@ struct UpdateSettingsRequest {
     saml_cert: Option<String>,
     saml_attribute_email: Option<String>,
     saml_attribute_name: Option<String>,
+    saml_login_label: Option<String>,
     client_ping_url: Option<String>,
     client_ping_any: Option<bool>,
     headroom_enabled: Option<bool>,
@@ -2398,6 +2399,9 @@ async fn update_settings_api(
             }
             if let Some(v) = req.saml_attribute_name {
                 db.settings.saml_attribute_name = v;
+            }
+            if let Some(v) = req.saml_login_label {
+                db.settings.saml_login_label = v;
             }
             if let Some(v) = req.oidc_enabled {
                 // Legacy flag — map onto auth_mode when auth_mode itself was not set.
