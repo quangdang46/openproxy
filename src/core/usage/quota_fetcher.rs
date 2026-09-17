@@ -3710,6 +3710,288 @@ pub async fn fetch_groq_quota(api_key: &str) -> Value {
     json!({ "plan": "Groq", "quotas": Value::Object(quotas) })
 }
 
+/// Zed cloud base URL (mirrors `ZED_CLOUD_BASE_URL` in zedAuth.js;
+/// `crate::oauth::zed_auth::ZED_CLOUD_BASE_URL` holds the same value —
+/// duplicated here to avoid coupling the usage module to the oauth module).
+const ZED_USERS_ME_URL: &str = "https://cloud.zed.dev/client/users/me";
+
+/// Map Zed `plan_v3` ids to dashboard labels (CodexBar-compatible).
+/// 9router `zed.js formatZedPlanLabel`.
+fn format_zed_plan_label(raw_plan: &str) -> String {
+    let raw = raw_plan.trim();
+    if raw.is_empty() {
+        return "Zed".to_string();
+    }
+    match raw.to_lowercase().as_str() {
+        "zed_free" => "Zed Free".to_string(),
+        "zed_pro" => "Zed Pro".to_string(),
+        "zed_pro_trial" => "Zed Pro Trial".to_string(),
+        "zed_student" => "Zed Student".to_string(),
+        "zed_business" => "Zed Business".to_string(),
+        _ => raw
+            .replace('_', " ")
+            .split_whitespace()
+            .map(|word| {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => {
+                        first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                    }
+                    None => String::new(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// Parse a Zed UsageLimit JSON value: `"unlimited"`, a number, or
+/// `{ limited: N }`. Returns `(unlimited, total)`.
+/// 9router `zed.js parseZedUsageLimit`.
+fn parse_zed_usage_limit(limit: &Value) -> (bool, f64) {
+    if limit.is_null() {
+        return (false, 0.0);
+    }
+    if limit == &Value::String("unlimited".to_string())
+        || limit
+            .get("unlimited")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    {
+        return (true, 0.0);
+    }
+    if let Some(n) = limit.as_f64() {
+        if n.is_finite() {
+            return (false, n.max(0.0));
+        }
+        return (false, 0.0);
+    }
+    if let Some(s) = limit.as_str() {
+        let trimmed = s.trim();
+        if trimmed == "unlimited" {
+            return (true, 0.0);
+        }
+        if let Ok(n) = trimmed.parse::<f64>() {
+            if n.is_finite() {
+                return (false, n.max(0.0));
+            }
+        }
+        return (false, 0.0);
+    }
+    // `{ limited: N }` (also accepts capitalised `Limited`).
+    if let Some(n) = limit
+        .get("limited")
+        .or_else(|| limit.get("Limited"))
+        .and_then(|v| v.as_f64())
+    {
+        if n.is_finite() {
+            return (false, n.max(0.0));
+        }
+    }
+    (false, 0.0)
+}
+
+/// `limit: { limited: 0 }` on Pro/Student means token billing, not a 0-cap
+/// request quota. 9router `zed.js isZedTokenBillingModelRequestsLimit`.
+fn is_zed_token_billing_limit(limit_raw: &Value) -> bool {
+    let (unlimited, total) = parse_zed_usage_limit(limit_raw);
+    !unlimited && total == 0.0
+}
+
+/// One finite-number-or-fallback coercion (9router `toFiniteNumber`).
+fn zed_finite(value: &Value, fallback: f64) -> f64 {
+    value.as_f64().filter(|f| f.is_finite()).unwrap_or(fallback)
+}
+
+/// Build one Zed quota row. 9router `zed.js makeZedQuotaRow`: unlimited
+/// rows report `remainingPercentage: 100`; a non-positive total reports 0%.
+fn make_zed_quota_row(used_raw: &Value, limit_raw: &Value, reset_at: Option<String>) -> Value {
+    let used = zed_finite(used_raw, 0.0).max(0.0);
+    let (unlimited, total) = parse_zed_usage_limit(limit_raw);
+    if unlimited {
+        return json!({
+            "used": used,
+            "total": 0,
+            "remainingPercentage": 100,
+            "resetAt": reset_at,
+            "unlimited": true,
+        });
+    }
+    if total <= 0.0 {
+        return json!({
+            "used": used,
+            "total": 0,
+            "remainingPercentage": 0,
+            "resetAt": reset_at,
+            "unlimited": false,
+        });
+    }
+    let clamped_used = used.min(total);
+    let remaining = (total - clamped_used).max(0.0);
+    json!({
+        "used": clamped_used,
+        "total": total,
+        "remainingPercentage": (remaining / total) * 100.0,
+        "resetAt": reset_at,
+        "unlimited": false,
+    })
+}
+
+/// Map a `/client/users/me` response to `{ plan, quotas, message }` for the
+/// dashboard. Pure function — unit-testable without network.
+/// 9router `zed.js parseZedAuthenticatedUserUsage`.
+fn parse_zed_user_usage(user_info: &Value) -> Value {
+    let plan = user_info.get("plan").unwrap_or(&Value::Null);
+    let plan_id = plan
+        .get("plan_v3")
+        .or_else(|| plan.get("plan_v2"))
+        .or_else(|| plan.get("plan"))
+        .or_else(|| user_info.get("plan_v3"))
+        .and_then(|v| v.as_str());
+    let reset_at = plan
+        .get("subscription_period")
+        .and_then(|v| v.get("ended_at"))
+        .and_then(parse_reset_time)
+        .or_else(|| {
+            plan.get("subscriptionPeriod")
+                .and_then(|v| v.get("endedAt"))
+                .and_then(parse_reset_time)
+        });
+
+    let mut quotas = serde_json::Map::new();
+    let usage = plan.get("usage").unwrap_or(&Value::Null);
+
+    if let Some(edit) = usage
+        .get("edit_predictions")
+        .or_else(|| usage.get("editPredictions"))
+    {
+        quotas.insert(
+            "Edit Predictions".to_string(),
+            make_zed_quota_row(&edit["used"], &edit["limit"], reset_at.clone()),
+        );
+    }
+
+    let model_requests = usage
+        .get("model_requests")
+        .or_else(|| usage.get("modelRequests"));
+    // Token-billed plans report model_requests.limit = 0 — not a request
+    // quota, so the row is omitted and a note is surfaced instead.
+    let mut token_billing_note: Option<&str> = None;
+    if let Some(mr) = model_requests {
+        let limit_raw = if mr.get("limit").is_some_and(|v| !v.is_null()) {
+            &mr["limit"]
+        } else if let Some(bucket) = mr.as_object().and_then(|o| {
+            // `usageBucketLimit`: a bare bucket object without `.limit`
+            // passes through as its own limit (effectively missing).
+            if o.contains_key("limit") {
+                None
+            } else {
+                Some(mr)
+            }
+        }) {
+            bucket
+        } else {
+            &Value::Null
+        };
+        let (unlimited, total) = parse_zed_usage_limit(limit_raw);
+        if unlimited || total > 0.0 {
+            quotas.insert(
+                "Hosted Model Requests".to_string(),
+                make_zed_quota_row(&mr["used"], limit_raw, reset_at.clone()),
+            );
+        }
+        if is_zed_token_billing_limit(limit_raw) {
+            token_billing_note = Some("Hosted AI models are billed per token (not request count). Edit Predictions are tracked below. Token spend is on dashboard.zed.dev.");
+        }
+    }
+
+    let trial_started = plan
+        .get("trial_started_at")
+        .or_else(|| plan.get("trialStartedAt"))
+        .is_some();
+    let mut plan_label = format_zed_plan_label(plan_id.unwrap_or(""));
+    if trial_started && !plan_label.to_lowercase().contains("trial") {
+        plan_label = format!("{plan_label} (Trial active)");
+    }
+
+    let has_overdue = plan
+        .get("has_overdue_invoices")
+        .or_else(|| plan.get("hasOverdueInvoices"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let message: Value = if has_overdue {
+        Value::String("This Zed account has overdue invoices. Usage may be blocked until billing is resolved.".to_string())
+    } else {
+        token_billing_note
+            .map(|s| Value::String(s.to_string()))
+            .unwrap_or(Value::Null)
+    };
+
+    json!({
+        "plan": plan_label,
+        "quotas": Value::Object(quotas),
+        "message": message,
+        "hasOverdueInvoices": has_overdue,
+        "trialStarted": trial_started,
+        "planId": plan_id,
+        "resetAt": reset_at,
+    })
+}
+
+/// Fetch Zed plan quota: GET `/client/users/me` with the
+/// `{userId} {accessToken}` auth header (same credential shape as the chat
+/// path in `crate::oauth::zed_auth::build_user_auth_header`).
+/// 9router `zed.js getZedUsage` (wired in e5a13c3a).
+pub async fn fetch_zed_quota(
+    access_token: &str,
+    provider_specific_data: &std::collections::BTreeMap<String, Value>,
+) -> Value {
+    let token = access_token.trim();
+    if token.is_empty() {
+        return json!({ "message": "Zed access token not available. Re-connect Zed to view quota." });
+    }
+    let user_id = provider_specific_data
+        .get("userId")
+        .or_else(|| provider_specific_data.get("user_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let Some(user_id) = user_id else {
+        return json!({ "message": "Zed credential is missing user id. Re-connect Zed to view quota." });
+    };
+    let system_id = provider_specific_data
+        .get("systemId")
+        .or_else(|| provider_specific_data.get("system_id"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let client = http_client();
+    let mut req = client
+        .get(ZED_USERS_ME_URL)
+        .header("Accept", "application/json")
+        .header("Authorization", format!("{user_id} {token}"));
+    if let Some(sid) = system_id {
+        req = req.header("x-zed-system-id", sid);
+    }
+    let resp = match req.send().await {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Zed error: {e}") }),
+    };
+    let status = resp.status().as_u16();
+    if status == 401 || status == 403 {
+        return json!({ "message": "Zed authentication failed. Sign in again from the dashboard or Zed editor." });
+    }
+    if !resp.status().is_success() {
+        return json!({ "message": format!("Zed usage API error ({status}).") });
+    }
+    let user_info: Value = match resp.json().await {
+        Ok(v) => v,
+        Err(_) => return json!({ "message": "Zed usage response was not JSON." }),
+    };
+    parse_zed_user_usage(&user_info)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4120,5 +4402,112 @@ mod tests {
             "x-ratelimit-reset-requests"
         )
         .is_none());
+    }
+    // 9router e5a13c3a (zed.js): plan labels, UsageLimit shapes,
+    // token-billing detection, quota rows, full user-info mapping.
+    #[test]
+    fn zed_plan_label_maps_known_ids() {
+        assert_eq!(format_zed_plan_label("zed_free"), "Zed Free");
+        assert_eq!(format_zed_plan_label("zed_pro"), "Zed Pro");
+        assert_eq!(format_zed_plan_label("zed_pro_trial"), "Zed Pro Trial");
+        assert_eq!(format_zed_plan_label("zed_student"), "Zed Student");
+        assert_eq!(format_zed_plan_label("zed_business"), "Zed Business");
+        assert_eq!(format_zed_plan_label(""), "Zed");
+        assert_eq!(format_zed_plan_label("zed_custom_plus"), "Zed Custom Plus");
+    }
+
+    #[test]
+    fn zed_usage_limit_parses_all_shapes() {
+        assert_eq!(parse_zed_usage_limit(&json!(null)), (false, 0.0));
+        assert_eq!(parse_zed_usage_limit(&json!("unlimited")), (true, 0.0));
+        assert_eq!(
+            parse_zed_usage_limit(&json!({"unlimited": true})),
+            (true, 0.0)
+        );
+        assert_eq!(parse_zed_usage_limit(&json!(500)), (false, 500.0));
+        assert_eq!(parse_zed_usage_limit(&json!(-5)), (false, 0.0));
+        assert_eq!(parse_zed_usage_limit(&json!("300")), (false, 300.0));
+        assert_eq!(
+            parse_zed_usage_limit(&json!({"limited": 250})),
+            (false, 250.0)
+        );
+        assert_eq!(
+            parse_zed_usage_limit(&json!({"Limited": 100})),
+            (false, 100.0)
+        );
+        assert_eq!(parse_zed_usage_limit(&json!({"other": 1})), (false, 0.0));
+        // Token-billing: { limited: 0 } on Pro means per-token billing.
+        assert!(is_zed_token_billing_limit(&json!({"limited": 0})));
+        assert!(!is_zed_token_billing_limit(&json!({"limited": 10})));
+        assert!(!is_zed_token_billing_limit(&json!("unlimited")));
+    }
+
+    #[test]
+    fn zed_quota_row_covers_unlimited_zero_and_clamped() {
+        let u = make_zed_quota_row(&json!(100), &json!("unlimited"), None);
+        assert_eq!(u["unlimited"], json!(true));
+        assert_eq!(u["remainingPercentage"], json!(100));
+        let z = make_zed_quota_row(&json!(0), &json!({"limited": 0}), None);
+        assert_eq!(z["total"], json!(0));
+        assert_eq!(z["remainingPercentage"], json!(0));
+        let c = make_zed_quota_row(&json!(900), &json!(500), None);
+        assert_eq!(c["used"], json!(500.0));
+        assert_eq!(c["remainingPercentage"], json!(0.0));
+    }
+
+    #[test]
+    fn zed_user_usage_maps_plan_quotas_and_messages() {
+        // Paid Pro: both rows, plan label, no message.
+        let out = parse_zed_user_usage(&json!({
+            "plan": {
+                "plan_v3": "zed_pro",
+                "subscription_period": {"ended_at": "2026-10-01T00:00:00Z"},
+                "usage": {
+                    "edit_predictions": {"used": 50, "limit": 1000},
+                    "model_requests": {"used": 10, "limit": {"limited": 500}},
+                }
+            }
+        }));
+        assert_eq!(out["plan"], json!("Zed Pro"));
+        assert_eq!(out["quotas"]["Edit Predictions"]["used"], json!(50.0));
+        assert_eq!(
+            out["quotas"]["Hosted Model Requests"]["total"],
+            json!(500.0)
+        );
+        assert!(out["message"].is_null());
+        assert_eq!(out["planId"], json!("zed_pro"));
+        // Trial suffix appended only once.
+        let trial = parse_zed_user_usage(&json!({
+            "plan": {"plan_v3": "zed_pro", "trial_started_at": "2026-09-01T00:00:00Z", "usage": {}}
+        }));
+        assert_eq!(trial["plan"], json!("Zed Pro (Trial active)"));
+        assert_eq!(trial["trialStarted"], json!(true));
+        // Token billing: model row omitted, note surfaced.
+        let tok = parse_zed_user_usage(&json!({
+            "plan": {"plan_v3": "zed_pro", "usage": {
+                "edit_predictions": {"used": 5, "limit": 100},
+                "model_requests": {"used": 3, "limit": {"limited": 0}},
+            }}
+        }));
+        assert!(tok["quotas"].get("Hosted Model Requests").is_none());
+        assert!(tok["message"].as_str().unwrap().contains("per token"));
+        // Overdue invoices override the token note.
+        let overdue = parse_zed_user_usage(&json!({
+            "plan": {"plan_v3": "zed_pro", "has_overdue_invoices": true, "usage": {
+                "model_requests": {"used": 1, "limit": {"limited": 0}},
+            }}
+        }));
+        assert!(overdue["message"].as_str().unwrap().contains("overdue"));
+        assert_eq!(overdue["hasOverdueInvoices"], json!(true));
+        // Unlimited model row kept.
+        let unlim = parse_zed_user_usage(&json!({
+            "plan": {"plan_v3": "zed_free", "usage": {
+                "model_requests": {"used": 7, "limit": "unlimited"},
+            }}
+        }));
+        assert_eq!(
+            unlim["quotas"]["Hosted Model Requests"]["unlimited"],
+            json!(true)
+        );
     }
 }

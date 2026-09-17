@@ -16,7 +16,7 @@ use crate::core::usage::quota_fetcher::{
     fetch_gemini_cli_quota, fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota,
     fetch_groq_quota, fetch_kimi_oauth_usage, fetch_kimi_usage, fetch_kiro_quota,
     fetch_minimax_quota, fetch_ollama_quota, fetch_qoder_quota, fetch_vercel_ai_gateway_quota,
-    get_codex_rate_limit_reset_credits,
+    fetch_zed_quota, get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
 use crate::oauth::token_refresh::{dispatch_oauth_refresh, refresh_codex_token};
@@ -74,6 +74,7 @@ pub async fn fetch_oauth_quota(connection: &ProviderConnection) -> Value {
         "antigravity" => fetch_antigravity_quota(token, provider).await,
         "qoder" => fetch_qoder_quota(token, provider).await,
         "groq" => fetch_groq_quota(token).await,
+        "zed" => fetch_zed_quota(token, psd).await,
         "grok-cli" => fetch_grok_cli_quota(token).await,
         "ollama" => fetch_ollama_quota(token).await,
         // Kimi OAuth connections hit /v1/usages with Bearer + X-Msh-* headers.
