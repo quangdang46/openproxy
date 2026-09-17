@@ -149,11 +149,12 @@ fn resolve_model_metadata(provider: &str, model: &str) -> (Option<Format>, Strin
         return (target, upstream, strip);
     }
     // 9router acb5c34c (`getModelTargetFormat` + `isMuseSparkModel`): all
-    // Muse Spark models on opencode/opencode-go route to /zen/v1/responses,
-    // even ones the static catalog hasn't registered yet (e.g. future
-    // 1.4/2.0 versions — the JS test pins exactly this). Scoped to opencode
-    // providers only; other providers keep Chat Completions routing.
-    if (provider == "opencode" || provider == "opencode-go") && is_muse_spark_model(model) {
+    // Muse Spark models on opencode-family providers route to
+    // /zen/v1/responses, even ones the static catalog hasn't registered yet
+    // (e.g. future 1.4/2.0 versions — the JS test pins exactly this).
+    // Scoped to opencode providers only (incl. short aliases oc/ocg);
+    // other providers keep Chat Completions routing.
+    if matches!(provider, "opencode" | "opencode-go" | "oc" | "ocg") && is_muse_spark_model(model) {
         return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
     }
     (None, model.to_string(), Vec::new())
@@ -173,10 +174,11 @@ fn is_muse_spark_model(model_id: &str) -> bool {
     }
     let base = clean.rsplit('/').next().unwrap_or(clean);
     let lower = base.to_lowercase();
-    let Some(pos) = lower.find("muse") else {
+    // Start-anchored like the JS `/^muse…/`: a mid-string "muse" (e.g.
+    // `amuse-spark-x`) must not match.
+    let Some(after_muse) = lower.strip_prefix("muse") else {
         return false;
     };
-    let after_muse = &lower[pos + 4..];
     // Optional single `-`/`_` separator, then literal "spark".
     let after_sep = after_muse.strip_prefix(['-', '_']).unwrap_or(after_muse);
     let Some(after_spark) = after_sep.strip_prefix("spark") else {
@@ -713,6 +715,9 @@ mod tests {
             "muse",
             "spark",
             "musical-sparkler",
+            // Start-anchored: mid-string "muse" must not match (JS /^muse/).
+            "amuse-spark-x",
+            "prefix-amuse-spark-1.2",
         ] {
             assert!(!is_muse_spark_model(id), "{id} should not match");
         }
@@ -724,10 +729,15 @@ mod tests {
         // Registered catalog entries (targetFormat openai-responses).
         let (t, _, _) = resolve_model_metadata("opencode", "muse-spark-1.2-contributor-free");
         assert_eq!(t, Some(Format::OpenAiResponses));
-        // Unregistered future version → isMuseSparkModel fallback, opencode only.
+        // Unregistered future version → isMuseSparkModel fallback, opencode
+        // family only (incl. short aliases oc/ocg).
         let (t, _, _) = resolve_model_metadata("opencode", "muse-spark-1.4-contributor-free");
         assert_eq!(t, Some(Format::OpenAiResponses));
         let (t, _, _) = resolve_model_metadata("opencode-go", "muse-spark-9.9-foo");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        let (t, _, _) = resolve_model_metadata("oc", "muse-spark-9.9-foo");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        let (t, _, _) = resolve_model_metadata("ocg", "muse-spark-9.9-foo");
         assert_eq!(t, Some(Format::OpenAiResponses));
         // Other providers keep Chat Completions routing.
         let (t, _, _) = resolve_model_metadata("openai", "muse-spark-1.4-contributor-free");
