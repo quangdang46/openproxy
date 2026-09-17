@@ -23,6 +23,7 @@ pub enum GenericFormat {
     Tortoise,
     OpenaiCompat,
     MinimaxTts,
+    FishAudio,
 }
 
 impl GenericFormat {
@@ -39,6 +40,7 @@ impl GenericFormat {
             "tortoise" => GenericFormat::Tortoise,
             "openai" => GenericFormat::OpenaiCompat,
             "minimax-tts" => GenericFormat::MinimaxTts,
+            "fish-audio" => GenericFormat::FishAudio,
             _ => return None,
         })
     }
@@ -75,6 +77,7 @@ pub async fn synthesize_via_format(
         MinimaxTts => Err(TtsError::Parse(
             "minimax-tts dispatched via the dedicated adapter".into(),
         )),
+        FishAudio => fish_audio(client, request).await,
     }
 }
 
@@ -329,6 +332,43 @@ async fn coqui(client: &Client, req: GenericTtsRequest<'_>) -> Result<TtsResult,
         return Err(upstream_error(res).await);
     }
     response_to_base64(res, "wav").await
+}
+
+/// Fish Audio: the model id travels in an HTTP `model` header rather than
+/// the JSON body, and the voice is a `reference_id` (preset or cloned voice
+/// model). Mirrors `fishAudio` in genericFormats.js (9router 8af5e752).
+async fn fish_audio(client: &Client, req: GenericTtsRequest<'_>) -> Result<TtsResult, TtsError> {
+    let key = require_key(&req, "fish-audio")?;
+    let model = if req.model_id.is_empty() {
+        "s2.1-pro-free"
+    } else {
+        req.model_id
+    };
+    let mut body = json!({"text": req.text, "format": "mp3"});
+    if !req.voice_id.is_empty() {
+        if let Some(obj) = body.as_object_mut() {
+            obj.insert("reference_id".into(), json!(req.voice_id));
+        }
+    }
+    let res = client
+        .post(req.base_url)
+        .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
+        .header(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {key}"))
+                .map_err(|e| TtsError::Parse(e.to_string()))?,
+        )
+        .header(
+            "model",
+            HeaderValue::from_str(model).map_err(|e| TtsError::Parse(e.to_string()))?,
+        )
+        .json(&body)
+        .send()
+        .await?;
+    if !res.status().is_success() {
+        return Err(upstream_error(res).await);
+    }
+    response_to_base64(res, "mp3").await
 }
 
 async fn tortoise(client: &Client, req: GenericTtsRequest<'_>) -> Result<TtsResult, TtsError> {
