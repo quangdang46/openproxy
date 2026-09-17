@@ -4,7 +4,9 @@ use reqwest::Client;
 use std::time::Duration;
 use thiserror::Error;
 
-use super::base::{SearchProvider, SearchRequest, SearchResultSet};
+use super::base::{
+    fetch_public, get_provider_setting, SearchProvider, SearchRequest, SearchResultSet,
+};
 
 /// 9router search.js: global timeout is 15s (was 30s in Rust).
 const GLOBAL_TIMEOUT: Duration = Duration::from_secs(15);
@@ -101,18 +103,39 @@ async fn fetch_upstream_body(
         .timeout_ms()
         .map(Duration::from_millis)
         .unwrap_or(GLOBAL_TIMEOUT);
-    let mut builder = client
-        .request(provider.method(), &url)
-        .headers(headers)
-        .timeout(effective_timeout);
-    if let Some(body) = provider.build_body(request) {
-        builder = builder.json(&body);
-    }
+    let body_value = provider.build_body(request);
 
-    let res = builder
-        .send()
+    // SSRF hardening: when the target URL came from a client-supplied
+    // `provider_options.baseUrl` override, re-validate it with a DNS-resolving
+    // check (a hostname can resolve to a private/metadata IP even though the
+    // literal string passed the sync `assert_public_url` check in
+    // `resolve_base_url`) and follow any redirect chain manually so a hop
+    // can't land on an internal target. The provider's own configured base
+    // URL is admin-controlled and skips this extra async round-trip.
+    let res = if get_provider_setting(request, "baseUrl").is_some() {
+        fetch_public(
+            client,
+            provider.method(),
+            &url,
+            headers,
+            body_value.as_ref(),
+            effective_timeout,
+        )
         .await
-        .map_err(|e| SearchHandlerError::Upstream(e.to_string()))?;
+        .map_err(SearchHandlerError::Validation)?
+    } else {
+        let mut builder = client
+            .request(provider.method(), &url)
+            .headers(headers)
+            .timeout(effective_timeout);
+        if let Some(body) = &body_value {
+            builder = builder.json(body);
+        }
+        builder
+            .send()
+            .await
+            .map_err(|e| SearchHandlerError::Upstream(e.to_string()))?
+    };
     if !res.status().is_success() {
         let status = res.status().as_u16();
         let text = res.text().await.unwrap_or_default();

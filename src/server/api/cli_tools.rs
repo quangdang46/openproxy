@@ -2718,10 +2718,46 @@ struct ProbeMcpToolsRequest {
     url: Option<String>,
 }
 
+/// `true` iff `raw_url`'s host is a loopback address/hostname — the
+/// "self-hosted MCP server on this machine" exception the SSRF guard on
+/// `probe_cowork_mcp_tools` carves out (mirrors 9router's `isLocalRequest`
+/// intent, applied to the target instead of the caller).
+fn is_loopback_url(raw_url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(raw_url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
 // POST /api/cli-tools/cowork-mcp-tools
-// Probe a remote MCP server: initialize + tools/list (authless only).
-// OAuth servers return requiresAuth so the UI can skip tool listing.
-async fn probe_cowork_mcp_tools(Json(body): Json<ProbeMcpToolsRequest>) -> Response {
+// Probe a remote MCP server: initialize + tools/list. Dashboard/management
+// auth is required (this handler previously had none at all — every other
+// /api/cli-tools/* handler requires it) and, per 9router 97f3ab97
+// "fix(security): guard cowork-mcp-tools probe against SSRF (#3783)", the
+// target URL is SSRF-guarded unless it points at loopback (the documented
+// self-hosted-MCP-server exception — 9router's JS guards that case by
+// checking the *caller's* peer address instead, which this single-process
+// server has no equivalent plumbing for; requiring auth here is the
+// substitute protection against an anonymous-internet-caller SSRF).
+async fn probe_cowork_mcp_tools(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ProbeMcpToolsRequest>,
+) -> Response {
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
+
     let url = body.url.unwrap_or_default();
     if url.is_empty() {
         return (
@@ -2729,6 +2765,16 @@ async fn probe_cowork_mcp_tools(Json(body): Json<ProbeMcpToolsRequest>) -> Respo
             Json(json!({ "error": "url required", "tools": [] })),
         )
             .into_response();
+    }
+
+    if !is_loopback_url(&url) {
+        if let Err(_e) = crate::core::media::search::assert_public_url(&url) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "URL not allowed", "tools": [] })),
+            )
+                .into_response();
+        }
     }
 
     let result = probe_mcp_server(&url).await;
@@ -3041,6 +3087,25 @@ async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> 
 mod tests {
     use super::*;
     use super::*;
+
+    #[test]
+    fn is_loopback_url_accepts_localhost_and_loopback_ips() {
+        assert!(is_loopback_url("http://localhost:3000/mcp"));
+        assert!(is_loopback_url("http://LOCALHOST/mcp"));
+        assert!(is_loopback_url("http://127.0.0.1:18731/internal-admin"));
+        assert!(is_loopback_url("http://[::1]:8080/mcp"));
+    }
+
+    #[test]
+    fn is_loopback_url_rejects_private_and_public_hosts() {
+        // Private-network / metadata targets are NOT the loopback exception —
+        // they must still go through assert_public_url and be rejected.
+        assert!(!is_loopback_url("http://10.0.0.5/mcp"));
+        assert!(!is_loopback_url("http://192.168.1.1/mcp"));
+        assert!(!is_loopback_url("http://169.254.169.254/mcp"));
+        assert!(!is_loopback_url("https://example.com/mcp"));
+        assert!(!is_loopback_url("not a url"));
+    }
 
     #[test]
     fn test_codex_settings_default() {
