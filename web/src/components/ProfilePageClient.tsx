@@ -168,6 +168,9 @@ export default function ProfilePageClient() {
         oidcLoginLabel: data.oidcLoginLabel || "Sign in with OIDC",
       });
       setOidcClientSecret("");
+      // Upstream profile/page.js: setSsoTypeTab(data?.ssoType || "saml") —
+      // tab fallback stays "saml" (UI default); only the /api/settings
+      // ssoType default follows upstream settingsRepo ("oidc").
       setSsoTypeTab(
         typeof data.ssoType === "string" && data.ssoType ? data.ssoType : "saml",
       );
