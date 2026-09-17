@@ -782,9 +782,11 @@ pub(crate) fn safe_settings_payload_with_db_path(
         fields.insert(
             "ssoType".to_string(),
             Value::String({
+                // Upstream settingsRepo default is ssoType:"oidc" (not saml);
+                // keep the same default so fresh-install GET matches 9router.
                 let s = settings.sso_type.trim();
                 if s.is_empty() {
-                    "saml".to_string()
+                    "oidc".to_string()
                 } else {
                     s.to_string()
                 }

@@ -252,7 +252,8 @@ async fn get_settings_exposes_saml_sso_fields_with_defaults() {
     assert_eq!(res.status(), StatusCode::OK);
     let body = axum::body::to_bytes(res.into_body(), 65536).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json["ssoType"], "saml");
+    // Upstream settingsRepo default is ssoType:"oidc" (review #463).
+    assert_eq!(json["ssoType"], "oidc");
     assert_eq!(json["samlLoginLabel"], "Sign in with SAML SSO");
     assert_eq!(json["samlIssuer"], "urn:9router:sp");
     assert_eq!(json["samlAttributeEmail"], "email");
