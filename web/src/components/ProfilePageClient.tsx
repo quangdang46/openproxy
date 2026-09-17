@@ -23,8 +23,15 @@ interface Settings {
   fallbackStrategy?: string;
   /** Sticky limit for combo round-robin (separate from account RR) */
   comboStickyRoundRobinLimit?: number;
-  /** Dashboard auth mode: "password" | "oidc" | "both" */
+  /** Dashboard auth mode: "password" | "oidc" | "sso" | "saml" | "both" */
   authMode?: string;
+  ssoType?: string;
+  samlConfigured?: boolean;
+  samlEntryPoint?: string;
+  samlIssuer?: string;
+  samlLoginLabel?: string;
+  samlAttributeEmail?: string;
+  samlAttributeName?: string;
   oidcConfigured?: boolean;
   oidcIssuerUrl?: string;
   oidcClientId?: string;
@@ -113,6 +120,26 @@ export default function ProfilePageClient() {
   const [oidcTestLoading, setOidcTestLoading] = useState(false);
   const [oidcTestStatus, setOidcTestStatus] = useState<StatusMessage | null>(null);
   const [oidcRedirectUri, setOidcRedirectUri] = useState("/api/auth/oidc/callback");
+  const [samlAcsUrl, setSamlAcsUrl] = useState("/api/auth/saml/acs");
+  const [samlMetadataUrl, setSamlMetadataUrl] = useState("/api/auth/saml/metadata");
+
+  // SAML state (9router profile/page.js 65197ad1: SSO protocol switcher).
+  const [ssoTypeTab, setSsoTypeTab] = useState<string>("saml");
+  const [samlForm, setSamlForm] = useState({
+    samlEntryPoint: "",
+    samlIssuer: "urn:9router:sp",
+    samlCert: "",
+    samlLoginLabel: "Sign in with SAML SSO",
+    samlAttributeEmail: "email",
+    samlAttributeName: "name",
+  });
+  const [samlStatus, setSamlStatus] = useState<StatusMessage | null>(null);
+  const [samlLoading, setSamlLoading] = useState(false);
+  const [samlTestLoading, setSamlTestLoading] = useState(false);
+  const [samlTestStatus, setSamlTestStatus] = useState<StatusMessage | null>(null);
+  const [showSamlGuide, setShowSamlGuide] = useState(false);
+  const idpMetadataFileRef = useRef<HTMLInputElement>(null);
+  const certFileRef = useRef<HTMLInputElement>(null);
 
   const importFileRef = useRef<HTMLInputElement>(null);
 
@@ -140,7 +167,24 @@ export default function ProfilePageClient() {
         oidcScopes: data.oidcScopes || "openid profile email",
         oidcLoginLabel: data.oidcLoginLabel || "Sign in with OIDC",
       });
-      if (data.authMode === "oidc" || data.authMode === "both") {
+      setOidcClientSecret("");
+      setSsoTypeTab(
+        typeof data.ssoType === "string" && data.ssoType ? data.ssoType : "saml",
+      );
+      setSamlForm({
+        samlEntryPoint: data.samlEntryPoint || "",
+        samlIssuer: data.samlIssuer || "urn:9router:sp",
+        samlCert: "",
+        samlLoginLabel: data.samlLoginLabel || "Sign in with SAML SSO",
+        samlAttributeEmail: data.samlAttributeEmail || "email",
+        samlAttributeName: data.samlAttributeName || "name",
+      });
+      if (
+        data.authMode === "sso" ||
+        data.authMode === "saml" ||
+        data.authMode === "oidc" ||
+        data.authMode === "both"
+      ) {
         setOidcExpanded(true);
       }
     } catch (err) {
@@ -156,7 +200,10 @@ export default function ProfilePageClient() {
 
   useEffect(() => {
     if (typeof window !== "undefined") {
-      setOidcRedirectUri(`${window.location.origin}/api/auth/oidc/callback`);
+      const origin = window.location.origin;
+      setOidcRedirectUri(`${origin}/api/auth/oidc/callback`);
+      setSamlAcsUrl(`${origin}/api/auth/saml/acs`);
+      setSamlMetadataUrl(`${origin}/api/auth/saml/metadata`);
     }
   }, []);
 
@@ -295,6 +342,173 @@ export default function ProfilePageClient() {
     setOidcForm((prev) => ({ ...prev, [field]: value }));
   };
 
+  // ── SAML handlers (9router profile/page.js 65197ad1) ────────────────
+  const updateSamlForm = (field: string, value: string) => {
+    setSamlForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const handleIdpMetadataUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (idpMetadataFileRef.current) idpMetadataFileRef.current.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const xmlText = String(e.target?.result || "");
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(xmlText, "text/xml");
+        if (doc.querySelector("parsererror")) {
+          setSamlStatus({
+            type: "error",
+            message: "Unable to parse valid SAML IdP metadata from XML file",
+          });
+          return;
+        }
+        const entityID = doc.documentElement.getAttribute("entityID") || "";
+        const ssoNodes = Array.from(
+          doc.getElementsByTagNameNS(
+            "urn:oasis:names:tc:SAML:2.0:metadata",
+            "SingleSignOnService",
+          ),
+        );
+        let ssoUrl = "";
+        for (const node of ssoNodes) {
+          const binding = node.getAttribute("Binding") || "";
+          const location = node.getAttribute("Location") || "";
+          if (location) {
+            ssoUrl = location;
+            if (binding.includes("HTTP-Redirect")) break;
+          }
+        }
+        const certNodes = Array.from(
+          doc.getElementsByTagNameNS(
+            "http://www.w3.org/2000/09/xmldsig#",
+            "X509Certificate",
+          ),
+        );
+        const certStr =
+          certNodes.length > 0 ? (certNodes[0].textContent || "").trim() : "";
+        setSamlForm((prev) => ({
+          ...prev,
+          samlEntryPoint: ssoUrl || prev.samlEntryPoint,
+          samlIssuer: prev.samlIssuer || "urn:9router:sp",
+          samlCert: certStr || prev.samlCert,
+        }));
+        setSamlStatus({
+          type: "success",
+          message: `IdP metadata imported! (SSO URL: ${ssoUrl ? "found" : "not found"}, EntityID: ${entityID ? "found" : "not found"}, Cert: ${certStr ? "found" : "not found"})`,
+        });
+      } catch {
+        setSamlStatus({
+          type: "error",
+          message: "Error reading IdP metadata XML file",
+        });
+      }
+    };
+    reader.readAsText(file);
+  };
+
+  const handleCertFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (certFileRef.current) certFileRef.current.value = "";
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const text = String(e.target?.result || "");
+      setSamlForm((prev) => ({ ...prev, samlCert: text.trim() }));
+      setSamlStatus({
+        type: "success",
+        message: "Certificate file loaded into configuration.",
+      });
+    };
+    reader.readAsText(file);
+  };
+
+  const saveSamlSettings = async (targetAuthMode?: string) => {
+    const mode = targetAuthMode || oidcForm.authMode || "password";
+    setSamlLoading(true);
+    setSamlStatus(null);
+    setSamlTestStatus(null);
+    try {
+      const payload: Record<string, string> = {
+        authMode: mode,
+        ssoType: "saml",
+        samlEntryPoint: samlForm.samlEntryPoint.trim(),
+        samlIssuer: samlForm.samlIssuer.trim() || "urn:9router:sp",
+        samlCert: samlForm.samlCert.trim(),
+        samlLoginLabel: samlForm.samlLoginLabel.trim() || "Sign in with SAML SSO",
+        samlAttributeEmail: samlForm.samlAttributeEmail.trim() || "email",
+        samlAttributeName: samlForm.samlAttributeName.trim() || "name",
+      };
+      const data = await patchSettings(payload);
+      if (data) {
+        setSettings((prev) => ({ ...prev, ...data }));
+        setSamlForm({
+          samlEntryPoint: data.samlEntryPoint || payload.samlEntryPoint,
+          samlIssuer: data.samlIssuer || payload.samlIssuer,
+          samlCert: "",
+          samlLoginLabel: data.samlLoginLabel || payload.samlLoginLabel,
+          samlAttributeEmail: data.samlAttributeEmail || payload.samlAttributeEmail,
+          samlAttributeName: data.samlAttributeName || payload.samlAttributeName,
+        });
+        setOidcForm((prev) => ({ ...prev, authMode: data.authMode || mode }));
+        setSamlStatus({
+          type: "success",
+          message:
+            mode === "sso" || mode === "saml"
+              ? "SAML SSO login enabled"
+              : mode === "both"
+                ? "Password and SAML SSO login enabled"
+                : "SAML 2.0 settings saved",
+        });
+      }
+    } catch (err) {
+      setSamlStatus({
+        type: "error",
+        message: err instanceof Error ? err.message : "An error occurred",
+      });
+    } finally {
+      setSamlLoading(false);
+    }
+  };
+
+  const testSamlConnection = async () => {
+    setSamlTestLoading(true);
+    setSamlStatus(null);
+    setSamlTestStatus(null);
+    try {
+      const res = await fetch("/api/auth/saml/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          samlEntryPoint: samlForm.samlEntryPoint.trim(),
+          samlIssuer: samlForm.samlIssuer.trim(),
+          samlCert: samlForm.samlCert.trim(),
+        }),
+      });
+      const data = (await res.json().catch(() => ({}))) as {
+        ok?: boolean;
+        error?: string;
+        message?: string;
+      };
+      if (res.ok && data.ok) {
+        setSamlTestStatus({
+          type: "success",
+          message: data.message || "SAML configuration verified!",
+        });
+      } else {
+        setSamlTestStatus({
+          type: "error",
+          message: data.error ?? "SAML configuration test failed",
+        });
+      }
+    } catch {
+      setSamlTestStatus({ type: "error", message: "SAML test request failed" });
+    } finally {
+      setSamlTestLoading(false);
+    }
+  };
+
   const saveOidcSettings = async () => {
     const authMode = oidcForm.authMode || "password";
     const issuerUrl = oidcForm.oidcIssuerUrl.trim();
@@ -318,6 +532,7 @@ export default function ProfilePageClient() {
     try {
       const payload: Record<string, string> = {
         authMode,
+        ssoType: "oidc",
         oidcIssuerUrl: issuerUrl,
         oidcClientId: clientId,
         oidcScopes: scopes || "openid profile email",
@@ -760,7 +975,7 @@ export default function ProfilePageClient() {
           </div>
         </Card>
 
-        {/* ── OIDC Dashboard Login Card ───────────────────────────── */}
+        {/* ── Single Sign-On (SSO) Card ─────────────────────────────── */}
         <Card>
           <button
             type="button"
@@ -771,13 +986,15 @@ export default function ProfilePageClient() {
               <span className="material-symbols-outlined text-[20px]">lock_open</span>
             </div>
             <div className="flex-1 min-w-0">
-              <h3 className="text-base sm:text-lg font-semibold">OIDC Dashboard Login</h3>
+              <h3 className="text-base sm:text-lg font-semibold">Single Sign-On (SSO)</h3>
               <p className="text-xs text-muted-soft">
-                {settings.authMode === "oidc"
-                  ? "OIDC active"
+                {settings.authMode === "sso" ||
+                settings.authMode === "oidc" ||
+                settings.authMode === "saml"
+                  ? `${settings.ssoType === "saml" ? "SAML 2.0" : "OIDC"} SSO active`
                   : settings.authMode === "both"
-                    ? "Password + OIDC active"
-                    : "Optional SSO via Authentik/Keycloak/Google"}
+                    ? `Password + ${settings.ssoType === "saml" ? "SAML 2.0" : "OIDC"} active`
+                    : "Optional SSO via Okta, Entra ID, Keycloak, or OIDC"}
               </p>
             </div>
             <span className="material-symbols-outlined text-muted-soft shrink-0">
@@ -787,10 +1004,31 @@ export default function ProfilePageClient() {
           {oidcExpanded && (
             <div className="flex flex-col gap-4 mt-4">
               <p className="text-xs sm:text-sm text-muted-soft">
-                Use Authentik or any OIDC provider to sign in to the dashboard. You can enable
-                password-only, OIDC-only, or both for the dashboard; model API access still uses API
-                keys.
+                Configure enterprise Single Sign-On (SSO) for dashboard access using SAML 2.0
+                or OIDC.
               </p>
+
+              {/* SSO protocol switcher tabs */}
+              <div className="flex flex-col gap-2">
+                <label className="font-medium text-sm">SSO Protocol</label>
+                <div className="flex p-1 rounded-lg bg-ink/5 border border-hairline">
+                  {(["saml", "oidc"] as const).map((tab) => (
+                    <button
+                      key={tab}
+                      type="button"
+                      onClick={() => setSsoTypeTab(tab)}
+                      className={cn(
+                        "flex-1 py-1.5 px-3 rounded-md font-medium text-xs sm:text-sm transition-all text-center",
+                        ssoTypeTab === tab
+                          ? "bg-surface-card text-ink shadow-sm"
+                          : "text-muted-soft hover:text-ink",
+                      )}
+                    >
+                      {tab === "saml" ? "SAML 2.0" : "OIDC"}
+                    </button>
+                  ))}
+                </div>
+              </div>
 
               <div className="flex flex-col gap-2">
                 <label className="font-medium text-sm">Auth Mode</label>
@@ -799,20 +1037,28 @@ export default function ProfilePageClient() {
                     {
                       value: "password",
                       title: "Password only",
-                      desc: "Keep the legacy password login.",
+                      desc: "Keep legacy password login.",
                     },
                     {
-                      value: "oidc",
-                      title: "OIDC only",
-                      desc: "Require OIDC for dashboard access.",
+                      value: "sso",
+                      title: `${ssoTypeTab === "saml" ? "SAML" : "OIDC"} only`,
+                      desc: "Require SSO for dashboard access.",
                     },
                     {
                       value: "both",
                       title: "Both",
-                      desc: "Allow either password or OIDC.",
+                      desc: "Allow password or SSO login.",
                     },
                   ].map((option) => {
-                    const active = oidcForm.authMode === option.value;
+                    const currentMode = oidcForm.authMode;
+                    const active =
+                      option.value === "password"
+                        ? currentMode === "password"
+                        : option.value === "sso"
+                          ? currentMode === "sso" ||
+                            currentMode === "saml" ||
+                            currentMode === "oidc"
+                          : currentMode === "both";
                     return (
                       <button
                         key={option.value}
@@ -824,7 +1070,7 @@ export default function ProfilePageClient() {
                             ? "border-ink bg-ink/5"
                             : "border-hairline bg-surface-card hover:bg-surface-2",
                         )}
-                        disabled={loading || oidcLoading}
+                        disabled={loading || oidcLoading || samlLoading}
                       >
                         <p className="font-medium text-sm">{option.title}</p>
                         <p className="text-xs text-muted-soft mt-1">{option.desc}</p>
@@ -834,6 +1080,8 @@ export default function ProfilePageClient() {
                 </div>
               </div>
 
+              {ssoTypeTab === "oidc" ? (
+                <>
               <div className="flex flex-col gap-2">
                 <label className="font-medium text-sm">Issuer URL</label>
                 <Input
@@ -915,15 +1163,192 @@ export default function ProfilePageClient() {
               <StatusAlert status={oidcTestStatus} />
               <StatusAlert status={oidcStatus} />
 
-              {settings.authMode === "oidc" && (
+              {(settings.authMode === "oidc" || settings.authMode === "sso") && (
                 <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
-                  OIDC login is currently active. Password login is disabled until you switch back.
+                  OIDC login is currently active. Password login is disabled until
+                  you switch back.
                 </p>
               )}
               {settings.authMode === "both" && (
                 <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
-                  Password and OIDC login are both active.
+                  Password and{" "}
+                  {settings.ssoType === "saml" ? "SAML SSO" : "OIDC"} login are both
+                  active.
                 </p>
+              )}
+                </>
+              ) : (
+                <>
+                  {/* ── SAML 2.0 form ── */}
+                  <div className="flex flex-col gap-2">
+                    <label className="font-medium text-sm">IdP SSO URL</label>
+                    <Input
+                      placeholder="https://idp.example.com/sso/saml"
+                      value={samlForm.samlEntryPoint}
+                      onChange={(e) => updateSamlForm("samlEntryPoint", e.target.value)}
+                      disabled={loading || samlLoading}
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label className="font-medium text-sm">SP Entity ID / Issuer</label>
+                    <Input
+                      placeholder="urn:9router:sp"
+                      value={samlForm.samlIssuer}
+                      onChange={(e) => updateSamlForm("samlIssuer", e.target.value)}
+                      disabled={loading || samlLoading}
+                    />
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label className="font-medium text-sm">IdP X.509 Certificate</label>
+                    <textarea
+                      className="w-full rounded-lg border border-hairline bg-surface-card p-3 font-mono text-xs min-h-28"
+                      placeholder="Paste PEM or base64 certificate…"
+                      value={samlForm.samlCert}
+                      onChange={(e) => updateSamlForm("samlCert", e.target.value)}
+                      disabled={loading || samlLoading}
+                    />
+                    <div className="flex flex-wrap gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => idpMetadataFileRef.current?.click()}
+                        className="w-full sm:w-auto"
+                      >
+                        Import IdP metadata XML
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => certFileRef.current?.click()}
+                        className="w-full sm:w-auto"
+                      >
+                        Upload certificate file
+                      </Button>
+                      <input
+                        ref={idpMetadataFileRef}
+                        type="file"
+                        accept=".xml"
+                        className="hidden"
+                        onChange={handleIdpMetadataUpload}
+                      />
+                      <input
+                        ref={certFileRef}
+                        type="file"
+                        accept=".pem,.crt,.cer,.txt"
+                        className="hidden"
+                        onChange={handleCertFileUpload}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-soft">
+                      Write-only after saving — the certificate is never shown again.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <label className="font-medium text-sm">Login Button Label</label>
+                    <Input
+                      placeholder="Sign in with SAML SSO"
+                      value={samlForm.samlLoginLabel}
+                      onChange={(e) => updateSamlForm("samlLoginLabel", e.target.value)}
+                      disabled={loading || samlLoading}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <div className="flex flex-col gap-2">
+                      <label className="font-medium text-sm">Email Attribute</label>
+                      <Input
+                        placeholder="email"
+                        value={samlForm.samlAttributeEmail}
+                        onChange={(e) =>
+                          updateSamlForm("samlAttributeEmail", e.target.value)
+                        }
+                        disabled={loading || samlLoading}
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2">
+                      <label className="font-medium text-sm">Name Attribute</label>
+                      <Input
+                        placeholder="name"
+                        value={samlForm.samlAttributeName}
+                        onChange={(e) =>
+                          updateSamlForm("samlAttributeName", e.target.value)
+                        }
+                        disabled={loading || samlLoading}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-hairline bg-surface-card p-3 text-xs sm:text-sm text-muted-soft">
+                    <p className="font-medium text-ink mb-1">ACS URL</p>
+                    <code className="block break-all font-mono">{samlAcsUrl}</code>
+                    <p className="font-medium text-ink mb-1 mt-2">Metadata URL</p>
+                    <code className="block break-all font-mono">{samlMetadataUrl}</code>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowSamlGuide((v) => !v)}
+                    className="text-xs text-muted-soft underline underline-offset-2 text-left"
+                  >
+                    {showSamlGuide ? "Hide" : "Show"} IdP setup guide
+                  </button>
+                  {showSamlGuide && (
+                    <div className="rounded-lg border border-hairline bg-surface-card p-3 text-xs sm:text-sm text-muted-soft">
+                      <p className="mb-1">
+                        1. In your IdP (Okta, Entra ID, Keycloak), create a SAML app
+                        with the ACS URL above.
+                      </p>
+                      <p className="mb-1">
+                        2. Download the IdP metadata XML and import it with the
+                        button above — the SSO URL and certificate fill in
+                        automatically.
+                      </p>
+                      <p>
+                        3. Save, then test the connection before switching auth
+                        mode to SAML-only.
+                      </p>
+                    </div>
+                  )}
+
+                  <div className="flex flex-col sm:flex-row gap-2 pt-2 border-t border-hairline-soft">
+                    <Button
+                      type="button"
+                      variant="primary"
+                      loading={samlLoading}
+                      onClick={() => void saveSamlSettings()}
+                      className="w-full sm:w-auto"
+                    >
+                      Save SAML settings
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      loading={samlTestLoading}
+                      onClick={testSamlConnection}
+                      className="w-full sm:w-auto"
+                    >
+                      Test connection
+                    </Button>
+                  </div>
+
+                  <StatusAlert status={samlTestStatus} />
+                  <StatusAlert status={samlStatus} />
+
+                  {(settings.authMode === "saml" || settings.authMode === "sso") && (
+                    <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
+                      SAML SSO login is currently active. Password login is disabled
+                      until you switch back.
+                    </p>
+                  )}
+                  {settings.authMode === "both" && (
+                    <p className="text-xs sm:text-sm text-amber-600 dark:text-amber-400">
+                      Password and SAML SSO login are both active.
+                    </p>
+                  )}
+                </>
               )}
             </div>
           )}
