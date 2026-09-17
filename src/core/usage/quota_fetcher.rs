@@ -3532,6 +3532,184 @@ pub async fn fetch_ollama_quota(api_key: &str) -> Value {
     }
 }
 
+/// Groq models endpoint — doubles as the quota source (rate-limit info
+/// rides on every API response as x-ratelimit-* headers; no dedicated
+/// quota endpoint exists, and reading usage costs zero tokens).
+/// 9router `groq.js` MODELS_URL (`U("groq").url`).
+const GROQ_MODELS_URL: &str = "https://api.groq.com/openai/v1/models";
+
+/// Parse a Go-style duration string ("2m59.56s", "7.66s", "1h2m3s",
+/// "150ms") into milliseconds. Returns `None` when nothing parses.
+/// 9router `groq.js parseGroqDurationMs`: `/(\d+(?:\.\d+)?)(ms|s|m|h)/g`
+/// summed per component.
+fn parse_groq_duration_ms(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let bytes = value.as_bytes();
+    let mut total_ms = 0f64;
+    let mut matched = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        // Parse a number (digits + optional single dot).
+        let num_start = i;
+        let mut seen_dot = false;
+        while i < bytes.len() && (bytes[i].is_ascii_digit() || (!seen_dot && bytes[i] == b'.')) {
+            if bytes[i] == b'.' {
+                seen_dot = true;
+            }
+            i += 1;
+        }
+        if i == num_start {
+            // Not a number here — skip one char (covers stray separators;
+            // note `ms` must be checked before `m`/`s` below).
+            i += 1;
+            continue;
+        }
+        let amount: f64 = value[num_start..i].parse().ok()?;
+        // Parse the unit suffix (longest match first: `ms` before `m`).
+        let unit_ms: f64 = if value[i..].starts_with("ms") {
+            i += 2;
+            1.0
+        } else if i < bytes.len() && bytes[i] == b'h' {
+            i += 1;
+            3_600_000.0
+        } else if i < bytes.len() && bytes[i] == b'm' {
+            i += 1;
+            60_000.0
+        } else if i < bytes.len() && bytes[i] == b's' {
+            i += 1;
+            1_000.0
+        } else {
+            // Trailing number with no unit (or unknown suffix) — the JS
+            // regex simply wouldn't match it, so ignore this component.
+            continue;
+        };
+        matched = true;
+        total_ms += amount * unit_ms;
+    }
+    if matched {
+        Some(total_ms as u64)
+    } else {
+        None
+    }
+}
+
+/// Resolve a Go-style duration reset header to a future RFC 3339 timestamp
+/// (`Date.now() + ms`). 9router `groq.js resetAtFromDuration`.
+fn groq_reset_at(value: Option<&str>) -> Value {
+    match value
+        .and_then(parse_groq_duration_ms)
+        .map(|ms| chrono::Utc::now() + chrono::Duration::milliseconds(ms as i64))
+    {
+        Some(dt) => Value::String(dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+        None => Value::Null,
+    }
+}
+
+/// Build one rate-limit quota entry from a limit/remaining/reset header
+/// triple. Missing or non-numeric headers → `None` (a missing header must
+/// never masquerade as a real "0 remaining" quota — 9router `groq.js`
+/// `buildRateLimitQuota` checks `headers.get()` presence explicitly because
+/// `Number(null) === 0`).
+fn groq_rate_limit_quota(
+    headers: &reqwest::header::HeaderMap,
+    limit_key: &str,
+    remaining_key: &str,
+    reset_key: &str,
+) -> Option<Value> {
+    let limit: f64 = headers.get(limit_key)?.to_str().ok()?.trim().parse().ok()?;
+    let remaining: f64 = headers
+        .get(remaining_key)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    if !limit.is_finite() || !remaining.is_finite() {
+        return None;
+    }
+    let used = (limit - remaining).max(0.0);
+    Some(json!({
+        "used": used,
+        "total": limit,
+        "remaining": remaining.max(0.0),
+        "resetAt": groq_reset_at(headers.get(reset_key).and_then(|v| v.to_str().ok())),
+        "unlimited": false,
+    }))
+}
+
+/// Fetch Groq usage — no dedicated quota endpoint; rate-limit info rides on
+/// every API response as x-ratelimit-* headers (requests + tokens, always
+/// included). Piggybacks on the models list (the registry `validateUrl`) so
+/// reading usage never costs tokens.
+/// 9router `groq.js getGroqUsage` (first slice of #3701).
+pub async fn fetch_groq_quota(api_key: &str) -> Value {
+    let token = api_key.trim();
+    if token.is_empty() {
+        return json!({ "message": "Groq API key not available. Add a key to view usage." });
+    }
+    let client = http_client();
+    let resp = match client
+        .get(GROQ_MODELS_URL)
+        .bearer_auth(token)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return json!({ "message": format!("Groq error: {e}") }),
+    };
+    let status = resp.status();
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        return json!({ "plan": "Groq", "message": "Groq authentication failed. Check the API key." });
+    }
+    if !status.is_success() {
+        let err_text = resp.text().await.unwrap_or_default();
+        let suffix = if err_text.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", err_text.chars().take(120).collect::<String>())
+        };
+        return json!({ "plan": "Groq", "message": format!("Groq usage API error ({}){suffix}", status.as_u16()) });
+    }
+    // The quota data lives in headers, not the body — drain it so the
+    // connection can be released without needing the payload.
+    let headers = resp.headers().clone();
+    let _ = resp.text().await;
+
+    let requests = groq_rate_limit_quota(
+        &headers,
+        "x-ratelimit-limit-requests",
+        "x-ratelimit-remaining-requests",
+        "x-ratelimit-reset-requests",
+    );
+    let tokens = groq_rate_limit_quota(
+        &headers,
+        "x-ratelimit-limit-tokens",
+        "x-ratelimit-remaining-tokens",
+        "x-ratelimit-reset-tokens",
+    );
+    if requests.is_none() && tokens.is_none() {
+        // Key is valid (request succeeded) but no rate-limit bucket reported
+        // — "not tracked yet", not an auth/error state.
+        return json!({
+            "plan": "Groq",
+            "message": "Groq connected. No rate-limit data reported for this key yet.",
+            "quotas": Value::Object(serde_json::Map::new()),
+        });
+    }
+    let mut quotas = serde_json::Map::new();
+    if let Some(r) = requests {
+        quotas.insert("Requests".to_string(), r);
+    }
+    if let Some(t) = tokens {
+        quotas.insert("Tokens".to_string(), t);
+    }
+    json!({ "plan": "Groq", "quotas": Value::Object(quotas) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3873,5 +4051,74 @@ mod tests {
         reconcile_weekly_quota(&mut quotas, weekly);
         assert_eq!(quotas["gemini_weekly"]["used"], json!(500.0));
         assert_eq!(quotas["gemini_weekly"]["remainingPercentage"], json!(50.0));
+    }
+    // 9router b9c92cb8 (groq.js): Go-style durations, header
+    // presence semantics, and quota entry shape.
+    #[test]
+    fn groq_duration_parses_go_style_components() {
+        assert_eq!(parse_groq_duration_ms("2m59.56s"), Some(179_560));
+        assert_eq!(parse_groq_duration_ms("7.66s"), Some(7_660));
+        assert_eq!(parse_groq_duration_ms("150ms"), Some(150));
+        assert_eq!(parse_groq_duration_ms("1h2m3s"), Some(3_723_000));
+        assert_eq!(parse_groq_duration_ms(""), None);
+        assert_eq!(parse_groq_duration_ms("   "), None);
+        assert_eq!(parse_groq_duration_ms("abc"), None);
+    }
+
+    #[test]
+    fn groq_rate_limit_quota_requires_both_headers_present_and_numeric() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut h = HeaderMap::new();
+        // Missing headers → None (must not masquerade as 0 remaining).
+        assert!(groq_rate_limit_quota(
+            &h,
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests"
+        )
+        .is_none());
+        h.insert(
+            "x-ratelimit-limit-requests",
+            HeaderValue::from_static("14400"),
+        );
+        // Only limit present → still None.
+        assert!(groq_rate_limit_quota(
+            &h,
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests"
+        )
+        .is_none());
+        h.insert(
+            "x-ratelimit-remaining-requests",
+            HeaderValue::from_static("14370"),
+        );
+        h.insert(
+            "x-ratelimit-reset-requests",
+            HeaderValue::from_static("2m59.56s"),
+        );
+        let q = groq_rate_limit_quota(
+            &h,
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests",
+        )
+        .expect("quota");
+        assert_eq!(q["used"], json!(30.0));
+        assert_eq!(q["total"], json!(14400.0));
+        assert_eq!(q["unlimited"], json!(false));
+        assert!(q["resetAt"].is_string(), "reset header resolves to ISO ts");
+        // Non-numeric → None.
+        h.insert(
+            "x-ratelimit-remaining-requests",
+            HeaderValue::from_static("many"),
+        );
+        assert!(groq_rate_limit_quota(
+            &h,
+            "x-ratelimit-limit-requests",
+            "x-ratelimit-remaining-requests",
+            "x-ratelimit-reset-requests"
+        )
+        .is_none());
     }
 }
