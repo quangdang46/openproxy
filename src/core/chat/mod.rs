@@ -148,7 +148,42 @@ fn resolve_model_metadata(provider: &str, model: &str) -> (Option<Format>, Strin
             .unwrap_or_default();
         return (target, upstream, strip);
     }
+    // 9router acb5c34c (`getModelTargetFormat` + `isMuseSparkModel`): all
+    // Muse Spark models on opencode/opencode-go route to /zen/v1/responses,
+    // even ones the static catalog hasn't registered yet (e.g. future
+    // 1.4/2.0 versions — the JS test pins exactly this). Scoped to opencode
+    // providers only; other providers keep Chat Completions routing.
+    if (provider == "opencode" || provider == "opencode-go") && is_muse_spark_model(model) {
+        return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
+    }
     (None, model.to_string(), Vec::new())
+}
+
+/// Whether a model id is a Muse Spark model (served by /zen/v1/responses).
+/// 9router `isMuseSparkModel` (helpers.js): strip a trailing thinking suffix
+/// `model(level)`, take the vendor-prefix base, match `muse[-_]?spark`
+/// followed by end-of-string or a `-_:.\s` separator (case-insensitive).
+fn is_muse_spark_model(model_id: &str) -> bool {
+    // Strip trailing thinking suffix "model(level)".
+    let mut clean = model_id.trim();
+    if let Some(open) = clean.rfind('(') {
+        if clean.ends_with(')') && !clean[open + 1..clean.len() - 1].contains(['(', ')']) {
+            clean = clean[..open].trim_end();
+        }
+    }
+    let base = clean.rsplit('/').next().unwrap_or(clean);
+    let lower = base.to_lowercase();
+    let Some(pos) = lower.find("muse") else {
+        return false;
+    };
+    let after_muse = &lower[pos + 4..];
+    // Optional single `-`/`_` separator, then literal "spark".
+    let after_sep = after_muse.strip_prefix(['-', '_']).unwrap_or(after_muse);
+    let Some(after_spark) = after_sep.strip_prefix("spark") else {
+        return false;
+    };
+    // Followed by end-of-string or one of `-_:.\s`.
+    after_spark.is_empty() || after_spark.starts_with(['-', '_', ':', '.', ' ', '\t'])
 }
 
 fn parse_strip_list(raw: &str) -> Vec<String> {
@@ -654,5 +689,51 @@ mod tests {
         let tc = &body["messages"][0]["tool_calls"][0];
         assert!(tc.get("id").is_some());
         assert!(tc["id"].as_str().unwrap().contains("read_file"));
+    }
+    // 9router acb5c34c (isMuseSparkModel + executor-const-guard test):
+    // routing matrix incl thinking suffixes and future versions.
+    #[test]
+    fn muse_spark_models_match_responses_routing() {
+        for id in [
+            "muse-spark-1.2-contributor-free",
+            "muse-spark-1.3-contributor-free",
+            "muse-spark-1.4-contributor-free",
+            "muse-spark-2.0-contributor-free(xhigh)",
+            "muse-spark-1.2-contributor-free(xhigh)",
+            "MUSE-SPARK-1.5",
+            "muse_spark-1.2",
+            "prefix/muse-spark-1.2",
+        ] {
+            assert!(is_muse_spark_model(id), "{id} should match");
+        }
+        for id in [
+            "big-pickle",
+            "hy3-free",
+            "",
+            "muse",
+            "spark",
+            "musical-sparkler",
+        ] {
+            assert!(!is_muse_spark_model(id), "{id} should not match");
+        }
+    }
+
+    #[test]
+    fn muse_spark_resolves_responses_target_on_opencode_only() {
+        use crate::core::translator::registry::Format;
+        // Registered catalog entries (targetFormat openai-responses).
+        let (t, _, _) = resolve_model_metadata("opencode", "muse-spark-1.2-contributor-free");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        // Unregistered future version → isMuseSparkModel fallback, opencode only.
+        let (t, _, _) = resolve_model_metadata("opencode", "muse-spark-1.4-contributor-free");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        let (t, _, _) = resolve_model_metadata("opencode-go", "muse-spark-9.9-foo");
+        assert_eq!(t, Some(Format::OpenAiResponses));
+        // Other providers keep Chat Completions routing.
+        let (t, _, _) = resolve_model_metadata("openai", "muse-spark-1.4-contributor-free");
+        assert_eq!(t, None);
+        // Non-spark models unaffected.
+        let (t, _, _) = resolve_model_metadata("opencode", "big-pickle");
+        assert_eq!(t, None);
     }
 }
