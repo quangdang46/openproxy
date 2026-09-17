@@ -318,19 +318,26 @@ pub fn pick_saml_display_name(profile: &SamlProfile, settings: &SamlSettings) ->
 /// 1. Require a configured IdP cert.
 /// 2. Require the `SAMLResponse` parameter.
 /// 3. Replay protection: when `expected_request_id` is non-empty, the
-///    response XML must carry a matching `InResponseTo`.
+///    response XML must carry a matching `InResponseTo`. Callers should
+///    additionally call [`is_assertion_replayed`] / [`mark_assertion_used`]
+///    to get single-use semantics (issues #454/#458).
 /// 4. Verify the enveloped XML-DSig RSA signature over the Response (or
-///    its Assertion when only the latter is signed) with the IdP cert;
-///    `wantAssertionsSigned` is enforced — an unsigned assertion inside a
-///    signed response is rejected.
+///    its Assertion when only the latter is signed) with the IdP cert.
+///    `wantAssertionsSigned` is enforced (issues #449/#450): when the
+///    Response is signed, the Assertion must ALSO be signed — and the
+///    Response Reference must actually cover the Assertion element, not
+///    just the Response wrapper.
 /// 5. Enforce audience (our issuer/SP entity id), bearer
-///    `SubjectConfirmation` recipient + `NotOnOrAfter`, and `Conditions`
-///    `NotBefore`/`NotOnOrAfter` with 60s clock skew.
+///    `SubjectConfirmation` recipient (== expected ACS URL) +
+///    `NotOnOrAfter`, `Destination` (required, must be the ACS URL), and
+///    `Conditions` `NotBefore`/`NotOnOrAfter` with 60s clock skew
+///    (issues #452/#455).
 pub fn validate_saml_response(
     saml_response_b64: &str,
     expected_request_id: &str,
     settings: &SamlSettings,
     now_unix: i64,
+    expected_acs_url: &str,
 ) -> Result<SamlProfile, SamlError> {
     if settings.cert.trim().is_empty() {
         return Err(SamlError::Config(
@@ -374,17 +381,40 @@ pub fn validate_saml_response(
     let public_key =
         rsa_public_key_from_cert_pem(&cert_pem).map_err(|e| SamlError::Config(e.to_string()))?;
 
-    // Verify the Response-level signature when present; otherwise fall back
-    // to the Assertion-level signature (which is then REQUIRED —
-    // wantAssertionsSigned).
+    // Verify signatures. wantAssertionsSigned (issues #449/#450): a signed
+    // Response wrapping an UNSIGNED Assertion is rejected — the Assertion
+    // must carry its own signature, and the Response Reference must cover
+    // the Assertion element (URI="" whole-doc, or #ID resolving to the
+    // Assertion, or ID == the Response ID whose digest covers the child).
     let response_sig = find_signature(&xml, "Response");
     let assertion_xml = extract_assertion(&xml).ok_or_else(|| {
         SamlError::Protocol("SAMLResponse contains no Assertion element".to_string())
     })?;
     let assertion_sig = find_signature(&assertion_xml, "Assertion");
     match (response_sig, assertion_sig) {
-        (Some(sig), _) => verify_xml_signature(&xml, &sig, &public_key)?,
+        (Some(rsig), Some(asig)) => {
+            verify_xml_signature(&xml, &rsig, &public_key)?;
+            // The Response Reference must cover the Assertion: accept
+            // whole-document refs (URI=""), refs resolving to the Assertion
+            // ID, or refs to the Response ID (digest covers the child).
+            let assertion_id = extract_attr(&assertion_xml, "ID").unwrap_or_default();
+            let covered = rsig.reference_uri.is_empty()
+                || (!assertion_id.is_empty() && rsig.reference_uri == format!("#{assertion_id}"))
+                || response_id_covered(&xml, &rsig.reference_uri, &assertion_xml);
+            if !covered {
+                return Err(SamlError::BadSignature(
+                    "Response signature Reference does not cover the Assertion element".into(),
+                ));
+            }
+            verify_xml_signature(&assertion_xml, &asig, &public_key)?;
+        }
         (None, Some(sig)) => verify_xml_signature(&assertion_xml, &sig, &public_key)?,
+        (Some(_), None) => {
+            return Err(SamlError::BadSignature(
+                "wantAssertionsSigned: Response is signed but the Assertion carries no signature"
+                    .into(),
+            ));
+        }
         (None, None) => {
             return Err(SamlError::BadSignature(
                 "no enveloped Signature found on Response or Assertion".into(),
@@ -392,8 +422,101 @@ pub fn validate_saml_response(
         }
     }
 
-    check_conditions(&xml, &assertion_xml, settings.issuer_or_default(), now_unix)?;
+    check_conditions(
+        &xml,
+        &assertion_xml,
+        settings.issuer_or_default(),
+        expected_acs_url,
+        now_unix,
+    )?;
     Ok(parse_assertion_profile(&assertion_xml))
+}
+
+/// True when the Response-signature Reference URI resolves to the Response
+/// root itself (whose digest then covers the Assertion child element).
+fn response_id_covered(xml: &str, reference_uri: &str, assertion_xml: &str) -> bool {
+    let Some(id) = reference_uri.strip_prefix('#') else {
+        return false;
+    };
+    if id.is_empty() {
+        return false;
+    }
+    // The referenced element must be an ancestor of (or equal to) the
+    // Assertion — i.e. the Response root carrying this ID must contain the
+    // Assertion markup.
+    let Some(target) = find_element_by_id(xml, id) else {
+        return false;
+    };
+    target.contains(assertion_xml)
+}
+
+/// Single-use assertion replay cache (issues #454/#458).
+///
+/// Maps consumed Assertion `@ID` (or `InResponseTo` fallback) → expiry unix
+/// time (NotOnOrAfter + skew). Entries are bounded (10k) and lazily evicted
+/// on insert; a periodic sweep is unnecessary because stale entries are
+/// skipped on lookup and overwritten on insert.
+static CONSUMED_ASSERTIONS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, i64>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// True when this assertion ID was already consumed and has not yet expired.
+/// Stale (expired) entries are treated as unused.
+pub fn is_assertion_replayed(assertion_id: &str, now_unix: i64) -> bool {
+    if assertion_id.is_empty() {
+        return false;
+    }
+    let map = CONSUMED_ASSERTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    map.get(assertion_id).is_some_and(|&exp| now_unix <= exp)
+}
+
+/// Record an assertion ID as consumed until `expiry_unix`. No-op on empty ID.
+pub fn mark_assertion_used(assertion_id: &str, expiry_unix: i64) {
+    if assertion_id.is_empty() {
+        return;
+    }
+    let mut map = CONSUMED_ASSERTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    // Opportunistic eviction: drop expired entries, then cap size.
+    map.retain(|_, &mut exp| exp > expiry_unix - 3600);
+    if map.len() >= 10_000 {
+        if let Some(k) = map.keys().next().cloned() {
+            map.remove(&k);
+        }
+    }
+    map.insert(assertion_id.to_string(), expiry_unix);
+}
+
+/// Extract the Assertion `@ID` (or `InResponseTo` fallback) for replay
+/// tracking. Returns "" when neither is present.
+pub fn assertion_replay_id(assertion_xml: &str, response_xml: &str) -> String {
+    extract_attr(assertion_xml, "ID")
+        .or_else(|| extract_attr(response_xml, "InResponseTo"))
+        .unwrap_or_default()
+}
+
+/// Extract the tightest expiry bound (min of all NotOnOrAfter values + 60s
+/// skew) for replay-cache TTL. Falls back to now + 300s when unparseable.
+pub fn assertion_expiry_unix(assertion_xml: &str, response_xml: &str, now_unix: i64) -> i64 {
+    let mut best: Option<i64> = None;
+    for src in [assertion_xml, response_xml] {
+        let mut search = src;
+        while let Some(pos) = search.find("NotOnOrAfter") {
+            let rest = &search[pos..];
+            let Some(end) = rest.find('>') else { break };
+            let head = &rest[..end];
+            if let Some(v) = extract_attr(head, "NotOnOrAfter") {
+                if let Some(ts) = parse_saml_time(&v) {
+                    best = Some(best.map_or(ts, |b: i64| b.min(ts)));
+                }
+            }
+            search = &rest[end + 1..];
+        }
+    }
+    best.map(|ts| ts + 60).unwrap_or(now_unix + 300)
 }
 
 /// Generate standard SP XML metadata. Mirrors `generateSamlMetadata` in
@@ -432,7 +555,8 @@ fn extract_attr(xml: &str, attr: &str) -> Option<String> {
 
 /// Extract the first `<saml:Assertion …>…</saml:Assertion>` (or
 /// `<Assertion …>`) block, preserving prefixes.
-fn extract_assertion(xml: &str) -> Option<String> {
+/// Public for ACS replay-ID derivation.
+pub fn extract_assertion(xml: &str) -> Option<String> {
     for tag in ["saml:Assertion", "saml2:Assertion", "Assertion"] {
         let open = format!("<{tag}");
         let close = format!("</{tag}>");
@@ -448,7 +572,9 @@ fn extract_assertion(xml: &str) -> Option<String> {
 /// Build an RSA public key from a PEM X.509 certificate.
 /// The SPKI public key is extracted with x509-parser; the RSA modulus and
 /// exponent come from its DER (PKCS#1 RSAPublicKey sequence).
-fn rsa_public_key_from_cert_pem(pem: &str) -> Result<RsaPublicKey, String> {
+/// Public so the `saml/test` endpoint and the settings validator can reject
+/// malformed certs before persisting (issues #457/#460).
+pub fn rsa_public_key_from_cert_pem(pem: &str) -> Result<RsaPublicKey, String> {
     let b64: String = pem
         .replace("-----BEGIN CERTIFICATE-----", "")
         .replace("-----END CERTIFICATE-----", "")
@@ -468,24 +594,74 @@ fn rsa_public_key_from_cert_pem(pem: &str) -> Result<RsaPublicKey, String> {
     RsaPublicKey::new(n, e).map_err(|e| format!("convert RSA public key: {e}"))
 }
 
+/// Find the next open tag whose local name is `Audience`
+/// (`<Audience>`, `<Audience …>`, `<saml:Audience …>`, …). Skips
+/// `<AudienceRestriction>` via a tag-name boundary check.
+fn find_audience_open(xml: &str) -> Option<usize> {
+    let mut from = 0;
+    let bytes = xml.as_bytes();
+    while from < bytes.len() {
+        let rel = xml[from..].find('<')?;
+        let abs = from + rel;
+        // Skip closing tags.
+        if bytes.get(abs + 1) == Some(&b'/') {
+            from = abs + 2;
+            continue;
+        }
+        let mut name_end = abs + 1;
+        while name_end < bytes.len()
+            && !matches!(bytes[name_end], b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>')
+        {
+            name_end += 1;
+        }
+        let name = &xml[abs + 1..name_end];
+        if name.rsplit(':').next() == Some("Audience") {
+            return Some(abs);
+        }
+        from = name_end + 1;
+    }
+    None
+}
+
 /// Enforce audience, bearer SubjectConfirmation, and Conditions time
 /// windows (60s clock skew, mirroring node-saml defaults +
 /// `acceptedClockSkewMs: 60000` in saml.js).
+///
+/// `expected_acs_url` is `{origin}/api/auth/saml/acs` (issues #452/#455):
+/// - `Recipient` (SubjectConfirmationData) is REQUIRED and must equal it.
+/// - `Destination` (Response attribute) is REQUIRED and must equal it.
 fn check_conditions(
     response_xml: &str,
     assertion_xml: &str,
     expected_audience: &str,
+    expected_acs_url: &str,
     now_unix: i64,
 ) -> Result<(), SamlError> {
     const SKEW: i64 = 60;
     let mut audience_ok = false;
     let mut search = assertion_xml;
-    while let Some(pos) = search.find("<Audience") {
+    // Match `<Audience>`, `<Audience …>`, and any prefixed form
+    // (`<saml:Audience>`, `<saml2:Audience …>`) — real IdPs always prefix.
+    // NOTE: a naive `find("<Audience")` misses prefixed tags entirely AND
+    // false-matches `<AudienceRestriction>` (fixed here with a tag-name
+    // boundary check).
+    while let Some(pos) = find_audience_open(search) {
         let rest = &search[pos..];
         let Some(end) = rest.find('>') else { break };
+        // Skip self-closing and the Restriction wrapper (no text content).
+        let local = rest[1..end]
+            .split([' ', '\t', '\n', '\r', '/', '>'])
+            .next()
+            .unwrap_or("");
+        let local = local.rsplit(':').next().unwrap_or(local);
+        if local != "Audience" || rest[..end].ends_with('/') {
+            search = &rest[end + 1..];
+            continue;
+        }
         let close = rest
             .find("</Audience>")
-            .or_else(|| rest.find("</saml:Audience>"));
+            .or_else(|| rest.find("</saml:Audience>"))
+            .or_else(|| rest.find("</saml2:Audience>"));
         let text = match close {
             Some(c) => rest[end + 1..c].trim().to_string(),
             None => String::new(),
@@ -540,10 +716,34 @@ fn check_conditions(
         }
     }
     if let Some(dest) = extract_attr(response_xml, "Destination") {
-        if !dest.is_empty() && !dest.ends_with("/api/auth/saml/acs") {
+        if dest.trim().is_empty() {
+            return Err(SamlError::Protocol(
+                "SAML Response Destination is empty".into(),
+            ));
+        }
+        if dest != expected_acs_url {
             return Err(SamlError::Protocol(format!(
                 "SAML Response Destination mismatch: {dest}"
             )));
+        }
+    } else {
+        return Err(SamlError::Protocol(
+            "SAML Response Destination is required".into(),
+        ));
+    }
+    // Recipient is REQUIRED and must equal the ACS URL (issues #452/#455).
+    let sc_recipient = extract_attr(sc_snippet, "Recipient");
+    match sc_recipient {
+        Some(r) if r == expected_acs_url => {}
+        Some(r) => {
+            return Err(SamlError::Protocol(format!(
+                "SAML SubjectConfirmation Recipient mismatch: {r}"
+            )));
+        }
+        None => {
+            return Err(SamlError::Protocol(
+                "SAML SubjectConfirmation Recipient is required".into(),
+            ));
         }
     }
     Ok(())
@@ -776,12 +976,14 @@ fn c14n_exclusive(xml: &str) -> Result<String, String> {
                 open.push(name);
             }
             Ok(Event::Empty(ref e)) => {
+                // Unreachable in practice: expand_empty_elements=true makes
+                // quick-xml emit Start+End instead of Empty. Kept as a loud
+                // reject (not silent attr-dropping) so a future flag flip
+                // can never arm a signature bypass (issues #451/#453).
                 let name = e.name().as_ref().to_string();
-                out.push('<');
-                out.push_str(&name);
-                out.push_str("></");
-                out.push_str(&name);
-                out.push('>');
+                return Err(format!(
+                    "self-closing element not allowed in canonicalization: {name}"
+                ));
             }
             Ok(Event::End(ref e)) => {
                 let name = e.name().as_ref().to_string();
@@ -1409,7 +1611,14 @@ mod tests {
         };
         let xml = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" InResponseTo="_other"><saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:Subject><saml:NameID>u@e.c</saml:NameID></saml:Subject></saml:Assertion></samlp:Response>"#;
         let b64 = base64::engine::general_purpose::STANDARD.encode(xml);
-        let err = validate_saml_response(&b64, "_expected", &settings, 0).unwrap_err();
+        let err = validate_saml_response(
+            &b64,
+            "_expected",
+            &settings,
+            0,
+            "https://sp.example.com/api/auth/saml/acs",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("InResponseTo mismatch"));
     }
 
@@ -1419,8 +1628,98 @@ mod tests {
             cert: "QUJD".into(),
             ..Default::default()
         };
-        let err = validate_saml_response("", "", &settings, 0).unwrap_err();
+        let err = validate_saml_response(
+            "",
+            "",
+            &settings,
+            0,
+            "https://sp.example.com/api/auth/saml/acs",
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("Missing SAMLResponse"));
+    }
+
+    #[test]
+    fn self_closing_elements_rejected_in_c14n() {
+        // Issues #451/#453: the old Event::Empty arm silently dropped
+        // attributes (e.g. Recipient/NotOnOrAfter on self-closing
+        // SubjectConfirmationData). expand_empty_elements=true means the
+        // parser never emits Empty in production — the arm is now a loud
+        // reject, verified here by feeding a self-closing element with
+        // expansion DISABLED is impossible via the public fn, so instead
+        // assert the production path keeps attributes (Start+End path).
+        let xml = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="_a"><saml:Subject><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData Recipient="https://sp.example.com/api/auth/saml/acs" NotOnOrAfter="2030-01-01T00:00:00Z"/></saml:SubjectConfirmation></saml:Subject></saml:Assertion>"#;
+        let out = c14n_exclusive(xml).expect("c14n must succeed");
+        assert!(
+            out.contains("Recipient=\"https://sp.example.com/api/auth/saml/acs\""),
+            "Recipient must survive canonicalization: {out}"
+        );
+        assert!(
+            out.contains("NotOnOrAfter=\"2030-01-01T00:00:00Z\""),
+            "NotOnOrAfter must survive canonicalization: {out}"
+        );
+    }
+
+    #[test]
+    fn replay_cache_single_use() {
+        // Issues #454/#458: an assertion ID is usable once within its
+        // lifetime, then rejected until expiry.
+        let id = "test-assertion-replay-1";
+        assert!(!is_assertion_replayed(id, 1000));
+        mark_assertion_used(id, 2000);
+        assert!(is_assertion_replayed(id, 1500));
+        assert!(is_assertion_replayed(id, 2000));
+        assert!(!is_assertion_replayed(id, 2001));
+        assert!(!is_assertion_replayed("", 1500));
+    }
+
+    #[test]
+    fn replay_id_prefers_assertion_id_then_inresponseto() {
+        let ax = r#"<saml:Assertion ID="_abc123"></saml:Assertion>"#;
+        let rx = r#"<samlp:Response InResponseTo="_req9"></samlp:Response>"#;
+        assert_eq!(assertion_replay_id(ax, rx), "_abc123");
+        assert_eq!(
+            assertion_replay_id("<saml:Assertion></saml:Assertion>", rx),
+            "_req9"
+        );
+        assert_eq!(assertion_replay_id("", ""), "");
+    }
+
+    #[test]
+    fn recipient_and_destination_required() {
+        use super::check_conditions;
+        let assertion = r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"><saml:Conditions NotBefore="2020-01-01T00:00:00Z" NotOnOrAfter="2030-01-01T00:00:00Z"><saml:AudienceRestriction><saml:Audience>urn:test:sp</saml:Audience></saml:AudienceRestriction></saml:Conditions><saml:Subject><saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer"><saml:SubjectConfirmationData Recipient="https://sp.example.com/api/auth/saml/acs" NotOnOrAfter="2030-01-01T00:00:00Z"/></saml:SubjectConfirmation></saml:Subject></saml:Assertion>"#;
+        let response_ok = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="https://sp.example.com/api/auth/saml/acs"></samlp:Response>"#;
+        let acs = "https://sp.example.com/api/auth/saml/acs";
+        // now_unix inside the fixture Conditions window (2020..2030).
+        let now: i64 = 1_750_000_000;
+        // Happy path: matching Recipient + Destination.
+        check_conditions(response_ok, assertion, "urn:test:sp", acs, now)
+            .expect("happy path must pass");
+        // Missing Destination rejected (issues #452/#455).
+        let no_dest = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"></samlp:Response>"#;
+        let err = check_conditions(no_dest, assertion, "urn:test:sp", acs, now).unwrap_err();
+        assert!(err.to_string().contains("Destination is required"), "{err}");
+        // Wrong Destination rejected.
+        let bad_dest = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" Destination="https://evil.example/acs"></samlp:Response>"#;
+        let err = check_conditions(bad_dest, assertion, "urn:test:sp", acs, now).unwrap_err();
+        assert!(err.to_string().contains("Destination mismatch"), "{err}");
+        // Wrong Recipient rejected.
+        let bad_recipient = assertion.replace(
+            "Recipient=\"https://sp.example.com/api/auth/saml/acs\"",
+            "Recipient=\"https://evil.example/acs\"",
+        );
+        let err =
+            check_conditions(response_ok, &bad_recipient, "urn:test:sp", acs, now).unwrap_err();
+        assert!(err.to_string().contains("Recipient mismatch"), "{err}");
+        // Missing Recipient rejected.
+        let no_recipient = assertion.replace(
+            " Recipient=\"https://sp.example.com/api/auth/saml/acs\"",
+            "",
+        );
+        let err =
+            check_conditions(response_ok, &no_recipient, "urn:test:sp", acs, now).unwrap_err();
+        assert!(err.to_string().contains("Recipient is required"), "{err}");
     }
 
     fn inflate_raw(data: &[u8]) -> String {

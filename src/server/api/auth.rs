@@ -1140,8 +1140,21 @@ fn saml_origin(headers: &HeaderMap, settings: &Settings) -> String {
     )
 }
 
-fn build_saml_cookie(name: &str, value: &str, max_age_seconds: i64) -> String {
-    format!("{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_seconds}")
+fn build_saml_cookie(name: &str, value: &str, max_age_seconds: i64, secure: bool) -> String {
+    let secure_flag = if secure { "; Secure" } else { "" };
+    format!(
+        "{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_seconds}{secure_flag}"
+    )
+}
+
+fn saml_cookie_secure(headers: &HeaderMap) -> bool {
+    // Mirror the dashboard session-cookie logic (issues #456/#459).
+    std::env::var("AUTH_COOKIE_SECURE").ok().as_deref() == Some("true")
+        || headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.eq_ignore_ascii_case("https"))
+            .unwrap_or(false)
 }
 
 /// GET /api/auth/saml/start - build AuthnRequest, stash ID in saml_state
@@ -1173,7 +1186,12 @@ pub async fn saml_start(headers: HeaderMap, State(state): State<AppState>) -> Re
         }
     };
     let mut response = Redirect::to(&authorize_url).into_response();
-    if let Ok(hv) = HeaderValue::from_str(&build_saml_cookie("saml_state", &request_id, 600)) {
+    if let Ok(hv) = HeaderValue::from_str(&build_saml_cookie(
+        "saml_state",
+        &request_id,
+        600,
+        saml_cookie_secure(&headers),
+    )) {
         response.headers_mut().append(header::SET_COOKIE, hv);
     }
     response
@@ -1184,6 +1202,7 @@ pub async fn saml_start(headers: HeaderMap, State(state): State<AppState>) -> Re
 /// cookie, 302 to /dashboard. Mirrors acs/route.js.
 pub async fn saml_acs(State(state): State<AppState>, headers: HeaderMap, body: String) -> Response {
     use crate::server::auth::saml::{
+        assertion_expiry_unix, assertion_replay_id, is_assertion_replayed, mark_assertion_used,
         pick_saml_display_name, pick_saml_email, validate_saml_response,
     };
     let snapshot = state.db.snapshot();
@@ -1203,7 +1222,7 @@ pub async fn saml_acs(State(state): State<AppState>, headers: HeaderMap, body: S
     }
     let stored_request_id =
         crate::server::auth::extract_cookie(&headers, "saml_state").unwrap_or_default();
-    let clear_cookie = build_saml_cookie("saml_state", "", 0);
+    let clear_cookie = build_saml_cookie("saml_state", "", 0, saml_cookie_secure(&headers));
     let saml_response =
         serde_urlencoded::from_str::<std::collections::HashMap<String, String>>(&body)
             .ok()
@@ -1231,15 +1250,56 @@ pub async fn saml_acs(State(state): State<AppState>, headers: HeaderMap, body: S
     }
     let saml_settings = saml_settings_from(&settings);
     let now = Utc::now().timestamp();
-    let profile =
-        match validate_saml_response(&saml_response, &stored_request_id, &saml_settings, now) {
-            Ok(p) => p,
-            Err(e) => {
-                tracing::warn!("SAML ACS validation failed: {e}");
-                let _ = state.login_limiter.check_and_record(client_ip, false).await;
-                return fail(e.to_string());
-            }
+    let origin = saml_origin(&headers, &settings);
+    let expected_acs = format!("{origin}/api/auth/saml/acs");
+    let profile = match validate_saml_response(
+        &saml_response,
+        &stored_request_id,
+        &saml_settings,
+        now,
+        &expected_acs,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("SAML ACS validation failed: {e}");
+            let _ = state.login_limiter.check_and_record(client_ip, false).await;
+            return fail(e.to_string());
+        }
+    };
+    // Single-use replay cache (issues #454/#458): reject an assertion ID
+    // already consumed within its lifetime window.
+    let replay_id = {
+        // Re-derive from the raw response: Assertion @ID, else InResponseTo.
+        let xml_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            saml_response.trim(),
+        )
+        .unwrap_or_default();
+        let xml = String::from_utf8_lossy(&xml_bytes).into_owned();
+        match crate::server::auth::saml::extract_assertion(&xml) {
+            Some(ax) => assertion_replay_id(&ax, &xml),
+            None => assertion_replay_id("", &xml),
+        }
+    };
+    if is_assertion_replayed(&replay_id, now) {
+        let _ = state.login_limiter.check_and_record(client_ip, false).await;
+        return fail("saml_assertion_replayed".into());
+    }
+    // Mark consumed BEFORE issuing the session so a concurrent replay of the
+    // same POST cannot mint a second session (issues #454/#458).
+    {
+        let xml_bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            saml_response.trim(),
+        )
+        .unwrap_or_default();
+        let xml = String::from_utf8_lossy(&xml_bytes).into_owned();
+        let exp_ts = match crate::server::auth::saml::extract_assertion(&xml) {
+            Some(ax) => assertion_expiry_unix(&ax, &xml, now),
+            None => assertion_expiry_unix("", &xml, now),
         };
+        mark_assertion_used(&replay_id, exp_ts);
+    }
     let email = pick_saml_email(&profile, &saml_settings);
     let mut name = pick_saml_display_name(&profile, &saml_settings);
     if name.trim().is_empty() {
@@ -1330,7 +1390,7 @@ pub async fn saml_test(
     headers: HeaderMap,
     Json(req): Json<SamlTestRequest>,
 ) -> Response {
-    use crate::server::auth::saml::format_x509_certificate;
+    use crate::server::auth::saml::{format_x509_certificate, rsa_public_key_from_cert_pem};
     let snapshot = state.db.snapshot();
     if snapshot.settings.require_login {
         if let Err(err) = crate::server::auth::require_dashboard_session(&headers, &state.db) {
@@ -1401,6 +1461,17 @@ pub async fn saml_test(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "error": "Invalid IdP X.509 Certificate format" })),
+        )
+            .into_response();
+    }
+    // Parse the cert and extract an RSA public key BEFORE accepting it
+    // (issues #457/#460): a garbage cert would otherwise break ACS while
+    // password login stays blocked (SSO lockout, manual DB fix to recover).
+    let pem = format_x509_certificate(&cert);
+    if let Err(e) = rsa_public_key_from_cert_pem(&pem) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("IdP X.509 Certificate is not a valid RSA certificate: {e}") })),
         )
             .into_response();
     }
