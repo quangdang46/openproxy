@@ -790,6 +790,14 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
         append_codex_quota_windows(&mut quotas, "review", &review);
     }
 
+    // 9router 40eed186 (feat(usage): track GPT-5.3-Codex-Spark quota
+    // windows): extract Spark rate-limit windows and expose them as
+    // spark_session / spark_weekly, reusing the same prefix mechanism.
+    let spark_rl = get_codex_spark_rate_limit(&body);
+    if let Some(spark) = &spark_rl {
+        append_codex_quota_windows(&mut quotas, "spark", spark);
+    }
+
     let available_reset_credits = body
         .pointer("/rate_limit_reset_credits/available_count")
         .and_then(|v| v.as_f64())
@@ -816,10 +824,21 @@ pub async fn fetch_codex_quota(access_token: &str, _provider: &str) -> Value {
                 .unwrap_or(false)
         })
         .unwrap_or(false);
+    // 9router 40eed186: sparkLimitReached alongside the normal flag.
+    let spark_limit_reached = spark_rl
+        .as_ref()
+        .map(|snapshot| {
+            codex_rate_limit_body(snapshot)
+                .get("limit_reached")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
 
     json!({
         "plan": plan.unwrap_or_else(|| "unknown".to_string()),
         "limitReached": limit_reached,
+        "sparkLimitReached": spark_limit_reached,
         "resetCredits": { "availableCount": available_reset_credits },
         "quotas": Value::Object(quotas),
     })
@@ -1114,6 +1133,49 @@ fn append_codex_quota_windows(
             quotas.insert(key, entry);
         }
     }
+}
+
+/// Extract the GPT-5.3-Codex-Spark rate-limit snapshot from a Codex
+/// usage response, trying (in order): top-level `spark_rate_limit` /
+/// `gpt_5_3_codex_spark_rate_limit`, `rate_limits_by_limit_id` entries
+/// (`gpt-5.3-codex-spark`, `gpt_5_3_codex_spark`, `spark`), then an
+/// `additional_rate_limits` entry whose id contains "spark" or
+/// "5.3-codex-spark". 9router `codex.js getCodexSparkRateLimit` (40eed186).
+fn get_codex_spark_rate_limit(data: &Value) -> Option<Value> {
+    if let Some(v) = data.get("spark_rate_limit") {
+        return Some(v.clone());
+    }
+    if let Some(v) = data.get("gpt_5_3_codex_spark_rate_limit") {
+        return Some(v.clone());
+    }
+    if let Some(map) = data
+        .get("rate_limits_by_limit_id")
+        .and_then(|v| v.as_object())
+    {
+        for key in &["gpt-5.3-codex-spark", "gpt_5_3_codex_spark", "spark"] {
+            if let Some(v) = map.get(*key) {
+                return Some(v.clone());
+            }
+        }
+    }
+    if let Some(limits) = data
+        .get("additional_rate_limits")
+        .and_then(|v| v.as_array())
+    {
+        for limit in limits {
+            let id = limit
+                .get("limit_name")
+                .or_else(|| limit.get("metered_feature"))
+                .or_else(|| limit.get("id"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if id.contains("spark") || id.contains("5.3-codex-spark") {
+                return Some(limit.clone());
+            }
+        }
+    }
+    None
 }
 
 fn get_codex_review_rate_limit(data: &Value) -> Option<Value> {
@@ -4741,5 +4803,56 @@ mod tests {
         assert!(out2.get("message").is_some());
         let out3 = opencode_go_quota_rows(&json!({}));
         assert!(out3.get("message").is_some());
+    }
+    // 9router 40eed186 (codex.js getCodexSparkRateLimit): lookup order
+    // across the four response shapes + prefix append of spark windows.
+    #[test]
+    fn codex_spark_rate_limit_lookup_order() {
+        // 1. Top-level keys win.
+        let top = json!({"spark_rate_limit": {"marker": 1},
+            "rate_limits_by_limit_id": {"gpt-5.3-codex-spark": {"marker": 2}}});
+        assert_eq!(
+            get_codex_spark_rate_limit(&top).unwrap()["marker"],
+            json!(1)
+        );
+        let top2 = json!({"gpt_5_3_codex_spark_rate_limit": {"marker": 3},
+            "rate_limits_by_limit_id": {"spark": {"marker": 4}}});
+        assert_eq!(
+            get_codex_spark_rate_limit(&top2).unwrap()["marker"],
+            json!(3)
+        );
+        // 2. rate_limits_by_limit_id keys.
+        for key in ["gpt-5.3-codex-spark", "gpt_5_3_codex_spark", "spark"] {
+            let d = json!({"rate_limits_by_limit_id": {key: {"marker": key}}});
+            let got = get_codex_spark_rate_limit(&d).expect("found");
+            assert_eq!(got["marker"], json!(key));
+        }
+        // 3. additional_rate_limits id match (case-insensitive).
+        let d = json!({"additional_rate_limits": [
+            {"limit_name": "codex-main"},
+            {"metered_feature": "GPT-5.3-Codex-Spark"},
+        ]});
+        let got = get_codex_spark_rate_limit(&d).expect("found");
+        assert_eq!(got["metered_feature"], json!("GPT-5.3-Codex-Spark"));
+        // 4. No match → None (no spark rows appended).
+        assert!(get_codex_spark_rate_limit(&json!({"rate_limit": {}})).is_none());
+        assert!(
+            get_codex_spark_rate_limit(&json!({"additional_rate_limits": [{"id": "other"}]}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn codex_spark_windows_use_spark_prefix() {
+        let mut quotas = serde_json::Map::new();
+        let snapshot = json!({
+            "primary_window": {"used_percent": 12.0, "reset_at": "2026-08-22T05:00:00.000Z"},
+            "secondary_window": {"used_percent": 25.0, "reset_at": "2026-08-28T05:00:00.000Z"},
+        });
+        append_codex_quota_windows(&mut quotas, "spark", &snapshot);
+        assert!(quotas.contains_key("spark_session"));
+        assert!(quotas.contains_key("spark_weekly"));
+        assert_eq!(quotas["spark_session"]["used"], json!(12.0));
+        assert_eq!(quotas["spark_weekly"]["used"], json!(25.0));
     }
 }
