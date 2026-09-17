@@ -14,8 +14,8 @@ use crate::core::usage::quota_fetcher::{
     codex_account_id, consume_codex_rate_limit_reset_credit, fetch_antigravity_quota,
     fetch_claude_quota, fetch_codebuddy_quota, fetch_codex_quota, fetch_deepseek_usage,
     fetch_gemini_cli_quota, fetch_github_quota, fetch_glm_quota, fetch_grok_cli_quota,
-    fetch_kimi_oauth_usage, fetch_kimi_usage, fetch_kiro_quota, fetch_minimax_quota,
-    fetch_ollama_quota, fetch_qoder_quota, fetch_vercel_ai_gateway_quota,
+    fetch_groq_quota, fetch_kimi_oauth_usage, fetch_kimi_usage, fetch_kiro_quota,
+    fetch_minimax_quota, fetch_ollama_quota, fetch_qoder_quota, fetch_vercel_ai_gateway_quota,
     get_codex_rate_limit_reset_credits,
 };
 use crate::core::usage::{DailyUsageSummary, Pricing, ProviderUsage, UsageTracker};
@@ -44,6 +44,7 @@ fn is_usage_apikey_provider(provider: &str) -> bool {
             | "kiro"
             | "ollama"
             | "qoder"
+            | "groq"
             | "vercel-ai-gateway"
             | "codebuddy-cn"
             | "codebuddy-intl"
@@ -72,6 +73,7 @@ pub async fn fetch_oauth_quota(connection: &ProviderConnection) -> Value {
         "gemini-cli" => fetch_gemini_cli_quota(token, provider, psd).await,
         "antigravity" => fetch_antigravity_quota(token, provider).await,
         "qoder" => fetch_qoder_quota(token, provider).await,
+        "groq" => fetch_groq_quota(token).await,
         "grok-cli" => fetch_grok_cli_quota(token).await,
         "ollama" => fetch_ollama_quota(token).await,
         // Kimi OAuth connections hit /v1/usages with Bearer + X-Msh-* headers.
@@ -617,6 +619,7 @@ async fn get_connection_usage(
                 "kimi" => fetch_kimi_usage(api_key).await,
                 "deepseek" => fetch_deepseek_usage(api_key).await,
                 "qoder" => fetch_qoder_quota(api_key, &provider).await,
+                "groq" => fetch_groq_quota(api_key).await,
                 "kiro" => fetch_kiro_quota(api_key, &provider, &psd).await,
                 "vercel-ai-gateway" => fetch_vercel_ai_gateway_quota(api_key).await,
                 "codebuddy-cn" | "codebuddy-intl" => {
