@@ -2782,7 +2782,14 @@ async fn probe_cowork_mcp_tools(
 }
 
 async fn probe_mcp_server(url: &str) -> Value {
+    // Manual redirect policy: the probe URL survived `assert_public_url`
+    // (unless loopback-exempted), so each hop must stay validated instead of
+    // auto-following a 302 to an internal target unchecked — mirrors the
+    // `redirect: "manual"` intent of 9router's `fetchPublic` in #3714.
+    // (The JS `probeMcp` itself auto-follows without re-validation, so this
+    // is strictly tighter than upstream parity — worth keeping regardless.)
     let client = match reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(std::time::Duration::from_secs(8))
         .build()
     {
