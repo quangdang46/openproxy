@@ -851,8 +851,15 @@ mod tests {
 
     #[test]
     fn delta_does_not_shrink_on_second_run_with_overlay() {
-        // End-to-end self-erasure pin: build a delta, install it as the
-        // overlay file, rebuild — the second delta must equal the first.
+        // End-to-end self-erasure pin (bead openproxy-b3wf): build a delta
+        // from the REAL collect_hand_baseline(), install it as the overlay
+        // file, then rebuild from collect_hand_baseline() AGAIN — the way
+        // sync_model_catalog_inner does on consecutive daily runs. The
+        // second delta must equal the first: an overlay-inflated baseline
+        // would measure agreeing values as "no change" and drop them (the
+        // e6f5724b file-erases-itself bug). The previous revision of this
+        // test precomputed one hand_ vector and reused it for both runs,
+        // which pinned build_delta purity only.
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!(
             "openproxy-delta-test-{}",
@@ -863,38 +870,71 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         init_catalog_overlay(&dir);
+        // Upstream fixture: zai (glm's models.dev alias) declares vision +
+        // generous limits for glm-5. The hand tables may already know
+        // glm-5, so assert on determinism (run1 == run2) rather than on
+        // any particular delta content.
         let catalog = serde_json::json!({
             "zai": {"models": {"glm-5": {
                 "modalities": {"input": ["text", "image"]},
                 "limit": {"context": 500000, "output": 16384},
             }}},
         });
-        let baseline = vec![(
-            "glm".to_string(),
-            "glm-5".to_string(),
-            None,
-            crate::core::combo::capabilities::hand_capabilities_for_model("glm", "glm-5"),
-        )];
-        let (models1, providers1) = build_delta(&catalog, &baseline);
-        assert!(models1.contains_key("glm-5"), "vision delta expected");
-        // Install run-1 output as the overlay file, then rebuild with a
-        // hand baseline (what sync_model_catalog_inner does).
+        // Run 1: real baseline, no overlay file yet.
+        let baseline1 = collect_hand_baseline();
+        // Sanity: the real baseline really ignores the overlay — install a
+        // maximal overlay first and confirm the baseline is unchanged.
+        let poison = serde_json::json!({
+            "v": 1,
+            "models": {"glm-5": {"vision": true, "pdf": true, "audioInput": true, "videoInput": true}},
+            "providers": {"glm": {"glm-5": {"contextWindow": 9999999, "maxOutput": 9999999}}},
+        });
+        let mut f = std::fs::File::create(dir.join(CATALOG_FILE_NAME)).unwrap();
+        f.write_all(serde_json::to_string(&poison).unwrap().as_bytes())
+            .unwrap();
+        drop(f);
+        let baseline2 = collect_hand_baseline();
+        assert_eq!(
+            baseline1.len(),
+            baseline2.len(),
+            "baseline must be identical with a poisoned overlay installed"
+        );
+        for ((p1, m1, c1, caps1), (p2, m2, c2, caps2)) in baseline1.iter().zip(baseline2.iter()) {
+            assert_eq!((p1, m1, c1), (p2, m2, c2));
+            assert_eq!(caps1.vision, caps2.vision, "{m1} vision differs");
+            assert_eq!(caps1.pdf, caps2.pdf, "{m1} pdf differs");
+            assert_eq!(caps1.audio_input, caps2.audio_input, "{m1} audio differs");
+            assert_eq!(caps1.video_input, caps2.video_input, "{m1} video differs");
+            assert_eq!(
+                caps1.context_window, caps2.context_window,
+                "{m1} ctx differs"
+            );
+            assert_eq!(caps1.max_output, caps2.max_output, "{m1} out differs");
+        }
+        // Run-1 delta from the real baseline, then install it as the overlay
+        // (what a completed sync writes) and rebuild from a FRESH real
+        // baseline — deltas must be identical.
+        let (models1, providers1) = build_delta(&catalog, &baseline1);
         let file = serde_json::json!({
             "v": 1,
-            "models": {"glm-5": {"vision": true}},
+            "models": models1.keys().map(|k| (k.clone(), serde_json::json!({"vision": true}))).collect::<serde_json::Map<String, Value>>(),
             "providers": {"glm": {"glm-5": {"contextWindow": 500000, "maxOutput": 16384}}},
         });
         let mut f = std::fs::File::create(dir.join(CATALOG_FILE_NAME)).unwrap();
         f.write_all(serde_json::to_string(&file).unwrap().as_bytes())
             .unwrap();
-        let (models2, providers2) = build_delta(&catalog, &baseline);
+        drop(f);
+        let baseline3 = collect_hand_baseline();
+        let (models2, providers2) = build_delta(&catalog, &baseline3);
         assert_eq!(
             models1.keys().collect::<Vec<_>>(),
-            models2.keys().collect::<Vec<_>>()
+            models2.keys().collect::<Vec<_>>(),
+            "modality delta shrank on second run"
         );
         assert_eq!(
             providers1.keys().collect::<Vec<_>>(),
-            providers2.keys().collect::<Vec<_>>()
+            providers2.keys().collect::<Vec<_>>(),
+            "limits delta shrank on second run"
         );
         let _ = std::fs::remove_dir_all(&dir);
         init_catalog_overlay(std::path::Path::new(""));
