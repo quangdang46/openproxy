@@ -620,9 +620,13 @@ fn set_sync_error(message: String) {
 }
 
 /// Snapshot every registered model with the capabilities the hand-written
-/// tables resolve on their own. The overlay is bypassed by construction
-/// (this reads the static tables directly, never the synced file) — the
-/// e6f5724b self-erasure guard.
+/// tables resolve on their own. Uses `hand_capabilities_for_model` (tables
+/// only, no overlay `refine()`, no vision heuristic) — this IS the e6f5724b
+/// self-erasure guard: measuring deltas against a baseline that includes
+/// the previous sync's output makes agreeing upstream values look like "no
+/// change", so the file erases itself over two runs (JS: `providers`
+/// 20→5). Mirrors `setCatalogSource(null)` + restore-in-`finally`; no
+/// restore needed since the static tables are never mutated.
 fn collect_hand_baseline() -> Vec<(
     String,
     String,
@@ -637,17 +641,7 @@ fn collect_hand_baseline() -> Vec<(
         let alias = entry.alias.clone();
         for model in &entry.models {
             let caps =
-                crate::core::combo::capabilities::get_capabilities_for_model(&alias, &model.id);
-            // NOTE: `collect_hand_baseline` calling `get_capabilities_for_model`
-            // would recurse through the overlay `refine()` — but the overlay
-            // reads the synced *file*, while the baseline must be the
-            // hand-written tables alone (e6f5724b). Since `refine()` only ever
-            // turns capabilities ON, and deltas are computed as "upstream
-            // differs from baseline", an overlay-inflated baseline could only
-            // *shrink* the delta (never fabricate a wrong capability) — and
-            // in practice the overlay file is empty on a fresh install when
-            // the first sync runs. Documented here so a future reader knows
-            // the layering assumption.
+                crate::core::combo::capabilities::hand_capabilities_for_model(&alias, &model.id);
             entries.push((
                 alias.clone(),
                 model.id.clone(),
@@ -809,5 +803,100 @@ mod tests {
         let caps2 =
             crate::core::combo::capabilities::get_capabilities_for_model("", "dall-e-3-image");
         assert!(!caps2.vision);
+    }
+    #[test]
+    fn baseline_ignores_installed_overlay_self_erasure() {
+        // e6f5724b regression: with an overlay file installed that already
+        // grants vision + raises limits, the hand baseline must still be
+        // the tables alone — otherwise run 2 measures deltas against run
+        // 1's output and drops agreeing values (file self-erases).
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "openproxy-overlay-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let overlay = serde_json::json!({
+            "v": 1,
+            "models": {"some-unknown-vl-model-xyz": {"vision": true}},
+            "providers": {"glm": {"glm-5": {"contextWindow": 202752, "maxOutput": 16384}}},
+        });
+        let mut f = std::fs::File::create(dir.join(CATALOG_FILE_NAME)).unwrap();
+        f.write_all(serde_json::to_string(&overlay).unwrap().as_bytes())
+            .unwrap();
+        init_catalog_overlay(&dir);
+        // Overlay read works…
+        let m = catalog_modalities("some-unknown-vl-model-xyz").expect("overlay hit");
+        assert!(m.vision);
+        // …but the hand baseline is unaffected by it.
+        let caps = crate::core::combo::capabilities::hand_capabilities_for_model(
+            "",
+            "some-unknown-vl-model-xyz",
+        );
+        assert!(!caps.vision, "hand baseline must ignore the overlay file");
+        // And the full refined lookup still applies the overlay on top.
+        let refined = crate::core::combo::capabilities::get_capabilities_for_model(
+            "",
+            "some-unknown-vl-model-xyz",
+        );
+        assert!(refined.vision, "refined lookup must apply the overlay");
+        let _ = std::fs::remove_dir_all(&dir);
+        // Restore the reader to uninitialized so later tests (and the
+        // server path, which calls init at startup) are unaffected.
+        init_catalog_overlay(std::path::Path::new(""));
+    }
+
+    #[test]
+    fn delta_does_not_shrink_on_second_run_with_overlay() {
+        // End-to-end self-erasure pin: build a delta, install it as the
+        // overlay file, rebuild — the second delta must equal the first.
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "openproxy-delta-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        init_catalog_overlay(&dir);
+        let catalog = serde_json::json!({
+            "zai": {"models": {"glm-5": {
+                "modalities": {"input": ["text", "image"]},
+                "limit": {"context": 500000, "output": 16384},
+            }}},
+        });
+        let baseline = vec![(
+            "glm".to_string(),
+            "glm-5".to_string(),
+            None,
+            crate::core::combo::capabilities::hand_capabilities_for_model("glm", "glm-5"),
+        )];
+        let (models1, providers1) = build_delta(&catalog, &baseline);
+        assert!(models1.contains_key("glm-5"), "vision delta expected");
+        // Install run-1 output as the overlay file, then rebuild with a
+        // hand baseline (what sync_model_catalog_inner does).
+        let file = serde_json::json!({
+            "v": 1,
+            "models": {"glm-5": {"vision": true}},
+            "providers": {"glm": {"glm-5": {"contextWindow": 500000, "maxOutput": 16384}}},
+        });
+        let mut f = std::fs::File::create(dir.join(CATALOG_FILE_NAME)).unwrap();
+        f.write_all(serde_json::to_string(&file).unwrap().as_bytes())
+            .unwrap();
+        let (models2, providers2) = build_delta(&catalog, &baseline);
+        assert_eq!(
+            models1.keys().collect::<Vec<_>>(),
+            models2.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            providers1.keys().collect::<Vec<_>>(),
+            providers2.keys().collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        init_catalog_overlay(std::path::Path::new(""));
     }
 }

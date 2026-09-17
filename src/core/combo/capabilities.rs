@@ -722,6 +722,26 @@ fn match_pattern(pattern: &str, model: &str) -> bool {
 }
 
 pub fn get_capabilities_for_model(provider: &str, model: &str) -> ModelCapabilities {
+    refine_capabilities(
+        hand_capabilities_for_model(provider, model),
+        provider,
+        model,
+    )
+}
+
+/// Hand-written table lookup only (provider override → exact → pattern →
+/// floor), WITHOUT the synced-catalog overlay or the vision heuristic.
+///
+/// This is the e6f5724b self-erasure guard: `collect_hand_baseline()` in
+/// `catalog_overlay` must measure upstream deltas against the hand-written
+/// tables ALONE. Going through `get_capabilities_for_model` (which applies
+/// `refine()`, reading the synced file) would measure each delta against
+/// the previous sync's output, so a value that still agrees with upstream
+/// looks like "no change" and is dropped — the file erases itself over two
+/// runs (JS observed `providers` 20→5). Mirrors `setCatalogSource(null)` +
+/// restore-in-`finally` in sync.js; no restore needed here since the static
+/// tables are never mutated.
+pub fn hand_capabilities_for_model(provider: &str, model: &str) -> ModelCapabilities {
     if model.is_empty() {
         return ModelCapabilities::default();
     }
@@ -744,16 +764,15 @@ pub fn get_capabilities_for_model(provider: &str, model: &str) -> ModelCapabilit
         return ModelCapabilities::from_value(entry);
     }
 
-    // 3. Pattern (first match wins), refined by the synced catalog overlay +
-    //    the vision name heuristic (both strictly additive — see `refine`).
+    // 3. Pattern (first match wins).
     for (pattern, caps) in PATTERN_CAPABILITIES.iter() {
         if match_pattern(pattern, base_model) || match_pattern(pattern, model) {
-            return refine_capabilities(ModelCapabilities::from_value(caps), provider, model);
+            return ModelCapabilities::from_value(caps);
         }
     }
 
-    // 4. Floor, refined the same way.
-    refine_capabilities(ModelCapabilities::default(), provider, model)
+    // 4. Floor.
+    ModelCapabilities::default()
 }
 
 /// Apply the synced models.dev catalog overlay + the vision name heuristic
@@ -805,13 +824,47 @@ fn looks_like_vision_model(model_id: &str) -> bool {
         return false;
     }
     let id = model_id.to_lowercase();
+    const SEP: &[char] = &['-', '_', '/', ':', '.'];
+    // Split into separator-delimited segments once; most block terms only
+    // match whole segments (mirrors the JS `(^|SEP)…(SEP|$)` anchoring).
+    let segments: Vec<&str> = id.split(SEP).collect();
+    let has_segment = |word: &str| segments.iter().any(|s| *s == word);
     // Image GENERATION, video generation, and non-chat models also carry
     // these words but take no image input — checked first so they never match.
-    const NOT_VISION: &[&str] = &[
-        "image",
-        "img",
-        "stable-image",
-        "gen",
+    // 9router `visionPatterns.js NOT_VISION`: `(^|SEP)(image|img)(SEP|$)`,
+    // `stable-image`, `gen[0-9]_image`, `nanobanana`, `imagine`, `t2v`,
+    // `i2v`, `flux`, `dall`, `sdxl`, `diffusion`, `embed`, `rerank`,
+    // `guard`, `moderation`, `tts`, `stt`, `whisper`, `voice`, `speech`,
+    // `audio` (unanchored alternation tail in the JS regex).
+    //
+    // NOTE: the JS alternation mixes anchored heads (`image`, `img`,
+    // `stable-image`, `gen[0-9]_image`, …) with an unanchored tail
+    // (`embed`, `tts`, …). The port keeps that exact shape: segment match
+    // for the anchored heads, substring for the tail. A former revision
+    // blocked any id containing `"gen"` as a substring — overbroad
+    // (fail-closed: `gen-vision-1`, `*-agentic` + a vision word, and
+    // `imageslider-vl` were denied vision the JS grants). Only
+    // `gen[0-9]_image` blocks now.
+    if has_segment("image") || has_segment("img") || id.contains("stable-image") {
+        return false;
+    }
+    if segments.iter().any(|seg| {
+        // `gen[0-9]_image`: split on `_`/`-`/… turns `gen0_image` into
+        // ["gen0", "image"] — match per-segment instead.
+        let b = seg.as_bytes();
+        b.len() >= 4
+            && b[0] == b'g'
+            && b[1] == b'e'
+            && b[2] == b'n'
+            && b[3].is_ascii_digit()
+            && seg[4..]
+                .split('-')
+                .any(|p| p == "image" || p.starts_with("image"))
+            || *seg == "image"
+    }) {
+        return false;
+    }
+    for w in [
         "nanobanana",
         "imagine",
         "t2v",
@@ -830,18 +883,15 @@ fn looks_like_vision_model(model_id: &str) -> bool {
         "voice",
         "speech",
         "audio",
-    ];
-    // NOTE: the JS NOT_VISION regex anchors most terms to separator
-    // boundaries (`(^|SEP)(image|img)(SEP|$)` etc.); the substring check
-    // below is deliberately broader (safer direction for a last-resort ON
-    // switch — an over-match only grants vision, never removes it).
-    if NOT_VISION.iter().any(|w| id.contains(w)) {
-        return false;
+    ] {
+        if id.contains(w) {
+            return false;
+        }
     }
     // Explicit modality words, plus the "<digit>v" suffix vendors use for
     // vision variants (glm-4.6v, glm-5v-turbo). The digit-v branch requires
     // a dotted version so the never-shipped `gpt-4v` cannot match.
-    const SEP: &[char] = &['-', '_', '/', ':', '.'];
+    // (SEP/segments already defined above.)
     let sep_or_edge = |pos: usize, len: usize| pos == 0 || pos + len == id.len();
     let has_word = |word: &str| {
         id.split(SEP).any(|seg| seg == word)
