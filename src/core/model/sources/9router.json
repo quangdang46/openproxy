@@ -1,7 +1,7 @@
 {
   "source": "9router",
-  "ref": "v0.5.65",
-  "generatedAt": "2026-09-05T16:33:11.805Z",
+  "ref": "v0.5.75-2-g17c4cc76",
+  "generatedAt": "2026-09-18T06:10:41.485Z",
   "providerIdToAlias": {
     "alicode-intl": "alicode-intl",
     "alicode": "alicode",
@@ -93,22 +93,22 @@
       "baseUrl": "https://api.airforce/v1/chat/completions",
       "models": [
         {
-          "id": "anthropic/claude-3.7-sonnet",
-          "name": "Claude 3.7 Sonnet (Free)",
+          "id": "gpt-oss-120b",
+          "name": "GPT-OSS 120B (Free)",
           "kind": "llm",
-          "contextLength": 200000
+          "contextLength": 131072
         },
         {
-          "id": "moonshot/kimi-k2.6",
-          "name": "Kimi K2.6 (Free)",
+          "id": "gpt-oss-20b",
+          "name": "GPT-OSS 20B (Free)",
+          "kind": "llm",
+          "contextLength": 131072
+        },
+        {
+          "id": "kimi-k2.7-code",
+          "name": "Kimi K2.7 Code (Free)",
           "kind": "llm",
           "contextLength": 262144
-        },
-        {
-          "id": "google/gemini-2.5-flash",
-          "name": "Gemini 2.5 Flash (Free)",
-          "kind": "llm",
-          "contextLength": 1048576
         }
       ]
     },
@@ -927,11 +927,6 @@
           "kind": "llm"
         },
         {
-          "id": "glm-5.0-turbo",
-          "name": "GLM-5.0-Turbo",
-          "kind": "llm"
-        },
-        {
           "id": "glm-5v-turbo",
           "name": "GLM-5v-Turbo",
           "kind": "llm"
@@ -939,11 +934,6 @@
         {
           "id": "minimax-m3",
           "name": "MiniMax-M3",
-          "kind": "llm"
-        },
-        {
-          "id": "minimax-m2.7",
-          "name": "MiniMax-M2.7",
           "kind": "llm"
         },
         {
@@ -957,33 +947,13 @@
           "kind": "llm"
         },
         {
-          "id": "kimi-k2.5",
-          "name": "Kimi-K2.5",
-          "kind": "llm"
-        },
-        {
-          "id": "hy3-preview",
-          "name": "Hy3 Preview",
-          "kind": "llm"
-        },
-        {
           "id": "hy3",
           "name": "Hy3",
           "kind": "llm"
         },
         {
-          "id": "hy3-x",
-          "name": "Hy3 (Paid)",
-          "kind": "llm"
-        },
-        {
           "id": "hy4-preview",
           "name": "Hy4-Preview",
-          "kind": "llm"
-        },
-        {
-          "id": "hy4-preview-x",
-          "name": "Hy4-Preview (Paid)",
           "kind": "llm"
         },
         {
@@ -1007,13 +977,8 @@
           "kind": "llm"
         },
         {
-          "id": "deepseek-v4-flash",
-          "name": "DeepSeek-V4-Flash",
-          "kind": "llm"
-        },
-        {
-          "id": "deepseek-v3-2-volc",
-          "name": "DeepSeek-V3.2",
+          "id": "deepseek-v4.1-flash",
+          "name": "DeepSeek-V4.1-Flash",
           "kind": "llm"
         }
       ]
@@ -1510,6 +1475,11 @@
       "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
       "models": [
         {
+          "id": "gpt-6-astra",
+          "name": "GPT 6.0 Astra",
+          "kind": "llm"
+        },
+        {
           "id": "gpt-5.6-sol",
           "name": "GPT 5.6 Sol",
           "kind": "llm"
@@ -1578,6 +1548,46 @@
           "id": "gpt-5.3-codex-spark-review",
           "name": "GPT 5.3 Codex Spark Review",
           "kind": "llm"
+        },
+        {
+          "id": "gpt-image-2.5",
+          "name": "GPT Image 2.5",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2.5-flare",
+          "name": "GPT Image 2.5 Flare",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2.5-sunburst",
+          "name": "GPT Image 2.5 Sunburst",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-2",
+          "name": "GPT Image 2",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-image-1.5",
+          "name": "GPT Image 1.5",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-5.6-sol-image",
+          "name": "GPT 5.6 Sol Image",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-5.6-terra-image",
+          "name": "GPT 5.6 Terra Image",
+          "kind": "image"
+        },
+        {
+          "id": "gpt-5.6-luna-image",
+          "name": "GPT 5.6 Luna Image",
+          "kind": "image"
         },
         {
           "id": "gpt-5.5-image",
@@ -2389,6 +2399,11 @@
           "kind": "llm"
         },
         {
+          "id": "glm-5-turbo",
+          "name": "GLM 5 Turbo",
+          "kind": "llm"
+        },
+        {
           "id": "glm-5",
           "name": "GLM 5",
           "kind": "llm"
@@ -2429,6 +2444,11 @@
         {
           "id": "glm-5.1",
           "name": "GLM 5.1",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5-turbo",
+          "name": "GLM 5 Turbo",
           "kind": "llm"
         },
         {
@@ -4076,6 +4096,21 @@
           "kind": "llm"
         },
         {
+          "id": "gpt-image-2.5",
+          "name": "GPT Image 2.5",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-image-2.5-flare",
+          "name": "GPT Image 2.5 Flare",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-image-2.5-sunburst",
+          "name": "GPT Image 2.5 Sunburst",
+          "kind": "llm"
+        },
+        {
           "id": "gpt-image-1",
           "name": "GPT Image 1",
           "kind": "llm"
@@ -4191,8 +4226,18 @@
       "baseUrl": "https://opencode.ai/zen/go/v1/chat/completions",
       "models": [
         {
+          "id": "deepseek-flash",
+          "name": "DeepSeek V4.1 Flash",
+          "kind": "llm"
+        },
+        {
           "id": "glm-5.3-flash",
           "name": "GLM 5.3 Flash (Vision)",
+          "kind": "llm"
+        },
+        {
+          "id": "glm-5.3",
+          "name": "GLM 5.3",
           "kind": "llm"
         },
         {
@@ -4216,6 +4261,11 @@
           "kind": "llm"
         },
         {
+          "id": "kimi-k3",
+          "name": "Kimi K3",
+          "kind": "llm"
+        },
+        {
           "id": "deepseek-v4-pro",
           "name": "DeepSeek V4 Pro",
           "kind": "llm"
@@ -4228,6 +4278,11 @@
         {
           "id": "deepseek-v4-flash-vision-exp",
           "name": "DeepSeek V4 Flash Vision (Exp)",
+          "kind": "llm"
+        },
+        {
+          "id": "longcat-2.0",
+          "name": "LongCat 2.0",
           "kind": "llm"
         },
         {
@@ -4256,6 +4311,16 @@
           "kind": "llm"
         },
         {
+          "id": "qwen3.8-max",
+          "name": "Qwen 3.8 Max",
+          "kind": "llm"
+        },
+        {
+          "id": "qwen3.8-flash",
+          "name": "Qwen 3.8 Flash",
+          "kind": "llm"
+        },
+        {
           "id": "qwen3.7-max",
           "name": "Qwen 3.7 Max",
           "kind": "llm"
@@ -4268,6 +4333,36 @@
         {
           "id": "qwen3.6-plus",
           "name": "Qwen 3.6 Plus",
+          "kind": "llm"
+        },
+        {
+          "id": "hy4-preview",
+          "name": "Hy4 Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "hy3",
+          "name": "Hy3",
+          "kind": "llm"
+        },
+        {
+          "id": "grok-4.6",
+          "name": "Grok 4.6",
+          "kind": "llm"
+        },
+        {
+          "id": "gpt-5.6-luna",
+          "name": "GPT 5.6 Luna",
+          "kind": "llm"
+        },
+        {
+          "id": "muse-spark-1.2-contributor",
+          "name": "Muse Spark 1.2 Contributor",
+          "kind": "llm"
+        },
+        {
+          "id": "muse-spark-1.3-contributor",
+          "name": "Muse Spark 1.3 Contributor",
           "kind": "llm"
         }
       ]
@@ -4346,6 +4441,21 @@
         {
           "id": "black-forest-labs/FLUX.1-schnell",
           "name": "FLUX.1 Schnell (via OpenRouter)",
+          "kind": "llm"
+        },
+        {
+          "id": "google/veo-3.1",
+          "name": "Veo 3.1 (via OpenRouter)",
+          "kind": "llm"
+        },
+        {
+          "id": "openai/sora-2-pro",
+          "name": "Sora 2 Pro (via OpenRouter)",
+          "kind": "llm"
+        },
+        {
+          "id": "bytedance/seedance-2.0",
+          "name": "Seedance 2.0 (via OpenRouter)",
           "kind": "llm"
         }
       ]
@@ -4612,8 +4722,13 @@
           "kind": "llm"
         },
         {
-          "id": "qmodel_preview",
-          "name": "Qwen3.8-Max-Preview",
+          "id": "lite",
+          "name": "Lite",
+          "kind": "llm"
+        },
+        {
+          "id": "qmodel_38max",
+          "name": "Qwen3.8-Max",
           "kind": "llm"
         },
         {
@@ -4627,6 +4742,11 @@
           "kind": "llm"
         },
         {
+          "id": "qfmodel",
+          "name": "Qwen3.8-Flash",
+          "kind": "llm"
+        },
+        {
           "id": "kmodel_latest",
           "name": "Kimi-K3",
           "kind": "llm"
@@ -4637,8 +4757,13 @@
           "kind": "llm"
         },
         {
-          "id": "gm51model",
-          "name": "GLM-5.2",
+          "id": "gmodel",
+          "name": "GLM-5.3",
+          "kind": "llm"
+        },
+        {
+          "id": "gfmodel",
+          "name": "GLM-5.3-Flash",
           "kind": "llm"
         },
         {
@@ -5196,6 +5321,26 @@
           "id": "gemini-2.5-flash",
           "name": "Gemini 2.5 Flash",
           "kind": "llm"
+        },
+        {
+          "id": "veo-3.1-generate-preview",
+          "name": "Veo 3.1 (Preview)",
+          "kind": "llm"
+        },
+        {
+          "id": "veo-3.1-fast-generate-preview",
+          "name": "Veo 3.1 Fast (Preview)",
+          "kind": "llm"
+        },
+        {
+          "id": "veo-3.0-generate-001",
+          "name": "Veo 3",
+          "kind": "llm"
+        },
+        {
+          "id": "veo-2.0-generate-001",
+          "name": "Veo 2",
+          "kind": "llm"
         }
       ]
     },
@@ -5375,6 +5520,16 @@
       "format": "openai",
       "baseUrl": "https://api.xiaomimimo.com/v1/chat/completions",
       "models": [
+        {
+          "id": "mimo-x-pro-preview",
+          "name": "MiMo-X-Pro-Preview",
+          "kind": "llm"
+        },
+        {
+          "id": "mimo-x-flash-preview",
+          "name": "MiMo-X-Flash-Preview",
+          "kind": "llm"
+        },
         {
           "id": "mimo-v2.5-pro",
           "name": "MiMo V2.5 Pro",
