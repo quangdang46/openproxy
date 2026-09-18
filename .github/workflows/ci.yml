@@ -128,3 +128,14 @@ jobs:
         # Run lib tests + remaining integration tests.
         if: runner.os == 'Linux'
         run: cargo test --lib --all-features
+
+      - name: cargo test — SAML live round-trip (Linux only)
+        # Explicitly wired in (issue #461 follow-up): this integration test
+        # is not covered by `--lib` above and would otherwise never run in
+        # CI, silently losing regression coverage for the SAML ACS crypto
+        # path (real RSA-signed assertion → Axum handler → session cookie).
+        # Not folded into a blanket `--tests` run because other files under
+        # tests/ include the 3 known-failing cases noted above plus
+        # env/network-dependent suites that aren't CI-ready yet.
+        if: runner.os == 'Linux'
+        run: cargo test --test saml_live_roundtrip --all-features
