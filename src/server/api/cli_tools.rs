@@ -929,6 +929,40 @@ async fn read_codex_config() -> anyhow::Result<Option<String>> {
     read_string_optional(&codex_config_path()).await
 }
 
+/// The `[model_providers.openproxy]` table written into Codex's
+/// `config.toml`. Live-verified 2026-09-18 against Codex CLI v0.154.0: a
+/// custom model_provider entry with only `wire_api`/`base_url` sends NO
+/// Authorization header at all — `env_key` isn't honored from
+/// `~/.codex/auth.json`'s `OPENAI_API_KEY` either ("Missing environment
+/// variable: `OPENAI_API_KEY`" even with `env_key` set, since Codex reads it
+/// from the process environment, not `auth.json`). The only working pattern
+/// for a custom provider is embedding the bearer token directly via
+/// `http_headers.Authorization`, matching how every other hand-written
+/// `[model_providers.*]` block in a Codex config does it.
+fn codex_openproxy_provider_table(base_url: &str, api_key: &str) -> TomlValue {
+    TomlValue::Table(TomlMap::from_iter([
+        (
+            "name".to_string(),
+            TomlValue::String("OpenProxy".to_string()),
+        ),
+        (
+            "base_url".to_string(),
+            TomlValue::String(normalize_v1_base_url(base_url)),
+        ),
+        (
+            "wire_api".to_string(),
+            TomlValue::String("responses".to_string()),
+        ),
+        (
+            "http_headers".to_string(),
+            TomlValue::Table(TomlMap::from_iter([(
+                "Authorization".to_string(),
+                TomlValue::String(format!("Bearer {api_key}")),
+            )])),
+        ),
+    ]))
+}
+
 async fn write_codex_settings(settings: &CodexSettings) -> anyhow::Result<String> {
     let config_path = codex_config_path();
     let auth_path = codex_auth_path();
@@ -956,20 +990,7 @@ async fn write_codex_settings(settings: &CodexSettings) -> anyhow::Result<String
     set_toml_section(
         &mut parsed,
         &["model_providers", "openproxy"],
-        TomlValue::Table(TomlMap::from_iter([
-            (
-                "name".to_string(),
-                TomlValue::String("OpenProxy".to_string()),
-            ),
-            (
-                "base_url".to_string(),
-                TomlValue::String(normalize_v1_base_url(&base_url)),
-            ),
-            (
-                "wire_api".to_string(),
-                TomlValue::String("responses".to_string()),
-            ),
-        ])),
+        codex_openproxy_provider_table(&base_url, &api_key),
     );
     set_toml_section(
         &mut parsed,
@@ -3138,6 +3159,36 @@ mod tests {
         assert_eq!(deserialized.api_key, settings.api_key);
         assert_eq!(deserialized.model, settings.model);
         assert_eq!(deserialized.subagent_model, settings.subagent_model);
+    }
+
+    // Live bug (2026-09-18, loop-test-fix): Codex CLI v0.154.0 sent zero
+    // Authorization header for a custom model_provider lacking
+    // http_headers — auth.json's OPENAI_API_KEY is never consulted for a
+    // non-default provider, and `env_key` requires an actual process env
+    // var (not auth.json). Pin the working shape.
+    #[test]
+    fn codex_openproxy_provider_table_embeds_bearer_header() {
+        let table = codex_openproxy_provider_table("http://127.0.0.1:4623", "sk-abc123");
+        let TomlValue::Table(map) = &table else {
+            panic!("expected a TOML table");
+        };
+        assert_eq!(
+            map.get("base_url").and_then(TomlValue::as_str),
+            Some("http://127.0.0.1:4623/v1")
+        );
+        assert_eq!(
+            map.get("wire_api").and_then(TomlValue::as_str),
+            Some("responses")
+        );
+        let headers = map
+            .get("http_headers")
+            .and_then(TomlValue::as_table)
+            .expect("http_headers table must be present");
+        assert_eq!(
+            headers.get("Authorization").and_then(TomlValue::as_str),
+            Some("Bearer sk-abc123"),
+            "Codex only sends auth for a custom provider via http_headers.Authorization"
+        );
     }
 
     #[test]
