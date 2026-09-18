@@ -21,6 +21,13 @@ pub fn provider_requires_streaming(provider: &str) -> bool {
             | "grok-cli"
             | "gcli"
             | "gb"
+            // 9router PR #4132 (decolua/9router): the OpenCode Zen free-tier
+            // gate rejects `stream:false` on both /chat/completions and
+            // /responses with 403 FreeTierError, even when UA/session/tools
+            // are otherwise valid. Force upstream streaming; SSE→JSON
+            // aggregation already covers non-streaming clients.
+            | "opencode"
+            | "oc"
     )
 }
 
