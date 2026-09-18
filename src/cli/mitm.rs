@@ -76,7 +76,7 @@ pub async fn run(cmd: MitmCmd, cfg: &ResolvedConfig, ctx: OutputCtx) -> anyhow::
         MitmCmd::Start { .. } => run_start(&rt, ctx).await,
         MitmCmd::Stop => run_stop(&rt, ctx).await,
         MitmCmd::Cert { cmd } => match cmd {
-            CertCmd::Generate => run_cert_generate(&rt, ctx).await,
+            CertCmd::Generate => run_cert_generate(&rt, cfg, ctx).await,
             CertCmd::Path => run_cert_path(cfg, ctx),
         },
         MitmCmd::Config { cmd } => match cmd {
@@ -158,9 +158,28 @@ async fn run_stop(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
     }
 }
 
-async fn run_cert_generate(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
+async fn run_cert_generate(
+    rt: &Runtime,
+    cfg: &ResolvedConfig,
+    ctx: OutputCtx,
+) -> anyhow::Result<i32> {
     match rt.post_empty("/api/mitm/cert/generate").await {
         Ok(payload) => {
+            // Live bug (2026-09-18): `mitm cert path` has always pointed at
+            // this local export copy, but nothing ever wrote it — the file
+            // never existed and the printed path was dead. The server's
+            // response already includes the raw PEM; save it here so `mitm
+            // cert path` resolves to a real, readable file (agent-friendly
+            // export, per the path's own doc comment).
+            if let Some(pem) = payload.get("certificate").and_then(Value::as_str) {
+                if let Err(e) = write_local_cert_copy(&cfg.data_dir, pem) {
+                    tracing::warn!(
+                        target: "openproxy::cli::mitm",
+                        error = %e,
+                        "failed to write local MITM cert export copy"
+                    );
+                }
+            }
             if ctx.is_robot() {
                 emit_robot("openproxy.v1.mitm.cert.generate", payload)?;
             } else {
@@ -194,6 +213,18 @@ fn run_cert_path(cfg: &ResolvedConfig, ctx: OutputCtx) -> anyhow::Result<i32> {
 /// location.
 fn local_cert_path(data_dir: &std::path::Path) -> PathBuf {
     data_dir.join("mitm-ca.pem")
+}
+
+/// Write the server-returned PEM to the local export path, creating parent
+/// directories as needed. Split out from `run_cert_generate` for testing
+/// without a live server.
+fn write_local_cert_copy(data_dir: &std::path::Path, pem: &str) -> std::io::Result<PathBuf> {
+    let path = local_cert_path(data_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, pem)?;
+    Ok(path)
 }
 
 async fn run_config_get(rt: &Runtime, ctx: OutputCtx) -> anyhow::Result<i32> {
@@ -335,5 +366,25 @@ mod tests {
     fn local_cert_path_lives_in_data_dir() {
         let p = local_cert_path(std::path::Path::new("/tmp/op"));
         assert!(p.ends_with("mitm-ca.pem"));
+    }
+
+    // Live bug (2026-09-18): `mitm cert path` printed a path nothing ever
+    // wrote to. Pin that `write_local_cert_copy` actually creates the file
+    // at exactly the path `local_cert_path` reports, with the given PEM
+    // content, including when the data dir doesn't exist yet.
+    #[test]
+    fn write_local_cert_copy_creates_file_at_local_cert_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "openproxy-mitm-cert-test-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let pem = "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
+        let written = write_local_cert_copy(&dir, pem).expect("write succeeds");
+        assert_eq!(written, local_cert_path(&dir));
+        assert_eq!(std::fs::read_to_string(&written).unwrap(), pem);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
