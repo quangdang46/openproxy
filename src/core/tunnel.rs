@@ -82,19 +82,48 @@ impl TunnelManager {
 
         let pid = child.id();
 
+        // `cloudflared tunnel --url` logs everything — including the
+        // `https://<sub>.trycloudflare.com` connection line we need, and an
+        // unrelated `https://developers.cloudflare.com/...` docs link in its
+        // startup banner that appears first — to **stderr**, not stdout
+        // (documented cloudflared behavior; verified live). Scanning stdout
+        // alone means the real URL is never found and this always burns the
+        // full 30s timeout below. `trycloudflare.com` is a stronger/first
+        // signal than a bare "https://" match, so check it before falling
+        // back to a generic https line.
+        //
+        // Deliberately DROP (not background-drain) the streams once we're
+        // done reading: an earlier version spawned `tokio::spawn` loops to
+        // keep consuming output indefinitely so the pipe buffer wouldn't
+        // fill and block cloudflared's writer — but those loops never
+        // terminate while the tunnel keeps running, and the CLI's
+        // short-lived `tokio::runtime::Runtime` blocks on shutdown waiting
+        // for every spawned task to finish, wedging the whole `tunnel
+        // start` invocation forever (had to be force-killed in testing).
+        // Dropping our end of the pipe instead closes it outright — the
+        // child's future writes to auxiliary log streams simply fail
+        // (broken pipe), which cloudflared/tailscale tolerate fine; this is
+        // exactly what happens whenever a user closes the terminal a
+        // background tunnel was launched from.
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        drop(stdout);
+
         let tunnel_url = if provider == TunnelProvider::Cloudflare {
-            if let Some(stdout) = child.stdout.take() {
-                let mut reader = BufReader::new(stdout).lines();
+            if let Some(stderr) = stderr {
+                let mut reader = BufReader::new(stderr).lines();
                 tokio::time::timeout(Duration::from_secs(30), async {
+                    let mut fallback: Option<String> = None;
                     while let Ok(Some(line)) = reader.next_line().await {
-                        if line.contains("trycloudflare.com") || line.contains("https://") {
-                            let url = extract_url(&line);
-                            if url.is_some() {
-                                return url;
+                        if line.contains("trycloudflare.com") {
+                            if let Some(url) = extract_url(&line) {
+                                return Some(url);
                             }
+                        } else if fallback.is_none() && line.contains("https://") {
+                            fallback = extract_url(&line);
                         }
                     }
-                    None
+                    fallback
                 })
                 .await
                 .ok()
@@ -223,4 +252,60 @@ fn extract_url(line: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_url_finds_trycloudflare_link() {
+        let line = "2026-09-18T10:00:00Z INF |  https://dependence-suspension-grocery-exceptions.trycloudflare.com  |";
+        assert_eq!(
+            extract_url(line).as_deref(),
+            Some("https://dependence-suspension-grocery-exceptions.trycloudflare.com")
+        );
+    }
+
+    #[test]
+    fn extract_url_returns_none_without_a_cloudflare_link() {
+        assert_eq!(
+            extract_url("2026-09-18T10:00:00Z INF Starting tunnel"),
+            None
+        );
+        assert_eq!(extract_url("some https://example.com line"), None);
+    }
+
+    // Live bug (2026-09-18): cloudflared's startup banner prints a docs link
+    // (https://developers.cloudflare.com/...) to stderr BEFORE the real
+    // ephemeral tunnel URL. `start()` must not report that banner link as
+    // the tunnel URL — this pins the priority logic (trycloudflare.com line
+    // wins over an earlier generic-https fallback), mirroring the scan order
+    // in `start()`.
+    #[test]
+    fn banner_docs_link_does_not_shadow_the_real_tunnel_url() {
+        let lines = [
+            "2026-09-18T10:00:00Z INF Thank you for trying Cloudflare Tunnel.",
+            "2026-09-18T10:00:00Z INF Requesting new quick Tunnel on trycloudflare.com...",
+            "2026-09-18T10:00:00Z INF |  https://developers.cloudflare.com/cloudflare-one/connections/connect-apps  |",
+            "2026-09-18T10:00:01Z INF |  https://dependence-suspension-grocery-exceptions.trycloudflare.com  |",
+        ];
+        let mut fallback: Option<String> = None;
+        let mut found: Option<String> = None;
+        for line in lines {
+            if line.contains("trycloudflare.com") {
+                if let Some(url) = extract_url(line) {
+                    found = Some(url);
+                    break;
+                }
+            } else if fallback.is_none() && line.contains("https://") {
+                fallback = extract_url(line);
+            }
+        }
+        assert_eq!(
+            found.as_deref(),
+            Some("https://dependence-suspension-grocery-exceptions.trycloudflare.com"),
+            "must resolve the real tunnel URL, not the banner docs link (fallback would have been {fallback:?})"
+        );
+    }
 }
