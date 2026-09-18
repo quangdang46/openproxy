@@ -13,7 +13,6 @@ use crate::types::{ProviderConnection, ProviderNode};
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const OPENCODE_BASE: &str = "https://opencode.ai";
-const OPENCODE_PICKLE_PATH: &str = "/zen/v1/messages";
 const OPENCODE_DEFAULT_PATH: &str = "/zen/v1/chat/completions";
 const OPENCODE_RESPONSES_PATH: &str = "/zen/v1/responses";
 
@@ -351,11 +350,16 @@ impl OpenCodeExecutor {
         &self.pool
     }
 
+    /// 9router `MESSAGES_MODELS` (the `/zen/v1/messages` Claude-format path)
+    /// was emptied in commit 67271d85 ("send official client headers on
+    /// free-tier requests") — `big-pickle` and every other non-Responses
+    /// model now route through `/zen/v1/chat/completions`. Live-verified
+    /// 2026-09-18: POSTing the OpenAI Chat body shape to `/zen/v1/messages`
+    /// for `big-pickle` 500s (it expects the Anthropic Messages shape we
+    /// never send); `/zen/v1/chat/completions` returns 200.
     fn build_url(&self, model: &str) -> String {
         let path = if is_responses_model(model) {
             OPENCODE_RESPONSES_PATH
-        } else if model == "big-pickle" {
-            OPENCODE_PICKLE_PATH
         } else {
             OPENCODE_DEFAULT_PATH
         };
@@ -472,6 +476,26 @@ impl OpenCodeExecutor {
         // Mirrors opencode.js:76-86 (transformRequest for isResponsesModel).
         let is_responses = is_responses_model(&request.model);
         if is_responses {
+            // A request that entered via a native /v1/responses endpoint
+            // (e.g. Codex) has source_format == target_format ==
+            // OpenAiResponses once Muse Spark's per-model targetFormat
+            // override applies, so chat.rs's `needs_translation()` (source
+            // != target) skips the translate step — the body is left in
+            // the intermediate `messages[]` shape produced by compat.rs's
+            // input→messages flattening, which the Zen `/responses`
+            // endpoint rejects outright ("unknown parameter `messages`").
+            // Convert it here when `input` is absent, mirroring codex.rs's
+            // own dual-shape handling (`transform_request_body`) for the
+            // identical reason. When translation already ran, `input` is
+            // already present and this is a no-op.
+            if request.body.get("input").is_none() {
+                crate::core::translator::request::openai_responses::chat_to_openai_responses_request(
+                    &request.model,
+                    &mut request.body,
+                    request.stream,
+                    None,
+                );
+            }
             if let Some(body_obj) = request.body.as_object_mut() {
                 // Read the value first to avoid borrow conflicts
                 let max_val = body_obj
@@ -695,5 +719,60 @@ mod tests {
             assert!(tool.get("function").is_none());
             assert_eq!(tool["type"], json!("function"));
         }
+    }
+
+    // Live bug (2026-09-18): a request entering via a native /v1/responses
+    // endpoint has source_format == target_format == OpenAiResponses once
+    // Muse Spark's per-model targetFormat override applies, so chat.rs's
+    // needs_translation() skips the translate step — the body is left in
+    // the intermediate messages[] shape from compat.rs's input→messages
+    // flattening, which the Zen /responses endpoint rejects with "unknown
+    // parameter `messages`". execute_request must convert it via the
+    // generic chat_to_openai_responses_request translator when `input` is
+    // absent (mirrors codex.rs's own messages[]/input[] dual handling).
+    #[test]
+    fn is_responses_gate_converts_stray_messages_shape_to_input() {
+        let mut body = json!({
+            "model": "muse-spark-1.3-contributor-free",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        assert!(body.get("input").is_none(), "precondition: no input yet");
+        if body.get("input").is_none() {
+            crate::core::translator::request::openai_responses::chat_to_openai_responses_request(
+                "muse-spark-1.3-contributor-free",
+                &mut body,
+                true,
+                None,
+            );
+        }
+        assert!(body.get("input").is_some(), "input must be populated");
+        assert!(
+            body.get("messages").is_none(),
+            "messages must not survive into the Responses-shaped body"
+        );
+        let input = body["input"].as_array().unwrap();
+        assert!(input
+            .iter()
+            .any(|item| item["type"] == json!("message") && item["role"] == json!("user")));
+    }
+
+    // A body that already went through translation (input present) must be
+    // left untouched by the guard — no double-conversion.
+    #[test]
+    fn is_responses_gate_is_noop_when_input_already_present() {
+        let original = json!({
+            "model": "muse-spark-1.3-contributor-free",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        });
+        let mut body = original.clone();
+        if body.get("input").is_none() {
+            crate::core::translator::request::openai_responses::chat_to_openai_responses_request(
+                "muse-spark-1.3-contributor-free",
+                &mut body,
+                true,
+                None,
+            );
+        }
+        assert_eq!(body["input"], original["input"]);
     }
 }
