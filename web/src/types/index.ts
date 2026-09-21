@@ -18,6 +18,8 @@ export interface ApiKey {
 export interface Provider {
   id: string;
   alias: string;
+  /** Extra lookup aliases (e.g. xiaomi-mimo: mimo-desktop, xmd). */
+  aliases?: string[];
   name: string;
   icon: string;
   color: string;
@@ -61,6 +63,13 @@ export interface Provider {
     deviceCodeUrl?: string;
     tokenUrl?: string;
     refreshUrl?: string;
+    /** Non-standard OAuth (e.g. xiaomi-mimo ECDH encrypted-callback flow). */
+    custom?: boolean;
+    authorizeUrl?: string;
+    /** Callback query param carrying the payload instead of ?code=. */
+    callbackParam?: string;
+    /** Stable key-name label sent as `kn` on the authorize URL. */
+    kn?: string;
   };
   authHint?: string;
   /** True when the provider is part of the free-tier set (see FREE_TIER_PROVIDER_IDS). */
