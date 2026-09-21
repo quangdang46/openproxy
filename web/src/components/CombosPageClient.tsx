@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, Select, CapacityBadges, ComboFormModal } from "@/shared/components";
+import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, Select, CapacityBadges, ComboFormModal, Toggle } from "@/shared/components";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
 import { useSettingsStore } from "@/store/settingsStore";
@@ -21,6 +21,42 @@ const STRATEGY_OPTIONS: ComboStrategyOption[] = [
 
 export type { Combo, ComboFormProvider, ComboHealthEntry } from "@/shared/components/ComboFormModal";
 import type { ComboFormProvider as Provider } from "@/shared/components/ComboFormModal";
+
+// Capacity adapter entry (one capability pool). Entry form mirrors
+// 9router EMPTY_CAP_ENTRY; legacy array form normalized on load.
+export interface CapacityAdapterEntry {
+  enabled: boolean;
+  roundRobin: boolean;
+  models: string[];
+}
+
+const CAPACITY_ADAPTER_CAPS = [
+  { key: "vision", label: "Vision", icon: "visibility", desc: "Images" },
+  // pdf, videoInput temporarily hidden — no translator support yet for those blocks.
+  { key: "audioInput", label: "Audio", icon: "graphic_eq", desc: "Audio input" },
+];
+const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free";
+const EMPTY_CAP_ENTRY: CapacityAdapterEntry = { enabled: true, roundRobin: false, models: [] };
+const EMPTY_CAPACITY_ADAPTER: Record<string, CapacityAdapterEntry> = {
+  vision: { ...EMPTY_CAP_ENTRY },
+  pdf: { ...EMPTY_CAP_ENTRY },
+  audioInput: { ...EMPTY_CAP_ENTRY },
+  videoInput: { ...EMPTY_CAP_ENTRY },
+};
+// Backward-compat: legacy stored form was an array of {model, enabled}.
+function normalizeCapEntry(entry: any): CapacityAdapterEntry {
+  if (Array.isArray(entry)) {
+    return { enabled: true, roundRobin: false, models: entry.map((e: any) => e?.model || e).filter(Boolean) };
+  }
+  if (entry && typeof entry === "object") {
+    return {
+      enabled: entry.enabled !== false,
+      roundRobin: !!entry.roundRobin,
+      models: Array.isArray(entry.models) ? entry.models.filter(Boolean) : [],
+    };
+  }
+  return { ...EMPTY_CAP_ENTRY };
+}
 
 /** Normalize settings.comboStrategies[name] which may be a bare string or nested object. */
 function normalizeStrategy(entry: unknown): ComboStrategyConfig {
@@ -43,6 +79,21 @@ export default function CombosPage() {
   const { copied, copy } = useCopyToClipboard();
   const { getCaps } = useModelCaps();
 
+  // Capacity adapter: global fallback pools of models per input-modality capability.
+  // A request needing a capability the target model/combo lacks switches straight
+  // to the first enabled model here instead of erroring or dropping the data.
+  // Ported from 9router combos/page.js (backend: Rust capacity_adapter.rs).
+  const [capacityAdapter, setCapacityAdapter] = useState<Record<string, CapacityAdapterEntry>>(EMPTY_CAPACITY_ADAPTER);
+
+  const handleSetCapacityAdapter = async (next: Record<string, CapacityAdapterEntry>) => {
+    setCapacityAdapter(next);
+    try {
+      await useSettingsStore.getState().patchSettings({ capacityAdapter: next });
+    } catch (error) {
+      console.log("Error updating capacity adapter:", error);
+    }
+  };
+
   useEffect(() => {
     fetchData();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -57,13 +108,19 @@ export default function CombosPage() {
       const combosData = await combosRes.json();
       const providersData = await providersRes.json();
       const settingsSafe = settingsData || {};
-      
+
       // Only LLM combos here — webSearch/webFetch combos belong to media-providers/web
       if (combosRes.ok) setCombos((combosData.combos || []).filter(c => !c.kind || c.kind === "llm"));
       if (providersRes.ok) {
         setActiveProviders(providersData.connections || []);
       }
       setComboStrategies(settingsSafe.comboStrategies || {});
+      const rawAdapter = settingsSafe.capacityAdapter || {};
+      const normalized: Record<string, CapacityAdapterEntry> = {};
+      for (const cap of CAPACITY_ADAPTER_CAPS) {
+        normalized[cap.key] = normalizeCapEntry(rawAdapter[cap.key]);
+      }
+      setCapacityAdapter(normalized);
     } catch (error) {
       console.log("Error fetching data:", error);
     } finally {
@@ -238,6 +295,14 @@ export default function CombosPage() {
           ))}
         </div>
       )}
+
+      {/* Capacity Adapter */}
+      <CapacityAdapterSection
+        capacityAdapter={capacityAdapter}
+        onChange={handleSetCapacityAdapter}
+        activeProviders={activeProviders}
+        getCaps={getCaps}
+      />
 
       {/* Create Modal - Use key to force remount and reset state */}
       <ComboFormModal
@@ -492,3 +557,168 @@ function ComboCard({
 // Re-exported for backward compat; prefer importing from "@/shared/components".
 export { ComboFormModal } from "@/shared/components/ComboFormModal";
 export type { ComboFormModalProps, ModelTestResult } from "@/shared/components/ComboFormModal";
+
+function CapacityAdapterSection({
+  capacityAdapter,
+  onChange,
+  activeProviders,
+  getCaps,
+}: {
+  capacityAdapter: Record<string, CapacityAdapterEntry>;
+  onChange: (next: Record<string, CapacityAdapterEntry>) => void;
+  activeProviders: Provider[];
+  getCaps?: (model: string) => import("@/shared/constants/models").ModelCaps | null | undefined;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Vision Adapter</p>
+          <p className="text-xs text-text-muted mt-0.5">
+            Your model can&apos;t read image/audio? Auto-switches to a model in the pool below.
+          </p>
+          <ul className="mt-1.5 text-[11px] text-text-muted flex flex-col gap-0.5">
+            <li><span className="font-medium text-text-main">Vision</span> — images (png, jpg, webp, …)</li>
+            <li><span className="font-medium text-text-main">Audio</span> — audio input</li>
+          </ul>
+        </div>
+      </div>
+      <div className="flex flex-col gap-4">
+        {CAPACITY_ADAPTER_CAPS.map((cap) => (
+          <CapacityAdapterCap
+            key={cap.key}
+            cap={cap}
+            entry={capacityAdapter[cap.key] || EMPTY_CAP_ENTRY}
+            onChange={(entry) => onChange({ ...capacityAdapter, [cap.key]: entry })}
+            activeProviders={activeProviders}
+            getCaps={getCaps}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CapacityAdapterCap({
+  cap,
+  entry,
+  onChange,
+  activeProviders,
+  getCaps,
+}: {
+  cap: { key: string; label: string; icon: string; desc: string };
+  entry: CapacityAdapterEntry;
+  onChange: (entry: CapacityAdapterEntry) => void;
+  activeProviders: Provider[];
+  getCaps?: (model: string) => import("@/shared/constants/models").ModelCaps | null | undefined;
+}) {
+  const [showModelSelect, setShowModelSelect] = useState(false);
+  const { enabled, roundRobin, models } = entry;
+
+  const patch = (p: Partial<CapacityAdapterEntry>) => onChange({ ...entry, ...p });
+
+  const handleAdd = (model: { value: string }) => {
+    if (models.includes(model.value)) return;
+    patch({ models: [...models, model.value] });
+  };
+
+  const handleRemove = (index: number) => {
+    const next = models.filter((_, i) => i !== index);
+    patch({ models: next.length === 0 ? [DEFAULT_FALLBACK_MODEL] : next });
+  };
+
+  const handleMove = (index: number, delta: number) => {
+    const target = index + delta;
+    if (target < 0 || target >= models.length) return;
+    const next = [...models];
+    [next[index], next[target]] = [next[target], next[index]];
+    patch({ models: next });
+  };
+
+  return (
+    <Card padding="sm" className={`group ${!enabled ? "opacity-50" : ""}`}>
+      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        {/* Master toggle + icon + label + chips */}
+        <div className="flex min-w-0 flex-1 items-start gap-2.5 sm:items-center">
+          <Toggle
+            checked={enabled}
+            onChange={(v) => patch({ enabled: v })}
+            aria-label={`Enable ${cap.label} adapter`}
+          />
+          <div className="size-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+            <span className="material-symbols-outlined text-primary text-[18px]">{cap.icon}</span>
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <code className="font-mono text-sm font-medium">{cap.label}</code>
+              <span className="text-[10px] text-text-muted">— {cap.desc}</span>
+            </div>
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
+              {models.length === 0 ? (
+                <span className="text-xs text-text-muted italic">No models</span>
+              ) : (
+                models.slice(0, 3).map((model, index) => (
+                  <code
+                    key={`${model}-${index}`}
+                    className="group/chip inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5"
+                  >
+                    <span>{model}</span>
+                    <CapacityBadges caps={getCaps?.(model)} />
+                    <button onClick={() => handleMove(index, -1)} disabled={index === 0} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === 0 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
+                      <span className="material-symbols-outlined text-[12px]">arrow_upward</span>
+                    </button>
+                    <button onClick={() => handleMove(index, 1)} disabled={index === models.length - 1} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === models.length - 1 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
+                      <span className="material-symbols-outlined text-[12px]">arrow_downward</span>
+                    </button>
+                    <button onClick={() => handleRemove(index)} className="leading-none opacity-0 group-hover/chip:opacity-100 text-text-muted hover:text-red-500">
+                      <span className="material-symbols-outlined text-[12px]">close</span>
+                    </button>
+                  </code>
+                ))
+              )}
+              {models.length > 3 && (
+                <span className="text-[10px] text-text-muted">+{models.length - 3} more</span>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Actions: Round-robin toggle + Add Model */}
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3 sm:shrink-0">
+          <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none">
+            <Toggle
+              checked={roundRobin}
+              onChange={(v) => patch({ roundRobin: v })}
+              disabled={!enabled}
+              aria-label={`Round-robin ${cap.label} adapter`}
+            />
+            <span>Round</span>
+          </label>
+          <Button
+            icon="add"
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowModelSelect(true)}
+            disabled={!enabled}
+            title={`Add ${cap.label} model`}
+          >
+            Add Model
+          </Button>
+        </div>
+      </div>
+
+      {showModelSelect && (
+        <ModelSelectModal
+          isOpen={showModelSelect}
+          onClose={() => setShowModelSelect(false)}
+          onSelect={handleAdd}
+          activeProviders={activeProviders}
+          title={`Add ${cap.label} Model`}
+          addedModelValues={models}
+          capFilter={cap.key}
+          closeOnSelect={false}
+        />
+      )}
+    </Card>
+  );
+}

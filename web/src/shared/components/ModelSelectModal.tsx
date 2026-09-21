@@ -71,6 +71,10 @@ interface ModelSelectModalProps {
   title?: string;
   modelAliases?: Record<string, string>;
   kindFilter?: string | null;
+  /** Filter models by input-modality capability (vision/pdf/audioInput/videoInput). 9router parity. */
+  capFilter?: string | null;
+  /** Values already added — floated to top of sort. 9router parity. */
+  addedModelValues?: string[];
   // When false, picking a model does not close the modal; the user must press
   // Done. Useful when the parent uses onSelect to toggle multiple entries.
   closeOnSelect?: boolean;
@@ -90,6 +94,8 @@ export default function ModelSelectModal({
   title = "Select Model",
   modelAliases = {},
   kindFilter = null,
+  capFilter = null,
+  addedModelValues = [],
   closeOnSelect = true,
   selectionMode = "single",
   onSelectIds,
@@ -435,18 +441,32 @@ export default function ModelSelectModal({
   }, [combos, searchQuery, kindFilter]);
 
   // Filter models by search query
-  const filteredGroups = useMemo(() => {
-    if (!searchQuery.trim()) return groupedModels;
+  // Sort models alphabetically, with added models floated to top
+  const sortModels = (models: Model[]) => {
+    const added = models.filter((m) => addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
+    const rest = models.filter((m) => !addedModelValues.includes(m.value)).sort((a, b) => a.name.localeCompare(b.name));
+    return [...added, ...rest];
+  };
 
-    const query = searchQuery.toLowerCase();
+  const filteredGroups = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+
     const filtered: Record<string, ModelGroup> = {};
 
     Object.entries(groupedModels).forEach(([providerId, group]) => {
-      const matchedModels = group.models.filter(
-        (m) =>
-          m.name.toLowerCase().includes(query) ||
-          m.id.toLowerCase().includes(query)
-      );
+      let models = group.models;
+      // Filter by input-modality capability (vision/pdf/audioInput/videoInput).
+      if (capFilter) {
+        models = models.filter((m) => getCaps(m.value)?.[capFilter] === true);
+        if (models.length === 0) return;
+      }
+      const matchedModels = query
+        ? models.filter(
+            (m) =>
+              m.name.toLowerCase().includes(query) ||
+              m.id.toLowerCase().includes(query),
+          )
+        : sortModels(models);
 
       const providerNameMatches = group.name.toLowerCase().includes(query);
 
@@ -459,7 +479,7 @@ export default function ModelSelectModal({
     });
 
     return filtered;
-  }, [groupedModels, searchQuery]);
+  }, [groupedModels, searchQuery, addedModelValues, capFilter]);
 
   const handleSelect = (model: Model) => {
     onSelect(model);
