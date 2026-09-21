@@ -137,6 +137,7 @@ function MediaProviderDetailPage({ kind, id }: { kind: string; id: string }) {
               className="object-contain rounded-mini-lg max-w-[48px] max-h-[48px]"
               fallbackText={(provider as any).textIcon || (provider as any).id.slice(0, 2).toUpperCase()}
               fallbackColor={(provider as any).color}
+              providerId={(provider as any).id}
             />
           </div>
           <div className="flex-1">
