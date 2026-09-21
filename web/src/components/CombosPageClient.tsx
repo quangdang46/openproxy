@@ -21,12 +21,18 @@ const STRATEGY_OPTIONS: ComboStrategyOption[] = [
   { value: "quality", label: "Quality — capability tier first" },
 ];
 
-interface Combo {
+export interface Combo {
   id: string;
   name: string;
   models: string[];
   disabledModels?: string[];
   kind?: string;
+}
+
+export interface ComboFormProvider {
+  id: string;
+  provider: string;
+  isActive?: boolean;
 }
 
 interface Provider {
@@ -726,18 +732,26 @@ function ModelItem({
   );
 }
 
-interface ComboFormModalProps {
+export interface ComboFormModalProps {
   isOpen: boolean;
   combo?: Combo | null;
   onClose: () => void;
   onSave: (data: { name: string; models: string[]; disabledModels?: string[] }) => void;
-  activeProviders: Provider[];
+  activeProviders: Provider[] | ComboFormProvider[];
   kindFilter?: string | null;
+  /** Auto-prepended to the combo name on save (9router parity). */
+  forcePrefix?: string;
+  title?: string;
 }
 
-function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindFilter = null }: ComboFormModalProps) {
-  // Initialize state with combo values - key prop on parent handles reset on remount
-  const [name, setName] = useState<string>(combo?.name || "");
+export function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindFilter = null, forcePrefix = "", title }: ComboFormModalProps) {
+  // Initialize state with combo values - key prop on parent handles reset on remount.
+  // With forcePrefix, strip it when editing so the user only edits the suffix.
+  const [name, setName] = useState<string>(
+    combo?.name
+      ? (forcePrefix && combo.name.startsWith(forcePrefix) ? combo.name.slice(forcePrefix.length) : combo.name)
+      : "",
+  );
   const [models, setModels] = useState<string[]>(combo?.models || []);
   const [disabledModels, setDisabledModels] = useState<string[]>(combo?.disabledModels || []);
   const [showModelSelect, setShowModelSelect] = useState<boolean>(false);
@@ -841,7 +855,8 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
       setNameError("Name is required");
       return false;
     }
-    if (!VALID_NAME_REGEX.test(value)) {
+    const full = forcePrefix + value;
+    if (!VALID_NAME_REGEX.test(full)) {
       setNameError("Only letters, numbers, -, _ and . allowed");
       return false;
     }
@@ -850,7 +865,9 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   };
 
   const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
+    let value = e.target.value;
+    // If user types prefix manually, strip it (we always prepend)
+    if (forcePrefix && value.startsWith(forcePrefix)) value = value.slice(forcePrefix.length);
     setName(value);
     if (value) validateName(value);
     else setNameError("");
@@ -885,7 +902,7 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
     // configured list — anything removed via the trash icon shouldn't
     // linger in the disabled set on disk.
     const cleanedDisabled = disabledModels.filter((m) => models.includes(m));
-    await onSave({ name: name.trim(), models, disabledModels: cleanedDisabled });
+    await onSave({ name: forcePrefix + name.trim(), models, disabledModels: cleanedDisabled });
     setSaving(false);
   };
 
@@ -897,21 +914,33 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
       <Modal
         isOpen={isOpen}
         onClose={onClose}
-        title={isEdit ? "Edit Combo" : "Create Combo"}
+        title={title || (isEdit ? "Edit Combo" : "Create Combo")}
         size="lg"
       >
         <div className="flex flex-col gap-3">
           {/* Name */}
           <div>
-            <Input
-              label="Combo Name"
-              value={name}
-              onChange={handleNameChange}
-              placeholder="my-combo"
-              error={nameError}
-            />
+            {forcePrefix ? (
+              <>
+                <label className="text-sm font-medium mb-1 block">Combo Name</label>
+                <div className="flex items-stretch">
+                  <span className="inline-flex items-center px-2 rounded-l border border-r-0 border-black/10 dark:border-white/10 bg-black/[0.04] dark:bg-white/[0.04] text-text-muted font-mono text-sm">{forcePrefix}</span>
+                  <input value={name} onChange={handleNameChange} placeholder="my-combo"
+                    className="flex-1 min-w-0 rounded-r border border-black/10 dark:border-white/10 bg-white dark:bg-black/20 px-2 py-1.5 font-mono text-sm outline-none focus:border-primary" />
+                </div>
+                {nameError && <p className="text-[11px] text-red-500 mt-0.5">{nameError}</p>}
+              </>
+            ) : (
+              <Input
+                label="Combo Name"
+                value={name}
+                onChange={handleNameChange}
+                placeholder="my-combo"
+                error={nameError}
+              />
+            )}
             <p className="text-[10px] text-text-muted mt-0.5">
-              Only letters, numbers, -, _ and . allowed
+              {forcePrefix ? `Auto-prefixed with "${forcePrefix}". ` : ""}Only letters, numbers, -, _ and . allowed
             </p>
           </div>
 
