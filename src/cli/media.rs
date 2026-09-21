@@ -608,8 +608,12 @@ async fn run_search(
     query: String,
 ) -> anyhow::Result<i32> {
     let q = read_input(&query)?;
+    // `/v1/search` (generic_media_handler) requires `model`; the provider
+    // alone is not enough. Send `<provider>/search` so parse_model resolves
+    // the provider and select_media_connection matches the stored row.
     let body = json!({
         "provider": provider,
+        "model": format!("{provider}/search"),
         "query": q.trim(),
     });
     match rt.post_json("/v1/search", &body).await {

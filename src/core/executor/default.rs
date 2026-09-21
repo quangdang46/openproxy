@@ -332,6 +332,10 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://www.googleapis.com/customsearch/v1"),
         ),
         (
+            "serpingapi",
+            ProviderConfig::openai("https://api.serpingapi.com/v1"),
+        ),
+        (
             "searchapi",
             ProviderConfig::openai("https://www.searchapi.io/api/v1"),
         ),
