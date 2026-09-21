@@ -1,10 +1,27 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import QuotaTable from "./QuotaTable";
 import Toggle from "@/shared/components/Toggle";
-import { parseQuotaData, calculatePercentage } from "./utils";
+import {
+  parseQuotaData,
+  calculatePercentage,
+  QUOTA_SORT_OPTIONS,
+  CLAUDE_REFRESH_INTERVAL_MS,
+  setQuotaCache,
+  buildLoadingState,
+  filterQuotaStateByConnections,
+  filterQuotasByVisibility,
+  getHiddenQuotaRows,
+  getQuotaVisibilityKey,
+  getConnectionLabel as getSharedConnectionLabel,
+  sortVisibleConnections as sortVisibleConnectionsSh,
+  kiroMethodLabel,
+  kiroRegion,
+} from "./utils";
+import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
+import { useSettingsStore } from "@/store/settingsStore";
 import Card from "@/shared/components/Card";
 import { EditConnectionModal } from "@/shared/components";
 import { updateSettings as patchSettings } from "@/shared/utils/backendApi";
@@ -22,6 +39,13 @@ interface Connection {
   displayName?: string;
   authType?: string;
   isActive?: boolean;
+  testStatus?: string;
+  providerSpecificData?: {
+    authMethod?: string;
+    region?: string;
+    profileArn?: string;
+    [key: string]: any;
+  };
 }
 
 interface QuotaDataEntry {
@@ -41,12 +65,8 @@ const isUsageEligible = (conn: Connection) =>
   (conn.authType === "oauth" || USAGE_APIKEY_PROVIDERS.includes(conn.provider));
 
 function getConnectionLabel(connection: Connection): string {
-  return (
-    connection.name?.trim() ||
-    connection.email?.trim() ||
-    connection.displayName?.trim() ||
-    ""
-  );
+  // Shared helper returns null when empty; call sites expect "".
+  return getSharedConnectionLabel(connection) || "";
 }
 
 function getConnectionSecondaryLabel(connection: Connection): string | null {
@@ -152,8 +172,12 @@ export default function ProviderLimits() {
   const [autoPingMaps, setAutoPingMaps] = useState<Record<string, Record<string, boolean>>>({ claude: {}, codex: {} });
   const autoPingTooltips: Record<string, string> = {
     claude: "When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.",
-    codex: "Auto-starts the next 5h Codex window after reset by sending a tiny gpt-5.5 request.",
+    codex: "Auto-starts the next 5h Codex window after reset by sending a tiny gpt-5.5 request. Consumes a small amount of quota.",
   };
+  const [quotaVisibility, setQuotaVisibility] = useState<Record<string, { hidden?: string[] }>>({});
+  const [quotaSortMode, setQuotaSortMode] = useState<string>("default");
+  const tickCountRef = useRef(0);
+  const { copied, copy } = useCopyToClipboard();
 
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
@@ -176,7 +200,7 @@ export default function ProviderLimits() {
   }, []);
 
   // Fetch quota for a specific connection
-  const fetchQuota = useCallback(async (connectionId: string, provider: string) => {
+  const fetchQuota = useCallback(async (connectionId: string, provider: string, { force = false }: { force?: boolean } = {}) => {
     setLoading((prev) => ({ ...prev, [connectionId]: true }));
     setErrors((prev) => ({ ...prev, [connectionId]: "" }));
 
@@ -184,7 +208,8 @@ export default function ProviderLimits() {
       console.log(
         `[ProviderLimits] Fetching quota for ${provider} (${connectionId})`,
       );
-      const response = await fetch(`/api/usage/${connectionId}`);
+      const url = `/api/usage/${connectionId}${force ? "?force=1" : ""}`;
+      const response = await fetch(url);
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
@@ -205,13 +230,15 @@ export default function ProviderLimits() {
             `[ProviderLimits] Auth error for ${provider}:`,
             errorMsg,
           );
+          const quotaEntry = {
+            quotas: [],
+            message: errorMsg,
+          };
           setQuotaData((prev) => ({
             ...prev,
-            [connectionId]: {
-              quotas: [],
-              message: errorMsg,
-            },
+            [connectionId]: quotaEntry,
           }));
+          setQuotaCache(connectionId, quotaEntry);
           return;
         }
 
@@ -224,15 +251,18 @@ export default function ProviderLimits() {
       // Parse quota data using provider-specific parser
       const parsedQuotas = parseQuotaData(provider, data);
 
+      const quotaEntry = {
+        quotas: parsedQuotas,
+        plan: data.plan || null,
+        message: data.message || null,
+        raw: data,
+      };
+
       setQuotaData((prev) => ({
         ...prev,
-        [connectionId]: {
-          quotas: parsedQuotas,
-          plan: data.plan || null,
-          message: data.message || null,
-          raw: data,
-        },
+        [connectionId]: quotaEntry,
       }));
+      setQuotaCache(connectionId, quotaEntry);
     } catch (error) {
       console.error(
         `[ProviderLimits] Error fetching quota for ${provider} (${connectionId}):`,
@@ -250,11 +280,82 @@ export default function ProviderLimits() {
   // Refresh quota for a specific provider
   const refreshProvider = useCallback(
     async (connectionId: string, provider: string) => {
-      await fetchQuota(connectionId, provider);
+      await fetchQuota(connectionId, provider, { force: true });
       setLastUpdated(new Date());
     },
     [fetchQuota],
   );
+
+  const updateQuotaVisibility = useCallback(async (
+    nextVisibility: Record<string, { hidden?: string[] }>,
+    previousVisibility: Record<string, { hidden?: string[] }>,
+  ) => {
+    setQuotaVisibility(nextVisibility);
+    try {
+      await useSettingsStore.getState().patchSettings({ quotaVisibility: nextVisibility });
+    } catch (error) {
+      console.error("Error updating quota visibility:", error);
+      setQuotaVisibility(previousVisibility);
+    }
+  }, []);
+
+  const handleHideQuota = useCallback((provider: string, quota: any) => {
+    const key = getQuotaVisibilityKey(quota);
+    if (!provider || !key) return;
+
+    const previous = quotaVisibility;
+    const providerVisibility = previous[provider] || {};
+    const hidden = new Set(providerVisibility.hidden || []);
+    hidden.add(key);
+    if (provider === "antigravity") {
+      if (key === "gemini") {
+        for (const k of hidden) {
+          if (k.startsWith("gemini-") && !k.includes("image")) hidden.delete(k);
+        }
+      } else if (key === "claude") {
+        for (const k of hidden) {
+          if (k.startsWith("claude-")) hidden.delete(k);
+        }
+      }
+    }
+    const next = {
+      ...previous,
+      [provider]: {
+        ...providerVisibility,
+        hidden: [...hidden],
+      },
+    };
+    updateQuotaVisibility(next, previous);
+  }, [quotaVisibility, updateQuotaVisibility]);
+
+  const handleShowQuota = useCallback((provider: string, quota: any) => {
+    const key = getQuotaVisibilityKey(quota);
+    if (!provider || !key) return;
+
+    const previous = quotaVisibility;
+    const providerVisibility = previous[provider] || {};
+    const hidden = new Set(providerVisibility.hidden || []);
+    hidden.delete(key);
+    if (provider === "antigravity") {
+      if (key === "gemini") {
+        for (const k of hidden) {
+          if (k.startsWith("gemini-") && !k.includes("image")) hidden.delete(k);
+        }
+      } else if (key === "claude") {
+        for (const k of hidden) {
+          if (k.startsWith("claude-")) hidden.delete(k);
+        }
+      }
+    }
+    const next = {
+      ...previous,
+      [provider]: {
+        ...providerVisibility,
+        hidden: [...hidden],
+      },
+    };
+    updateQuotaVisibility(next, previous);
+  }, [quotaVisibility, updateQuotaVisibility]);
 
   const handleResetCodexLimit = useCallback(
     async (connectionId: string, provider: string) => {
@@ -464,11 +565,17 @@ export default function ProviderLimits() {
   }, []);
 
   // Refresh all providers
-  const refreshAll = useCallback(async () => {
+  const refreshAll = useCallback(async (force = false) => {
     if (refreshingAll) return;
 
     setRefreshingAll(true);
     setCountdown(60);
+
+    // Throttle Claude: poll its quota every Nth auto-tick (manual force bypasses)
+    const tick = (tickCountRef.current += 1);
+    const claudeEvery = Math.round(CLAUDE_REFRESH_INTERVAL_MS / REFRESH_INTERVAL_MS);
+    const shouldFetch = (conn: Connection) =>
+      force || conn.provider !== "claude" || tick % claudeEvery === 0;
 
     try {
       const conns = await fetchConnections();
@@ -476,8 +583,18 @@ export default function ProviderLimits() {
       // Filter eligible connections (OAuth + whitelisted apikey)
       const eligibleConnections = conns.filter(isUsageEligible);
 
+      setLoading(buildLoadingState(eligibleConnections));
+      setErrors((prev) =>
+        filterQuotaStateByConnections(prev, eligibleConnections),
+      );
+      setQuotaData((prev) =>
+        filterQuotaStateByConnections(prev, eligibleConnections),
+      );
+
       await Promise.all(
-        eligibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
+        eligibleConnections
+          .filter(shouldFetch)
+          .map((conn) => fetchQuota(conn.id, conn.provider, { force })),
       );
 
       setLastUpdated(new Date());
@@ -497,12 +614,14 @@ export default function ProviderLimits() {
 
       const eligibleConnections = conns.filter(isUsageEligible);
 
-      // Mark all as loading before fetching
-      const loadingState: Record<string, boolean> = {};
-      eligibleConnections.forEach((conn) => {
-        loadingState[conn.id] = true;
-      });
-      setLoading(loadingState);
+      // Always fetch fresh quota on mount, no cache display
+      setLoading(buildLoadingState(eligibleConnections));
+      setErrors((prev) =>
+        filterQuotaStateByConnections(prev, eligibleConnections),
+      );
+      setQuotaData((prev) =>
+        filterQuotaStateByConnections(prev, eligibleConnections),
+      );
 
       await Promise.all(
         eligibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
@@ -518,6 +637,19 @@ export default function ProviderLimits() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(AUTO_REFRESH_STORAGE_KEY, String(autoRefresh));
   }, [autoRefresh]);
+
+  // Load auto-ping per-connection maps + quota visibility
+  useEffect(() => {
+    useSettingsStore.getState().fetchSettings()
+      .then((s) => {
+        setAutoPingMaps({
+          claude: (s as any)?.claudeAutoPing?.connections || {},
+          codex: (s as any)?.codexAutoPing?.connections || {},
+        });
+        setQuotaVisibility((s as any)?.quotaVisibility || {});
+      })
+      .catch(() => {});
+  }, []);
 
   // Auto-refresh interval
   useEffect(() => {
@@ -586,25 +718,27 @@ export default function ProviderLimits() {
     (conn) => providerFilter === "all" || conn.provider === providerFilter,
   );
 
-  const getEarliestResetTime = (conn: Connection): number => {
-    const resetTimes = (quotaData[conn.id]?.quotas || [])
-      .map((quota: any) => quota.resetAt ? new Date(quota.resetAt).getTime() : Number.POSITIVE_INFINITY)
-      .filter((time) => Number.isFinite(time));
-    return resetTimes.length > 0 ? Math.min(...resetTimes) : Number.POSITIVE_INFINITY;
-  };
-
-  // Sort providers by USAGE_SUPPORTED_PROVIDERS order, then alphabetically.
-  // Optionally surface accounts with quotas expiring soonest first.
-  const sortedConnections = [...providerFilteredConnections].sort((a, b) => {
-    if (expiringFirst) {
-      const expiryDiff = getEarliestResetTime(a) - getEarliestResetTime(b);
-      if (expiryDiff !== 0) return expiryDiff;
-    }
-    const orderA = USAGE_SUPPORTED_PROVIDERS.indexOf(a.provider);
-    const orderB = USAGE_SUPPORTED_PROVIDERS.indexOf(b.provider);
-    if (orderA !== orderB) return orderA - orderB;
-    return a.provider.localeCompare(b.provider);
-  });
+  // Sort: codex remaining-% modes via shared helper, else USAGE_SUPPORTED_PROVIDERS
+  // order with optional expiring-first (9router parity).
+  const sortedConnections = useMemo(() => {
+    const base = sortVisibleConnectionsSh(
+      providerFilteredConnections,
+      quotaData,
+      expiringFirst,
+      providerFilter,
+      quotaSortMode,
+    );
+    // Shared helper groups by provider; web keeps its SUPPORTED-providers
+    // ordering on top for non-codex-sort modes.
+    if (quotaSortMode !== "default" && providerFilter === "codex") return base;
+    if (expiringFirst) return base;
+    return [...providerFilteredConnections].sort((a, b) => {
+      const orderA = USAGE_SUPPORTED_PROVIDERS.indexOf(a.provider);
+      const orderB = USAGE_SUPPORTED_PROVIDERS.indexOf(b.provider);
+      if (orderA !== orderB) return orderA - orderB;
+      return a.provider.localeCompare(b.provider);
+    });
+  }, [providerFilteredConnections, quotaData, expiringFirst, providerFilter, quotaSortMode]);
 
   // Connection is depleted when any quota entry hit the threshold
   const isConnectionDepleted = (conn: Connection): boolean => {
@@ -745,6 +879,7 @@ export default function ProviderLimits() {
                     size={18}
                     className="size-[18px] rounded object-contain"
                     fallbackText={providerFilter.slice(0, 2).toUpperCase()}
+                    providerId={providerFilter}
                   />
                 )}
                 <span className="truncate capitalize hidden lg:inline">{selectedProviderLabel}</span>
@@ -785,6 +920,7 @@ export default function ProviderLimits() {
                           size={24}
                           className="size-6 rounded-md object-contain"
                           fallbackText={provider.slice(0, 2).toUpperCase()}
+                          providerId={provider}
                         />
                         <span className="font-medium capitalize">{provider}</span>
                         {providerFilter === provider && <span className="material-symbols-outlined ml-auto text-[20px]">check</span>}
@@ -795,6 +931,20 @@ export default function ProviderLimits() {
               </>
             )}
           </div>
+          {providerFilter === "codex" && (
+            <select
+              value={quotaSortMode}
+              onChange={(event) => setQuotaSortMode(event.target.value)}
+              className="h-8 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+              aria-label="Sort Codex quotas by remaining"
+            >
+              {QUOTA_SORT_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          )}
           <button
             type="button"
             onClick={() => setExpiringFirst((prev) => !prev)}
@@ -851,7 +1001,7 @@ export default function ProviderLimits() {
           {/* Refresh all button */}
           <button
             type="button"
-            onClick={refreshAll}
+            onClick={() => refreshAll(true)}
             disabled={refreshingAll}
             className="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-black/10 px-2 text-xs text-text-primary transition-colors hover:bg-black/5 dark:border-white/10 dark:hover:bg-white/5 disabled:opacity-50"
             title="Refresh all"
@@ -896,6 +1046,7 @@ export default function ProviderLimits() {
                         fallbackText={
                           conn.provider?.slice(0, 2).toUpperCase() || "PR"
                         }
+                        providerId={conn.provider}
                       />
                     </div>
                     <div className="min-w-0">
@@ -905,7 +1056,7 @@ export default function ProviderLimits() {
                       {(() => {
                         const label = getConnectionLabel(conn);
                         const secondary = getConnectionSecondaryLabel(conn);
-                        if (!label && !secondary) return null;
+                        if (!label && !secondary && conn.provider !== "kiro") return null;
                         return (
                           <>
                             {label && (
@@ -913,6 +1064,33 @@ export default function ProviderLimits() {
                             )}
                             {secondary && (
                               <p className="text-[10px] text-text-muted/70 truncate">{secondary}</p>
+                            )}
+                            {conn.provider === "kiro" && (
+                              <div className="mt-1 flex flex-wrap items-center gap-1">
+                                <span className="rounded-full bg-brand-500/10 px-2 py-0.5 text-[10px] font-semibold text-brand-600 dark:text-brand-300">
+                                  {kiroMethodLabel(conn)}
+                                </span>
+                                {kiroRegion(conn) && (
+                                  <span className="rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] font-semibold text-blue-600 dark:text-blue-400">
+                                    {kiroRegion(conn)}
+                                  </span>
+                                )}
+                                {conn.providerSpecificData?.profileArn && (
+                                  <button
+                                    type="button"
+                                    onClick={() => copy(conn.providerSpecificData!.profileArn!, conn.id)}
+                                    title={conn.providerSpecificData.profileArn}
+                                    className="inline-flex max-w-full items-center gap-1 rounded-full border border-border-subtle px-2 py-0.5 text-[10px] text-text-muted transition-colors hover:text-primary"
+                                  >
+                                    <span className="material-symbols-outlined text-[12px]">
+                                      {copied === conn.id ? "check" : "content_copy"}
+                                    </span>
+                                    <code className="truncate font-mono">
+                                      {conn.providerSpecificData.profileArn}
+                                    </code>
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </>
                         );
@@ -1069,7 +1247,50 @@ export default function ProviderLimits() {
                     <p className="text-xs text-text-muted">{quota.message}</p>
                   </div>
                 ) : (
-                  <QuotaTable quotas={quota?.quotas} compact />
+                  (() => {
+                    const rawQuotas = quota?.quotas || [];
+                    const visibleQuotas = filterQuotasByVisibility(conn.provider, rawQuotas, quotaVisibility);
+                    const hiddenQuotaRows = getHiddenQuotaRows(conn.provider, rawQuotas, quotaVisibility);
+                    return (
+                      <>
+                        <QuotaTable
+                          quotas={visibleQuotas}
+                          compact
+                          sortMode="default"
+                          showSortLabel={
+                            conn.provider === "codex" && quotaSortMode !== "default"
+                          }
+                          onHideQuota={(quotaRow) => handleHideQuota(conn.provider, quotaRow)}
+                        />
+                        {quota?.message && !error && !isLoading && (
+                          <p className="mt-2 px-1 text-[10px] leading-relaxed text-text-muted">
+                            {quota.message}
+                          </p>
+                        )}
+                        {hiddenQuotaRows.length > 0 && (
+                          <div className="mt-2 flex min-w-0 items-center gap-1 border-t border-black/5 pt-2 text-[10px] text-text-muted dark:border-white/5">
+                            <span className="material-symbols-outlined shrink-0 text-[14px]">
+                              visibility_off
+                            </span>
+                            <span className="shrink-0">Hidden:</span>
+                            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto whitespace-nowrap pb-2">
+                              {hiddenQuotaRows.map((quotaRow: any) => (
+                                <button
+                                  key={getQuotaVisibilityKey(quotaRow)}
+                                  type="button"
+                                  onClick={() => handleShowQuota(conn.provider, quotaRow)}
+                                  className="shrink-0 rounded-md border border-black/10 px-1.5 py-0.5 transition-colors hover:bg-black/5 hover:text-text-primary dark:border-white/10 dark:hover:bg-white/5"
+                                  title="Show this quota row"
+                                >
+                                  {quotaRow.name}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()
                 )}
               </div>
             </Card>
