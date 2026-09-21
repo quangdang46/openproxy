@@ -113,6 +113,7 @@ export default function ProvidersPageClient() {
   const [testingMode, setTestingMode] = useState(null);
   const [testResults, setTestResults] = useState(null);
   const [filterFreeOnly, setFilterFreeOnly] = useState(false);
+  const [statusFilter, setStatusFilter] = useState("all");
   const [proxyPools, setProxyPools] = useState([]);
   const notify = useNotificationStore();
   const searchQuery = useHeaderSearchStore((s) => s.query);
@@ -261,6 +262,25 @@ export default function ProvidersPageClient() {
 
     return { connected, error, total, errorCode, errorTime, allDisabled };
   };
+
+  // 9router providers/utils.js parity: noAuth providers never fall into "none".
+  const getConnectionStatus = (stats: any, isNoAuth = false) => {
+    if (isNoAuth) return "active";
+    if (!stats || stats.total === 0) return "none";
+    return stats.allDisabled ? "inactive" : "active";
+  };
+
+  const matchStatus = (stats: any, isNoAuth = false) => {
+    if (statusFilter === "all") return true;
+    return getConnectionStatus(stats, isNoAuth) === statusFilter;
+  };
+
+  const STATUS_FILTER_OPTIONS = [
+    { value: "all", label: "All" },
+    { value: "active", label: "Active" },
+    { value: "inactive", label: "Inactive" },
+    { value: "none", label: "No connection" },
+  ];
 
   // Toggle all connections for a provider on/off. authType may be a single
   // string or an array (kiro counts oauth + api_key/apikey together).
@@ -413,7 +433,7 @@ export default function ProvidersPageClient() {
         textIcon: "OC",
         apiType: node.apiType,
       }))
-      .filter((p) => matchSearch(p.name)),
+      .filter((p) => matchSearch(p.name) && matchStatus(getProviderStats(p.id, "apikey"))),
   );
 
   const anthropicCompatibleProviders = sortCompatibleByConnected(
@@ -449,23 +469,24 @@ export default function ProvidersPageClient() {
 
   const oauthEntries = sortByPriority(
     Object.entries(OAUTH_PROVIDERS).filter(
-      ([, info]) => !info.hidden && matchSearch(info.name),
+      ([key, info]) => !info.hidden && matchSearch(info.name) && matchStatus(getProviderStats(key, "oauth"), info.noAuth),
     ),
     "oauth",
   );
   const freeEntries = sortNoAuthFirst(
     Object.entries(FREE_PROVIDERS).filter(
-      ([, info]) => !info.hidden && matchSearch(info.name),
+      ([key, info]) => !info.hidden && matchSearch(info.name) && matchStatus(getProviderStats(key, "oauth"), info.noAuth),
     ),
   );
   // Free-tier: registry priority first, then noAuth providers bubble up (9r parity).
   const freeTierEntries = sortNoAuthFirst(
     sortByPriority(
       Object.entries(FREE_TIER_PROVIDERS).filter(
-        ([, info]) =>
+        ([key, info]) =>
           !info.hidden &&
           (info.serviceKinds ?? ["llm"]).includes("llm") &&
-          matchSearch(info.name),
+          matchSearch(info.name) &&
+          matchStatus(getProviderStats(key, "apikey"), info.noAuth),
       ),
       "apikey",
     ),
@@ -474,10 +495,11 @@ export default function ProvidersPageClient() {
   // OAuth keeps sortByPriority; apikey intentionally uses total>0 not connected.
   const apikeyEntries = Object.entries(APIKEY_PROVIDERS)
     .filter(
-      ([, info]) =>
+      ([key, info]) =>
         !info.hidden &&
         (info.serviceKinds ?? ["llm"]).includes("llm") &&
-        matchSearch(info.name),
+        matchSearch(info.name) &&
+        matchStatus(getProviderStats(key, "apikey"), info.noAuth),
     )
     .sort(([ka, a], [kb, b]) => {
       const ca = getProviderStats(ka, "apikey").total > 0 ? 0 : 1;
@@ -497,7 +519,7 @@ export default function ProvidersPageClient() {
   const filteredOAuthEntries = filterFreeOnly
     ? oauthEntries.filter(([key]) => isFreeTierProvider(key))
     : oauthEntries;
-  const isApikeySearching = !!searchQuery.trim();
+  const isApikeySearching = !!searchQuery.trim() || statusFilter !== "all";
   const visibleApikeyEntries =
     isApikeySearching || showAllApikey
       ? filteredApikeyEntries
@@ -528,12 +550,27 @@ export default function ProvidersPageClient() {
 
   return (
     <div className="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
+      <div className="flex items-center justify-end">
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="h-8 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+          aria-label="Filter providers by connection status"
+        >
+          {STATUS_FILTER_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
       {!hasAnyResult && (
         <div className="text-center py-8 border border-dashed border-border rounded-xl">
           <span className="material-symbols-outlined text-[32px] text-text-muted mb-2">
             search_off
           </span>
-          <p className="text-text-muted text-sm">No providers match your search</p>
+          <p className="text-text-muted text-sm">No providers match your search or filters</p>
         </div>
       )}
 
@@ -823,7 +860,16 @@ export default function ProvidersPageClient() {
           addProviderId ? AI_PROVIDERS[addProviderId]?.website : undefined
         }
         proxyPools={proxyPools}
+        existingNames={connections.filter((c: any) => c.provider === addProviderId).map((c: any) => c.name).filter(Boolean)}
         onSave={handleSaveApiKey}
+        onBulkDone={() => {
+          fetch("/api/providers")
+            .then((r) => r.json())
+            .then((data) => {
+              if (data?.connections) setConnections(data.connections);
+            })
+            .catch(() => {});
+        }}
         onClose={() => {
           setShowAddApiKeyModal(false);
           setAddProviderId(null);
@@ -910,6 +956,7 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
                   provider.textIcon || provider.id.slice(0, 2).toUpperCase()
                 }
                 fallbackColor={provider.color}
+                providerId={provider.id}
               />
             </div>
             <div className="min-w-0">
@@ -1053,6 +1100,7 @@ function ApiKeyProviderCard({
                   provider.textIcon || provider.id.slice(0, 2).toUpperCase()
                 }
                 fallbackColor={provider.color}
+                providerId={provider.id}
               />
             </div>
             <div className="min-w-0">
