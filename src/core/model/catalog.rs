@@ -176,6 +176,27 @@ mod tests {
         assert!(models.iter().any(|m| m.id == "kimi-k2.6"));
     }
 
+    // Bead .131: deepseek-web must be registered in the static catalog
+    // (OmniRoute registry/deepseek/web/index.ts: id deepseek-web, alias
+    // ds-web, 14 models) so /dashboard/providers lists Deepseek Web.
+    #[test]
+    fn deepseek_web_registered_in_static_catalog() {
+        let catalog = provider_catalog();
+
+        let provider = catalog
+            .provider_info("deepseek-web")
+            .expect("deepseek-web should have a provider entry in provider_catalog.json");
+        assert_eq!(provider.alias, "ds-web");
+
+        let models = catalog
+            .models_for_alias("deepseek-web")
+            .expect("deepseek-web should have models in provider_catalog.json");
+        assert_eq!(models.len(), 14, "expected the 14-model registry list");
+        assert!(models.iter().any(|m| m.id == "deepseek-v4-pro"));
+        assert!(models.iter().any(|m| m.id == "deepseek-reasoner"));
+        assert!(models.iter().any(|m| m.id == "DeepSeek-R1"));
+    }
+
     // Bead .46: all 17 parity providers must be registered in the static
     // catalog (providerIdToAlias + providerModels + providers[]), keyed by the
     // same aliases the 9router v0.5.50 registry files declare.

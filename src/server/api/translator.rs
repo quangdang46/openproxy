@@ -253,6 +253,7 @@ fn default_provider_url(provider: &str) -> String {
             "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions".to_string()
         }
         "deepseek" => "https://api.deepseek.com/v1/chat/completions".to_string(),
+        "deepseek-web" | "ds-web" => "https://chat.deepseek.com/api/v0/chat/completion".to_string(),
         "groq" => "https://api.groq.com/openai/v1/chat/completions".to_string(),
         "openrouter" => "https://openrouter.ai/api/v1/chat/completions".to_string(),
         _ => format!("https://api.{provider}.com/v1/chat/completions"),
