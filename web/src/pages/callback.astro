@@ -69,15 +69,18 @@
 
         var params = new URLSearchParams(window.location.search);
         var code = params.get('code');
+        var token = params.get('token');
         var state = params.get('state');
         var error = params.get('error');
         var errorDescription = params.get('error_description');
 
         var data = {
           code: code,
+          token: token,
           state: state,
           error: error,
           errorDescription: errorDescription,
+          fullUrl: window.location.href,
           timestamp: Date.now(),
         };
 
@@ -111,14 +114,30 @@
           // localStorage unavailable — fall through
         }
 
-        // Method 3: postMessage to opener
+        // Method 3: postMessage to opener (popup mode).
+        // Send once per expected origin. The browser delivers the message
+        // only when the opener's origin matches the targetOrigin we pass —
+        // using "*" here would leak the code/state to any opener, so
+        // iterate over the allowlist (9router callback/page.js parity).
+        // Trusted origins: same origin (most providers) + Codex helper
+        // listening on a fixed loopback port.
+        var expectedOrigins = [
+          window.location.origin,
+          'http://localhost:1455', // Codex specific port
+        ];
         try {
           if (window.opener && !window.opener.closed) {
-            window.opener.postMessage(
-              { type: 'oauth_callback', data: data },
-              window.location.origin
-            );
-            sentByMessage = true;
+            for (var i = 0; i < expectedOrigins.length; i++) {
+              try {
+                window.opener.postMessage(
+                  { type: 'oauth_callback', data: data },
+                  expectedOrigins[i]
+                );
+                sentByMessage = true;
+              } catch (e) {
+                // This origin didn't match — try the next one
+              }
+            }
           }
         } catch (e) {
           // Cross-origin opener — fall through

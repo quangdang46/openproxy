@@ -6,6 +6,7 @@
 import Layout from '@/layouts/Layout.astro';
 import Navigation from '@/components/landing/Navigation';
 import HeroSection from '@/components/landing/HeroSection';
+import FlowAnimation from '@/components/landing/FlowAnimation';
 import Features from '@/components/landing/Features';
 import HowItWorks from '@/components/landing/HowItWorks';
 import GetStarted from '@/components/landing/GetStarted';
@@ -15,9 +16,41 @@ import Footer from '@/components/landing/Footer';
   <main className="min-h-screen bg-[#0d0b0a] text-white">
     <Navigation client:only="react" />
     <HeroSection client:only="react" />
-    <Features client:only="react" />
-    <HowItWorks client:only="react" />
+    {/* Flow Animation below Hero (9router landing/page.js parity).
+        AnimatedBackground intentionally not used: the page keeps its
+        flat dark bg (#0d0b0a) instead of the 9router orb/vignette wash. */}
+    <div className="flex justify-center pb-20">
+      <FlowAnimation client:only="react" />
+    </div>
     <GetStarted client:only="react" />
+    <HowItWorks client:only="react" />
+    <Features client:only="react" />
+    {/* CTA Section (9router landing/page.js parity, OpenProxy branding) */}
+    <section className="py-32 px-6 relative overflow-hidden">
+      <div className="absolute inset-0 bg-gradient-to-t from-[#f97815]/5 to-transparent pointer-events-none"></div>
+      <div className="max-w-4xl mx-auto text-center relative z-10">
+        <h2 className="text-4xl md:text-5xl font-black mb-6">Ready to Simplify Your AI Infrastructure?</h2>
+        <p className="text-xl text-gray-400 mb-10 max-w-2xl mx-auto">
+          Join developers who are streamlining their AI integrations with OpenProxy. Open source and free to start.
+        </p>
+        <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+          <a
+            href="/dashboard"
+            className="w-full sm:w-auto h-14 px-10 rounded-lg bg-[#f97815] hover:bg-[#e0650a] text-[#181411] text-lg font-bold transition-all shadow-[0_0_20px_rgba(249,120,21,0.5)] inline-flex items-center justify-center"
+          >
+            Start Free
+          </a>
+          <a
+            href="https://github.com/quangdang46/openproxy#readme"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="w-full sm:w-auto h-14 px-10 rounded-lg border border-[#3a2f27] hover:bg-[#23180f] text-white text-lg font-bold transition-all inline-flex items-center justify-center"
+          >
+            Read Documentation
+          </a>
+        </div>
+      </div>
+    </section>
     <Footer client:only="react" />
   </main>
 </Layout>
