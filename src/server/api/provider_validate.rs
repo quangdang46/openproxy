@@ -67,6 +67,9 @@ async fn validate_provider(
     let (valid, error) = match provider.as_str() {
         "openai" => validate_bearer(&client, "https://api.openai.com/v1/models", &api_key).await,
         "deepseek" => validate_bearer(&client, "https://api.deepseek.com/models", &api_key).await,
+        // deepseek-web: web-cookie provider — validate the userToken via
+        // GET /api/v0/users/current (OmniRoute webProvidersA.ts parity).
+        "deepseek-web" | "ds-web" => validate_deepseek_web(&client, &api_key).await,
         "groq" => validate_bearer(&client, "https://api.groq.com/openai/v1/models", &api_key).await,
         "openrouter" => validate_bearer(&client, "https://openrouter.ai/api/v1/models", &api_key).await,
         "mistral" => validate_bearer(&client, "https://api.mistral.ai/v1/models", &api_key).await,
@@ -352,6 +355,48 @@ async fn validate_bearer(
         .await
     {
         Ok(resp) => (resp.status().is_success(), None),
+        Err(e) => (false, Some(e.to_string())),
+    }
+}
+
+/// Validate a deepseek-web userToken (OmniRoute
+/// `webProvidersA.ts validateDeepSeekWebProvider` parity): unwrap a
+/// JSON-wrapped token, then `GET /api/v0/users/current` with browser
+/// headers. 401/403 means the token is wrong; any other status proves the
+/// token was accepted.
+async fn validate_deepseek_web(client: &reqwest::Client, api_key: &str) -> (bool, Option<String>) {
+    let mut token = api_key.trim().to_string();
+    if token.starts_with('{') {
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&token) {
+            if let Some(v) = map.get("value").and_then(Value::as_str) {
+                token = v.to_string();
+            }
+        }
+    }
+    match client
+        .get("https://chat.deepseek.com/api/v0/users/current")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "*/*")
+        .header("Origin", "https://chat.deepseek.com")
+        .header("Referer", "https://chat.deepseek.com/")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+        )
+        .header("X-Client-Bundle-Id", "com.deepseek.chat")
+        .header("X-Client-Platform", "web")
+        .header("X-Client-Version", "2.0.0")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            if code == 401 || code == 403 {
+                (false, Some("Invalid userToken".into()))
+            } else {
+                (resp.status().is_success(), None)
+            }
+        }
         Err(e) => (false, Some(e.to_string())),
     }
 }

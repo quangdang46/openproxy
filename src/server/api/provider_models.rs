@@ -361,6 +361,8 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "nous-research"
                 | "glhf"
                 | "kilocode"
+                | "deepseek-web"
+                | "ds-web"
         )
 }
 
@@ -521,6 +523,10 @@ async fn fetch_provider_models_response(
             fetch_first_party_openai_style_models(connection, "https://api.deepseek.com/models")
                 .await
         }
+        // deepseek-web has no /models endpoint — it is a web-cookie
+        // provider, so discovery returns the static registry model list
+        // (OmniRoute registry/deepseek/web/index.ts, 14 models).
+        "deepseek-web" | "ds-web" => fetch_deepseek_web_static_models(connection).await,
         "groq" => {
             fetch_first_party_openai_style_models(
                 connection,
@@ -711,6 +717,44 @@ async fn fetch_first_party_openai_style_models(
     let token = primary_token(connection)
         .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
     fetch_openai_style_models_with_bearer(connection, url, &token).await
+}
+
+/// Static model list for deepseek-web (OmniRoute
+/// `config/providers/registry/deepseek/web/index.ts`): the web-cookie API
+/// has no `/models` endpoint, so discovery serves the registry list.
+async fn fetch_deepseek_web_static_models(
+    connection: &ProviderConnection,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let models = [
+        ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+        ("deepseek-v4-pro-think", "DeepSeek V4 Pro Think"),
+        ("deepseek-v4-pro-search", "DeepSeek V4 Pro Search"),
+        (
+            "deepseek-v4-pro-think-search",
+            "DeepSeek V4 Pro Think+Search",
+        ),
+        ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+        ("deepseek-v4-flash-think", "DeepSeek V4 Flash Think"),
+        ("deepseek-v4-flash-search", "DeepSeek V4 Flash Search"),
+        (
+            "deepseek-v4-flash-think-search",
+            "DeepSeek V4 Flash Think+Search",
+        ),
+        ("deepseek-chat", "DeepSeek Chat"),
+        ("deepseek-reasoner", "DeepSeek Reasoner"),
+        ("DeepSeek-R1", "DeepSeek R1"),
+        ("DeepSeek-R1-Search", "DeepSeek R1 Search"),
+        ("DeepSeek-V3.2", "DeepSeek V3.2"),
+        ("DeepSeek-Search", "DeepSeek Search"),
+    ]
+    .into_iter()
+    .map(|(id, name)| ProviderModel {
+        id: id.to_string(),
+        name: name.to_string(),
+        extra: BTreeMap::new(),
+    })
+    .collect();
+    Ok(response_with_models(connection, models, None))
 }
 
 /// Models listing for a `noAuth: true` provider (OpenCode Zen): the catalog is
