@@ -3,6 +3,7 @@
 import { useState } from "react";
 import type { ChangeEvent } from "react";
 import { Button, Badge, Input, Modal, Select } from "@/shared/components";
+import { planBulkAdd } from "@/shared/utils/bulkAdd";
 
 interface ProxyPool {
   id: string;
@@ -21,11 +22,14 @@ interface AddApiKeyModalProps {
   proxyPools?: ProxyPool[];
   /** Error message from parent failed save (9router parity). */
   error?: string;
+  /** Connection names already saved — used to gap-fill bulk names (9router parity). */
+  existingNames?: string[];
   onSave: (data: any) => Promise<void>;
+  onBulkDone?: () => void;
   onClose: () => void;
 }
 
-export default function AddApiKeyModal({ isOpen, provider, providerName, isCompatible, isAnthropic, authType, authHint, website, proxyPools, onSave, onClose, error }: AddApiKeyModalProps): React.ReactNode {
+export default function AddApiKeyModal({ isOpen, provider, providerName, isCompatible, isAnthropic, authType, authHint, website, proxyPools, onSave, onBulkDone, onClose, error, existingNames }: AddApiKeyModalProps): React.ReactNode {
   const NONE_PROXY_POOL_VALUE = "__none__";
   const isOllamaLocal = provider === "ollama-local";
   const isCookie = authType === "cookie";
@@ -70,53 +74,46 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
 
   const handleBulkSubmit = async (): Promise<void> => {
     if (!provider) return;
-    const lines = bulkText
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
+    const lines = bulkText.split("\n");
     if (!lines.length) return;
+    // Plan collision-free names against existing connections so a generated
+    // "Key N" never matches a saved name (which the backend would upsert /
+    // overwrite instead of inserting). See bulkAdd.ts for the full rationale.
+    const plan = planBulkAdd(lines, existingNames, { isCloudflareAi });
+    if (!plan.length) return;
     setSaving(true);
     setBulkResult(null);
     let success = 0;
     let failed = 0;
     // POST directly: onSave from the parent closes the modal on success which
     // would interrupt the loop. The parent should refresh on onClose.
-    for (let i = 0; i < lines.length; i++) {
-      const parts = lines[i].split("|").map((p) => p.trim());
-      let name: string;
-      let apiKey: string;
-      let providerSpecificData: { accountId: string } | undefined;
-
-      if (isCloudflareAi && parts.length >= 3) {
-        // name|apiKey|accountId — apiKey may itself contain pipes
-        const baseName = parts[0] || "Key";
-        const accountId = parts[parts.length - 1];
-        apiKey = parts.slice(1, -1).join("|").trim();
-        name = `${baseName} ${i + 1}`;
-        providerSpecificData = accountId ? { accountId } : undefined;
-      } else if (parts.length >= 2) {
-        const baseName = parts[0] || "Key";
-        apiKey = parts.slice(1).join("|").trim();
-        name = `${baseName} ${i + 1}`;
-      } else {
-        apiKey = parts[0] || "";
-        name = `Key ${i + 1}`;
-      }
-      if (!apiKey) {
-        failed++;
-        continue;
-      }
+    for (const entry of plan) {
       try {
+        // Validate each key before saving so bulk-added connections get a
+        // real status (active/unknown) like single adds, instead of a
+        // hardcoded "unknown" that never flips until a manual test.
+        let isValid = false;
+        try {
+          const vres = await fetch("/api/providers/validate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ provider, apiKey: entry.apiKey }),
+          });
+          const vdata = await vres.json().catch(() => ({}));
+          isValid = !!vdata.valid;
+        } catch {
+          isValid = false;
+        }
         const res = await fetch("/api/providers", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             provider,
-            name,
-            apiKey,
+            name: entry.name,
+            apiKey: entry.apiKey,
             priority: 1,
-            testStatus: "unknown",
-            ...(providerSpecificData ? { providerSpecificData } : {}),
+            testStatus: isValid ? "active" : "unknown",
+            ...(entry.providerSpecificData ? { providerSpecificData: entry.providerSpecificData } : {}),
           }),
         });
         if (res.ok) success++;
@@ -127,6 +124,7 @@ export default function AddApiKeyModal({ isOpen, provider, providerName, isCompa
     }
     setSaving(false);
     setBulkResult({ success, failed });
+    if (success > 0 && onBulkDone) onBulkDone();
   };
 
   const buildProviderSpecificData = (): any => {

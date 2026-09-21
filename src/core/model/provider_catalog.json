@@ -123,6 +123,11 @@
   "selfhosted-embedding": "selfhosted-embedding",
   "selfhosted-stt": "selfhosted-stt",
   "selfhosted-tts": "selfhosted-tts",
+  "trae": "trae",
+  "commandcode": "commandcode",
+  "mmf": "mmf",
+  "ollama-search": "ollama-search",
+  "xquik": "xquik",
    "tokenrouter": "tokenrouter",
    "agentrouter": "ar"
   },
@@ -7253,6 +7258,95 @@
    "embeddingModels": [],
    "hasSearch": false,
    "hasFetch": false
+  },
+  {
+   "id": "trae",
+   "alias": "trae",
+   "serviceKinds": [
+    "llm"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": false,
+   "hasFetch": false
+  },
+  {
+   "id": "windsurf",
+   "alias": "ws",
+   "serviceKinds": [
+    "llm"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": false,
+   "hasFetch": false
+  },
+  {
+   "id": "gitlab",
+   "alias": "gitlab",
+   "serviceKinds": [
+    "llm"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": false,
+   "hasFetch": false
+  },
+  {
+   "id": "devin-cli",
+   "alias": "dv",
+   "serviceKinds": [
+    "llm"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": false,
+   "hasFetch": false
+  },
+  {
+   "id": "commandcode",
+   "alias": "commandcode",
+   "serviceKinds": [
+    "llm"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": false,
+   "hasFetch": false
+  },
+  {
+   "id": "mmf",
+   "alias": "mmf",
+   "serviceKinds": [
+    "llm"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": false,
+   "hasFetch": false
+  },
+  {
+   "id": "ollama-search",
+   "alias": "ollama-search",
+   "serviceKinds": [
+    "webSearch"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": true,
+   "hasFetch": false
+  },
+  {
+   "id": "xquik",
+   "alias": "xquik",
+   "serviceKinds": [
+    "webSearch"
+   ],
+   "ttsModels": [],
+   "embeddingModels": [],
+   "hasSearch": true,
+   "hasFetch": false
   }
+
  ]
 }

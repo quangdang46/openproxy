@@ -1749,7 +1749,9 @@ export default function ProviderDetailPageClient() {
         website={providerInfo?.website}
         proxyPools={proxyPools}
         error={addConnectionError}
+        existingNames={connections.map((c: any) => c.name).filter(Boolean)}
         onSave={handleSaveApiKey}
+        onBulkDone={fetchConnections}
         onClose={() => {
           setAddConnectionError("");
           setShowAddApiKeyModal(false);
