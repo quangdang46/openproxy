@@ -316,6 +316,7 @@ export default function ProvidersNewPageClient() {
                     selected.provider.id.slice(0, 2).toUpperCase()
                   }
                   fallbackColor={selected.provider.color}
+                  providerId={selected.provider.id}
                 />
               </div>
               <div className="min-w-0">

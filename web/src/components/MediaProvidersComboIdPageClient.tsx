@@ -316,6 +316,7 @@ export default function MediaProvidersComboIdPageClient() {
                     className="object-contain rounded shrink-0"
                     fallbackText={p?.textIcon || providerId.slice(0, 2).toUpperCase()}
                     fallbackColor={p?.color}
+                    providerId={providerId}
                   />
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium truncate">{p?.name || providerId}</div>
