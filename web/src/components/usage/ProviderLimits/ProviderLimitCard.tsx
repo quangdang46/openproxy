@@ -88,6 +88,7 @@ export default function ProviderLimitCard({
               className="object-contain rounded-lg"
               fallbackText={provider?.slice(0, 2).toUpperCase() || "PR"}
               fallbackColor={providerColor}
+              providerId={provider}
             />
           </div>
 
