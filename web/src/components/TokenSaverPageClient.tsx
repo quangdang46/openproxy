@@ -5,6 +5,7 @@ import { Card, Button, Input, Modal, Toggle, ConfirmModal } from "@/shared/compo
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { getCurrentLocale, onLocaleChange } from "@/i18n/runtime";
 import React from "react";
+import { useSettingsStore } from "@/store/settingsStore";
 
 interface CavemanLevel {
   id: string;
@@ -405,9 +406,8 @@ export default function TokenSaverPageClient() {
   useEffect(() => {
     const loadSettings = async () => {
       try {
-        const res = await fetch("/api/settings");
-        if (res.ok) {
-          const data = await res.json();
+        const data = await useSettingsStore.getState().fetchSettings();
+        if (data) {
           setRtkEnabledState(data.rtkEnabled !== false);
           setHeadroomEnabled(!!data.headroomEnabled);
           setHeadroomUrl(data.headroomUrl || "http://localhost:8787");

@@ -5,6 +5,7 @@ import type { ChangeEvent, MutableRefObject, ReactNode, MouseEvent } from "react
 import { Card, Button, Input, Modal, CardSkeleton, Toggle } from "@/shared/components";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
+import { useSettingsStore } from "@/store/settingsStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import CacheStatsCard from "@/components/CacheStatsCard";
 
@@ -355,12 +356,12 @@ export default function APIPageClient({ machineId }: APIPageClientProps) {
   const loadSettings = async (): Promise<void> => {
     setTunnelChecking(true);
     try {
-      const [settingsRes, statusRes] = await Promise.all([
-        fetch("/api/settings"),
+      const [settingsData, statusRes] = await Promise.all([
+        useSettingsStore.getState().fetchSettings(),
         fetch("/api/tunnel/status", { cache: "no-store" }),
       ]);
-      if (settingsRes.ok) {
-        const data = await settingsRes.json();
+      if (settingsData) {
+        const data = settingsData;
         setRequireApiKey(data.requireApiKey || false);
         setRequireLogin(data.requireLogin !== false);
         setHasPassword(data.hasPassword || false);
