@@ -1502,6 +1502,8 @@ pub fn routes() -> Router<AppState> {
         .route("/api/auth/session/{session_id}", get(get_session))
         .route("/api/auth/status", get(auth_status))
         .route("/api/auth/oidc/login", get(oidc_login))
+        // 9router parity: login page calls /api/auth/oidc/start.
+        .route("/api/auth/oidc/start", get(oidc_login))
         .route("/api/auth/oidc/callback", get(oidc_callback))
         .route("/api/auth/oidc/test", post(oidc_test))
         .route("/api/user", get(get_user))
