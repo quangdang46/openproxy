@@ -139,7 +139,7 @@ export const APIKEY_PROVIDERS: Record<string, Provider> = {
   "minimax-cn": { id: "minimax-cn", alias: "minimax-cn", name: "Minimax (China)", icon: "memory", color: "#DC2626", textIcon: "MC", website: "https://www.minimaxi.com", notice: { apiKeyUrl: "https://platform.minimaxi.com/user-center/basic-information/interface-key" }, serviceKinds: ["llm", "tts"], ttsConfig: { baseUrl: "https://api.minimaxi.com/v1/t2a_v2", authType: "apikey", authHeader: "bearer", format: "minimax-tts", models: [{ id: "speech-2.8-hd", name: "Speech 2.8 HD" }, { id: "speech-2.8-turbo", name: "Speech 2.8 Turbo" }, { id: "speech-2.6-hd", name: "Speech 2.6 HD" }, { id: "speech-2.6-turbo", name: "Speech 2.6 Turbo" }] } },
   alicode: { id: "alicode", alias: "alicode", name: "Alibaba", icon: "cloud", color: "#FF6A00", textIcon: "ALi", website: "https://bailian.console.aliyun.com", notice: { apiKeyUrl: "https://bailian.console.aliyun.com/?apiKey=1" } },
   "alicode-intl": { id: "alicode-intl", alias: "alicode-intl", name: "Alibaba Intl", icon: "cloud", color: "#FF6A00", textIcon: "ALi", website: "https://modelstudio.console.alibabacloud.com", notice: { apiKeyUrl: "https://modelstudio.console.alibabacloud.com/?apiKey=1" } },
-  "xiaomi-mimo": { id: "xiaomi-mimo", alias: "mimo", name: "Xiaomi MiMo", icon: "smart_toy", color: "#FF6900", textIcon: "XM", website: "https://xiaomimimo.com", notice: { apiKeyUrl: "https://xiaomimimo.com" }, serviceKinds: ["llm", "tts"], ttsConfig: { baseUrl: "https://api.xiaomimimo.com/v1/chat/completions", authType: "apikey", authHeader: "bearer", format: "xiaomi-mimo-tts" }, authModes: ["oauth", "apikey"], hasOAuth: true },
+  "xiaomi-mimo": { id: "xiaomi-mimo", alias: "mimo", aliases: ["mimo-desktop", "xmd"], name: "Xiaomi MiMo", icon: "smart_toy", color: "#FF6900", textIcon: "XM", website: "https://xiaomimimo.com", notice: { apiKeyUrl: "https://platform.xiaomimimo.com/console/api-keys", signupUrl: "https://mimo.xiaomimimo.com/desktop/invite/" }, serviceKinds: ["llm", "tts"], ttsConfig: { baseUrl: "https://api.xiaomimimo.com/v1/chat/completions", authType: "apikey", authHeader: "bearer", format: "xiaomi-mimo-tts" }, authModes: ["oauth", "apikey"], hasOAuth: true, oauth: { custom: true, authorizeUrl: "https://platform.xiaomimimo.com/authorize", callbackParam: "u", kn: "mimocode" } },
   "xiaomi-tokenplan": { id: "xiaomi-tokenplan", alias: "xmtp", name: "Xiaomi MiMo (Token Plan)", icon: "smart_toy", color: "#FF6700", textIcon: "XT", website: "https://mimo.xiaomi.com", notice: { text: "Xiaomi MiMo Token Plan subscription (API key starts with tp-). Token Plan keys are cluster-specific — select the region matching your subscription.", apiKeyUrl: "https://mimo.xiaomi.com" }, hasProviderSpecificData: true, regions: [{ id: "sgp", label: "Singapore", baseUrl: "https://token-plan-sgp.xiaomimimo.com/v1" }, { id: "cn", label: "China", baseUrl: "https://token-plan-cn.xiaomimimo.com/v1" }, { id: "ams", label: "Europe", baseUrl: "https://token-plan-ams.xiaomimimo.com/v1" }], defaultRegion: "sgp" },
   "volcengine-ark": { id: "volcengine-ark", alias: "ark", name: "Volcengine Ark", icon: "cloud", color: "#1677FF", textIcon: "ARK", website: "https://ark.cn-beijing.volces.com", notice: { apiKeyUrl: "https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey" } },
   openai: { id: "openai", alias: "openai", name: "OpenAI", icon: "auto_awesome", color: "#10A37F", textIcon: "OA", website: "https://platform.openai.com", notice: { apiKeyUrl: "https://platform.openai.com/api-keys" }, serviceKinds: ["llm", "embedding", "tts", "stt", "image", "imageToText", "webSearch"], thinkingConfig: THINKING_CONFIG.effort, searchViaChat: { defaultModel: "gpt-4o-mini", pricingUrl: "https://openai.com/api/pricing" }, ttsConfig: { baseUrl: "https://api.openai.com/v1/audio/speech", authType: "apikey", authHeader: "bearer", format: "openai", models: [{ id: "tts-1", name: "TTS-1" }, { id: "tts-1-hd", name: "TTS-1 HD" }, { id: "gpt-4o-mini-tts", name: "GPT-4o Mini TTS" }] }, sttConfig: { baseUrl: "https://api.openai.com/v1/audio/transcriptions", authType: "apikey", authHeader: "bearer", format: "openai", models: [{ id: "whisper-1", name: "Whisper 1" }, { id: "gpt-4o-transcribe", name: "GPT-4o Transcribe" }, { id: "gpt-4o-mini-transcribe", name: "GPT-4o Mini Transcribe" }] }, embeddingConfig: { baseUrl: "https://api.openai.com/v1/embeddings", authType: "apikey", authHeader: "bearer", models: [{ id: "text-embedding-3-small", name: "Text Embedding 3 Small", dimensions: 1536 }, { id: "text-embedding-3-large", name: "Text Embedding 3 Large", dimensions: 3072 }, { id: "text-embedding-ada-002", name: "Text Embedding Ada 002", dimensions: 1536 }] } },
@@ -590,10 +590,10 @@ export const AUTH_METHODS: Record<string, AuthMethod> = {
   cookie: { id: "cookie", name: "Browser Cookie", icon: "cookie" },
 };
 
-// Helper: Get provider by alias
+// Helper: Get provider by alias (also matches `aliases` extras, e.g. xmd → xiaomi-mimo)
 export function getProviderByAlias(alias: string): Provider | null {
   for (const provider of Object.values(AI_PROVIDERS)) {
-    if (provider.alias === alias || provider.id === alias) {
+    if (provider.alias === alias || provider.id === alias || provider.aliases?.includes(alias)) {
       return provider;
     }
   }
@@ -612,9 +612,12 @@ export function getProviderAlias(providerId: string): string {
   return provider?.alias || providerId;
 }
 
-// Alias to ID mapping (for quick lookup)
+// Alias to ID mapping (for quick lookup; includes `aliases` extras when present)
 export const ALIAS_TO_ID: Record<string, string> = Object.values(AI_PROVIDERS).reduce((acc, p) => {
   acc[p.alias] = p.id;
+  for (const a of p.aliases || []) {
+    if (!(a in acc)) acc[a] = p.id;
+  }
   return acc;
 }, {} as Record<string, string>);
 

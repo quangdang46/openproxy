@@ -99,6 +99,15 @@ pub fn strip_unsupported_params(provider: &str, model: &str, body: &mut Value) {
         flatten_content(obj);
     }
 
+    // MiMo Desktop Preview models on the account-service route (9router 73cb8914):
+    // content must be a plain string, rejects OpenAI content-part arrays.
+    // Cloud models keep their parts (mimo-v2-omni is multi-modal).
+    if (provider == "xiaomi-mimo" || provider == "mimo")
+        && model.to_ascii_lowercase().contains("preview")
+    {
+        flatten_content(obj);
+    }
+
     // clampToModelMaxOutput / maxOutputCap — volcengine-ark (9router
     // paramSupport.js:17-23, 57-71): clamp max_tokens / max_completion_tokens
     // / max_output_tokens to the per-model ceiling when they exceed it.
@@ -307,5 +316,22 @@ mod tests {
         });
         strip_unsupported_params("github", "gpt-5.4", &mut body);
         assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn flattens_content_for_mimo_preview_models() {
+        // 9router 73cb8914: Preview models on the account-service route need
+        // plain-string content; cloud models keep their parts.
+        let mut body = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}]
+        });
+        strip_unsupported_params("xiaomi-mimo", "mimo-x-pro-preview", &mut body);
+        assert_eq!(body["messages"][0]["content"], json!("ab"));
+
+        let mut body = json!({
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "a"}]}]
+        });
+        strip_unsupported_params("xiaomi-mimo", "mimo-v2.5-pro", &mut body);
+        assert!(body["messages"][0]["content"].is_array());
     }
 }

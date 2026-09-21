@@ -809,6 +809,21 @@ impl DefaultExecutor {
         }
     }
 
+    /// Xiaomi MiMo Preview models (9router 73cb8914 xiaomi-mimo.js): Desktop-exclusive
+    /// `mimo-x-pro-preview` / `mimo-x-flash-preview` are served by the account-service
+    /// route on mimo-server-cn, authorized by the Xiaomi account session cookie
+    /// (NOT the sk- key). Bare ids arrive as `xiaomi/<id>` via upstreamModelId.
+    pub fn is_mimo_preview_model(model: &str) -> bool {
+        let bare = model.split('/').next_back().unwrap_or(model);
+        matches!(bare, "mimo-x-pro-preview" | "mimo-x-flash-preview")
+    }
+
+    const MIMO_PREVIEW_URL: &'static str =
+        "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions";
+
+    const MIMO_PREVIEW_UA: &'static str =
+        "miNative PC/Normal Windows_NT/10.0.19045 SDKV/1.0.0 DEVT/PC DEVS/Windows APP/miaccount_desktop APPV/0.1.0";
+
     /// Xiaomi Token Plan: region host + dual OpenAI/Claude path (9router XiaomiTokenplanExecutor).
     fn xiaomi_tokenplan_url(credentials: &ProviderConnection) -> Result<String, ExecutorError> {
         let region =
@@ -840,6 +855,16 @@ impl DefaultExecutor {
         // Region-specific providers must win over resolve_transport's default-region URL.
         if self.provider == "xiaomi-tokenplan" || self.provider == "xmtp" {
             return Self::xiaomi_tokenplan_url(credentials);
+        }
+
+        // Xiaomi MiMo Preview models live on the account-service route, which is not
+        // one of the declared transports — resolve before the runtimeTransport path
+        // (9router 73cb8914; cloud models keep default handling so Claude clients
+        // still reach /anthropic/v1/messages).
+        if (self.provider == "xiaomi-mimo" || self.provider == "mimo")
+            && Self::is_mimo_preview_model(model)
+        {
+            return Ok(Self::MIMO_PREVIEW_URL.to_string());
         }
 
         // Check runtime_transport base_url override on the connection first.
@@ -1015,6 +1040,26 @@ impl DefaultExecutor {
             } else {
                 return Err(ExecutorError::MissingCredentials(self.provider.clone()));
             }
+        } else if (self.provider == "xiaomi-mimo" || self.provider == "mimo")
+            && Self::is_mimo_preview_model(model)
+        {
+            // Preview models authenticate with the account-session cookie, not the key
+            // (9router 73cb8914). Cookie is resolved in chat.rs before execute and
+            // carried on provider_specific_data (`mimoAccountCookie`).
+            let cookie =
+                compatible_value(credentials.provider_specific_data.get("mimoAccountCookie"))
+                    .ok_or_else(|| ExecutorError::MissingCredentials(self.provider.clone()))?;
+            headers.insert("Cookie", HeaderValue::from_str(cookie)?);
+            headers.insert(
+                reqwest::header::USER_AGENT,
+                HeaderValue::from_static(Self::MIMO_PREVIEW_UA),
+            );
+            if !stream {
+                headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+            } else {
+                headers.insert(ACCEPT, HeaderValue::from_static("text/event-stream"));
+            }
+            return Ok(headers);
         } else if self.provider == "opencode-go" && opencode_go_uses_claude_format(model) {
             let token = credentials
                 .api_key
@@ -1113,6 +1158,22 @@ impl DefaultExecutor {
                 // the Cline client headers. Hooks run BEFORE auth in JS, so the
                 // generic Bearer Authorization above stands (verbatim token); only
                 // the client-identifying headers are overlaid here.
+                //
+                // WorkOS JWT prefix (clineAuth.js getClineAccessToken): Cline OAuth
+                // access tokens are WorkOS JWTs (base64url `eyJ…` header) and must
+                // be sent as `Bearer workos:<jwt>`. ClinePass API keys (e.g.
+                // `clp_…`) are NOT JWTs and go verbatim — prefixing them makes
+                // the Cline API 401. Replace the generic Bearer set above.
+                if let Some(raw) = credentials
+                    .access_token
+                    .as_deref()
+                    .or(credentials.api_key.as_deref())
+                {
+                    let token = cline_access_token(raw);
+                    if let Ok(val) = HeaderValue::from_str(&format!("Bearer {token}")) {
+                        headers.insert(AUTHORIZATION, val);
+                    }
+                }
                 headers.insert(
                     "User-Agent",
                     HeaderValue::from_str(&format!("OpenProxy/{}", env!("CARGO_PKG_VERSION")))?,
@@ -1211,6 +1272,34 @@ impl DefaultExecutor {
 
         // Strip unsupported request params for providers that don't support them
         strip_unsupported_params(&self.provider, model, &mut body);
+
+        // Xiaomi MiMo Preview defaults (9router 73cb8914 transformRequest):
+        // thinking/params get defaults only — never override the caller's values.
+        if (self.provider == "xiaomi-mimo" || self.provider == "mimo")
+            && Self::is_mimo_preview_model(model)
+        {
+            if let Some(obj) = body.as_object_mut() {
+                if obj.get("thinking").is_none() {
+                    obj.insert(
+                        "thinking".to_string(),
+                        serde_json::json!({ "type": "enabled" }),
+                    );
+                }
+                if obj.get("temperature").is_none() {
+                    obj.insert("temperature".to_string(), serde_json::json!(1.0));
+                }
+                if obj.get("top_p").is_none() {
+                    obj.insert("top_p".to_string(), serde_json::json!(0.95));
+                }
+                let needs_max = obj
+                    .get("max_tokens")
+                    .and_then(|v| v.as_u64())
+                    .is_none_or(|n| n == 0);
+                if needs_max {
+                    obj.insert("max_tokens".to_string(), serde_json::json!(4096));
+                }
+            }
+        }
 
         body
     }
@@ -1641,6 +1730,35 @@ fn bearer_token(credentials: &ProviderConnection) -> Option<&str> {
         .or_else(|| non_empty_option(credentials.api_key.as_deref()))
 }
 
+/// 9router open-sse/shared/clineAuth.js getClineAccessToken: Cline OAuth
+/// access tokens are WorkOS JWTs (base64url `eyJ…` header) and must be sent
+/// as `workos:<jwt>`. Anything already prefixed (case-insensitive) or not
+/// a JWT (e.g. ClinePass `clp_…` keys) goes verbatim.
+fn cline_access_token(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("workos:") {
+        return trimmed.to_string();
+    }
+    let mut parts = trimmed.split('.');
+    let (h, b) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let is_jwt = !h.is_empty()
+        && !b.is_empty()
+        && h.len() >= 3
+        && h.as_bytes()[..3] == *b"eyJ"
+        && h.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        && b.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
+    if is_jwt {
+        format!("workos:{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Providers whose upstream accepts unauthenticated requests (dashboard
 /// `noAuth: true`). They must reach the upstream without an Authorization
 /// header instead of failing with `MissingCredentials`.
@@ -1955,6 +2073,26 @@ mod tests {
     }
 
     #[test]
+    fn cline_access_token_prefixes_workos_jwt_only() {
+        // OAuth JWT -> prefixed.
+        let jwt = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2ln";
+        assert_eq!(cline_access_token(jwt), format!("workos:{jwt}"));
+        // Already prefixed (any case) -> verbatim.
+        assert_eq!(
+            cline_access_token("workos:eyJhYmM.def"),
+            "workos:eyJhYmM.def"
+        );
+        assert_eq!(
+            cline_access_token("WORKOS:eyJhYmM.def"),
+            "WORKOS:eyJhYmM.def"
+        );
+        // ClinePass API key -> verbatim.
+        assert_eq!(cline_access_token("clp_abc123"), "clp_abc123");
+        assert_eq!(cline_access_token("sk-plain"), "sk-plain");
+        assert_eq!(cline_access_token("  "), "");
+    }
+
+    #[test]
     fn kilocode_posts_to_live_openrouter_gateway_endpoint() {
         // Live-verified: POST https://api.kilo.ai/api/openrouter/chat/completions → 200.
         let executor = DefaultExecutor::new("kilocode", Arc::new(ClientPool::new()), None).unwrap();
@@ -1966,5 +2104,88 @@ mod tests {
             .build_url("tencent/hy3:free", false, &credentials)
             .unwrap();
         assert_eq!(url, "https://api.kilo.ai/api/openrouter/chat/completions");
+    }
+
+    #[test]
+    fn xiaomi_mimo_preview_routing() {
+        // 9router 73cb8914 executor parity: Preview models → account-service
+        // route regardless of runtime transport; bare `xiaomi/<id>` refs match too.
+        let executor =
+            DefaultExecutor::new("xiaomi-mimo", Arc::new(ClientPool::new()), None).unwrap();
+        let creds = ProviderConnection::default();
+        let expected = "https://mimo-server-cn.xiaomimimo.com/api/route/chat/completions";
+        assert_eq!(
+            executor
+                .build_url("mimo-x-pro-preview", true, &creds)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            executor
+                .build_url("xiaomi/mimo-x-flash-preview", true, &creds)
+                .unwrap(),
+            expected
+        );
+        assert!(DefaultExecutor::is_mimo_preview_model(
+            "xiaomi/mimo-x-pro-preview"
+        ));
+        assert!(!DefaultExecutor::is_mimo_preview_model("mimo-v2.5-pro"));
+
+        // Cloud models keep default handling (openai transport endpoint).
+        let url = executor.build_url("mimo-v2.5-pro", true, &creds).unwrap();
+        assert_eq!(url, "https://api.xiaomimimo.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn xiaomi_mimo_preview_headers_use_cookie() {
+        // Preview calls authenticate with the account cookie, not the key.
+        let executor =
+            DefaultExecutor::new("xiaomi-mimo", Arc::new(ClientPool::new()), None).unwrap();
+        let mut psd = std::collections::BTreeMap::new();
+        psd.insert(
+            "mimoAccountCookie".to_string(),
+            serde_json::json!("serviceToken=abc"),
+        );
+        let creds = ProviderConnection {
+            api_key: Some("sk-x".to_string()),
+            provider_specific_data: psd,
+            ..ProviderConnection::default()
+        };
+        let headers = executor
+            .build_headers("mimo-x-pro-preview", &creds, true)
+            .unwrap();
+        assert_eq!(headers["Cookie"], "serviceToken=abc");
+        assert!(!headers.contains_key(AUTHORIZATION));
+
+        // Cloud calls keep the bearer key.
+        let creds = ProviderConnection {
+            api_key: Some("sk-x".to_string()),
+            ..ProviderConnection::default()
+        };
+        let headers = executor
+            .build_headers("mimo-v2.5-pro", &creds, true)
+            .unwrap();
+        assert_eq!(headers[AUTHORIZATION], "Bearer sk-x");
+    }
+
+    #[test]
+    fn xiaomi_mimo_preview_defaults_do_not_override() {
+        // Preview defaults fill missing fields only (9router transformRequest).
+        let executor =
+            DefaultExecutor::new("xiaomi-mimo", Arc::new(ClientPool::new()), None).unwrap();
+        let body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "temperature": 0.2
+        });
+        let out = executor.transform_request(&body, "mimo-x-pro-preview");
+        assert_eq!(out["temperature"], serde_json::json!(0.2));
+        assert_eq!(out["top_p"], serde_json::json!(0.95));
+        assert_eq!(out["max_tokens"], serde_json::json!(4096));
+        assert_eq!(out["thinking"], serde_json::json!({"type": "enabled"}));
+
+        let body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        let out = executor.transform_request(&body, "mimo-v2.5-pro");
+        assert!(out.get("thinking").is_none());
+        assert!(out.get("max_tokens").is_none());
     }
 }

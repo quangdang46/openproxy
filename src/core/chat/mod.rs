@@ -157,6 +157,14 @@ fn resolve_model_metadata(provider: &str, model: &str) -> (Option<Format>, Strin
     if matches!(provider, "opencode" | "opencode-go" | "oc" | "ocg") && is_muse_spark_model(model) {
         return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
     }
+    // 9router opencode-go.js registry: grok-4.6 + gpt-5.6-luna are
+    // responses-only (`targetFormat: openai-responses`,
+    // `supportedFormats: [openai-responses]`) — route them to
+    // /zen/go/v1/responses like Muse Spark. Scoped to opencode-go only
+    // (registry entry lives on that provider); opencode/oc keep Chat.
+    if matches!(provider, "opencode-go" | "ocg") && is_opencode_go_responses_only_model(model) {
+        return (Some(Format::OpenAiResponses), model.to_string(), Vec::new());
+    }
     (None, model.to_string(), Vec::new())
 }
 
@@ -186,6 +194,21 @@ fn is_muse_spark_model(model_id: &str) -> bool {
     };
     // Followed by end-of-string or one of `-_:.\s`.
     after_spark.is_empty() || after_spark.starts_with(['-', '_', ':', '.', ' ', '\t'])
+}
+
+/// Responses-only models on opencode-go (9router registry
+/// `open-sse/providers/registry/opencode-go.js`): grok-4.6 + gpt-5.6-luna
+/// carry `targetFormat: openai-responses` with no Chat transport.
+fn is_opencode_go_responses_only_model(model_id: &str) -> bool {
+    let mut clean = model_id.trim();
+    if let Some(open) = clean.rfind('(') {
+        if clean.ends_with(')') && !clean[open + 1..clean.len() - 1].contains(['(', ')']) {
+            clean = clean[..open].trim_end();
+        }
+    }
+    let base = clean.rsplit('/').next().unwrap_or(clean);
+    let lower = base.to_lowercase();
+    lower == "grok-4.6" || lower == "gpt-5.6-luna"
 }
 
 fn parse_strip_list(raw: &str) -> Vec<String> {
@@ -745,5 +768,32 @@ mod tests {
         // Non-spark models unaffected.
         let (t, _, _) = resolve_model_metadata("opencode", "big-pickle");
         assert_eq!(t, None);
+    }
+
+    #[test]
+    fn opencode_go_responses_only_models_route_to_responses() {
+        use crate::core::translator::registry::Format;
+        for id in [
+            "grok-4.6",
+            "GROK-4.6",
+            "gpt-5.6-luna",
+            "ocg/grok-4.6",
+            "grok-4.6(high)",
+        ] {
+            assert!(is_opencode_go_responses_only_model(id), "{id} should match");
+            let (t, _, _) = resolve_model_metadata("opencode-go", id);
+            assert_eq!(t, Some(Format::OpenAiResponses), "{id} on opencode-go");
+            let (t, _, _) = resolve_model_metadata("ocg", id);
+            assert_eq!(t, Some(Format::OpenAiResponses), "{id} on ocg");
+        }
+        // Scoped to opencode-go: opencode/oc keep Chat routing.
+        let (t, _, _) = resolve_model_metadata("opencode", "grok-4.6");
+        assert_eq!(t, None);
+        let (t, _, _) = resolve_model_metadata("oc", "gpt-5.6-luna");
+        assert_eq!(t, None);
+        // Non-listed models unaffected.
+        assert!(!is_opencode_go_responses_only_model("grok-4.5"));
+        assert!(!is_opencode_go_responses_only_model("gpt-5.6-terra"));
+        assert!(!is_opencode_go_responses_only_model("big-pickle"));
     }
 }

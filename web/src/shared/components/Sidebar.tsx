@@ -30,7 +30,7 @@ const NAV_ITEM_NESTED_BASE =
 const NAV_ITEM_NESTED_ACTIVE =
   "bg-surface-card text-ink font-medium before:content-[''] before:absolute before:left-2 before:top-1.5 before:bottom-1.5 before:w-[2px] before:rounded-r-full before:bg-brand-coral";
 
-const VISIBLE_MEDIA_KINDS = ["embedding", "image", "tts", "stt"];
+const VISIBLE_MEDIA_KINDS = ["embedding", "image", "video", "tts", "stt"];
 // Combined entry: webSearch + webFetch share one page at /dashboard/media-providers/web
 const COMBINED_WEB_ITEM = { id: "web", label: "Web Fetch & Search", icon: "travel_explore", href: "/dashboard/media-providers/web" };
 
