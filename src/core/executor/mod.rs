@@ -7,6 +7,8 @@ mod codebuddy_intl;
 mod codex;
 mod commandcode;
 mod cursor;
+mod deepseek_pow;
+mod deepseek_web;
 mod default;
 mod devin_cli;
 mod gemini_cli;
@@ -58,6 +60,13 @@ pub use commandcode::{
 pub use cursor::{
     parse_cursor_sse_events, CursorExecutionRequest, CursorExecutor, CursorExecutorError,
     CursorExecutorResponse, SseEvent,
+};
+pub use deepseek_pow::{
+    deepseek_hash_v1, find_pow_nonce, validate_challenge, MAX_DEEPSEEK_POW_DIFFICULTY,
+};
+pub use deepseek_web::{
+    DeepSeekWebExecutionRequest, DeepSeekWebExecutor, DeepSeekWebExecutorError,
+    DeepSeekWebExecutorResponse, DEEPSEEK_WEB_BASE,
 };
 pub use default::{
     provider_config_base_url, select_anthropic_beta, DefaultExecutor, ExecutionRequest,

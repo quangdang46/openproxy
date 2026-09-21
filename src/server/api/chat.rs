@@ -1910,6 +1910,31 @@ async fn forward_with_provider_fallback(
                     transformed_body: result.transformed_body,
                     transport: result.transport,
                 })
+            } else if provider == "deepseek-web" || provider == "ds-web" {
+                use crate::core::executor::{DeepSeekWebExecutionRequest, DeepSeekWebExecutor};
+                let executor = DeepSeekWebExecutor::new(state.client_pool.clone());
+                let result = executor
+                    .execute_request(DeepSeekWebExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("DeepSeekWeb execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
             } else if provider == "windsurf" || provider == "ws" {
                 let executor = WindsurfExecutor::new(state.client_pool.clone());
                 let result = executor
