@@ -5,6 +5,7 @@ import { MITM_TOOLS } from "@/shared/constants/cliTools";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import { MitmServerCard, MitmToolCard } from "@/components/cli-tools";
+import { useSettingsStore } from "@/store/settingsStore";
 
 interface MitmStatus {
   running: boolean;
@@ -63,11 +64,8 @@ export default function MitmPageClient() {
 
   const fetchCloudSettings = async () => {
     try {
-      const res = await fetch("/api/settings");
-      if (res.ok) {
-        const data = await res.json();
-        setCloudEnabled(data.cloudEnabled || false);
-      }
+      const data = await useSettingsStore.getState().fetchSettings();
+      if (data) setCloudEnabled(data.cloudEnabled || false);
     } catch { /* ignore */ }
   };
 

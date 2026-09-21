@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 // import { useParams, useRouter } from "next/navigation";  // ported: next.js -> Astro+React
 // import Link from "next/link";  // ported: next.js -> Astro+React
 // import Image from "next/image";  // ported: next.js -> Astro+React
-import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, FreeTierLimits } from "@/shared/components";
+import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, XiaomiMimoAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, FreeTierLimits } from "@/shared/components";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, THINKING_CONFIG } from "@/shared/constants/providers";
@@ -25,6 +25,7 @@ import AddApiKeyModal from "./AddApiKeyModal";
 import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
+import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
 
@@ -75,6 +76,7 @@ export default function ProviderDetailPageClient() {
   const [testingModelIds, setTestingModelIds] = useState(new Set<string>());
   const [showAddCustomModel, setShowAddCustomModel] = useState(false);
   const [showBulkImportCodex, setShowBulkImportCodex] = useState(false);
+  const [showBulkImportGrokCli, setShowBulkImportGrokCli] = useState(false);
   const [selectedConnectionIds, setSelectedConnectionIds] = useState([]);
   const [bulkDeletePending, setBulkDeletePending] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
@@ -93,6 +95,7 @@ export default function ProviderDetailPageClient() {
   const [oneByOneSummary, setOneByOneSummary] = useState<null | { total: number; completed: number; passed: number; failed: number; stopped: boolean }>(null);
   const stopOneByOneRef = useRef(false);
   const [importingQoderModels, setImportingQoderModels] = useState(false);
+  const [importingClineModels, setImportingClineModels] = useState(false);
   const { copied, copy } = useCopyToClipboard();
   const notify = useNotificationStore();
   const AG_RISK_STORAGE_KEY = "ag_risk_confirmed";
@@ -496,6 +499,63 @@ export default function ProviderDetailPageClient() {
       notify.error(`Error fetching models: ${error?.message || "unknown"}`);
     } finally {
       setImportingQoderModels(false);
+    }
+  };
+
+  // Fetch the live Cline /models catalog and add every model not yet present.
+  // Cline and ClinePass share the same catalog endpoint (api.cline.bot/api/v1/models).
+  const handleImportClineModels = async () => {
+    if (importingClineModels) return;
+    const activeConnection = connections.find((conn: any) => conn.isActive !== false);
+    if (!activeConnection) {
+      notify.error("Please add an active Cline connection first");
+      return;
+    }
+    setImportingClineModels(true);
+    try {
+      const res = await fetch(`/api/providers/${activeConnection.id}/models`);
+      const data = await res.json();
+      if (!res.ok) {
+        notify.error(data.error || "Failed to fetch models");
+        return;
+      }
+      const fetched = data.models || [];
+      if (fetched.length === 0) {
+        notify.error("No models returned");
+        return;
+      }
+      let importedCount = 0;
+      for (const model of fetched) {
+        const modelId = model.id || model.name;
+        if (!modelId) continue;
+        const alreadyExists =
+          customModels.some(
+            (entry: any) =>
+              entry.providerAlias === providerStorageAlias &&
+              entry.id === modelId &&
+              (entry.kind || entry.type || "llm") === "llm",
+          ) ||
+          Object.values(modelAliases).includes(
+            `${providerStorageAlias}/${modelId}`,
+          );
+        if (alreadyExists) continue;
+        await handleAddCustomModel(modelId, "llm", providerStorageAlias);
+        importedCount += 1;
+      }
+      if (importedCount === 0) {
+        notify.success("All models already exist, no new models added");
+      } else {
+        notify.success(`Successfully added ${importedCount} models`);
+        await fetchCustomModels();
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new CustomEvent("customModelChanged"));
+        }
+      }
+    } catch (error: any) {
+      console.log("Error importing Cline models:", error);
+      notify.error(`Error fetching models: ${error?.message || "unknown"}`);
+    } finally {
+      setImportingClineModels(false);
     }
   };
 
@@ -1173,6 +1233,20 @@ export default function ProviderDetailPageClient() {
           </button>
         )}
 
+        {/* Import Cline /models catalog button — only show for cline and clinepass providers */}
+        {(providerId === "cline" || providerId === "clinepass") && connections.some((conn: any) => conn.isActive !== false) && (
+          <button
+            onClick={handleImportClineModels}
+            disabled={importingClineModels}
+            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-blue-500/40 px-3 py-2 text-xs text-blue-600 dark:text-blue-400 transition-colors hover:border-blue-500 hover:bg-blue-500/5 sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <span className="material-symbols-outlined text-sm" style={importingClineModels ? { animation: "spin 1s linear infinite" } : undefined}>
+              {importingClineModels ? "progress_activity" : "download"}
+            </span>
+            {importingClineModels ? "Fetching..." : "Import from /models"}
+          </button>
+        )}
+
         {/* Suggested models from provider API — show only models not yet added */}
         {suggestedModels.length > 0 && (() => {
           const addedFullModels = new Set([
@@ -1527,6 +1601,11 @@ export default function ProviderDetailPageClient() {
                         Bulk Add
                       </Button>
                     )}
+                    {providerId === "grok-cli" && (
+                      <Button size="sm" icon="playlist_add" variant="secondary" onClick={() => setShowBulkImportGrokCli(true)}>
+                        Bulk Add
+                      </Button>
+                    )}
                     <Button
                       size="sm"
                       icon="add"
@@ -1613,6 +1692,18 @@ export default function ProviderDetailPageClient() {
                           variant="secondary"
                           onClick={() => setShowBulkImportCodex(true)}
                           title="Bulk import codex accounts from JSON"
+                          className="w-full sm:w-auto"
+                        >
+                          Bulk Add
+                        </Button>
+                      )}
+                      {providerId === "grok-cli" && (
+                        <Button
+                          size="sm"
+                          icon="playlist_add"
+                          variant="secondary"
+                          onClick={() => setShowBulkImportGrokCli(true)}
+                          title="Bulk import Grok CLI accounts from JSON"
                           className="w-full sm:w-auto"
                         >
                           Bulk Add
@@ -1722,6 +1813,12 @@ export default function ProviderDetailPageClient() {
           onSuccess={handleOAuthSuccess}
           onClose={() => setShowOAuthModal(false)}
         />
+      ) : providerId === "xiaomi-mimo" ? (
+        <XiaomiMimoAuthModal
+          isOpen={showOAuthModal}
+          onSuccess={handleOAuthSuccess}
+          onClose={() => setShowOAuthModal(false)}
+        />
       ) : (
         <OAuthModal
           isOpen={showOAuthModal}
@@ -1749,7 +1846,9 @@ export default function ProviderDetailPageClient() {
         website={providerInfo?.website}
         proxyPools={proxyPools}
         error={addConnectionError}
+        existingNames={connections.map((c: any) => c.name).filter(Boolean)}
         onSave={handleSaveApiKey}
+        onBulkDone={fetchConnections}
         onClose={() => {
           setAddConnectionError("");
           setShowAddApiKeyModal(false);
@@ -1794,6 +1893,17 @@ export default function ProviderDetailPageClient() {
           onClose={() => setShowBulkImportCodex(false)}
           onSuccess={async () => {
             setShowBulkImportCodex(false);
+            await fetchConnections();
+          }}
+        />
+      )}
+
+      {providerId === "grok-cli" && (
+        <BulkImportGrokCliModal
+          isOpen={showBulkImportGrokCli}
+          onClose={() => setShowBulkImportGrokCli(false)}
+          onSuccess={async () => {
+            setShowBulkImportGrokCli(false);
             await fetchConnections();
           }}
         />

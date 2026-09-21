@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { CardSkeleton } from "@/shared/components";
 import { CLI_TOOLS, MITM_TOOLS } from "@/shared/constants/cliTools";
 import { getModelsByProviderId, PROVIDER_ID_TO_ALIAS, useEnsureCatalog } from "@/shared/constants/models";
+import { useSettingsStore } from "@/store/settingsStore";
 import {
   ClaudeToolCard,
   CodexToolCard,
@@ -71,9 +72,9 @@ export default function ToolDetailClient() {
     let mountedFlag = true;
     (async () => {
       try {
-        const [provRes, settingsRes, tunnelRes, keysRes] = await Promise.all([
+        const [provRes, settingsData, tunnelRes, keysRes] = await Promise.all([
           fetch("/api/providers"),
-          fetch("/api/settings"),
+          useSettingsStore.getState().fetchSettings(),
           fetch("/api/tunnel/status"),
           fetch("/api/keys"),
         ]);
@@ -82,9 +83,8 @@ export default function ToolDetailClient() {
           const data = await provRes.json();
           setConnections(data.connections || []);
         }
-        if (settingsRes.ok) {
-          const data = await settingsRes.json();
-          setCloudEnabled(data.cloudEnabled || false);
+        if (settingsData) {
+          setCloudEnabled(settingsData.cloudEnabled || false);
         }
         if (tunnelRes.ok) {
           const data = await tunnelRes.json();

@@ -63,6 +63,7 @@ function MediaProviderCard({
                 className="object-contain rounded-mini-lg max-w-[30px] max-h-[30px]"
                 fallbackText={provider.textIcon || provider.id.slice(0, 2).toUpperCase()}
                 fallbackColor={provider.color}
+                providerId={provider.id}
               />
             </div>
             <div className="min-w-0">
@@ -125,6 +126,7 @@ function ComboList({ combos }: { combos: any[] }) {
                         className="object-contain rounded max-w-[18px] max-h-[18px]"
                         fallbackText={p?.textIcon || pid.slice(0, 2).toUpperCase()}
                         fallbackColor={p?.color}
+                        providerId={pid}
                       />
                     </div>
                   );

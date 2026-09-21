@@ -1126,6 +1126,16 @@
     "hasFetch": false
   },
   {
+    "id": "serpingapi",
+    "alias": "sping",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
     "id": "exa",
     "alias": "exa",
     "serviceKinds": [
@@ -1427,5 +1437,208 @@
     "models": [],
     "hasSearch": false,
     "hasFetch": false
+  },
+  {
+    "id": "trae",
+    "alias": "trae",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "windsurf",
+    "alias": "ws",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "zed",
+    "alias": "zd",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "gitlab",
+    "alias": "gitlab",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "devin-cli",
+    "alias": "dv",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "kimchi",
+    "alias": "kimchi",
+    "serviceKinds": [
+      "llm",
+      "imageToText"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "clinepass",
+    "alias": "clinepass",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "codebuddy-intl",
+    "alias": "cbai",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "commandcode",
+    "alias": "commandcode",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "mmf",
+    "alias": "mmf",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "featherless",
+    "alias": "featherless",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "ollama-search",
+    "alias": "ollama-search",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "xquik",
+    "alias": "xquik",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "fish-audio",
+    "alias": "fish",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "perplexity-agent",
+    "alias": "perplexity-agent",
+    "serviceKinds": [
+      "llm",
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
+    "id": "alims-intl",
+    "alias": "alims-intl",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "alitp-intl",
+    "alias": "alitp-intl",
+    "serviceKinds": [
+      "llm"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "selfhosted-embedding",
+    "alias": "selfhosted-embedding",
+    "serviceKinds": [
+      "embedding"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "selfhosted-stt",
+    "alias": "selfhosted-stt",
+    "serviceKinds": [
+      "stt"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
+  },
+  {
+    "id": "selfhosted-tts",
+    "alias": "selfhosted-tts",
+    "serviceKinds": [
+      "tts"
+    ],
+    "models": [],
+    "hasSearch": false,
+    "hasFetch": false
   }
+
 ]

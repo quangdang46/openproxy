@@ -86,6 +86,7 @@ export default function FlowAnimation() {
                 size={48}
                 className="object-contain rounded-xl max-w-[48px] max-h-[48px]"
                 fallbackText={tool.name.slice(0, 2).toUpperCase()}
+                providerId={tool.id}
               />
             </div>
           </div>

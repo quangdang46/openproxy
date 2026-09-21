@@ -6,7 +6,7 @@
 //! the unified [`SearchResultSet`] shape (matches OmniRoute's schema).
 //!
 //! Supported providers:
-//!   serper, brave-search, perplexity, exa, tavily, google-pse, linkup,
+//!   serper, serpingapi, brave-search, perplexity, exa, tavily, google-pse, linkup,
 //!   searchapi, youcom, searxng, xquik, ollama-search, glm.
 //!
 //! Chat-based LLM search (`searchViaChat` in the 9router registry) is
