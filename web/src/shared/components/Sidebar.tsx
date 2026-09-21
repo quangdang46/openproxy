@@ -9,6 +9,7 @@ import Button from "./Button";
 import AnthropicSpike from "./AnthropicSpike";
 import { ConfirmModal } from "./Modal";
 import { useNotificationStore } from "@/store/notificationStore";
+import { useSettingsStore } from "@/store/settingsStore";
 import NineRemotePromoModal from "./NineRemotePromoModal";
 import React from "react";
 
@@ -117,9 +118,8 @@ export default function Sidebar({ onClose }: SidebarProps) {
   const STATUS_URL = `http://localhost:${UPDATER_CONFIG.statusPort}/update/status`;
 
   useEffect(() => {
-    fetch("/api/settings")
-      .then(res => res.json())
-      .then(data => { if (data.enableTranslator) setEnableTranslator(true); })
+    useSettingsStore.getState().fetchSettings()
+      .then(data => { if (data?.enableTranslator) setEnableTranslator(true); })
       .catch(() => {});
   }, []);
 
