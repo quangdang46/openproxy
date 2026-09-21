@@ -480,8 +480,9 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.cursor.sh/v1/chat/completions"),
         ),
         (
+            // 9router registry/codebuddy-cn.js:22 — NOT api.codebuddy.cn.
             "codebuddy-cn",
-            ProviderConfig::openai("https://api.codebuddy.cn/v1/chat/completions"),
+            ProviderConfig::openai("https://copilot.tencent.com/v2/chat/completions"),
         ),
         (
             "mimo-free",
@@ -2187,5 +2188,15 @@ mod tests {
         let out = executor.transform_request(&body, "mimo-v2.5-pro");
         assert!(out.get("thinking").is_none());
         assert!(out.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn codebuddy_cn_base_url_matches_js_registry() {
+        // 9router open-sse/providers/registry/codebuddy-cn.js:22 —
+        // https://copilot.tencent.com/v2/chat/completions (NOT api.codebuddy.cn).
+        assert_eq!(
+            provider_config_base_url("codebuddy-cn"),
+            Some("https://copilot.tencent.com/v2/chat/completions".to_string())
+        );
     }
 }
