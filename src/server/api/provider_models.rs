@@ -156,75 +156,88 @@ pub(super) async fn import_provider_models(
     };
 
     let now = chrono::Utc::now().to_rfc3339();
-    let mut imported = 0usize;
-    let mut skipped = 0usize;
     let total = payload.models.len();
 
-    for model in payload.models {
-        let model_id = model.id.trim().to_string();
-        if model_id.is_empty() {
-            continue;
-        }
-
-        // Snapshot read to decide import vs skip (mirrors create_custom_model).
-        let exists_before =
-            state.db.snapshot().custom_models.iter().any(|m| {
-                m.provider_alias == provider_alias && m.id == model_id && m.r#type == "llm"
-            });
-        if exists_before {
-            skipped += 1;
-            continue;
-        }
-
-        let mut extra = model.extra.clone();
-        extra
-            .entry("source".to_string())
-            .or_insert_with(|| serde_json::Value::String("imported".to_string()));
-        extra
-            .entry("importedAt".to_string())
-            .or_insert_with(|| serde_json::Value::String(now.clone()));
-
-        let name = if model.name.is_empty() {
-            None
-        } else {
-            Some(model.name)
-        };
-
-        let model_id_owned = model_id.clone();
-        let alias = provider_alias.clone();
-        let result = state
-            .db
-            .update(move |db| {
-                // Re-check inside the write lock to guard a concurrent insert.
-                let exists = db.custom_models.iter().any(|m| {
-                    m.provider_alias == alias && m.id == model_id_owned && m.r#type == "llm"
-                });
-                if exists {
-                    return;
-                }
-
-                db.custom_models.push(CustomModel {
-                    provider_alias: alias,
-                    id: model_id_owned,
-                    r#type: "llm".to_string(),
-                    name,
-                    extra,
-                });
+    // OmniRoute merge semantics (.133: mergeProviderModelListing.ts:57-118 +
+    // managedModelImport.ts:292-329): previously-synced `imported` rows absent
+    // from the fresh listing are dropped (compat knobs preserved for
+    // re-imports); operator rows are always preserved; operator fields win on
+    // id collision. The whole merge applies atomically inside one write lock.
+    let fresh: Vec<super::model_merge::DiscoveredModel> = payload
+        .models
+        .iter()
+        .filter_map(|model| {
+            let id = model.id.trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let mut extra = model.extra.clone();
+            extra
+                .entry("source".to_string())
+                .or_insert_with(|| serde_json::Value::String("imported".to_string()));
+            extra
+                .entry("importedAt".to_string())
+                .or_insert_with(|| serde_json::Value::String(now.clone()));
+            Some(super::model_merge::DiscoveredModel {
+                id,
+                name: if model.name.is_empty() {
+                    None
+                } else {
+                    Some(model.name.clone())
+                },
+                extra,
             })
-            .await;
+        })
+        .collect();
 
-        match result {
-            Ok(_) => imported += 1,
-            Err(_) => skipped += 1,
-        }
-    }
+    // OmniRoute merge plan (.133) computed PURELY from the pre-update
+    // snapshot: stale `imported` rows drop, operator rows preserve, operator
+    // fields overlay on id collision. Only the resulting `keep` set is
+    // written, atomically, inside one write lock (Db::update is FnOnce->()).
+    let snap = state.db.snapshot();
+    let previous: Vec<CustomModel> = snap
+        .custom_models
+        .iter()
+        .filter(|m| m.provider_alias == provider_alias && m.r#type == "llm")
+        .cloned()
+        .collect();
+    let mut compat = super::model_merge::CompatOverrideStore::default();
+    let outcome = super::model_merge::merge_model_listing(&previous, &fresh, "llm", &mut compat);
+    let imported = outcome
+        .keep
+        .len()
+        .saturating_sub(outcome.preserved_custom.len());
+    let dropped = outcome.dropped_imported.len();
+    let preserved = outcome.preserved_custom.len();
+    let keep_rows = outcome.keep;
+
+    let alias_for_merge = provider_alias.clone();
+    state
+        .db
+        .update(move |db| {
+            db.custom_models
+                .retain(|m| !(m.provider_alias == alias_for_merge && m.r#type == "llm"));
+            db.custom_models.extend(keep_rows);
+        })
+        .await
+        .ok();
+
+    let kept = state
+        .db
+        .snapshot()
+        .custom_models
+        .iter()
+        .filter(|m| m.provider_alias == provider_alias && m.r#type == "llm")
+        .count();
 
     Json(json!({
         "provider": provider,
         "connectionId": connection.id,
         "imported": imported,
-        "skipped": skipped,
+        "skipped": kept.saturating_sub(imported),
         "total": total,
+        "dropped": dropped,
+        "preservedCustom": preserved,
     }))
     .into_response()
 }
