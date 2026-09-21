@@ -459,6 +459,31 @@ fn build_fetch_request(
             Ok((request_url, request_body, headers))
         }
 
+        "ollama" => {
+            // 9router open-sse/handlers/fetch/index.js runOllama: POST
+            // {base}/api/web_fetch {url} with Bearer key, normalize
+            // `content` string. Base URL from connection override or
+            // the web fetchConfig default.
+            let base = connection
+                .provider_specific_data
+                .get("baseUrl")
+                .and_then(|v| v.as_str())
+                .unwrap_or("https://ollama.com/api/web_fetch");
+            let request_url = base.trim_end_matches('/').to_string();
+            let request_body = json!({ "url": url });
+            let mut h = headers.clone();
+            if let Some(key) = api_key {
+                h.insert(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&format!("Bearer {}", key)).map_err(|_| FetchError {
+                        status: 500,
+                        message: "Invalid API key header".into(),
+                    })?,
+                );
+            }
+            Ok((request_url, request_body, h))
+        }
+
         _ => Err(FetchError {
             status: 400,
             message: format!("Unsupported web fetch provider: {}", provider),
@@ -472,6 +497,7 @@ fn resolve_fetch_provider(alias: &str) -> String {
         "fc" | "firecrawl" => "firecrawl".to_string(),
         "tv" | "tavily" => "tavily".to_string(),
         "exa" => "exa".to_string(),
+        "ol" | "ollama" => "ollama".to_string(),
         other => other.to_string(),
     }
 }
@@ -613,6 +639,15 @@ fn normalize_fetch_response(
                 .and_then(|o| o.get("title").and_then(|v| v.as_str()))
                 .map(str::to_string);
             (text, title)
+        }
+        "ollama" => {
+            // 9router runOllama: `content` must be a string, else 502.
+            let text = body
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            (text, None)
         }
         _ => ("".to_string(), None),
     };

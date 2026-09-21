@@ -126,6 +126,13 @@ const getPageInfo = (pathname: string): PageInfo => {
       icon: "security",
       breadcrumbs: [],
     };
+  if (pathname.includes("/token-saver"))
+    return {
+      title: "Token Saver",
+      description: "Compress prompts and outputs to save tokens",
+      icon: "savings",
+      breadcrumbs: [],
+    };
   if (pathname.includes("/cli-tools"))
     return {
       title: "CLI Tools",
@@ -138,6 +145,13 @@ const getPageInfo = (pathname: string): PageInfo => {
       title: "Proxy Pools",
       description: "Manage your proxy pool configurations",
       icon: "lan",
+      breadcrumbs: [],
+    };
+  if (pathname.includes("/skills"))
+    return {
+      title: "Agent Skills",
+      description: "Copy a link and paste to your AI to use OpenProxy — no install needed",
+      icon: "extension",
       breadcrumbs: [],
     };
   if (pathname.includes("/endpoint"))

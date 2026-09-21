@@ -1125,9 +1125,7 @@ impl DefaultExecutor {
                     .or(credentials.api_key.as_deref())
                 {
                     let token = cline_access_token(raw);
-                    if let Ok(val) =
-                        HeaderValue::from_str(&format!("Bearer {token}"))
-                    {
+                    if let Ok(val) = HeaderValue::from_str(&format!("Bearer {token}")) {
                         headers.insert(AUTHORIZATION, val);
                     }
                 }
@@ -1677,12 +1675,10 @@ fn cline_access_token(raw: &str) -> String {
         && !b.is_empty()
         && h.len() >= 3
         && h.as_bytes()[..3] == *b"eyJ"
-        && h.bytes().all(|c| {
-            c.is_ascii_alphanumeric() || c == b'-' || c == b'_'
-        })
-        && b.bytes().all(|c| {
-            c.is_ascii_alphanumeric() || c == b'-' || c == b'_'
-        });
+        && h.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+        && b.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_');
     if is_jwt {
         format!("workos:{trimmed}")
     } else {

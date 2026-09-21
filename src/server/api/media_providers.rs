@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+use crate::server::api::require_dashboard_or_management_api_key;
 use crate::server::auth::require_api_key_with_reload;
 use crate::server::state::AppState;
 use crate::types::ProviderConnection;
@@ -830,8 +831,10 @@ async fn get_tts_voices(
     headers: axum::http::HeaderMap,
     Query(query): Query<TtsVoiceQuery>,
 ) -> axum::response::Response {
-    if let Err(e) = require_api_key_with_reload(&headers, &state.db).await {
-        return crate::server::api::auth_error_response(e);
+    // 9router parity (route /media-providers/{kind}/voices): dashboard
+    // session suffices — only external callers need a management key.
+    if let Err(resp) = require_dashboard_or_management_api_key(&headers, &state) {
+        return resp;
     }
     let provider = query.provider.as_deref().unwrap_or("edge-tts");
     match provider {

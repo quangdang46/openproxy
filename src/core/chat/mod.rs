@@ -773,7 +773,13 @@ mod tests {
     #[test]
     fn opencode_go_responses_only_models_route_to_responses() {
         use crate::core::translator::registry::Format;
-        for id in ["grok-4.6", "GROK-4.6", "gpt-5.6-luna", "ocg/grok-4.6", "grok-4.6(high)"] {
+        for id in [
+            "grok-4.6",
+            "GROK-4.6",
+            "gpt-5.6-luna",
+            "ocg/grok-4.6",
+            "grok-4.6(high)",
+        ] {
             assert!(is_opencode_go_responses_only_model(id), "{id} should match");
             let (t, _, _) = resolve_model_metadata("opencode-go", id);
             assert_eq!(t, Some(Format::OpenAiResponses), "{id} on opencode-go");
