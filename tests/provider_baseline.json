@@ -1126,6 +1126,16 @@
     "hasFetch": false
   },
   {
+    "id": "serpingapi",
+    "alias": "sping",
+    "serviceKinds": [
+      "webSearch"
+    ],
+    "models": [],
+    "hasSearch": true,
+    "hasFetch": false
+  },
+  {
     "id": "exa",
     "alias": "exa",
     "serviceKinds": [

@@ -1,4 +1,4 @@
-//! Concrete `SearchProvider` impls for the 13 supported providers.
+//! Concrete `SearchProvider` impls for the 14 supported providers.
 //!
 //! Builder + normalizer pairs from `open-sse/handlers/search/{callers,normalizers}.js`.
 
@@ -14,6 +14,7 @@ use super::base::{
 pub fn lookup(id: &str) -> Option<&'static dyn SearchProvider> {
     Some(match id {
         "serper" => &SERPER,
+        "serpingapi" => &SERPINGAPI,
         "brave-search" => &BRAVE,
         "perplexity" => &PERPLEXITY,
         "exa" => &EXA,
@@ -143,6 +144,105 @@ impl SearchProvider for SerperProvider {
         SearchResultSet {
             results,
             total_results: total,
+        }
+    }
+}
+
+// ─── serpingapi ──────────────────────────────────────────────────────────
+
+pub struct SerpingApiProvider;
+pub static SERPINGAPI: SerpingApiProvider = SerpingApiProvider;
+impl SearchProvider for SerpingApiProvider {
+    fn id(&self) -> &'static str {
+        "serpingapi"
+    }
+    fn timeout_ms(&self) -> Option<u64> {
+        Some(10_000)
+    }
+    fn max_max_results(&self) -> u32 {
+        100
+    }
+    fn build_url(&self, request: &SearchRequest<'_>) -> Result<String, String> {
+        if request.search_type == SearchType::News {
+            return Err("serpingapi does not support news search".to_string());
+        }
+        Ok(format!(
+            "{}/v1/search",
+            resolve_base_url("https://api.serpingapi.com", request)?
+        ))
+    }
+    fn build_headers(&self, request: &SearchRequest<'_>) -> Result<HeaderMap, String> {
+        let token = require_token(request, "serpingapi")?;
+        let mut h = json_headers();
+        h.insert(
+            "X-API-Key",
+            HeaderValue::from_str(token).map_err(|e| e.to_string())?,
+        );
+        Ok(h)
+    }
+    fn method(&self) -> Method {
+        Method::POST
+    }
+    fn build_body(&self, request: &SearchRequest<'_>) -> Option<Value> {
+        let mut body = json!({"q": request.query, "num": request.max_results});
+        if let Some(c) = &request.country {
+            body["gl"] = json!(c.to_lowercase());
+        }
+        if let Some(l) = &request.language {
+            body["hl"] = json!(l);
+        }
+        if let Some(t) = request.time_range.as_deref() {
+            let tbs = match t {
+                "day" => Some("qdr:d"),
+                "week" => Some("qdr:w"),
+                "month" => Some("qdr:m"),
+                "year" => Some("qdr:y"),
+                _ => None,
+            };
+            if let Some(tbs) = tbs {
+                body["tbs"] = json!(tbs);
+            }
+        }
+        if let Some(page) = page_number(request.offset, request.max_results) {
+            body["page"] = json!(page);
+        }
+        if let Some(location) = get_provider_setting(request, "location") {
+            body["location"] = json!(location);
+        }
+        Some(body)
+    }
+    fn normalize(&self, body: &Value, _request: &SearchRequest<'_>) -> SearchResultSet {
+        let now = now_iso();
+        let items = body
+            .get("organic")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let results: Vec<SearchResult> = items
+            .iter()
+            .enumerate()
+            .map(|(idx, item)| {
+                make_result(
+                    "serpingapi",
+                    item.get("title").and_then(|v| v.as_str()),
+                    item.get("link").and_then(|v| v.as_str()),
+                    item.get("snippet").and_then(|v| v.as_str()),
+                    None,
+                    item.get("date").and_then(|v| v.as_str()),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    idx as u32,
+                    &now,
+                )
+            })
+            .collect();
+        SearchResultSet {
+            results,
+            total_results: None,
         }
     }
 }
@@ -1471,6 +1571,7 @@ mod tests {
     fn registry_finds_known() {
         for id in [
             "serper",
+            "serpingapi",
             "brave-search",
             "perplexity",
             "exa",
@@ -1813,6 +1914,65 @@ mod tests {
         assert_eq!(body["params"]["arguments"]["search_query"], json!("hello"));
         assert_eq!(body["params"]["arguments"]["count"], json!(7));
         assert_eq!(GLM.max_max_results(), 50);
+    }
+
+    #[test]
+    fn serpingapi_requires_token() {
+        let r = req("hi", 5);
+        assert!(SERPINGAPI.build_headers(&r).is_err());
+        let mut ok = req("hi", 5);
+        ok.token = Some("key");
+        let headers = SERPINGAPI.build_headers(&ok).unwrap();
+        assert_eq!(
+            headers.get("X-API-Key").and_then(|v| v.to_str().ok()),
+            Some("key")
+        );
+    }
+
+    #[test]
+    fn serpingapi_rejects_news() {
+        let mut r = req("hi", 5);
+        r.search_type = SearchType::News;
+        assert!(SERPINGAPI.build_url(&r).is_err());
+        let web = req("hi", 5);
+        let url = SERPINGAPI.build_url(&web).unwrap();
+        assert_eq!(url, "https://api.serpingapi.com/v1/search");
+        assert_eq!(SERPINGAPI.max_max_results(), 100);
+    }
+
+    #[test]
+    fn serpingapi_body_maps_country_language_time_range_and_page() {
+        let mut r = req("openproxy", 10);
+        r.country = Some("US".into());
+        r.language = Some("en".into());
+        r.time_range = Some("week".into());
+        r.offset = Some(20);
+        r.provider_options
+            .insert("location".to_string(), serde_json::json!("New York,US"));
+        let body = SERPINGAPI.build_body(&r).unwrap();
+        assert_eq!(body["q"], json!("openproxy"));
+        assert_eq!(body["num"], json!(10));
+        assert_eq!(body["gl"], json!("us"));
+        assert_eq!(body["hl"], json!("en"));
+        assert_eq!(body["tbs"], json!("qdr:w"));
+        assert_eq!(body["page"], json!(3));
+        assert_eq!(body["location"], json!("New York,US"));
+    }
+
+    #[test]
+    fn serpingapi_normalize_maps_organic() {
+        let body = json!({
+            "organic": [
+                {"title": "T", "link": "https://x.com", "snippet": "s", "date": "2026-09-01"},
+                {"title": "T2", "link": "https://y.com", "snippet": "s2"}
+            ]
+        });
+        let r = req("hi", 5);
+        let set = SERPINGAPI.normalize(&body, &r);
+        assert_eq!(set.results.len(), 2);
+        assert_eq!(set.results[0].citation["provider"], json!("serpingapi"));
+        assert_eq!(set.results[0].url, "https://x.com");
+        assert_eq!(set.total_results, None);
     }
 
     #[test]
