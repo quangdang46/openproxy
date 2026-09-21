@@ -18,6 +18,7 @@ pub mod mcp_server;
 pub mod media;
 pub mod media_providers;
 pub mod mitm_config;
+pub mod model_merge;
 pub mod models_alias;
 pub mod models_availability;
 pub mod models_custom;
