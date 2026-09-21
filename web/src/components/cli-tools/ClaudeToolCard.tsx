@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from "react";
 import type { ChangeEvent } from "react";
 import { Card, Button, ModelSelectModal, ManualConfigModal, Tooltip } from "@/shared/components";
+import { useSettingsStore } from "@/store/settingsStore";
 // import Image from "next/image";
 import EndpointPresetControl from "./EndpointPresetControl";
 
@@ -136,19 +137,15 @@ export default function ClaudeToolCard({
   }, [isExpanded]);
 
   useEffect(() => {
-    fetch("/api/settings").then(r => r.json()).then(data => {
-      setCcFilterNaming(!!data.ccFilterNaming);
+    useSettingsStore.getState().fetchSettings().then((data) => {
+      if (data) setCcFilterNaming(!!data.ccFilterNaming);
     }).catch(() => {});
   }, []);
 
   const handleCcFilterNamingToggle = async (e: ChangeEvent<HTMLInputElement>): Promise<void> => {
     const value = e.target.checked;
     setCcFilterNaming(value);
-    await fetch("/api/settings", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ccFilterNaming: value }),
-    }).catch(() => {});
+    await useSettingsStore.getState().patchSettings({ ccFilterNaming: value }).catch(() => {});
   };
 
   const fetchModelAliases = async (): Promise<void> => {

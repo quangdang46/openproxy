@@ -1,16 +1,14 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, Select, CapacityBadges } from "@/shared/components";
+import { Card, Button, Modal, Input, CardSkeleton, ModelSelectModal, Select, CapacityBadges, ComboFormModal, Toggle } from "@/shared/components";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
+import { useSettingsStore } from "@/store/settingsStore";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { isOpenAICompatibleProvider, isAnthropicCompatibleProvider } from "@/shared/constants/providers";
 import type { ComboStrategyConfig, ComboStrategyOption } from "@/types";
-
-// Validate combo name: only a-z, A-Z, 0-9, -, _
-const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
 
 const STRATEGY_OPTIONS: ComboStrategyOption[] = [
   { value: "fallback", label: "Fallback — try in order" },
@@ -21,18 +19,43 @@ const STRATEGY_OPTIONS: ComboStrategyOption[] = [
   { value: "quality", label: "Quality — capability tier first" },
 ];
 
-interface Combo {
-  id: string;
-  name: string;
+export type { Combo, ComboFormProvider, ComboHealthEntry } from "@/shared/components/ComboFormModal";
+import type { ComboFormProvider as Provider } from "@/shared/components/ComboFormModal";
+
+// Capacity adapter entry (one capability pool). Entry form mirrors
+// 9router EMPTY_CAP_ENTRY; legacy array form normalized on load.
+export interface CapacityAdapterEntry {
+  enabled: boolean;
+  roundRobin: boolean;
   models: string[];
-  disabledModels?: string[];
-  kind?: string;
 }
 
-interface Provider {
-  id: string;
-  provider: string;
-  isActive?: boolean;
+const CAPACITY_ADAPTER_CAPS = [
+  { key: "vision", label: "Vision", icon: "visibility", desc: "Images" },
+  // pdf, videoInput temporarily hidden — no translator support yet for those blocks.
+  { key: "audioInput", label: "Audio", icon: "graphic_eq", desc: "Audio input" },
+];
+const DEFAULT_FALLBACK_MODEL = "oc/mimo-v2.5-free";
+const EMPTY_CAP_ENTRY: CapacityAdapterEntry = { enabled: true, roundRobin: false, models: [] };
+const EMPTY_CAPACITY_ADAPTER: Record<string, CapacityAdapterEntry> = {
+  vision: { ...EMPTY_CAP_ENTRY },
+  pdf: { ...EMPTY_CAP_ENTRY },
+  audioInput: { ...EMPTY_CAP_ENTRY },
+  videoInput: { ...EMPTY_CAP_ENTRY },
+};
+// Backward-compat: legacy stored form was an array of {model, enabled}.
+function normalizeCapEntry(entry: any): CapacityAdapterEntry {
+  if (Array.isArray(entry)) {
+    return { enabled: true, roundRobin: false, models: entry.map((e: any) => e?.model || e).filter(Boolean) };
+  }
+  if (entry && typeof entry === "object") {
+    return {
+      enabled: entry.enabled !== false,
+      roundRobin: !!entry.roundRobin,
+      models: Array.isArray(entry.models) ? entry.models.filter(Boolean) : [],
+    };
+  }
+  return { ...EMPTY_CAP_ENTRY };
 }
 
 /** Normalize settings.comboStrategies[name] which may be a bare string or nested object. */
@@ -41,26 +64,6 @@ function normalizeStrategy(entry: unknown): ComboStrategyConfig {
   if (typeof entry === "string") return { fallbackStrategy: entry };
   if (typeof entry === "object") return entry as ComboStrategyConfig;
   return {};
-}
-
-// Per-row result of the `/api/combos/test-model` ping. We keep it in the
-// edit modal's local state only; the backend doesn't persist it because
-// "did this model just respond?" is meaningful for ~seconds, not across
-// sessions.
-type ModelTestStatus = "idle" | "testing" | "ok" | "failed";
-
-interface ModelTestResult {
-  status: ModelTestStatus;
-  latencyMs?: number;
-  error?: string;
-}
-
-// Snapshot of `GET /api/combos/{id}/health` — purely UI surface so the
-// operator can see which members are currently auto-quarantined after a
-// recent failure and how long until they get retried.
-interface ComboHealthEntry {
-  model: string;
-  remainingSeconds: number;
 }
 
 export default function CombosPage() {
@@ -76,27 +79,48 @@ export default function CombosPage() {
   const { copied, copy } = useCopyToClipboard();
   const { getCaps } = useModelCaps();
 
+  // Capacity adapter: global fallback pools of models per input-modality capability.
+  // A request needing a capability the target model/combo lacks switches straight
+  // to the first enabled model here instead of erroring or dropping the data.
+  // Ported from 9router combos/page.js (backend: Rust capacity_adapter.rs).
+  const [capacityAdapter, setCapacityAdapter] = useState<Record<string, CapacityAdapterEntry>>(EMPTY_CAPACITY_ADAPTER);
+
+  const handleSetCapacityAdapter = async (next: Record<string, CapacityAdapterEntry>) => {
+    setCapacityAdapter(next);
+    try {
+      await useSettingsStore.getState().patchSettings({ capacityAdapter: next });
+    } catch (error) {
+      console.log("Error updating capacity adapter:", error);
+    }
+  };
+
   useEffect(() => {
     fetchData();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const fetchData = async () => {
     try {
-      const [combosRes, providersRes, settingsRes] = await Promise.all([
+      const [combosRes, providersRes, settingsData] = await Promise.all([
         fetch("/api/combos"),
         fetch("/api/providers"),
-        fetch("/api/settings"),
+        useSettingsStore.getState().fetchSettings(),
       ]);
       const combosData = await combosRes.json();
       const providersData = await providersRes.json();
-      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
-      
+      const settingsSafe = settingsData || {};
+
       // Only LLM combos here — webSearch/webFetch combos belong to media-providers/web
       if (combosRes.ok) setCombos((combosData.combos || []).filter(c => !c.kind || c.kind === "llm"));
       if (providersRes.ok) {
         setActiveProviders(providersData.connections || []);
       }
-      setComboStrategies(settingsData.comboStrategies || {});
+      setComboStrategies(settingsSafe.comboStrategies || {});
+      const rawAdapter = settingsSafe.capacityAdapter || {};
+      const normalized: Record<string, CapacityAdapterEntry> = {};
+      for (const cap of CAPACITY_ADAPTER_CAPS) {
+        normalized[cap.key] = normalizeCapEntry(rawAdapter[cap.key]);
+      }
+      setCapacityAdapter(normalized);
     } catch (error) {
       console.log("Error fetching data:", error);
     } finally {
@@ -271,6 +295,14 @@ export default function CombosPage() {
           ))}
         </div>
       )}
+
+      {/* Capacity Adapter */}
+      <CapacityAdapterSection
+        capacityAdapter={capacityAdapter}
+        onChange={handleSetCapacityAdapter}
+        activeProviders={activeProviders}
+        getCaps={getCaps}
+      />
 
       {/* Create Modal - Use key to force remount and reset state */}
       <ComboFormModal
@@ -521,516 +553,172 @@ function ComboCard({
   );
 }
 
-// Inline editable model item
-interface ModelItemProps {
-  index: number;
-  model: string;
-  isDragging: boolean;
-  isDragOver: boolean;
-  // Per-combo-member health state. `disabled` is the persisted manual
-  // mute that the dispatcher enforces; `testResult` is transient state
-  // from clicking the test icon; `quarantineSeconds` is how long the
-  // server says the model is auto-quarantined after a recent failure.
-  disabled: boolean;
-  testResult: ModelTestResult;
-  quarantineSeconds?: number;
-  onEdit: (newVal: string) => void;
-  onToggleDisabled: () => void;
-  onTest: () => void;
-  onDragStart: (index: number) => void;
-  onDragEnter: (index: number) => void;
-  onDragEnd: () => void;
-  onDrop: (index: number, from: number | null) => void;
-  onRemove: () => void;
-}
+// ComboFormModal lives in shared (reused by CombosPageClient + media combo pages).
+// Re-exported for backward compat; prefer importing from "@/shared/components".
+export { ComboFormModal } from "@/shared/components/ComboFormModal";
+export type { ComboFormModalProps, ModelTestResult } from "@/shared/components/ComboFormModal";
 
-function ModelItem({
-  index,
-  model,
-  isDragging,
-  isDragOver,
-  disabled,
-  testResult,
-  quarantineSeconds,
-  onEdit,
-  onToggleDisabled,
-  onTest,
-  onDragStart,
-  onDragEnter,
-  onDragEnd,
-  onDrop,
-  onRemove,
-}: ModelItemProps) {
-  const [editing, setEditing] = useState<boolean>(false);
-  const [draft, setDraft] = useState<string>(model);
-
-  const commit = () => {
-    const trimmed = draft.trim();
-    if (trimmed && trimmed !== model) onEdit(trimmed);
-    else setDraft(model); // revert if empty or unchanged
-    setEditing(false);
-  };
-
-  const handleKeyDown = (e) => {
-    if (e.key === "Enter") commit();
-    if (e.key === "Escape") { setDraft(model); setEditing(false); }
-  };
-
+function CapacityAdapterSection({
+  capacityAdapter,
+  onChange,
+  activeProviders,
+  getCaps,
+}: {
+  capacityAdapter: Record<string, CapacityAdapterEntry>;
+  onChange: (next: Record<string, CapacityAdapterEntry>) => void;
+  activeProviders: Provider[];
+  getCaps?: (model: string) => import("@/shared/constants/models").ModelCaps | null | undefined;
+}) {
   return (
-    <div
-      draggable={!editing}
-      onDragStart={(e) => {
-        e.dataTransfer.effectAllowed = "move";
-        e.dataTransfer.setData("text/plain", String(index));
-        onDragStart(index);
-      }}
-      onDragEnter={(e) => {
-        e.preventDefault();
-        onDragEnter(index);
-      }}
-      onDragOver={(e) => {
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-      }}
-      onDrop={(e) => {
-        e.preventDefault();
-        const fromStr = e.dataTransfer.getData("text/plain");
-        const from = fromStr === "" ? NaN : Number(fromStr);
-        onDrop(index, Number.isFinite(from) ? from : null);
-      }}
-      onDragEnd={onDragEnd}
-      className={`group flex min-w-0 items-center gap-1.5 rounded-md px-2 py-1 transition-all ${
-        disabled
-          ? "bg-red-500/[0.05] hover:bg-red-500/[0.08] dark:bg-red-500/[0.08] dark:hover:bg-red-500/[0.12]"
-          : "bg-black/[0.02] hover:bg-black/[0.04] dark:bg-white/[0.02] dark:hover:bg-white/[0.04]"
-      } ${isDragging ? "opacity-40" : ""} ${
-        isDragOver && !isDragging
-          ? "ring-2 ring-primary/60 ring-offset-1 ring-offset-bg dark:ring-offset-canvas"
-          : ""
-      }`}
-    >
-      {/* Drag handle */}
-      <span
-        className="material-symbols-outlined text-text-muted/70 cursor-grab active:cursor-grabbing text-[14px] shrink-0 hover:text-primary"
-        title="Drag to reorder"
-      >
-        drag_indicator
-      </span>
-
-      {/* Index badge */}
-      <span className="text-[10px] font-medium text-text-muted w-3 text-center shrink-0">{index + 1}</span>
-
-      {/* Inline editable model value */}
-      {editing ? (
-        <input
-          autoFocus
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onBlur={commit}
-          onKeyDown={handleKeyDown}
-          className="min-w-0 flex-1 rounded border border-primary/40 bg-white px-1.5 py-0.5 font-mono text-xs text-text-main outline-none dark:bg-black/20"
-        />
-      ) : (
-        <div
-          className={`min-w-0 flex-1 cursor-text truncate rounded px-1.5 py-0.5 font-mono text-xs hover:bg-black/5 dark:hover:bg-white/5 ${
-            disabled ? "text-text-muted line-through" : "text-text-main"
-          }`}
-          onClick={() => setEditing(true)}
-          title={disabled ? `${model} — disabled, never dispatched` : "Click to edit"}
-        >
-          {model}
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="min-w-0">
+          <p className="text-sm font-medium">Vision Adapter</p>
+          <p className="text-xs text-text-muted mt-0.5">
+            Your model can&apos;t read image/audio? Auto-switches to a model in the pool below.
+          </p>
+          <ul className="mt-1.5 text-[11px] text-text-muted flex flex-col gap-0.5">
+            <li><span className="font-medium text-text-main">Vision</span> — images (png, jpg, webp, …)</li>
+            <li><span className="font-medium text-text-main">Audio</span> — audio input</li>
+          </ul>
         </div>
-      )}
-
-      {/* Test status badge (only shown after a test run) */}
-      {testResult.status === "ok" && (
-        <span
-          className="inline-flex items-center gap-0.5 rounded bg-emerald-500/10 px-1 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400 shrink-0"
-          title={`Last test ok in ${testResult.latencyMs}ms`}
-        >
-          <span className="material-symbols-outlined text-[10px]">check_circle</span>
-          {testResult.latencyMs}ms
-        </span>
-      )}
-      {testResult.status === "failed" && (
-        <span
-          className="inline-flex items-center gap-0.5 rounded bg-red-500/10 px-1 py-0.5 text-[10px] font-medium text-red-500 shrink-0 max-w-[160px] truncate"
-          title={testResult.error || "Test failed"}
-        >
-          <span className="material-symbols-outlined text-[10px]">error</span>
-          {testResult.error ? testResult.error.slice(0, 24) : "failed"}
-        </span>
-      )}
-
-      {/* Auto-quarantine indicator (server-driven) */}
-      {!disabled && quarantineSeconds !== undefined && quarantineSeconds > 0 && (
-        <span
-          className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400 shrink-0"
-          title={`Auto-quarantined after recent failure. Retries unlock in ${quarantineSeconds}s.`}
-        >
-          <span className="material-symbols-outlined text-[10px]">schedule</span>
-          {quarantineSeconds}s
-        </span>
-      )}
-
-      {/* Test */}
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onTest();
-        }}
-        disabled={testResult.status === "testing"}
-        className={`p-0.5 rounded transition-all ${
-          testResult.status === "testing"
-            ? "text-primary animate-pulse"
-            : "text-text-muted hover:text-primary hover:bg-primary/10"
-        }`}
-        title={testResult.status === "testing" ? "Testing…" : "Test this model"}
-      >
-        <span className="material-symbols-outlined text-[12px]">
-          {testResult.status === "testing" ? "progress_activity" : "speed"}
-        </span>
-      </button>
-
-      {/* Mute / unmute */}
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          onToggleDisabled();
-        }}
-        className={`p-0.5 rounded transition-all ${
-          disabled
-            ? "text-red-500 hover:bg-red-500/10"
-            : "text-text-muted hover:text-amber-600 hover:bg-amber-500/10"
-        }`}
-        title={
-          disabled
-            ? "Re-enable this combo member"
-            : "Disable — keep in list but never dispatch to it"
-        }
-      >
-        <span className="material-symbols-outlined text-[12px]">
-          {disabled ? "block" : "visibility"}
-        </span>
-      </button>
-
-      {/* Remove */}
-      <button
-        onClick={onRemove}
-        className="p-0.5 hover:bg-red-500/10 rounded text-text-muted hover:text-red-500 transition-all"
-        title="Remove"
-      >
-        <span className="material-symbols-outlined text-[12px]">close</span>
-      </button>
+      </div>
+      <div className="flex flex-col gap-4">
+        {CAPACITY_ADAPTER_CAPS.map((cap) => (
+          <CapacityAdapterCap
+            key={cap.key}
+            cap={cap}
+            entry={capacityAdapter[cap.key] || EMPTY_CAP_ENTRY}
+            onChange={(entry) => onChange({ ...capacityAdapter, [cap.key]: entry })}
+            activeProviders={activeProviders}
+            getCaps={getCaps}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
-interface ComboFormModalProps {
-  isOpen: boolean;
-  combo?: Combo | null;
-  onClose: () => void;
-  onSave: (data: { name: string; models: string[]; disabledModels?: string[] }) => void;
+function CapacityAdapterCap({
+  cap,
+  entry,
+  onChange,
+  activeProviders,
+  getCaps,
+}: {
+  cap: { key: string; label: string; icon: string; desc: string };
+  entry: CapacityAdapterEntry;
+  onChange: (entry: CapacityAdapterEntry) => void;
   activeProviders: Provider[];
-  kindFilter?: string | null;
-}
+  getCaps?: (model: string) => import("@/shared/constants/models").ModelCaps | null | undefined;
+}) {
+  const [showModelSelect, setShowModelSelect] = useState(false);
+  const { enabled, roundRobin, models } = entry;
 
-function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindFilter = null }: ComboFormModalProps) {
-  // Initialize state with combo values - key prop on parent handles reset on remount
-  const [name, setName] = useState<string>(combo?.name || "");
-  const [models, setModels] = useState<string[]>(combo?.models || []);
-  const [disabledModels, setDisabledModels] = useState<string[]>(combo?.disabledModels || []);
-  const [showModelSelect, setShowModelSelect] = useState<boolean>(false);
-  const [saving, setSaving] = useState<boolean>(false);
-  const [nameError, setNameError] = useState<string>("");
-  const [modelAliases, setModelAliases] = useState<Record<string, any>>({});
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
-  // Map of `<model>` → last test result; local to this modal lifecycle.
-  const [testResults, setTestResults] = useState<Record<string, ModelTestResult>>({});
-  // Map of `<model>` → remaining auto-quarantine seconds (server-driven).
-  const [quarantine, setQuarantine] = useState<Record<string, number>>({});
+  const patch = (p: Partial<CapacityAdapterEntry>) => onChange({ ...entry, ...p });
 
-  const fetchModalData = async () => {
-    try {
-      const aliasesRes = await fetch("/api/models/alias");
-      if (!aliasesRes.ok) return;
-      const aliasesData = await aliasesRes.json();
-      setModelAliases(aliasesData.aliases || {});
-    } catch (error) {
-      console.error("Error fetching modal data:", error);
-    }
+  const handleAdd = (model: { value: string }) => {
+    if (models.includes(model.value)) return;
+    patch({ models: [...models, model.value] });
   };
 
-  // Refresh combo health (auto-quarantine map) so the modal mirrors what
-  // the dispatcher would do on the next request. We only do this in edit
-  // mode — the create flow doesn't have an id to look up yet.
-  const fetchHealth = useCallback(async () => {
-    if (!combo?.id) return;
-    try {
-      const res = await fetch(`/api/combos/${combo.id}/health`);
-      if (!res.ok) return;
-      const data = await res.json();
-      const next: Record<string, number> = {};
-      for (const entry of data.quarantined || []) {
-        next[entry.model] = entry.remainingSeconds;
-      }
-      setQuarantine(next);
-    } catch {
-      // silent
-    }
-  }, [combo?.id]);
-
-  useEffect(() => {
-    if (isOpen) {
-      fetchModalData();
-      fetchHealth();
-    }
-  }, [isOpen, fetchHealth]);
-
-  const runTest = async (model: string) => {
-    setTestResults((prev) => ({ ...prev, [model]: { status: "testing" } }));
-    try {
-      const res = await fetch("/api/combos/test-model", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model }),
-      });
-      const data = await res.json();
-      setTestResults((prev) => ({
-        ...prev,
-        [model]: {
-          status: data.ok ? "ok" : "failed",
-          latencyMs: data.latencyMs,
-          error: data.error,
-        },
-      }));
-    } catch (error) {
-      setTestResults((prev) => ({
-        ...prev,
-        [model]: {
-          status: "failed",
-          error: error instanceof Error ? error.message : "Test failed",
-        },
-      }));
-    }
+  const handleRemove = (index: number) => {
+    const next = models.filter((_, i) => i !== index);
+    patch({ models: next.length === 0 ? [DEFAULT_FALLBACK_MODEL] : next });
   };
 
-  const runTestAll = async () => {
-    await Promise.all(models.map((model) => runTest(model)));
-  };
-
-  const clearQuarantine = async () => {
-    if (!combo?.id) return;
-    try {
-      await fetch(`/api/combos/${combo.id}/health`, { method: "DELETE" });
-      await fetchHealth();
-    } catch (error) {
-      console.error("Error clearing quarantine:", error);
-    }
-  };
-
-  const toggleDisabled = (model: string) => {
-    setDisabledModels((prev) =>
-      prev.includes(model) ? prev.filter((m) => m !== model) : [...prev, model],
-    );
-  };
-
-  const validateName = (value: string): boolean => {
-    if (!value.trim()) {
-      setNameError("Name is required");
-      return false;
-    }
-    if (!VALID_NAME_REGEX.test(value)) {
-      setNameError("Only letters, numbers, -, _ and . allowed");
-      return false;
-    }
-    setNameError("");
-    return true;
-  };
-
-  const handleNameChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    setName(value);
-    if (value) validateName(value);
-    else setNameError("");
-  };
-
-  // Toggle in/out of combo so the modal can stay open while operators
-  // pick several models, including unpicking ones added by mistake.
-  const handleAddModel = (model: { value: string }) => {
-    setModels((prev) =>
-      prev.includes(model.value)
-        ? prev.filter((m) => m !== model.value)
-        : [...prev, model.value],
-    );
-  };
-
-  const handleRemoveModel = (index: number) => {
-    setModels(models.filter((_, i) => i !== index));
-  };
-
-  const handleReorder = (from: number, to: number) => {
-    if (from === to || from < 0 || to < 0 || from >= models.length || to >= models.length) return;
+  const handleMove = (index: number, delta: number) => {
+    const target = index + delta;
+    if (target < 0 || target >= models.length) return;
     const next = [...models];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    setModels(next);
+    [next[index], next[target]] = [next[target], next[index]];
+    patch({ models: next });
   };
-
-  const handleSave = async () => {
-    if (!validateName(name)) return;
-    setSaving(true);
-    // Filter `disabledModels` down to only members that are still in the
-    // configured list — anything removed via the trash icon shouldn't
-    // linger in the disabled set on disk.
-    const cleanedDisabled = disabledModels.filter((m) => models.includes(m));
-    await onSave({ name: name.trim(), models, disabledModels: cleanedDisabled });
-    setSaving(false);
-  };
-
-  const isEdit = !!combo;
-  const hasQuarantine = Object.keys(quarantine).length > 0;
 
   return (
-    <>
-      <Modal
-        isOpen={isOpen}
-        onClose={onClose}
-        title={isEdit ? "Edit Combo" : "Create Combo"}
-        size="lg"
-      >
-        <div className="flex flex-col gap-3">
-          {/* Name */}
-          <div>
-            <Input
-              label="Combo Name"
-              value={name}
-              onChange={handleNameChange}
-              placeholder="my-combo"
-              error={nameError}
-            />
-            <p className="text-[10px] text-text-muted mt-0.5">
-              Only letters, numbers, -, _ and . allowed
-            </p>
+    <Card padding="sm" className={`group ${!enabled ? "opacity-50" : ""}`}>
+      <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        {/* Master toggle + icon + label + chips */}
+        <div className="flex min-w-0 flex-1 items-start gap-2.5 sm:items-center">
+          <Toggle
+            checked={enabled}
+            onChange={(v) => patch({ enabled: v })}
+            aria-label={`Enable ${cap.label} adapter`}
+          />
+          <div className="size-8 rounded-lg bg-primary/10 flex items-center justify-center shrink-0">
+            <span className="material-symbols-outlined text-primary text-[18px]">{cap.icon}</span>
           </div>
-
-          {/* Models */}
-          <div>
-            <div className="flex items-center justify-between mb-1.5">
-              <label className="text-sm font-medium block">Models</label>
-              {models.length > 0 && (
-                <div className="flex items-center gap-1">
-                  {hasQuarantine && isEdit && (
-                    <button
-                      type="button"
-                      onClick={clearQuarantine}
-                      className="inline-flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-500/10 dark:text-amber-400"
-                      title="Clear the auto-quarantine cooldowns so the dispatcher retries those members on the next request."
-                    >
-                      <span className="material-symbols-outlined text-[12px]">refresh</span>
-                      Clear cooldowns
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={runTestAll}
-                    className="inline-flex items-center gap-1 rounded-md border border-primary/30 bg-primary/5 px-2 py-1 text-[11px] font-medium text-primary hover:bg-primary/10"
-                    title="Ping every member with max_tokens=1 to spot broken ones quickly."
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-1.5">
+              <code className="font-mono text-sm font-medium">{cap.label}</code>
+              <span className="text-[10px] text-text-muted">— {cap.desc}</span>
+            </div>
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1">
+              {models.length === 0 ? (
+                <span className="text-xs text-text-muted italic">No models</span>
+              ) : (
+                models.slice(0, 3).map((model, index) => (
+                  <code
+                    key={`${model}-${index}`}
+                    className="group/chip inline-flex items-center gap-1 rounded bg-black/5 px-1.5 py-0.5 font-mono text-xs text-text-muted dark:bg-white/5"
                   >
-                    <span className="material-symbols-outlined text-[12px]">speed</span>
-                    Test all
-                  </button>
-                </div>
+                    <span>{model}</span>
+                    <CapacityBadges caps={getCaps?.(model)} />
+                    <button onClick={() => handleMove(index, -1)} disabled={index === 0} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === 0 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
+                      <span className="material-symbols-outlined text-[12px]">arrow_upward</span>
+                    </button>
+                    <button onClick={() => handleMove(index, 1)} disabled={index === models.length - 1} className={`leading-none opacity-0 group-hover/chip:opacity-100 ${index === models.length - 1 ? "text-text-muted/20" : "text-text-muted hover:text-primary"}`}>
+                      <span className="material-symbols-outlined text-[12px]">arrow_downward</span>
+                    </button>
+                    <button onClick={() => handleRemove(index)} className="leading-none opacity-0 group-hover/chip:opacity-100 text-text-muted hover:text-red-500">
+                      <span className="material-symbols-outlined text-[12px]">close</span>
+                    </button>
+                  </code>
+                ))
+              )}
+              {models.length > 3 && (
+                <span className="text-[10px] text-text-muted">+{models.length - 3} more</span>
               )}
             </div>
-
-            {models.length === 0 ? (
-              <div className="text-center py-4 border border-dashed border-black/10 dark:border-white/10 rounded-lg bg-black/[0.01] dark:bg-white/[0.01]">
-                <span className="material-symbols-outlined text-text-muted text-xl mb-1">layers</span>
-                <p className="text-xs text-text-muted">No models added yet</p>
-              </div>
-            ) : (
-            <div className="flex max-h-[55vh] min-w-0 flex-col gap-1 overflow-y-auto sm:max-h-[350px]">
-                {models.map((model, index) => (
-                  <ModelItem
-                    key={index}
-                    index={index}
-                    model={model}
-                    isDragging={dragIndex === index}
-                    isDragOver={dragOverIndex === index}
-                    disabled={disabledModels.includes(model)}
-                    testResult={testResults[model] || { status: "idle" }}
-                    quarantineSeconds={quarantine[model]}
-                    onEdit={(newVal) => {
-                      const updated = [...models];
-                      updated[index] = newVal;
-                      // Migrate disabled flag if the user renamed in
-                      // place so we don't strand the old entry.
-                      setDisabledModels((prev) =>
-                        prev.map((m) => (m === model ? newVal : m)),
-                      );
-                      setModels(updated);
-                    }}
-                    onToggleDisabled={() => toggleDisabled(model)}
-                    onTest={() => runTest(model)}
-                    onDragStart={setDragIndex}
-                    onDragEnter={setDragOverIndex}
-                    onDragEnd={() => {
-                      setDragIndex(null);
-                      setDragOverIndex(null);
-                    }}
-                    onDrop={(target, from) => {
-                      const src = from ?? dragIndex;
-                      if (src !== null && src !== undefined) handleReorder(src, target);
-                      setDragIndex(null);
-                      setDragOverIndex(null);
-                    }}
-                    onRemove={() => handleRemoveModel(index)}
-                  />
-                ))}
-              </div>
-            )}
-
-            {/* Add Model button */}
-            <button
-              onClick={() => setShowModelSelect(true)}
-              className="w-full mt-2 py-2 border border-dashed border-black/10 dark:border-white/10 rounded-lg text-xs text-primary font-medium hover:text-primary hover:border-primary/50 transition-colors flex items-center justify-center gap-1"
-            >
-              <span className="material-symbols-outlined text-[16px]">add</span>
-              Add Model
-            </button>
-          </div>
-
-          {/* Actions */}
-          <div className="flex flex-col gap-2 pt-1 sm:flex-row">
-            <Button onClick={onClose} variant="ghost" fullWidth size="sm">
-              Cancel
-            </Button>
-            <Button
-              onClick={handleSave}
-              fullWidth
-              size="sm"
-              disabled={!name.trim() || !!nameError || saving}
-            >
-              {saving ? "Saving..." : isEdit ? "Save" : "Create"}
-            </Button>
           </div>
         </div>
-      </Modal>
 
-      {/* Model Select Modal */}
-      <ModelSelectModal
-        isOpen={showModelSelect}
-        onClose={() => setShowModelSelect(false)}
-        onSelect={handleAddModel}
-        selectedModel={models}
-        closeOnSelect={false}
-        activeProviders={activeProviders}
-        modelAliases={modelAliases}
-        title="Add Models to Combo"
-        kindFilter={kindFilter}
-      />
-    </>
+        {/* Actions: Round-robin toggle + Add Model */}
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center sm:gap-3 sm:shrink-0">
+          <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none">
+            <Toggle
+              checked={roundRobin}
+              onChange={(v) => patch({ roundRobin: v })}
+              disabled={!enabled}
+              aria-label={`Round-robin ${cap.label} adapter`}
+            />
+            <span>Round</span>
+          </label>
+          <Button
+            icon="add"
+            variant="ghost"
+            size="sm"
+            onClick={() => setShowModelSelect(true)}
+            disabled={!enabled}
+            title={`Add ${cap.label} model`}
+          >
+            Add Model
+          </Button>
+        </div>
+      </div>
+
+      {showModelSelect && (
+        <ModelSelectModal
+          isOpen={showModelSelect}
+          onClose={() => setShowModelSelect(false)}
+          onSelect={handleAdd}
+          activeProviders={activeProviders}
+          title={`Add ${cap.label} Model`}
+          addedModelValues={models}
+          capFilter={cap.key}
+          closeOnSelect={false}
+        />
+      )}
+    </Card>
   );
 }

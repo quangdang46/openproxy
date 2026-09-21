@@ -28,6 +28,7 @@ fn resolve_search_provider(alias: &str) -> Option<&'static str> {
     // Direct provider ids
     let static_id = match lowered.as_str() {
         "serper" => "serper",
+        "serpingapi" | "sping" => "serpingapi",
         "brave-search" | "brave" | "bs" => "brave-search",
         "perplexity" => "perplexity",
         "exa" => "exa",

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import React from "react";
+import { markProviderIconMissing } from "@/shared/utils/providerIcon";
 
 interface ProviderIconProps {
   src?: string;
@@ -10,6 +11,8 @@ interface ProviderIconProps {
   className?: string;
   fallbackText?: string;
   fallbackColor?: string;
+  /** Provider id — recorded in the session 404 cache on error (9router parity). */
+  providerId?: string;
 }
 
 export default function ProviderIcon({
@@ -19,6 +22,7 @@ export default function ProviderIcon({
   className = "",
   fallbackText = "?",
   fallbackColor,
+  providerId,
 }: ProviderIconProps) {
   const [errored, setErrored] = useState(false);
 
@@ -45,7 +49,10 @@ export default function ProviderIcon({
       width={size}
       height={size}
       className={className}
-      onError={() => setErrored(true)}
+      onError={() => {
+        if (providerId) markProviderIconMissing(providerId);
+        setErrored(true);
+      }}
     />
   );
 }

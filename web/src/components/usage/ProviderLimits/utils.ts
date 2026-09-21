@@ -1,6 +1,12 @@
 import { getModelsByProviderId } from "@/shared/constants/models";
 
-// ─── Pagination / filter / sort constants (9router ProviderLimits contract) ───
+// ─── Constants (9router ProviderLimits/utils.js contract) ───
+export const QUOTA_CACHE_KEY = "quotaCacheData";
+export const REFRESH_INTERVAL_MS = 60000;
+// Claude usage/quota endpoint rate-limits; poll it less often than other providers
+export const CLAUDE_REFRESH_INTERVAL_MS = 600000;
+export const DEPLETED_QUOTA_THRESHOLD = 5;
+export const AUTO_REFRESH_STORAGE_KEY = "quotaAutoRefresh";
 export const CONNECTIONS_PAGE_SIZE = 20;
 export const ACCOUNT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 export const ACCOUNT_PAGE_SIZE_MAX = 500;
@@ -28,6 +34,19 @@ export interface ConnectionsPagination {
 export interface ConnectionsTotals {
   eligibleConnections: number;
   providerFilteredConnections: number;
+}
+
+export function getConnectionLabel(connection: {
+  name?: string;
+  email?: string;
+  displayName?: string;
+}): string | null {
+  return (
+    connection.name?.trim() ||
+    connection.email?.trim() ||
+    connection.displayName?.trim() ||
+    null
+  );
 }
 
 export function getConnectionQuotaRemaining(
@@ -189,6 +208,131 @@ export async function reconcileConnectionsPage(
 /**
  * Get remaining percentage from a normalized quota row
  */
+export function buildLoadingState(connections: Array<{ id: string }>): Record<string, boolean> {
+  const nextLoadingState: Record<string, boolean> = {};
+  connections.forEach((connection) => {
+    nextLoadingState[connection.id] = true;
+  });
+  return nextLoadingState;
+}
+
+export function filterQuotaStateByConnections<T>(
+  state: Record<string, T>,
+  connections: Array<{ id: string }>,
+): Record<string, T> {
+  const visibleIds = new Set(connections.map((connection) => connection.id));
+  return Object.fromEntries(
+    Object.entries(state).filter(([id]) => visibleIds.has(id)),
+  ) as Record<string, T>;
+}
+
+export function getQuotaCache(): Record<string, any> {
+  if (typeof window === "undefined") return {};
+  try {
+    const cached = window.localStorage.getItem(QUOTA_CACHE_KEY);
+    return cached ? JSON.parse(cached) : {};
+  } catch (error) {
+    console.error("Error reading quota cache:", error);
+    return {};
+  }
+}
+
+export function setQuotaCache(connectionId: string, quotaEntry: Record<string, any>): void {
+  if (typeof window === "undefined") return;
+  try {
+    const cache = getQuotaCache();
+    cache[connectionId] = {
+      ...quotaEntry,
+      cachedAt: new Date().toISOString(),
+    };
+    window.localStorage.setItem(QUOTA_CACHE_KEY, JSON.stringify(cache));
+  } catch (error) {
+    console.error("Error writing quota cache:", error);
+  }
+}
+
+export function getQuotaVisibilityKey(quota: any): string {
+  if (!quota || typeof quota !== "object") return "";
+  return String(quota.modelKey || quota.name || "").trim();
+}
+
+/**
+ * Trim hidden quota keys to only those matching currently valid quotas.
+ * Stale or obsolete model keys are dropped.
+ */
+export function trimHiddenQuotaKeys(hidden: string[] = [], quotas: any[] = []): string[] {
+  if (!Array.isArray(hidden) || hidden.length === 0) return [];
+  const validKeys = new Set(quotas.map(getQuotaVisibilityKey).filter(Boolean));
+  return [...new Set(hidden.map((k) => String(k).trim()).filter((k) => validKeys.has(k)))];
+}
+
+function getProviderHiddenQuotaSet(
+  provider: string,
+  quotaVisibility: Record<string, { hidden?: string[] }>,
+  quotas: any[] = [],
+): Set<string> {
+  const hidden = quotaVisibility?.[provider]?.hidden;
+  if (!Array.isArray(hidden) || hidden.length === 0) return new Set();
+  const trimmed = quotas.length > 0 ? trimHiddenQuotaKeys(hidden, quotas) : hidden;
+  return new Set(trimmed.map(String));
+}
+
+export function filterQuotasByVisibility(
+  provider: string,
+  quotas: any[] = [],
+  quotaVisibility: Record<string, { hidden?: string[] }> = {},
+): any[] {
+  if (!Array.isArray(quotas) || quotas.length === 0) return [];
+  const hidden = getProviderHiddenQuotaSet(provider, quotaVisibility, quotas);
+  if (hidden.size === 0) return quotas;
+  return quotas.filter((quota) => !hidden.has(getQuotaVisibilityKey(quota)));
+}
+
+export function getHiddenQuotaRows(
+  provider: string,
+  quotas: any[] = [],
+  quotaVisibility: Record<string, { hidden?: string[] }> = {},
+): any[] {
+  if (!Array.isArray(quotas) || quotas.length === 0) return [];
+  const hidden = getProviderHiddenQuotaSet(provider, quotaVisibility, quotas);
+  if (hidden.size === 0) return [];
+  return quotas.filter((quota) => hidden.has(getQuotaVisibilityKey(quota)));
+}
+
+// Maps the stored providerSpecificData.authMethod to a human label for Kiro.
+// Values come from the Kiro connect flows: builder-id/idc (device code),
+// google/github (social), imported (refresh-token paste), api_key (headless).
+export const KIRO_METHOD_LABELS: Record<string, string> = {
+  "builder-id": "AWS Builder ID",
+  idc: "IAM Identity Center",
+  google: "Google",
+  github: "GitHub",
+  imported: "Imported Token",
+  api_key: "API Key",
+};
+
+export function kiroMethodLabel(conn: {
+  providerSpecificData?: { authMethod?: string };
+  authType?: string;
+}): string {
+  const m = conn.providerSpecificData?.authMethod;
+  if (m && KIRO_METHOD_LABELS[m]) return KIRO_METHOD_LABELS[m];
+  return conn.authType === "api_key" ? "API Key" : "OAuth";
+}
+
+// Region is stored for builder-id/idc/api_key flows; social and imported flows
+// omit it, so fall back to the region segment of the profileArn
+// (arn:aws:codewhisperer:<region>:...).
+export function kiroRegion(conn: {
+  providerSpecificData?: { region?: string; profileArn?: string };
+}): string {
+  const r = conn.providerSpecificData?.region;
+  if (r) return r;
+  const arn = conn.providerSpecificData?.profileArn;
+  const seg = typeof arn === "string" ? arn.split(":")[3] : "";
+  return seg || "";
+}
+
 export function getRemainingPercentage(quota: {
   remaining?: number;
   remainingPercentage?: number;

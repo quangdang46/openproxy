@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, Button, Toggle, Input, LanguageSwitcher } from "@/shared/components";
 import Modal, { ConfirmModal } from "@/shared/components/Modal";
+import { useSettingsStore } from "@/store/settingsStore";
 import { useTheme } from "@/shared/hooks/useTheme";
 import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG } from "@/shared/constants/config";
@@ -148,11 +149,10 @@ export default function ProfilePageClient() {
     return onLocaleChange(() => setLocale(getLocaleFromCookie()));
   }, []);
 
-  const fetchSettings = useCallback(async () => {
+  const fetchSettings = useCallback(async ({ force = false }: { force?: boolean } = {}) => {
     try {
-      const res = await fetch("/api/settings");
-      if (!res.ok) throw new Error(`Server returned ${res.status}`);
-      const data = (await res.json()) as Settings;
+      const data = (await useSettingsStore.getState().fetchSettings({ force })) as Settings | null;
+      if (!data) throw new Error("Failed to load settings");
       setSettings(data);
       setProxyForm({
         outboundProxyUrl: data.outboundProxyUrl ?? "",
@@ -766,7 +766,7 @@ export default function ProfilePageClient() {
       if (!res.ok) {
         throw new Error((data as { error?: string }).error ?? "Failed to import database");
       }
-      await fetchSettings();
+      await fetchSettings({ force: true });
       setDbStatus({ type: "success", message: `Database imported from ${file.name}` });
       pendingImportRef.current = null;
     } catch (err) {

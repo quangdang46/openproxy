@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, Card, Input } from "@/shared/components";
 import Modal, { ConfirmModal } from "@/shared/components/Modal";
+import { useSettingsStore } from "@/store/settingsStore";
 
 // ──────────────────────────────────────────────────────────────────────
 // Types — mirror src/db/backups.rs and src/server/api/db_backups.rs.
@@ -102,14 +103,10 @@ export default function DbBackupsPageClient() {
     // Load settings so we know whether password re-auth is required.
     void (async () => {
       try {
-        const res = await fetch("/api/settings");
-        if (!res.ok) return;
-        const json = (await res.json()) as {
-          requireLogin?: boolean;
-          hasPassword?: boolean;
-        };
-        setRequireLogin(json.requireLogin === true);
-        setHasPassword(json.hasPassword === true);
+        const json = await useSettingsStore.getState().fetchSettings();
+        if (!json) return;
+        setRequireLogin((json as { requireLogin?: boolean }).requireLogin === true);
+        setHasPassword((json as { hasPassword?: boolean }).hasPassword === true);
       } catch {
         // Best-effort; export/import still works without re-auth when
         // requireLogin is off (server skips the check).
