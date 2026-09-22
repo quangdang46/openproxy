@@ -2929,6 +2929,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn simulated_hostile_credentials_still_mock() {
+        // sim-16 (plan §4 normative): mock branch NEVER touches credentials.
+        // Expired OAuth + garbage key + garbage tokens -> 200 in all 3 formats.
+        // Audit: execute_simulated + helpers contain zero credential reads;
+        // build_headers/try_refresh run only on the REAL branch after the gate.
+        fn hostile() -> ProviderConnection {
+            let mut c = ProviderConnection::default();
+            c.api_key = Some("sk-invalid-garbage".into());
+            c.access_token = Some("expired-token".into());
+            c.refresh_token = Some("dead-refresh".into());
+            c.expires_at = Some("2000-01-01T00:00:00Z".into());
+            c
+        }
+        fn sim_headers() -> HeaderMap {
+            let mut h = HeaderMap::new();
+            h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+            h
+        }
+        // OpenAI non-stream.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: hostile(),
+            proxy: None,
+            sim_headers: sim_headers(),
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("mock ignores creds");
+        assert_eq!(resp.response.status(), http::StatusCode::OK);
+        assert_eq!(
+            resp.transformed_body["choices"][0]["message"]["content"],
+            "Echo: hi"
+        );
+        // Anthropic stream.
+        let req = ExecutionRequest {
+            model: "claude-sonnet-4-6".into(),
+            body: serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: true,
+            credentials: hostile(),
+            proxy: None,
+            sim_headers: sim_headers(),
+        };
+        let exec = DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("mock ignores creds");
+        assert_eq!(resp.response.status(), http::StatusCode::OK);
+        let text = resp.response.text().await;
+        assert!(text.contains("event: message_start"), "named events");
+        // Gemini non-stream.
+        let req = ExecutionRequest {
+            model: "gemini-2.5-flash".into(),
+            body: serde_json::json!({"contents": [{"parts": [{"text": "hi"}]}]}),
+            stream: false,
+            credentials: hostile(),
+            proxy: None,
+            sim_headers: sim_headers(),
+        };
+        let exec = DefaultExecutor::new("gemini", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("mock ignores creds");
+        assert_eq!(resp.response.status(), http::StatusCode::OK);
+        assert_eq!(
+            resp.transformed_body["candidates"][0]["content"]["parts"][0]["text"],
+            "Echo: hi"
+        );
+    }
+
+    #[tokio::test]
     async fn simulated_gemini_non_stream_e2e() {
         // sim-10: gemini provider + header -> candidates envelope, no creds.
         let req = ExecutionRequest {
