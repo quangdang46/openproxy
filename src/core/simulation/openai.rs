@@ -24,7 +24,7 @@ impl super::engine::ProviderSimulator for OpenAiSimulator {
     }
 
     async fn execute(&self, ctx: &SimContext<'_>) -> Result<Value, SimulationError> {
-        validate(ctx)?;
+        validate(ctx, self.format())?;
         if ctx.stream {
             // SSE framing is applied by the caller from the content + usage in
             // this envelope (see sse_body()); the Value contract stays whole.
@@ -47,7 +47,7 @@ impl super::engine::ProviderSimulator for OpenAiCompatibleSimulator {
     }
 
     async fn execute(&self, ctx: &SimContext<'_>) -> Result<Value, SimulationError> {
-        validate(ctx)?;
+        validate(ctx, self.format())?;
         if ctx.stream {
             // SSE framing is applied by the caller from the content + usage in
             // this envelope (see sse_body()); the Value contract stays whole.
@@ -182,31 +182,14 @@ pub fn sse_body(envelope: &Value) -> String {
     out
 }
 
-/// Interim known-model list (bead sim-08). Bead sim-11 replaces this with
-/// models.rs registry. Unknown ids → provider-correct 404 (validates error path).
-fn is_known_model(model: &str) -> bool {
-    const KNOWN: &[&str] = &[
-        "gpt-5",
-        "gpt-5-mini",
-        "gpt-5-nano",
-        "gpt-4o",
-        "gpt-4o-mini",
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4-turbo",
-        "gpt-4",
-        "gpt-3.5-turbo",
-        "o1",
-        "o1-mini",
-        "o3",
-        "o3-mini",
-        "o4-mini",
-    ];
-    KNOWN.contains(&model)
+/// Model check via shared registry (bead sim-11). This file serves both
+/// OpenAI and OpenAI-compatible sims; callers pass their format key.
+fn is_known_model(format: ProviderFormat, model: &str) -> bool {
+    super::models::is_known(format, model)
 }
 
 /// Validate request shape + model. Returns provider-correct rejection.
-fn validate(ctx: &SimContext<'_>) -> Result<(), SimulationError> {
+fn validate(ctx: &SimContext<'_>, format: ProviderFormat) -> Result<(), SimulationError> {
     let has_messages = ctx
         .body
         .get("messages")
@@ -224,7 +207,7 @@ fn validate(ctx: &SimContext<'_>) -> Result<(), SimulationError> {
             retry_after: None,
         });
     }
-    if !is_known_model(ctx.model) {
+    if !is_known_model(format, ctx.model) {
         return Err(SimulationError::Validation {
             status: 404,
             body: serde_json::json!({"error": {

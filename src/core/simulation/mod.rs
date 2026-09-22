@@ -1,4 +1,5 @@
-//! Provider simulation layer (sim-01..07: types, persistence, resolver, errors, engine, OpenAI).
+//! Provider simulation layer (sim-01..11: types, persistence, resolver, errors,
+//! engine, OpenAI, Anthropic, Gemini, models).
 //!
 //! See `COMPREHENSIVE-PLAN-FOR-MOCK-SERVER.md` §2.5, §3.1.
 //! NOTE: `Replay` / `Hybrid` variants arrive in a separate Phase-2 epic —
@@ -9,6 +10,7 @@ pub mod engine;
 pub mod error;
 pub mod gemini;
 pub mod mode;
+pub mod models;
 pub mod openai;
 pub mod persistence;
 pub mod resolver;
