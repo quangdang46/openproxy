@@ -1,4 +1,4 @@
-//! Provider simulation layer (beads sim-01 types, sim-02 persistence, sim-05 errors).
+//! Provider simulation layer (sim-01 types, sim-02 persistence, sim-03 resolver, sim-05 errors).
 //!
 //! See `COMPREHENSIVE-PLAN-FOR-MOCK-SERVER.md` §2.5, §3.1.
 //! NOTE: `Replay` / `Hybrid` variants arrive in a separate Phase-2 epic —
