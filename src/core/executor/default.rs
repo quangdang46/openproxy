@@ -173,6 +173,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ),
         ),
         (
+            "alitp-intl",
+            ProviderConfig::openai(
+                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+            ),
+        ),
+        (
             "baidu",
             ProviderConfig::openai("https://qianfan.baidubce.com/v2/chat/completions"),
         ),
@@ -486,7 +492,7 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
         ),
         (
             "mimo-free",
-            ProviderConfig::openai("https://mimo.kiro.dev/v1/chat/completions"),
+            ProviderConfig::openai("https://api.xiaomimimo.com/api/free-ai/openai/chat"),
         ),
         // NOTE: no second "xiaomi-tokenplan" entry — BTreeMap::from keeps the
         // LAST duplicate, which previously shadowed the sgp region URL with
@@ -2198,6 +2204,30 @@ mod tests {
         assert_eq!(
             provider_config_base_url("codebuddy-cn"),
             Some("https://copilot.tencent.com/v2/chat/completions".to_string())
+        );
+    }
+
+    #[test]
+    fn alitp_intl_base_url_matches_chat_transport() {
+        // src/core/chat/mod.rs:321 transport baseUrl (Alibaba Token Plan
+        // Singapore-only, OpenAI-compatible) — the map entry must match it.
+        assert_eq!(
+            provider_config_base_url("alitp-intl"),
+            Some(
+                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn mimo_free_base_url_matches_js_registry() {
+        // 9router registry/mimo-free.js transport.baseUrl (hidden:true —
+        // free channel ended). The dedicated MimoFreeExecutor is source of
+        // truth for dispatch (MIMO_CHAT_URL); this map entry is fallback only.
+        assert_eq!(
+            provider_config_base_url("mimo-free"),
+            Some("https://api.xiaomimimo.com/api/free-ai/openai/chat".to_string())
         );
     }
 
