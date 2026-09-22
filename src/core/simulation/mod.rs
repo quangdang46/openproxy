@@ -7,6 +7,8 @@
 pub mod error;
 pub mod mode;
 pub mod persistence;
+pub mod resolver;
 
 pub use error::SimulationError;
 pub use mode::{EffectiveReason, ProviderExecutionMode, ResolvedMode};
+pub use resolver::{is_format_supported, resolve_effective_mode, ResolveInput, SIM_HEADER};
