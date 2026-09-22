@@ -853,6 +853,38 @@ impl DefaultExecutor {
     /// Simulated execution stub (beads sim-06+ fill in per-format bodies).
     /// Currently unreachable unless simulation was explicitly activated above;
     /// returns an explicit error so a miswire fails loudly, never silently.
+    /// Resolve the simulation [`ProviderFormat`] for this executor.
+    /// Shared by the mock branch (execute_simulated) and the REAL-branch
+    /// fault path (sim-15) so both agree on the envelope shape.
+    /// NOTE: DefaultExecutor ProviderConfig.format is a plain string and
+    /// anthropic()/claude_compatible() constructors delegate to openai(),
+    /// so config.format alone misroutes the anthropic family. Provider name
+    /// takes precedence for family resolution (mirrors provider_wants_claude_beta).
+    fn sim_format(&self) -> crate::core::executor::ProviderFormat {
+        const ANTHROPIC_FAMILY: &[&str] = &[
+            "anthropic",
+            "claude",
+            "glm",
+            "kimi",
+            "kimi-coding",
+            "minimax",
+            "minimax-cn",
+            "agentrouter",
+        ];
+        if ANTHROPIC_FAMILY.contains(&self.provider.as_str()) {
+            return crate::core::executor::ProviderFormat::Anthropic;
+        }
+        match self.config.format.as_str() {
+            "openai-compatible" => crate::core::executor::ProviderFormat::OpenAICompatible,
+            "anthropic" => crate::core::executor::ProviderFormat::Anthropic,
+            "anthropic-compatible" | "claude-compatible" => {
+                crate::core::executor::ProviderFormat::AnthropicCompatible
+            }
+            "gemini" => crate::core::executor::ProviderFormat::Gemini,
+            _ => crate::core::executor::ProviderFormat::OpenAI,
+        }
+    }
+
     async fn execute_simulated(
         &self,
         request: &ExecutionRequest,
@@ -877,35 +909,15 @@ impl DefaultExecutor {
                 format: self.config.format.clone(),
             });
         }
-        // NOTE: DefaultExecutor ProviderConfig.format is a plain string and
-        // anthropic()/claude_compatible() constructors delegate to openai(),
-        // so config.format alone misroutes the anthropic family. Provider name
-        // takes precedence for family resolution (mirrors provider_wants_claude_beta).
-        const ANTHROPIC_FAMILY: &[&str] = &[
-            "anthropic",
-            "claude",
-            "glm",
-            "kimi",
-            "kimi-coding",
-            "minimax",
-            "minimax-cn",
-            "agentrouter",
-        ];
-        let format = if ANTHROPIC_FAMILY.contains(&self.provider.as_str()) {
-            crate::core::executor::ProviderFormat::Anthropic
-        } else {
-            match self.config.format.as_str() {
-                "openai-compatible" => crate::core::executor::ProviderFormat::OpenAICompatible,
-                "anthropic" => crate::core::executor::ProviderFormat::Anthropic,
-                "anthropic-compatible" | "claude-compatible" => {
-                    crate::core::executor::ProviderFormat::AnthropicCompatible
-                }
-                "gemini" => crate::core::executor::ProviderFormat::Gemini,
-                _ => crate::core::executor::ProviderFormat::OpenAI,
-            }
-        };
+        // NOTE: format resolution lives in sim_format() (single source; also
+        // used by the REAL-branch fault path, sim-15).
+        let format = self.sim_format();
         // sim-12: status fault short-circuits before the engine with a
         // provider-correct envelope (same render path as Validation errors).
+        // Ordering (deliberate, do NOT reorder without updating the
+        // precedence test): latency → status fault → engine+validation →
+        // response override. Status fault pre-empts everything; override
+        // applies post-validation by design.
         let fault = crate::core::simulation::FaultSpec::parse(&request.sim_headers);
         // sim-13: first-byte latency applies to ALL mock outcomes (fault error,
         // validation error, echo, SSE) — sleep before first byte, never after.
@@ -968,14 +980,22 @@ impl DefaultExecutor {
                 ));
             }
             Some(crate::core::simulation::OverrideAction::Json(v)) if !request.stream => {
-                // Non-stream JSON object → verbatim body (caller owns schema).
-                return Ok(Self::sim_json_response(&self.provider, request, v));
+                // Non-stream JSON object: tool-shape objects replace the echo
+                // inside the simulator envelope (spec bullet); all other
+                // objects are verbatim bodies (caller owns schema, §5.1.1).
+                if v.get("tool_calls").is_some() || v.get("tool_use").is_some() {
+                    // Reuse the stream applier with stream=false: it mutates
+                    // the envelope in place and never touches framing.
+                    Self::apply_stream_override(envelope, &v, format)
+                } else {
+                    return Ok(Self::sim_json_response(&self.provider, request, v));
+                }
             }
             Some(crate::core::simulation::OverrideAction::Json(v)) => {
                 Self::apply_stream_override(envelope, &v, format)
             }
             Some(crate::core::simulation::OverrideAction::Text(t)) => {
-                Self::apply_stream_text_override(envelope, &t, request.stream, format)
+                Self::apply_stream_text_override(envelope, &t, request.stream)
             }
             None => envelope,
         };
@@ -1018,25 +1038,108 @@ impl DefaultExecutor {
             .and_then(|c| c.as_str())
             .or_else(|| v.as_str())
         {
-            envelope = Self::apply_stream_text_override(envelope, text, true, format);
+            envelope = Self::apply_stream_text_override(envelope, text, true);
         }
-        // Tool payload extraction per format.
+        // Tool payload extraction per format — applied DIRECTLY to the
+        // envelope (not only sim_* hints), so every render path observes it:
+        // - OpenAI non-stream reads message.tool_calls; OpenAI stream reads
+        //   sim_tool_calls (sse_body); both are set here.
+        // - Anthropic non-stream/stream read content[1] (tool_use block).
+        // - Gemini has no tool path: warn-log instead of silent ignore.
         let tool_calls = match format {
             Anthropic | AnthropicCompatible => v.get("tool_use").cloned(),
+            Gemini => {
+                if v.get("tool_calls").is_some() || v.get("tool_use").is_some() {
+                    tracing::warn!(
+                        target: "openproxy::simulation",
+                        "tool override ignored for Gemini (no tool path in MVP)"
+                    );
+                }
+                None
+            }
             _ => v
                 .get("tool_calls")
                 .cloned()
                 .or_else(|| v.get("tool_use").cloned()),
         };
         if let Some(tc) = tool_calls {
-            if let Some(obj) = envelope.as_object_mut() {
-                match format {
-                    Anthropic | AnthropicCompatible => {
-                        obj.insert("sim_tool_calls".into(), tc);
+            match format {
+                Anthropic | AnthropicCompatible => {
+                    // Replace content[1] with the override tool_use block;
+                    // keep content[0] text, force stop_reason tool_use.
+                    let block = if tc.get("type").is_some() {
+                        tc.clone()
+                    } else {
+                        serde_json::json!({
+                            "type": "tool_use",
+                            "id": tc.get("id").cloned().unwrap_or(serde_json::Value::String(
+                                "toolu_sim_override".to_string())),
+                            "name": tc.get("name").cloned().unwrap_or(serde_json::Value::String(
+                                "override".to_string())),
+                            "input": tc.get("input").cloned().unwrap_or(serde_json::json!({})),
+                        })
+                    };
+                    if let Some(content) = envelope.get_mut("content") {
+                        if let Some(arr) = content.as_array_mut() {
+                            if arr.len() > 1 {
+                                arr[1] = block;
+                            } else {
+                                arr.push(block);
+                            }
+                        }
+                    }
+                    if let Some(stop) = envelope.get_mut("stop_reason") {
+                        *stop = serde_json::Value::String("tool_use".to_string());
+                    }
+                    if let Some(obj) = envelope.as_object_mut() {
+                        obj.insert("sim_tool_calls".into(), serde_json::json!([]));
                         obj.insert("sim_is_tool".into(), serde_json::Value::from(true));
                     }
-                    _ => {
-                        obj.insert("sim_tool_calls".into(), tc);
+                }
+                _ => {
+                    // OpenAI(+compat): replace message.tool_calls directly AND
+                    // stash for the stream renderer.
+                    if let Some(msg) = envelope
+                        .get_mut("choices")
+                        .and_then(|c| c.get_mut(0))
+                        .and_then(|c| c.get_mut("message"))
+                    {
+                        if let Some(obj) = msg.as_object_mut() {
+                            // Normalize bare objects to tool_calls array shape.
+                            let calls = if tc.is_array() {
+                                tc.clone()
+                            } else {
+                                serde_json::json!([{
+                                    "id": tc.get("id").cloned().unwrap_or(
+                                        serde_json::Value::String("call_sim_override".to_string())),
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc.get("name").cloned().unwrap_or(
+                                            tc.get("function")
+                                                .and_then(|f| f.get("name")).cloned()
+                                                .unwrap_or(serde_json::Value::String(
+                                                    "override".to_string()))),
+                                        "arguments": tc.get("arguments").cloned().unwrap_or(
+                                            tc.get("function")
+                                                .and_then(|f| f.get("arguments")).cloned()
+                                                .unwrap_or(serde_json::json!("{}"))),
+                                    },
+                                }])
+                            };
+                            obj.insert("tool_calls".into(), calls.clone());
+                            obj.remove("content");
+                            if let Some(obj) = envelope.as_object_mut() {
+                                obj.insert("sim_tool_calls".into(), calls);
+                            }
+                        }
+                        if let Some(ch) = envelope.get_mut("choices").and_then(|c| c.get_mut(0)) {
+                            if let Some(obj) = ch.as_object_mut() {
+                                obj.insert(
+                                    "finish_reason".into(),
+                                    serde_json::Value::String("tool_calls".to_string()),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1046,11 +1149,13 @@ impl DefaultExecutor {
 
     /// Apply a plain-text override to an envelope (bead sim-14).
     /// Replaces message content and suppresses tool echo (plan §5.1.1).
+    /// NOTE: stream text-override drops the usage chunk (`sim_include_usage`
+    /// forced false) so chunk counts stay deterministic; the base echo path
+    /// keeps usage. Deliberate, locked by the stream-override test.
     fn apply_stream_text_override(
         mut envelope: serde_json::Value,
         text: &str,
         stream: bool,
-        format: crate::core::executor::ProviderFormat,
     ) -> serde_json::Value {
         use crate::core::executor::ProviderFormat::*;
         // Strip any tool echo: text forces a text answer.
@@ -1108,18 +1213,23 @@ impl DefaultExecutor {
                 obj.insert("sim_chunks".into(), serde_json::Value::from(chunks));
                 obj.insert("sim_include_usage".into(), serde_json::Value::from(false));
             }
-            let _ = format;
         }
         envelope
     }
 
     /// Build a synthetic non-stream JSON response (no network).
+    /// Strips internal `sim_*` envelope hints so they never leak to clients
+    /// (reviewer sim-14: the stream renderer reads them; the JSON renderer
+    /// must not expose them).
     fn sim_json_response(
         provider: &str,
         request: &ExecutionRequest,
-        body: serde_json::Value,
+        mut body: serde_json::Value,
     ) -> ExecutionResponse {
         use reqwest::header::{HeaderMap, HeaderValue};
+        if let Some(obj) = body.as_object_mut() {
+            obj.retain(|k, _| !k.starts_with("sim_"));
+        }
         let bytes = serde_json::to_vec(&body).unwrap_or_default();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -1831,6 +1941,15 @@ impl DefaultExecutor {
         if Self::simulation_active(&request) {
             return self.execute_simulated(&request).await;
         }
+        // sim-15: REAL-branch fault support (plan §2.4: injector wraps BOTH
+        // branches). Parse once here. `sim_headers` NEVER reach upstream:
+        // `build_headers`/`send_one` only see `headers` built from
+        // credentials+config — request.sim_headers is a separate map that no
+        // forward path reads. The parse below is the only REAL-branch use,
+        // and sim headers are redacted from logs (never logged at info+).
+        let real_fault = crate::core::simulation::FaultSpec::parse(&request.sim_headers);
+        // Latency applies to REAL too (first-byte delay before send loop).
+        crate::core::simulation::FaultInjector::apply_latency(&real_fault).await;
         // Build headers and transformed body once, reused across retries and
         // fallback URLs.
         let mut headers =
@@ -1860,8 +1979,24 @@ impl DefaultExecutor {
                     .await?;
                 let status = upstream.status();
 
-                // Success: return immediately.
+                // Success: return immediately — unless a REAL-branch status
+                // fault overrides it (sim-15: post-execution middleware proof).
                 if status.is_success() {
+                    if let Some((fstatus, fbody, fretry)) =
+                        crate::core::simulation::FaultInjector::status_fault(
+                            self.sim_format(),
+                            &self.provider,
+                            &real_fault,
+                        )
+                    {
+                        return Ok(Self::sim_error_response(
+                            &self.provider,
+                            &request,
+                            fstatus,
+                            fbody,
+                            fretry,
+                        ));
+                    }
                     return Ok(ExecutionResponse {
                         response: upstream,
                         url: url.clone(),
@@ -2553,6 +2688,78 @@ mod tests {
             "cut short, got {}",
             text.matches("data:").count()
         );
+    }
+
+    #[tokio::test]
+    async fn simulated_override_tool_non_stream_no_leak() {
+        // sim-14 fix (reviewer): tool override replaces echo AND leaves no
+        // sim_* internals in the client-visible body.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function",
+                    "function": {"name": "echo_tool", "parameters": {}}}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert(
+                    "x-openproxy-sim-response",
+                    HeaderValue::from_static(
+                        "{\"tool_calls\":[{\"id\":\"call_9\",\"type\":\"function\",\"function\":{\"name\":\"override_tool\",\"arguments\":\"{}\"}}]}",
+                    ),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim tool override");
+        assert_eq!(
+            resp.transformed_body["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "override_tool",
+            "override replaces echo"
+        );
+        let raw = serde_json::to_string(&resp.transformed_body).unwrap();
+        assert!(!raw.contains("sim_tool_calls"), "no internal leak");
+        assert!(!raw.contains("echo_tool"), "echo replaced");
+    }
+
+    #[tokio::test]
+    async fn simulated_override_tool_anthropic_stream() {
+        // sim-14 fix (reviewer): Anthropic stream override renders the override
+        // tool name (not the echo) through named events.
+        let req = ExecutionRequest {
+            model: "claude-sonnet-4-6".into(),
+            body: serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"name": "echo_tool", "description": "e",
+                    "input_schema": {"type": "object"}}]}),
+            stream: true,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert(
+                    "x-openproxy-sim-response",
+                    HeaderValue::from_static(
+                        "{\"tool_use\":{\"id\":\"toolu_9\",\"name\":\"override_tool\",\"input\":{}}}",
+                    ),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec
+            .execute(req)
+            .await
+            .expect("sim anthropic tool override");
+        let text = resp.response.text().await;
+        assert!(text.contains("override_tool"), "override name rendered");
+        assert!(!text.contains("echo_tool"), "echo replaced");
     }
 
     #[tokio::test]
