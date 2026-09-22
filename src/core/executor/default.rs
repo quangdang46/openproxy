@@ -858,12 +858,19 @@ impl DefaultExecutor {
         request: &ExecutionRequest,
     ) -> Result<ExecutionResponse, ExecutorError> {
         use crate::core::simulation::{SimContext, SimulationEngine};
-        // sim-07: OpenAI + OpenAI-compatible non-stream AND stream.
-        // Other formats fall through to loud explicit error (sim-09/sim-10).
-        let is_openai = self.provider == "openai"
-            || self.config.format == "openai"
-            || self.config.format == "openai-compatible";
-        if !is_openai {
+        // sim-07/09: OpenAI(+compat) and Anthropic(+compat, incl.
+        // ClaudeCompatible reuse) non-stream AND stream.
+        // Gemini falls through to loud explicit error (sim-10).
+        let supported = matches!(
+            self.config.format.as_str(),
+            "openai"
+                | "openai-compatible"
+                | "anthropic"
+                | "anthropic-compatible"
+                | "claude-compatible"
+        ) || self.provider == "openai"
+            || self.provider == "anthropic";
+        if !supported {
             return Err(ExecutorError::SimulationUnsupported {
                 provider: self.provider.clone(),
                 format: self.config.format.clone(),
@@ -876,10 +883,13 @@ impl DefaultExecutor {
             body: &request.body,
             stream: request.stream,
         };
-        let format = if self.config.format == "openai-compatible" {
-            crate::core::executor::ProviderFormat::OpenAICompatible
-        } else {
-            crate::core::executor::ProviderFormat::OpenAI
+        let format = match self.config.format.as_str() {
+            "openai-compatible" => crate::core::executor::ProviderFormat::OpenAICompatible,
+            "anthropic" => crate::core::executor::ProviderFormat::Anthropic,
+            "anthropic-compatible" | "claude-compatible" => {
+                crate::core::executor::ProviderFormat::AnthropicCompatible
+            }
+            _ => crate::core::executor::ProviderFormat::OpenAI,
         };
         let envelope = match engine.execute(format, &self.provider, &ctx).await {
             Ok(env) => env,
@@ -888,20 +898,38 @@ impl DefaultExecutor {
                 body,
                 retry_after,
             }) => {
-                return Ok(Self::sim_error_response(request, status, body, retry_after));
+                return Ok(Self::sim_error_response(
+                    &self.provider,
+                    request,
+                    status,
+                    body,
+                    retry_after,
+                ));
             }
             Err(e) => return Err(e.into()),
         };
         if request.stream {
-            let body = crate::core::simulation::sse_body_openai(&envelope);
-            Ok(Self::sim_sse_response(request, body))
+            let body = if matches!(
+                format,
+                crate::core::executor::ProviderFormat::Anthropic
+                    | crate::core::executor::ProviderFormat::AnthropicCompatible
+            ) {
+                crate::core::simulation::sse_body_anthropic(&envelope)
+            } else {
+                crate::core::simulation::sse_body_openai(&envelope)
+            };
+            Ok(Self::sim_sse_response(&self.provider, request, body))
         } else {
-            Ok(Self::sim_json_response(request, envelope))
+            Ok(Self::sim_json_response(&self.provider, request, envelope))
         }
     }
 
     /// Build a synthetic non-stream JSON response (no network).
-    fn sim_json_response(request: &ExecutionRequest, body: serde_json::Value) -> ExecutionResponse {
+    fn sim_json_response(
+        provider: &str,
+        request: &ExecutionRequest,
+        body: serde_json::Value,
+    ) -> ExecutionResponse {
         use reqwest::header::{HeaderMap, HeaderValue};
         let bytes = serde_json::to_vec(&body).unwrap_or_default();
         let mut headers = HeaderMap::new();
@@ -916,7 +944,7 @@ impl DefaultExecutor {
             .unwrap();
         ExecutionResponse {
             response: UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)),
-            url: format!("sim://{}/{}", "openai", request.model),
+            url: format!("sim://{}/{}", provider, request.model),
             headers,
             transformed_body: body,
             transport: TransportKind::Reqwest,
@@ -926,6 +954,7 @@ impl DefaultExecutor {
     /// Build a synthetic provider-correct error response (no network).
     /// Renders the exact status + envelope; sets Retry-After when present.
     fn sim_error_response(
+        provider: &str,
         request: &ExecutionRequest,
         status: u16,
         body: serde_json::Value,
@@ -944,14 +973,16 @@ impl DefaultExecutor {
             }
         }
         let code = http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::BAD_REQUEST);
-        let http_resp = http::Response::builder()
+        let mut builder = http::Response::builder()
             .status(code)
-            .header("content-type", "application/json")
-            .body(reqwest::Body::from(bytes))
-            .unwrap();
+            .header("content-type", "application/json");
+        if let Some(secs) = retry_after {
+            builder = builder.header("retry-after", secs.to_string());
+        }
+        let http_resp = builder.body(reqwest::Body::from(bytes)).unwrap();
         ExecutionResponse {
             response: UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)),
-            url: format!("sim://{}/{}", "openai", request.model),
+            url: format!("sim://{}/{}", provider, request.model),
             headers,
             transformed_body: body,
             transport: TransportKind::Reqwest,
@@ -959,24 +990,29 @@ impl DefaultExecutor {
     }
 
     /// Build a synthetic SSE response (no network).
-    fn sim_sse_response(request: &ExecutionRequest, body: String) -> ExecutionResponse {
+    fn sim_sse_response(
+        provider: &str,
+        request: &ExecutionRequest,
+        body: String,
+    ) -> ExecutionResponse {
         use reqwest::header::{HeaderMap, HeaderValue};
         let mut headers = HeaderMap::new();
         headers.insert(
             reqwest::header::CONTENT_TYPE,
             HeaderValue::from_static("text/event-stream"),
         );
+        let byte_len = body.len();
         let http_resp = http::Response::builder()
             .status(http::StatusCode::OK)
             .header("content-type", "text/event-stream")
             .header("cache-control", "no-cache")
-            .body(reqwest::Body::from(body.clone()))
+            .body(reqwest::Body::from(body))
             .unwrap();
         ExecutionResponse {
             response: UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)),
-            url: format!("sim://{}/{}", "openai", request.model),
+            url: format!("sim://{}/{}", provider, request.model),
             headers,
-            transformed_body: serde_json::json!({"sim_sse": true, "bytes": body.len()}),
+            transformed_body: serde_json::json!({"sim_sse": true, "bytes": byte_len}),
             transport: TransportKind::Reqwest,
         }
     }
@@ -2201,6 +2237,54 @@ mod tests {
         let resp = exec.execute(req).await.expect("sim 404 renders");
         assert_eq!(resp.response.status(), http::StatusCode::NOT_FOUND);
         assert_eq!(resp.transformed_body["error"]["code"], "model_not_found");
+        #[tokio::test]
+        async fn simulated_anthropic_non_stream_e2e() {
+            // sim-09: anthropic provider + header -> message envelope, no creds.
+            let req = ExecutionRequest {
+                model: "claude-sonnet-4-6".into(),
+                body: serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 64,
+                "messages": [{"role": "user", "content": "ping"}]}),
+                stream: false,
+                credentials: ProviderConnection::default(),
+                proxy: None,
+                sim_headers: {
+                    let mut h = HeaderMap::new();
+                    h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                    h
+                },
+            };
+            let exec =
+                DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
+            let resp = exec.execute(req).await.expect("sim anthropic");
+            assert!(resp.url.starts_with("sim://anthropic/"));
+            assert_eq!(resp.transformed_body["type"], "message");
+            assert_eq!(resp.transformed_body["content"][0]["text"], "Echo: ping");
+            assert_eq!(resp.response.status(), http::StatusCode::OK);
+        }
+
+        #[tokio::test]
+        async fn simulated_anthropic_stream_e2e() {
+            // sim-09: named SSE events flow through the real downstream path.
+            let req = ExecutionRequest {
+                model: "claude-sonnet-4-6".into(),
+                body: serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 64,
+                "messages": [{"role": "user", "content": "hi there"}]}),
+                stream: true,
+                credentials: ProviderConnection::default(),
+                proxy: None,
+                sim_headers: {
+                    let mut h = HeaderMap::new();
+                    h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                    h
+                },
+            };
+            let exec =
+                DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
+            let resp = exec.execute(req).await.expect("sim anthropic stream");
+            let text = resp.response.text().await;
+            assert!(text.contains("event: message_start"), "named events");
+            assert!(text.contains("event: message_stop"), "terminal event");
+        }
     }
 
     #[tokio::test]
