@@ -65,6 +65,7 @@ docs/*
 !docs/git-conventions.md
 !docs/integrations/
 !docs/parity-9router.md
+!docs/mock-mode.md
 test/*
 bin/*
 open-sse/test/*
