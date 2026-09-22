@@ -131,6 +131,69 @@ fn header_requests_mock(headers: &HeaderMap) -> bool {
         .is_some_and(|v| v.trim().eq_ignore_ascii_case(SIM_MOCK_VALUE))
 }
 
+/// One provider's mode snapshot for the status surface (bead sim-19).
+/// `effective`/`reason` are computed WITHOUT request headers (status time has
+/// no single request); per-request `x-openproxy-sim: mock` can still promote
+/// an individual call, noted in the API docs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModeStatus {
+    /// Provider name as configured.
+    pub provider: String,
+    /// Stored configuration (`real` default).
+    pub configured: ProviderExecutionMode,
+    /// Effective mode absent per-request overrides.
+    pub effective: ProviderExecutionMode,
+    /// Why effective is what it is.
+    pub reason: EffectiveReason,
+    /// Whether the format has a registered simulator.
+    pub simulation_supported: bool,
+}
+
+/// Snapshot the effective mode for one provider (no request headers).
+pub fn status_for(
+    conn: &rusqlite::Connection,
+    provider: &str,
+    settings_force_all: bool,
+) -> ProviderModeStatus {
+    use super::persistence::{env_force_all, get_provider_mode};
+    use crate::core::executor::provider_sim_format;
+    let configured = get_provider_mode(conn, provider);
+    // provider_sim_format maps by name first, so unknown providers fall back
+    // to the OpenAI mapping (their support is then decided by the engine).
+    let config_format = crate::core::executor::provider_config_format(provider).unwrap_or_default();
+    let format = provider_sim_format(provider, &config_format);
+    let supported = is_format_supported(format);
+    let env_force = env_force_all();
+    let (effective, reason) = if (env_force || settings_force_all) && supported {
+        (ProviderExecutionMode::Mock, {
+            if env_force {
+                EffectiveReason::EnvForce
+            } else {
+                EffectiveReason::SettingsForce
+            }
+        })
+    } else if configured == ProviderExecutionMode::Mock && supported {
+        (ProviderExecutionMode::Mock, EffectiveReason::ProviderConfig)
+    } else {
+        (ProviderExecutionMode::Real, {
+            if configured == ProviderExecutionMode::Mock {
+                // Mock configured but format unsupported → stays real loudly
+                // at execution time (SimulationUnsupported); report config.
+                EffectiveReason::ProviderConfig
+            } else {
+                EffectiveReason::Default
+            }
+        })
+    };
+    ProviderModeStatus {
+        provider: provider.to_string(),
+        configured,
+        effective,
+        reason,
+        simulation_supported: supported,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

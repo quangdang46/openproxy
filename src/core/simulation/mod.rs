@@ -24,4 +24,7 @@ pub use gemini::sse_body as sse_body_gemini;
 pub use mode::{EffectiveReason, ProviderExecutionMode, ResolvedMode};
 pub use openai::sse_body as sse_body_openai;
 pub use persistence::env_force_all;
-pub use resolver::{is_format_supported, resolve_effective_mode, ResolveInput, SIM_HEADER};
+pub use resolver::{
+    is_format_supported, resolve_effective_mode, status_for, ProviderModeStatus, ResolveInput,
+    SIM_HEADER,
+};

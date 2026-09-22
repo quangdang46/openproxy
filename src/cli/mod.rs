@@ -456,6 +456,15 @@ pub enum ProviderCmd {
     Disable { id_or_name: String },
     /// Run a real connectivity probe.
     Test { id_or_name: String },
+    /// Show or set simulation mode (bead sim-19).
+    Mode {
+        /// Provider alias (openai, anthropic, ...).
+        name: String,
+        /// New configured mode: `real` or `mock` (omit to show).
+        mode: Option<String>,
+    },
+    /// Show simulation modes for all providers.
+    Status,
     /// Validate raw credentials (no DB write).
     Validate {
         #[arg(long)]
@@ -1166,6 +1175,12 @@ pub async fn run_provider(cmd: ProviderCmd, db: &Db, ctx: output::OutputCtx) -> 
         }
         ProviderCmd::Test { id_or_name } => {
             provider_ext::run(provider_ext::ProviderExtCmd::Test { id_or_name }, db, ctx).await?
+        }
+        ProviderCmd::Mode { name, mode } => {
+            provider_ext::run(provider_ext::ProviderExtCmd::Mode { name, mode }, db, ctx).await?
+        }
+        ProviderCmd::Status => {
+            provider_ext::run(provider_ext::ProviderExtCmd::Status, db, ctx).await?
         }
         ProviderCmd::Validate {
             provider,
