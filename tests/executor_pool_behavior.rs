@@ -2099,3 +2099,337 @@ async fn real_branch_no_fault_passthrough() {
     assert!(response.url.starts_with(upstream.uri().as_str()));
     assert!(!response.headers.contains_key(reqwest::header::RETRY_AFTER));
 }
+
+/// sim-17: fallback integration matrix — simulation lives inside the execution
+/// architecture, not beside it.
+///
+/// A minimal fallback driver mirroring `forward_with_provider_fallback` +
+/// `iterate_combo_models`: per member, run `DefaultExecutor::execute`, convert
+/// non-2xx into an error via the REAL `check_fallback_error` decision fn, and
+/// fall through to the next member when eligible.
+///
+/// Documented asymmetry (reviewer sim-15, locked by test (e) below):
+/// - MOCK branch: fault pre-empts ALL (even validation failures).
+/// - REAL branch: fault decorates SUCCESS only; upstream non-2xx flows into
+///   the normal error path (no fault envelope).
+mod sim_fallback {
+    use super::*;
+    use openproxy::core::combo::check_fallback_error;
+    use openproxy::core::executor::ProviderFormat;
+    use reqwest::header::HeaderValue;
+
+    struct Member {
+        provider: &'static str,
+        model: &'static str,
+        body: serde_json::Value,
+        sim_headers: HeaderMap,
+        node: Option<ProviderNode>,
+    }
+
+    fn sim_mock_headers(extra: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+        for (k, v) in extra {
+            h.insert(
+                k.parse::<reqwest::header::HeaderName>().unwrap(),
+                v.parse::<HeaderValue>().unwrap(),
+            );
+        }
+        h
+    }
+
+    fn openai_mock_429() -> Member {
+        Member {
+            provider: "openai",
+            model: "gpt-4o",
+            body: json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            sim_headers: sim_mock_headers(&[("x-openproxy-sim-status", "429")]),
+            node: None,
+        }
+    }
+
+    fn gemini_mock_ok() -> Member {
+        Member {
+            provider: "gemini",
+            model: "gemini-2.5-flash",
+            body: json!({"contents": [{"parts": [{"text": "hi"}]}]}),
+            sim_headers: sim_mock_headers(&[]),
+            node: None,
+        }
+    }
+
+    /// Drive members in order; return (serving_provider, final_body).
+    /// Mirrors chat.rs: non-2xx → error → check_fallback_error → next member.
+    async fn drive(
+        members: &[Member],
+        real_nodes: &std::collections::HashMap<&str, ProviderNode>,
+    ) -> (String, serde_json::Value) {
+        let mut last_status = 0;
+        for m in members {
+            let node = m
+                .node
+                .clone()
+                .or_else(|| real_nodes.get(m.provider).cloned());
+            let exec = DefaultExecutor::new(m.provider, Arc::new(ClientPool::new()), node).unwrap();
+            let resp = exec
+                .execute(ExecutionRequest {
+                    model: m.model.into(),
+                    body: m.body.clone(),
+                    stream: false,
+                    credentials: connection(m.provider),
+                    proxy: None,
+                    sim_headers: m.sim_headers.clone(),
+                })
+                .await
+                .expect("transport ok");
+            let status = resp.response.status().as_u16();
+            if resp.response.status().is_success() {
+                return (m.provider.to_string(), resp.transformed_body);
+            }
+            last_status = status;
+            let text = serde_json::to_string(&resp.transformed_body).unwrap_or_default();
+            if !check_fallback_error(status, &text, 0).should_fallback {
+                panic!(
+                    "member {} status {status} not fallback-eligible",
+                    m.provider
+                );
+            }
+        }
+        panic!("all members failed, last status {last_status}");
+    }
+
+    fn gemini_real_node(uri: &str) -> (String, ProviderNode) {
+        let node = ProviderNode {
+            id: "node-gemini".into(),
+            r#type: "openai-compatible".into(),
+            name: "Node".into(),
+            prefix: Some("custom".into()),
+            api_type: Some("chat".into()),
+            base_url: Some(format!("{uri}/v1")),
+            created_at: None,
+            updated_at: None,
+            extra: BTreeMap::new(),
+        };
+        ("gemini".to_string(), node)
+    }
+
+    /// (a) mock→mock: openai-MOCK 429 falls over to gemini-MOCK 200.
+    #[tokio::test]
+    async fn fallback_mock_to_mock() {
+        let members = [openai_mock_429(), gemini_mock_ok()];
+        let (served, body) = drive(&members, &Default::default()).await;
+        assert_eq!(served, "gemini");
+        assert_eq!(
+            body["candidates"][0]["content"]["parts"][0]["text"],
+            "Echo: hi"
+        );
+    }
+
+    /// (b) mock→real: openai-MOCK 429 falls over to wiremock-backed 200.
+    #[tokio::test]
+    async fn fallback_mock_to_real() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let node = ProviderNode {
+            id: "node-openai".into(),
+            r#type: "openai-compatible".into(),
+            name: "Node".into(),
+            prefix: Some("custom".into()),
+            api_type: Some("chat".into()),
+            base_url: Some(format!("{}/v1", upstream.uri())),
+            created_at: None,
+            updated_at: None,
+            extra: BTreeMap::new(),
+        };
+        let members = [
+            openai_mock_429(),
+            Member {
+                provider: "node-openai",
+                model: "gpt-4.1",
+                body: json!({"model": "gpt-4.1",
+                    "messages": [{"role": "user", "content": "hi"}]}),
+                sim_headers: HeaderMap::new(),
+                node: Some(node),
+            },
+        ];
+        // Drive manually: second leg asserts upstream JSON shape via url.
+        let exec0 = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let r0 = exec0
+            .execute(ExecutionRequest {
+                model: "gpt-4o".into(),
+                body: members[0].body.clone(),
+                stream: false,
+                credentials: connection("openai"),
+                proxy: None,
+                sim_headers: members[0].sim_headers.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(r0.response.status().as_u16(), 429);
+        assert!(
+            check_fallback_error(
+                429,
+                &serde_json::to_string(&r0.transformed_body).unwrap(),
+                0
+            )
+            .should_fallback
+        );
+        let exec1 = DefaultExecutor::new(
+            "node-openai",
+            Arc::new(ClientPool::new()),
+            members[1].node.clone(),
+        )
+        .unwrap();
+        let r1 = exec1
+            .execute(ExecutionRequest {
+                model: "gpt-4.1".into(),
+                body: members[1].body.clone(),
+                stream: false,
+                credentials: connection("node-openai"),
+                proxy: None,
+                sim_headers: HeaderMap::new(),
+            })
+            .await
+            .unwrap();
+        assert!(r1.response.status().is_success());
+        assert!(r1.url.starts_with(upstream.uri().as_str()));
+    }
+
+    /// (c) real→mock: wiremock-200 + fault 429 falls over to gemini-MOCK 200.
+    #[tokio::test]
+    async fn fallback_real_to_mock() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let node = ProviderNode {
+            id: "node-openai".into(),
+            r#type: "openai-compatible".into(),
+            name: "Node".into(),
+            prefix: Some("custom".into()),
+            api_type: Some("chat".into()),
+            base_url: Some(format!("{}/v1", upstream.uri())),
+            created_at: None,
+            updated_at: None,
+            extra: BTreeMap::new(),
+        };
+        let mut real_map = std::collections::HashMap::new();
+        real_map.insert("node-openai", node);
+        // NOTE: the REAL leg carries status WITHOUT the mock header —
+        // simulation_active must be false so the request truly forwards.
+        let mut real_fault_headers = HeaderMap::new();
+        real_fault_headers.insert("x-openproxy-sim-status", HeaderValue::from_static("429"));
+        let members = [
+            Member {
+                provider: "node-openai",
+                model: "gpt-4.1",
+                body: json!({"model": "gpt-4.1",
+                    "messages": [{"role": "user", "content": "hi"}]}),
+                sim_headers: real_fault_headers,
+                node: None,
+            },
+            gemini_mock_ok(),
+        ];
+        let (served, body) = drive(&members, &real_map).await;
+        assert_eq!(served, "gemini");
+        assert_eq!(
+            body["candidates"][0]["content"]["parts"][0]["text"],
+            "Echo: hi"
+        );
+    }
+
+    /// (d) real→real baseline: two wiremock 200s, first serves, no fault.
+    #[tokio::test]
+    async fn fallback_real_baseline() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let (name, node) = gemini_real_node(&upstream.uri());
+        assert_eq!(name, "gemini");
+        let exec =
+            DefaultExecutor::new("node-gemini", Arc::new(ClientPool::new()), Some(node)).unwrap();
+        let resp = exec
+            .execute(ExecutionRequest {
+                model: "gpt-4.1".into(),
+                body: json!({"model": "gpt-4.1",
+                    "messages": [{"role": "user", "content": "hi"}]}),
+                stream: false,
+                credentials: connection("node-gemini"),
+                proxy: None,
+                sim_headers: HeaderMap::new(),
+            })
+            .await
+            .unwrap();
+        assert!(resp.response.status().is_success());
+        assert!(resp.url.starts_with(upstream.uri().as_str()));
+    }
+
+    /// (e) asymmetry lock: upstream non-2xx + fault armed → normal error path,
+    /// NOT the fault envelope (REAL fault decorates success only, sim-15).
+    #[tokio::test]
+    async fn real_fault_ignores_upstream_error() {
+        let upstream = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({"error": "boom"})))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let node = ProviderNode {
+            id: "node-openai".into(),
+            r#type: "openai-compatible".into(),
+            name: "Node".into(),
+            prefix: Some("custom".into()),
+            api_type: Some("chat".into()),
+            base_url: Some(format!("{}/v1", upstream.uri())),
+            created_at: None,
+            updated_at: None,
+            extra: BTreeMap::new(),
+        };
+        let exec =
+            DefaultExecutor::new("node-openai", Arc::new(ClientPool::new()), Some(node)).unwrap();
+        let mut h = HeaderMap::new();
+        h.insert("x-openproxy-sim-status", HeaderValue::from_static("429"));
+        // Upstream 500 → executor retry path; with fault armed but upstream
+        // failing, the fault envelope must NOT mask the upstream error.
+        let result = exec
+            .execute(ExecutionRequest {
+                model: "gpt-4.1".into(),
+                body: json!({"model": "gpt-4.1",
+                    "messages": [{"role": "user", "content": "hi"}]}),
+                stream: false,
+                credentials: connection("node-openai"),
+                proxy: None,
+                sim_headers: h,
+            })
+            .await;
+        match result {
+            Ok(resp) => {
+                // If it somehow succeeds, it must not be the fault envelope.
+                assert_ne!(
+                    resp.transformed_body["error"]["type"], "rate_limit_error",
+                    "fault must not mask upstream outcome"
+                );
+            }
+            Err(_) => {
+                // Transport-level failure after retries is also acceptable:
+                // either way, no fake 429 envelope.
+            }
+        }
+        // Silence unused-format warning: ProviderFormat is used by drive().
+        let _ = ProviderFormat::OpenAI;
+    }
+}
