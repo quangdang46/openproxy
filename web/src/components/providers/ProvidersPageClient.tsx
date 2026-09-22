@@ -115,6 +115,9 @@ export default function ProvidersPageClient() {
   const [filterFreeOnly, setFilterFreeOnly] = useState(false);
   const [statusFilter, setStatusFilter] = useState("all");
   const [proxyPools, setProxyPools] = useState([]);
+  // Simulation mock badges (bead sim-20): one /api/mock/status fetch,
+  // threaded to cards (same source as detail toggle + modal).
+  const [mockById, setMockById] = useState({});
   const notify = useNotificationStore();
   const searchQuery = useHeaderSearchStore((s) => s.query);
   const registerSearch = useHeaderSearchStore((s) => s.register);
@@ -132,10 +135,11 @@ export default function ProvidersPageClient() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [connectionsRes, nodesRes, proxyPoolsRes] = await Promise.all([
+        const [connectionsRes, nodesRes, proxyPoolsRes, mockRes] = await Promise.all([
           fetch("/api/providers"),
           fetch("/api/provider-nodes"),
           fetch("/api/proxy-pools?isActive=true"),
+          fetch("/api/mock/status", { cache: "no-store" }),
         ]);
         const connectionsData = await connectionsRes.json();
         const nodesData = await nodesRes.json();
@@ -145,6 +149,15 @@ export default function ProvidersPageClient() {
         if (nodesRes.ok) setProviderNodes(nodesData.nodes || []);
         if (proxyPoolsRes.ok)
           setProxyPools(proxyPoolsData.proxyPools || []);
+        if (mockRes.ok) {
+          const mockData = await mockRes.json().catch(() => ({}));
+          const map = {};
+          for (const [name, entry] of Object.entries(mockData?.providers || {})) {
+            if (entry?.effective === "mock") map[name] = true;
+          }
+          setMockById(map);
+          setForceAll(!!mockData?.forcedAll);
+        }
       } catch (error) {
         console.log("Error fetching data:", error);
       } finally {
@@ -548,9 +561,49 @@ export default function ProvidersPageClient() {
     anthropicCompatibleProviders.length > 0 ||
     pluginAndCookieSectionCount > 0;
 
+  const setForceAllMode = async (next: boolean) => {
+    setForceSaving(true);
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ devMockAll: next }),
+      });
+      if (res.ok) setForceAll(next);
+    } finally {
+      setForceSaving(false);
+    }
+  };
+
   return (
     <div className="flex min-w-0 flex-col gap-6 px-1 sm:px-0">
-      <div className="flex items-center justify-end">
+      {forceAll && (
+        <div className="flex items-center gap-2 rounded-lg border border-purple-500/30 bg-purple-500/10 px-3 py-2">
+          <span className="text-sm">🧪</span>
+          <p className="min-w-0 flex-1 text-xs text-purple-700 dark:text-purple-300">
+            Dev mock force is ON — all supported providers execute locally
+            (OPENPROXY_DEV_MOCK or settings).
+          </p>
+          <button
+            type="button"
+            disabled={forceSaving}
+            onClick={() => setForceAllMode(false)}
+            className="rounded-md border border-border px-2 py-1 text-xs hover:border-primary hover:text-primary"
+          >
+            Turn off
+          </button>
+        </div>
+      )}
+      <div className="flex items-center justify-end gap-2">
+        <label className="flex items-center gap-1.5 text-xs text-text-muted" title="Force all supported providers to mock (dev only). Same as OPENPROXY_DEV_MOCK=1.">
+          <input
+            type="checkbox"
+            checked={forceAll}
+            disabled={forceSaving}
+            onChange={(e) => setForceAllMode(e.target.checked)}
+          />
+          Dev: mock all
+        </label>
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value)}
@@ -620,6 +673,7 @@ export default function ProvidersPageClient() {
                 <ApiKeyProviderCard
                   key={info.id}
                   providerId={info.id}
+              mockMode={mockById[info.id]}
                   provider={info}
                   stats={getProviderStats(info.id, "apikey")}
                   authType="compatible"
@@ -668,6 +722,7 @@ export default function ProvidersPageClient() {
             <ProviderCard
               key={key}
               providerId={key}
+              mockMode={mockById[key]}
               provider={info}
               stats={getProviderStats(key, "oauth")}
               authType="oauth"
@@ -727,6 +782,7 @@ export default function ProvidersPageClient() {
               <ProviderCard
                 key={key}
                 providerId={key}
+              mockMode={mockById[key]}
                 provider={info}
                 stats={getProviderStats(key, freeAuthTypes)}
                 authType="free"
@@ -740,6 +796,7 @@ export default function ProvidersPageClient() {
             <ApiKeyProviderCard
               key={key}
               providerId={key}
+              mockMode={mockById[key]}
               provider={info}
               stats={getProviderStats(key, "apikey")}
               authType="apikey"
@@ -781,6 +838,7 @@ export default function ProvidersPageClient() {
             <ApiKeyProviderCard
               key={key}
               providerId={key}
+              mockMode={mockById[key]}
               provider={info}
               stats={getProviderStats(key, "apikey")}
               authType="apikey"
@@ -813,6 +871,7 @@ export default function ProvidersPageClient() {
               <ApiKeyProviderCard
                 key={key}
                 providerId={key}
+              mockMode={mockById[key]}
                 provider={info}
                 // Include legacy "apikey" rows created before cookie auth_type parity
                 stats={getProviderStats(key, ["cookie", "apikey"])}
@@ -914,7 +973,7 @@ export default function ProvidersPageClient() {
   );
 }
 
-function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
+function ProviderCard({ providerId, provider, stats, authType, onToggle, mockMode }: any) {
   const { connected, error, errorCode, errorTime, total, allDisabled } = stats;
   const isNoAuth = !!provider.noAuth;
 
@@ -986,6 +1045,13 @@ function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
                     )}
                   </>
                 )}
+                {mockMode && (
+                  <Badge variant="default" size="sm" title="Mock mode: simulated locally, no API key used">
+                    <span className="flex items-center gap-1 text-purple-600 dark:text-purple-400">
+                      🧪 mock
+                    </span>
+                  </Badge>
+                )}
                 {isFreeTierProvider(providerId) && (
                   <Badge variant="success" size="sm" dot>
                     <span className="flex items-center gap-1">
@@ -1046,7 +1112,8 @@ function ApiKeyProviderCard({
   stats,
   authType,
   onToggle,
-}) {
+  mockMode,
+}: any) {
   const { connected, error, errorCode, errorTime, total, allDisabled } = stats;
   const isCompatible = providerId.startsWith(OPENAI_COMPATIBLE_PREFIX);
   const isAnthropicCompatible = providerId.startsWith(
@@ -1139,6 +1206,20 @@ function ApiKeyProviderCard({
                       <span className="text-text-muted">{errorTime}</span>
                     )}
                   </>
+                )}
+                {mockMode && (
+                  <Badge variant="default" size="sm" title="Mock mode: simulated locally, no API key used">
+                    <span className="flex items-center gap-1 text-purple-600 dark:text-purple-400">
+                      🧪 mock
+                    </span>
+                  </Badge>
+                )}
+                {mockMode && (
+                  <Badge variant="default" size="sm" title="Mock mode: simulated locally, no API key used">
+                    <span className="flex items-center gap-1 text-purple-600 dark:text-purple-400">
+                      🧪 mock
+                    </span>
+                  </Badge>
                 )}
                 {isFreeTierProvider(providerId) && (
                   <Badge variant="success" size="sm" dot>

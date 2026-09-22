@@ -118,6 +118,9 @@ export default function ModelSelectModal({
   const [disabledMap, setDisabledMap] = useState<Record<string, string[]>>({});
   const [liveModelsByAlias, setLiveModelsByAlias] = useState<Record<string, LiveModel[]>>({});
   const [freeOnlyByAlias, setFreeOnlyByAlias] = useState<Record<string, boolean>>({});
+  // Simulation mock badges (bead sim-20): same /api/mock/status source as
+  // the provider page toggle (AGENTS.md consistency rule).
+  const [mockByAlias, setMockByAlias] = useState<Record<string, boolean>>({});
   const listRef = useRef<HTMLDivElement>(null);
 
   // Shared favorites (star) store — same cache the provider page uses.
@@ -148,6 +151,24 @@ export default function ModelSelectModal({
 
   useEffect(() => {
     if (isOpen) fetchCombos();
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    (async () => {
+      try {
+        const res = await fetch("/api/mock/status", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        const map: Record<string, boolean> = {};
+        for (const [name, entry] of Object.entries<any>(data?.providers || {})) {
+          if (entry?.effective === "mock") map[name] = true;
+        }
+        setMockByAlias(map);
+      } catch {
+        /* badges stay hidden on error */
+      }
+    })();
   }, [isOpen]);
 
   const fetchProviderNodes = async () => {
@@ -634,6 +655,14 @@ export default function ModelSelectModal({
               <span className="text-[10px] text-text-muted">
                 ({group.models.length})
               </span>
+              {mockByAlias[providerId] && (
+                <span
+                  className="text-[10px] font-medium text-purple-600 dark:text-purple-400"
+                  title="This provider is in Mock mode (simulated locally, no API key used)"
+                >
+                  🧪 mock
+                </span>
+              )}
             </div>
 
             <div className="flex flex-wrap gap-1.5">
