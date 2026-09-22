@@ -945,6 +945,40 @@ impl DefaultExecutor {
             }
             Err(e) => return Err(e.into()),
         };
+        // sim-14: response override (plan §5.1.1, content-level only).
+        let envelope = match crate::core::simulation::FaultInjector::response_override(&fault) {
+            Some(crate::core::simulation::OverrideAction::Malformed) => {
+                // Malformed JSON-looking value → provider-correct 400.
+                let spec400 = crate::core::simulation::FaultSpec {
+                    status: Some(400),
+                    ..Default::default()
+                };
+                let (_, body, _) = crate::core::simulation::FaultInjector::status_fault(
+                    format,
+                    &self.provider,
+                    &spec400,
+                )
+                .expect("400 always allowlisted");
+                return Ok(Self::sim_error_response(
+                    &self.provider,
+                    request,
+                    400,
+                    body,
+                    None,
+                ));
+            }
+            Some(crate::core::simulation::OverrideAction::Json(v)) if !request.stream => {
+                // Non-stream JSON object → verbatim body (caller owns schema).
+                return Ok(Self::sim_json_response(&self.provider, request, v));
+            }
+            Some(crate::core::simulation::OverrideAction::Json(v)) => {
+                Self::apply_stream_override(envelope, &v, format)
+            }
+            Some(crate::core::simulation::OverrideAction::Text(t)) => {
+                Self::apply_stream_text_override(envelope, &t, request.stream, format)
+            }
+            None => envelope,
+        };
         if request.stream {
             let body = match format {
                 crate::core::executor::ProviderFormat::Anthropic
@@ -956,10 +990,127 @@ impl DefaultExecutor {
                 }
                 _ => crate::core::simulation::sse_body_openai(&envelope),
             };
+            // sim-14: disconnect truncates AFTER framing (frame boundaries kept,
+            // terminals dropped) so the client sees a cut stream, never a hang.
+            let body = match crate::core::simulation::FaultInjector::truncate_sse(&body, &fault) {
+                Some(cut) => cut,
+                None => body,
+            };
             Ok(Self::sim_sse_response(&self.provider, request, body))
         } else {
             Ok(Self::sim_json_response(&self.provider, request, envelope))
         }
+    }
+
+    /// Apply a JSON-object override to a stream envelope (bead sim-14).
+    /// Extracts `content` (string) and/or `tool_calls`/`tool_use` payloads;
+    /// framing stays simulator-generated. Unknown shapes → content suppressed
+    /// (empty chunks + terminal), never raw passthrough.
+    fn apply_stream_override(
+        mut envelope: serde_json::Value,
+        v: &serde_json::Value,
+        format: crate::core::executor::ProviderFormat,
+    ) -> serde_json::Value {
+        use crate::core::executor::ProviderFormat::*;
+        // Plain-text content extraction (OpenAI/Gemini `content`, or raw string).
+        if let Some(text) = v
+            .get("content")
+            .and_then(|c| c.as_str())
+            .or_else(|| v.as_str())
+        {
+            envelope = Self::apply_stream_text_override(envelope, text, true, format);
+        }
+        // Tool payload extraction per format.
+        let tool_calls = match format {
+            Anthropic | AnthropicCompatible => v.get("tool_use").cloned(),
+            _ => v
+                .get("tool_calls")
+                .cloned()
+                .or_else(|| v.get("tool_use").cloned()),
+        };
+        if let Some(tc) = tool_calls {
+            if let Some(obj) = envelope.as_object_mut() {
+                match format {
+                    Anthropic | AnthropicCompatible => {
+                        obj.insert("sim_tool_calls".into(), tc);
+                        obj.insert("sim_is_tool".into(), serde_json::Value::from(true));
+                    }
+                    _ => {
+                        obj.insert("sim_tool_calls".into(), tc);
+                    }
+                }
+            }
+        }
+        envelope
+    }
+
+    /// Apply a plain-text override to an envelope (bead sim-14).
+    /// Replaces message content and suppresses tool echo (plan §5.1.1).
+    fn apply_stream_text_override(
+        mut envelope: serde_json::Value,
+        text: &str,
+        stream: bool,
+        format: crate::core::executor::ProviderFormat,
+    ) -> serde_json::Value {
+        use crate::core::executor::ProviderFormat::*;
+        // Strip any tool echo: text forces a text answer.
+        if let Some(msg) = envelope
+            .get_mut("choices")
+            .and_then(|c| c.get_mut(0))
+            .and_then(|c| c.get_mut("message"))
+        {
+            if let Some(obj) = msg.as_object_mut() {
+                obj.remove("tool_calls");
+                obj.insert(
+                    "content".into(),
+                    serde_json::Value::String(text.to_string()),
+                );
+            }
+            if let Some(ch) = envelope.get_mut("choices").and_then(|c| c.get_mut(0)) {
+                if let Some(obj) = ch.as_object_mut() {
+                    obj.insert(
+                        "finish_reason".into(),
+                        serde_json::Value::String("stop".to_string()),
+                    );
+                }
+            }
+        }
+        if let Some(content) = envelope.get_mut("content") {
+            // Anthropic non-stream shape: content[0].text.
+            if let Some(first) = content.get_mut(0) {
+                if let Some(obj) = first.as_object_mut() {
+                    obj.retain(|k, _| k == "type");
+                    obj.insert("type".into(), serde_json::Value::String("text".to_string()));
+                    obj.insert("text".into(), serde_json::Value::String(text.to_string()));
+                }
+            }
+            if let Some(stop) = envelope.get_mut("stop_reason") {
+                *stop = serde_json::Value::String("end_turn".to_string());
+            }
+        }
+        if let Some(parts) = envelope
+            .get_mut("candidates")
+            .and_then(|c| c.get_mut(0))
+            .and_then(|c| c.get_mut("content"))
+            .and_then(|c| c.get_mut("parts"))
+        {
+            *parts = serde_json::json!([{"text": text}]);
+        }
+        if stream {
+            // Re-chunk the overridden text; drop tool descriptors.
+            if let Some(obj) = envelope.as_object_mut() {
+                obj.remove("sim_tool_calls");
+                obj.remove("sim_is_tool");
+                let chunks: Vec<String> = crate::core::simulation::engine::split_words(text)
+                    .into_iter()
+                    .collect();
+                // Anthropic envelope reads sim_chunks too (same helper shape).
+                obj.insert("sim_chunks".into(), serde_json::Value::from(chunks));
+                obj.insert("sim_include_usage".into(), serde_json::Value::from(false));
+            }
+            let _ = format;
+        }
+        envelope
     }
 
     /// Build a synthetic non-stream JSON response (no network).
@@ -2252,6 +2403,155 @@ mod tests {
         assert_eq!(
             resp.transformed_body["choices"][0]["finish_reason"],
             "tool_calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn simulated_override_text_non_stream() {
+        // sim-14 §5.1.1: plain string -> message content (suppresses echo).
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert(
+                    "x-openproxy-sim-response",
+                    HeaderValue::from_static("custom answer"),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim override");
+        assert_eq!(
+            resp.transformed_body["choices"][0]["message"]["content"],
+            "custom answer"
+        );
+        // Envelope intact (ids, usage, finish_reason).
+        assert_eq!(resp.transformed_body["choices"][0]["finish_reason"], "stop");
+        assert!(
+            resp.transformed_body["usage"]["total_tokens"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+    }
+
+    #[tokio::test]
+    async fn simulated_override_json_verbatim_non_stream() {
+        // sim-14 §5.1.1: JSON object + non-stream → verbatim body.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert(
+                    "x-openproxy-sim-response",
+                    HeaderValue::from_static("{\"custom\":true}"),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim json override");
+        assert_eq!(resp.transformed_body, serde_json::json!({"custom": true}));
+    }
+
+    #[tokio::test]
+    async fn simulated_override_text_stream_chunks() {
+        // sim-14 §5.1.1: stream value replaces content payload ONLY — framing
+        // stays simulator-generated (chunks + [DONE], no raw injection).
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: true,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert(
+                    "x-openproxy-sim-response",
+                    HeaderValue::from_static("overridden stream"),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim stream override");
+        let text = resp.response.text().await;
+        assert!(text.contains("overridden"), "override payload chunked");
+        assert!(!text.contains("Echo:"), "echo suppressed");
+        assert!(text.ends_with("data: [DONE]\n\n"), "framing intact");
+    }
+
+    #[tokio::test]
+    async fn simulated_override_malformed_400() {
+        // sim-14 §5.1.1: malformed JSON-looking value → provider-correct 400.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert(
+                    "x-openproxy-sim-response",
+                    HeaderValue::from_static("{\"broken\": "),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim malformed renders");
+        assert_eq!(resp.response.status(), http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn simulated_disconnect_truncates_stream() {
+        // sim-14: disconnect-after-N keeps frame boundaries, drops [DONE],
+        // client sees a cut stream (no hang — body completes, just short).
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hello world one two three"}]}),
+            stream: true,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert(
+                    "x-openproxy-sim-disconnect-after-chunks",
+                    HeaderValue::from_static("1"),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim disconnect");
+        let text = resp.response.text().await;
+        assert!(!text.contains("[DONE]"), "terminal dropped");
+        assert!(text.contains("data:"), "partial frames kept");
+        // Full stream would be longer; truncated must be a strict prefix shape.
+        assert!(
+            text.matches("data:").count() < 8,
+            "cut short, got {}",
+            text.matches("data:").count()
         );
     }
 
