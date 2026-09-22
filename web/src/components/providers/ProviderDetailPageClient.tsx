@@ -8,6 +8,7 @@ import { useNotificationStore } from "@/store/notificationStore";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS, THINKING_CONFIG } from "@/shared/constants/providers";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { useAvailableModels } from "@/shared/models/availableModels";
+import SimulationModeToggle from "@/components/providers/SimulationModeToggle";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
@@ -1384,6 +1385,13 @@ export default function ProviderDetailPageClient() {
             <p className="text-text-muted">
               {connections.length} connection{connections.length === 1 ? "" : "s"}
             </p>
+            <div className="mt-2">
+              <SimulationModeToggle
+                providerId={providerId}
+                connectionId={connections.find((conn: any) => conn.isActive !== false)?.id || connections[0]?.id || null}
+                onChanged={() => fetchConnections()}
+              />
+            </div>
           </div>
         </div>
       </div>

@@ -2258,6 +2258,9 @@ struct UpdateSettingsRequest {
     provider_thinking: Option<Value>,
     /// Per-capability model pools for the capacity adapter.
     capacity_adapter: Option<Value>,
+    /// Force all supported providers into simulation mock mode (bead sim-20).
+    /// Typed Settings field (not extra); same effect as OPENPROXY_DEV_MOCK=1.
+    dev_mock_all: Option<bool>,
 }
 
 async fn update_settings_api(
@@ -2561,6 +2564,9 @@ async fn update_settings_api(
             }
             if let Some(v) = req.capacity_adapter {
                 db.settings.capacity_adapter = v;
+            }
+            if let Some(v) = req.dev_mock_all {
+                db.settings.dev_mock_all = v;
             }
             db.settings.normalize();
         })

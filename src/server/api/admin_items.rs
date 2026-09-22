@@ -133,6 +133,70 @@ struct UpdateProviderRequest {
     proxy_pool_id: Option<Value>,
 }
 
+impl UpdateProviderRequest {
+    /// True when the payload carries ONLY a simulation mode write.
+    fn is_mode_only(&self) -> bool {
+        self.mode.is_some()
+            && self.name.is_none()
+            && self.email.is_none()
+            && self.display_name.is_none()
+            && self.priority.is_none()
+            && self.global_priority.is_none()
+            && self.default_model.is_none()
+            && self.is_active.is_none()
+            && self.api_key.is_none()
+            && self.test_status.is_none()
+            && self.last_error.is_none()
+            && self.last_error_at.is_none()
+            && self.provider_specific_data.is_none()
+            && self.connection_proxy_enabled.is_none()
+            && self.connection_proxy_url.is_none()
+            && self.connection_no_proxy.is_none()
+            && self.proxy_pool_id.is_none()
+    }
+}
+
+/// Mode-only write for providers with no connection row (bead sim-20).
+/// `PUT /api/providers/<provider-name> {"mode": ...}` — the point of mock
+/// mode is testing without credentials, so no connection may exist yet.
+async fn write_simulation_mode_only(
+    state: &AppState,
+    provider: &str,
+    mode: Option<&str>,
+) -> Response {
+    let mode = mode.unwrap_or("").trim().to_ascii_lowercase();
+    if mode != "real" && mode != "mock" {
+        return bad_request("mode must be \"real\" or \"mock\"");
+    }
+    let want = if mode == "mock" {
+        crate::core::simulation::ProviderExecutionMode::Mock
+    } else {
+        crate::core::simulation::ProviderExecutionMode::Real
+    };
+    let provider = provider.to_string();
+    let provider_for_write = provider.clone();
+    let sqlite = state.db.sqlite.clone();
+    let write = tokio::task::spawn_blocking(move || {
+        sqlite.with_transaction(|conn| {
+            crate::core::simulation::persistence::set_provider_mode(
+                conn,
+                &provider_for_write,
+                want,
+            )
+        })
+    })
+    .await;
+    match write {
+        Ok(Ok(())) => Json(json!({
+            "provider": provider,
+            "simulation": simulation_mode_payload(state, &provider),
+        }))
+        .into_response(),
+        Ok(Err(error)) => internal_error(anyhow::anyhow!("mode write failed: {error}")),
+        Err(error) => internal_error(anyhow::anyhow!("spawn_blocking: {error}")),
+    }
+}
+
 async fn update_provider(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -147,9 +211,20 @@ async fn update_provider(
     let Some(existing) = snapshot
         .provider_connections
         .iter()
-        .find(|connection| connection.id == id)
+        .find(|connection| {
+            connection.id == id
+                || connection.provider == id
+                || connection.name.as_deref() == Some(id.as_str())
+        })
         .cloned()
     else {
+        // Mode-only writes don't need a connection row (the point of mock
+        // mode is testing without credentials): resolve the provider NAME
+        // directly when the payload carries only `mode`.
+        if req.is_mode_only() {
+            let provider = id.clone();
+            return write_simulation_mode_only(&state, &provider, req.mode.as_deref()).await;
+        }
         return not_found("Connection not found");
     };
 
