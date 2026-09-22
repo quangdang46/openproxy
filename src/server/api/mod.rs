@@ -18,6 +18,7 @@ pub mod mcp_server;
 pub mod media;
 pub mod media_providers;
 pub mod mitm_config;
+pub mod model_merge;
 pub mod models_alias;
 pub mod models_availability;
 pub mod models_custom;
@@ -2964,7 +2965,7 @@ fn bad_request_response(message: &str) -> Response {
 /// Providers that authenticate with a browser session cookie (stored in the
 /// `api_key` field). Must match `WEB_COOKIE_PROVIDERS` in the dashboard.
 fn is_web_cookie_provider(provider: &str) -> bool {
-    matches!(provider, "grok-web" | "perplexity-web")
+    matches!(provider, "grok-web" | "perplexity-web" | "deepseek-web")
 }
 
 fn normalize_create_provider_proxy(

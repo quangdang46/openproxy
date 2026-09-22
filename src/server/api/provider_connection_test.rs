@@ -746,6 +746,9 @@ async fn test_api_key_connection(
         "perplexity-web" => {
             test_perplexity_web_connection(state, connection, effective_proxy).await
         }
+        "deepseek-web" | "ds-web" => {
+            test_deepseek_web_connection(state, connection, effective_proxy).await
+        }
         "opencode-go" => {
             openai_chat_status_test(
                 state,
@@ -1035,6 +1038,64 @@ async fn test_perplexity_web_connection(
                 },
                 Ok(_) => invalid("Session expired — re-paste cookie"),
                 Err(error) => invalid(&error.to_string()),
+            }
+        }
+        Err(error) => invalid(&error),
+    }
+}
+
+async fn test_deepseek_web_connection(
+    state: &AppState,
+    connection: &ProviderConnection,
+    effective_proxy: &EffectiveProxy,
+) -> ConnectionTestResult {
+    // OmniRoute webProvidersA parity: unwrap JSON-wrapped userToken, then
+    // GET /api/v0/users/current with web-client headers.
+    let raw = connection.api_key.clone().unwrap_or_default();
+    let mut token = raw.trim().to_string();
+    if token.starts_with('{') {
+        if let Ok(Value::Object(map)) = serde_json::from_str::<Value>(&token) {
+            if let Some(v) = map.get("value").and_then(Value::as_str) {
+                token = v.to_string();
+            }
+        }
+    }
+    if token.is_empty() {
+        return invalid("Missing userToken — paste the value from DevTools → Application → Local Storage → chat.deepseek.com → userToken");
+    }
+    let request = PreparedRequest {
+        method: Method::GET,
+        url: "https://chat.deepseek.com/api/v0/users/current".to_string(),
+        headers: vec![
+            ("Authorization".to_string(), format!("Bearer {token}")),
+            ("Accept".to_string(), "*/*".to_string()),
+            ("Origin".to_string(), "https://chat.deepseek.com".to_string()),
+            ("Referer".to_string(), "https://chat.deepseek.com/".to_string()),
+            (
+                "User-Agent".to_string(),
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36".to_string(),
+            ),
+            ("X-Client-Bundle-Id".to_string(), "com.deepseek.chat".to_string()),
+            ("X-Client-Platform".to_string(), "web".to_string()),
+            ("X-Client-Version".to_string(), "2.0.0".to_string()),
+        ],
+        body: None,
+    };
+
+    match execute_request(state, &connection.provider, effective_proxy, request).await {
+        Ok(response) => {
+            let code = response.status().as_u16();
+            if code == 401 || code == 403 {
+                return invalid("Invalid userToken");
+            }
+            if !response.status().is_success() {
+                return invalid(&format!("DeepSeek returned HTTP {code}"));
+            }
+            ConnectionTestResult {
+                valid: true,
+                error: None,
+                refreshed: false,
+                new_tokens: None,
             }
         }
         Err(error) => invalid(&error),
