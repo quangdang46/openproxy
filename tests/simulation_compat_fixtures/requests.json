@@ -1,0 +1,85 @@
+{
+  "description": "Pinned request fixtures for the simulation compat contract (sim-18). Engine outputs for these inputs must keep the documented shapes; the oracle script replays the same inputs against LLMock and diffs schema shape.",
+  "requests": [
+    {
+      "id": "openai-text",
+      "format": "openai",
+      "model": "gpt-4o",
+      "stream": false,
+      "body": {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hello sim"}]
+      }
+    },
+    {
+      "id": "openai-tools",
+      "format": "openai",
+      "model": "gpt-4o",
+      "stream": false,
+      "body": {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "search"}],
+        "tools": [{"type": "function", "function": {"name": "web_search", "parameters": {}}}]
+      }
+    },
+    {
+      "id": "openai-stream",
+      "format": "openai",
+      "model": "gpt-4o",
+      "stream": true,
+      "body": {
+        "model": "gpt-4o",
+        "messages": [{"role": "user", "content": "hello world"}],
+        "stream_options": {"include_usage": true}
+      }
+    },
+    {
+      "id": "anthropic-text",
+      "format": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "stream": false,
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello sim"}]
+      }
+    },
+    {
+      "id": "anthropic-tools",
+      "format": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "stream": false,
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "search"}],
+        "tools": [{"name": "web_search", "description": "search", "input_schema": {"type": "object"}}]
+      }
+    },
+    {
+      "id": "anthropic-stream",
+      "format": "anthropic",
+      "model": "claude-sonnet-4-6",
+      "stream": true,
+      "body": {
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hello world"}]
+      }
+    },
+    {
+      "id": "gemini-text",
+      "format": "gemini",
+      "model": "gemini-2.5-flash",
+      "stream": false,
+      "body": {"contents": [{"parts": [{"text": "hello sim"}]}]}
+    },
+    {
+      "id": "gemini-stream",
+      "format": "gemini",
+      "model": "gemini-2.5-flash",
+      "stream": true,
+      "body": {"contents": [{"parts": [{"text": "hello world"}]}]}
+    }
+  ]
+}
