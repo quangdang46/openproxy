@@ -395,9 +395,15 @@ async fn chat_completions_impl(
     // Feature4: ResponseCache — consult before provider dispatch.
     // Only non-streaming requests are cached: the cache stores a single JSON
     // body, and a streaming client would misinterpret a cached non-SSE body.
+    // Simulation bypass (live-E2E fix): any x-openproxy-sim-* control header
+    // bypasses lookup AND store — fault/override/latency are test controls,
+    // and sim responses must never poison the cache for real requests.
     let is_streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    let sim_controlled = headers_map
+        .keys()
+        .any(|k| k == "x-openproxy-sim" || k.starts_with("x-openproxy-sim-"));
 
-    if !is_streaming {
+    if !is_streaming && !sim_controlled {
         if let Some((cached, ttl_remaining)) = state.response_cache.get_with_ttl(&body) {
             let mut resp = Response::new(Body::from(cached));
             resp.headers_mut().insert(
@@ -777,7 +783,8 @@ async fn chat_completions_impl(
     };
 
     // Feature4: populate the cache on a successful non-streaming miss.
-    if !is_streaming {
+    // Skipped for simulation-controlled requests (see lookup bypass above).
+    if !is_streaming && !sim_controlled {
         return cache_miss_response(&state, &body, cache_provider, response).await;
     }
     response
@@ -1355,8 +1362,42 @@ async fn forward_with_provider_fallback(
 
     loop {
         let snapshot = state.db.snapshot();
-        let Some(mut connection) =
-            select_connection(&snapshot, provider, model, &excluded, Some(registry))
+        // Simulation credentialless path (sim-16 dispatch completion): mock
+        // mode needs NO credentials by design. When selection finds nothing
+        // but the provider's effective mode is mock, a stub connection keeps
+        // the loop on the normal dispatch tail — the executor mock branch
+        // never reads credentials (audit-locked by test).
+        // Single-shot: once the stub id is excluded (a stub attempt failed),
+        // never recreate it, or error-loop iterations would spin forever.
+        let stub: Option<ProviderConnection> = if !excluded
+            .iter()
+            .any(|id| id == &format!("sim-stub-{provider}"))
+            && select_connection(&snapshot, provider, model, &excluded, Some(registry)).is_none()
+        {
+            let settings_force = snapshot.settings.dev_mock_all;
+            let is_mock = state.db.sqlite.with_conn(|conn| {
+                Ok::<_, rusqlite::Error>(crate::core::simulation::status_for(
+                    conn,
+                    provider,
+                    settings_force,
+                ))
+            });
+            match is_mock {
+                Ok(s) if s.effective == crate::core::simulation::ProviderExecutionMode::Mock => {
+                    let mut stub = ProviderConnection::default();
+                    stub.id = format!("sim-stub-{provider}");
+                    stub.provider = provider.to_string();
+                    stub.auth_type = "apiKey".to_string();
+                    stub.is_active = Some(true);
+                    Some(stub)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Some(mut connection) = stub
+            .or_else(|| select_connection(&snapshot, provider, model, &excluded, Some(registry)))
         else {
             let retry_after = earliest_retry_after(&snapshot, provider, model, &excluded);
             if let Some(mut error) = last_error {
