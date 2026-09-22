@@ -835,15 +835,85 @@ impl DefaultExecutor {
     /// returns an explicit error so a miswire fails loudly, never silently.
     async fn execute_simulated(
         &self,
-        _request: &ExecutionRequest,
+        request: &ExecutionRequest,
     ) -> Result<ExecutionResponse, ExecutorError> {
-        // Loud miswire signal WITHOUT panicking the worker: the engine arrives
-        // in beads sim-06+. Reachable only when simulation was explicitly
-        // activated (env force or sim header), never by default.
-        Err(ExecutorError::SimulationUnsupported {
-            provider: self.provider.clone(),
-            format: self.config.format.clone(),
-        })
+        use crate::core::simulation::{SimContext, SimulationEngine};
+        // sim-07: OpenAI + OpenAI-compatible non-stream AND stream.
+        // Other formats fall through to loud explicit error (sim-09/sim-10).
+        let is_openai = self.provider == "openai"
+            || self.config.format == "openai"
+            || self.config.format == "openai-compatible";
+        if !is_openai {
+            return Err(ExecutorError::SimulationUnsupported {
+                provider: self.provider.clone(),
+                format: self.config.format.clone(),
+            });
+        }
+        let engine = SimulationEngine::mvp();
+        let ctx = SimContext {
+            provider: &self.provider,
+            model: &request.model,
+            body: &request.body,
+            stream: request.stream,
+        };
+        let format = if self.config.format == "openai-compatible" {
+            crate::core::executor::ProviderFormat::OpenAICompatible
+        } else {
+            crate::core::executor::ProviderFormat::OpenAI
+        };
+        let envelope = engine.execute(format, &self.provider, &ctx).await?;
+        if request.stream {
+            let body = crate::core::simulation::sse_body_openai(&envelope);
+            Ok(Self::sim_sse_response(request, body))
+        } else {
+            Ok(Self::sim_json_response(request, envelope))
+        }
+    }
+
+    /// Build a synthetic non-stream JSON response (no network).
+    fn sim_json_response(request: &ExecutionRequest, body: serde_json::Value) -> ExecutionResponse {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let bytes = serde_json::to_vec(&body).unwrap_or_default();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let http_resp = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(reqwest::Body::from(bytes))
+            .unwrap();
+        ExecutionResponse {
+            response: UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)),
+            url: format!("sim://{}/{}", "openai", request.model),
+            headers,
+            transformed_body: body,
+            transport: TransportKind::Reqwest,
+        }
+    }
+
+    /// Build a synthetic SSE response (no network).
+    fn sim_sse_response(request: &ExecutionRequest, body: String) -> ExecutionResponse {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        let http_resp = http::Response::builder()
+            .status(http::StatusCode::OK)
+            .header("content-type", "text/event-stream")
+            .header("cache-control", "no-cache")
+            .body(reqwest::Body::from(body.clone()))
+            .unwrap();
+        ExecutionResponse {
+            response: UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)),
+            url: format!("sim://{}/{}", "openai", request.model),
+            headers,
+            transformed_body: serde_json::json!({"sim_sse": true, "bytes": body.len()}),
+            transport: TransportKind::Reqwest,
+        }
     }
 
     /// Full endpoint URL already (path present); optional query is ignored for matching.
@@ -2018,6 +2088,67 @@ mod tests {
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
         assert_eq!(DefaultExecutor::simulation_active(&req), env_force);
+    }
+
+    #[tokio::test]
+    async fn simulated_execute_non_stream_e2e() {
+        // sim-07: execute() with sim header takes the MOCK branch end-to-end
+        // (no network, no credentials) and returns a well-formed envelope.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "ping"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim execute");
+        assert!(resp.url.starts_with("sim://"));
+        assert_eq!(resp.transformed_body["object"], "chat.completion");
+        assert_eq!(
+            resp.transformed_body["choices"][0]["message"]["content"],
+            "Echo: ping"
+        );
+        assert_eq!(resp.response.status(), http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn simulated_execute_stream_e2e() {
+        // sim-07: stream=true returns SSE body with frames + [DONE].
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi there"}],
+                "stream_options": {"include_usage": true}}),
+            stream: true,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim stream execute");
+        assert!(resp.url.starts_with("sim://"));
+        let text = resp.response.text().await;
+        assert!(text.contains("chat.completion.chunk"), "sse frames");
+        assert!(text.contains("usage"), "usage chunk");
+        assert!(
+            text.ends_with(
+                "data: [DONE]
+
+"
+            ),
+            "DONE terminal"
+        );
     }
 
     #[test]
