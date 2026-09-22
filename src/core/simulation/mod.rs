@@ -8,6 +8,7 @@
 pub mod anthropic;
 pub mod engine;
 pub mod error;
+pub mod fault;
 pub mod gemini;
 pub mod mode;
 pub mod models;
@@ -18,6 +19,7 @@ pub mod resolver;
 pub use anthropic::sse_body as sse_body_anthropic;
 pub use engine::{SimContext, SimulationEngine};
 pub use error::SimulationError;
+pub use fault::{FaultInjector, FaultSpec};
 pub use gemini::sse_body as sse_body_gemini;
 pub use mode::{EffectiveReason, ProviderExecutionMode, ResolvedMode};
 pub use openai::sse_body as sse_body_openai;

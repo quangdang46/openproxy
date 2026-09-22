@@ -38,8 +38,7 @@ impl super::engine::ProviderSimulator for GeminiSimulator {
 
 /// Model check via shared registry (bead sim-11).
 fn is_known_model(model: &str) -> bool {
-    // NOTE: format-agnostic here; per-format dispatch passes the
-    // right key via validate() below (see sim_validate_format).
+    // Single-format file: the key always matches this simulator.
     super::models::is_known(ProviderFormat::Gemini, model)
 }
 
