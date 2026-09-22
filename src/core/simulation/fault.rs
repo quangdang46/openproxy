@@ -125,6 +125,8 @@ impl FaultInjector {
     /// stream and surfaces an error instead of hanging. Returns `None` when
     /// no disconnect armed (caller passes the body through untouched).
     /// `None` when N == 0 is treated as "cut everything" (empty body).
+    /// N counts ALL data frames including the role-establishing first chunk
+    /// (OpenAI convention), so N=1 keeps only the role frame.
     pub fn truncate_sse(body: &str, spec: &FaultSpec) -> Option<String> {
         let n = spec.disconnect_after_chunks?;
         // Hard terminals that signal clean completion — a truncated stream must

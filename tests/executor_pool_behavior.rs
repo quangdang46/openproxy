@@ -1968,3 +1968,134 @@ fn media_base_url_resolves_from_live_map() {
         );
     }
 }
+
+/// sim-15: REAL branch + status fault → forced 429 envelope on a 200 upstream.
+/// Architecture proof that FaultInjector is post-execution middleware, not
+/// mock-only. Upstream returns 200; the injector overrides with 429 +
+/// Retry-After WITHOUT leaking sim headers upstream (wiremock expects exactly
+/// 1 request with no x-openproxy-sim-* headers — a leak would still match
+/// here, so leak-freedom is asserted by construction: send_one only sees
+/// `headers` built from credentials+config, never request.sim_headers).
+#[tokio::test]
+async fn real_branch_status_fault_overrides_success() {
+    use reqwest::header::HeaderValue;
+    let upstream = MockServer::start().await;
+    let request_body = json!({
+        "model": "gpt-4.1",
+        "stream": false,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .and(header("authorization", "Bearer sk-test"))
+        .and(body_json(request_body.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let provider_node = ProviderNode {
+        id: "node-openai".into(),
+        r#type: "openai-compatible".into(),
+        name: "Node".into(),
+        prefix: Some("custom".into()),
+        api_type: Some("chat".into()),
+        base_url: Some(format!("{}/v1", upstream.uri())),
+        created_at: None,
+        updated_at: None,
+        extra: BTreeMap::new(),
+    };
+
+    let executor = DefaultExecutor::new(
+        "node-openai",
+        Arc::new(ClientPool::new()),
+        Some(provider_node),
+    )
+    .expect("compatible executor");
+
+    let mut sim_headers = HeaderMap::new();
+    sim_headers.insert("x-openproxy-sim-status", HeaderValue::from_static("429"));
+
+    let response = executor
+        .execute(ExecutionRequest {
+            model: "gpt-4.1".into(),
+            body: request_body.clone(),
+            stream: false,
+            credentials: connection("node-openai"),
+            proxy: None,
+            sim_headers,
+        })
+        .await
+        .expect("execute with fault");
+
+    // Upstream said 200, but the fault middleware forced 429.
+    assert_eq!(
+        response.response.status(),
+        reqwest::StatusCode::TOO_MANY_REQUESTS
+    );
+    assert_eq!(
+        response.transformed_body["error"]["type"],
+        "rate_limit_error"
+    );
+    assert!(response.headers.contains_key(reqwest::header::RETRY_AFTER));
+    assert!(response
+        .response
+        .headers()
+        .contains_key(reqwest::header::RETRY_AFTER));
+}
+
+/// sim-15: REAL branch without fault passes upstream 200 through untouched.
+#[tokio::test]
+async fn real_branch_no_fault_passthrough() {
+    let upstream = MockServer::start().await;
+    let request_body = json!({
+        "model": "gpt-4.1",
+        "stream": false,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let provider_node = ProviderNode {
+        id: "node-openai".into(),
+        r#type: "openai-compatible".into(),
+        name: "Node".into(),
+        prefix: Some("custom".into()),
+        api_type: Some("chat".into()),
+        base_url: Some(format!("{}/v1", upstream.uri())),
+        created_at: None,
+        updated_at: None,
+        extra: BTreeMap::new(),
+    };
+
+    let executor = DefaultExecutor::new(
+        "node-openai",
+        Arc::new(ClientPool::new()),
+        Some(provider_node),
+    )
+    .expect("compatible executor");
+
+    let response = executor
+        .execute(ExecutionRequest {
+            model: "gpt-4.1".into(),
+            body: request_body.clone(),
+            stream: false,
+            credentials: connection("node-openai"),
+            proxy: None,
+            sim_headers: HeaderMap::new(),
+        })
+        .await
+        .expect("execute clean");
+
+    assert_eq!(response.response.status(), reqwest::StatusCode::OK);
+    // transformed_body is the transformed REQUEST (existing REAL-path
+    // behavior), not the upstream JSON — assert url + headers instead.
+    assert!(response.url.starts_with(upstream.uri().as_str()));
+    assert!(!response.headers.contains_key(reqwest::header::RETRY_AFTER));
+}
