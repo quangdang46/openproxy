@@ -488,10 +488,11 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             "mimo-free",
             ProviderConfig::openai("https://mimo.kiro.dev/v1/chat/completions"),
         ),
-        (
-            "xiaomi-tokenplan",
-            ProviderConfig::openai("https://tokenplan.xiaomi.com/v1/chat/completions"),
-        ),
+        // NOTE: no second "xiaomi-tokenplan" entry — BTreeMap::from keeps the
+        // LAST duplicate, which previously shadowed the sgp region URL with
+        // tokenplan.xiaomi.com. Region routing lives in xiaomi_tokenplan_url
+        // (registry/xiaomi-tokenplan.js transport.regions); the map entry is
+        // only a fallback and must stay the sgp default (:359).
     ])
 });
 
@@ -2198,5 +2199,35 @@ mod tests {
             provider_config_base_url("codebuddy-cn"),
             Some("https://copilot.tencent.com/v2/chat/completions".to_string())
         );
+    }
+
+    #[test]
+    fn xiaomi_tokenplan_region_routing_matches_js_registry() {
+        // 9router registry/xiaomi-tokenplan.js transport.regions — the map
+        // entry must stay the sgp default (a duplicate key once shadowed it
+        // with tokenplan.xiaomi.com); build_url resolves regions per-connection.
+        assert_eq!(
+            provider_config_base_url("xiaomi-tokenplan"),
+            Some("https://token-plan-sgp.xiaomimimo.com/v1/chat/completions".to_string())
+        );
+        let executor =
+            DefaultExecutor::new("xiaomi-tokenplan", Arc::new(ClientPool::new()), None).unwrap();
+        for (region, host) in [
+            ("sgp", "token-plan-sgp.xiaomimimo.com"),
+            ("cn", "token-plan-cn.xiaomimimo.com"),
+            ("ams", "token-plan-ams.xiaomimimo.com"),
+        ] {
+            let mut psd = std::collections::BTreeMap::new();
+            psd.insert("region".to_string(), serde_json::json!(region));
+            let creds = ProviderConnection {
+                provider_specific_data: psd,
+                ..ProviderConnection::default()
+            };
+            let url = executor.build_url("mimo-v2.5-pro", true, &creds).unwrap();
+            assert!(
+                url.contains(host),
+                "region {region} must route to {host}, got {url}"
+            );
+        }
     }
 }
