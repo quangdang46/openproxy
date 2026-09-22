@@ -678,6 +678,13 @@ pub enum ExecutorError {
         provider: String,
         format: String,
     },
+    /// Provider-correct simulated rejection (bead sim-08): renders as the
+    /// exact HTTP status + envelope, never masked as 500.
+    SimulationValidation {
+        status: http::StatusCode,
+        body: serde_json::Value,
+        retry_after: Option<u64>,
+    },
 }
 impl ExecutorError {
     /// Map an executor failure into a ComboAttemptError preserving the raw
@@ -716,6 +723,19 @@ impl From<crate::core::simulation::SimulationError> for ExecutorError {
             }
             crate::core::simulation::SimulationError::Internal(detail) => {
                 Self::MaxRetriesExhausted(detail)
+            }
+            crate::core::simulation::SimulationError::Validation {
+                status,
+                body,
+                retry_after,
+            } => {
+                let code =
+                    http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::BAD_REQUEST);
+                Self::SimulationValidation {
+                    status: code,
+                    body,
+                    retry_after,
+                }
             }
         }
     }
@@ -861,7 +881,17 @@ impl DefaultExecutor {
         } else {
             crate::core::executor::ProviderFormat::OpenAI
         };
-        let envelope = engine.execute(format, &self.provider, &ctx).await?;
+        let envelope = match engine.execute(format, &self.provider, &ctx).await {
+            Ok(env) => env,
+            Err(crate::core::simulation::SimulationError::Validation {
+                status,
+                body,
+                retry_after,
+            }) => {
+                return Ok(Self::sim_error_response(request, status, body, retry_after));
+            }
+            Err(e) => return Err(e.into()),
+        };
         if request.stream {
             let body = crate::core::simulation::sse_body_openai(&envelope);
             Ok(Self::sim_sse_response(request, body))
@@ -881,6 +911,41 @@ impl DefaultExecutor {
         );
         let http_resp = http::Response::builder()
             .status(http::StatusCode::OK)
+            .header("content-type", "application/json")
+            .body(reqwest::Body::from(bytes))
+            .unwrap();
+        ExecutionResponse {
+            response: UpstreamResponse::Reqwest(reqwest::Response::from(http_resp)),
+            url: format!("sim://{}/{}", "openai", request.model),
+            headers,
+            transformed_body: body,
+            transport: TransportKind::Reqwest,
+        }
+    }
+
+    /// Build a synthetic provider-correct error response (no network).
+    /// Renders the exact status + envelope; sets Retry-After when present.
+    fn sim_error_response(
+        request: &ExecutionRequest,
+        status: u16,
+        body: serde_json::Value,
+        retry_after: Option<u64>,
+    ) -> ExecutionResponse {
+        use reqwest::header::{HeaderMap, HeaderValue};
+        let bytes = serde_json::to_vec(&body).unwrap_or_default();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        if let Some(secs) = retry_after {
+            if let Ok(v) = HeaderValue::from_str(&secs.to_string()) {
+                headers.insert(reqwest::header::RETRY_AFTER, v);
+            }
+        }
+        let code = http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::BAD_REQUEST);
+        let http_resp = http::Response::builder()
+            .status(code)
             .header("content-type", "application/json")
             .body(reqwest::Body::from(bytes))
             .unwrap();
@@ -2088,6 +2153,54 @@ mod tests {
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
             .unwrap_or(false);
         assert_eq!(DefaultExecutor::simulation_active(&req), env_force);
+    }
+
+    #[tokio::test]
+    async fn simulated_tool_echo_e2e() {
+        // sim-08: tools in body -> tool_calls + finish_reason tool_calls.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "search"}],
+                "tools": [{"type": "function",
+                    "function": {"name": "web_search", "parameters": {}}}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim tool execute");
+        assert_eq!(
+            resp.transformed_body["choices"][0]["finish_reason"],
+            "tool_calls"
+        );
+    }
+
+    #[tokio::test]
+    async fn simulated_unknown_model_renders_404() {
+        // sim-08: Validation renders as HTTP 404 + envelope, not Err/500.
+        let req = ExecutionRequest {
+            model: "gpt-999".into(),
+            body: serde_json::json!({"model": "gpt-999",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim 404 renders");
+        assert_eq!(resp.response.status(), http::StatusCode::NOT_FOUND);
+        assert_eq!(resp.transformed_body["error"]["code"], "model_not_found");
     }
 
     #[tokio::test]
