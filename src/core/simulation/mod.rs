@@ -4,11 +4,14 @@
 //! NOTE: `Replay` / `Hybrid` variants arrive in a separate Phase-2 epic —
 //! do NOT add variants here.
 
+pub mod engine;
 pub mod error;
 pub mod mode;
+pub mod openai;
 pub mod persistence;
 pub mod resolver;
 
+pub use engine::{SimContext, SimulationEngine};
 pub use error::SimulationError;
 pub use mode::{EffectiveReason, ProviderExecutionMode, ResolvedMode};
 pub use persistence::env_force_all;
