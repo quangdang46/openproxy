@@ -1440,7 +1440,7 @@ async fn forward_with_provider_fallback(
             PerplexityWebExecutor, ProviderExecutionRequest, ProviderExecutor,
             QoderExecutionRequest, QoderExecutor, QwenExecutionRequest, QwenExecutor,
             TraeExecutionRequest, TraeExecutor, VertexExecutionRequest, VertexExecutor,
-            WindsurfExecutionRequest, WindsurfExecutor,
+            WindsurfExecutionRequest, WindsurfExecutor, XaiExecutionRequest, XaiExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/") || provider == "codex";
@@ -1640,6 +1640,42 @@ async fn forward_with_provider_fallback(
                     .map_err(|e| ComboAttemptError {
                         status: 500,
                         message: format!("Qwen execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "xai" {
+                // Dedicated XaiExecutor (was falling through to DefaultExecutor).
+                // Registry extras (xai.js): responsesUrl + image/video/search
+                // configs live in provider_catalog/media layers; the chat path
+                // only needs the wired executor with its grok-cli UA + Bearer.
+                let executor =
+                    XaiExecutor::new(state.client_pool.clone(), provider_node).map_err(|e| {
+                        ComboAttemptError {
+                            status: 500,
+                            message: format!("Xai executor creation failed: {:?}", e),
+                            retry_after: None,
+                            upstream_body: None,
+                        }
+                    })?;
+                let result = executor
+                    .execute_request(XaiExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Xai execution failed: {:?}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
