@@ -11,4 +11,5 @@ pub mod resolver;
 
 pub use error::SimulationError;
 pub use mode::{EffectiveReason, ProviderExecutionMode, ResolvedMode};
+pub use persistence::env_force_all;
 pub use resolver::{is_format_supported, resolve_effective_mode, ResolveInput, SIM_HEADER};

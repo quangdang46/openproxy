@@ -14,6 +14,7 @@ use openproxy::core::executor::{
 };
 use openproxy::core::proxy::{normalize, resolve_proxy_target, ProxyTarget};
 use openproxy::types::{AppDb, ProviderConnection, ProviderNode, ProxyPool, Settings};
+use reqwest::header::HeaderMap;
 use serde_json::json;
 use tokio::sync::oneshot;
 use wiremock::matchers::{body_json, header, method, path};
@@ -965,6 +966,7 @@ async fn default_executor_execute_posts_expected_request() {
             stream: true,
             credentials: connection("node-openai"),
             proxy: None,
+            sim_headers: HeaderMap::new(),
         })
         .await
         .expect("execute request");
@@ -1030,6 +1032,7 @@ async fn default_executor_execute_uses_reqwest_when_proxy_present() {
                 label: None,
                 rtt_ms: None,
             }),
+            sim_headers: HeaderMap::new(),
         })
         .await
         .expect("execute request");
@@ -1086,6 +1089,7 @@ async fn default_executor_execute_uses_reqwest_for_responses_api() {
             stream: false,
             credentials,
             proxy: None,
+            sim_headers: HeaderMap::new(),
         })
         .await
         .expect("execute request");
@@ -1602,6 +1606,7 @@ async fn default_executor_reuses_hyper_connection_for_sequential_requests() {
                 stream: true,
                 credentials: connection("node-openai"),
                 proxy: None,
+                sim_headers: HeaderMap::new(),
             })
             .await
             .expect("execute request");

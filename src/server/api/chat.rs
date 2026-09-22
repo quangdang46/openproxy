@@ -1270,11 +1270,28 @@ async fn execute_single_model(
         plan.strip_list,
     );
 
+    // Simulation control headers (bead sim-04): extract x-openproxy-sim-* from
+    // the incoming client headers. Never forwarded upstream (stripped at send).
+    let mut sim_headers = HeaderMap::new();
+    if let Some(ch) = client_headers {
+        for (k, v) in ch {
+            let kl = k.to_ascii_lowercase();
+            if kl == "x-openproxy-sim" || kl.starts_with("x-openproxy-sim-") {
+                if let (Ok(name), Ok(val)) = (
+                    kl.parse::<reqwest::header::HeaderName>(),
+                    v.parse::<reqwest::header::HeaderValue>(),
+                ) {
+                    sim_headers.insert(name, val);
+                }
+            }
+        }
+    }
     forward_with_provider_fallback(
         state,
         &plan.provider,
         &dispatch_model,
         body,
+        sim_headers,
         api_key,
         endpoint,
         plan,
@@ -1289,6 +1306,7 @@ async fn forward_with_provider_fallback(
     provider: &str,
     model: &str,
     mut request_body: Value,
+    sim_headers: HeaderMap,
     api_key: Option<&str>,
     endpoint: Option<&'static str>,
     plan: &RequestPlan,
@@ -2262,6 +2280,7 @@ async fn forward_with_provider_fallback(
                         stream,
                         credentials: connection.clone(),
                         proxy,
+                        sim_headers: sim_headers.clone(),
                     })
                     .await
                     .map_err(|err| err.into_combo_attempt_error())?;

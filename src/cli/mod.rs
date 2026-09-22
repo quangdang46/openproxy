@@ -1750,6 +1750,7 @@ async fn run_direct_route(
                 stream: stream_flag,
                 credentials: connection.clone(),
                 proxy,
+                sim_headers: reqwest::header::HeaderMap::new(),
             })
             .await;
 
@@ -1917,6 +1918,7 @@ async fn run_combo_route(
                 stream: stream_flag,
                 credentials: connection.clone(),
                 proxy,
+                sim_headers: reqwest::header::HeaderMap::new(),
             })
             .await;
 

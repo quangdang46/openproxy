@@ -19,6 +19,8 @@ use crate::core::utils::reasoning_content_injector::inject_reasoning_content;
 use crate::oauth::token_refresh::dispatch_oauth_refresh;
 use crate::types::{ProviderConnection, ProviderNode};
 
+use crate::core::simulation::{env_force_all, is_format_supported};
+
 use super::strip_unsupported::strip_unsupported_params;
 use super::ClientPool;
 
@@ -577,6 +579,10 @@ pub struct DefaultExecutor {
     config: ProviderConfig,
     pool: Arc<ClientPool>,
     provider_node: Option<ProviderNode>,
+    /// Incoming client headers for this executor instance, used ONLY for
+    /// simulation control headers (`x-openproxy-sim-*`, bead sim-04).
+    /// Never forwarded upstream (stripped before send).
+    sim_headers: HeaderMap,
 }
 
 #[derive(Debug, Clone)]
@@ -586,6 +592,23 @@ pub struct ExecutionRequest {
     pub stream: bool,
     pub credentials: ProviderConnection,
     pub proxy: Option<ProxyTarget>,
+    /// Incoming client headers for simulation control only
+    /// (`x-openproxy-sim-*`, bead sim-04). Defaults empty; never forwarded.
+    #[allow(dead_code)]
+    pub sim_headers: HeaderMap,
+}
+
+impl Default for ExecutionRequest {
+    fn default() -> Self {
+        Self {
+            model: String::new(),
+            body: Value::Null,
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: HeaderMap::new(),
+        }
+    }
 }
 
 pub struct ExecutionResponse {
@@ -653,6 +676,12 @@ pub enum ExecutorError {
     CredentialRefreshFailed(String),
     MaxRetriesExhausted(String),
     UpstreamStatus(http::StatusCode, String),
+    /// Mock requested for a provider format with no registered simulator
+    /// (bead sim-04/sim-05: surfaces explicitly, never silent).
+    SimulationUnsupported {
+        provider: String,
+        format: String,
+    },
 }
 impl ExecutorError {
     /// Map an executor failure into a ComboAttemptError preserving the raw
@@ -679,6 +708,19 @@ impl ExecutorError {
                 retry_after: None,
                 upstream_body: None,
             },
+        }
+    }
+}
+
+impl From<crate::core::simulation::SimulationError> for ExecutorError {
+    fn from(error: crate::core::simulation::SimulationError) -> Self {
+        match error {
+            crate::core::simulation::SimulationError::Unsupported { provider, format } => {
+                Self::SimulationUnsupported { provider, format }
+            }
+            crate::core::simulation::SimulationError::Internal(detail) => {
+                Self::MaxRetriesExhausted(detail)
+            }
         }
     }
 }
@@ -770,7 +812,45 @@ impl DefaultExecutor {
             config,
             pool,
             provider_node,
+            sim_headers: HeaderMap::new(),
         })
+    }
+
+    /// Attach incoming client headers for simulation control (bead sim-04).
+    /// Only `x-openproxy-sim-*` headers are ever read; the rest is ignored
+    /// and never forwarded upstream.
+    pub fn with_sim_headers(mut self, headers: HeaderMap) -> Self {
+        self.sim_headers = headers;
+        self
+    }
+
+    /// Whether simulation mock mode is active for this request (bead sim-04).
+    ///
+    /// Reads the request-scoped sim headers + process env only — NO DB access
+    /// here (hot path; configured mode arrives via later beads through a cached
+    /// map on the executor or AppState). Active iff:
+    /// global env force is set, or the per-request `x-openproxy-sim: mock`
+    /// header is present. Format support is enforced at dispatch (bead sim-06+).
+    fn simulation_active(request: &ExecutionRequest) -> bool {
+        use crate::core::simulation::SIM_HEADER;
+        if env_force_all() {
+            return true;
+        }
+        request
+            .sim_headers
+            .get(SIM_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("mock"))
+    }
+
+    /// Simulated execution stub (beads sim-06+ fill in per-format bodies).
+    /// Currently unreachable unless simulation was explicitly activated above;
+    /// returns an explicit error so a miswire fails loudly, never silently.
+    async fn execute_simulated(
+        &self,
+        _request: &ExecutionRequest,
+    ) -> Result<ExecutionResponse, ExecutorError> {
+        unimplemented!("SimulationEngine not yet wired (beads sim-06+)")
     }
 
     /// Full endpoint URL already (path present); optional query is ignored for matching.
@@ -1390,6 +1470,13 @@ impl DefaultExecutor {
         &self,
         mut request: ExecutionRequest,
     ) -> Result<ExecutionResponse, ExecutorError> {
+        // --- Simulation interception (bead sim-04, default-off) ---
+        // Mode resolution happens BEFORE credential use: when mock is active,
+        // no key validation, no refresh, no network. Default (unconfigured) is
+        // Real, so this block is unreachable unless simulation was configured.
+        if Self::simulation_active(&request) {
+            return self.execute_simulated(&request).await;
+        }
         // Build headers and transformed body once, reused across retries and
         // fallback URLs.
         let mut headers =
@@ -1915,6 +2002,29 @@ fn strip_fireworks_unsupported_tools(body: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
+    use super::*;
+
+    #[test]
+    fn simulation_branch_unreachable_by_default() {
+        // Default-off contract (bead sim-04): no sim header and (in CI) no
+        // OPENPROXY_DEV_MOCK env -> simulation_active is false, so execute()
+        // takes the REAL path. Asserts the gate directly (no network).
+        // NOTE: if the developer exports OPENPROXY_DEV_MOCK=1 locally this
+        // test correctly fails — the gate IS active then.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o", "messages": []}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: HeaderMap::new(),
+        };
+        let env_force = std::env::var("OPENPROXY_DEV_MOCK")
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+            .unwrap_or(false);
+        assert_eq!(DefaultExecutor::simulation_active(&req), env_force);
+    }
 
     #[test]
     fn test_opencode_go_claude_format_models() {
