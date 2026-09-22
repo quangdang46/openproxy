@@ -28,6 +28,10 @@ const OPENCODE_UA: &str = "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime
 /// (9router PR #4132 `BASE62_CHARS`).
 const BASE62_CHARS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
+/// Max lengths (9router opencode.js:18-19).
+const MAX_SESSION_LENGTH: usize = 256;
+const MAX_TOOL_NAME_LEN: usize = 128;
+
 /// File-search tool quartet the Zen free-tier gate fingerprints as proof of
 /// an agentic OpenCode client (9router PR #4132, verified live 2026-09-18):
 /// 0-3 of {bash, glob, grep, read} present → 403 FreeTierError, regardless
@@ -100,6 +104,246 @@ fn resolve_gate_session(downstream_session: Option<&str>, resolved_seed: &str) -
         }
     }
     translate_opencode_session(resolved_seed)
+}
+
+/// A canonical OpenCode request id: `msg_` + 12 lowercase hex + 14 base62
+/// (9router `OPENCODE_REQUEST_RE`, `/^msg_[0-9a-f]{12}[0-9A-Za-z]{14}$/`).
+fn is_native_opencode_request(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("msg_") else {
+        return false;
+    };
+    if rest.len() != 12 + 14 {
+        return false;
+    }
+    let (hex_part, b62_part) = rest.split_at(12);
+    hex_part
+        .bytes()
+        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        && b62_part.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// Normalize a downstream `x-opencode-request` value (9router
+/// `normalizeRequestId`, opencode.js:273-277): trim, length-cap, shape-check.
+fn normalize_opencode_request_id(value: &str) -> Option<String> {
+    let normalized = value.trim();
+    if normalized.is_empty() || normalized.len() > MAX_SESSION_LENGTH {
+        return None;
+    }
+    is_native_opencode_request(normalized).then(|| normalized.to_string())
+}
+
+/// Last user text, last 600 chars (9router `lastUserText`, opencode.js:225-254).
+fn last_user_text(body: &Value) -> String {
+    let arr = body
+        .get("messages")
+        .and_then(Value::as_array)
+        .or_else(|| body.get("input").and_then(Value::as_array));
+    if let Some(items) = arr {
+        for msg in items.iter().rev() {
+            if msg
+                .get("role")
+                .and_then(Value::as_str)
+                .is_some_and(|r| r != "user")
+            {
+                continue;
+            }
+            let content = msg.get("content");
+            match content {
+                Some(Value::String(s)) if !s.trim().is_empty() => {
+                    return tail_chars(s.trim(), 600);
+                }
+                Some(Value::Array(parts)) => {
+                    let mut text = String::new();
+                    for p in parts {
+                        match p {
+                            Value::String(s) => text.push_str(s),
+                            Value::Object(_) => {
+                                for k in ["text", "input_text", "content", "output"] {
+                                    if let Some(t) = p.get(k).and_then(Value::as_str) {
+                                        text.push_str(t);
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if !text.trim().is_empty() {
+                        return tail_chars(text.trim(), 600);
+                    }
+                }
+                _ => {}
+            }
+            // Responses-API message items {type:"message", content:[...]}.
+            if msg.get("type").and_then(Value::as_str) == Some("message") {
+                if let Some(items) = msg.get("content").and_then(Value::as_array) {
+                    let mut text = String::new();
+                    for p in items {
+                        for k in ["text", "input_text"] {
+                            if let Some(t) = p.get(k).and_then(Value::as_str) {
+                                text.push_str(t);
+                            }
+                        }
+                    }
+                    if !text.trim().is_empty() {
+                        return tail_chars(text.trim(), 600);
+                    }
+                }
+            }
+        }
+        return String::new();
+    }
+    match body.get("input").and_then(Value::as_str) {
+        Some(s) => tail_chars(s, 600),
+        None => String::new(),
+    }
+}
+
+fn tail_chars(s: &str, n: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= n {
+        return s.to_string();
+    }
+    chars[chars.len() - n..].iter().collect()
+}
+
+/// Deterministic per-turn request id (9router `deriveRequestId`,
+/// opencode.js:256-270): sha256 over `opencode-req\0<session>\0<text>`,
+/// first 6 digest bytes as hex + 14 base62 chars. Retries share the id
+/// because the session + last user text are stable across retries.
+fn derive_opencode_request_id(session_id: &str, body: &Value) -> String {
+    let text = last_user_text(body);
+    if text.is_empty() {
+        return translate_opencode_request_id(&[]);
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"opencode-req\0");
+    hasher.update(session_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    request_id_from_digest(&digest)
+}
+
+fn request_id_from_digest(digest: &[u8]) -> String {
+    let time_hex: String = digest[0..6].iter().map(|b| format!("{b:02x}")).collect();
+    let random_part: String = digest[6..20]
+        .iter()
+        .map(|b| BASE62_CHARS[(*b as usize) % 62] as char)
+        .collect();
+    let id = format!("msg_{time_hex}{random_part}");
+    if is_native_opencode_request(&id) {
+        return id;
+    }
+    translate_opencode_request_id(&digest[20..])
+}
+
+fn translate_opencode_request_id(seed: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"opencode-req-fallback\0");
+    hasher.update(seed);
+    let digest = hasher.finalize();
+    let bytes: &[u8] = &digest;
+    request_id_from_digest_fallback(bytes)
+}
+
+fn request_id_from_digest_fallback(digest: &[u8]) -> String {
+    let time_hex: String = digest[0..6].iter().map(|b| format!("{b:02x}")).collect();
+    let random_part: String = digest[6..20]
+        .iter()
+        .map(|b| BASE62_CHARS[(*b as usize) % 62] as char)
+        .collect();
+    format!("msg_{time_hex}{random_part}")
+}
+
+/// Resolve the `x-opencode-request` value (9router `resolveOpencodeRequestId`,
+/// opencode.js:359-369): normalized downstream value wins, else derive
+/// deterministically from session + last user text (stable across retries).
+fn resolve_opencode_request_id(downstream: Option<&str>, session_id: &str, body: &Value) -> String {
+    if let Some(raw) = downstream {
+        if let Some(normalized) = normalize_opencode_request_id(raw) {
+            return normalized;
+        }
+    }
+    derive_opencode_request_id(session_id, body)
+}
+
+/// Normalize Responses-API tools in place (9router `normalizeResponsesTools`,
+/// opencode.js:371-397): drop non-objects/unnamed, coerce flat
+/// `{type,name,description,parameters}` shape, truncate names, default
+/// `{type:"object",properties:{}}` params, drop invalid tool_choice refs.
+fn normalize_responses_tools(body_obj: &mut serde_json::Map<String, Value>) {
+    let Some(tools) = body_obj.get_mut("tools").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut valid_names = std::collections::HashSet::new();
+    tools.retain_mut(|tool| {
+        // Snapshot the fields we need before mutating (borrow discipline).
+        let snapshot: Value = tool.clone();
+        let Some(obj) = snapshot.as_object() else {
+            return false;
+        };
+        let func = obj
+            .get("function")
+            .and_then(Value::as_object)
+            .filter(|_| !obj.get("function").is_some_and(|f| f.is_array()));
+        let raw_name = obj
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| func.and_then(|f| f.get("name")).and_then(Value::as_str))
+            .unwrap_or("");
+        let name = raw_name.trim();
+        if name.is_empty() {
+            return false;
+        }
+        let description = obj
+            .get("description")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                func.and_then(|f| f.get("description"))
+                    .and_then(Value::as_str)
+            })
+            .unwrap_or("");
+        let mut parameters = obj
+            .get("parameters")
+            .filter(|p| p.is_object())
+            .or_else(|| {
+                func.and_then(|f| f.get("parameters"))
+                    .filter(|p| p.is_object())
+            })
+            .cloned()
+            .unwrap_or(json!({"type": "object", "properties": {}}));
+        if parameters.get("type").and_then(Value::as_str) == Some("object")
+            && parameters.get("properties").is_none()
+        {
+            if let Some(pobj) = parameters.as_object_mut() {
+                pobj.insert("properties".to_string(), json!({}));
+            }
+        }
+        let truncated: String = name.chars().take(MAX_TOOL_NAME_LEN).collect();
+        let tool_obj = tool.as_object_mut().expect("checked above");
+        tool_obj.clear();
+        tool_obj.insert("type".to_string(), Value::String("function".to_string()));
+        tool_obj.insert("name".to_string(), Value::String(truncated.clone()));
+        if !description.is_empty() {
+            tool_obj.insert(
+                "description".to_string(),
+                Value::String(description.to_string()),
+            );
+        }
+        tool_obj.insert("parameters".to_string(), parameters);
+        valid_names.insert(truncated);
+        true
+    });
+    if let Some(choice) = body_obj.get("tool_choice") {
+        if let Some(obj) = choice.as_object() {
+            if obj.get("type").and_then(Value::as_str) == Some("function") {
+                let name = obj.get("name").and_then(Value::as_str).unwrap_or("").trim();
+                if name.is_empty() || !valid_names.contains(name) {
+                    body_obj.remove("tool_choice");
+                }
+            }
+        }
+    }
 }
 
 fn tool_name_of(tool: &Value) -> Option<String> {
@@ -415,10 +659,14 @@ impl OpenCodeExecutor {
             .unwrap_or("desktop");
         let downstream_session = raw_headers.get("x-opencode-session").map(String::as_str);
         let session = resolve_gate_session(downstream_session, &resolved_seed);
-        let request_id = raw_headers
-            .get("x-opencode-request")
-            .map(String::as_str)
-            .unwrap_or("global");
+        // Deterministic per-turn id (9router resolveOpencodeRequestId):
+        // normalized downstream value wins, else derive from session + last
+        // user text so retries share the id.
+        let request_id = resolve_opencode_request_id(
+            raw_headers.get("x-opencode-request").map(String::as_str),
+            &session,
+            body,
+        );
 
         // User-Agent: forward downstream only if it's a gate-compatible
         // OpenCode client (opencode/<major>.<minor> with major>1 or
@@ -443,7 +691,7 @@ impl OpenCodeExecutor {
         );
         headers.insert(
             "x-opencode-request",
-            HeaderValue::from_str(request_id)
+            HeaderValue::from_str(&request_id)
                 .unwrap_or_else(|_| HeaderValue::from_static("global")),
         );
         headers.insert(
@@ -719,6 +967,74 @@ mod tests {
             assert!(tool.get("function").is_none());
             assert_eq!(tool["type"], json!("function"));
         }
+    }
+
+    // Bead .143: request-id derivation (opencode.js:256-277) — normalized
+    // downstream wins, else deterministic from session + last user text.
+    #[test]
+    fn opencode_request_id_normalize_and_derive() {
+        let native = "msg_0123456789abCDEFGHIJKLMN00";
+        assert_eq!(
+            normalize_opencode_request_id(native).as_deref(),
+            Some(native)
+        );
+        assert!(normalize_opencode_request_id("junk").is_none());
+        assert!(normalize_opencode_request_id("").is_none());
+        let long = "x".repeat(300);
+        assert!(normalize_opencode_request_id(&long).is_none());
+
+        let body = json!({"messages": [{"role": "user", "content": "hello"}]});
+        let a = derive_opencode_request_id("ses_abc", &body);
+        let b = derive_opencode_request_id("ses_abc", &body);
+        assert_eq!(a, b, "retries share the id");
+        assert!(is_native_opencode_request(&a), "derived id is gate-shaped");
+        let c = derive_opencode_request_id("ses_other", &body);
+        assert_ne!(a, c, "different sessions differ");
+
+        // resolve_: downstream normalized wins.
+        assert_eq!(
+            resolve_opencode_request_id(Some(native), "ses_abc", &body),
+            native
+        );
+        assert_eq!(
+            resolve_opencode_request_id(Some("junk"), "ses_abc", &body),
+            a
+        );
+        // last user text only (assistant turns ignored).
+        let body2 = json!({"messages": [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "ack"},
+            {"role": "user", "content": "second"},
+        ]});
+        assert_eq!(last_user_text(&body2), "second");
+    }
+
+    // Bead .143: normalize_responses_tools (opencode.js:371-397) — flat
+    // shape, name truncation, params default, invalid tool_choice dropped.
+    #[test]
+    fn opencode_normalize_responses_tools_coerces_shape() {
+        let long_name = "n".repeat(200);
+        let mut body = json!({"tools": [
+            {"name": "ok", "description": "d", "parameters": {"type": "object"}},
+            {"function": {"name": "nested", "description": "e"}},
+            {"name": "   "},
+            {"name": long_name, "parameters": {"type": "object", "properties": {}}},
+            "junk",
+        ], "tool_choice": {"type": "function", "name": "missing"}});
+        let obj = body.as_object_mut().unwrap();
+        normalize_responses_tools(obj);
+        let tools = obj["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 3);
+        assert_eq!(tools[0]["type"], json!("function"));
+        assert_eq!(tools[1]["name"], json!("nested"));
+        // nested function description preserved, params defaulted.
+        assert_eq!(tools[1]["description"], json!("e"));
+        assert_eq!(
+            tools[1]["parameters"],
+            json!({"type": "object", "properties": {}})
+        );
+        assert_eq!(tools[2]["name"].as_str().unwrap().len(), MAX_TOOL_NAME_LEN);
+        assert!(obj.get("tool_choice").is_none(), "dangling choice dropped");
     }
 
     // Live bug (2026-09-18): a request entering via a native /v1/responses

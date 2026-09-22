@@ -48,14 +48,15 @@ enum ZedProvider {
 }
 
 /// JS normalizeZedProvider: explicit provider field first, then model-name
-/// heuristics (claude→Anthropic, gemini→Google, grok/xai→XAi).
+/// heuristics (claude→Anthropic, gemini→Google, grok/xai→XAi). Accepts both
+/// the catalog spellings (`open_ai`, `x_ai`) and the plain forms.
 fn normalize_zed_provider(raw_provider: Option<&str>, model: &str) -> ZedProvider {
     if let Some(raw) = raw_provider {
         let lower = raw.to_ascii_lowercase().replace(['_', '-'], "");
         match lower.as_str() {
             "anthropic" => return ZedProvider::Anthropic,
             "openai" | "openairesponses" => return ZedProvider::OpenAiResponses,
-            "google" => return ZedProvider::Google,
+            "google" | "gemini" => return ZedProvider::Google,
             "xai" => return ZedProvider::XAi,
             _ => {}
         }
@@ -75,6 +76,7 @@ fn normalize_zed_provider(raw_provider: Option<&str>, model: &str) -> ZedProvide
 /// JS buildProviderRequest — translate the OpenAI chat body into the
 /// provider-shaped request Zed's upstream expects.
 fn build_provider_request(provider: ZedProvider, model: &str, body: &mut Value) -> Value {
+    use crate::core::translator::request::openai_responses::chat_to_openai_responses_request;
     use crate::core::translator::request::openai_to_claude::openai_to_claude_request;
     use crate::core::translator::request::openai_to_gemini::openai_to_gemini_request;
     match provider {
@@ -84,16 +86,105 @@ fn build_provider_request(provider: ZedProvider, model: &str, body: &mut Value) 
         }
         ZedProvider::Google => {
             openai_to_gemini_request(model, body, true, None);
+            // Zed's hosted Gemini backend speaks the Vertex safety vocabulary,
+            // not the public Gemini API enum — drop client-side safetySettings
+            // so Zed applies its own defaults (zed.js buildProviderRequest).
+            if let Some(obj) = body.as_object_mut() {
+                obj.remove("safetySettings");
+            }
             body.clone()
         }
-        // OpenAi → OpenAI Responses shape; xAI is OpenAI-shaped — forward as-is.
-        _ => {
+        ZedProvider::OpenAiResponses => {
+            chat_to_openai_responses_request(model, body, true, None);
+            body.clone()
+        }
+        // xAI is OpenAI-shaped — forward as-is.
+        ZedProvider::XAi => {
             let mut out = body.clone();
             out["model"] = json!(model);
             out["stream"] = json!(true);
             out
         }
     }
+}
+
+/// Look up the live Zed model catalog entry for `model` and infer the wire
+/// provider from its `provider` field. Falls back to name heuristics when the
+/// catalog is unavailable or the model is unknown (JS resolveModel plus the
+/// EXEC-13 offline fallback).
+///
+/// The catalog lives in `provider_specific_data.zed_models` when a prior
+/// `/models` sync populated it; each entry is expected to carry `id` and
+/// `provider`. Returns `(raw_entry, provider)`.
+pub fn resolve_model(
+    model: &str,
+    credentials: &ProviderConnection,
+) -> (Option<Value>, ZedProvider) {
+    let psd = &credentials.provider_specific_data;
+    let entries: Vec<&Value> = psd
+        .get("zed_models")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().collect())
+        .or_else(|| {
+            psd.get("models")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().collect())
+        })
+        .unwrap_or_default();
+    let raw = entries
+        .iter()
+        .find(|e| {
+            e.get("id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == model)
+        })
+        .map(|e| (*e).clone());
+    let provider = normalize_zed_provider(
+        raw.as_ref()
+            .and_then(|r| r.get("provider"))
+            .and_then(Value::as_str),
+        model,
+    );
+    (raw, provider)
+}
+
+/// JS parseError — map the upstream error body into a human-readable message,
+/// with the `trial_blocked` branch called out explicitly.
+pub fn parse_error(status: u16, body_text: &str) -> (u16, String) {
+    let parsed: Option<Value> = serde_json::from_str(body_text).ok();
+    let error_obj = parsed.as_ref().and_then(|p| p.get("error"));
+    let code = parsed
+        .as_ref()
+        .and_then(|p| p.get("code"))
+        .or_else(|| error_obj.and_then(|e| e.get("code")))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let raw_message = parsed
+        .as_ref()
+        .and_then(|p| p.get("message"))
+        .or_else(|| error_obj.and_then(|e| e.get("message")))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if body_text.is_empty() {
+                format!("Zed upstream error: {status}")
+            } else {
+                body_text.to_string()
+            }
+        });
+    if code == "trial_blocked" {
+        return (
+            status,
+            format!(
+                "Zed trial access is blocked upstream. The account can list hosted models, but Zed is refusing completions until trial/billing access is enabled or unblocked. Zed says: {raw_message}"
+            ),
+        );
+    }
+    if !code.is_empty() {
+        return (status, format!("Zed {code}: {raw_message}"));
+    }
+    (status, raw_message)
 }
 
 /// Streaming transformer for the provider leg (JS convertProviderEvent /
@@ -301,9 +392,9 @@ impl ZedExecutor {
     ) -> Result<ZedExecutorResponse, String> {
         let llm_token = self.resolve_llm_token(&request.credentials).await?;
 
-        // Provider inference from the model name (catalog lookup is not yet
-        // wired; JS falls back to the same heuristics when offline).
-        let provider = normalize_zed_provider(None, &request.model);
+        // Model resolution: catalog lookup first, name heuristics on miss
+        // (JS resolveModel; offline fallback when the catalog is unavailable).
+        let (_raw, provider) = resolve_model(&request.model, &request.credentials);
         let mut provider_body = request.body.clone();
         let provider_request = build_provider_request(provider, &request.model, &mut provider_body);
 
@@ -344,7 +435,8 @@ impl ZedExecutor {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            return Err(format!("Zed returned HTTP {}: {text}", status.as_u16()));
+            let (code, message) = parse_error(status.as_u16(), &text);
+            return Err(format!("Zed returned HTTP {code}: {message}"));
         }
 
         // Drain the NDJSON line stream and translate each event to OpenAI SSE.
@@ -394,5 +486,65 @@ impl ZedExecutor {
             transformed_body: payload,
             transport: TransportKind::Reqwest,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn conn_with_models(models: Value) -> ProviderConnection {
+        let mut psd = std::collections::BTreeMap::new();
+        psd.insert("zed_models".to_string(), models);
+        ProviderConnection {
+            provider_specific_data: psd,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_model_uses_catalog_provider() {
+        let conn = conn_with_models(json!([
+            { "id": "claude-sonnet-4", "provider": "anthropic" },
+            { "id": "grok-4", "provider": "x_ai" },
+        ]));
+        let (raw, provider) = resolve_model("grok-4", &conn);
+        assert_eq!(provider, ZedProvider::XAi);
+        assert_eq!(
+            raw.as_ref()
+                .and_then(|r| r.get("id"))
+                .and_then(Value::as_str),
+            Some("grok-4")
+        );
+    }
+
+    #[test]
+    fn resolve_model_falls_back_to_heuristics() {
+        let conn = conn_with_models(json!([]));
+        let (raw, provider) = resolve_model("claude-opus-4-1", &conn);
+        assert!(raw.is_none());
+        assert_eq!(provider, ZedProvider::Anthropic);
+    }
+
+    #[test]
+    fn parse_error_maps_trial_blocked() {
+        let body = r#"{"code":"trial_blocked","message":"no trial"}"#;
+        let (status, message) = parse_error(403, body);
+        assert_eq!(status, 403);
+        assert!(message.contains("trial access is blocked upstream"));
+        assert!(message.contains("no trial"));
+    }
+
+    #[test]
+    fn parse_error_maps_plain_code() {
+        let body = r#"{"error":{"code":"rate_limited","message":"slow down"}}"#;
+        let (_, message) = parse_error(429, body);
+        assert_eq!(message, "Zed rate_limited: slow down");
+    }
+
+    #[test]
+    fn parse_error_passthrough_without_code() {
+        let (_, message) = parse_error(500, "boom");
+        assert_eq!(message, "boom");
     }
 }

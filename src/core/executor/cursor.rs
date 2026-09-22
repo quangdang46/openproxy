@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
 use http_body_util::BodyExt;
@@ -92,6 +92,13 @@ pub enum CursorExecutorError {
     ProtobufDecode(String),
     ChecksumError(String),
     StreamError(String),
+    Timeout(String),
+}
+
+impl From<tokio::time::error::Elapsed> for CursorExecutorError {
+    fn from(_: tokio::time::error::Elapsed) -> Self {
+        Self::Timeout("Cursor request timed out".to_string())
+    }
 }
 
 impl From<reqwest::Error> for CursorExecutorError {
@@ -1858,6 +1865,94 @@ fn parse_connect_rpc_frame(buffer: &[u8]) -> Result<Option<(u8, Vec<u8>)>, Curso
 
 // ==================== EXECUTOR IMPLEMENTATION ====================
 
+/// Hang-timeout for the chat-path POST (cursor.js:330 `HTTP2_TIMEOUT_MS`
+/// 60s max — prevent hung sessions). Overridable via
+/// `CURSOR_HTTP_TIMEOUT_MS` for tests.
+fn cursor_request_timeout() -> Duration {
+    std::env::var("CURSOR_HTTP_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(Duration::from_secs(60))
+}
+
+/// Detect a rate-limit error body produced by `build_cursor_error_body`.
+/// A hang timeout (`connection_error` / `HTTP/2 request timed out`) is NOT
+/// a rate limit — it must stay 500 so fallback retries a fresh attempt.
+fn is_rate_limit_error_body(text: &str) -> bool {
+    text.contains("\"rate_limit_error\"") && !text.contains("\"connection_error\"")
+}
+
+/// Build a structured JSON error body (cursor.js:257-275 `createErrorResponse`):
+/// deep `error.details[0].debug.details.title|detail` wins, then
+/// `error.message`, else "API Error". `resource_exhausted` maps to
+/// `rate_limit_error` (status 429); everything else is `api_error` (400).
+fn build_cursor_error_body(json_error: &Value) -> (String, u16) {
+    let debug_details = json_error
+        .pointer("/error/details/0/debug/details")
+        .or_else(|| json_error.pointer("/error/details/0/debug"));
+    let message = debug_details
+        .and_then(|d| d.get("title").or_else(|| d.get("detail")))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            json_error
+                .pointer("/error/message")
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or("API Error");
+    let code = json_error
+        .pointer("/error/details/0/debug/error")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let is_rate_limit = json_error
+        .pointer("/error/code")
+        .and_then(|v| v.as_str())
+        .map(|c| c == "resource_exhausted")
+        .unwrap_or(false);
+    let error_type = if is_rate_limit {
+        "rate_limit_error"
+    } else {
+        "api_error"
+    };
+    let status = if is_rate_limit { 429u16 } else { 400u16 };
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": code,
+        }
+    });
+    (serde_json::to_string(&body).unwrap_or_default(), status)
+}
+
+/// Build a structured connection/timeout error body
+/// (cursor.js:666-680 + 712-724 `execute` catch + `executeAgent` hang timeout:
+/// `connection_error` type, HTTP 500).
+fn build_cursor_connection_error_body(message: &str) -> String {
+    serde_json::to_string(&serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "connection_error",
+            "code": "",
+        }
+    }))
+    .unwrap_or_default()
+}
+
+/// Build an `UpstreamResponse` carrying a JSON error body with the given
+/// status and content-type (cursor.js:271-274 / 694-703).
+fn cursor_error_upstream_response(
+    body: String,
+    status: u16,
+) -> Result<reqwest::Response, CursorExecutorError> {
+    let http_response = http::Response::builder()
+        .status(status)
+        .header("content-type", "application/json")
+        .body(reqwest::Body::from(body))
+        .map_err(CursorExecutorError::InvalidRequest)?;
+    Ok(http_response.into())
+}
+
 impl CursorExecutor {
     pub fn new(
         pool: Arc<ClientPool>,
@@ -2021,9 +2116,12 @@ impl CursorExecutor {
         let req = request_builder
             .body(Full::new(bytes::Bytes::from(frame)))
             .map_err(CursorExecutorError::InvalidRequest)?;
-        let response = client
-            .request(req)
+        // Hang-timeout guard (cursor.js:349-351 `hangTimeout` — close the
+        // session if the server never responds). Maps to a `connection_error`
+        // 500 via `execute`, matching cursor.js `executeAgent` semantics.
+        let response = tokio::time::timeout(cursor_request_timeout(), client.request(req))
             .await
+            .map_err(|_| CursorExecutorError::Timeout("HTTP/2 request timed out".to_string()))?
             .map_err(CursorExecutorError::Hyper)?;
 
         let status = response.status();
@@ -2083,7 +2181,7 @@ impl CursorExecutor {
         // resource_exhausted error must surface as HTTP 429 so the caller's
         // account rotation / combo fallback reacts instead of treating the
         // turn as a successful empty completion.
-        let is_rate_limit = String::from_utf8_lossy(&body_bytes).contains("\"rate_limit_error\"");
+        let is_rate_limit = is_rate_limit_error_body(&String::from_utf8_lossy(&body_bytes));
         let content_type = if request.stream {
             "text/event-stream"
         } else {
@@ -2163,12 +2261,21 @@ impl CursorExecutor {
         let endpoint = Self::resolve_endpoint(&request.credentials);
 
         let client = self.pool.get("cursor", request.proxy.as_ref())?;
-        let raw_response = client
-            .post(endpoint)
-            .headers(headers.clone())
-            .body(body_bytes)
-            .send()
-            .await?;
+        // Hang-timeout guard (cursor.js:330 `HTTP2_TIMEOUT_MS` 60s +
+        // cursor.js:687-690 request dispatch): a hung upstream must not hang
+        // the session. Times out into `CursorExecutorError::Timeout`, which
+        // the chat.rs dispatcher maps to a `connection_error` 500 — same as
+        // the JS `execute` catch (cursor.js:712-724).
+        let raw_response = tokio::time::timeout(
+            cursor_request_timeout(),
+            client
+                .post(endpoint)
+                .headers(headers.clone())
+                .body(body_bytes)
+                .send(),
+        )
+        .await
+        .map_err(|_| CursorExecutorError::Timeout("HTTP/2 request timed out".to_string()))??;
 
         let status = raw_response.status();
         let is_stream = request.stream;
@@ -2205,8 +2312,35 @@ impl CursorExecutor {
                 transport: TransportKind::Reqwest,
             })
         } else {
+            // Structured error (cursor.js:692-704): wrap the upstream body as
+            // `{message: "[status]: text", type: "invalid_request_error"}`,
+            // preserving the upstream status. A JSON error payload goes
+            // through `build_cursor_error_body` (cursor.js:257-275) so
+            // `resource_exhausted` still maps to `rate_limit_error` 429.
+            let error_text = raw_response
+                .text()
+                .await
+                .unwrap_or_else(|_| "Unknown error".to_string());
+            let (body, upstream_status) = match serde_json::from_str::<Value>(&error_text) {
+                Ok(json_error) if json_error.get("error").is_some() => {
+                    let (structured, _) = build_cursor_error_body(&json_error);
+                    (structured, status.as_u16())
+                }
+                _ => (
+                    serde_json::to_string(&serde_json::json!({
+                        "error": {
+                            "message": format!("[{}]: {}", status.as_u16(), error_text),
+                            "type": "invalid_request_error",
+                            "code": "",
+                        }
+                    }))
+                    .unwrap_or_default(),
+                    status.as_u16(),
+                ),
+            };
+            let fake_response = cursor_error_upstream_response(body, upstream_status)?;
             Ok(CursorExecutorResponse {
-                response: UpstreamResponse::Reqwest(raw_response),
+                response: UpstreamResponse::Reqwest(fake_response),
                 url: endpoint.to_string(),
                 headers,
                 transformed_body: request.body,
@@ -3550,5 +3684,92 @@ mod tests {
                 false,
             )]
         );
+    }
+
+    #[test]
+    fn test_build_cursor_error_body_rate_limit() {
+        let err = serde_json::json!({
+            "error": {
+                "code": "resource_exhausted",
+                "message": "quota exceeded",
+                "details": [{ "debug": { "error": "QUOTA_EXCEEDED" } }],
+            }
+        });
+        let (body, status) = build_cursor_error_body(&err);
+        assert_eq!(status, 429);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["type"], json!("rate_limit_error"));
+        assert_eq!(v["error"]["message"], json!("quota exceeded"));
+        assert_eq!(v["error"]["code"], json!("QUOTA_EXCEEDED"));
+    }
+
+    #[test]
+    fn test_build_cursor_error_body_deep_title_wins() {
+        let err = serde_json::json!({
+            "error": {
+                "code": "invalid_argument",
+                "message": "shallow",
+                "details": [{ "debug": { "details": { "title": "deep title" }, "error": "BAD" } }],
+            }
+        });
+        let (body, status) = build_cursor_error_body(&err);
+        assert_eq!(status, 400);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["message"], json!("deep title"));
+        assert_eq!(v["error"]["type"], json!("api_error"));
+    }
+
+    #[test]
+    fn test_build_cursor_error_body_fallback() {
+        let err = serde_json::json!({});
+        let (body, status) = build_cursor_error_body(&err);
+        assert_eq!(status, 400);
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["message"], json!("API Error"));
+        assert_eq!(v["error"]["code"], json!("unknown"));
+    }
+
+    #[test]
+    fn test_build_cursor_connection_error_body() {
+        let body = build_cursor_connection_error_body("HTTP/2 request timed out");
+        let v: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["error"]["type"], json!("connection_error"));
+        assert_eq!(v["error"]["message"], json!("HTTP/2 request timed out"));
+        assert_eq!(v["error"]["code"], json!(""));
+    }
+
+    #[test]
+    fn test_is_rate_limit_error_body_ignores_timeout() {
+        assert!(is_rate_limit_error_body(
+            r#"{"error":{"message":"x","type":"rate_limit_error"}}"#
+        ));
+        assert!(!is_rate_limit_error_body(
+            &build_cursor_connection_error_body("HTTP/2 request timed out")
+        ));
+    }
+
+    #[test]
+    fn test_cursor_request_timeout_env_override() {
+        std::env::set_var("CURSOR_HTTP_TIMEOUT_MS", "1234");
+        assert_eq!(cursor_request_timeout(), Duration::from_millis(1234));
+        std::env::remove_var("CURSOR_HTTP_TIMEOUT_MS");
+        assert_eq!(cursor_request_timeout(), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn test_timeout_error_from_elapsed() {
+        // Elapsed has no public constructor; synthesize via an expired timeout.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let err: CursorExecutorError = rt.block_on(async {
+            let elapsed =
+                tokio::time::timeout(Duration::from_millis(1), std::future::pending::<()>())
+                    .await
+                    .unwrap_err();
+            CursorExecutorError::from(elapsed)
+        });
+        assert!(matches!(err, CursorExecutorError::Timeout(_)));
     }
 }
