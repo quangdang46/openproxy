@@ -178,11 +178,7 @@ async fn write_simulation_mode_only(
     let sqlite = state.db.sqlite.clone();
     let write = tokio::task::spawn_blocking(move || {
         sqlite.with_transaction(|conn| {
-            crate::core::simulation::persistence::set_provider_mode(
-                conn,
-                &provider_for_write,
-                want,
-            )
+            crate::core::simulation::persistence::set_provider_mode(conn, &provider_for_write, want)
         })
     })
     .await;
