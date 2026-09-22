@@ -53,6 +53,17 @@ check_shape() { # name, json-path-desc, python-expr (reads stdin JSON, exit 0 = 
   fi
 }
 
+check_text() { # name, desc, python-expr (reads stdin TEXT as v, exit 0 = ok)
+  local name="$1" desc="$2"
+  if python3 -c "import sys; v=sys.stdin.read(); assert $3, '$desc'" ; then
+    echo "  ok: $name ($desc)"
+    pass=$((pass+1))
+  else
+    echo "  FAIL: $name ($desc)"
+    fail=$((fail+1))
+  fi
+}
+
 echo "-- OpenAI non-stream (text) --"
 curl -sf -m 10 "$OPENAI_BASE/chat/completions" \
   -H 'Content-Type: application/json' \
@@ -71,8 +82,8 @@ echo "-- OpenAI SSE --"
 curl -sfN -m 15 "$OPENAI_BASE/chat/completions" \
   -H 'Content-Type: application/json' \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}],"stream":true}' \
-| check_shape "openai-stream" "delta frames + DONE" \
-  "'data:' in v if isinstance(v,str) else True"
+| check_text "openai-stream" "delta frames + DONE" \
+  "'data:' in v and '[DONE]' in v"
 # NOTE: SSE shape is checked loosely here (framing bytes); the strict
 # frame-order contract lives in simulation_compat.rs against our engine.
 

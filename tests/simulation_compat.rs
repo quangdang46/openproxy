@@ -14,6 +14,14 @@
 //! Known oracle notes (reviewer sim-14/18): single-delta tool streaming,
 //! single tool_use block at index 0, `is_terminal` substring edge — the
 //! oracle may flag fidelity there; contract asserts structure, not realism.
+//!
+//! Model-name note (sim-11): fixtures pin `gpt-4o`, `claude-sonnet-4-6`,
+//! `gemini-2.5-flash`. An oracle must serve these ids (or be adapted); a
+//! missing id on the oracle side is oracle drift, not engine drift.
+//!
+//! HTTP-status note: this contract asserts `SimulationError.status` (u16,
+//! internal). The u16→HTTP mapping is covered by executor E2E tests
+//! (404/429 renders); no duplication here by design.
 
 use openproxy::core::executor::ProviderFormat;
 use openproxy::core::simulation::{SimContext, SimulationEngine};
