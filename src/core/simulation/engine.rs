@@ -95,23 +95,24 @@ impl Default for SimulationEngine {
 
 /// Deterministic 8-hex id from canonical request bytes (plan §5:
 /// same request + same config → same bytes; no wall-clock, no randomness).
+///
+/// Uses SHA-256 (NOT `DefaultHasher`): SipHash is explicitly unstable across
+/// Rust toolchains, which would break the determinism contract on rebuild.
 pub fn hash8(bytes: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    bytes.hash(&mut h);
-    format!("{:08x}", h.finish() & 0xffff_ffff)
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    hex::encode(&digest[..4])
 }
 
 /// `created` timestamp derived from the same hash (stable, not wall-clock).
 pub fn hash_created(bytes: &[u8]) -> i64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    b"created:".hash(&mut h);
-    bytes.hash(&mut h);
+    use sha2::{Digest, Sha256};
+    let mut prefixed = b"created:".to_vec();
+    prefixed.extend_from_slice(bytes);
+    let digest = Sha256::digest(&prefixed);
+    let off = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
     // Fixed base (2025-01-01) + hash-derived offset: deterministic, plausible.
-    1_735_689_600 + (h.finish() % 30_000_000) as i64
+    1_735_689_600 + (off % 30_000_000) as i64
 }
 
 /// Last user-message text from an OpenAI chat body (for `Echo:` default).

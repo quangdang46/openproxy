@@ -1,4 +1,4 @@
-//! Provider simulation layer (sim-01 types, sim-02 persistence, sim-03 resolver, sim-05 errors).
+//! Provider simulation layer (sim-01..07: types, persistence, resolver, errors, engine, OpenAI).
 //!
 //! See `COMPREHENSIVE-PLAN-FOR-MOCK-SERVER.md` §2.5, §3.1.
 //! NOTE: `Replay` / `Hybrid` variants arrive in a separate Phase-2 epic —
@@ -14,5 +14,6 @@ pub mod resolver;
 pub use engine::{SimContext, SimulationEngine};
 pub use error::SimulationError;
 pub use mode::{EffectiveReason, ProviderExecutionMode, ResolvedMode};
+pub use openai::sse_body as sse_body_openai;
 pub use persistence::env_force_all;
 pub use resolver::{is_format_supported, resolve_effective_mode, ResolveInput, SIM_HEADER};
