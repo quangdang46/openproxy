@@ -459,6 +459,11 @@ impl ApiKey {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
+    /// Dev safety boundary: force ALL supported providers into simulation
+    /// mock mode (plan §3.2, bead sim-02). Same effect as the
+    /// `OPENPROXY_DEV_MOCK=1` env var. Default off — production untouched.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub dev_mock_all: bool,
     #[serde(default, deserialize_with = "deserialize_null_default")]
     pub cloud_enabled: bool,
     #[serde(default, deserialize_with = "deserialize_null_default")]
@@ -696,6 +701,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            dev_mock_all: false,
             cloud_enabled: false,
             cloud_url: String::new(),
             tunnel_enabled: false,

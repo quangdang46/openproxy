@@ -5,5 +5,6 @@
 //! do NOT add variants here.
 
 pub mod mode;
+pub mod persistence;
 
 pub use mode::{EffectiveReason, ProviderExecutionMode, ResolvedMode};
