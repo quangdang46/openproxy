@@ -491,7 +491,6 @@ impl DeepSeekWebExecutor {
         // Session: reuse when persistSession, else fresh per request.
         // A reused id may be stale (user deleted the chat in the DeepSeek
         // UI) — tracked so a failure triggers one fresh-session retry.
-        let mut reused = false;
         let mut session_id = if persist_session {
             SESSION_CACHE
                 .lock()
@@ -501,7 +500,7 @@ impl DeepSeekWebExecutor {
         } else {
             None
         };
-        reused = session_id.is_some();
+        let reused = session_id.is_some();
         if session_id.is_none() {
             session_id = Some(
                 create_session(&client, access_token)
@@ -551,7 +550,6 @@ impl DeepSeekWebExecutor {
                 evict_oldest(&mut cache);
                 cache.insert(user_token.to_string(), fresh_sid.clone());
             }
-            reused = false;
             let (resp2, headers2, payload2) = match self
                 .post_completion(
                     &client,
