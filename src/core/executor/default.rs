@@ -850,9 +850,6 @@ impl DefaultExecutor {
             .is_some_and(|v| v.trim().eq_ignore_ascii_case("mock"))
     }
 
-    /// Simulated execution stub (beads sim-06+ fill in per-format bodies).
-    /// Currently unreachable unless simulation was explicitly activated above;
-    /// returns an explicit error so a miswire fails loudly, never silently.
     /// Resolve the simulation [`ProviderFormat`] for this executor.
     /// Shared by the mock branch (execute_simulated) and the REAL-branch
     /// fault path (sim-15) so both agree on the envelope shape.
