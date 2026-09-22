@@ -858,9 +858,8 @@ impl DefaultExecutor {
         request: &ExecutionRequest,
     ) -> Result<ExecutionResponse, ExecutorError> {
         use crate::core::simulation::{SimContext, SimulationEngine};
-        // sim-07/09: OpenAI(+compat) and Anthropic(+compat, incl.
-        // ClaudeCompatible reuse) non-stream AND stream.
-        // Gemini falls through to loud explicit error (sim-10).
+        // sim-07/09/10: OpenAI(+compat), Anthropic(+compat incl.
+        // ClaudeCompatible reuse), and Gemini non-stream AND stream.
         let supported = matches!(
             self.config.format.as_str(),
             "openai"
@@ -868,8 +867,10 @@ impl DefaultExecutor {
                 | "anthropic"
                 | "anthropic-compatible"
                 | "claude-compatible"
+                | "gemini"
         ) || self.provider == "openai"
-            || self.provider == "anthropic";
+            || self.provider == "anthropic"
+            || self.provider == "gemini";
         if !supported {
             return Err(ExecutorError::SimulationUnsupported {
                 provider: self.provider.clone(),
@@ -883,13 +884,32 @@ impl DefaultExecutor {
             body: &request.body,
             stream: request.stream,
         };
-        let format = match self.config.format.as_str() {
-            "openai-compatible" => crate::core::executor::ProviderFormat::OpenAICompatible,
-            "anthropic" => crate::core::executor::ProviderFormat::Anthropic,
-            "anthropic-compatible" | "claude-compatible" => {
-                crate::core::executor::ProviderFormat::AnthropicCompatible
+        // NOTE: DefaultExecutor ProviderConfig.format is a plain string and
+        // anthropic()/claude_compatible() constructors delegate to openai(),
+        // so config.format alone misroutes the anthropic family. Provider name
+        // takes precedence for family resolution (mirrors provider_wants_claude_beta).
+        const ANTHROPIC_FAMILY: &[&str] = &[
+            "anthropic",
+            "claude",
+            "glm",
+            "kimi",
+            "kimi-coding",
+            "minimax",
+            "minimax-cn",
+            "agentrouter",
+        ];
+        let format = if ANTHROPIC_FAMILY.contains(&self.provider.as_str()) {
+            crate::core::executor::ProviderFormat::Anthropic
+        } else {
+            match self.config.format.as_str() {
+                "openai-compatible" => crate::core::executor::ProviderFormat::OpenAICompatible,
+                "anthropic" => crate::core::executor::ProviderFormat::Anthropic,
+                "anthropic-compatible" | "claude-compatible" => {
+                    crate::core::executor::ProviderFormat::AnthropicCompatible
+                }
+                "gemini" => crate::core::executor::ProviderFormat::Gemini,
+                _ => crate::core::executor::ProviderFormat::OpenAI,
             }
-            _ => crate::core::executor::ProviderFormat::OpenAI,
         };
         let envelope = match engine.execute(format, &self.provider, &ctx).await {
             Ok(env) => env,
@@ -909,14 +929,15 @@ impl DefaultExecutor {
             Err(e) => return Err(e.into()),
         };
         if request.stream {
-            let body = if matches!(
-                format,
+            let body = match format {
                 crate::core::executor::ProviderFormat::Anthropic
-                    | crate::core::executor::ProviderFormat::AnthropicCompatible
-            ) {
-                crate::core::simulation::sse_body_anthropic(&envelope)
-            } else {
-                crate::core::simulation::sse_body_openai(&envelope)
+                | crate::core::executor::ProviderFormat::AnthropicCompatible => {
+                    crate::core::simulation::sse_body_anthropic(&envelope)
+                }
+                crate::core::executor::ProviderFormat::Gemini => {
+                    crate::core::simulation::sse_body_gemini(&envelope)
+                }
+                _ => crate::core::simulation::sse_body_openai(&envelope),
             };
             Ok(Self::sim_sse_response(&self.provider, request, body))
         } else {
@@ -2237,54 +2258,126 @@ mod tests {
         let resp = exec.execute(req).await.expect("sim 404 renders");
         assert_eq!(resp.response.status(), http::StatusCode::NOT_FOUND);
         assert_eq!(resp.transformed_body["error"]["code"], "model_not_found");
-        #[tokio::test]
-        async fn simulated_anthropic_non_stream_e2e() {
-            // sim-09: anthropic provider + header -> message envelope, no creds.
-            let req = ExecutionRequest {
-                model: "claude-sonnet-4-6".into(),
-                body: serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 64,
-                "messages": [{"role": "user", "content": "ping"}]}),
-                stream: false,
-                credentials: ProviderConnection::default(),
-                proxy: None,
-                sim_headers: {
-                    let mut h = HeaderMap::new();
-                    h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
-                    h
-                },
-            };
-            let exec =
-                DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
-            let resp = exec.execute(req).await.expect("sim anthropic");
-            assert!(resp.url.starts_with("sim://anthropic/"));
-            assert_eq!(resp.transformed_body["type"], "message");
-            assert_eq!(resp.transformed_body["content"][0]["text"], "Echo: ping");
-            assert_eq!(resp.response.status(), http::StatusCode::OK);
-        }
+    }
 
-        #[tokio::test]
-        async fn simulated_anthropic_stream_e2e() {
-            // sim-09: named SSE events flow through the real downstream path.
-            let req = ExecutionRequest {
-                model: "claude-sonnet-4-6".into(),
-                body: serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 64,
-                "messages": [{"role": "user", "content": "hi there"}]}),
-                stream: true,
-                credentials: ProviderConnection::default(),
-                proxy: None,
-                sim_headers: {
-                    let mut h = HeaderMap::new();
-                    h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
-                    h
-                },
-            };
-            let exec =
-                DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
-            let resp = exec.execute(req).await.expect("sim anthropic stream");
-            let text = resp.response.text().await;
-            assert!(text.contains("event: message_start"), "named events");
-            assert!(text.contains("event: message_stop"), "terminal event");
-        }
+    #[tokio::test]
+    async fn simulated_gemini_non_stream_e2e() {
+        // sim-10: gemini provider + header -> candidates envelope, no creds.
+        let req = ExecutionRequest {
+            model: "gemini-2.5-flash".into(),
+            body: serde_json::json!({"contents": [{"parts": [{"text": "ping"}]}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("gemini", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim gemini");
+        assert!(resp.url.starts_with("sim://gemini/"));
+        assert_eq!(
+            resp.transformed_body["candidates"][0]["content"]["parts"][0]["text"],
+            "Echo: ping"
+        );
+        assert_eq!(resp.response.status(), http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn simulated_gemini_stream_e2e() {
+        // sim-10: Gemini-shape SSE chunks flow through the real path.
+        let req = ExecutionRequest {
+            model: "gemini-2.5-flash".into(),
+            body: serde_json::json!({"contents": [{"parts": [{"text": "hi there"}]}]}),
+            stream: true,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("gemini", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim gemini stream");
+        let text = resp.response.text().await;
+        assert!(text.contains("candidates"), "gemini chunks");
+        assert!(text.contains("STOP"), "terminal finish");
+    }
+
+    #[tokio::test]
+    async fn simulated_stream_mode_validation_rejected() {
+        // sim-10 (reviewer sim-08 nit): stream + unknown model -> JSON error,
+        // not SSE. Covers the stream-mode validation gap for OpenAI path.
+        let req = ExecutionRequest {
+            model: "gpt-999".into(),
+            body: serde_json::json!({"model": "gpt-999",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: true,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim stream 404 renders");
+        assert_eq!(resp.response.status(), http::StatusCode::NOT_FOUND);
+        assert!(
+            !resp.transformed_body.to_string().contains("data: "),
+            "no SSE"
+        );
+    }
+
+    #[tokio::test]
+    async fn simulated_anthropic_non_stream_e2e() {
+        // sim-09: anthropic provider + header -> message envelope, no creds.
+        let req = ExecutionRequest {
+            model: "claude-sonnet-4-6".into(),
+            body: serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "ping"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim anthropic");
+        assert!(resp.url.starts_with("sim://anthropic/"));
+        assert_eq!(resp.transformed_body["type"], "message");
+        assert_eq!(resp.transformed_body["content"][0]["text"], "Echo: ping");
+        assert_eq!(resp.response.status(), http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn simulated_anthropic_stream_e2e() {
+        // sim-09: named SSE events flow through the real downstream path.
+        let req = ExecutionRequest {
+            model: "claude-sonnet-4-6".into(),
+            body: serde_json::json!({"model": "claude-sonnet-4-6", "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi there"}]}),
+            stream: true,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim anthropic stream");
+        let text = resp.response.text().await;
+        assert!(text.contains("event: message_start"), "named events");
+        assert!(text.contains("event: message_stop"), "terminal event");
     }
 
     #[tokio::test]

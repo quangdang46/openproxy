@@ -9,7 +9,9 @@
 
 use serde_json::{json, Value};
 
-use super::engine::{estimate_tokens, hash8, hash_created, last_user_text, SimContext};
+use super::engine::{
+    estimate_tokens, hash8, hash_created, last_user_text, split_words, SimContext,
+};
 use super::error::SimulationError;
 use crate::core::executor::ProviderFormat;
 
@@ -54,33 +56,6 @@ impl super::engine::ProviderSimulator for OpenAiCompatibleSimulator {
             Ok(non_stream(ctx))
         }
     }
-}
-
-/// Split content into word-boundary chunks (deterministic, no randomness).
-fn split_words(content: &str) -> Vec<String> {
-    let words: Vec<&str> = content.split_inclusive(char::is_whitespace).collect();
-    if words.is_empty() && !content.is_empty() {
-        return vec![content.to_string()];
-    }
-    // Merge tiny pieces so chunks look like real token streaming (1-3 words).
-    let mut chunks: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut n = 0;
-    for w in words {
-        cur.push_str(w);
-        n += 1;
-        if n >= 2 {
-            chunks.push(std::mem::take(&mut cur));
-            n = 0;
-        }
-    }
-    if !cur.is_empty() {
-        chunks.push(cur);
-    }
-    if chunks.is_empty() {
-        chunks.push(String::new());
-    }
-    chunks
 }
 
 /// Stream envelope: same ids/usage as non-stream + content chunks + flag.
@@ -393,7 +368,6 @@ mod tests {
         let engine = SimulationEngine::mvp();
         assert!(engine.supports(ProviderFormat::OpenAI));
         assert!(engine.supports(ProviderFormat::OpenAICompatible));
-        assert!(!engine.supports(ProviderFormat::Gemini));
         let body = json!({"model": "x", "messages": [{"role": "user", "content": "hi"}]});
         let v = engine
             .execute(ProviderFormat::OpenAICompatible, "openrouter", &ctx(&body))
