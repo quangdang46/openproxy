@@ -189,3 +189,29 @@ async fn mock_status_forced_all_via_settings() {
     assert_eq!(json["providers"]["openai"]["effective"], "mock");
     assert_eq!(json["providers"]["openai"]["reason"], "settings-force");
 }
+
+#[tokio::test]
+async fn provider_mode_survives_restart() {
+    // sim-19 review gap: mode must survive binary rebuilds/restarts (Core
+    // Product Surfaces: configuration is user data in SQLite). Reload the Db
+    // from the same data dir and assert the mode persists.
+    let (state, temp) = app_state().await;
+    let app = openproxy::build_app(state);
+    let (status, _) = put_json(app, "/api/providers/provider-1", json!({"mode": "mock"})).await;
+    assert_eq!(status, StatusCode::OK);
+    // "Restart": fresh Db handle on the same dir (temp kept alive; SQLite
+    // allows concurrent handles, WAL mode).
+    let db2 = Arc::new(Db::load_from(temp.path()).await.expect("db reload"));
+    let modes = db2
+        .sqlite
+        .with_conn(|conn| {
+            Ok::<_, rusqlite::Error>(openproxy::core::simulation::status_for(
+                conn, "openai", false,
+            ))
+        })
+        .unwrap();
+    assert_eq!(modes.configured.to_string(), "mock");
+    assert_eq!(modes.effective.to_string(), "mock");
+    // `temp` kept alive by binding: dir survives until end of test.
+    let _ = temp.path();
+}
