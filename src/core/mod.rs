@@ -12,6 +12,7 @@ pub mod mitm;
 pub mod model;
 pub mod proxy;
 pub mod rtk;
+pub mod simulation;
 pub mod translator;
 pub mod tunnel;
 pub mod usage;
