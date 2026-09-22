@@ -156,75 +156,88 @@ pub(super) async fn import_provider_models(
     };
 
     let now = chrono::Utc::now().to_rfc3339();
-    let mut imported = 0usize;
-    let mut skipped = 0usize;
     let total = payload.models.len();
 
-    for model in payload.models {
-        let model_id = model.id.trim().to_string();
-        if model_id.is_empty() {
-            continue;
-        }
-
-        // Snapshot read to decide import vs skip (mirrors create_custom_model).
-        let exists_before =
-            state.db.snapshot().custom_models.iter().any(|m| {
-                m.provider_alias == provider_alias && m.id == model_id && m.r#type == "llm"
-            });
-        if exists_before {
-            skipped += 1;
-            continue;
-        }
-
-        let mut extra = model.extra.clone();
-        extra
-            .entry("source".to_string())
-            .or_insert_with(|| serde_json::Value::String("imported".to_string()));
-        extra
-            .entry("importedAt".to_string())
-            .or_insert_with(|| serde_json::Value::String(now.clone()));
-
-        let name = if model.name.is_empty() {
-            None
-        } else {
-            Some(model.name)
-        };
-
-        let model_id_owned = model_id.clone();
-        let alias = provider_alias.clone();
-        let result = state
-            .db
-            .update(move |db| {
-                // Re-check inside the write lock to guard a concurrent insert.
-                let exists = db.custom_models.iter().any(|m| {
-                    m.provider_alias == alias && m.id == model_id_owned && m.r#type == "llm"
-                });
-                if exists {
-                    return;
-                }
-
-                db.custom_models.push(CustomModel {
-                    provider_alias: alias,
-                    id: model_id_owned,
-                    r#type: "llm".to_string(),
-                    name,
-                    extra,
-                });
+    // OmniRoute merge semantics (.133: mergeProviderModelListing.ts:57-118 +
+    // managedModelImport.ts:292-329): previously-synced `imported` rows absent
+    // from the fresh listing are dropped (compat knobs preserved for
+    // re-imports); operator rows are always preserved; operator fields win on
+    // id collision. The whole merge applies atomically inside one write lock.
+    let fresh: Vec<super::model_merge::DiscoveredModel> = payload
+        .models
+        .iter()
+        .filter_map(|model| {
+            let id = model.id.trim().to_string();
+            if id.is_empty() {
+                return None;
+            }
+            let mut extra = model.extra.clone();
+            extra
+                .entry("source".to_string())
+                .or_insert_with(|| serde_json::Value::String("imported".to_string()));
+            extra
+                .entry("importedAt".to_string())
+                .or_insert_with(|| serde_json::Value::String(now.clone()));
+            Some(super::model_merge::DiscoveredModel {
+                id,
+                name: if model.name.is_empty() {
+                    None
+                } else {
+                    Some(model.name.clone())
+                },
+                extra,
             })
-            .await;
+        })
+        .collect();
 
-        match result {
-            Ok(_) => imported += 1,
-            Err(_) => skipped += 1,
-        }
-    }
+    // OmniRoute merge plan (.133) computed PURELY from the pre-update
+    // snapshot: stale `imported` rows drop, operator rows preserve, operator
+    // fields overlay on id collision. Only the resulting `keep` set is
+    // written, atomically, inside one write lock (Db::update is FnOnce->()).
+    let snap = state.db.snapshot();
+    let previous: Vec<CustomModel> = snap
+        .custom_models
+        .iter()
+        .filter(|m| m.provider_alias == provider_alias && m.r#type == "llm")
+        .cloned()
+        .collect();
+    let mut compat = super::model_merge::CompatOverrideStore::default();
+    let outcome = super::model_merge::merge_model_listing(&previous, &fresh, "llm", &mut compat);
+    let imported = outcome
+        .keep
+        .len()
+        .saturating_sub(outcome.preserved_custom.len());
+    let dropped = outcome.dropped_imported.len();
+    let preserved = outcome.preserved_custom.len();
+    let keep_rows = outcome.keep;
+
+    let alias_for_merge = provider_alias.clone();
+    state
+        .db
+        .update(move |db| {
+            db.custom_models
+                .retain(|m| !(m.provider_alias == alias_for_merge && m.r#type == "llm"));
+            db.custom_models.extend(keep_rows);
+        })
+        .await
+        .ok();
+
+    let kept = state
+        .db
+        .snapshot()
+        .custom_models
+        .iter()
+        .filter(|m| m.provider_alias == provider_alias && m.r#type == "llm")
+        .count();
 
     Json(json!({
         "provider": provider,
         "connectionId": connection.id,
         "imported": imported,
-        "skipped": skipped,
+        "skipped": kept.saturating_sub(imported),
         "total": total,
+        "dropped": dropped,
+        "preservedCustom": preserved,
     }))
     .into_response()
 }
@@ -348,6 +361,8 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "nous-research"
                 | "glhf"
                 | "kilocode"
+                | "deepseek-web"
+                | "ds-web"
         )
 }
 
@@ -508,6 +523,10 @@ async fn fetch_provider_models_response(
             fetch_first_party_openai_style_models(connection, "https://api.deepseek.com/models")
                 .await
         }
+        // deepseek-web has no /models endpoint — it is a web-cookie
+        // provider, so discovery returns the static registry model list
+        // (OmniRoute registry/deepseek/web/index.ts, 14 models).
+        "deepseek-web" | "ds-web" => fetch_deepseek_web_static_models(connection).await,
         "groq" => {
             fetch_first_party_openai_style_models(
                 connection,
@@ -698,6 +717,44 @@ async fn fetch_first_party_openai_style_models(
     let token = primary_token(connection)
         .ok_or_else(|| RouteError::unauthorized("No valid token found"))?;
     fetch_openai_style_models_with_bearer(connection, url, &token).await
+}
+
+/// Static model list for deepseek-web (OmniRoute
+/// `config/providers/registry/deepseek/web/index.ts`): the web-cookie API
+/// has no `/models` endpoint, so discovery serves the registry list.
+async fn fetch_deepseek_web_static_models(
+    connection: &ProviderConnection,
+) -> Result<ProviderModelsResponse, RouteError> {
+    let models = [
+        ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+        ("deepseek-v4-pro-think", "DeepSeek V4 Pro Think"),
+        ("deepseek-v4-pro-search", "DeepSeek V4 Pro Search"),
+        (
+            "deepseek-v4-pro-think-search",
+            "DeepSeek V4 Pro Think+Search",
+        ),
+        ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+        ("deepseek-v4-flash-think", "DeepSeek V4 Flash Think"),
+        ("deepseek-v4-flash-search", "DeepSeek V4 Flash Search"),
+        (
+            "deepseek-v4-flash-think-search",
+            "DeepSeek V4 Flash Think+Search",
+        ),
+        ("deepseek-chat", "DeepSeek Chat"),
+        ("deepseek-reasoner", "DeepSeek Reasoner"),
+        ("DeepSeek-R1", "DeepSeek R1"),
+        ("DeepSeek-R1-Search", "DeepSeek R1 Search"),
+        ("DeepSeek-V3.2", "DeepSeek V3.2"),
+        ("DeepSeek-Search", "DeepSeek Search"),
+    ]
+    .into_iter()
+    .map(|(id, name)| ProviderModel {
+        id: id.to_string(),
+        name: name.to_string(),
+        extra: BTreeMap::new(),
+    })
+    .collect();
+    Ok(response_with_models(connection, models, None))
 }
 
 /// Models listing for a `noAuth: true` provider (OpenCode Zen): the catalog is

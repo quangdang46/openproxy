@@ -173,6 +173,12 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ),
         ),
         (
+            "alitp-intl",
+            ProviderConfig::openai(
+                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions",
+            ),
+        ),
+        (
             "baidu",
             ProviderConfig::openai("https://qianfan.baidubce.com/v2/chat/completions"),
         ),
@@ -480,17 +486,19 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             ProviderConfig::openai("https://api.cursor.sh/v1/chat/completions"),
         ),
         (
+            // 9router registry/codebuddy-cn.js:22 — NOT api.codebuddy.cn.
             "codebuddy-cn",
-            ProviderConfig::openai("https://api.codebuddy.cn/v1/chat/completions"),
+            ProviderConfig::openai("https://copilot.tencent.com/v2/chat/completions"),
         ),
         (
             "mimo-free",
-            ProviderConfig::openai("https://mimo.kiro.dev/v1/chat/completions"),
+            ProviderConfig::openai("https://api.xiaomimimo.com/api/free-ai/openai/chat"),
         ),
-        (
-            "xiaomi-tokenplan",
-            ProviderConfig::openai("https://tokenplan.xiaomi.com/v1/chat/completions"),
-        ),
+        // NOTE: no second "xiaomi-tokenplan" entry — BTreeMap::from keeps the
+        // LAST duplicate, which previously shadowed the sgp region URL with
+        // tokenplan.xiaomi.com. Region routing lives in xiaomi_tokenplan_url
+        // (registry/xiaomi-tokenplan.js transport.regions); the map entry is
+        // only a fallback and must stay the sgp default (:359).
     ])
 });
 
@@ -2187,5 +2195,69 @@ mod tests {
         let out = executor.transform_request(&body, "mimo-v2.5-pro");
         assert!(out.get("thinking").is_none());
         assert!(out.get("max_tokens").is_none());
+    }
+
+    #[test]
+    fn codebuddy_cn_base_url_matches_js_registry() {
+        // 9router open-sse/providers/registry/codebuddy-cn.js:22 —
+        // https://copilot.tencent.com/v2/chat/completions (NOT api.codebuddy.cn).
+        assert_eq!(
+            provider_config_base_url("codebuddy-cn"),
+            Some("https://copilot.tencent.com/v2/chat/completions".to_string())
+        );
+    }
+
+    #[test]
+    fn alitp_intl_base_url_matches_chat_transport() {
+        // src/core/chat/mod.rs:321 transport baseUrl (Alibaba Token Plan
+        // Singapore-only, OpenAI-compatible) — the map entry must match it.
+        assert_eq!(
+            provider_config_base_url("alitp-intl"),
+            Some(
+                "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn mimo_free_base_url_matches_js_registry() {
+        // 9router registry/mimo-free.js transport.baseUrl (hidden:true —
+        // free channel ended). The dedicated MimoFreeExecutor is source of
+        // truth for dispatch (MIMO_CHAT_URL); this map entry is fallback only.
+        assert_eq!(
+            provider_config_base_url("mimo-free"),
+            Some("https://api.xiaomimimo.com/api/free-ai/openai/chat".to_string())
+        );
+    }
+
+    #[test]
+    fn xiaomi_tokenplan_region_routing_matches_js_registry() {
+        // 9router registry/xiaomi-tokenplan.js transport.regions — the map
+        // entry must stay the sgp default (a duplicate key once shadowed it
+        // with tokenplan.xiaomi.com); build_url resolves regions per-connection.
+        assert_eq!(
+            provider_config_base_url("xiaomi-tokenplan"),
+            Some("https://token-plan-sgp.xiaomimimo.com/v1/chat/completions".to_string())
+        );
+        let executor =
+            DefaultExecutor::new("xiaomi-tokenplan", Arc::new(ClientPool::new()), None).unwrap();
+        for (region, host) in [
+            ("sgp", "token-plan-sgp.xiaomimimo.com"),
+            ("cn", "token-plan-cn.xiaomimimo.com"),
+            ("ams", "token-plan-ams.xiaomimimo.com"),
+        ] {
+            let mut psd = std::collections::BTreeMap::new();
+            psd.insert("region".to_string(), serde_json::json!(region));
+            let creds = ProviderConnection {
+                provider_specific_data: psd,
+                ..ProviderConnection::default()
+            };
+            let url = executor.build_url("mimo-v2.5-pro", true, &creds).unwrap();
+            assert!(
+                url.contains(host),
+                "region {region} must route to {host}, got {url}"
+            );
+        }
     }
 }
