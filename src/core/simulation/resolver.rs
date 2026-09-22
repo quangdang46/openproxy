@@ -242,7 +242,7 @@ mod tests {
     fn env_force_cannot_be_bypassed_by_headers() {
         // Safety boundary: with OPENPROXY_DEV_MOCK=1 the resolver must return
         // Mock regardless of headers, and no header value may select Real.
-        // NOTE: mutates process env; saves + restores like persistence tests.
+        // NOTE: injects force via input_env — does NOT touch process env.
         let db = SqliteDb::open_in_memory().unwrap();
         let h = HeaderMap::new();
         let r = db
