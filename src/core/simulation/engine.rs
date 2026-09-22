@@ -84,6 +84,8 @@ impl SimulationEngine {
         Self::new()
             .register(Arc::new(super::openai::OpenAiSimulator))
             .register(Arc::new(super::openai::OpenAiCompatibleSimulator))
+            .register(Arc::new(super::anthropic::AnthropicSimulator))
+            .register(Arc::new(super::anthropic::AnthropicCompatibleSimulator))
     }
 }
 
