@@ -28,6 +28,9 @@ pub fn provider_requires_streaming(provider: &str) -> bool {
             // aggregation already covers non-streaming clients.
             | "opencode"
             | "oc"
+            // 9router registry/zed.js:27 + registry/api-airforce.js:32.
+            | "zed"
+            | "api-airforce"
     )
 }
 
@@ -211,5 +214,27 @@ mod tests {
             Some("imageGen"),
         );
         assert!(!p.stream);
+    }
+
+    #[test]
+    fn force_stream_covers_zed_and_api_airforce() {
+        // 9router registry/zed.js:27 + registry/api-airforce.js:32.
+        for provider in ["zed", "api-airforce"] {
+            assert!(
+                provider_requires_streaming(provider),
+                "{provider} must force streaming"
+            );
+            let p = resolve_stream_flags(
+                Some(false),
+                Some("application/json"),
+                provider,
+                "m",
+                Format::OpenAi,
+                None,
+                None,
+            );
+            assert!(p.stream, "{provider} streams upstream");
+            assert!(p.sse_to_json, "{provider} aggregates to JSON");
+        }
     }
 }

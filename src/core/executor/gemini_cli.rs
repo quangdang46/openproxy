@@ -313,6 +313,28 @@ impl GeminiCliExecutor {
         }
     }
 
+    /// Extract `retryDelay` from a Google API 429 body (9router gemini-cli.js
+    /// parseError:38-54). Returns the retryDelay string when
+    /// `error.details[]` contains `@type ==
+    /// "type.googleapis.com/google.rpc.RetryInfo"` with a `retryDelay` value.
+    pub fn parse_gemini_cli_error(status: u16, body_text: &str) -> Option<String> {
+        if status != 429 || body_text.is_empty() {
+            return None;
+        }
+        let parsed: serde_json::Value = serde_json::from_str(body_text).ok()?;
+        let details = parsed.get("error")?.get("details")?.as_array()?;
+        for d in details {
+            if d.get("@type").and_then(|v| v.as_str())
+                == Some("type.googleapis.com/google.rpc.RetryInfo")
+            {
+                if let Some(delay) = d.get("retryDelay").and_then(|v| v.as_str()) {
+                    return Some(delay.to_string());
+                }
+            }
+        }
+        None
+    }
+
     pub async fn execute_request(
         &self,
         request: GeminiCliExecutionRequest,
@@ -598,5 +620,29 @@ mod tests {
         // Cloud Code envelope fields still injected even without project.
         assert!(transformed.get("requestId").is_some());
         assert!(transformed.get("sessionId").is_some());
+    }
+
+    #[test]
+    fn parse_gemini_cli_error_extracts_retry_delay_on_429() {
+        // 9router gemini-cli.js parseError: 429 body with RetryInfo detail.
+        let body = r#"{"error":{"code":429,"message":"Resource exhausted","status":"RESOURCE_EXHAUSTED","details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"31s"},{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"RATE_LIMIT_EXCEEDED"}]}}"#;
+        assert_eq!(
+            GeminiCliExecutor::parse_gemini_cli_error(429, body),
+            Some("31s".to_string())
+        );
+        // Non-429 → None even with RetryInfo present.
+        assert_eq!(GeminiCliExecutor::parse_gemini_cli_error(400, body), None);
+        // 429 without RetryInfo → None.
+        let no_retry = r#"{"error":{"code":429,"details":[]}}"#;
+        assert_eq!(
+            GeminiCliExecutor::parse_gemini_cli_error(429, no_retry),
+            None
+        );
+        // Empty / malformed body → None, never panics.
+        assert_eq!(GeminiCliExecutor::parse_gemini_cli_error(429, ""), None);
+        assert_eq!(
+            GeminiCliExecutor::parse_gemini_cli_error(429, "not-json"),
+            None
+        );
     }
 }
