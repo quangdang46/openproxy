@@ -41,10 +41,9 @@ pub fn set_provider_mode(
     mode: ProviderExecutionMode,
 ) -> rusqlite::Result<()> {
     let provider = provider.trim();
-    assert!(
-        !provider.is_empty(),
-        "set_provider_mode: empty provider name"
-    );
+    if provider.is_empty() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     let value = Value::String(mode.to_string());
     crate::db::sqlite::repo::kv_repo::set(conn, SIM_MODE_SCOPE, provider, &value)
 }
