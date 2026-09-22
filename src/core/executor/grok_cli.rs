@@ -43,6 +43,232 @@ const HOSTED_TOOL_TYPES: &[&str] = &[
     "local_shell",
 ];
 
+/// Native Grok CLI Responses item ids (`rs_`/`msg_`/`fc_` + UUID) that survive
+/// `store=false` round-trips (9router `GROK_CLI_NATIVE_ITEM_ID`).
+fn native_item_id_pattern() -> &'static regex::Regex {
+    static PATTERN: OnceLock<regex::Regex> = OnceLock::new();
+    PATTERN.get_or_init(|| {
+        regex::Regex::new(
+            r"^(?:rs|msg|fc)_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        )
+        .expect("native item id regex must compile")
+    })
+}
+
+/// 9router `isNativeGrokCliItemId`.
+fn is_native_grok_cli_item_id(id: &str) -> bool {
+    native_item_id_pattern().is_match(id)
+}
+
+/// 9router `stringifyGrokCliToolOutput`.
+fn stringify_grok_cli_tool_output(output: &Value) -> String {
+    match output {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+fn stringify_grok_cli_tool_output_opt(output: Option<&Value>) -> String {
+    match output {
+        None => String::new(),
+        Some(v) => stringify_grok_cli_tool_output(v),
+    }
+}
+
+/// 9router `resolveGrokCliSessionId` — stable per-conversation session id.
+/// Prefers an explicit id carried on the body, falls back to the connection id.
+pub fn resolve_grok_cli_session_id(connection_id: &str, body: &Value) -> Option<String> {
+    for key in ["session_id", "conversation_id", "prompt_cache_key"] {
+        if let Some(s) = body
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s.to_string());
+        }
+    }
+    if let Some(meta) = body.get("metadata") {
+        for key in ["session_id", "conversation_id"] {
+            if let Some(s) = meta
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(s.to_string());
+            }
+        }
+    }
+    if connection_id.is_empty() {
+        None
+    } else {
+        Some(connection_id.to_string())
+    }
+}
+
+/// 9router `normalizeGrokCliInputItem` — returns `None` for items to drop.
+fn normalize_grok_cli_input_item(item: &Value) -> Option<Value> {
+    let Some(obj) = item.as_object() else {
+        // 9router: non-object items pass through unchanged.
+        return Some(item.clone());
+    };
+    let mut clean = item.clone();
+    if let Some(map) = clean.as_object_mut() {
+        map.remove("internal_chat_message_metadata_passthrough");
+    }
+    let ty = obj.get("type").and_then(Value::as_str).unwrap_or("");
+
+    if ty == "reasoning" {
+        let id_ok = obj
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(is_native_grok_cli_item_id);
+        let enc_ok = obj
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some();
+        if !id_ok || !enc_ok {
+            return None;
+        }
+        return Some(clean);
+    }
+
+    if ty == "custom_tool_call" {
+        let call_id = obj
+            .get("call_id")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("id").and_then(Value::as_str))
+            .unwrap_or("");
+        let name = obj.get("name").and_then(Value::as_str).unwrap_or("").trim();
+        if call_id.is_empty() || name.is_empty() {
+            return None;
+        }
+        let input = obj.get("input").or_else(|| obj.get("arguments"));
+        return Some(json!({
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": json!({"input": stringify_grok_cli_tool_output_opt(input)}).to_string(),
+        }));
+    }
+
+    if ty == "custom_tool_call_output" || ty == "function_call_output" {
+        let call_id = obj
+            .get("call_id")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("id").and_then(Value::as_str))
+            .unwrap_or("");
+        if call_id.is_empty() {
+            return None;
+        }
+        return Some(json!({
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": stringify_grok_cli_tool_output_opt(obj.get("output")),
+        }));
+    }
+
+    if ty == "function_call" {
+        let call_id = obj
+            .get("call_id")
+            .and_then(Value::as_str)
+            .or_else(|| obj.get("id").and_then(Value::as_str))
+            .unwrap_or("");
+        let name = obj.get("name").and_then(Value::as_str).unwrap_or("").trim();
+        if call_id.is_empty() || name.is_empty() {
+            return None;
+        }
+        let mut out = json!({
+            "type": "function_call",
+            "call_id": call_id,
+            "name": name,
+            "arguments": match obj.get("arguments") {
+                Some(Value::String(s)) => s.clone(),
+                Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".into()),
+                None => "{}".into(),
+            },
+        });
+        if let Some(id) = obj.get("id").and_then(Value::as_str) {
+            if is_native_grok_cli_item_id(id) {
+                out["id"] = json!(id);
+            }
+        }
+        if let Some(status) = obj.get("status").and_then(Value::as_str) {
+            out["status"] = json!(status);
+        }
+        return Some(out);
+    }
+
+    Some(clean)
+}
+
+/// 9router `normalizeGrokCliInput` — normalize items, then drop orphan
+/// `function_call_output`s with no matching `function_call`.
+pub fn normalize_grok_cli_input(body: &mut Value) {
+    let Some(arr) = body.get("input").and_then(Value::as_array).cloned() else {
+        return;
+    };
+    let normalized: Vec<Value> = arr
+        .iter()
+        .filter_map(normalize_grok_cli_input_item)
+        .collect();
+    let call_ids: std::collections::HashSet<String> = normalized
+        .iter()
+        .filter(|i| i.get("type").and_then(Value::as_str) == Some("function_call"))
+        .filter_map(|i| i.get("call_id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let filtered: Vec<Value> = normalized
+        .into_iter()
+        .filter(|i| {
+            if i.get("type").and_then(Value::as_str) != Some("function_call_output") {
+                return true;
+            }
+            i.get("call_id")
+                .and_then(Value::as_str)
+                .is_some_and(|c| call_ids.contains(c))
+        })
+        .collect();
+    body["input"] = json!(filtered);
+}
+
+/// 9router `needsRefresh` → `shouldRefreshCredentials("grok-cli", …)`.
+/// Rust: refresh token present and expiry within the lead window.
+pub fn grok_cli_needs_refresh(credentials: &ProviderConnection) -> bool {
+    if credentials.refresh_token.is_none() {
+        return false;
+    }
+    crate::oauth::needs_refresh(&credentials.expires_at)
+}
+
+/// 9router `parseError` — 402 spending-limit surfaces payment/quota detail;
+/// 400 and everything else map to a sanitized message.
+pub fn parse_grok_cli_error(
+    status: u16,
+    body_text: &str,
+) -> crate::core::utils::error::UpstreamError {
+    if status == 402 && !body_text.is_empty() {
+        if let Ok(v) = serde_json::from_str::<Value>(body_text) {
+            let code = v.get("code").and_then(Value::as_str).unwrap_or("");
+            let msg = v
+                .get("error")
+                .and_then(Value::as_str)
+                .or_else(|| v.get("message").and_then(Value::as_str))
+                .unwrap_or(body_text);
+            return crate::core::utils::error::UpstreamError {
+                status: 402,
+                message: msg.to_string(),
+                resets_at_ms: None,
+            };
+        }
+    }
+    crate::core::utils::error::UpstreamError {
+        status,
+        message: crate::core::utils::error::friendly_error_message(status, body_text),
+        resets_at_ms: None,
+    }
+}
+
 const RESPONSES_ALLOWLIST: &[&str] = &[
     "model",
     "input",
@@ -194,7 +420,7 @@ fn strip_stored_item_references(body: &mut Value) {
     });
     for item in arr.iter_mut() {
         if let Some(id) = item.get("id").and_then(Value::as_str) {
-            if is_server_id(id) {
+            if is_server_id(id) && !is_native_grok_cli_item_id(id) {
                 if let Some(obj) = item.as_object_mut() {
                     obj.remove("id");
                 }
@@ -218,6 +444,7 @@ fn normalize_grok_cli_tools(body: &mut Value) {
             out.push(tool.clone());
             continue;
         }
+        let is_custom = ty == "custom";
         let fn_obj = tool.get("function").filter(|v| v.is_object());
         let raw_name = tool
             .get("name")
@@ -237,11 +464,26 @@ fn normalize_grok_cli_tools(body: &mut Value) {
             .and_then(Value::as_str)
             .or_else(|| fn_obj.and_then(|f| f.get("description").and_then(Value::as_str)))
             .unwrap_or("");
-        let parameters = tool
-            .get("parameters")
-            .cloned()
-            .or_else(|| fn_obj.and_then(|f| f.get("parameters").cloned()))
-            .unwrap_or_else(|| json!({"type": "object", "properties": {}}));
+        // 9router GROK_CLI_FREEFORM_TOOL_PARAMETERS: custom tools carry a
+        // freeform `input` string, not a JSON schema.
+        fn is_schema_object(v: Option<&Value>) -> bool {
+            matches!(v, Some(Value::Object(_)))
+        }
+        let parameters = if is_custom {
+            json!({
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+            })
+        } else if is_schema_object(tool.get("parameters")) {
+            tool.get("parameters").cloned().unwrap_or_default()
+        } else if is_schema_object(fn_obj.and_then(|f| f.get("parameters"))) {
+            fn_obj
+                .and_then(|f| f.get("parameters").cloned())
+                .unwrap_or_default()
+        } else {
+            json!({"type": "object", "properties": {}})
+        };
         let mut flat = json!({
             "type": "function",
             "name": name,
@@ -483,6 +725,7 @@ impl GrokCliExecutor {
             }]);
         }
 
+        normalize_grok_cli_input(&mut body);
         strip_stored_item_references(&mut body);
         normalize_grok_cli_tools(&mut body);
 
@@ -603,11 +846,10 @@ impl GrokCliExecutor {
         let url = Self::build_url();
         let transformed = Self::transform_request_body(&request.model, &request.body);
 
-        let session_id = if request.credentials.id.is_empty() {
-            Uuid::new_v4().to_string()
-        } else {
-            request.credentials.id.clone()
-        };
+        // 9router resolveGrokCliSessionId: explicit session/conversation id on
+        // the body wins; otherwise the connection id; random UUID as fallback.
+        let session_id = resolve_grok_cli_session_id(&request.credentials.id, &request.body)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let req_id = Uuid::new_v4().to_string();
         let turn_idx = resolve_grok_cli_turn_idx(
             Some(&session_id),
@@ -860,5 +1102,162 @@ mod tests {
         );
         assert!(h.get(AUTHORIZATION).is_some());
         // never panic on secrets — just presence
+    }
+
+    #[test]
+    fn session_id_prefers_body_then_connection() {
+        let body = json!({"session_id": "sess-explicit"});
+        assert_eq!(
+            resolve_grok_cli_session_id("conn1", &body).as_deref(),
+            Some("sess-explicit")
+        );
+        let body = json!({"metadata": {"conversation_id": "conv-9"}});
+        assert_eq!(
+            resolve_grok_cli_session_id("conn1", &body).as_deref(),
+            Some("conv-9")
+        );
+        let body = json!({});
+        assert_eq!(
+            resolve_grok_cli_session_id("conn1", &body).as_deref(),
+            Some("conn1")
+        );
+        assert_eq!(resolve_grok_cli_session_id("", &body), None);
+    }
+
+    #[test]
+    fn native_item_id_detection() {
+        assert!(is_native_grok_cli_item_id(
+            "rs_12345678-1234-1234-1234-123456789012"
+        ));
+        assert!(is_native_grok_cli_item_id(
+            "msg_abcdef12-3456-7890-abcd-ef1234567890"
+        ));
+        assert!(!is_native_grok_cli_item_id("rs_abc"));
+        assert!(!is_native_grok_cli_item_id("resp_xyz"));
+        assert!(!is_native_grok_cli_item_id(""));
+    }
+
+    #[test]
+    fn stringify_tool_output_shapes() {
+        assert_eq!(
+            stringify_grok_cli_tool_output(&json!("raw")),
+            "raw".to_string()
+        );
+        assert_eq!(stringify_grok_cli_tool_output(&json!(null)), String::new());
+        assert_eq!(
+            stringify_grok_cli_tool_output(&json!({"a": 1})),
+            r#"{"a":1}"#.to_string()
+        );
+        assert_eq!(stringify_grok_cli_tool_output_opt(None), String::new());
+    }
+
+    #[test]
+    fn normalize_input_reasoning_keeps_native_only() {
+        let mut body = json!({
+            "input": [
+                {"type": "reasoning", "id": "rs_12345678-1234-1234-1234-123456789012", "encrypted_content": "enc"},
+                {"type": "reasoning", "id": "rs_short", "encrypted_content": "enc"},
+                {"type": "reasoning", "encrypted_content": "enc"},
+                {"type": "message", "role": "user", "content": "hi", "internal_chat_message_metadata_passthrough": {"x": 1}},
+            ]
+        });
+        normalize_grok_cli_input(&mut body);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["type"], "reasoning");
+        assert_eq!(input[1]["type"], "message");
+        assert!(input[1]
+            .get("internal_chat_message_metadata_passthrough")
+            .is_none());
+    }
+
+    #[test]
+    fn normalize_input_custom_tool_shapes() {
+        let mut body = json!({
+            "input": [
+                {"type": "custom_tool_call", "call_id": "c1", "name": " grep ", "input": {"q": "x"}},
+                {"type": "custom_tool_call", "name": "no-call-id"},
+                {"type": "function_call", "call_id": "c2", "name": "run", "arguments": {"a": 1}},
+                {"type": "function_call_output", "call_id": "c2", "output": {"ok": true}},
+                {"type": "function_call_output", "call_id": "orphan", "output": "x"},
+            ]
+        });
+        normalize_grok_cli_input(&mut body);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[0]["type"], "function_call");
+        assert_eq!(input[0]["call_id"], "c1");
+        assert_eq!(input[0]["name"], "grep");
+        assert!(input[1]["arguments"].as_str().is_some());
+        assert_eq!(input[2]["type"], "function_call_output");
+        assert_eq!(input[2]["call_id"], "c2");
+        assert!(input[2]["output"].as_str().is_some());
+    }
+
+    #[test]
+    fn normalize_input_non_array_is_noop() {
+        let mut body = json!({"input": "oops"});
+        normalize_grok_cli_input(&mut body);
+        assert_eq!(body["input"], json!("oops"));
+    }
+
+    #[test]
+    fn native_id_survives_strip_but_server_id_does_not() {
+        let native = "rs_12345678-1234-1234-1234-123456789012";
+        let body = json!({
+            "model": "grok-4.5",
+            "input": [
+                {"type": "message", "role": "user", "content": "a", "id": native},
+                {"type": "message", "role": "user", "content": "b", "id": "rs_short"},
+                "resp_abc",
+                {"type": "item_reference"},
+            ],
+        });
+        let out = GrokCliExecutor::transform_request_body("grok-4.5", &body);
+        let input = out["input"].as_array().unwrap();
+        assert_eq!(input.len(), 2);
+        assert_eq!(input[0]["id"], native);
+        assert!(input[1].get("id").is_none());
+    }
+
+    #[test]
+    fn transform_drops_empty_tools_and_bad_choice() {
+        let body = json!({
+            "model": "grok-4.5",
+            "input": [{"type": "message", "role": "user", "content": "hi"}],
+            "tools": [{"type": "bogus"}],
+            "tool_choice": {"type": "function", "name": "missing"},
+        });
+        let out = GrokCliExecutor::transform_request_body("grok-4.5", &body);
+        assert_eq!(out["tools"].as_array().map(|t| t.len()), Some(0));
+        assert!(out.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn parse_error_maps_402_and_400() {
+        let e = parse_grok_cli_error(402, r#"{"code":"spending-limit","error":"quota hit"}"#);
+        assert_eq!(e.status, 402);
+        assert_eq!(e.message, "quota hit");
+        let e = parse_grok_cli_error(400, "Bad request: input too long");
+        assert_eq!(e.status, 400);
+        assert!(e.message.contains("Bad request"));
+        let e = parse_grok_cli_error(500, "");
+        assert_eq!(e.status, 500);
+    }
+
+    #[test]
+    fn needs_refresh_requires_token_and_expiry() {
+        let mut creds = ProviderConnection {
+            id: "c".into(),
+            provider: "grok-cli".into(),
+            ..Default::default()
+        };
+        assert!(!grok_cli_needs_refresh(&creds));
+        // refresh token present but no expiry → not refreshable
+        creds.refresh_token = Some("rt".into());
+        assert!(!grok_cli_needs_refresh(&creds));
+        // past expiry → refresh needed
+        creds.expires_at = Some("2000-01-01T00:00:00Z".into());
+        assert!(grok_cli_needs_refresh(&creds));
     }
 }

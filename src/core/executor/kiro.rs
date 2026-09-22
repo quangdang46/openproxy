@@ -314,32 +314,234 @@ pub enum StopDisposition {
     UnknownFailure,
 }
 
-pub fn stop_disposition(stop_reason: Option<&str>, has_tool_calls: bool) -> StopDisposition {
-    let reason = stop_reason.unwrap_or("").trim();
-    if reason.is_empty() {
-        if has_tool_calls {
-            return StopDisposition::ToolUse;
+impl StopDisposition {
+    /// JS `stopDisposition` string for diagnostics / failure-code mapping.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StopDisposition::Complete => "complete",
+            StopDisposition::ToolUse => "tool_use",
+            StopDisposition::Length => "length",
+            StopDisposition::RetryableProtocolFailure => "retryable_protocol_failure",
+            StopDisposition::TerminalIncomplete => "terminal_incomplete",
+            StopDisposition::TerminalRefusal => "terminal_refusal",
+            StopDisposition::UnknownFailure => "unknown_failure",
         }
+    }
+}
+
+kiro_re!(
+    refusal_like,
+    r"(?i)(?:content.*filter|guardrail|safety|policy|blocked)"
+);
+
+/// Normalize a raw stop reason (9router `normalizeStopReason`, kiro.js:145-151):
+/// trim, camelCase → snake_case, whitespace/hyphens → underscores, then fold
+/// known aliases (`stop`/`stop_sequence` → `end_turn`, `tool_calls` →
+/// `tool_use`, `length`/`max_output_tokens` → `max_tokens`).
+pub fn normalize_stop_reason(value: Option<&str>) -> Option<String> {
+    let raw = value.unwrap_or("").trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_is_lower = false;
+    for c in raw.chars() {
+        if c.is_ascii_uppercase() {
+            if prev_is_lower {
+                out.push('_');
+            }
+            out.push(c.to_ascii_lowercase());
+            prev_is_lower = false;
+        } else if c.is_whitespace() || c == '-' {
+            out.push('_');
+            prev_is_lower = false;
+        } else {
+            out.push(c.to_ascii_lowercase());
+            prev_is_lower = c.is_ascii_lowercase();
+        }
+    }
+    let normalized = match out.as_str() {
+        "endturn" | "end_turn" | "stop" | "stop_sequence" => "end_turn",
+        "tooluse" | "tool_use" | "tool_calls" => "tool_use",
+        "maxtokens" | "max_tokens" | "max_output_tokens" | "length" => "max_tokens",
+        other => other,
+    };
+    Some(normalized.to_string())
+}
+
+pub fn stop_disposition(stop_reason: Option<&str>, has_tool_calls: bool) -> StopDisposition {
+    let reason = normalize_stop_reason(stop_reason);
+    let reason = reason.as_deref();
+    if matches!(
+        reason,
+        Some("malformed_model_output" | "invalid_model_output")
+    ) {
+        return StopDisposition::RetryableProtocolFailure;
+    }
+    if matches!(
+        reason,
+        Some("cancelled" | "pause_turn" | "model_context_window_exceeded")
+    ) {
+        return StopDisposition::TerminalIncomplete;
+    }
+    if reason == Some("refusal") || reason.is_some_and(|r| refusal_like().is_match(r)) {
+        return StopDisposition::TerminalRefusal;
+    }
+    if reason == Some("max_tokens") {
+        return if has_tool_calls {
+            StopDisposition::TerminalIncomplete
+        } else {
+            StopDisposition::Length
+        };
+    }
+    if reason.is_some() && !matches!(reason, Some("end_turn" | "tool_use")) {
+        return StopDisposition::UnknownFailure;
+    }
+    if has_tool_calls || reason == Some("tool_use") {
+        return StopDisposition::ToolUse;
+    }
+    if reason.is_none() || reason == Some("end_turn") {
         return StopDisposition::Complete;
     }
-    match reason.to_ascii_lowercase().as_str() {
-        "tool_use" | "tool_calls" => StopDisposition::ToolUse,
-        "length" => StopDisposition::Length,
-        "max_tokens" => {
-            if has_tool_calls {
-                StopDisposition::TerminalIncomplete
+    StopDisposition::UnknownFailure
+}
+
+/// Severity used to merge competing stop reasons (9router `mergeStopReason`,
+/// kiro.js:170-183): derived from the disposition, terminal refusal wins.
+fn stop_reason_severity(reason: &str) -> u8 {
+    match stop_disposition(Some(reason), false) {
+        StopDisposition::TerminalRefusal => 6,
+        StopDisposition::TerminalIncomplete => 5,
+        StopDisposition::UnknownFailure => 4,
+        StopDisposition::RetryableProtocolFailure => 3,
+        StopDisposition::Length => 2,
+        StopDisposition::Complete | StopDisposition::ToolUse => 1,
+    }
+}
+
+/// Merge two stop reasons keeping the higher severity (9router
+/// `mergeStopReason`). `None` means "no reason seen yet".
+pub fn merge_stop_reason(current: Option<&str>, incoming: Option<&str>) -> Option<String> {
+    match (current, incoming) {
+        (None, incoming) => incoming.map(str::to_string),
+        (Some(c), None) => Some(c.to_string()),
+        (Some(c), Some(i)) => {
+            if stop_reason_severity(i) > stop_reason_severity(c) {
+                Some(i.to_string())
             } else {
-                StopDisposition::Length
+                Some(c.to_string())
             }
         }
-        "model_context_window_exceeded" | "cancelled" | "pause_turn" => {
-            StopDisposition::TerminalIncomplete
+    }
+}
+
+/// Stop reasons that mean "usable as far as it got, then the budget ran out"
+/// (9router `KIRO_TRUNCATION_STOP_REASONS`, kiro.js:157). `cancelled` /
+/// `pause_turn` are abandoned turns whose partial content must stay private,
+/// so they are deliberately absent.
+pub const KIRO_TRUNCATION_STOP_REASONS: &[&str] = &["model_context_window_exceeded", "max_tokens"];
+
+/// True when a terminal-incomplete turn still keeps its streamed output: the
+/// stop reason is a truncation reason and at least one chunk already reached
+/// the client (finish_reason remaps to `"length"`). Mirrors the JS
+/// `declaredTruncatedAfterOutput` / `truncatedAfterOutput` checks
+/// (kiro.js:1014-1015,1079-1080), which derive the disposition with the
+/// turn's tool-use state — so `max_tokens` only truncates on a tool turn.
+pub fn is_truncated_after_output(
+    stop_reason: Option<&str>,
+    has_tool_calls: bool,
+    emitted_chunks: bool,
+) -> bool {
+    if !emitted_chunks {
+        return false;
+    }
+    let normalized = normalize_stop_reason(stop_reason);
+    normalized
+        .as_deref()
+        .is_some_and(|r| KIRO_TRUNCATION_STOP_REASONS.contains(&r))
+        && stop_disposition(stop_reason, has_tool_calls) == StopDisposition::TerminalIncomplete
+}
+
+/// Retry only endpoint/auth-surface failures (9router `shouldRetry`,
+/// kiro.js:338-342 + `KIRO_ENDPOINT_FALLBACK_STATUSES`). Payload-invalid 400
+/// is terminal: sending the same body to every surface cannot repair it.
+pub fn should_retry_status(status: u16, has_fallback: bool) -> bool {
+    const KIRO_ENDPOINT_FALLBACK_STATUSES: &[u16] = &[401, 403, 404];
+    has_fallback && KIRO_ENDPOINT_FALLBACK_STATUSES.contains(&status)
+}
+
+/// Outcome of one integrity-gated attempt (9router `readIntegrityAttempt`
+/// `kind`, kiro.js:521-627).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntegrityAttemptKind {
+    Complete,
+    Ellipsis,
+    ShortFinal,
+    InvalidTool,
+    RetryableStop,
+    TerminalStop,
+    UpstreamError,
+    MissingTerminal,
+}
+
+/// What `runIntegrityRecovery` does with a first-attempt outcome (9router
+/// kiro.js:437-505), as a pure decision: return the bytes, fail terminally,
+/// repair with an appended instruction, or retry the body unmodified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    Complete,
+    FailTerminal,
+    FailInvalidToolDisabled,
+    Repair(KiroRepairKind),
+    RetryUnmodified,
+}
+
+pub fn recovery_action(kind: IntegrityAttemptKind, repair_enabled: bool) -> RecoveryAction {
+    match kind {
+        IntegrityAttemptKind::Complete => RecoveryAction::Complete,
+        IntegrityAttemptKind::TerminalStop | IntegrityAttemptKind::UpstreamError => {
+            RecoveryAction::FailTerminal
         }
-        "content_filter" | "recitation" => StopDisposition::RetryableProtocolFailure,
-        "refusal" | "end_turn_refusal" | "model_refusal" => StopDisposition::TerminalRefusal,
-        "complete" | "end_turn" | "stop" => StopDisposition::Complete,
-        "malformed_function_call" | "malformed_tool_call" => StopDisposition::TerminalIncomplete,
-        _ => StopDisposition::UnknownFailure,
+        IntegrityAttemptKind::InvalidTool if !repair_enabled => {
+            RecoveryAction::FailInvalidToolDisabled
+        }
+        IntegrityAttemptKind::Ellipsis => RecoveryAction::Repair(KiroRepairKind::Ellipsis),
+        IntegrityAttemptKind::ShortFinal => RecoveryAction::Repair(KiroRepairKind::ShortFinal),
+        IntegrityAttemptKind::InvalidTool => RecoveryAction::Repair(KiroRepairKind::InvalidTool),
+        IntegrityAttemptKind::RetryableStop | IntegrityAttemptKind::MissingTerminal => {
+            RecoveryAction::RetryUnmodified
+        }
+    }
+}
+
+/// SSE error code for a terminal first/retry attempt (9router
+/// `integrityFailureSSE`, kiro.js:507-519).
+pub fn integrity_failure_code(
+    kind: IntegrityAttemptKind,
+    terminal_provenance: Option<&str>,
+    disposition: StopDisposition,
+) -> &'static str {
+    if terminal_provenance == Some("integrity_buffer_exceeded") {
+        return "kiro_integrity_buffer_exceeded";
+    }
+    if kind == IntegrityAttemptKind::UpstreamError {
+        return "kiro_upstream_eventstream_error";
+    }
+    match disposition {
+        StopDisposition::TerminalRefusal => "kiro_terminal_refusal",
+        StopDisposition::TerminalIncomplete => "kiro_terminal_incomplete",
+        _ => "kiro_unknown_stop_reason",
+    }
+}
+
+/// SSE error code when the bounded retry still fails (9router
+/// `runIntegrityRecovery` tail, kiro.js:493-499).
+pub fn retry_failure_code(kind: IntegrityAttemptKind) -> &'static str {
+    match kind {
+        IntegrityAttemptKind::Ellipsis => "kiro_ellipsis_retry_failed",
+        IntegrityAttemptKind::ShortFinal => "kiro_short_final_retry_failed",
+        IntegrityAttemptKind::InvalidTool => "kiro_tool_call_repair_retry_failed",
+        _ => "kiro_missing_terminal_retry_failed",
     }
 }
 
@@ -734,9 +936,8 @@ impl KiroExecutor {
                 // repair it). EventStream→SSE conversion runs in
                 // kiro_to_openai_streaming (ResponseTransform path).
                 let status = response.status().as_u16();
-                let is_fallback_status = status == 401 || status == 403 || status == 404;
                 let has_fallback = url_index + 1 < urls.len();
-                if is_fallback_status && has_fallback {
+                if should_retry_status(status, has_fallback) {
                     last_error = Some(KiroExecutorError::EndpointStatus {
                         status,
                         url: url.clone(),
@@ -866,19 +1067,21 @@ impl KiroExecutor {
                                             transport: TransportKind::Reqwest,
                                         });
                                     }
-                                    // Retry still failed — emit the specific code.
-                                    let code = match retry_kind {
-                                        KiroRepairKind::Ellipsis => "kiro_ellipsis_retry_failed",
+                                    // Retry still failed — emit the specific code
+                                    // (9router runIntegrityRecovery tail).
+                                    let retry_attempt_kind = match retry_kind {
+                                        KiroRepairKind::Ellipsis => IntegrityAttemptKind::Ellipsis,
                                         KiroRepairKind::ShortFinal => {
-                                            "kiro_short_final_retry_failed"
+                                            IntegrityAttemptKind::ShortFinal
                                         }
                                         KiroRepairKind::InvalidTool => {
-                                            "kiro_tool_call_repair_retry_failed"
+                                            IntegrityAttemptKind::InvalidTool
                                         }
                                         KiroRepairKind::None => {
-                                            "kiro_missing_terminal_retry_failed"
+                                            IntegrityAttemptKind::MissingTerminal
                                         }
                                     };
+                                    let code = retry_failure_code(retry_attempt_kind);
                                     return Ok(KiroExecutorResponse {
                                         response: UpstreamResponse::Reqwest(
                                             http::Response::builder()
@@ -1728,9 +1931,10 @@ mod tests {
             stop_disposition(Some("length"), false),
             StopDisposition::Length
         );
+        // Guardrail-flavored stops are terminal refusals (JS line 162).
         assert_eq!(
             stop_disposition(Some("content_filter"), false),
-            StopDisposition::RetryableProtocolFailure
+            StopDisposition::TerminalRefusal
         );
         assert_eq!(
             stop_disposition(Some("refusal"), false),
@@ -1738,7 +1942,7 @@ mod tests {
         );
         assert_eq!(
             stop_disposition(Some("malformed_function_call"), false),
-            StopDisposition::TerminalIncomplete
+            StopDisposition::UnknownFailure
         );
         assert_eq!(
             stop_disposition(Some("end_turn"), false),
@@ -1814,6 +2018,270 @@ mod tests {
         assert_eq!(kind, KiroRepairKind::None);
     }
 
+    #[test]
+    fn normalize_stop_reason_aliases() {
+        // 9router normalizeStopReason (kiro.js:145-151).
+        assert_eq!(
+            normalize_stop_reason(Some("stop")),
+            Some("end_turn".to_string())
+        );
+        assert_eq!(
+            normalize_stop_reason(Some("endTurn")),
+            Some("end_turn".to_string())
+        );
+        assert_eq!(
+            normalize_stop_reason(Some("tool_calls")),
+            Some("tool_use".to_string())
+        );
+        assert_eq!(
+            normalize_stop_reason(Some("length")),
+            Some("max_tokens".to_string())
+        );
+        assert_eq!(
+            normalize_stop_reason(Some("maxTokens")),
+            Some("max_tokens".to_string())
+        );
+        assert_eq!(normalize_stop_reason(None), None);
+        assert_eq!(normalize_stop_reason(Some("  ")), None);
+    }
+
+    #[test]
+    fn stop_disposition_js_parity() {
+        // malformed output is retryable, not terminal (JS line 160).
+        assert_eq!(
+            stop_disposition(Some("malformed_model_output"), false),
+            StopDisposition::RetryableProtocolFailure
+        );
+        assert_eq!(
+            stop_disposition(Some("invalid_model_output"), false),
+            StopDisposition::RetryableProtocolFailure
+        );
+        // Guardrail-flavored refusals are terminal refusals (JS line 162).
+        assert_eq!(
+            stop_disposition(Some("guardrail_intervened"), false),
+            StopDisposition::TerminalRefusal
+        );
+        assert_eq!(
+            stop_disposition(Some("content-filtered"), false),
+            StopDisposition::TerminalRefusal
+        );
+        // end_turn aliases stay complete.
+        assert_eq!(
+            stop_disposition(Some("stop_sequence"), false),
+            StopDisposition::Complete
+        );
+        // camelCase input normalizes before classification.
+        assert_eq!(
+            stop_disposition(Some("endTurn"), false),
+            StopDisposition::Complete
+        );
+        assert_eq!(
+            stop_disposition(Some("toolUse"), false),
+            StopDisposition::ToolUse
+        );
+    }
+
+    #[test]
+    fn merge_stop_reason_keeps_severe() {
+        // 9router mergeStopReason (kiro.js:170-183).
+        assert_eq!(
+            merge_stop_reason(None, Some("end_turn")),
+            Some("end_turn".to_string())
+        );
+        assert_eq!(
+            merge_stop_reason(Some("end_turn"), None),
+            Some("end_turn".to_string())
+        );
+        assert_eq!(merge_stop_reason(None, None), None);
+        // Terminal refusal outranks terminal incomplete.
+        assert_eq!(
+            merge_stop_reason(Some("cancelled"), Some("refusal")),
+            Some("refusal".to_string())
+        );
+        // Lower severity incoming does not replace current.
+        assert_eq!(
+            merge_stop_reason(Some("refusal"), Some("end_turn")),
+            Some("refusal".to_string())
+        );
+        // Unknown outranks length.
+        assert_eq!(
+            merge_stop_reason(Some("max_tokens"), Some("mystery")),
+            Some("mystery".to_string())
+        );
+    }
+
+    #[test]
+    fn truncation_keeps_streamed_output() {
+        // JS derives the disposition with the turn's sawToolUse state, so a
+        // truncation reason only keeps output on a tool turn.
+        assert!(is_truncated_after_output(
+            Some("model_context_window_exceeded"),
+            true,
+            true
+        ));
+        assert!(is_truncated_after_output(Some("max_tokens"), true, true));
+        // Plain-text max_tokens is Length, not terminal → no truncation branch.
+        assert!(!is_truncated_after_output(Some("max_tokens"), false, true));
+        // No chunks yet → nothing to keep.
+        assert!(!is_truncated_after_output(Some("max_tokens"), true, false));
+        // Abandoned turns stay private even with output on a tool turn.
+        assert!(!is_truncated_after_output(Some("cancelled"), true, true));
+        assert!(!is_truncated_after_output(Some("pause_turn"), true, true));
+    }
+
+    #[test]
+    fn should_retry_status_endpoint_only() {
+        // 9router shouldRetry (kiro.js:338-342): 401/403/404 with fallback.
+        assert!(should_retry_status(401, true));
+        assert!(should_retry_status(403, true));
+        assert!(should_retry_status(404, true));
+        // 400 is terminal even with fallback left.
+        assert!(!should_retry_status(400, true));
+        // No fallback left → no retry.
+        assert!(!should_retry_status(401, false));
+        assert!(!should_retry_status(429, true));
+        assert!(!should_retry_status(500, true));
+    }
+
+    #[test]
+    fn recovery_action_matches_js_gate() {
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::Complete, true),
+            RecoveryAction::Complete
+        );
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::TerminalStop, true),
+            RecoveryAction::FailTerminal
+        );
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::UpstreamError, true),
+            RecoveryAction::FailTerminal
+        );
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::InvalidTool, false),
+            RecoveryAction::FailInvalidToolDisabled
+        );
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::InvalidTool, true),
+            RecoveryAction::Repair(KiroRepairKind::InvalidTool)
+        );
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::Ellipsis, true),
+            RecoveryAction::Repair(KiroRepairKind::Ellipsis)
+        );
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::ShortFinal, true),
+            RecoveryAction::Repair(KiroRepairKind::ShortFinal)
+        );
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::RetryableStop, true),
+            RecoveryAction::RetryUnmodified
+        );
+        assert_eq!(
+            recovery_action(IntegrityAttemptKind::MissingTerminal, true),
+            RecoveryAction::RetryUnmodified
+        );
+    }
+
+    #[test]
+    fn integrity_failure_codes() {
+        // Buffer cap has its own code regardless of disposition.
+        assert_eq!(
+            integrity_failure_code(
+                IntegrityAttemptKind::TerminalStop,
+                Some("integrity_buffer_exceeded"),
+                StopDisposition::TerminalIncomplete
+            ),
+            "kiro_integrity_buffer_exceeded"
+        );
+        assert_eq!(
+            integrity_failure_code(
+                IntegrityAttemptKind::UpstreamError,
+                None,
+                StopDisposition::UnknownFailure
+            ),
+            "kiro_upstream_eventstream_error"
+        );
+        assert_eq!(
+            integrity_failure_code(
+                IntegrityAttemptKind::TerminalStop,
+                None,
+                StopDisposition::TerminalRefusal
+            ),
+            "kiro_terminal_refusal"
+        );
+        assert_eq!(
+            integrity_failure_code(
+                IntegrityAttemptKind::TerminalStop,
+                None,
+                StopDisposition::TerminalIncomplete
+            ),
+            "kiro_terminal_incomplete"
+        );
+        assert_eq!(
+            integrity_failure_code(
+                IntegrityAttemptKind::TerminalStop,
+                None,
+                StopDisposition::UnknownFailure
+            ),
+            "kiro_unknown_stop_reason"
+        );
+    }
+
+    #[test]
+    fn retry_failure_codes_tail() {
+        // 9router runIntegrityRecovery tail (kiro.js:493-499).
+        assert_eq!(
+            retry_failure_code(IntegrityAttemptKind::Ellipsis),
+            "kiro_ellipsis_retry_failed"
+        );
+        assert_eq!(
+            retry_failure_code(IntegrityAttemptKind::ShortFinal),
+            "kiro_short_final_retry_failed"
+        );
+        assert_eq!(
+            retry_failure_code(IntegrityAttemptKind::InvalidTool),
+            "kiro_tool_call_repair_retry_failed"
+        );
+        assert_eq!(
+            retry_failure_code(IntegrityAttemptKind::MissingTerminal),
+            "kiro_missing_terminal_retry_failed"
+        );
+    }
+
+    #[test]
+    fn decode_body_to_sse_transforms_frames() {
+        // The EventStream→SSE transform path (JS transformEventStreamToSSE):
+        // a binary assistantResponseEvent frame decodes to OpenAI SSE text.
+        fn make_frame(event_type: &str, payload: &str) -> Vec<u8> {
+            let mut header_bytes = Vec::new();
+            let name = b":event-type";
+            header_bytes.push(name.len() as u8);
+            header_bytes.extend_from_slice(name);
+            header_bytes.push(7u8);
+            header_bytes.extend_from_slice(&(event_type.len() as u16).to_be_bytes());
+            header_bytes.extend_from_slice(event_type.as_bytes());
+            let total = 12 + header_bytes.len() + payload.len() + 4;
+            let mut frame = Vec::new();
+            frame.extend_from_slice(&(total as u32).to_be_bytes());
+            frame.extend_from_slice(&(header_bytes.len() as u32).to_be_bytes());
+            let prelude_crc = crc32fast::hash(&frame[..8]);
+            frame.extend_from_slice(&prelude_crc.to_be_bytes());
+            frame.extend_from_slice(&header_bytes);
+            frame.extend_from_slice(payload.as_bytes());
+            let msg_crc = crc32fast::hash(&frame);
+            frame.extend_from_slice(&msg_crc.to_be_bytes());
+            frame
+        }
+
+        let body = make_frame("assistantResponseEvent", r#"{"content":"hello"}"#);
+        let sse = decode_body_to_sse(&body);
+        assert!(
+            sse.contains("data: "),
+            "expected SSE data lines, got: {sse}"
+        );
+        assert!(sse.contains("hello"), "expected content in SSE, got: {sse}");
+    }
     #[test]
     fn test_normalize_kiro_model_body() {
         assert_eq!(
