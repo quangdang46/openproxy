@@ -11,6 +11,7 @@ import {
   Toggle,
 } from "@/shared/components";
 import ProviderIcon from "@/shared/components/ProviderIcon";
+import { ConfirmModal } from "@/shared/components/Modal";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import {
   FREE_PROVIDERS,
@@ -118,6 +119,12 @@ export default function ProvidersPageClient() {
   // Simulation mock badges (bead sim-20): one /api/mock/status fetch,
   // threaded to cards (same source as detail toggle + modal).
   const [mockById, setMockById] = useState({});
+  const [forceAll, setForceAll] = useState(false);
+  const [forceSaving, setForceSaving] = useState(false);
+  // Confirm guard (reviewer sim-20 retro): enabling force-all is a global
+  // behavior change — require explicit confirmation. Disabling applies
+  // immediately (safe direction).
+  const [pendingForceOn, setPendingForceOn] = useState(false);
   const notify = useNotificationStore();
   const searchQuery = useHeaderSearchStore((s) => s.query);
   const registerSearch = useHeaderSearchStore((s) => s.register);
@@ -594,13 +601,38 @@ export default function ProvidersPageClient() {
           </button>
         </div>
       )}
+      <ConfirmModal
+        isOpen={pendingForceOn}
+        onClose={() => setPendingForceOn(false)}
+        onConfirm={async () => {
+          await setForceAllMode(true);
+          setPendingForceOn(false);
+        }}
+        title="Mock all providers?"
+        message={
+          <>
+            This forces <code>all supported providers</code> to execute locally
+            (no API keys used) until turned off. Use for development only —
+            production traffic would silently stop hitting real providers.
+          </>
+        }
+        confirmText="Mock all"
+        variant="danger"
+        loading={forceSaving}
+      />
       <div className="flex items-center justify-end gap-2">
         <label className="flex items-center gap-1.5 text-xs text-text-muted" title="Force all supported providers to mock (dev only). Same as OPENPROXY_DEV_MOCK=1.">
           <input
             type="checkbox"
             checked={forceAll}
             disabled={forceSaving}
-            onChange={(e) => setForceAllMode(e.target.checked)}
+            onChange={(e) => {
+              if (e.target.checked) {
+                setPendingForceOn(true);
+              } else {
+                setForceAllMode(false);
+              }
+            }}
           />
           Dev: mock all
         </label>
