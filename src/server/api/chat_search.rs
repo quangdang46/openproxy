@@ -145,6 +145,45 @@ fn select_search_connection(
     })
 }
 
+/// Canonical search-provider order used for cross-provider failover
+/// (mirrors the 15-provider registry in [`resolve_search_provider`]).
+const SEARCH_FAILOVER_ORDER: &[&str] = &[
+    "serper",
+    "serpingapi",
+    "brave-search",
+    "perplexity",
+    "exa",
+    "tavily",
+    "google-pse",
+    "linkup",
+    "searchapi",
+    "youcom",
+    "searxng",
+    "xquik",
+    "ollama-search",
+    "glm",
+    "antigravity",
+];
+
+/// Pure failover ordering: primary first, then the remaining providers in
+/// canonical order. Unit-testable decision fn; the handler filters this
+/// down to providers with an active connection.
+fn failover_order(primary: &str) -> Vec<&'static str> {
+    let mut order = Vec::with_capacity(SEARCH_FAILOVER_ORDER.len());
+    if let Some(hit) = SEARCH_FAILOVER_ORDER.iter().find(|id| **id == primary) {
+        order.push(*hit);
+    } else {
+        return order;
+    }
+    order.extend(
+        SEARCH_FAILOVER_ORDER
+            .iter()
+            .filter(|id| **id != primary)
+            .copied(),
+    );
+    order
+}
+
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route(
@@ -230,27 +269,6 @@ pub async fn handle_search_completions(
         }
     };
 
-    // -- Select credentials --
-    let snapshot = state.db.snapshot();
-    let connection = match select_search_connection(&snapshot, provider) {
-        Some(c) => c,
-        None => {
-            return with_cors_response(
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": {
-                            "message": format!("No active credentials found for search provider: {}", provider),
-                            "type": "invalid_request_error",
-                            "code": null
-                        }
-                    })),
-                )
-                    .into_response(),
-            );
-        }
-    };
-
     // -- Build the search request body for the dispatch function --
     let max_results = body
         .get("max_results")
@@ -284,69 +302,78 @@ pub async fn handle_search_completions(
         }
     }
 
-    // -- Execute search --
-    let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
-    let client = match state.client_pool.get(provider, proxy.as_ref()) {
-        Ok(c) => c,
-        Err(e) => {
-            return with_cors_response(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({
-                        "error": {
-                            "message": format!("Failed to create HTTP client: {}", e),
-                            "type": "server_error",
-                            "code": null
-                        }
-                    })),
-                )
-                    .into_response(),
-            );
-        }
-    };
+    // -- Execute search with cross-provider failover: primary first, then
+    // the remaining registry providers that have an active connection --
+    let snapshot = state.db.snapshot();
+    let mut attempted: Vec<&'static str> = Vec::new();
+    let mut last_err_msg: Option<String> = None;
+    let mut last_err_code: Option<String> = None;
+    let mut success: Option<(Value, u64, &'static str)> = None;
 
-    let result = search_dispatch(&client, &connection, provider, &search_body).await;
+    for candidate in failover_order(provider) {
+        let connection = match select_search_connection(&snapshot, candidate) {
+            Some(c) => c,
+            None => continue,
+        };
+        attempted.push(candidate);
+        let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+        let client = match state.client_pool.get(candidate, proxy.as_ref()) {
+            Ok(c) => c,
+            Err(e) => {
+                last_err_msg = Some(format!("Failed to create HTTP client: {}", e));
+                last_err_code = Some("server_error".to_string());
+                continue;
+            }
+        };
+        match search_dispatch(&client, &connection, candidate, &search_body).await {
+            Some(Ok(raw_value)) => {
+                let results_arr = raw_value
+                    .get("results")
+                    .and_then(Value::as_array)
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                success = Some((raw_value, results_arr as u64, candidate));
+                break;
+            }
+            Some(Err(err)) => {
+                last_err_msg = Some(err.message().to_string());
+                last_err_code = Some(format!("search_{}", err.status()));
+                continue;
+            }
+            None => continue,
+        }
+    }
 
-    let (results_value, usage_tokens) = match result {
-        Some(Ok(raw_value)) => {
-            // Estimate token usage based on result count.
-            let results_arr = raw_value
-                .get("results")
-                .and_then(Value::as_array)
-                .map(|a| a.len())
-                .unwrap_or(0);
-            (raw_value, results_arr as u64)
-        }
-        Some(Err(err)) => {
-            return with_cors_response(
-                (
-                    StatusCode::BAD_GATEWAY,
-                    Json(json!({
-                        "error": {
-                            "message": format!("Search failed: {}", err.message()),
-                            "type": "server_error",
-                            "code": format!("search_{}", err.status())
-                        }
-                    })),
-                )
-                    .into_response(),
-            );
-        }
-        None => {
-            return with_cors_response(
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": {
-                            "message": format!("Unsupported search provider: {}", provider),
-                            "type": "invalid_request_error",
-                            "code": null
-                        }
-                    })),
-                )
-                    .into_response(),
-            );
-        }
+    if attempted.is_empty() {
+        return with_cors_response(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": format!("No active credentials found for search provider: {}", provider),
+                        "type": "invalid_request_error",
+                        "code": null
+                    }
+                })),
+            )
+                .into_response(),
+        );
+    }
+
+    let Some((results_value, usage_tokens, effective_provider)) = success else {
+        return with_cors_response(
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({
+                    "error": {
+                        "message": format!("Search failed: {}", last_err_msg.unwrap_or_else(|| "all search providers failed".to_string())),
+                        "type": "server_error",
+                        "code": last_err_code
+                    }
+                })),
+            )
+                .into_response(),
+        );
     };
 
     // -- Build the chat-completion-style response --
@@ -399,7 +426,7 @@ pub async fn handle_search_completions(
         },
         "search_results": results,
         "search_metadata": {
-            "provider": provider,
+            "provider": effective_provider,
             "query": query,
             "total_results": total_results,
             "search_type": search_type,
@@ -408,4 +435,47 @@ pub async fn handle_search_completions(
 
     let resp = (StatusCode::OK, Json(response)).into_response();
     with_cors_response(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{extract_query, failover_order, resolve_search_provider, SEARCH_FAILOVER_ORDER};
+
+    #[test]
+    fn chat_search_failover_order_primary_first() {
+        let order = failover_order("exa");
+        assert_eq!(order.first(), Some(&"exa"));
+        assert_eq!(order.len(), SEARCH_FAILOVER_ORDER.len());
+        let mut seen = std::collections::HashSet::new();
+        for id in &order {
+            assert!(seen.insert(*id), "duplicate failover entry: {id}");
+        }
+    }
+
+    #[test]
+    fn chat_search_failover_order_unknown_primary_is_empty() {
+        assert!(failover_order("not-a-provider").is_empty());
+    }
+
+    #[test]
+    fn chat_search_failover_order_covers_registry_aliases() {
+        // Every alias target in resolve_search_provider must appear in the
+        // failover order so failover can actually reach it.
+        for alias in [
+            "serper",
+            "brave",
+            "exa",
+            "tavily",
+            "ollama-search",
+            "glm",
+            "antigravity",
+        ] {
+            let id = resolve_search_provider(alias).unwrap();
+            assert!(
+                SEARCH_FAILOVER_ORDER.contains(&id),
+                "failover order missing provider id: {id}"
+            );
+        }
+        assert!(extract_query(&serde_json::json!({"query": "q"})).is_some());
+    }
 }
