@@ -80,6 +80,7 @@ impl ProviderExecutor for CodeBuddyIntlExecutor {
             stream: true, // registry forceStream
             credentials: request.credentials.clone(),
             proxy: request.proxy.clone(),
+            sim_headers: HeaderMap::new(),
         };
         let ExecutionResponse {
             response,
