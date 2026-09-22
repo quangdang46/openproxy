@@ -36,18 +36,11 @@ impl super::engine::ProviderSimulator for GeminiSimulator {
     }
 }
 
-/// Interim known-model list (bead sim-10). Bead sim-11 replaces with models.rs.
+/// Model check via shared registry (bead sim-11).
 fn is_known_model(model: &str) -> bool {
-    const KNOWN: &[&str] = &[
-        "gemini-2.5-pro",
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite",
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-pro",
-        "gemini-1.5-flash",
-    ];
-    KNOWN.contains(&model)
+    // NOTE: format-agnostic here; per-format dispatch passes the
+    // right key via validate() below (see sim_validate_format).
+    super::models::is_known(ProviderFormat::Gemini, model)
 }
 
 /// Last user text from a Gemini contents body.

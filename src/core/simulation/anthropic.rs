@@ -58,20 +58,11 @@ impl super::engine::ProviderSimulator for AnthropicCompatibleSimulator {
     }
 }
 
-/// Interim known-model list (bead sim-09). Bead sim-11 replaces with models.rs.
+/// Model check via shared registry (bead sim-11).
 fn is_known_model(model: &str) -> bool {
-    const KNOWN: &[&str] = &[
-        "claude-opus-4-6",
-        "claude-opus-4-1",
-        "claude-sonnet-4-6",
-        "claude-sonnet-4-5",
-        "claude-haiku-4-5",
-        "claude-3-7-sonnet-latest",
-        "claude-3-5-sonnet-latest",
-        "claude-3-5-haiku-latest",
-        "claude-3-opus-latest",
-    ];
-    KNOWN.contains(&model)
+    // NOTE: format-agnostic here; per-format dispatch passes the
+    // right key via validate() below (see sim_validate_format).
+    super::models::is_known(ProviderFormat::Anthropic, model)
 }
 
 /// Last user text from an Anthropic messages body (string or content blocks).
