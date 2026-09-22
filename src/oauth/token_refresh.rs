@@ -912,6 +912,10 @@ pub async fn refresh_codebuddy_cn_token(refresh_token: &str) -> Result<RefreshRe
 }
 
 /// Qoder does not support token refresh. This function always returns an error.
+///
+/// 9router parity: `services/tokenRefresh.js` REFRESH_HANDLERS has no qoder
+/// entry, and `src/oauth/qoder.rs` documents "NO refresh (server returns
+/// 403), re-login after 30d" — the stub matches that behavior by design.
 pub async fn refresh_qoder_token(_refresh_token: &str) -> Result<RefreshResult, String> {
     Err("Qoder does not support token refresh".to_string())
 }
@@ -1350,5 +1354,20 @@ mod tests {
         assert_eq!(body["refreshToken"], serde_json::json!("cline-old"));
         assert_eq!(body["grantType"], serde_json::json!("refresh_token"));
         assert_eq!(body["clientType"], serde_json::json!("extension"));
+    }
+
+    #[test]
+    fn qoder_refresh_is_unsupported_by_design() {
+        // 9router services/tokenRefresh.js REFRESH_HANDLERS has no qoder
+        // entry; src/oauth/qoder.rs documents server-403 on refresh. The
+        // stub must keep returning Err (callers fall back to re-login).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt
+            .block_on(refresh_qoder_token("any-refresh-token"))
+            .expect_err("qoder refresh must fail");
+        assert!(
+            err.to_lowercase().contains("does not support"),
+            "unexpected qoder refresh error: {err}"
+        );
     }
 }
