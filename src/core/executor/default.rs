@@ -19,7 +19,7 @@ use crate::core::utils::reasoning_content_injector::inject_reasoning_content;
 use crate::oauth::token_refresh::dispatch_oauth_refresh;
 use crate::types::{ProviderConnection, ProviderNode};
 
-use crate::core::simulation::{env_force_all, is_format_supported};
+use crate::core::simulation::env_force_all;
 
 use super::strip_unsupported::strip_unsupported_params;
 use super::ClientPool;
@@ -579,10 +579,6 @@ pub struct DefaultExecutor {
     config: ProviderConfig,
     pool: Arc<ClientPool>,
     provider_node: Option<ProviderNode>,
-    /// Incoming client headers for this executor instance, used ONLY for
-    /// simulation control headers (`x-openproxy-sim-*`, bead sim-04).
-    /// Never forwarded upstream (stripped before send).
-    sim_headers: HeaderMap,
 }
 
 #[derive(Debug, Clone)]
@@ -812,16 +808,7 @@ impl DefaultExecutor {
             config,
             pool,
             provider_node,
-            sim_headers: HeaderMap::new(),
         })
-    }
-
-    /// Attach incoming client headers for simulation control (bead sim-04).
-    /// Only `x-openproxy-sim-*` headers are ever read; the rest is ignored
-    /// and never forwarded upstream.
-    pub fn with_sim_headers(mut self, headers: HeaderMap) -> Self {
-        self.sim_headers = headers;
-        self
     }
 
     /// Whether simulation mock mode is active for this request (bead sim-04).
@@ -850,7 +837,13 @@ impl DefaultExecutor {
         &self,
         _request: &ExecutionRequest,
     ) -> Result<ExecutionResponse, ExecutorError> {
-        unimplemented!("SimulationEngine not yet wired (beads sim-06+)")
+        // Loud miswire signal WITHOUT panicking the worker: the engine arrives
+        // in beads sim-06+. Reachable only when simulation was explicitly
+        // activated (env force or sim header), never by default.
+        Err(ExecutorError::SimulationUnsupported {
+            provider: self.provider.clone(),
+            format: self.config.format.clone(),
+        })
     }
 
     /// Full endpoint URL already (path present); optional query is ignored for matching.
@@ -1471,9 +1464,10 @@ impl DefaultExecutor {
         mut request: ExecutionRequest,
     ) -> Result<ExecutionResponse, ExecutorError> {
         // --- Simulation interception (bead sim-04, default-off) ---
-        // Mode resolution happens BEFORE credential use: when mock is active,
-        // no key validation, no refresh, no network. Default (unconfigured) is
-        // Real, so this block is unreachable unless simulation was configured.
+        // Checked BEFORE any credential *use*: when mock is active, no signing,
+        // no refresh, no network. (The credentials object is already resolved by
+        // the caller; the branch guarantees it is never used.) Default
+        // (unconfigured) is Real, so this block is unreachable in production.
         if Self::simulation_active(&request) {
             return self.execute_simulated(&request).await;
         }
@@ -2006,7 +2000,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simulation_branch_unreachable_by_default() {
+    fn simulation_gate_matches_env_force() {
         // Default-off contract (bead sim-04): no sim header and (in CI) no
         // OPENPROXY_DEV_MOCK env -> simulation_active is false, so execute()
         // takes the REAL path. Asserts the gate directly (no network).

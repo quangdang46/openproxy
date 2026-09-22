@@ -130,7 +130,7 @@ impl std::fmt::Display for ProviderExecutorError {
 
 impl std::error::Error for ProviderExecutorError {}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProviderFormat {
     OpenAI,
     Anthropic,
