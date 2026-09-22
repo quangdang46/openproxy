@@ -24,6 +24,17 @@ pub enum SimulationError {
     },
     /// Simulator failed to build a response (bug — not a provider error).
     Internal(String),
+    /// Provider-correct request rejection (bead sim-08): malformed body,
+    /// unknown model. Carries the exact HTTP status + error envelope the real
+    /// provider would return, so callers render it without translation.
+    Validation {
+        /// HTTP status (400 malformed, 404 unknown model).
+        status: u16,
+        /// Exact provider error envelope JSON.
+        body: serde_json::Value,
+        /// Optional Retry-After seconds (429 path, bead sim-12 extends).
+        retry_after: Option<u64>,
+    },
 }
 
 impl SimulationError {
@@ -34,6 +45,9 @@ impl SimulationError {
                 "mock unavailable for this provider format (provider: {provider}, format: {format})"
             ),
             Self::Internal(detail) => format!("simulation internal error: {detail}"),
+            Self::Validation { status, body, .. } => {
+                format!("simulation validation error {status}: {body}")
+            }
         }
     }
 
@@ -69,6 +83,18 @@ mod tests {
             msg.contains("mock unavailable"),
             "must say unavailable: {msg}"
         );
+        assert!(!e.simulation_supported());
+    }
+
+    #[test]
+    fn validation_message() {
+        let e = SimulationError::Validation {
+            status: 404,
+            body: serde_json::json!({"error": {"code": "model_not_found"}}),
+            retry_after: None,
+        };
+        let msg = e.message();
+        assert!(msg.contains("404"), "missing status: {msg}");
         assert!(!e.simulation_supported());
     }
 
