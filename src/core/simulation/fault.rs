@@ -94,6 +94,19 @@ impl FaultSpec {
 /// the real provider would return for the given format.
 pub struct FaultInjector;
 
+/// Content-level override action (plan §5.1.1). The simulator always owns
+/// envelope + SSE framing; the override only supplies payload.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverrideAction {
+    /// Non-stream: use as the complete response body verbatim.
+    /// Stream: extract `content`/`tool_calls`/`tool_use` payload if present.
+    Json(serde_json::Value),
+    /// Plain string: inserted as message content (suppresses tool echo).
+    Text(String),
+    /// JSON-looking but unparseable: caller renders provider-correct 400.
+    Malformed,
+}
+
 impl FaultInjector {
     /// Sleep for the injected latency, if any (bead sim-13). Called by the
     /// executor BEFORE first byte on every mock outcome (status fault,
@@ -103,6 +116,76 @@ impl FaultInjector {
     pub async fn apply_latency(spec: &FaultSpec) {
         if spec.latency_ms > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(spec.latency_ms)).await;
+        }
+    }
+
+    /// Truncate an SSE body after N data frames (bead sim-14).
+    /// Keeps frame boundaries (splits on `\n\n`, keeps whole frames), drops
+    /// the terminal `[DONE]`/`message_stop` so the client sees a truncated
+    /// stream and surfaces an error instead of hanging. Returns `None` when
+    /// no disconnect armed (caller passes the body through untouched).
+    /// `None` when N == 0 is treated as "cut everything" (empty body).
+    pub fn truncate_sse(body: &str, spec: &FaultSpec) -> Option<String> {
+        let n = spec.disconnect_after_chunks?;
+        // Hard terminals that signal clean completion — a truncated stream must
+        // NEVER keep these, regardless of framing style (bare `data:` for
+        // OpenAI/Gemini, `event:`+`data:` for Anthropic).
+        fn is_terminal(frame: &str) -> bool {
+            let t = frame.trim();
+            t == "data: [DONE]"
+                || t.contains("\"type\":\"message_stop\"")
+                || t.contains("\"type\": \"message_stop\"")
+                || t.contains("event: message_stop")
+        }
+        let mut out = String::new();
+        let mut kept = 0;
+        for frame in body.split_inclusive("\n\n") {
+            if frame.trim().is_empty() {
+                continue;
+            }
+            if is_terminal(frame) {
+                break;
+            }
+            let is_data =
+                frame.trim_start().starts_with("data:") || frame.trim_start().starts_with("event:");
+            if !is_data {
+                out.push_str(frame);
+                continue;
+            }
+            if kept >= n {
+                break;
+            }
+            out.push_str(frame);
+            kept += 1;
+        }
+        Some(out)
+    }
+
+    /// Response-override resolution (bead sim-14, plan §5.1.1).
+    ///
+    /// The override is **content-level**, never raw protocol: the simulator
+    /// always owns envelope + SSE framing. Returns an action the caller
+    /// applies to the normal envelope:
+    /// - `None` → no override armed.
+    /// - JSON object → non-stream: verbatim body (caller owns schema);
+    ///   stream: object with `content`/`tool_calls`/`tool_use` extracts the
+    ///   payload, framing stays simulator-generated.
+    /// - Plain string → inserted as message content (suppresses tool echo).
+    /// - Malformed JSON-looking value (starts with `{`/`[` but doesn't parse)
+    ///   → caller renders provider-correct 400.
+    pub fn response_override(spec: &FaultSpec) -> Option<OverrideAction> {
+        let raw = spec.response_override.as_ref()?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.starts_with('{') || trimmed.starts_with('[') {
+            match serde_json::from_str::<serde_json::Value>(trimmed) {
+                Ok(v) => Some(OverrideAction::Json(v)),
+                Err(_) => Some(OverrideAction::Malformed),
+            }
+        } else {
+            Some(OverrideAction::Text(raw.clone()))
         }
     }
 
@@ -336,5 +419,84 @@ mod tests {
         let r =
             FaultInjector::status_fault(ProviderFormat::OpenAI, "openai", &FaultSpec::default());
         assert!(r.is_none(), "non-fault result untouched");
+        assert!(FaultInjector::truncate_sse("data: {}\n\n", &FaultSpec::default()).is_none());
+        assert!(FaultInjector::response_override(&FaultSpec::default()).is_none());
+    }
+
+    #[test]
+    fn truncate_keeps_frame_boundaries() {
+        let body = "data: {\"a\":1}\n\ndata: {\"a\":2}\n\ndata: {\"a\":3}\n\ndata: [DONE]\n\n";
+        let spec = FaultSpec {
+            disconnect_after_chunks: Some(2),
+            ..Default::default()
+        };
+        let out = FaultInjector::truncate_sse(body, &spec).unwrap();
+        assert!(out.contains("\"a\":1"), "first kept");
+        assert!(out.contains("\"a\":2"), "second kept");
+        assert!(!out.contains("\"a\":3"), "third cut");
+        assert!(!out.contains("[DONE]"), "terminal dropped");
+        // N=0 cuts everything.
+        let spec0 = FaultSpec {
+            disconnect_after_chunks: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(
+            FaultInjector::truncate_sse(body, &spec0).unwrap(),
+            "",
+            "N=0 empty"
+        );
+        // Anthropic message_stop terminal dropped too.
+        let a_body = "event: message_start\ndata: {}\n\nevent: message_stop\ndata: {}\n\n";
+        let out_a = FaultInjector::truncate_sse(a_body, &spec).unwrap();
+        assert!(!out_a.contains("message_stop"), "terminal dropped");
+    }
+
+    #[test]
+    fn response_override_resolution() {
+        use OverrideAction::*;
+        // JSON object → Json.
+        let s = FaultSpec {
+            response_override: Some("{\"content\":\"hi\"}".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            FaultInjector::response_override(&s),
+            Some(Json(_))
+        ));
+        // Plain string → Text.
+        let s = FaultSpec {
+            response_override: Some("hello there".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            FaultInjector::response_override(&s),
+            Some(Text(t)) if t == "hello there"
+        ));
+        // Malformed JSON-looking → Malformed.
+        let s = FaultSpec {
+            response_override: Some("{\"broken\": ".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            FaultInjector::response_override(&s),
+            Some(Malformed)
+        ));
+        // Empty/whitespace → None.
+        let s = FaultSpec {
+            response_override: Some("   ".into()),
+            ..Default::default()
+        };
+        assert!(FaultInjector::response_override(&s).is_none());
+    }
+
+    #[test]
+    fn parse_status_allowlist_clean() {
+        // Reviewer sim-12 nit: "429 " trims to allowed — its own case.
+        let s = FaultSpec::parse(&headers(&[(HDR_STATUS, " 429 ")]));
+        assert_eq!(s.status, Some(429));
+        for code in ["200", "404", "418", "abc", ""] {
+            let s = FaultSpec::parse(&headers(&[(HDR_STATUS, code)]));
+            assert_eq!(s.status, None, "value {code:?}");
+        }
     }
 }
