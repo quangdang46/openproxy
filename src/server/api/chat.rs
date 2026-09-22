@@ -2940,6 +2940,40 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
     clear_connection_error_for_model(state, connection_id, None).await;
 }
 
+/// Selective lock clear (9router src/sse/services/auth.js:306-312):
+/// succeeded model lock + account-level `modelLock___all` + expired locks.
+/// Other active model locks survive (different-model failures stay locked).
+fn retain_lock_after_success(
+    extra: &mut std::collections::BTreeMap<String, Value>,
+    succeeded_model: Option<&str>,
+    now: DateTime<Utc>,
+) {
+    let model_key = succeeded_model.map(|m| format!("modelLock_{m}"));
+    extra.retain(|k, v| {
+        if !k.starts_with("modelLock_") {
+            return true;
+        }
+        // Drop expired
+        if let Some(exp) = v.as_str() {
+            if let Ok(t) = DateTime::parse_from_rfc3339(exp) {
+                if t.with_timezone(&Utc) <= now {
+                    return false;
+                }
+            }
+        }
+        // Drop succeeded model lock + account-level lock
+        if let Some(ref mk) = model_key {
+            if k == mk {
+                return false;
+            }
+        }
+        if k == "modelLock___all" {
+            return false;
+        }
+        true
+    });
+}
+
 /// Clear error state; only remove expired model locks and optionally the
 /// succeeded model lock (9router clearAccountError selective clear).
 async fn clear_connection_error_for_model(
@@ -2964,28 +2998,7 @@ async fn clear_connection_error_for_model(
                 connection.backoff_level = Some(0);
                 connection.consecutive_errors = Some(0);
                 connection.test_status = None;
-                // Selective clear: remove expired locks + lock for succeeded model only
-                let model_key = succeeded_model.as_ref().map(|m| format!("modelLock_{m}"));
-                connection.extra.retain(|k, v| {
-                    if !k.starts_with("modelLock_") {
-                        return true;
-                    }
-                    // Drop expired
-                    if let Some(exp) = v.as_str() {
-                        if let Ok(t) = DateTime::parse_from_rfc3339(exp) {
-                            if t.with_timezone(&Utc) <= now {
-                                return false;
-                            }
-                        }
-                    }
-                    // Drop succeeded model lock
-                    if let Some(ref mk) = model_key {
-                        if k == mk {
-                            return false;
-                        }
-                    }
-                    true
-                });
+                retain_lock_after_success(&mut connection.extra, succeeded_model.as_deref(), now);
             }
         })
         .await;
@@ -4901,6 +4914,37 @@ mod tests {
             super::is_model_locked(&conn, "any-model", Utc::now()),
             "account-level lock should block any model"
         );
+    }
+
+    #[test]
+    fn success_clear_drops_model_and_all_locks_but_keeps_others() {
+        // 9router src/sse/services/auth.js:306-312 parity: succeeded model
+        // lock + modelLock___all clear; other active model locks survive.
+        let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
+        let past = (Utc::now() - ChronoDuration::seconds(10)).to_rfc3339();
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("modelLock_gpt-4.1".into(), Value::String(future.clone()));
+        extra.insert("modelLock___all".into(), Value::String(future));
+        extra.insert(
+            "modelLock_other-model".into(),
+            Value::String((Utc::now() + ChronoDuration::seconds(60)).to_rfc3339()),
+        );
+        extra.insert("modelLock_stale".into(), Value::String(past));
+        extra.insert("unrelated".into(), Value::String("keep".into()));
+
+        super::retain_lock_after_success(&mut extra, Some("gpt-4.1"), Utc::now());
+
+        assert!(
+            !extra.contains_key("modelLock_gpt-4.1"),
+            "succeeded lock cleared"
+        );
+        assert!(!extra.contains_key("modelLock___all"), "___all cleared");
+        assert!(!extra.contains_key("modelLock_stale"), "expired cleared");
+        assert!(
+            extra.contains_key("modelLock_other-model"),
+            "other lock survives"
+        );
+        assert!(extra.contains_key("unrelated"), "non-lock keys untouched");
     }
 
     #[test]
