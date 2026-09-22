@@ -69,8 +69,9 @@ pub use deepseek_web::{
     DeepSeekWebExecutorResponse, DEEPSEEK_WEB_BASE,
 };
 pub use default::{
-    provider_config_base_url, select_anthropic_beta, DefaultExecutor, ExecutionRequest,
-    ExecutionResponse, ExecutorError, ProviderConfig, TransportKind, UpstreamResponse,
+    provider_config_base_url, provider_config_format, provider_config_names, provider_sim_format,
+    select_anthropic_beta, DefaultExecutor, ExecutionRequest, ExecutionResponse, ExecutorError,
+    ProviderConfig, TransportKind, UpstreamResponse,
 };
 pub use devin_cli::{DevinCliExecutor, DevinExecutionRequest, DevinExecutorResponse};
 pub use gemini_cli::{

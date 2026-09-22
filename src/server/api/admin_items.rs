@@ -74,9 +74,39 @@ async fn get_provider(
     };
 
     Json(json!({
-        "connection": super::redact_provider_connection(&connection)
+        "connection": super::redact_provider_connection(&connection),
+        "simulation": simulation_mode_payload(&state, &connection.provider),
     }))
     .into_response()
+}
+
+/// Simulation mode payload for one provider name (bead sim-19, plan §3.3).
+/// Additive fields: configuredMode / effectiveMode / effectiveReason /
+/// simulationSupported. Computed without request headers (status time has no
+/// single request; per-request `x-openproxy-sim: mock` can still promote).
+fn simulation_mode_payload(state: &AppState, provider: &str) -> serde_json::Value {
+    let settings_force = state.db.snapshot().settings.dev_mock_all;
+    let status = state.db.sqlite.with_conn(|conn| {
+        Ok::<_, rusqlite::Error>(crate::core::simulation::status_for(
+            conn,
+            provider,
+            settings_force,
+        ))
+    });
+    match status {
+        Ok(s) => serde_json::json!({
+            "configuredMode": s.configured.to_string(),
+            "effectiveMode": s.effective.to_string(),
+            "effectiveReason": s.reason.to_string(),
+            "simulationSupported": s.simulation_supported,
+        }),
+        Err(_) => serde_json::json!({
+            "configuredMode": "real",
+            "effectiveMode": "real",
+            "effectiveReason": "default",
+            "simulationSupported": false,
+        }),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +126,9 @@ struct UpdateProviderRequest {
     provider_specific_data: Option<serde_json::Map<String, Value>>,
     connection_proxy_enabled: Option<bool>,
     connection_proxy_url: Option<String>,
+    /// Simulation configured mode (bead sim-19): "real" | "mock".
+    /// Persisted per provider NAME in kv scope `simulationMode`.
+    mode: Option<String>,
     connection_no_proxy: Option<String>,
     proxy_pool_id: Option<Value>,
 }
@@ -230,8 +263,41 @@ async fn update_provider(
                 return not_found("Connection not found");
             };
 
+            // Simulation mode write (bead sim-19): keyed by provider NAME in
+            // kv scope `simulationMode`, independent of connection rows.
+            if let Some(mode) = req.mode.as_deref() {
+                let mode = mode.trim().to_ascii_lowercase();
+                if mode != "real" && mode != "mock" {
+                    return bad_request("mode must be \"real\" or \"mock\"");
+                }
+                let provider = connection.provider.clone();
+                let mode_value = mode.clone();
+                let sqlite = state.db.sqlite.clone();
+                let write = tokio::task::spawn_blocking(move || {
+                    sqlite.with_transaction(|conn| {
+                        crate::core::simulation::persistence::set_provider_mode(
+                            conn,
+                            &provider,
+                            if mode_value == "mock" {
+                                crate::core::simulation::ProviderExecutionMode::Mock
+                            } else {
+                                crate::core::simulation::ProviderExecutionMode::Real
+                            },
+                        )
+                    })
+                })
+                .await;
+                if let Err(error) = write {
+                    return internal_error(anyhow::anyhow!("spawn_blocking: {error}"));
+                }
+                if let Err(error) = write.unwrap() {
+                    return internal_error(anyhow::anyhow!("mode write failed: {error}"));
+                }
+            }
+
             Json(json!({
-                "connection": super::redact_provider_connection(connection)
+                "connection": super::redact_provider_connection(connection),
+                "simulation": simulation_mode_payload(&state, &connection.provider),
             }))
             .into_response()
         }
@@ -1016,6 +1082,7 @@ mod tests {
             connection_proxy_url: Some(" ".into()),
             connection_no_proxy: None,
             proxy_pool_id: None,
+            mode: None,
         };
 
         assert!(normalize_connection_proxy(&req).is_err());

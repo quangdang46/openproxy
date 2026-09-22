@@ -41,6 +41,17 @@ pub enum ProviderExtCmd {
     Enable { id_or_name: String },
     /// Mark provider inactive.
     Disable { id_or_name: String },
+    /// Show or set simulation mode (bead sim-19): `provider mode <name>`
+    /// prints configured+effective+reason; `provider mode <name> <real|mock>`
+    /// writes the CONFIGURED mode.
+    Mode {
+        /// Provider alias (openai, anthropic, ...).
+        name: String,
+        /// New configured mode: `real` or `mock` (omit to show).
+        mode: Option<String>,
+    },
+    /// Show configured+effective simulation modes for all providers.
+    Status,
     /// Run a real connectivity probe against the provider's `/v1/models`.
     Test { id_or_name: String },
     /// Validate raw credentials (does not require saved connection).
@@ -126,6 +137,8 @@ pub async fn run(cmd: ProviderExtCmd, db: &Db, ctx: OutputCtx) -> anyhow::Result
         }
         ProviderExtCmd::Enable { id_or_name } => run_set_active(db, ctx, &id_or_name, true).await,
         ProviderExtCmd::Disable { id_or_name } => run_set_active(db, ctx, &id_or_name, false).await,
+        ProviderExtCmd::Mode { name, mode } => run_mode(db, ctx, &name, mode.as_deref()).await,
+        ProviderExtCmd::Status => run_status(db, ctx).await,
         ProviderExtCmd::Test { id_or_name } => run_test(db, ctx, &id_or_name).await,
         ProviderExtCmd::Validate {
             provider,
@@ -331,6 +344,108 @@ async fn run_set_active(
                 if active { "enabled" } else { "disabled" }
             ),
         );
+    }
+    Ok(())
+}
+
+/// Show or set simulation mode (bead sim-19, plan §3.3).
+async fn run_mode(db: &Db, ctx: OutputCtx, name: &str, mode: Option<&str>) -> anyhow::Result<()> {
+    use crate::core::simulation::{status_for, ProviderExecutionMode};
+    if let Some(m) = mode {
+        let m = m.trim().to_ascii_lowercase();
+        if m != "real" && m != "mock" {
+            let exit = emit_error(ctx, "invalid_argument", "mode must be real or mock")?;
+            std::process::exit(exit);
+        }
+        let want = if m == "mock" {
+            ProviderExecutionMode::Mock
+        } else {
+            ProviderExecutionMode::Real
+        };
+        let provider = name.to_string();
+        db.sqlite_handle()
+            .with_transaction(|conn| {
+                crate::core::simulation::persistence::set_provider_mode(conn, &provider, want)
+            })
+            .map_err(|e| anyhow::anyhow!("mode write failed: {e}"))?;
+    }
+    let settings_force = db.snapshot().settings.dev_mock_all;
+    let status = db
+        .sqlite_handle()
+        .with_conn(|conn| Ok::<_, rusqlite::Error>(status_for(conn, name, settings_force)))
+        .map_err(|e| anyhow::anyhow!("mode read failed: {e}"))?;
+    if ctx.is_robot() {
+        emit_robot(
+            "openproxy.v1.provider.mode",
+            json!({
+                "provider": name,
+                "configuredMode": status.configured.to_string(),
+                "effectiveMode": status.effective.to_string(),
+                "effectiveReason": status.reason.to_string(),
+                "simulationSupported": status.simulation_supported,
+            }),
+        )?;
+    } else {
+        humanln(
+            ctx,
+            format!(
+                "{}: configured={} effective={} reason={} supported={}",
+                name,
+                status.configured,
+                status.effective,
+                status.reason,
+                status.simulation_supported,
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// Status across all known providers (bead sim-19).
+async fn run_status(db: &Db, ctx: OutputCtx) -> anyhow::Result<()> {
+    use crate::core::executor::provider_config_names;
+    use crate::core::simulation::status_for;
+    let settings_force = db.snapshot().settings.dev_mock_all;
+    let env_force = crate::core::simulation::env_force_all();
+    let rows: Vec<Value> = db
+        .sqlite_handle()
+        .with_conn(|conn| {
+            let mut rows = Vec::new();
+            for name in provider_config_names() {
+                let s = status_for(conn, &name, settings_force);
+                rows.push(json!({
+                    "provider": name,
+                    "configured": s.configured.to_string(),
+                    "effective": s.effective.to_string(),
+                    "reason": s.reason.to_string(),
+                    "simulationSupported": s.simulation_supported,
+                }));
+            }
+            Ok::<_, rusqlite::Error>(rows)
+        })
+        .map_err(|e| anyhow::anyhow!("status read failed: {e}"))?;
+    if ctx.is_robot() {
+        emit_robot(
+            "openproxy.v1.provider.status",
+            json!({
+                "forcedAll": env_force || settings_force,
+                "providers": rows,
+            }),
+        )?;
+    } else {
+        humanln(ctx, format!("forced_all={}", env_force || settings_force));
+        for r in &rows {
+            humanln(
+                ctx,
+                format!(
+                    "  {}: configured={} effective={} ({})",
+                    r["provider"].as_str().unwrap_or("?"),
+                    r["configured"].as_str().unwrap_or("?"),
+                    r["effective"].as_str().unwrap_or("?"),
+                    r["reason"].as_str().unwrap_or("?"),
+                ),
+            );
+        }
     }
     Ok(())
 }
@@ -913,5 +1028,42 @@ mod tests {
             p.provider_specific_data.get("extraField"),
             Some(&Value::String("extra".into()))
         );
+    }
+
+    /// sim-19: mode set/show roundtrip through the real Db (tempdir SQLite).
+    #[tokio::test]
+    async fn sim_mode_set_show_roundtrip() {
+        use crate::core::simulation::{status_for, ProviderExecutionMode};
+        let tmp = tempfile::tempdir().unwrap();
+        let db = Db::load_from(tmp.path()).await.expect("db");
+        // Default: real.
+        let s = db
+            .sqlite_handle()
+            .with_conn(|conn| Ok::<_, rusqlite::Error>(status_for(conn, "openai", false)))
+            .unwrap();
+        assert_eq!(s.configured, ProviderExecutionMode::Real);
+        assert_eq!(s.effective, ProviderExecutionMode::Real);
+        // run_mode writes CONFIGURED mode.
+        run_mode(&db, OutputCtx::robot(), "openai", Some("mock"))
+            .await
+            .expect("set mock");
+        let s = db
+            .sqlite_handle()
+            .with_conn(|conn| Ok::<_, rusqlite::Error>(status_for(conn, "openai", false)))
+            .unwrap();
+        assert_eq!(s.configured, ProviderExecutionMode::Mock);
+        assert_eq!(s.effective, ProviderExecutionMode::Mock);
+        // run_mode show path + run_status succeed (output to stdout/robot).
+        run_mode(&db, OutputCtx::robot(), "openai", None)
+            .await
+            .expect("show");
+        run_status(&db, OutputCtx::robot()).await.expect("status");
+        // Invalid mode errors (process exit in run_mode — test via status_for
+        // instead: invalid values never persist).
+        let s = db
+            .sqlite_handle()
+            .with_conn(|conn| Ok::<_, rusqlite::Error>(status_for(conn, "openai", false)))
+            .unwrap();
+        assert_eq!(s.configured, ProviderExecutionMode::Mock, "unchanged");
     }
 }

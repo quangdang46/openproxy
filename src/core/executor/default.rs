@@ -800,6 +800,58 @@ pub fn provider_config_base_url(provider: &str) -> Option<String> {
         .map(|config| config.base_url.clone())
 }
 
+/// Resolve the simulation [`ProviderFormat`](crate::core::executor::ProviderFormat)
+/// for a provider name + config format string (bead sim-19: shared by the
+/// executor method and the status API so both agree).
+/// NOTE: DefaultExecutor ProviderConfig.format is a plain string and
+/// anthropic()/claude_compatible() constructors delegate to openai(),
+/// so config.format alone misroutes the anthropic family. Provider name
+/// takes precedence for family resolution (mirrors provider_wants_claude_beta).
+pub fn provider_sim_format(
+    provider: &str,
+    config_format: &str,
+) -> crate::core::executor::ProviderFormat {
+    const ANTHROPIC_FAMILY: &[&str] = &[
+        "anthropic",
+        "claude",
+        "glm",
+        "kimi",
+        "kimi-coding",
+        "minimax",
+        "minimax-cn",
+        "agentrouter",
+    ];
+    if ANTHROPIC_FAMILY.contains(&provider) {
+        return crate::core::executor::ProviderFormat::Anthropic;
+    }
+    match config_format {
+        "openai-compatible" => crate::core::executor::ProviderFormat::OpenAICompatible,
+        "anthropic" => crate::core::executor::ProviderFormat::Anthropic,
+        "anthropic-compatible" | "claude-compatible" => {
+            crate::core::executor::ProviderFormat::AnthropicCompatible
+        }
+        "gemini" => crate::core::executor::ProviderFormat::Gemini,
+        _ => crate::core::executor::ProviderFormat::OpenAI,
+    }
+}
+
+/// Config format string for a provider (for status/dispatch surfaces).
+/// Returns `None` for unknown providers.
+pub fn provider_config_format(provider: &str) -> Option<String> {
+    PROVIDER_CONFIGS
+        .get(provider)
+        .map(|config| config.format.clone())
+}
+
+/// All known provider names (keys of `PROVIDER_CONFIGS`), sorted.
+/// Used by the simulation status surface (bead sim-19) so every supported
+/// provider reports a mode even without a kv override stored.
+pub fn provider_config_names() -> Vec<String> {
+    let mut names: Vec<String> = PROVIDER_CONFIGS.keys().map(|k| k.to_string()).collect();
+    names.sort();
+    names
+}
+
 impl DefaultExecutor {
     pub fn new(
         provider: impl Into<String>,
@@ -853,33 +905,8 @@ impl DefaultExecutor {
     /// Resolve the simulation [`ProviderFormat`] for this executor.
     /// Shared by the mock branch (execute_simulated) and the REAL-branch
     /// fault path (sim-15) so both agree on the envelope shape.
-    /// NOTE: DefaultExecutor ProviderConfig.format is a plain string and
-    /// anthropic()/claude_compatible() constructors delegate to openai(),
-    /// so config.format alone misroutes the anthropic family. Provider name
-    /// takes precedence for family resolution (mirrors provider_wants_claude_beta).
     fn sim_format(&self) -> crate::core::executor::ProviderFormat {
-        const ANTHROPIC_FAMILY: &[&str] = &[
-            "anthropic",
-            "claude",
-            "glm",
-            "kimi",
-            "kimi-coding",
-            "minimax",
-            "minimax-cn",
-            "agentrouter",
-        ];
-        if ANTHROPIC_FAMILY.contains(&self.provider.as_str()) {
-            return crate::core::executor::ProviderFormat::Anthropic;
-        }
-        match self.config.format.as_str() {
-            "openai-compatible" => crate::core::executor::ProviderFormat::OpenAICompatible,
-            "anthropic" => crate::core::executor::ProviderFormat::Anthropic,
-            "anthropic-compatible" | "claude-compatible" => {
-                crate::core::executor::ProviderFormat::AnthropicCompatible
-            }
-            "gemini" => crate::core::executor::ProviderFormat::Gemini,
-            _ => crate::core::executor::ProviderFormat::OpenAI,
-        }
+        provider_sim_format(&self.provider, self.config.format.as_str())
     }
 
     async fn execute_simulated(

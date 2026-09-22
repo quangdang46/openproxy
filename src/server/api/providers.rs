@@ -1197,4 +1197,50 @@ pub fn routes() -> Router<AppState> {
         .route("/api/provider-nodes/validate", post(validate_provider_node))
         // Model test - POST /api/models/test
         .route("/api/models/test", post(test_model))
+        // Simulation status - GET /api/mock/status (bead sim-19, plan §3.3)
+        .route("/api/mock/status", get(get_mock_status))
+}
+
+/// Simulation status across providers (bead sim-19).
+/// `{forcedAll, providers: {name: {configured, effective, reason,
+/// simulationSupported}}}`. Effective is computed WITHOUT request headers
+/// (status time has no single request).
+async fn get_mock_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_management_access(&headers, &state) {
+        return response;
+    }
+    let snapshot = state.db.snapshot();
+    let settings_force = snapshot.settings.dev_mock_all;
+    let env_force = crate::core::simulation::env_force_all();
+    let names = crate::core::executor::provider_config_names();
+    let modes = state.db.sqlite.with_conn(|conn| {
+        let mut map = serde_json::Map::new();
+        for name in &names {
+            let s = crate::core::simulation::status_for(conn, name, settings_force);
+            map.insert(
+                name.clone(),
+                json!({
+                    "configured": s.configured.to_string(),
+                    "effective": s.effective.to_string(),
+                    "reason": s.reason.to_string(),
+                    "simulationSupported": s.simulation_supported,
+                }),
+            );
+        }
+        Ok::<_, rusqlite::Error>(Value::Object(map))
+    });
+    match modes {
+        Ok(providers) => Json(json!({
+            "forcedAll": env_force || settings_force,
+            "envForce": env_force,
+            "settingsForce": settings_force,
+            "providers": providers,
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
 }
