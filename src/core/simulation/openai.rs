@@ -490,7 +490,7 @@ mod tests {
             .collect();
         assert!(frames[0].contains("role"), "first frame role");
         assert!(
-            text.contains("Echo: hello world") == false,
+            !text.contains("Echo: hello world"),
             "content must be chunked"
         );
         assert!(text.contains("hello"), "chunk content present");
