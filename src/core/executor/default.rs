@@ -907,6 +907,9 @@ impl DefaultExecutor {
         // sim-12: status fault short-circuits before the engine with a
         // provider-correct envelope (same render path as Validation errors).
         let fault = crate::core::simulation::FaultSpec::parse(&request.sim_headers);
+        // sim-13: first-byte latency applies to ALL mock outcomes (fault error,
+        // validation error, echo, SSE) — sleep before first byte, never after.
+        crate::core::simulation::FaultInjector::apply_latency(&fault).await;
         if let Some((status, body, retry_after)) =
             crate::core::simulation::FaultInjector::status_fault(format, &self.provider, &fault)
         {
@@ -2324,6 +2327,101 @@ mod tests {
         let resp = exec.execute(req).await.expect("sim ignores 418");
         assert_eq!(resp.response.status(), http::StatusCode::OK);
         assert_eq!(resp.transformed_body["object"], "chat.completion");
+    }
+
+    #[tokio::test]
+    async fn simulated_fault_beats_validation_precedence() {
+        // sim-12 review lock: fault status wins over validation — unknown model
+        // + fault 429 renders 429 (not 404). Covers non-stream and stream.
+        for stream in [false, true] {
+            let req = ExecutionRequest {
+                model: "gpt-999".into(),
+                body: serde_json::json!({"model": "gpt-999",
+                    "messages": [{"role": "user", "content": "hi"}]}),
+                stream,
+                credentials: ProviderConnection::default(),
+                proxy: None,
+                sim_headers: {
+                    let mut h = HeaderMap::new();
+                    h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                    h.insert("x-openproxy-sim-status", HeaderValue::from_static("429"));
+                    h
+                },
+            };
+            let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+            let resp = exec.execute(req).await.expect("sim fault precedence");
+            assert_eq!(
+                resp.response.status(),
+                http::StatusCode::TOO_MANY_REQUESTS,
+                "stream={stream}"
+            );
+            assert_eq!(
+                resp.transformed_body["error"]["type"], "rate_limit_error",
+                "stream={stream}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn simulated_latency_delays_first_byte() {
+        // sim-13: latency header delays every mock outcome (echo path here).
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert(
+                    "x-openproxy-sim-latency-ms",
+                    HeaderValue::from_static("150"),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let t0 = std::time::Instant::now();
+        let resp = exec.execute(req).await.expect("sim latency echo");
+        assert!(
+            t0.elapsed() >= std::time::Duration::from_millis(120),
+            "first byte delayed"
+        );
+        assert_eq!(resp.response.status(), http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn simulated_latency_wraps_fault_path() {
+        // sim-13 (reviewer sim-12 note): latency wraps the fault-error path too
+        // (fault 429 + latency → delay, then 429).
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert("x-openproxy-sim-status", HeaderValue::from_static("429"));
+                h.insert(
+                    "x-openproxy-sim-latency-ms",
+                    HeaderValue::from_static("150"),
+                );
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let t0 = std::time::Instant::now();
+        let resp = exec.execute(req).await.expect("sim latency fault");
+        assert!(
+            t0.elapsed() >= std::time::Duration::from_millis(120),
+            "fault delayed"
+        );
+        assert_eq!(resp.response.status(), http::StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]

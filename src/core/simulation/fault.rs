@@ -95,6 +95,17 @@ impl FaultSpec {
 pub struct FaultInjector;
 
 impl FaultInjector {
+    /// Sleep for the injected latency, if any (bead sim-13). Called by the
+    /// executor BEFORE first byte on every mock outcome (status fault,
+    /// validation error, echo, SSE). Pure sleep — no response transformation.
+    /// Stream variant: the same await delays the first stream item, since the
+    /// whole synthetic body is produced after this point (no partial flush).
+    pub async fn apply_latency(spec: &FaultSpec) {
+        if spec.latency_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(spec.latency_ms)).await;
+        }
+    }
+
     /// Status fault for one format. Returns `None` when no status armed
     /// (caller passes the result through untouched).
     pub fn status_fault(
