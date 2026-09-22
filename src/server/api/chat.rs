@@ -1241,12 +1241,8 @@ async fn execute_single_model(
         crate::core::translator::request::claude_format::anchor_claude_cache(&mut body);
     }
 
-    // 8. TTS models: strip tool messages + tools (9router chatCore.js:185-189)
-    let model_lower = plan.model.to_lowercase();
-    if model_lower.contains("tts")
-        || model_lower.contains("speech")
-        || model_lower.starts_with("tts-")
-    {
+    // 8. TTS models: strip tool messages + tools (9router chatCore.js:185-189).
+    if is_tts_request(&plan.provider, &plan.model) {
         if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
             msgs.retain(|m| m.get("role").and_then(|r| r.as_str()) != Some("tool"));
         }
@@ -2891,6 +2887,22 @@ fn earliest_retry_after(
         })
         .filter(|until| *until > now)
         .min()
+}
+
+/// TTS gate (9router chatCore.js:185-189): strip tool messages + tools for
+/// TTS models. Catalog-first — model `kind == "tts"` in
+/// `provider_catalog.json` wins when the model is known (e.g. `kokoro`,
+/// `gpt-4o-mini-tts`); fall back to name-substring for unknown models.
+fn is_tts_request(provider: &str, model: &str) -> bool {
+    let base = model.rsplit('/').next().unwrap_or(model);
+    if crate::core::model::catalog::provider_catalog()
+        .find_model(provider, base)
+        .is_some_and(|m| m.kind == "tts")
+    {
+        return true;
+    }
+    let lower = model.to_lowercase();
+    lower.contains("tts") || lower.contains("speech") || lower.starts_with("tts-")
 }
 
 /// Merge 9router nested comboStrategies[name] (judgeModel / fusionTuning) into FusionConfig.
@@ -4623,7 +4635,7 @@ mod tests {
 
     use super::{
         build_dashboard_sse_response, build_proxied_response, earliest_retry_after,
-        is_no_auth_provider, select_connection,
+        is_no_auth_provider, is_tts_request, select_connection,
     };
     use crate::types::{AppDb, ProviderConnection};
 
@@ -5163,6 +5175,19 @@ mod tests {
         assert!(is_no_auth_provider("opencode"));
         assert!(!is_no_auth_provider("opencode-go"));
         assert!(!is_no_auth_provider("ocg"));
+    }
+
+    #[test]
+    fn is_tts_request_consults_catalog_then_substring() {
+        // Catalog kind == "tts" wins even without a tts/speech substring
+        // (kokoro on selfhosted-tts).
+        assert!(is_tts_request("selfhosted-tts", "kokoro"));
+        // Catalog-known TTS model with substring also matches.
+        assert!(is_tts_request("openai", "tts-1"));
+        // Unknown models fall back to name-substring.
+        assert!(is_tts_request("custom", "my-tts-voice"));
+        assert!(is_tts_request("custom", "speech-synth"));
+        assert!(!is_tts_request("openai", "gpt-4.1"));
     }
     // Bead openproxy-i7yt: upstream error bodies must survive to the
     // client verbatim (H23) instead of collapsing to generic 500.
