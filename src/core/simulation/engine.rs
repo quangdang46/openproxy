@@ -86,6 +86,7 @@ impl SimulationEngine {
             .register(Arc::new(super::openai::OpenAiCompatibleSimulator))
             .register(Arc::new(super::anthropic::AnthropicSimulator))
             .register(Arc::new(super::anthropic::AnthropicCompatibleSimulator))
+            .register(Arc::new(super::gemini::GeminiSimulator))
     }
 }
 
@@ -139,6 +140,35 @@ pub fn last_user_text(body: &serde_json::Value) -> String {
                 .unwrap_or_default()
         })
         .unwrap_or_default()
+}
+
+/// Split content into word-boundary chunks (deterministic, no randomness).
+/// Shared by all format simulators (hoisted in sim-10 per sim-09 review:
+/// one copy prevents chunking drift across formats).
+/// Merges into 1–2 word pieces so chunks look like real token streaming.
+pub fn split_words(content: &str) -> Vec<String> {
+    let words: Vec<&str> = content.split_inclusive(char::is_whitespace).collect();
+    if words.is_empty() && !content.is_empty() {
+        return vec![content.to_string()];
+    }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut n = 0;
+    for w in words {
+        cur.push_str(w);
+        n += 1;
+        if n >= 2 {
+            chunks.push(std::mem::take(&mut cur));
+            n = 0;
+        }
+    }
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    if chunks.is_empty() {
+        chunks.push(String::new());
+    }
+    chunks
 }
 
 /// Whitespace-split token estimate (documented approximation).

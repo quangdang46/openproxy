@@ -15,7 +15,7 @@
 
 use serde_json::{json, Value};
 
-use super::engine::{estimate_tokens, hash8, SimContext};
+use super::engine::{estimate_tokens, hash8, split_words, SimContext};
 use super::error::SimulationError;
 use crate::core::executor::ProviderFormat;
 
@@ -186,32 +186,6 @@ fn non_stream(ctx: &SimContext<'_>) -> Value {
             "usage": base["usage"],
         }),
     }
-}
-
-/// Split content into word-boundary chunks (same convention as OpenAI sim-07).
-fn split_words(content: &str) -> Vec<String> {
-    let words: Vec<&str> = content.split_inclusive(char::is_whitespace).collect();
-    if words.is_empty() && !content.is_empty() {
-        return vec![content.to_string()];
-    }
-    let mut chunks: Vec<String> = Vec::new();
-    let mut cur = String::new();
-    let mut n = 0;
-    for w in words {
-        cur.push_str(w);
-        n += 1;
-        if n >= 2 {
-            chunks.push(std::mem::take(&mut cur));
-            n = 0;
-        }
-    }
-    if !cur.is_empty() {
-        chunks.push(cur);
-    }
-    if chunks.is_empty() {
-        chunks.push(String::new());
-    }
-    chunks
 }
 
 /// Stream envelope: full message object + internal chunk/tool descriptors.
