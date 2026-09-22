@@ -877,13 +877,6 @@ impl DefaultExecutor {
                 format: self.config.format.clone(),
             });
         }
-        let engine = SimulationEngine::mvp();
-        let ctx = SimContext {
-            provider: &self.provider,
-            model: &request.model,
-            body: &request.body,
-            stream: request.stream,
-        };
         // NOTE: DefaultExecutor ProviderConfig.format is a plain string and
         // anthropic()/claude_compatible() constructors delegate to openai(),
         // so config.format alone misroutes the anthropic family. Provider name
@@ -910,6 +903,27 @@ impl DefaultExecutor {
                 "gemini" => crate::core::executor::ProviderFormat::Gemini,
                 _ => crate::core::executor::ProviderFormat::OpenAI,
             }
+        };
+        // sim-12: status fault short-circuits before the engine with a
+        // provider-correct envelope (same render path as Validation errors).
+        let fault = crate::core::simulation::FaultSpec::parse(&request.sim_headers);
+        if let Some((status, body, retry_after)) =
+            crate::core::simulation::FaultInjector::status_fault(format, &self.provider, &fault)
+        {
+            return Ok(Self::sim_error_response(
+                &self.provider,
+                request,
+                status,
+                body,
+                retry_after,
+            ));
+        }
+        let engine = SimulationEngine::mvp();
+        let ctx = SimContext {
+            provider: &self.provider,
+            model: &request.model,
+            body: &request.body,
+            stream: request.stream,
         };
         let envelope = match engine.execute(format, &self.provider, &ctx).await {
             Ok(env) => env,
@@ -2258,6 +2272,58 @@ mod tests {
         let resp = exec.execute(req).await.expect("sim 404 renders");
         assert_eq!(resp.response.status(), http::StatusCode::NOT_FOUND);
         assert_eq!(resp.transformed_body["error"]["code"], "model_not_found");
+    }
+
+    #[tokio::test]
+    async fn simulated_status_fault_429_e2e() {
+        // sim-12: x-openproxy-sim-status:429 short-circuits with provider-correct
+        // 429 envelope; Retry-After visible on BOTH sidecar headers and body.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert("x-openproxy-sim-status", HeaderValue::from_static("429"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim 429 renders");
+        assert_eq!(resp.response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(resp.transformed_body["error"]["type"], "rate_limit_error");
+        assert!(resp.headers.contains_key(reqwest::header::RETRY_AFTER));
+        assert!(resp
+            .response
+            .headers()
+            .contains_key(reqwest::header::RETRY_AFTER));
+    }
+
+    #[tokio::test]
+    async fn simulated_status_fault_invalid_ignored() {
+        // sim-12: non-allowlisted status is ignored -> normal echo path.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "hi"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: {
+                let mut h = HeaderMap::new();
+                h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
+                h.insert("x-openproxy-sim-status", HeaderValue::from_static("418"));
+                h
+            },
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("sim ignores 418");
+        assert_eq!(resp.response.status(), http::StatusCode::OK);
+        assert_eq!(resp.transformed_body["object"], "chat.completion");
     }
 
     #[tokio::test]

@@ -28,7 +28,7 @@ impl super::engine::ProviderSimulator for AnthropicSimulator {
     }
 
     async fn execute(&self, ctx: &SimContext<'_>) -> Result<Value, SimulationError> {
-        validate(ctx)?;
+        validate(ctx, self.format())?;
         if ctx.stream {
             Ok(stream_envelope(ctx))
         } else {
@@ -49,7 +49,7 @@ impl super::engine::ProviderSimulator for AnthropicCompatibleSimulator {
     }
 
     async fn execute(&self, ctx: &SimContext<'_>) -> Result<Value, SimulationError> {
-        validate(ctx)?;
+        validate(ctx, self.format())?;
         if ctx.stream {
             Ok(stream_envelope(ctx))
         } else {
@@ -58,11 +58,10 @@ impl super::engine::ProviderSimulator for AnthropicCompatibleSimulator {
     }
 }
 
-/// Model check via shared registry (bead sim-11).
-fn is_known_model(model: &str) -> bool {
-    // NOTE: format-agnostic here; per-format dispatch passes the
-    // right key via validate() below (see sim_validate_format).
-    super::models::is_known(ProviderFormat::Anthropic, model)
+/// Model check via shared registry (bead sim-11). Callers pass their format
+/// key (Anthropic vs AnthropicCompatible share the list today, plan §2.2).
+fn is_known_model(format: ProviderFormat, model: &str) -> bool {
+    super::models::is_known(format, model)
 }
 
 /// Last user text from an Anthropic messages body (string or content blocks).
@@ -108,7 +107,7 @@ fn tool_use_id(canon: &[u8]) -> String {
     format!("toolu_sim_{}", hash8(canon))
 }
 
-fn validate(ctx: &SimContext<'_>) -> Result<(), SimulationError> {
+fn validate(ctx: &SimContext<'_>, format: ProviderFormat) -> Result<(), SimulationError> {
     let has_messages = ctx
         .body
         .get("messages")
@@ -124,7 +123,7 @@ fn validate(ctx: &SimContext<'_>) -> Result<(), SimulationError> {
             retry_after: None,
         });
     }
-    if !is_known_model(ctx.model) {
+    if !is_known_model(format, ctx.model) {
         return Err(SimulationError::Validation {
             status: 404,
             body: json!({"type": "error", "error": {
