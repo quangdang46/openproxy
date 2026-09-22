@@ -100,6 +100,16 @@ toolchain rebuilds). Snapshot-friendly for CI.
   hang. If a client hangs, its SSE parser ignores truncation — client bug.
 - **Stale dashboard after `web/src` change** — rebuild: `cd web && pnpm build`
   (`web/dist` is what the server serves; Astro has no live reload here).
+- **Live-E2E verified 2026-09-23** (fresh binary, temp DATA_DIR, no credentials):
+  non-stream echo, SSE + `[DONE]`, 429 (HTTP 429 + envelope), override,
+  disconnect-cut, cache-bypass (no `x-cache` on sim requests) all PASS.
+  Two live-only fixes resulted: credentialless stub dispatch (no-connection +
+  mock ⇒ stub, single-shot anti-loop) and sim-header cache bypass (both
+  directions). Known gap: native-format HTTP edges (`/v1/messages`,
+  Gemini generateContent) return mistranslated/empty bodies — the simulators
+  are correct at executor level (sim-09/10 E2E + contract), but the
+  OpenAI-normalized chat pipeline mistranslates native shapes at the compat
+  edge. Follow-up epic (translator interop), not MVP.
 
 ## 6. Manual verification checklist (plan §11)
 
