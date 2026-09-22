@@ -775,4 +775,32 @@ mod tests {
         assert!(unary.contains(":generateContent"));
         assert!(!unary.contains("streamGenerateContent"));
     }
+
+    #[test]
+    fn adc_authorized_user_shape_matches_9router_parser() {
+        // 9router executors/vertex.js parseVertexAdcJson requires
+        // type == "authorized_user" plus client_id/client_secret/refresh_token.
+        // The Rust AuthorizedUserCredential struct must accept that shape.
+        let adc = r#"{"type":"authorized_user","client_id":"cid","client_secret":"csec","refresh_token":"rt","quota_project_id":"qp"}"#;
+        let cred: AuthorizedUserCredential = serde_json::from_str(adc).unwrap();
+        assert_eq!(cred.credential_type, "authorized_user");
+        assert_eq!(cred.client_id, "cid");
+        assert_eq!(cred.client_secret, "csec");
+        assert_eq!(cred.refresh_token, "rt");
+        assert_eq!(cred.quota_project_id.as_deref(), Some("qp"));
+        // SA JSON must NOT parse as authorized_user (missing required fields).
+        let sa =
+            r#"{"type":"service_account","client_email":"e","private_key":"k","token_uri":"t"}"#;
+        assert!(serde_json::from_str::<AuthorizedUserCredential>(sa).is_err());
+    }
+
+    #[test]
+    fn sa_json_parser_matches_9router_requirements() {
+        // 9router services/tokenRefresh.js parseVertexSaJson requires
+        // type == "service_account" plus client_email/private_key/project_id.
+        // ADC JSON must be rejected by the SA parser.
+        let adc =
+            r#"{"type":"authorized_user","client_id":"c","client_secret":"s","refresh_token":"r"}"#;
+        assert!(VertexExecutor::parse_service_account_json(adc).is_err());
+    }
 }

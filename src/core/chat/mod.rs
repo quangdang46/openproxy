@@ -86,8 +86,14 @@ impl RequestPlan {
             upstream_model_id = stripped;
         }
 
-        // 9router: modelTargetFormat || resolveTransport?.format || getTargetFormat
-        let transport = resolve_transport(provider, source_format);
+        // 9router chatCore `useTransport` guard (modelTargetFormat is checked
+        // first in Rust, transport second): only use the sourceFormat-matched
+        // transport when the model declares support for that sourceFormat —
+        // opencode-go models differ in endpoint support (kimi/glm only do
+        // /chat/completions). Undeclared models keep the upstream default
+        // (use the transport).
+        let transport = resolve_transport(provider, source_format)
+            .filter(|_| model_supports_source_format(provider, &upstream_model_id, source_format));
         let mut target_format = model_target
             .or_else(|| transport.as_ref().map(|t| t.format))
             .unwrap_or_else(|| registry::get_target_format_for_provider(provider));
@@ -211,6 +217,83 @@ fn is_opencode_go_responses_only_model(model_id: &str) -> bool {
     lower == "grok-4.6" || lower == "gpt-5.6-luna"
 }
 
+/// Per-model endpoint support on opencode-go (9router registry opencode-go.js
+/// `supportedFormats`, following https://opencode.ai/docs/go/). `None` means
+/// the model is not in the static table — keep the upstream default of using
+/// the transport (JS: `!modelSupportedFormats` → use transport).
+fn opencode_go_supported_formats(model_id: &str) -> Option<&'static [Format]> {
+    let mut clean = model_id.trim();
+    if let Some(open) = clean.rfind('(') {
+        if clean.ends_with(')') && !clean[open + 1..clean.len() - 1].contains(['(', ')']) {
+            clean = clean[..open].trim_end();
+        }
+    }
+    let base = clean.rsplit('/').next().unwrap_or(clean);
+    let lower = base.to_lowercase();
+    // Strip a trailing "-free" subscription-tier suffix (catalog ids carry it).
+    let core = lower.strip_suffix("-free").unwrap_or(&lower);
+    // Responses-only + Muse Spark: /zen/go/v1/responses only.
+    if core == "grok-4.6" || core == "gpt-5.6-luna" || is_muse_spark_model(model_id) {
+        return Some(&[Format::OpenAiResponses]);
+    }
+    // Full 3-leg models: openai + claude + openai-responses.
+    if matches!(
+        core,
+        "deepseek-v4-pro" | "deepseek-v4-flash" | "deepseek-v4-flash-vision-exp"
+    ) {
+        return Some(&[Format::OpenAi, Format::Claude, Format::OpenAiResponses]);
+    }
+    // Dual-leg models: openai + claude.
+    if matches!(
+        core,
+        "minimax-m3"
+            | "minimax-m2.7"
+            | "minimax-m2.5"
+            | "qwen3.8-max"
+            | "qwen3.8-flash"
+            | "qwen3.7-max"
+            | "qwen3.7-plus"
+            | "qwen3.6-plus"
+    ) {
+        return Some(&[Format::OpenAi, Format::Claude]);
+    }
+    // Single-leg models: openai (/chat/completions) only.
+    if matches!(
+        core,
+        "deepseek-flash"
+            | "glm-5.3-flash"
+            | "glm-5.3"
+            | "glm-5.2"
+            | "glm-5.1"
+            | "kimi-k2.7-code"
+            | "kimi-k2.6"
+            | "kimi-k3"
+            | "longcat-2.0"
+            | "mimo-v2.5"
+            | "mimo-v2.5-pro"
+            | "hy4-preview"
+            | "hy3"
+    ) {
+        return Some(&[Format::OpenAi]);
+    }
+    None
+}
+
+/// 9router chatCore `useTransport` guard: when a model declares
+/// supportedFormats, only use the sourceFormat-matched transport if that
+/// format is declared. Scoped to opencode-go/ocg (the only provider whose
+/// registry models declare supportedFormats); every other provider — and
+/// undeclared opencode-go models — keeps the upstream default (true).
+fn model_supports_source_format(provider: &str, model: &str, source: Format) -> bool {
+    if !matches!(provider, "opencode-go" | "ocg") {
+        return true;
+    }
+    match opencode_go_supported_formats(model) {
+        Some(formats) => formats.contains(&source),
+        None => true,
+    }
+}
+
 fn parse_strip_list(raw: &str) -> Vec<String> {
     raw.split(|c: char| c == ',' || c == '|' || c.is_whitespace())
         .map(str::trim)
@@ -322,6 +405,24 @@ fn provider_transports(provider: &str) -> Vec<TransportMatch> {
             TransportMatch {
                 format: Format::OpenAi,
                 base_url: "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions".into(),
+            },
+        ],
+        // opencode-go 3-leg transports (9router registry opencode-go.js
+        // `transports[]`): openai → /zen/go/v1/chat/completions,
+        // claude → /zen/go/v1/messages, openai-responses → /zen/go/v1/responses.
+        // Guarded per-model by supportedFormats in RequestPlan::new.
+        "opencode-go" | "ocg" => vec![
+            TransportMatch {
+                format: Format::OpenAi,
+                base_url: "https://opencode.ai/zen/go/v1/chat/completions".into(),
+            },
+            TransportMatch {
+                format: Format::Claude,
+                base_url: "https://opencode.ai/zen/go/v1/messages".into(),
+            },
+            TransportMatch {
+                format: Format::OpenAiResponses,
+                base_url: "https://opencode.ai/zen/go/v1/responses".into(),
             },
         ],
         _ => Vec::new(),
@@ -795,5 +896,109 @@ mod tests {
         assert!(!is_opencode_go_responses_only_model("grok-4.5"));
         assert!(!is_opencode_go_responses_only_model("gpt-5.6-terra"));
         assert!(!is_opencode_go_responses_only_model("big-pickle"));
+    }
+
+    #[test]
+    fn opencode_go_three_leg_transports() {
+        // 9router registry opencode-go.js `transports[]`.
+        let t = resolve_transport("opencode-go", Format::OpenAi).expect("openai leg");
+        assert_eq!(t.base_url, "https://opencode.ai/zen/go/v1/chat/completions");
+        let t = resolve_transport("opencode-go", Format::Claude).expect("claude leg");
+        assert_eq!(t.base_url, "https://opencode.ai/zen/go/v1/messages");
+        let t = resolve_transport("opencode-go", Format::OpenAiResponses).expect("responses leg");
+        assert_eq!(t.base_url, "https://opencode.ai/zen/go/v1/responses");
+        // Short alias ocg shares the table.
+        let t = resolve_transport("ocg", Format::Claude).expect("ocg claude leg");
+        assert_eq!(t.base_url, "https://opencode.ai/zen/go/v1/messages");
+        // opencode/oc are single-endpoint — no transports.
+        assert!(resolve_transport("opencode", Format::OpenAi).is_none());
+        assert!(resolve_transport("oc", Format::Claude).is_none());
+    }
+
+    #[test]
+    fn opencode_go_supported_formats_guard() {
+        // Single-leg kimi: claude-format request must not use the claude transport.
+        let body = json!({
+            "model": "kimi-k2.6",
+            "system": [{"type": "text", "text": "sys"}],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 64
+        });
+        let plan = RequestPlan::new(Some("/v1/messages"), &body, "opencode-go", "kimi-k2.6");
+        assert_eq!(plan.source_format, Format::Claude);
+        assert!(plan.transport_base_url.is_none());
+        assert!(plan.needs_translation());
+
+        // Same request on the openai leg keeps the transport (lossless).
+        let body = json!({"model": "kimi-k2.6", "messages": [{"role": "user", "content": "hi"}]});
+        let plan = RequestPlan::new(
+            Some("/v1/chat/completions"),
+            &body,
+            "opencode-go",
+            "kimi-k2.6",
+        );
+        assert_eq!(plan.target_format, Format::OpenAi);
+        assert_eq!(
+            plan.transport_base_url.as_deref(),
+            Some("https://opencode.ai/zen/go/v1/chat/completions")
+        );
+        assert!(!plan.needs_translation());
+    }
+
+    #[test]
+    fn opencode_go_dual_and_full_leg_models() {
+        // Dual-leg minimax-m3: claude transport applies, responses does not.
+        assert!(model_supports_source_format(
+            "opencode-go",
+            "minimax-m3",
+            Format::Claude
+        ));
+        assert!(!model_supports_source_format(
+            "opencode-go",
+            "minimax-m3",
+            Format::OpenAiResponses
+        ));
+        // Full 3-leg deepseek-v4-pro supports all legs.
+        for fmt in [Format::OpenAi, Format::Claude, Format::OpenAiResponses] {
+            assert!(model_supports_source_format(
+                "opencode-go",
+                "deepseek-v4-pro",
+                fmt
+            ));
+        }
+        // Responses-only models accept only the responses leg.
+        assert!(model_supports_source_format(
+            "opencode-go",
+            "grok-4.6",
+            Format::OpenAiResponses
+        ));
+        assert!(!model_supports_source_format(
+            "opencode-go",
+            "grok-4.6",
+            Format::OpenAi
+        ));
+        // Case, vendor prefix, -free tier suffix, and thinking suffix tolerated.
+        assert!(model_supports_source_format(
+            "opencode-go",
+            "OCG/Kimi-K2.6-free(high)",
+            Format::OpenAi
+        ));
+        // Undeclared models keep the upstream default (use the transport).
+        assert!(model_supports_source_format(
+            "opencode-go",
+            "some-future-model",
+            Format::Claude
+        ));
+        // Guard scoped to opencode-go/ocg: other providers always use transport.
+        assert!(model_supports_source_format(
+            "deepseek",
+            "deepseek-chat",
+            Format::Claude
+        ));
+        assert!(model_supports_source_format(
+            "opencode",
+            "kimi-k2.6",
+            Format::Claude
+        ));
     }
 }

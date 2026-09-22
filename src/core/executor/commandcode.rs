@@ -12,6 +12,35 @@ use super::{ClientPool, TransportKind, UpstreamResponse};
 
 const COMMANDCODE_URL: &str = "https://api.commandcode.ai/alpha/generate";
 
+/// Max upstream retries on retryable status (port of JS `maxRetries = 2`).
+pub const COMMANDCODE_MAX_RETRIES: u32 = 2;
+
+/// Retryable upstream statuses for the CommandCode retry loop.
+///
+/// Port of 9router `execute()` (executors/commandcode.js:42-61): only
+/// 502/503/504 trigger a retry. Pure fn so it is unit-testable without network.
+pub fn should_retry_commandcode_status(status: u16) -> bool {
+    matches!(status, 502 | 503 | 504)
+}
+
+/// Backoff for retry attempt `attempt` (0-based): `1000 * (attempt + 1)` ms.
+///
+/// Port of JS `await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))`.
+pub fn commandcode_retry_backoff_ms(attempt: u32) -> u64 {
+    1000 * (u64::from(attempt) + 1)
+}
+
+/// Force `stream = true` on the outgoing body.
+///
+/// Port of 9router `transformRequest()` (commandcode.js:23-26): the upstream
+/// always speaks NDJSON streaming, so both streaming and non-streaming
+/// downstream paths consume forced-SSE.
+pub fn force_commandcode_stream(body: &mut Value) {
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("stream".to_string(), Value::Bool(true));
+    }
+}
+
 /// Parsed error from a CommandCode NDJSON `{"type":"error", ...}` event.
 #[derive(Debug, Clone)]
 pub struct CommandCodeParsedError {
@@ -360,36 +389,111 @@ impl CommandCodeExecutor {
 
     pub async fn execute_request(
         &self,
-        request: CommandCodeExecutionRequest,
+        mut request: CommandCodeExecutionRequest,
     ) -> Result<CommandCodeExecutorResponse, CommandCodeExecutorError> {
+        // Port of JS transformRequest(): always force stream=true upstream.
+        force_commandcode_stream(&mut request.body);
         let url = self.build_url();
-        let headers = self.build_headers(&request.credentials, request.stream);
+        let headers = self.build_headers(&request.credentials, true);
 
         let client = self.pool.get("commandcode", request.proxy.as_ref())?;
-        let response = client
-            .post(&url)
-            .headers(headers.clone())
-            .json(&request.body)
-            .send()
-            .await?;
+        // Retry loop for 502/503/504 (port of JS execute():42-61, x2 + backoff).
+        // Note: `inspect_and_wrap_response` consumes the response, so each
+        // iteration re-sends the request — the replay semantic of JS
+        // `createReplayedStream` (:245) is satisfied because we never forward
+        // a partially-consumed body: on success the wrapped SSE body is a
+        // freshly built buffer covering every buffered line.
+        let mut last_status: Option<u16> = None;
+        for attempt in 0..=COMMANDCODE_MAX_RETRIES {
+            let response = client
+                .post(&url)
+                .headers(headers.clone())
+                .json(&request.body)
+                .send()
+                .await?;
 
-        // Inspect NDJSON stream for mid-stream errors and convert to SSE format.
-        // Port of 9router inspectAndWrapCommandCodeResponse().
-        let response = inspect_and_wrap_response(response, &request.model).await;
+            // Inspect NDJSON stream for mid-stream errors and convert to SSE.
+            // Port of 9router inspectAndWrapCommandCodeResponse().
+            let wrapped = inspect_and_wrap_response(response, &request.model).await;
+            let status = wrapped.status().as_u16();
+            if should_retry_commandcode_status(status) && attempt < COMMANDCODE_MAX_RETRIES {
+                tracing::debug!(
+                    target: "openproxy::executor::commandcode",
+                    "CommandCode upstream returned status {status}, retrying {}/{}...",
+                    attempt + 1,
+                    COMMANDCODE_MAX_RETRIES,
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    commandcode_retry_backoff_ms(attempt),
+                ))
+                .await;
+                last_status = Some(status);
+                continue;
+            }
 
-        Ok(CommandCodeExecutorResponse {
-            response,
-            url,
-            headers,
-            transformed_body: request.body,
-            transport: TransportKind::Reqwest,
-        })
+            return Ok(CommandCodeExecutorResponse {
+                response: wrapped,
+                url,
+                headers,
+                transformed_body: request.body,
+                transport: TransportKind::Reqwest,
+            });
+        }
+
+        unreachable!("commandcode retry loop always returns; last_status={last_status:?}");
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn force_stream_sets_true_on_object() {
+        let mut body = json!({"model": "x", "stream": false});
+        force_commandcode_stream(&mut body);
+        assert_eq!(body.get("stream"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn force_stream_adds_flag_when_missing() {
+        let mut body = json!({"model": "x"});
+        force_commandcode_stream(&mut body);
+        assert_eq!(body.get("stream"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn force_stream_ignores_non_object() {
+        let mut body = json!([1, 2, 3]);
+        force_commandcode_stream(&mut body);
+        assert_eq!(body, json!([1, 2, 3]));
+    }
+
+    #[test]
+    fn retry_decision_only_502_503_504() {
+        for s in [502u16, 503, 504] {
+            assert!(should_retry_commandcode_status(s), "status {s} must retry");
+        }
+        for s in [200u16, 400, 401, 402, 403, 404, 429, 500, 501, 505] {
+            assert!(
+                !should_retry_commandcode_status(s),
+                "status {s} must not retry"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_backoff_increases_per_attempt() {
+        assert_eq!(commandcode_retry_backoff_ms(0), 1000);
+        assert_eq!(commandcode_retry_backoff_ms(1), 2000);
+        assert_eq!(commandcode_retry_backoff_ms(2), 3000);
+    }
+
+    #[test]
+    fn max_retries_matches_js() {
+        // Port of JS `maxRetries = 2` (commandcode.js:43).
+        assert_eq!(COMMANDCODE_MAX_RETRIES, 2);
+    }
 
     #[test]
     fn parse_error_with_status_code_and_message() {

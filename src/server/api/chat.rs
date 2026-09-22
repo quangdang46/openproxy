@@ -1241,12 +1241,8 @@ async fn execute_single_model(
         crate::core::translator::request::claude_format::anchor_claude_cache(&mut body);
     }
 
-    // 8. TTS models: strip tool messages + tools (9router chatCore.js:185-189)
-    let model_lower = plan.model.to_lowercase();
-    if model_lower.contains("tts")
-        || model_lower.contains("speech")
-        || model_lower.starts_with("tts-")
-    {
+    // 8. TTS models: strip tool messages + tools (9router chatCore.js:185-189).
+    if is_tts_request(&plan.provider, &plan.model) {
         if let Some(msgs) = body.get_mut("messages").and_then(|m| m.as_array_mut()) {
             msgs.retain(|m| m.get("role").and_then(|r| r.as_str()) != Some("tool"));
         }
@@ -1440,7 +1436,7 @@ async fn forward_with_provider_fallback(
             PerplexityWebExecutor, ProviderExecutionRequest, ProviderExecutor,
             QoderExecutionRequest, QoderExecutor, QwenExecutionRequest, QwenExecutor,
             TraeExecutionRequest, TraeExecutor, VertexExecutionRequest, VertexExecutor,
-            WindsurfExecutionRequest, WindsurfExecutor,
+            WindsurfExecutionRequest, WindsurfExecutor, XaiExecutionRequest, XaiExecutor,
         };
 
         let is_codex_model = model.starts_with("codex/") || provider == "codex";
@@ -1640,6 +1636,42 @@ async fn forward_with_provider_fallback(
                     .map_err(|e| ComboAttemptError {
                         status: 500,
                         message: format!("Qwen execution failed: {:?}", e),
+                        retry_after: None,
+                        upstream_body: None,
+                    })?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "xai" {
+                // Dedicated XaiExecutor (was falling through to DefaultExecutor).
+                // Registry extras (xai.js): responsesUrl + image/video/search
+                // configs live in provider_catalog/media layers; the chat path
+                // only needs the wired executor with its grok-cli UA + Bearer.
+                let executor =
+                    XaiExecutor::new(state.client_pool.clone(), provider_node).map_err(|e| {
+                        ComboAttemptError {
+                            status: 500,
+                            message: format!("Xai executor creation failed: {:?}", e),
+                            retry_after: None,
+                            upstream_body: None,
+                        }
+                    })?;
+                let result = executor
+                    .execute_request(XaiExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                    })
+                    .await
+                    .map_err(|e| ComboAttemptError {
+                        status: 500,
+                        message: format!("Xai execution failed: {:?}", e),
                         retry_after: None,
                         upstream_body: None,
                     })?;
@@ -2857,6 +2889,22 @@ fn earliest_retry_after(
         .min()
 }
 
+/// TTS gate (9router chatCore.js:185-189): strip tool messages + tools for
+/// TTS models. Catalog-first — model `kind == "tts"` in
+/// `provider_catalog.json` wins when the model is known (e.g. `kokoro`,
+/// `gpt-4o-mini-tts`); fall back to name-substring for unknown models.
+fn is_tts_request(provider: &str, model: &str) -> bool {
+    let base = model.rsplit('/').next().unwrap_or(model);
+    if crate::core::model::catalog::provider_catalog()
+        .find_model(provider, base)
+        .is_some_and(|m| m.kind == "tts")
+    {
+        return true;
+    }
+    let lower = model.to_lowercase();
+    lower.contains("tts") || lower.contains("speech") || lower.starts_with("tts-")
+}
+
 /// Merge 9router nested comboStrategies[name] (judgeModel / fusionTuning) into FusionConfig.
 fn fusion_config_for(snapshot: &AppDb, combo_name: &str, panel_count: usize) -> FusionConfig {
     let mut extra: serde_json::Map<String, Value> = snapshot
@@ -2940,6 +2988,40 @@ async fn clear_connection_error(state: &AppState, connection_id: &str) {
     clear_connection_error_for_model(state, connection_id, None).await;
 }
 
+/// Selective lock clear (9router src/sse/services/auth.js:306-312):
+/// succeeded model lock + account-level `modelLock___all` + expired locks.
+/// Other active model locks survive (different-model failures stay locked).
+fn retain_lock_after_success(
+    extra: &mut std::collections::BTreeMap<String, Value>,
+    succeeded_model: Option<&str>,
+    now: DateTime<Utc>,
+) {
+    let model_key = succeeded_model.map(|m| format!("modelLock_{m}"));
+    extra.retain(|k, v| {
+        if !k.starts_with("modelLock_") {
+            return true;
+        }
+        // Drop expired
+        if let Some(exp) = v.as_str() {
+            if let Ok(t) = DateTime::parse_from_rfc3339(exp) {
+                if t.with_timezone(&Utc) <= now {
+                    return false;
+                }
+            }
+        }
+        // Drop succeeded model lock + account-level lock
+        if let Some(ref mk) = model_key {
+            if k == mk {
+                return false;
+            }
+        }
+        if k == "modelLock___all" {
+            return false;
+        }
+        true
+    });
+}
+
 /// Clear error state; only remove expired model locks and optionally the
 /// succeeded model lock (9router clearAccountError selective clear).
 async fn clear_connection_error_for_model(
@@ -2964,28 +3046,7 @@ async fn clear_connection_error_for_model(
                 connection.backoff_level = Some(0);
                 connection.consecutive_errors = Some(0);
                 connection.test_status = None;
-                // Selective clear: remove expired locks + lock for succeeded model only
-                let model_key = succeeded_model.as_ref().map(|m| format!("modelLock_{m}"));
-                connection.extra.retain(|k, v| {
-                    if !k.starts_with("modelLock_") {
-                        return true;
-                    }
-                    // Drop expired
-                    if let Some(exp) = v.as_str() {
-                        if let Ok(t) = DateTime::parse_from_rfc3339(exp) {
-                            if t.with_timezone(&Utc) <= now {
-                                return false;
-                            }
-                        }
-                    }
-                    // Drop succeeded model lock
-                    if let Some(ref mk) = model_key {
-                        if k == mk {
-                            return false;
-                        }
-                    }
-                    true
-                });
+                retain_lock_after_success(&mut connection.extra, succeeded_model.as_deref(), now);
             }
         })
         .await;
@@ -4574,7 +4635,7 @@ mod tests {
 
     use super::{
         build_dashboard_sse_response, build_proxied_response, earliest_retry_after,
-        is_no_auth_provider, select_connection,
+        is_no_auth_provider, is_tts_request, select_connection,
     };
     use crate::types::{AppDb, ProviderConnection};
 
@@ -4904,6 +4965,37 @@ mod tests {
     }
 
     #[test]
+    fn success_clear_drops_model_and_all_locks_but_keeps_others() {
+        // 9router src/sse/services/auth.js:306-312 parity: succeeded model
+        // lock + modelLock___all clear; other active model locks survive.
+        let future = (Utc::now() + ChronoDuration::seconds(60)).to_rfc3339();
+        let past = (Utc::now() - ChronoDuration::seconds(10)).to_rfc3339();
+        let mut extra = std::collections::BTreeMap::new();
+        extra.insert("modelLock_gpt-4.1".into(), Value::String(future.clone()));
+        extra.insert("modelLock___all".into(), Value::String(future));
+        extra.insert(
+            "modelLock_other-model".into(),
+            Value::String((Utc::now() + ChronoDuration::seconds(60)).to_rfc3339()),
+        );
+        extra.insert("modelLock_stale".into(), Value::String(past));
+        extra.insert("unrelated".into(), Value::String("keep".into()));
+
+        super::retain_lock_after_success(&mut extra, Some("gpt-4.1"), Utc::now());
+
+        assert!(
+            !extra.contains_key("modelLock_gpt-4.1"),
+            "succeeded lock cleared"
+        );
+        assert!(!extra.contains_key("modelLock___all"), "___all cleared");
+        assert!(!extra.contains_key("modelLock_stale"), "expired cleared");
+        assert!(
+            extra.contains_key("modelLock_other-model"),
+            "other lock survives"
+        );
+        assert!(extra.contains_key("unrelated"), "non-lock keys untouched");
+    }
+
+    #[test]
     fn is_model_locked_expired_lock_allows_connection() {
         let past = (Utc::now() - ChronoDuration::seconds(10)).to_rfc3339();
         let mut conn = connection("conn", 1);
@@ -5083,6 +5175,19 @@ mod tests {
         assert!(is_no_auth_provider("opencode"));
         assert!(!is_no_auth_provider("opencode-go"));
         assert!(!is_no_auth_provider("ocg"));
+    }
+
+    #[test]
+    fn is_tts_request_consults_catalog_then_substring() {
+        // Catalog kind == "tts" wins even without a tts/speech substring
+        // (kokoro on selfhosted-tts).
+        assert!(is_tts_request("selfhosted-tts", "kokoro"));
+        // Catalog-known TTS model with substring also matches.
+        assert!(is_tts_request("openai", "tts-1"));
+        // Unknown models fall back to name-substring.
+        assert!(is_tts_request("custom", "my-tts-voice"));
+        assert!(is_tts_request("custom", "speech-synth"));
+        assert!(!is_tts_request("openai", "gpt-4.1"));
     }
     // Bead openproxy-i7yt: upstream error bodies must survive to the
     // client verbatim (H23) instead of collapsing to generic 500.
