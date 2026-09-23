@@ -203,10 +203,13 @@ pub(super) async fn import_provider_models(
         .collect();
     let mut compat = super::model_merge::CompatOverrideStore::default();
     let outcome = super::model_merge::merge_model_listing(&previous, &fresh, "llm", &mut compat);
+    // `imported` counts rows actually added: an operator row that the fresh
+    // listing also contains is an overlay, not an import.
     let imported = outcome
         .keep
         .len()
-        .saturating_sub(outcome.preserved_custom.len());
+        .saturating_sub(outcome.preserved_custom.len())
+        .saturating_sub(outcome.updated_custom.len());
     let dropped = outcome.dropped_imported.len();
     let preserved = outcome.preserved_custom.len();
     let keep_rows = outcome.keep;
