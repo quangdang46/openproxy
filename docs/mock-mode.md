@@ -122,7 +122,19 @@ toolchain rebuilds). Snapshot-friendly for CI.
 - [ ] Dashboard toggle flips mode; banner + modal badge mirror; `web/dist` rebuilt
 - [ ] `git status` / `git diff --cached` — no secrets
 
-## 7. Boundaries (NOT in MVP)
+## 7. Endpoint coverage (mock MVP)
+
+Mock execution is wired into the **chat dispatch path** only:
+
+| Surface | Mock | Notes |
+|---|---|---|
+| `POST /v1/chat/completions` (plus `/chat/completions`, `/v1/v1/...`) | yes | stream + non-stream, 3 formats |
+| `POST /v1/messages` (Anthropic) | executor-level | see troubleshooting note on the compat edge |
+| `POST /v1beta/models/{model}:generateContent` (Gemini) | executor-level | same compat-edge note |
+| `GET /v1/models`, `/api/*` | n/a | real data (mode is a config surface, not a request) |
+| `POST /v1/embeddings`, `/v1/audio/*`, `/v1/images/*` | **no** | these dispatch outside the chat path and the simulator implements no embeddings/audio/image response shape, so they return the normal "No credentials" error. Simulators for them belong in a follow-up epic. |
+
+## 8. Boundaries (NOT in MVP)
 
 Record/replay, multi-step scenarios, stateful simulation, chaos
 probabilities, Mock Lab page, semantic intelligence emulation, non-LLM
