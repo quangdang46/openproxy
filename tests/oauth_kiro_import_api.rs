@@ -159,6 +159,19 @@ async fn kiro_import_route_matches_openproxy_success_flow() {
 
 #[tokio::test]
 async fn kiro_import_route_validates_missing_and_invalid_tokens_like_openproxy() {
+    let _lock = ENV_LOCK.lock().unwrap();
+    // The import route does soft validation (any non-empty refreshToken is
+    // accepted, matching the 9router JS route) and fails later at the real
+    // refresh call — so a bad prefix surfaces as a wrapped refresh failure, not
+    // a format rejection. Point the auth service at a mock to stay offline.
+    let server = MockServer::start().await;
+    let _env = EnvVarGuard::set("OPENPROXY_KIRO_AUTH_SERVICE_BASE_URL", &server.uri());
+    Mock::given(method("POST"))
+        .and(path("/refreshToken"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("bad token"))
+        .mount(&server)
+        .await;
+
     let app = openproxy::build_app(app_state().await);
 
     let missing = app
@@ -179,8 +192,8 @@ async fn kiro_import_route_validates_missing_and_invalid_tokens_like_openproxy()
     let (status, json) = response_json(invalid).await;
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(
-        json,
-        json!({ "error": "Invalid token format. Token should start with aorAAAAAG..." })
+        json["error"],
+        json!("Token validation failed: Token refresh failed: bad token")
     );
 }
 

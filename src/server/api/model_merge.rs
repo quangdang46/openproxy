@@ -119,6 +119,9 @@ pub struct ModelMergeOutcome {
     pub dropped_imported: Vec<String>,
     /// Operator ids absent from the fresh listing (kept, reported for UI).
     pub preserved_custom: Vec<String>,
+    /// Operator ids that the fresh listing also contains (overlay: operator
+    /// fields win, no new row). Counted as NOT imported by callers.
+    pub updated_custom: Vec<String>,
 }
 
 /// Merge a fresh model listing over stored rows with OmniRoute semantics.
@@ -180,10 +183,17 @@ pub fn merge_model_listing(
                         merged_extra.insert(k.clone(), v.clone());
                     }
                 }
-                // Keep the operator's source tag so the row is never
-                // mistaken for a machine-imported row.
-                if let Some(s) = row_source(prev) {
-                    merged_extra.insert("source".to_string(), Value::String(s.to_string()));
+                // Never let the listing tag an operator row as imported: an
+                // untagged operator row stays untagged, a tagged one keeps
+                // its own tag. Otherwise the next sync would treat the row
+                // as stale machine data and drop it.
+                match row_source(prev) {
+                    Some(s) => {
+                        merged_extra.insert("source".to_string(), Value::String(s.to_string()));
+                    }
+                    None => {
+                        merged_extra.remove("source");
+                    }
                 }
                 outcome.keep.push(CustomModel {
                     provider_alias: prev.provider_alias.clone(),
@@ -192,6 +202,7 @@ pub fn merge_model_listing(
                     name: prev.name.clone().or(disc.name.clone()),
                     extra: merged_extra,
                 });
+                outcome.updated_custom.push(disc.id.clone());
             }
             _ => {
                 // Fresh imported row (new, refreshed, or replacing a stale
@@ -213,6 +224,7 @@ pub fn merge_model_listing(
 
     outcome.dropped_imported.sort();
     outcome.preserved_custom.sort();
+    outcome.updated_custom.sort();
     outcome
 }
 

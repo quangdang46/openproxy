@@ -126,14 +126,10 @@ async fn kiro_auto_import_prefers_kiro_auth_token_file_like_openproxy() {
     let (status, json) = response_json(response).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        json,
-        json!({
-            "found": true,
-            "refreshToken": "aorAAAAAG-primary-token",
-            "source": "kiro-auth-token.json"
-        })
-    );
+    // Additive response: assert the contract fields, not exact shape.
+    assert_eq!(json["found"], json!(true));
+    assert_eq!(json["refreshToken"], json!("aorAAAAAG-primary-token"));
+    assert_eq!(json["source"], json!("kiro-auth-token.json"));
 }
 
 #[tokio::test]
@@ -159,14 +155,10 @@ async fn kiro_auto_import_scans_other_json_files_when_needed() {
     let (status, json) = response_json(response).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        json,
-        json!({
-            "found": true,
-            "refreshToken": "aorAAAAAG-fallback-token",
-            "source": "match.json"
-        })
-    );
+    // Additive response: assert the contract fields, not exact shape.
+    assert_eq!(json["found"], json!(true));
+    assert_eq!(json["refreshToken"], json!("aorAAAAAG-fallback-token"));
+    assert_eq!(json["source"], json!("match.json"));
 }
 
 #[tokio::test]

@@ -154,19 +154,25 @@ fn kiro_executor_new_with_provider_node() {
 // ============================================================================
 
 #[test]
-fn kiro_executor_build_url_default_order_kiro_dev_first() {
+fn kiro_executor_build_url_default_order_q_first() {
     let pool = Arc::new(ClientPool::new());
     let executor = KiroExecutor::new(pool, None).expect("kiro executor");
-    // No authMethod → non-CodeWhisperer surface → default order (kiro.dev first).
+    // 9router `getOrderedBaseUrls` puts the q.* surface first for every auth
+    // method (parity fix 610a3ed9) — kiro.dev stays reachable as a later
+    // fallback, not the lead.
     let creds = ProviderConnection::default();
 
     let urls = executor.build_url("claude-sonnet-4.5", true, &creds);
     assert!(!urls.is_empty());
     assert!(
-        urls[0].contains("runtime.us-east-1.kiro.dev"),
-        "default order should keep kiro.dev first: {urls:?}"
+        urls[0].contains("://q."),
+        "default order should be q.* first: {urls:?}"
     );
     assert!(urls[0].contains("generateAssistantResponse"));
+    assert!(
+        urls.iter().any(|u| u.contains("kiro.dev")),
+        "kiro.dev must remain a fallback: {urls:?}"
+    );
 }
 
 #[test]

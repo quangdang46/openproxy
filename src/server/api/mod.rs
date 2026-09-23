@@ -31,6 +31,7 @@ pub mod provider_filters;
 mod provider_model_tests;
 mod provider_models;
 pub mod provider_nodes;
+pub mod sanitization;
 mod provider_validate;
 pub mod providers;
 pub mod pxpipe;

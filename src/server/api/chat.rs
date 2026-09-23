@@ -1054,6 +1054,11 @@ async fn execute_single_model(
         });
     }
 
+    // Strip control characters before the body is translated/forwarded: some
+    // providers reject raw C0 bytes, and clients emit them from copied terminal
+    // output (9router parity: sanitizeInput).
+    crate::server::api::sanitization::sanitize_request_body(&mut body);
+
     // 0. providerThinking on SOURCE body BEFORE translate (9router chatCore.js:68-80)
     inject_provider_thinking(&mut body, &snapshot.settings, &plan.provider);
 
@@ -3132,7 +3137,7 @@ async fn proxy_sse_to_json_response(
     let status = response.status();
     let (body_bytes, body_complete) = collect_upstream_response_bytes(response).await;
 
-    let json_body =
+    let mut json_body =
         crate::core::media::responses::stream_to_json::sse_stream_to_json(&body_bytes, Some(model))
             .unwrap_or_else(|| {
                 // Fallback: try parse as JSON already, else wrap error
@@ -3146,6 +3151,7 @@ async fn proxy_sse_to_json_response(
                     })
                 })
             });
+    crate::server::api::sanitization::sanitize_response_object(&mut json_body);
 
     let out = Bytes::from(serde_json::to_vec(&json_body).unwrap_or_default());
 
@@ -3597,10 +3603,10 @@ async fn proxy_response_with_pending_tracking(
                                         }
                                     }
                                 } else {
-                                    yield Ok::<Bytes, std::io::Error>(chunk);
+                                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&chunk));
                                 }
                             } else {
-                                yield Ok::<Bytes, std::io::Error>(chunk);
+                                yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&chunk));
                             }
                         }
                         Ok(Ok(None)) => break,
@@ -3736,10 +3742,10 @@ async fn proxy_response_with_pending_tracking(
                                             }
                                         }
                                     } else {
-                                        yield Ok::<Bytes, std::io::Error>(data);
+                                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&data));
                                     }
                                 } else {
-                                    yield Ok::<Bytes, std::io::Error>(data);
+                                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&data));
                                 }
                             }
                         }
@@ -3838,6 +3844,18 @@ async fn record_streaming_usage(
             compression,
         )
         .await;
+}
+
+/// Strip provider-specific fields from one raw upstream SSE chunk before it
+/// reaches the client (9router parity: sanitizeResponse). Chunks can split a
+/// frame across reads, so each `data:` line is sanitized in isolation and
+/// non-JSON payloads pass through untouched.
+fn sanitize_sse_chunk(chunk: &Bytes) -> Bytes {
+    let text = String::from_utf8_lossy(chunk);
+    if !text.contains("data:") {
+        return chunk.clone();
+    }
+    Bytes::from(crate::server::api::sanitization::sanitize_sse_body(&text).into_bytes())
 }
 
 fn sse_frame_for_dashboard(line: &str) -> Option<Bytes> {

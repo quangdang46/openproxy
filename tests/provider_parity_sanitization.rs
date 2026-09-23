@@ -136,7 +136,7 @@ async fn input_sanitization_strips_control_chars_before_upstream() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/api/chat")
+                .uri("/v1/chat/completions")
                 .header("authorization", "Bearer valid-bearer")
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -199,7 +199,7 @@ async fn input_sanitization_preserves_code_indentation_and_newlines() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/api/chat")
+                .uri("/v1/chat/completions")
                 .header("authorization", "Bearer valid-bearer")
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -267,7 +267,7 @@ async fn input_sanitization_noop_for_clean_payload() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/api/chat")
+                .uri("/v1/chat/completions")
                 .header("authorization", "Bearer valid-bearer")
                 .header("content-type", "application/json")
                 .body(Body::from(
@@ -331,7 +331,7 @@ async fn response_sanitization_strips_breaking_fields() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/v1/api/chat")
+                .uri("/v1/chat/completions")
                 .header("authorization", "Bearer valid-bearer")
                 .header("content-type", "application/json")
                 .body(Body::from(

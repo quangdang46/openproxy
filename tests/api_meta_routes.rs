@@ -50,7 +50,10 @@ async fn api_health_returns_sidecar_compatible_payload() {
         .await
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(json, serde_json::json!({ "ok": true }));
+    // Sidecar-compatible shape: `ok` is the readiness probe; `providers` is the
+    // additive health summary the dashboard consumes.
+    assert_eq!(json["ok"], serde_json::json!(true));
+    assert!(json["providers"].is_object(), "providers summary present");
 }
 
 #[tokio::test]
