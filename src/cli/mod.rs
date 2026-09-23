@@ -1716,7 +1716,20 @@ async fn run_direct_route(
         let snapshot = db_snapshot();
         let connection = select_connection_cli(&snapshot, &provider, &resolved.model, &excluded);
 
-        let Some(connection) = connection else {
+        let Some(connection) = connection.or_else(|| {
+            // Resolver-wiring: no credentials + effective mock => stub (single-shot).
+            if excluded
+                .iter()
+                .any(|id| id == &format!("sim-stub-{provider}"))
+            {
+                return None;
+            }
+            if cli_effective_mock(&provider, snapshot.settings.dev_mock_all) {
+                Some(cli_stub_connection(&provider))
+            } else {
+                None
+            }
+        }) else {
             if let Some(error) = last_error {
                 eprintln!("Error: {}", error);
                 std::process::exit(1);
@@ -1766,6 +1779,9 @@ async fn run_direct_route(
                 credentials: connection.clone(),
                 proxy,
                 sim_headers: reqwest::header::HeaderMap::new(),
+                // Resolver-wiring: stub connections (no credentials) imply
+                // effective mock — the stub gate above already did the lookup.
+                force_mock: connection.id.starts_with("sim-stub-"),
             })
             .await;
 
@@ -1888,7 +1904,20 @@ async fn run_combo_route(
         let snapshot = db_snapshot();
         let connection = select_connection_cli(&snapshot, &provider, &resolved.model, &excluded);
 
-        let Some(connection) = connection else {
+        let Some(connection) = connection.or_else(|| {
+            // Resolver-wiring (follow-up openproxy-1ycq): single-shot stub.
+            if excluded
+                .iter()
+                .any(|id| id == &format!("sim-stub-{provider}"))
+            {
+                return None;
+            }
+            if cli_effective_mock(&provider, snapshot.settings.dev_mock_all) {
+                Some(cli_stub_connection(&provider))
+            } else {
+                None
+            }
+        }) else {
             eprintln!(
                 "Error: no available credentials for provider '{}'",
                 provider
@@ -1934,6 +1963,9 @@ async fn run_combo_route(
                 credentials: connection.clone(),
                 proxy,
                 sim_headers: reqwest::header::HeaderMap::new(),
+                // Resolver-wiring: stub connections (no credentials) imply
+                // effective mock — the stub gate above already did the lookup.
+                force_mock: connection.id.starts_with("sim-stub-"),
             })
             .await;
 
@@ -1976,6 +2008,35 @@ fn db_snapshot() -> Arc<AppDb> {
         let db = Db::load().await.expect("Failed to load database");
         db.snapshot()
     })
+}
+
+/// Resolver-wiring (follow-up openproxy-1ycq): effective mock for a provider
+/// via one kv lookup. Used to activate the executor mock branch + stub
+/// connections when no credentials exist.
+fn cli_effective_mock(provider: &str, settings_force: bool) -> bool {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let db = Db::load().await.expect("Failed to load database");
+        db.sqlite
+            .with_conn(|conn| {
+                Ok::<_, rusqlite::Error>(crate::core::simulation::status_for(
+                    conn,
+                    provider,
+                    settings_force,
+                ))
+            })
+            .map(|s| s.effective == crate::core::simulation::ProviderExecutionMode::Mock)
+            .unwrap_or(false)
+    })
+}
+
+fn cli_stub_connection(provider: &str) -> ProviderConnection {
+    let mut stub = ProviderConnection::default();
+    stub.id = format!("sim-stub-{provider}");
+    stub.provider = provider.to_string();
+    stub.auth_type = "apiKey".to_string();
+    stub.is_active = Some(true);
+    stub
 }
 
 fn select_connection_cli(

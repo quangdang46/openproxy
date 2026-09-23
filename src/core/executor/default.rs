@@ -592,6 +592,14 @@ pub struct ExecutionRequest {
     /// (`x-openproxy-sim-*`, bead sim-04). Defaults empty; never forwarded.
     #[allow(dead_code)]
     pub sim_headers: HeaderMap,
+    /// Resolver-wiring (follow-up openproxy-1ycq): when true, the executor
+    /// activates the mock branch for configured-mock providers even without
+    /// the per-request header. Set by dispatch sites that performed a DB
+    /// lookup via `status_for` (chat stub gate, CLI). Unit/integration tests
+    /// that build ExecutionRequest literally keep the default `false` and
+    /// drive mock mode via `sim_headers` — unchanged behavior.
+    #[allow(dead_code)]
+    pub force_mock: bool,
 }
 
 impl Default for ExecutionRequest {
@@ -603,6 +611,7 @@ impl Default for ExecutionRequest {
             credentials: ProviderConnection::default(),
             proxy: None,
             sim_headers: HeaderMap::new(),
+            force_mock: false,
         }
     }
 }
@@ -883,16 +892,20 @@ impl DefaultExecutor {
         })
     }
 
-    /// Whether simulation mock mode is active for this request (bead sim-04).
+    /// Whether simulation mock mode is active for this request.
     ///
-    /// Reads the request-scoped sim headers + process env only — NO DB access
-    /// here (hot path; configured mode arrives via later beads through a cached
-    /// map on the executor or AppState). Active iff:
-    /// global env force is set, or the per-request `x-openproxy-sim: mock`
-    /// header is present. Format support is enforced at dispatch (bead sim-06+).
+    /// Active iff: global env force is set, the per-request `x-openproxy-sim:
+    /// mock` header is present, or `force_mock` was set by a dispatch site
+    /// that already performed the DB lookup (resolver-wiring follow-up
+    /// openproxy-1ycq: chat stub gate, CLI stub gate). The executor itself
+    /// stays DB-free (hot path) — resolution happens once at dispatch.
+    /// Format support is enforced at dispatch (bead sim-06+).
     fn simulation_active(request: &ExecutionRequest) -> bool {
         use crate::core::simulation::SIM_HEADER;
         if env_force_all() {
+            return true;
+        }
+        if request.force_mock {
             return true;
         }
         request
@@ -2532,6 +2545,7 @@ mod tests {
             credentials: ProviderConnection::default(),
             proxy: None,
             sim_headers: HeaderMap::new(),
+            force_mock: false,
         };
         let env_force = std::env::var("OPENPROXY_DEV_MOCK")
             .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
@@ -2556,6 +2570,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim tool execute");
@@ -2584,6 +2599,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim override");
@@ -2620,6 +2636,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim json override");
@@ -2646,6 +2663,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim stream override");
@@ -2674,6 +2692,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim malformed renders");
@@ -2700,6 +2719,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim disconnect");
@@ -2738,6 +2758,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim tool override");
@@ -2775,6 +2796,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec
@@ -2801,6 +2823,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim 404 renders");
@@ -2825,6 +2848,7 @@ mod tests {
                 h.insert("x-openproxy-sim-status", HeaderValue::from_static("429"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim 429 renders");
@@ -2853,6 +2877,7 @@ mod tests {
                 h.insert("x-openproxy-sim-status", HeaderValue::from_static("418"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim ignores 418");
@@ -2878,6 +2903,7 @@ mod tests {
                     h.insert("x-openproxy-sim-status", HeaderValue::from_static("429"));
                     h
                 },
+                force_mock: false,
             };
             let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
             let resp = exec.execute(req).await.expect("sim fault precedence");
@@ -2912,6 +2938,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let t0 = std::time::Instant::now();
@@ -2944,6 +2971,7 @@ mod tests {
                 );
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let t0 = std::time::Instant::now();
@@ -2953,6 +2981,43 @@ mod tests {
             "fault delayed"
         );
         assert_eq!(resp.response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn simulated_force_mock_without_header() {
+        // Resolver-wiring (follow-up openproxy-1ycq): configured-mode mock
+        // activates via force_mock even with no header and no credentials.
+        // This is what the chat stub gate + CLI set after their DB lookup.
+        let req = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "wired"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: HeaderMap::new(),
+            force_mock: true,
+        };
+        let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
+        let resp = exec.execute(req).await.expect("force_mock serves");
+        assert!(resp.url.starts_with("sim://"));
+        assert_eq!(
+            resp.transformed_body["choices"][0]["message"]["content"],
+            "Echo: wired"
+        );
+        // And force_mock:false + no header stays real-path (would need creds;
+        // assert the gate directly instead of hitting network).
+        let req2 = ExecutionRequest {
+            model: "gpt-4o".into(),
+            body: serde_json::json!({"model": "gpt-4o",
+                "messages": [{"role": "user", "content": "wired"}]}),
+            stream: false,
+            credentials: ProviderConnection::default(),
+            proxy: None,
+            sim_headers: HeaderMap::new(),
+            force_mock: false,
+        };
+        assert!(!DefaultExecutor::simulation_active(&req2));
     }
 
     #[tokio::test]
@@ -2983,6 +3048,7 @@ mod tests {
             credentials: hostile(),
             proxy: None,
             sim_headers: sim_headers(),
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("mock ignores creds");
@@ -3000,6 +3066,7 @@ mod tests {
             credentials: hostile(),
             proxy: None,
             sim_headers: sim_headers(),
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("mock ignores creds");
@@ -3014,6 +3081,7 @@ mod tests {
             credentials: hostile(),
             proxy: None,
             sim_headers: sim_headers(),
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("gemini", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("mock ignores creds");
@@ -3038,6 +3106,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("gemini", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim gemini");
@@ -3063,6 +3132,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("gemini", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim gemini stream");
@@ -3087,6 +3157,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim stream 404 renders");
@@ -3112,6 +3183,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim anthropic");
@@ -3136,6 +3208,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("anthropic", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim anthropic stream");
@@ -3160,6 +3233,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim execute");
@@ -3188,6 +3262,7 @@ mod tests {
                 h.insert("x-openproxy-sim", HeaderValue::from_static("mock"));
                 h
             },
+            force_mock: false,
         };
         let exec = DefaultExecutor::new("openai", Arc::new(ClientPool::new()), None).unwrap();
         let resp = exec.execute(req).await.expect("sim stream execute");

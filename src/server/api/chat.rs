@@ -2322,6 +2322,11 @@ async fn forward_with_provider_fallback(
                         credentials: connection.clone(),
                         proxy,
                         sim_headers: sim_headers.clone(),
+                        // Resolver-wiring (follow-up openproxy-1ycq): the stub
+                        // gate above already did the DB lookup, so a stubbed
+                        // connection means effective mock — activate the branch
+                        // even without the per-request header.
+                        force_mock: connection.id.starts_with("sim-stub-"),
                     })
                     .await
                     .map_err(|err| err.into_combo_attempt_error())?;

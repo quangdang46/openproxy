@@ -967,6 +967,7 @@ async fn default_executor_execute_posts_expected_request() {
             credentials: connection("node-openai"),
             proxy: None,
             sim_headers: HeaderMap::new(),
+            force_mock: false,
         })
         .await
         .expect("execute request");
@@ -1033,6 +1034,7 @@ async fn default_executor_execute_uses_reqwest_when_proxy_present() {
                 rtt_ms: None,
             }),
             sim_headers: HeaderMap::new(),
+            force_mock: false,
         })
         .await
         .expect("execute request");
@@ -1090,6 +1092,7 @@ async fn default_executor_execute_uses_reqwest_for_responses_api() {
             credentials,
             proxy: None,
             sim_headers: HeaderMap::new(),
+            force_mock: false,
         })
         .await
         .expect("execute request");
@@ -1607,6 +1610,7 @@ async fn default_executor_reuses_hyper_connection_for_sequential_requests() {
                 credentials: connection("node-openai"),
                 proxy: None,
                 sim_headers: HeaderMap::new(),
+                force_mock: false,
             })
             .await
             .expect("execute request");
@@ -2025,6 +2029,7 @@ async fn real_branch_status_fault_overrides_success() {
             credentials: connection("node-openai"),
             proxy: None,
             sim_headers,
+            force_mock: false,
         })
         .await
         .expect("execute with fault");
@@ -2089,6 +2094,7 @@ async fn real_branch_no_fault_passthrough() {
             credentials: connection("node-openai"),
             proxy: None,
             sim_headers: HeaderMap::new(),
+            force_mock: false,
         })
         .await
         .expect("execute clean");
@@ -2180,6 +2186,7 @@ mod sim_fallback {
                     credentials: connection(m.provider),
                     proxy: None,
                     sim_headers: m.sim_headers.clone(),
+                    force_mock: false,
                 })
                 .await
                 .expect("transport ok");
@@ -2268,6 +2275,7 @@ mod sim_fallback {
                 credentials: connection("openai"),
                 proxy: None,
                 sim_headers: members[0].sim_headers.clone(),
+                force_mock: false,
             })
             .await
             .unwrap();
@@ -2294,6 +2302,7 @@ mod sim_fallback {
                 credentials: connection("node-openai"),
                 proxy: None,
                 sim_headers: HeaderMap::new(),
+                force_mock: false,
             })
             .await
             .unwrap();
@@ -2370,6 +2379,7 @@ mod sim_fallback {
                 credentials: connection("node-gemini"),
                 proxy: None,
                 sim_headers: HeaderMap::new(),
+                force_mock: false,
             })
             .await
             .unwrap();
@@ -2414,6 +2424,7 @@ mod sim_fallback {
                 credentials: connection("node-openai"),
                 proxy: None,
                 sim_headers: h,
+                force_mock: false,
             })
             .await;
         match result {
