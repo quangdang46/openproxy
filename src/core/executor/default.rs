@@ -598,7 +598,6 @@ pub struct ExecutionRequest {
     /// lookup via `status_for` (chat stub gate, CLI). Unit/integration tests
     /// that build ExecutionRequest literally keep the default `false` and
     /// drive mock mode via `sim_headers` — unchanged behavior.
-    #[allow(dead_code)]
     pub force_mock: bool,
 }
 
