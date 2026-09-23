@@ -81,6 +81,9 @@ impl ProviderExecutor for CodeBuddyIntlExecutor {
             credentials: request.credentials.clone(),
             proxy: request.proxy.clone(),
             sim_headers: HeaderMap::new(),
+            // Resolver-wiring: inner request carries no dispatch context;
+            // configured-mode mock for codebuddy flows via header/env only.
+            force_mock: false,
         };
         let ExecutionResponse {
             response,
