@@ -43,7 +43,23 @@ pub const QUERY_KEY_HEADER: &str = "x-9r-query-key";
 /// 2. Otherwise a cryptographically-random 256-bit hex string generated
 ///    exactly once per process lifetime. This means the secret changes
 ///    on every server restart, invalidating all existing sessions.
+/// Placeholder that earlier versions of `.env.example` shipped in the clear.
+/// Anyone who has read a public copy of this repository knows it, so a session
+/// signed with it is forgeable by anyone. Refuse it outright rather than
+/// warning and continuing.
+pub const KNOWN_INSECURE_JWT_PLACEHOLDER: &str = "openproxy-default-secret-change-me";
+
 static JWT_SECRET: Lazy<String> = Lazy::new(|| {
+    if let Ok(secret) = std::env::var("JWT_SECRET") {
+        if secret == KNOWN_INSECURE_JWT_PLACEHOLDER {
+            panic!(
+                "JWT_SECRET is set to the placeholder value that shipped in older \
+                 .env.example files. Anyone can read it, so dashboard sessions \
+                 signed with it are forgeable. Unset JWT_SECRET for a random \
+                 per-process secret, or set it to $(openssl rand -hex 32)."
+            );
+        }
+    }
     std::env::var("JWT_SECRET")
         .ok()
         .filter(|s| !s.is_empty())
@@ -229,15 +245,26 @@ pub fn require_dashboard_session(
     if !decoded.claims.authenticated {
         return Err(DashboardAuthError::Invalid);
     }
+    // A jti is MANDATORY, not optional.
+    //
+    // It used to be `if let Some(ref jti) = ...`, so a token carrying no jti
+    // skipped BOTH the epoch check and the per-session revocation check. The
+    // signature still had to verify, so this was not a forgery on its own —
+    // but it meant that once the signing secret was known (a copied
+    // .env.example default is one way), an attacker could mint a token that
+    // ignored a password change AND ignored logout. Every token this server
+    // issues carries a jti (see generate_jti), so requiring one breaks
+    // nothing legitimate and closes the bypass.
+    let Some(ref jti) = decoded.claims.jti else {
+        return Err(DashboardAuthError::Invalid);
+    };
     // Reject tokens from a previous epoch (password change, bulk revoke).
-    if let Some(ref jti) = decoded.claims.jti {
-        if !is_jti_valid(jti) {
-            return Err(DashboardAuthError::Invalid);
-        }
-        // Reject individually-revoked tokens (per-session logout).
-        if REVOKED_JTIS.contains_key(jti) {
-            return Err(DashboardAuthError::Invalid);
-        }
+    if !is_jti_valid(jti) {
+        return Err(DashboardAuthError::Invalid);
+    }
+    // Reject individually-revoked tokens (per-session logout).
+    if REVOKED_JTIS.contains_key(jti) {
+        return Err(DashboardAuthError::Invalid);
     }
     Ok(decoded.claims)
 }
