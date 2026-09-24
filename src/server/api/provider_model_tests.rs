@@ -195,7 +195,12 @@ async fn ping_model(
 
     let latency_ms = start.elapsed().as_millis() as u64;
     let status = response.status();
-    let ok = status == StatusCode::OK || status == StatusCode::BAD_REQUEST;
+    // openproxy-s2oc: only a success status means the model answered. A 400
+    // here is openproxy's OWN in-process rejection ("No credentials for
+    // provider: X") — the unconfigured-provider / disabled-model case — and
+    // the sibling endpoint already treats it as failure
+    // (providers.rs `response.status().is_success()`).
+    let ok = status.is_success();
     let error = if ok {
         None
     } else {
@@ -237,9 +242,11 @@ pub(super) struct ComboTestModelResponse {
 /// connection backs each combo entry.
 ///
 /// The actual request shape (`max_tokens=1`, single `"hi"` message,
-/// non-streaming, 15s timeout, treat both `200 OK` and `400 Bad Request`
-/// as "model responded") deliberately matches [`ping_model`] so the two
-/// surfaces produce comparable results.
+/// non-streaming, 15s timeout, only `200 OK` counts as "model responded")
+/// deliberately matches [`ping_model`] so the two surfaces produce
+/// comparable results. A `400` is openproxy's own in-process rejection
+/// ("No credentials for provider: X"), not an upstream model answer, so it
+/// is reported as a failure with the dispatcher's reason (openproxy-s2oc).
 pub(super) async fn test_combo_model(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -294,7 +301,10 @@ pub(super) async fn test_combo_model(
 
     let latency_ms = start.elapsed().as_millis() as u64;
     let status = response.status();
-    let ok = status == StatusCode::OK || status == StatusCode::BAD_REQUEST;
+    // openproxy-s2oc: see `ping_model` — a 400 is openproxy's own rejection,
+    // not a model answer, so it must surface as `ok: false` with the
+    // dispatcher's reason instead of a green tick in the combo modal.
+    let ok = status.is_success();
     let error = if ok {
         None
     } else {
