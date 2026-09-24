@@ -1295,6 +1295,39 @@ async fn openai_chat_status_test(
     .await
 }
 
+/// Non-2xx statuses that still prove the credential is good, matching
+/// 9router's per-provider probe config
+/// (`src/app/api/providers/[id]/test/testUtils.js`).
+///
+/// 9router's rule is `res.ok || config.acceptStatuses.includes(status)`.
+/// The previous logic here was the INVERSE — "valid unless 401/403" — so a 500
+/// from an upstream outage was recorded as a successful test and persisted a
+/// green "active" badge to SQLite. Inverting to `is_success() || allowlisted`
+/// matches the baseline and fixes the data integrity problem.
+///
+/// 9router entries that declare one:
+///   codex    -> [400]  a deliberately minimal body earns a fast 400 that
+///                        proves auth without consuming quota
+///   grok-cli -> [402]  subscription spending-limit: the token is fine, the
+///                        credits are not, so the connection stays active
+pub fn probe_accept_statuses(provider: &str) -> &'static [u16] {
+    match provider {
+        "codex" => &[400],
+        "grok-cli" | "gcli" | "gb" | "grok-build" => &[402],
+        _ => &[],
+    }
+}
+
+/// 9router soft-fail message: connected, but warn the operator.
+pub fn probe_soft_fail_message(provider: &str, status: u16) -> Option<&'static str> {
+    match (provider, status) {
+        ("grok-cli" | "gcli" | "gb" | "grok-build", 402) => Some(
+            "Connected, but Grok Build credits are exhausted (spending limit). Add credits or upgrade SuperGrok.",
+        ),
+        _ => None,
+    }
+}
+
 async fn status_test_excluding(
     state: &AppState,
     connection: &ProviderConnection,
@@ -1303,16 +1336,22 @@ async fn status_test_excluding(
     invalid_statuses: &[StatusCode],
     error_message: &str,
 ) -> ConnectionTestResult {
+    let _ = invalid_statuses;
     match execute_request(state, &connection.provider, effective_proxy, request).await {
         Ok(response) => {
-            let valid = !invalid_statuses.contains(&response.status());
+            let status = response.status();
+            // 9router: accepted = res.ok || acceptStatuses.includes(status).
+            let accept = probe_accept_statuses(&connection.provider);
+            let valid = status.is_success() || accept.contains(&status.as_u16());
+            let error = if valid {
+                // A soft-accepted status still carries its operator warning.
+                probe_soft_fail_message(&connection.provider, status.as_u16()).map(str::to_string)
+            } else {
+                Some(error_message.to_string())
+            };
             ConnectionTestResult {
                 valid,
-                error: if valid {
-                    None
-                } else {
-                    Some(error_message.to_string())
-                },
+                error,
                 refreshed: false,
                 new_tokens: None,
             }
@@ -2010,5 +2049,47 @@ fn invalid(error: &str) -> ConnectionTestResult {
         error: Some(error.to_string()),
         refreshed: false,
         new_tokens: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{probe_accept_statuses, probe_soft_fail_message};
+
+    /// Regression (audit finding #59, 9router parity): the API-key probe path
+    /// used "valid unless the status is 401/403", the INVERSE of 9router's
+    /// `res.ok || acceptStatuses.includes(status)`. A 500 from an upstream
+    /// outage therefore recorded a successful test and persisted a green
+    /// "active" badge to SQLite, so the dashboard claimed a working provider
+    /// that could not answer.
+    #[test]
+    fn only_success_and_explicit_accept_statuses_count_as_valid() {
+        // 5xx is not success, and no provider allowlists it.
+        for provider in ["openai", "anthropic", "gemini", "codex", "grok-cli"] {
+            for code in [500u16, 502, 503, 504] {
+                assert!(
+                    !probe_accept_statuses(provider).contains(&code),
+                    "{provider} must not allowlist {code}"
+                );
+            }
+        }
+        // 9router declares exactly these two allowlists.
+        assert_eq!(probe_accept_statuses("codex"), &[400]);
+        assert_eq!(probe_accept_statuses("grok-cli"), &[402]);
+        assert_eq!(probe_accept_statuses("gb"), &[402]);
+        assert_eq!(probe_accept_statuses("grok-build"), &[402]);
+        assert!(probe_accept_statuses("openai").is_empty());
+        assert!(probe_accept_statuses("").is_empty());
+    }
+
+    #[test]
+    fn grok_spending_limit_is_connected_with_a_warning() {
+        assert!(probe_soft_fail_message("grok-cli", 402).is_some());
+        assert!(probe_soft_fail_message("gb", 402).is_some());
+        // 402 on an unrelated provider is a hard failure, not a soft one.
+        assert!(probe_soft_fail_message("openai", 402).is_none());
+        assert!(probe_soft_fail_message("grok-cli", 500).is_none());
+        // codex accepts 400 silently, with no soft message.
+        assert!(probe_soft_fail_message("codex", 400).is_none());
     }
 }
