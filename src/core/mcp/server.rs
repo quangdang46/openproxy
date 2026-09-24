@@ -877,7 +877,16 @@ fn handle_resources_read(state: &AppState, id: Value, params: &Value) -> Value {
         }
         "openproxy://providers" => {
             let snap = state.db.snapshot();
-            serde_json::to_string_pretty(&snap.provider_connections)
+            // Same redaction as the provider_list TOOL and as the dashboard
+            // and REST surfaces. This is a second, independent read arm over
+            // provider_connections; leaving it raw while redacting the tool
+            // would leave the exact same leak reachable one route over.
+            let redacted: Vec<_> = snap
+                .provider_connections
+                .iter()
+                .map(crate::server::api::redact_provider_connection)
+                .collect();
+            serde_json::to_string_pretty(&redacted)
         }
         "openproxy://combos" => {
             let snap = state.db.snapshot();
