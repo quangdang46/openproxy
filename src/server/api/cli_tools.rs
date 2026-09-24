@@ -163,7 +163,19 @@ pub async fn run_tool(
     let timeout_secs = req.timeout_secs.unwrap_or(30).min(120);
     let start_time = std::time::Instant::now();
 
-    let (program, args) = build_tool_command(&tool_name, req.args.unwrap_or_default());
+    let (program, args) = match build_tool_command(&tool_name, req.args.unwrap_or_default()) {
+        Ok(cmd) => cmd,
+        Err(why) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": why,
+                    "supported": SUPPORTED_RUN_TOOLS,
+                })),
+            )
+                .into_response();
+        }
+    };
 
     let response = run_command_with_timeout(&program, &args, timeout_secs).await;
     let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -257,28 +269,28 @@ fn parse_cli_command(
 }
 
 /// Build a command for a specific tool
-fn build_tool_command(tool_name: &str, args: Vec<String>) -> (String, Vec<String>) {
+fn build_tool_command(tool_name: &str, args: Vec<String>) -> Result<(String, Vec<String>), String> {
     // Map tool names to actual commands
     match tool_name {
-        "provider-list" => (
+        "provider-list" => Ok((
             "openproxy".to_string(),
             vec![
                 "provider".to_string(),
                 "list".to_string(),
                 "--json".to_string(),
             ],
-        ),
-        "key-list" => (
+        )),
+        "key-list" => Ok((
             "openproxy".to_string(),
             vec!["key".to_string(), "list".to_string(), "--json".to_string()],
-        ),
-        "pool-list" => (
+        )),
+        "pool-list" => Ok((
             "openproxy".to_string(),
             vec!["pool".to_string(), "list".to_string(), "--json".to_string()],
-        ),
+        )),
         "pool-status" => {
             let pool_name = args.first().cloned().unwrap_or_default();
-            (
+            Ok((
                 "openproxy".to_string(),
                 vec![
                     "pool".to_string(),
@@ -287,11 +299,28 @@ fn build_tool_command(tool_name: &str, args: Vec<String>) -> (String, Vec<String
                     pool_name,
                     "--json".to_string(),
                 ],
-            )
+            ))
         }
-        _ => (tool_name.to_string(), args),
+        // Security: an unknown tool name must NOT become the program.
+        //
+        // This arm used to be `_ => (tool_name.to_string(), args)`, which
+        // passed the URL path segment straight to exec. The route is gated on
+        // a management key, but CLI clients ship their API key in plain
+        // config, so any key holder got host code execution — and a typo in a
+        // dashboard or script turned into running an arbitrary binary with
+        // the server's privileges.
+        //
+        // /api/cli-tools/execute is the deliberate path for running an
+        // arbitrary command; /run/{tool_name} is for running one of the
+        // tools listed here, so an unknown name is rejected rather than
+        // exec'd. The CLI's `tool run <name>` still works for the supported
+        // names; anything else must go through `/execute`.
+        _ => Err(format!("unknown tool '{tool_name}'")),
     }
 }
+
+/// The tool names `/api/cli-tools/run/{tool_name}` will accept.
+const SUPPORTED_RUN_TOOLS: &[&str] = &["provider-list", "key-list", "pool-list", "pool-status"];
 
 /// GET /api/cli-tools/help
 /// Get help information for CLI tools
@@ -3629,6 +3658,41 @@ async fn get_all_statuses(State(state): State<AppState>, headers: HeaderMap) -> 
 
 #[cfg(test)]
 mod tests {
+    /// Regression (audit finding #32): `build_tool_command` used to end in
+    /// `_ => (tool_name.to_string(), args)`, handing the URL path segment
+    /// straight to exec. The route is management-key gated, but CLI clients
+    /// ship their key in plain config, so any key holder got host code
+    /// execution — and a typo in a dashboard or script silently became an
+    /// arbitrary process launch.
+    #[test]
+    fn unknown_tool_name_is_rejected_not_executed() {
+        for hostile in [
+            "/bin/sh",
+            "sh",
+            "bash",
+            "curl",
+            "../../bin/sh",
+            "openproxy",
+            "definitely-not-a-tool",
+        ] {
+            let got = build_tool_command(hostile, vec!["-c".into(), "id".into()]);
+            assert!(
+                got.is_err(),
+                "tool name {hostile:?} must not become a program, got {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn supported_tool_names_still_map_to_openproxy() {
+        for name in SUPPORTED_RUN_TOOLS {
+            let (program, args) =
+                build_tool_command(name, vec![]).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(program, "openproxy", "{name} must run the openproxy binary");
+            assert!(!args.is_empty(), "{name} must pass subcommand args");
+        }
+    }
+
     use super::*;
     use super::*;
 
@@ -3748,23 +3812,30 @@ mod tests {
 
     #[test]
     fn test_build_tool_command_provider_list() {
-        let (program, args) = build_tool_command("provider-list", vec![]);
+        let (program, args) = build_tool_command("provider-list", vec![]).expect("known tool");
         assert_eq!(program, "openproxy");
         assert_eq!(args, vec!["provider", "list", "--json"]);
     }
 
     #[test]
     fn test_build_tool_command_pool_status() {
-        let (program, args) = build_tool_command("pool-status", vec!["my-pool".to_string()]);
+        let (program, args) =
+            build_tool_command("pool-status", vec!["my-pool".to_string()]).expect("known tool");
         assert_eq!(program, "openproxy");
         assert_eq!(args, vec!["pool", "status", "--name", "my-pool", "--json"]);
     }
 
     #[test]
     fn test_build_tool_command_unknown() {
-        let (program, args) = build_tool_command("unknown-tool", vec!["arg1".to_string()]);
-        assert_eq!(program, "unknown-tool");
-        assert_eq!(args, vec!["arg1"]);
+        // This test used to assert the opposite: that an unknown tool name
+        // became the program to execute. That fallback is the RCE described
+        // in audit finding #32, so the assertion is now inverted — an unknown
+        // name is rejected, never exec'd.
+        let got = build_tool_command("unknown-tool", vec!["arg1".to_string()]);
+        assert!(
+            got.is_err(),
+            "unknown tool must not resolve to a program, got {got:?}"
+        );
     }
 
     #[tokio::test]
