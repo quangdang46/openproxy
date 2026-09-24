@@ -62,6 +62,14 @@ static PROVIDER_CONFIGS: Lazy<BTreeMap<&'static str, ProviderConfig>> = Lazy::ne
             "kimi",
             ProviderConfig::claude_compatible("https://api.kimi.com/coding/v1/messages"),
         ),
+        // kimi-coding is the dual-auth alias of kimi (providers.rs: kimi() is
+        // kimi_coding() with a renamed id). Connections created through the
+        // device-code OAuth path carry no provider_node, so without this entry
+        // DefaultExecutor::new returned UnsupportedProvider -> HTTP 500.
+        (
+            "kimi-coding",
+            ProviderConfig::claude_compatible("https://api.kimi.com/coding/v1/messages"),
+        ),
         (
             "minimax",
             ProviderConfig::claude_compatible("https://api.minimax.io/anthropic/v1/messages"),
