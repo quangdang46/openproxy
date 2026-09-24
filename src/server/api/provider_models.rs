@@ -333,6 +333,8 @@ pub(super) fn supports_models_discovery(provider: &str) -> bool {
                 | "volcengine-ark"
                 | "byteplus"
                 | "deepseek"
+                | "cline"
+                | "clinepass"
                 | "groq"
                 | "xai"
                 | "mistral"
@@ -524,6 +526,17 @@ async fn fetch_provider_models_response(
         }
         "deepseek" => {
             fetch_first_party_openai_style_models(connection, "https://api.deepseek.com/models")
+                .await
+        }
+        // cline / clinepass share `https://api.cline.bot/api/v1/chat/completions`
+        // (9router providers/registry/cline.js:20 and clinepass.js:23), so the
+        // models list is the sibling path on the same host. Both are first-party
+        // OpenAI-shaped providers with their own PROVIDER_CONFIGS entry, so they
+        // are NOT matched by the `openai-compatible-*` prefix branch above and
+        // previously fell through to the catch-all — which is why the
+        // "Import from /models" button returned 400 for both.
+        "cline" | "clinepass" => {
+            fetch_first_party_openai_style_models(connection, "https://api.cline.bot/api/v1/models")
                 .await
         }
         // deepseek-web has no /models endpoint — it is a web-cookie
@@ -2384,5 +2397,31 @@ mod tests {
             m.provider_alias == provider_alias && m.id == "different/model" && m.r#type == "llm"
         });
         assert!(!missing, "different id should not match");
+    }
+}
+
+#[cfg(test)]
+mod discovery_parity_tests {
+    /// Regression (audit finding #182): cline and clinepass are first-party
+    /// OpenAI-shaped providers in 9router (registry/cline.js:20,
+    /// clinepass.js:23) with their own PROVIDER_CONFIGS entries, so they are
+    /// not matched by the `openai-compatible-*` prefix branch. With no explicit
+    /// match arm they fell through to the catch-all, and the dashboard's
+    /// "Import from /models" button returned 400 on every click for both.
+    #[test]
+    fn cline_family_supports_models_discovery() {
+        use super::supports_models_discovery;
+        for p in ["cline", "clinepass"] {
+            assert!(
+                supports_models_discovery(p),
+                "{p} must report that it can discover models"
+            );
+        }
+        // deepseek-web IS supported — via a static list rather than a network
+        // call, which is why the "no /models endpoint" comment sits on the
+        // fetch arm and not on this table. A provider with neither must
+        // report false so /v1/models does not issue a doomed request.
+        assert!(supports_models_discovery("deepseek-web"));
+        assert!(!supports_models_discovery("definitely-not-a-provider"));
     }
 }
