@@ -28,10 +28,18 @@ use crate::core::mcp::bridge;
 use crate::core::mcp::plugins::find_plugin;
 use crate::server::state::AppState;
 
-pub fn routes() -> Router<AppState> {
+pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/mcp/{plugin}/sse", get(sse_handler))
         .route("/api/mcp/{plugin}/message", post(message_handler))
+        // Plugin-bridge MCP spawns child processes from user-supplied plugin
+        // names. It carried no authentication of its own because it was merged
+        // into the unguarded `remaining` router — the same defect fixed for
+        // `mcp_server::routes`. Transport-level auth, not per-tool checks.
+        .route_layer(axum::middleware::from_fn_with_state(
+            state,
+            crate::server::api::guard::require_admin,
+        ))
 }
 
 fn data_dir(state: &AppState) -> PathBuf {

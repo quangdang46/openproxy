@@ -283,3 +283,124 @@ async fn bogus_api_key_argument_still_rejected_at_tool_layer() {
         "tool-layer _api_key check must remain: {parsed}"
     );
 }
+
+// ── Regression: the credential-leak PoC ────────────────────────────────────
+// The first pass at these tests ran against an EMPTY database, where
+// `provider_list` returns `[]` and every assertion passes — so the leak was
+// missed. These seed a connection that actually carries credentials, including
+// the two provider-specific secrets that live in `provider_specific_data`
+// rather than on the struct, and assert none of them survive.
+
+const CANARY_API_KEY: &str = "sk-ANT-CANARY-999";
+const CANARY_ACCESS: &str = "at-ant-canary-999";
+const CANARY_REFRESH: &str = "rt-ant-canary-999";
+const CANARY_CLIENT_SECRET: &str = "kiro-client-secret-canary";
+const CANARY_MIMO_TOKEN: &str = "mimo-pass-token-canary";
+
+async fn seeded_state_with_credentials() -> AppState {
+    let temp = tempdir().expect("tempdir");
+    let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
+    let mut conn = openproxy::types::ProviderConnection::default();
+    conn.id = "conn-canary".into();
+    conn.provider = "kiro".into();
+    conn.auth_type = "oauth".into();
+    conn.name = Some("Canary".into());
+    conn.api_key = Some(CANARY_API_KEY.to_string());
+    conn.access_token = Some(CANARY_ACCESS.to_string());
+    conn.refresh_token = Some(CANARY_REFRESH.to_string());
+    conn.provider_specific_data
+        .insert("clientSecret".into(), json!(CANARY_CLIENT_SECRET));
+    conn.provider_specific_data
+        .insert("mimoPassToken".into(), json!(CANARY_MIMO_TOKEN));
+    db.update(move |state| {
+        state.settings.require_login = true;
+        state.provider_connections = vec![conn];
+        state.api_keys = vec![openproxy::types::ApiKey {
+            id: "admin-1".into(),
+            name: "Local".into(),
+            key: ADMIN_KEY.into(),
+            machine_id: None,
+            is_active: Some(true),
+            created_at: None,
+            extra: Default::default(),
+            monthly_budget_usd: None,
+        }];
+    })
+    .await
+    .expect("db update");
+    AppState::new(db)
+}
+
+#[tokio::test]
+async fn unauthenticated_mcp_never_returns_credentials() {
+    let app = openproxy::build_app(seeded_state_with_credentials().await);
+
+    for tool in ["provider_list", "key_list", "settings_get"] {
+        let response = post_mcp(&app, call_rpc(tool, json!({}))).await;
+        assert_ne!(
+            response.status(),
+            StatusCode::OK,
+            "{tool} answered an unauthenticated caller"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+        for canary in [
+            CANARY_API_KEY,
+            CANARY_ACCESS,
+            CANARY_REFRESH,
+            CANARY_CLIENT_SECRET,
+            CANARY_MIMO_TOKEN,
+        ] {
+            assert!(
+                !text.contains(canary),
+                "{tool} leaked {canary} to an unauthenticated caller: {text}"
+            );
+        }
+    }
+}
+
+// multi_thread flavor: the MCP tool dispatcher uses tokio::task::block_in_place,
+// which panics on a current-thread runtime.
+#[tokio::test(flavor = "multi_thread")]
+async fn authenticated_mcp_redacts_credentials() {
+    // Auth is necessary but not sufficient: an authenticated caller is still
+    // an agent, and `provider_list` must hand back a redacted projection, the
+    // same way the dashboard and the REST API do.
+    let app = openproxy::build_app(seeded_state_with_credentials().await);
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/mcp")
+                .header("authorization", format!("Bearer {ADMIN_KEY}"))
+                .header("content-type", "application/json")
+                .body(Body::from(call_rpc("provider_list", json!({}))))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    for canary in [
+        CANARY_API_KEY,
+        CANARY_ACCESS,
+        CANARY_REFRESH,
+        CANARY_CLIENT_SECRET,
+        CANARY_MIMO_TOKEN,
+    ] {
+        assert!(
+            !text.contains(canary),
+            "authenticated provider_list leaked {canary}: {text}"
+        );
+    }
+    // The connection itself must still be listed — redaction, not omission.
+    assert!(
+        text.contains("conn-canary"),
+        "provider_list dropped the row"
+    );
+}

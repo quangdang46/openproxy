@@ -405,7 +405,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(media_providers::routes())
         .merge(observability::routes())
         .merge(mitm_config::routes())
-        .merge(mcp::routes())
+        // Same reasoning as mcp_server below: the plugin-bridge MCP surface
+        // spawns child processes and must not sit in the unguarded set.
+        .merge(mcp::routes(state.clone()))
         // MCP transport carries its own admin gate (dashboard session or
         // management API key) — it is not part of the unguarded `remaining`
         // set. See `mcp_server::routes` for why.
@@ -662,7 +664,7 @@ pub(super) fn require_database_password_reauth(
     }
 }
 
-pub(super) fn redact_provider_connection(connection: &ProviderConnection) -> ProviderConnection {
+pub(crate) fn redact_provider_connection(connection: &ProviderConnection) -> ProviderConnection {
     let mut redacted = connection.clone();
     redacted.access_token = None;
     redacted.refresh_token = None;
@@ -676,6 +678,13 @@ pub(super) fn redact_provider_connection(connection: &ProviderConnection) -> Pro
         "apiKey",
         "cookie",
         "password",
+        // Provider-specific secrets that live in this map, not on the struct:
+        // kiro stores its OAuth client secret here and xiaomi-mimo stores
+        // mimoPassToken. Both are credentials; neither was redacted before.
+        "clientSecret",
+        "client_secret",
+        "mimoPassToken",
+        "mimo_pass_token",
     ] {
         redacted.provider_specific_data.remove(secret_field);
     }
