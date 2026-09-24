@@ -587,6 +587,33 @@ pub struct DefaultExecutor {
     config: ProviderConfig,
     pool: Arc<ClientPool>,
     provider_node: Option<ProviderNode>,
+    /// When set, `execute` runs in simulation mode and renders its envelope
+    /// in this format regardless of the provider's registry config.
+    ///
+    /// Bead openproxy-umtq: the dispatch short-circuit routes EVERY provider
+    /// that resolves to mock through this executor, including providers with
+    /// a dedicated arm (kiro, codex, cursor, …) that have no `PROVIDER_CONFIGS`
+    /// entry. `sim_override` is the plan's *source* format, so the simulated
+    /// envelope is rendered in the client's own dialect and the response
+    /// translator (which is bypassed for mock) stays coherent.
+    sim_override: Option<SimulationMode>,
+}
+
+/// The simulation override carried by a mock-only `DefaultExecutor`.
+///
+/// The mock branch is a pure function of the request (no credentials, no
+/// network, no `base_url`), so a simulated executor can be built for ANY
+/// provider — including ones with a dedicated dispatch arm and no
+/// `PROVIDER_CONFIGS` entry — without the real-transport config those
+/// providers would need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SimulationMode {
+    /// Render the simulated envelope in this format (the client's dialect).
+    pub format: crate::core::executor::ProviderFormat,
+    /// Force the simulation branch even with no sim header and no stub
+    /// connection (i.e. when the provider is *configured* mock, not just
+    /// credentialless). Mirrors `ExecutionRequest::force_mock`.
+    pub force: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -896,7 +923,42 @@ impl DefaultExecutor {
             config,
             pool,
             provider_node,
+            sim_override: None,
         })
+    }
+
+    /// Build a simulation-only executor for any provider (bead openproxy-umtq).
+    ///
+    /// The mock branch in `execute` never reads `base_url`, credentials, or the
+    /// client pool, so it does not need the real-transport `PROVIDER_CONFIGS`
+    /// entry. This lets the dispatch short-circuit route providers with a
+    /// dedicated executor (kiro, codex, cursor, …) — which have no such entry
+    /// — through the simulator, so mock mode is honored for every provider
+    /// instead of only the OpenAI-shaped `else` arm.
+    ///
+    /// `format` is the client's dialect (the plan's source format): the
+    /// simulated envelope is rendered in it, so the caller can return it
+    /// verbatim without response translation.
+    pub fn new_for_mock(
+        provider: impl Into<String>,
+        format: crate::core::executor::ProviderFormat,
+        pool: Arc<ClientPool>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            config: ProviderConfig {
+                base_url: String::new(),
+                format: format.as_str().to_string(),
+                default_headers: Vec::new(),
+                fallback_urls: Vec::new(),
+            },
+            pool,
+            provider_node: None,
+            sim_override: Some(SimulationMode {
+                format,
+                force: true,
+            }),
+        }
     }
 
     /// Whether simulation mock mode is active for this request.
@@ -926,6 +988,9 @@ impl DefaultExecutor {
     /// Shared by the mock branch (execute_simulated) and the REAL-branch
     /// fault path (sim-15) so both agree on the envelope shape.
     fn sim_format(&self) -> crate::core::executor::ProviderFormat {
+        if let Some(override_mode) = self.sim_override {
+            return override_mode.format;
+        }
         provider_sim_format(&self.provider, self.config.format.as_str())
     }
 
@@ -936,15 +1001,20 @@ impl DefaultExecutor {
         use crate::core::simulation::{SimContext, SimulationEngine};
         // sim-07/09/10: OpenAI(+compat), Anthropic(+compat incl.
         // ClaudeCompatible reuse), and Gemini non-stream AND stream.
-        let supported = matches!(
-            self.config.format.as_str(),
-            "openai"
-                | "openai-compatible"
-                | "anthropic"
-                | "anthropic-compatible"
-                | "claude-compatible"
-                | "gemini"
-        ) || self.provider == "openai"
+        // A mock-only executor (openproxy-umtq) bypasses the config-format
+        // check: it renders in the explicitly chosen client dialect, which the
+        // dispatch short-circuit validated is simulatable.
+        let supported = self.sim_override.is_some()
+            || matches!(
+                self.config.format.as_str(),
+                "openai"
+                    | "openai-compatible"
+                    | "anthropic"
+                    | "anthropic-compatible"
+                    | "claude-compatible"
+                    | "gemini"
+            )
+            || self.provider == "openai"
             || self.provider == "anthropic"
             || self.provider == "gemini";
         if !supported {
@@ -1982,7 +2052,10 @@ impl DefaultExecutor {
         // no refresh, no network. (The credentials object is already resolved by
         // the caller; the branch guarantees it is never used.) Default
         // (unconfigured) is Real, so this block is unreachable in production.
-        if Self::simulation_active(&request) {
+        // A mock-only executor (openproxy-umtq) always simulates: it is built
+        // only when the dispatch short-circuit already resolved the effective
+        // mode to `mock`, so no further per-request signal is required.
+        if self.sim_override.is_some() || Self::simulation_active(&request) {
             return self.execute_simulated(&request).await;
         }
         // sim-15: REAL-branch fault support (plan §2.4: injector wraps BOTH
