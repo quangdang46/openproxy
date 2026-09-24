@@ -106,7 +106,13 @@ async fn upsert_provider_filter(
 
     match result {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => Json(json!({ "success": false, "error": error.to_string() })).into_response(),
+        // 5xx, not 200 + success:false — the dashboard gates on res.ok, so a 200
+        // reads as "filter saved" while the DB rejected it.
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": error.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -184,7 +190,11 @@ async fn upsert_favorites(
         .await;
     match result {
         Ok(_) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => Json(json!({ "success": false, "error": error.to_string() })).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": error.to_string() })),
+        )
+            .into_response(),
     }
 }
 

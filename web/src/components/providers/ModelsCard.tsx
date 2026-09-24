@@ -6,6 +6,15 @@ import { getModelsByProviderId, useEnsureCatalog, type ModelCaps } from "@/share
 import { getProviderAlias } from "@/shared/constants/providers";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useModelCaps } from "@/shared/hooks/useModelCaps";
+import { useNotificationStore } from "@/store/notificationStore";
+
+// 401 (expired dashboard session) is the routine failure here and must not
+// read as a generic server fault — the fix is to sign in again.
+function describeFailure(res: { status?: number } | null | undefined, what: string) {
+  if (res?.status === 401) return `Your session expired. Sign in again to ${what}.`;
+  if (res?.status === 403) return `Not authorized to ${what}.`;
+  return `Failed to ${what} (${res?.status ?? "network error"}).`;
+}
 
 interface Model {
   id: string;
@@ -130,6 +139,7 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
   useEnsureCatalog();
   const { copied, copy } = useCopyToClipboard();
   const { getCaps } = useModelCaps();
+  const notify = useNotificationStore();
   const [modelAliases, setModelAliases] = useState<Record<string, string>>({});
   const [customModels, setCustomModels] = useState<Array<{ providerAlias: string; id: string; name?: string; type?: string }>>([]);
   const [modelTestResults, setModelTestResults] = useState<Record<string, "ok" | "error">>({});
@@ -167,17 +177,22 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ model: fullModel, alias }),
       });
-      if (res.ok) { await fetchData(); window.dispatchEvent(new CustomEvent("customModelChanged")); }
-    } catch (e) { console.log("set alias error:", e); }
+      if (res.ok) { await fetchData(); window.dispatchEvent(new CustomEvent("customModelChanged")); return; }
+      notify.error(describeFailure(res, "set alias"));
+    } catch (e) { console.log("set alias error:", e); notify.error("Failed to set alias."); }
   };
 
   const handleDeleteAlias = async (alias: string) => {
     try {
       const res = await fetch(`/api/models/alias?alias=${encodeURIComponent(alias)}`, { method: "DELETE" });
-      if (res.ok) { await fetchData(); window.dispatchEvent(new CustomEvent("customModelChanged")); }
-    } catch (e) { console.log("delete alias error:", e); }
+      if (res.ok) { await fetchData(); window.dispatchEvent(new CustomEvent("customModelChanged")); return; }
+      notify.error(describeFailure(res, "delete alias"));
+    } catch (e) { console.log("delete alias error:", e); notify.error("Failed to delete alias."); }
   };
 
+  // Returns whether the model was saved. The modal below closes only on true —
+  // it used to close unconditionally, so a rejected add destroyed the typed id
+  // and, on a network failure, produced no message at all.
   const handleAddCustomModel = async (modelId: string) => {
     try {
       const res = await fetch("/api/models/custom", {
@@ -185,16 +200,19 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providerAlias, id: modelId, type: effectiveType }),
       });
-      if (res.ok) { await fetchData(); window.dispatchEvent(new CustomEvent("customModelChanged")); }
-    } catch (e) { console.log("add custom model error:", e); }
+      if (res.ok) { await fetchData(); window.dispatchEvent(new CustomEvent("customModelChanged")); return true; }
+      notify.error(describeFailure(res, "add custom model"));
+    } catch (e) { console.log("add custom model error:", e); notify.error("Failed to add custom model."); }
+    return false;
   };
 
   const handleDeleteCustomModel = async (modelId: string) => {
     try {
       const params = new URLSearchParams({ providerAlias, id: modelId, type: effectiveType });
       const res = await fetch(`/api/models/custom?${params}`, { method: "DELETE" });
-      if (res.ok) { await fetchData(); window.dispatchEvent(new CustomEvent("customModelChanged")); }
-    } catch (e) { console.log("delete custom model error:", e); }
+      if (res.ok) { await fetchData(); window.dispatchEvent(new CustomEvent("customModelChanged")); return; }
+      notify.error(describeFailure(res, "delete custom model"));
+    } catch (e) { console.log("delete custom model error:", e); notify.error("Failed to delete custom model."); }
   };
 
   const handleTestModel = async (modelId: string) => {
@@ -299,8 +317,8 @@ export default function ModelsCard({ providerId, kindFilter, providerAliasOverri
       <AddCustomModelModal
         isOpen={showAddCustomModel}
         onSave={async (modelId) => {
-          await handleAddCustomModel(modelId);
-          setShowAddCustomModel(false);
+          const ok = await handleAddCustomModel(modelId);
+          if (ok) setShowAddCustomModel(false);
         }}
         onClose={() => setShowAddCustomModel(false)}
       />

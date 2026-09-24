@@ -320,9 +320,11 @@ async fn update_alias(
 
     match result {
         Ok(_) => Json(serde_json::json!({ "success": true, "alias": alias })).into_response(),
-        Err(e) => {
-            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 

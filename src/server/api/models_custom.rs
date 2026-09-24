@@ -165,9 +165,11 @@ async fn update_custom_model(
 
     match result {
         Ok(_) => Json(serde_json::json!({ "success": true })).into_response(),
-        Err(e) => {
-            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -189,9 +191,11 @@ async fn delete_custom_model(
 
     match result {
         Ok(_) => Json(serde_json::json!({ "success": true })).into_response(),
-        Err(e) => {
-            Json(serde_json::json!({ "success": false, "error": e.to_string() })).into_response()
-        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
     }
 }
 

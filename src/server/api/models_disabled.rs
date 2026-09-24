@@ -159,7 +159,13 @@ async fn disable_models_handler(
 
     match result {
         Ok(_) => Json(json!({ "success": true })).into_response(),
-        Err(error) => Json(json!({ "success": false, "error": error.to_string() })).into_response(),
+        // 5xx, not 200 + success:false: the dashboard gates on res.ok, so a 200
+        // here reads as "model disabled" while the DB kept it enabled.
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": error.to_string() })),
+        )
+            .into_response(),
     }
 }
 
@@ -210,6 +216,10 @@ async fn enable_models_handler(
 
     match result {
         Ok(_) => Json(json!({ "success": true })).into_response(),
-        Err(error) => Json(json!({ "success": false, "error": error.to_string() })).into_response(),
+        Err(error) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "success": false, "error": error.to_string() })),
+        )
+            .into_response(),
     }
 }

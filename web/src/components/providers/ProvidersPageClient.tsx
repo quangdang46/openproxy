@@ -29,6 +29,22 @@ import { useHeaderSearchStore } from "@/store/headerSearchStore";
 import ModelAvailabilityBadge from "@/components/providers/ModelAvailabilityBadge";
 import AddApiKeyModal from "@/components/providers/AddApiKeyModal";
 
+// Turn a failed response into a message a user can act on. 401 is by far the
+// most common case here (expired dashboard session), and it must not read as a
+// generic server fault — the fix is to sign in again.
+export function describeFailure(
+  res: { status?: number } | null | undefined,
+  what = "complete the request",
+) {
+  if (res?.status === 401) {
+    return "Your session expired. Sign in again to " + what + ".";
+  }
+  if (res?.status === 403) {
+    return "Not authorized to " + what + ".";
+  }
+  return `Failed to ${what} (${res?.status ?? "network error"}).`;
+}
+
 function getStatusDisplay(connected, error, errorCode, total = 0) {
   const parts = [];
   if (connected > 0) {
@@ -101,9 +117,14 @@ function getConnectionErrorTag(connection) {
 }
 
 export default function ProvidersPageClient() {
-  const [connections, setConnections] = useState([]);
+  const [connections, setConnections] = useState<any[]>([]);
   const [providerNodes, setProviderNodes] = useState([]);
   const [loading, setLoading] = useState(true);
+  // A failed mount fetch used to leave connections = [], which rendered a
+  // confident "No connections" on every card. 401 (expired session) is the
+  // routine trigger, so the empty list has to be distinguishable from a real
+  // one.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [showAddCompatibleModal, setShowAddCompatibleModal] = useState(false);
   const [showAllApikey, setShowAllApikey] = useState(false);
   const APIKEY_INITIAL_VISIBLE = 20;
@@ -148,25 +169,40 @@ export default function ProvidersPageClient() {
           fetch("/api/proxy-pools?isActive=true"),
           fetch("/api/mock/status", { cache: "no-store" }),
         ]);
-        const connectionsData = await connectionsRes.json();
-        const nodesData = await nodesRes.json();
+        // Both fetches must resolve before any `.json()` — a 401 comes back as
+        // an HTML login page and would throw here, hiding the real status.
+        const connectionsData = connectionsRes.ok
+          ? await connectionsRes.json().catch(() => ({}))
+          : null;
+        const nodesData = nodesRes.ok
+          ? await nodesRes.json().catch(() => ({}))
+          : null;
         const proxyPoolsData = await proxyPoolsRes.json().catch(() => ({}));
-        if (connectionsRes.ok)
-          setConnections(connectionsData.connections || []);
+        if (!connectionsRes.ok) {
+          throw new Error(describeFailure(connectionsRes, "load connections"));
+        }
+        setConnections(connectionsData.connections || []);
         if (nodesRes.ok) setProviderNodes(nodesData.nodes || []);
         if (proxyPoolsRes.ok)
           setProxyPools(proxyPoolsData.proxyPools || []);
         if (mockRes.ok) {
           const mockData = await mockRes.json().catch(() => ({}));
-          const map = {};
+          const map: Record<string, boolean> = {};
           for (const [name, entry] of Object.entries(mockData?.providers || {})) {
             if (entry?.effective === "mock") map[name] = true;
           }
           setMockById(map);
           setForceAll(!!mockData?.forcedAll);
         }
+        setLoadError(null);
       } catch (error) {
         console.log("Error fetching data:", error);
+        setConnections([]);
+        setLoadError(
+          error instanceof Error
+            ? error.message
+            : "Failed to load providers. Please retry.",
+        );
       } finally {
         setLoading(false);
       }
@@ -304,15 +340,19 @@ export default function ProvidersPageClient() {
 
   // Toggle all connections for a provider on/off. authType may be a single
   // string or an array (kiro counts oauth + api_key/apikey together).
+  // The flip is optimistic, so every failed PUT has to roll back and say so —
+  // the previous version discarded the Promise.allSettled result, leaving the
+  // card showing a state the backend rejected until a manual reload.
   const handleToggleProvider = async (providerId, authType, newActive) => {
     const authTypes = Array.isArray(authType) ? authType : [authType];
     const matches = (c) =>
       c.provider === providerId && authTypes.includes(c.authType);
     const providerConns = connections.filter(matches);
+    if (providerConns.length === 0) return;
     setConnections((prev) =>
       prev.map((c) => (matches(c) ? { ...c, isActive: newActive } : c)),
     );
-    await Promise.allSettled(
+    const settled = await Promise.allSettled(
       providerConns.map((c) =>
         fetch(`/api/providers/${c.id}`, {
           method: "PUT",
@@ -321,6 +361,38 @@ export default function ProvidersPageClient() {
         }),
       ),
     );
+    const failed = settled
+      .map((r, i) => ({ r, conn: providerConns[i] }))
+      .filter(
+        ({ r }) => r.status === "rejected" || (r.status === "fulfilled" && !r.value.ok),
+      );
+    if (failed.length === 0) return;
+
+    // Roll back only the rows that failed, and re-sync with the server so a
+    // partial failure can't leave a stale card.
+    const failedIds = new Set(failed.map(({ conn }) => conn.id));
+    setConnections((prev) =>
+      prev.map((c) =>
+        failedIds.has(c.id) ? { ...c, isActive: !newActive } : c,
+      ),
+    );
+    const status = failed.find(
+      ({ r }) => r.status === "fulfilled" && !r.value.ok,
+    )?.r;
+    const failedStatus =
+      status?.status === "fulfilled" ? status.value.status : undefined;
+    notify.error(
+      `${failed.length} of ${providerConns.length} connection(s) could not be ${newActive ? "enabled" : "disabled"} — ${describeFailure({ status: failedStatus }, newActive ? "enable connection" : "disable connection")}`,
+    );
+    try {
+      const res = await fetch("/api/providers", { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json().catch(() => ({}));
+        setConnections(data.connections || []);
+      }
+    } catch {
+      /* the rollback above already reflects the truth */
+    }
   };
 
   const handleSaveApiKey = async (formData) => {
@@ -555,6 +627,33 @@ export default function ProvidersPageClient() {
     );
   }
 
+  // A failed mount fetch must not fall through to the card grid: with
+  // connections = [] every one of ~150 cards renders "No connections", which
+  // reads as a real account state. hasAnyResult is computed from the static
+  // catalog, so it cannot suppress that. Show the failure instead.
+  if (loadError) {
+    return (
+      <div
+        role="alert"
+        className="flex flex-col items-center gap-3 border border-red-500/40 bg-red-500/5 rounded-xl py-12"
+      >
+        <span className="material-symbols-outlined text-[32px] text-red-500">
+          cloud_off
+        </span>
+        <p className="text-sm text-red-600 dark:text-red-400 text-center px-4">
+          {loadError}
+        </p>
+        <p className="text-xs text-text-muted text-center px-4 max-w-md">
+          Provider cards are hidden until this loads, so nothing is missing
+          from your account.
+        </p>
+        <a href="/dashboard/providers" className="text-sm text-primary hover:underline">
+          Reload
+        </a>
+      </div>
+    );
+  }
+
   const pluginAndCookieSectionCount =
     Object.entries(WEB_COOKIE_PROVIDERS).filter(
       ([, info]) => !info.hidden && matchSearch(info.name),
@@ -568,6 +667,10 @@ export default function ProvidersPageClient() {
     anthropicCompatibleProviders.length > 0 ||
     pluginAndCookieSectionCount > 0;
 
+  // The banner and badges are driven by /api/mock/status, not by what we asked
+  // for — a rejected PATCH used to leave local `forceAll` untouched with no
+  // message, and a successful one set it from the request rather than from the
+  // server, so a stale badge survived until reload. Mirrors SimulationModeToggle.
   const setForceAllMode = async (next: boolean) => {
     setForceSaving(true);
     try {
@@ -576,7 +679,29 @@ export default function ProvidersPageClient() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ devMockAll: next }),
       });
-      if (res.ok) setForceAll(next);
+      if (!res.ok) {
+        notify.error(describeFailure(res, `${next ? "enable" : "disable"} mock mode`));
+        return;
+      }
+      try {
+        const statusRes = await fetch("/api/mock/status", { cache: "no-store" });
+        if (!statusRes.ok) {
+          notify.error(describeFailure(statusRes, "refresh mock status"));
+          return;
+        }
+        const mockData = await statusRes.json().catch(() => ({}));
+        const map: Record<string, boolean> = {};
+        for (const [name, entry] of Object.entries(mockData?.providers || {})) {
+          if (entry?.effective === "mock") map[name] = true;
+        }
+        setMockById(map);
+        setForceAll(!!mockData?.forcedAll);
+      } catch {
+        notify.error("Mock mode changed, but its status could not be re-read.");
+      }
+    } catch (error) {
+      console.log("Error setting mock mode:", error);
+      notify.error("Failed to change mock mode.");
     } finally {
       setForceSaving(false);
     }

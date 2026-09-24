@@ -232,10 +232,18 @@ async fn delete_provider_node(
             .into_response();
     }
 
+    // Cascade: a connection/custom model references a node by using the node id
+    // as its provider alias. Removing only the node left those rows behind —
+    // still listed by /api/providers, still selectable in
+    // filter_available_accounts, and with no UI left to find or remove them.
     let result = state
         .db
         .update(|db| {
             db.provider_nodes.retain(|n| n.id != id);
+            db.provider_connections
+                .retain(|c| c.provider.as_str() != id.as_str());
+            db.custom_models
+                .retain(|m| m.provider_alias.as_str() != id.as_str());
         })
         .await;
 
