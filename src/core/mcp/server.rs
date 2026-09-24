@@ -242,7 +242,16 @@ fn tool_table() -> Vec<ToolHandler> {
             json!({}),
             |state, _args| {
                 let snap = state.db.snapshot();
-                Ok(json!(snap.provider_connections))
+                // Redact like the dashboard/API surface does: the MCP tool runs
+                // on the server's own auth path, so it must not be the one
+                // surface that hands out live credentials. `key_list` already
+                // re-projects; this was drift, not a deliberate difference.
+                let redacted: Vec<_> = snap
+                    .provider_connections
+                    .iter()
+                    .map(crate::server::api::redact_provider_connection)
+                    .collect();
+                Ok(json!(redacted))
             }
         ),
         mcp_tool!(
