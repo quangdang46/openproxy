@@ -3844,10 +3844,13 @@ async fn proxy_response_with_pending_tracking(
                 } else {
                     None
                 };
-                // Accumulate the last data frame for best-effort `usage` extraction
-                // at stream end. Streaming SSE responses usually lack a usage field,
-                // so most requests record with tokens=None (request count only).
-                let mut last_data: Option<Bytes> = None;
+                // Accumulate usage across EVERY frame, not just the last one.
+                // Anthropic splits usage across events (message_start carries
+                // input + cache counters, message_delta carries the cumulative
+                // output, message_stop carries none), so reading only the final
+                // frame structurally cannot see the prompt tokens. Merged with
+                // field-wise max, matching 9router mergeUsage.
+                let mut stream_usage: Option<TokenUsage> = None;
                 loop {
                     let next = tokio::time::timeout(SSE_STALL_TIMEOUT, upstream.try_next()).await;
                     match next {
@@ -3861,7 +3864,7 @@ async fn proxy_response_with_pending_tracking(
                                 "SSE stalled, closing stream"
                             );
                             record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -3873,7 +3876,10 @@ async fn proxy_response_with_pending_tracking(
                             return;
                         }
                         Ok(Ok(Some(chunk))) => {
-                            last_data = Some(chunk.clone());
+                            stream_usage = merge_token_usage(
+                                stream_usage,
+                                extract_token_usage_from_bytes(&chunk),
+                            );
                             if qoder_sse_unwrap {
                                 for line in qoder_unwrap_sse_chunk(
                                     &chunk,
@@ -3891,7 +3897,7 @@ async fn proxy_response_with_pending_tracking(
                                     // executor's pre-stream peek; this flag is
                                     // the backstop for already-open streams.)
                                     record_streaming_usage(&state, &provider, &model,
-                                        connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
+                                        connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                                     state
                                         .usage_live
                                         .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -3928,7 +3934,7 @@ async fn proxy_response_with_pending_tracking(
                         Ok(Ok(None)) => break,
                         Ok(Err(_)) => {
                             record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -3970,7 +3976,7 @@ async fn proxy_response_with_pending_tracking(
                     }
                 }
                 record_streaming_usage(&state, &provider, &model,
-                    connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
+                    connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                 state
                     .usage_live
                     .finish_request(&model, &provider, connection_id.as_deref(), false)
@@ -4007,7 +4013,10 @@ async fn proxy_response_with_pending_tracking(
                 };
                 // Accumulate the last data frame for best-effort `usage` extraction
                 // at stream end (streaming SSE responses usually lack a usage field).
-                let mut last_data: Option<Bytes> = None;
+                // Same per-frame accumulation as the first stream arm: usage is
+                // split across Anthropic events, so the final frame alone is
+                // structurally insufficient.
+                let mut stream_usage: Option<TokenUsage> = None;
                 loop {
                     let next = tokio::time::timeout(SSE_STALL_TIMEOUT, body.frame()).await;
                     let frame_result = match next {
@@ -4019,7 +4028,7 @@ async fn proxy_response_with_pending_tracking(
                                 "SSE stalled, closing stream"
                             );
                             record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -4036,7 +4045,10 @@ async fn proxy_response_with_pending_tracking(
                     match frame_result {
                         Ok(frame) => {
                             if let Ok(data) = frame.into_data() {
-                                last_data = Some(data.clone());
+                                stream_usage = merge_token_usage(
+                                    stream_usage,
+                                    extract_token_usage_from_bytes(&data),
+                                );
                                 if let Some(transformer) = transformer.as_mut() {
                                     for line in transform_dashboard_sse_chunk(&data, transformer.as_mut(), &mut pending_text) {
                                         if let Some(frame) = sse_frame_for_dashboard(&line) {
@@ -4067,7 +4079,7 @@ async fn proxy_response_with_pending_tracking(
                         }
                         Err(_) => {
                             record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
+                                connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                             state
                                 .usage_live
                                 .finish_request(&model, &provider, connection_id.as_deref(), true)
@@ -4101,7 +4113,7 @@ async fn proxy_response_with_pending_tracking(
                     }
                 }
                 record_streaming_usage(&state, &provider, &model,
-                    connection_id.as_deref(), api_key.as_deref(), endpoint, &last_data, compression.clone()).await;
+                    connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                 state
                     .usage_live
                     .finish_request(&model, &provider, connection_id.as_deref(), false)
@@ -4142,12 +4154,10 @@ async fn record_streaming_usage(
     connection_id: Option<&str>,
     api_key: Option<&str>,
     endpoint: Option<&'static str>,
-    last_data: &Option<Bytes>,
+    usage: &Option<TokenUsage>,
     compression: Option<CompressionStats>,
 ) {
-    let usage = last_data
-        .as_ref()
-        .and_then(|b| extract_token_usage_from_bytes(b));
+    let usage = usage.clone();
     state
         .usage_tracker()
         .track_request(
@@ -4514,6 +4524,58 @@ fn strip_sse_data_prefix(body: &[u8]) -> &[u8] {
         return body;
     }
     body
+}
+
+/// Fold a per-frame usage reading into a running accumulator, matching
+/// 9router's `mergeUsage`
+/// (.tmp/9router/open-sse/utils/usageTracking.js:321-335).
+///
+/// Why this exists: usage is SPLIT across Anthropic stream events. The comment
+/// in 9router says it outright — "message_start has real input+cache,
+/// message_delta has the real cumulative output". Reading only the final frame
+/// therefore misses the prompt tokens and both cache counters entirely, because
+/// the final frame is `message_stop` (no usage) or `message_delta` (output
+/// only). The ledger recorded tokens:null / cost 0.00 for every Claude
+/// streaming request, and that $0 flowed into the per-key monthly budget
+/// guard, so streaming spend never counted against a limit.
+///
+/// Semantics copied from 9router:
+///  - numeric fields take `max(prev, next)`, because the later frame carries
+///    the CUMULATIVE value, not a delta;
+///  - a non-finite value is skipped so one malformed chunk cannot poison the
+///    whole accumulation (`Math.max(x, NaN)` is NaN — 9router guards this);
+///  - nested detail objects take the latest.
+pub(super) fn merge_token_usage(
+    prev: Option<TokenUsage>,
+    next: Option<TokenUsage>,
+) -> Option<TokenUsage> {
+    let Some(next) = next else { return prev };
+    let Some(mut acc) = prev else {
+        return Some(next);
+    };
+
+    macro_rules! max_field {
+        ($($f:ident),+ $(,)?) => {$(
+            if let Some(n) = next.$f {
+                acc.$f = Some(acc.$f.unwrap_or(0).max(n));
+            }
+        )+};
+    }
+    max_field!(
+        prompt_tokens,
+        input_tokens,
+        completion_tokens,
+        output_tokens,
+        total_tokens,
+        reasoning_tokens,
+        cached_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+    );
+    if !next.extra.is_empty() {
+        acc.extra.extend(next.extra);
+    }
+    Some(acc)
 }
 
 fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
@@ -5643,5 +5705,124 @@ mod tests {
         let (_, body3, _) =
             extract_error_message_and_retry_after_with_body(upstream(500, "")).await;
         assert_eq!(body3, None);
+    }
+}
+
+#[cfg(test)]
+mod usage_merge_tests {
+    use super::merge_token_usage;
+    use crate::types::TokenUsage;
+
+    fn empty() -> TokenUsage {
+        TokenUsage {
+            prompt_tokens: None,
+            input_tokens: None,
+            completion_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            reasoning_tokens: None,
+            cached_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+            extra: Default::default(),
+        }
+    }
+
+    /// Regression (parity finding P0-4xx, 9router stream.js:319-321 +
+    /// usageTracking.js:321-335): usage is split across Anthropic stream
+    /// events. The final frame is message_stop (no usage) or message_delta
+    /// (output only), so reading only the last frame left prompt tokens and
+    /// both cache counters structurally unreachable — the ledger recorded
+    /// tokens:null / cost 0.00 for every Claude streaming request, and that $0
+    /// flowed into the per-key monthly budget guard.
+    fn anthropic_start() -> TokenUsage {
+        TokenUsage {
+            input_tokens: Some(1200),
+            output_tokens: Some(0),
+            cache_read_input_tokens: Some(8000),
+            cache_creation_input_tokens: Some(400),
+            ..empty()
+        }
+    }
+
+    fn anthropic_delta() -> TokenUsage {
+        TokenUsage {
+            output_tokens: Some(180),
+            ..empty()
+        }
+    }
+
+    #[test]
+    fn usage_is_merged_across_the_frames_that_carry_it() {
+        let merged = merge_token_usage(Some(anthropic_start()), Some(anthropic_delta()));
+        let m = merged.expect("merged");
+        assert_eq!(m.input_tokens, Some(1200), "input from message_start");
+        assert_eq!(m.output_tokens, Some(180), "output from message_delta");
+        assert_eq!(
+            m.cache_read_input_tokens,
+            Some(8000),
+            "cache read preserved"
+        );
+        assert_eq!(
+            m.cache_creation_input_tokens,
+            Some(400),
+            "cache create preserved"
+        );
+    }
+
+    /// The exact regression: the LAST frame carries no usage at all. The
+    /// accumulator must not be clobbered by it.
+    #[test]
+    fn a_final_frame_with_no_usage_does_not_erase_the_total() {
+        let merged = merge_token_usage(
+            merge_token_usage(Some(anthropic_start()), Some(anthropic_delta())),
+            None,
+        );
+        let m = merged.expect("merged");
+        assert_eq!(m.input_tokens, Some(1200));
+        assert_eq!(m.output_tokens, Some(180));
+    }
+
+    /// 9router uses max, not sum, because the later frame is CUMULATIVE.
+    /// A provider that re-sends the same usage on every event must not inflate.
+    #[test]
+    fn repeated_cumulative_frames_take_max_not_sum() {
+        let a = TokenUsage {
+            output_tokens: Some(100),
+            total_tokens: Some(900),
+            ..empty()
+        };
+        let b = TokenUsage {
+            output_tokens: Some(100),
+            total_tokens: Some(900),
+            ..empty()
+        };
+        let m = merge_token_usage(Some(a), Some(b)).expect("merged");
+        assert_eq!(m.output_tokens, Some(100), "not 200");
+        assert_eq!(m.total_tokens, Some(900), "not 1800");
+    }
+
+    /// A later frame that legitimately grows the count must still win.
+    #[test]
+    fn a_growing_counter_still_advances() {
+        let a = TokenUsage {
+            output_tokens: Some(100),
+            ..empty()
+        };
+        let b = TokenUsage {
+            output_tokens: Some(250),
+            ..empty()
+        };
+        let m = merge_token_usage(Some(a), Some(b)).expect("merged");
+        assert_eq!(m.output_tokens, Some(250));
+    }
+
+    #[test]
+    fn first_frame_seeds_the_accumulator_and_none_passes_it_through() {
+        let seeded = merge_token_usage(None, Some(anthropic_start()));
+        assert_eq!(seeded.expect("seeded").input_tokens, Some(1200));
+        let carried = merge_token_usage(Some(anthropic_start()), None);
+        assert_eq!(carried.expect("carried").input_tokens, Some(1200));
+        assert!(merge_token_usage(None, None).is_none());
     }
 }
