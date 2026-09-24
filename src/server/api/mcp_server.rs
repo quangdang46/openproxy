@@ -14,6 +14,25 @@
 //!
 //! This is DIFFERENT from `/api/mcp/<plugin>/...` which bridges to external
 //! stdio-based MCP child processes. This endpoint IS the MCP server.
+//!
+//! # Transport authentication
+//!
+//! Every route here is admin-gated: the caller must present a dashboard
+//! session or a management API key, exactly like every other dashboard
+//! surface (see the `admin` router in [`super::routes`] and the sibling
+//! A2A transport). MCP clients configured against a local OpenProxy pass the
+//! key as `Authorization: Bearer <key>`.
+//!
+//! This transport used to have no authentication of its own — auth was pushed
+//! down into a handful of mutating tool handlers via a `_api_key` JSON-RPC
+//! *argument*, which left every read-only tool (tool inventory, `key_list`,
+//! `settings_get`, model list, health) callable by any unauthenticated local
+//! process. Arguments are also the part most likely to land in access logs and
+//! crash dumps, so credential-shaped data does not belong there.
+//!
+//! The per-tool `_api_key` check in `core::mcp::server` is deliberately KEPT as
+//! defence in depth — a future tool must not become reachable just because the
+//! transport happens to be open.
 
 use std::sync::Arc;
 
@@ -21,6 +40,7 @@ use async_stream::stream;
 use axum::body::Body;
 use axum::extract::{Query, State};
 use axum::http::{header, StatusCode};
+use axum::middleware;
 use axum::response::{IntoResponse, Response};
 use axum::{
     routing::{get, post},
@@ -32,6 +52,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::core::mcp::server;
+use crate::server::api::guard;
 use crate::server::state::AppState;
 
 /// Broadcast capacity for SSE event channels.
@@ -44,7 +65,11 @@ struct SessionQuery {
 }
 
 /// Build the sub-router mounted at `/api/mcp-server` and `/api/mcp`.
-pub fn routes() -> Router<AppState> {
+///
+/// All three routes sit behind [`guard::require_admin`], so the gate is applied
+/// once at the router and covers the SSE stream (before it emits the
+/// `event: endpoint` frame) as well as both JSON-RPC POST endpoints.
+pub fn routes(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/api/mcp-server/sse", get(sse_handler))
         .route("/api/mcp-server/message", post(message_handler))
@@ -53,6 +78,7 @@ pub fn routes() -> Router<AppState> {
         // tools/call, resources/list, resources/read) and returns the
         // response directly.
         .route("/api/mcp", post(stateless_mcp_handler))
+        .route_layer(middleware::from_fn_with_state(state, guard::require_admin))
 }
 
 /// SSE handler: opens a long-lived connection and pushes MCP JSON-RPC responses

@@ -406,7 +406,10 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(observability::routes())
         .merge(mitm_config::routes())
         .merge(mcp::routes())
-        .merge(mcp_server::routes())
+        // MCP transport carries its own admin gate (dashboard session or
+        // management API key) — it is not part of the unguarded `remaining`
+        // set. See `mcp_server::routes` for why.
+        .merge(mcp_server::routes(state.clone()))
         .merge(auth::routes())
         .merge(a2a::routes(state.clone()))
         .merge(provider_validate::routes())
