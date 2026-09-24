@@ -60,13 +60,21 @@ export interface BuildAvailableModelsInput {
 }
 
 export interface BuildAvailableModelsResult {
-  /** Custom + legacyAlias rows. Always shown (not subject to freeOnly). */
+  /** Custom + legacyAlias rows, enabled AND disabled. Keep the disabled flag. */
   customRows: AvailableModelRow[];
+  /** Custom + legacyAlias rows that are enabled (not subject to freeOnly). */
+  enabledCustomRows: AvailableModelRow[];
   /** Catalog + live rows that are enabled and pass the freeOnly filter. */
   enabledCoreRows: AvailableModelRow[];
   /** Catalog + live rows that are disabled. */
   disabledCoreRows: AvailableModelRow[];
-  /** customRows + enabledCoreRows — the visible enabled set. */
+  /**
+   * Every disabled row, custom and core alike. This is the single set behind
+   * the "Disabled models" restore section and the "Active All" gate, so a lone
+   * disabled custom model is never stranded with no escape hatch.
+   */
+  disabledRows: AvailableModelRow[];
+  /** enabledCustomRows + enabledCoreRows — the visible enabled set. */
   enabledRows: AvailableModelRow[];
   /** Every merged row (custom + enabled core + disabled core). */
   allRows: AvailableModelRow[];
@@ -97,8 +105,11 @@ function modelKind(model: CatalogModelInput): string | undefined {
  * Pure builder. Merges catalog + live + custom models into a single,
  * deduplicated, llm-filtered list with consistent id normalization.
  *
- * - Custom/legacyAlias rows are always returned (never freeOnly-filtered).
+ * - Custom/legacyAlias rows are never freeOnly-filtered, but they ARE split by
+ *   `disabledIds` exactly like catalog/live rows.
  * - Catalog/live rows respect `disabledIds` and the `freeOnly` filter.
+ * - `enabledRows` contains no disabled row of any source; `disabledRows` is the
+ *   combined restore set.
  */
 export function buildAvailableModels(
   input: BuildAvailableModelsInput
@@ -173,14 +184,24 @@ export function buildAvailableModels(
   );
   const disabledCoreRows = coreRows.filter((r) => r.disabled);
 
-  const enabledRows = [...customRows, ...enabledCoreRows];
+  // 4. Split custom rows the same way. Before this, `enabledRows` spliced the
+  //    whole customRows list in unfiltered, which made the `disabled` flag on a
+  //    custom row write-only: the row stayed on the Providers page AND stayed
+  //    selectable in the opencode picker, breaking the mirror rule.
+  const enabledCustomRows = customRows.filter((r) => !r.disabled);
+  const disabledCustomRows = customRows.filter((r) => r.disabled);
+
+  const enabledRows = [...enabledCustomRows, ...enabledCoreRows];
+  const disabledRows = [...disabledCustomRows, ...disabledCoreRows];
   const allRows = [...customRows, ...coreRows];
   const allCoreIds = coreRows.map((r) => r.id);
 
   return {
     customRows,
+    enabledCustomRows,
     enabledCoreRows,
     disabledCoreRows,
+    disabledRows,
     enabledRows,
     allRows,
     allCoreIds,
@@ -245,7 +266,15 @@ export async function fetchLiveModels(
 
 const FREE_ONLY_LS_PREFIX = "openproxy:freeOnly:";
 
-async function loadFreeOnly(alias: string): Promise<boolean> {
+/**
+ * Read the persisted `freeOnly` flag for a provider.
+ *
+ * Exported so ModelSelectModal reads it through the same path the provider page
+ * does. The modal used to call /api/providers/filters directly, with no
+ * localStorage fallback — one failed GET desynchronised the two surfaces
+ * permanently on a perfectly healthy backend.
+ */
+export async function loadFreeOnly(alias: string): Promise<boolean> {
   try {
     const res = await fetch("/api/providers/filters", { cache: "no-store" });
     if (res.ok) {
