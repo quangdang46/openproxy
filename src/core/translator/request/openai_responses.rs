@@ -28,11 +28,14 @@ fn clamp_call_id(id: Option<&str>) -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     match id {
         Some(s) if !s.is_empty() => {
-            if s.len() > 64 {
-                s[..64].to_string()
-            } else {
-                s.to_string()
-            }
+            // Truncate on a CHARACTER boundary, never a byte boundary: a byte
+            // slice panics when the offset lands inside a multi-byte char, and
+            // `[profile.release]` sets `panic = "abort"`, so that panic kills
+            // the whole process rather than failing one request. The input is
+            // a client-supplied tool_call id, so this is remotely triggerable.
+            // Matches the `chars().take(n)` convention used elsewhere in this
+            // file (see `raw_name` handling).
+            s.chars().take(64).collect()
         }
         _ => {
             let n = SEQ.fetch_add(1, Ordering::Relaxed) + 1;
@@ -809,6 +812,36 @@ pub fn chat_to_openai_responses_request(
 
 #[cfg(test)]
 mod tests {
+    /// Regression (audit finding B4): the clamp used to slice at a fixed BYTE
+    /// offset, which panics when the offset lands inside a multi-byte char.
+    /// `[profile.release]` sets `panic = "abort"`, so that panic aborts the
+    /// whole process from a client-supplied tool_call id.
+    #[test]
+    fn clamp_call_id_never_panics_on_multibyte_input() {
+        // 63 ASCII bytes + a 2-byte char = 65 bytes; byte 64 is mid-char.
+        let hostile = format!("{}é", "a".repeat(63));
+        let out = super::clamp_call_id(Some(hostile.as_str()));
+        assert!(
+            out.chars().count() <= 64,
+            "must truncate on a char budget, got {} chars",
+            out.chars().count()
+        );
+        // A 4-byte char repeated must also be bounded by CHARS, not bytes.
+        let emoji = "🙂".repeat(80);
+        assert_eq!(
+            super::clamp_call_id(Some(emoji.as_str())).chars().count(),
+            64
+        );
+    }
+
+    #[test]
+    fn clamp_call_id_fallback_still_generates_sequential_ids() {
+        let a = super::clamp_call_id(None);
+        let b = super::clamp_call_id(Some(""));
+        assert!(a.starts_with("call_"), "generated id shape changed: {a}");
+        assert_ne!(a, b, "sequential ids must differ");
+    }
+
     use super::*;
 
     #[test]

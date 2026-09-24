@@ -1265,9 +1265,13 @@ pub fn json_summary_impl(input: &str) -> String {
                     JSON_SUMMARY_MAX_ITEMS.min(total_lines)
                 );
                 for line in non_empty_lines.iter().take(JSON_SUMMARY_MAX_ITEMS) {
-                    // Truncate each line to 200 chars
-                    let display = if line.len() > 200 {
-                        format!("{}...", &line[..200])
+                    // Truncate each line to 200 chars. `char_indices` keeps the
+                    // cut on a character boundary: a byte slice panics mid
+                    // multi-byte char, and release builds use panic=abort, so
+                    // that would take down the process from tool output.
+                    let display = if line.chars().count() > 200 {
+                        let cut: String = line.chars().take(200).collect();
+                        format!("{cut}...")
                     } else {
                         line.to_string()
                     };
@@ -1345,8 +1349,12 @@ fn describe_json_value(val: &Value) -> String {
         Value::Bool(b) => format!("bool({})", b),
         Value::Number(n) => format!("number({})", n),
         Value::String(s) => {
-            if s.len() > 80 {
-                format!("\"{}\"... ({} chars)", &s[..80], s.len())
+            // Character-boundary truncation, same reason as the 200-char case
+            // above: byte slicing panics on multi-byte input and release uses
+            // panic=abort.
+            if s.chars().count() > 80 {
+                let cut: String = s.chars().take(80).collect();
+                format!("\"{}\"... ({} chars)", cut, s.len())
             } else {
                 format!("\"{}", s)
             }
@@ -1405,6 +1413,18 @@ fn is_build_summary_line(trimmed: &str, lower: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Regression (audit finding #165, same class as B4): these truncations
+    /// used to slice at fixed BYTE offsets, which panics mid multi-byte char.
+    /// Release builds use `panic = "abort"`, and the input here is tool output
+    /// the operator did not write, so the blast radius is the process.
+    #[test]
+    fn rtk_truncation_never_panics_on_multibyte_input() {
+        // 199 ASCII + a 2-byte char = 201 bytes; byte 200 is mid-char.
+        let hostile = format!("{}é", "x".repeat(199));
+        let _ = super::json_summary_impl(&hostile);
+        let _ = super::describe_json_value(&Value::String(format!("{}é", "y".repeat(79))));
+    }
+
     use super::*;
 
     #[test]
