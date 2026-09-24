@@ -177,12 +177,24 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
             let kind: Option<String> = row.get(2)?;
             let models_str: String = row.get(3)?;
             let models: Vec<String> = serde_json::from_str(&models_str).unwrap_or_default();
+            let data_str: String = row.get(4)?;
             let created_at: String = row.get(5)?;
             let updated_at: String = row.get(6)?;
-            Ok(json!({
-                "id": id, "name": name, "kind": kind, "models": models,
-                "createdAt": created_at, "updatedAt": updated_at,
-            }))
+            // `data` is `Combo.extra` (strategy, isActive, fusionConfig,
+            // judgeModel, …). Flatten it back to the top level so a snapshot
+            // rebuilt by `AppDb::from_json_value` restores it; the canonical
+            // columns below always win over anything in the blob.
+            let mut obj = serde_json::from_str::<Value>(&data_str)
+                .ok()
+                .and_then(|value| value.as_object().cloned())
+                .unwrap_or_default();
+            obj.insert("id".into(), json!(id));
+            obj.insert("name".into(), json!(name));
+            obj.insert("kind".into(), json!(kind));
+            obj.insert("models".into(), json!(models));
+            obj.insert("createdAt".into(), json!(created_at));
+            obj.insert("updatedAt".into(), json!(updated_at));
+            Ok(Value::Object(obj))
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };

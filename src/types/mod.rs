@@ -414,6 +414,22 @@ pub struct Combo {
     pub extra: BTreeMap<String, Value>,
 }
 
+impl Combo {
+    /// Effective dispatch flag for this combo. `openproxy combo enable` /
+    /// `combo disable` write `isActive` into the combo's `extra` blob
+    /// (9router parity), and the dashboard persists the same key, so the
+    /// marker lives in `extra` rather than in a typed field. A combo with no
+    /// marker is active — matching 9router, where `isActive` is only ever set
+    /// by an explicit enable/disable.
+    pub fn is_active(&self) -> bool {
+        self.extra
+            .get("isActive")
+            .or_else(|| self.extra.get("is_active"))
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+    }
+}
+
 #[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiKey {

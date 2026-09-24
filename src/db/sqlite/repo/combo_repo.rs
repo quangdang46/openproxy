@@ -1,6 +1,9 @@
 //! Repository for `combos` table.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params, Connection};
+use serde_json::Value;
 
 use crate::types::Combo;
 
@@ -56,11 +59,15 @@ fn row_to_combo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Combo> {
     let name: String = row.get(1)?;
     let kind: Option<String> = row.get(2)?;
     let models_json: String = row.get(3)?;
-    let _data: String = row.get(4)?;
+    let data_json: String = row.get(4)?;
     let created_at: String = row.get(5)?;
     let updated_at: String = row.get(6)?;
 
     let models: Vec<String> = serde_json::from_str(&models_json).unwrap_or_default();
+    // `data` is the durable home of `Combo.extra` (strategy, isActive,
+    // fusionConfig, judgeModel, …). It used to be bound to `let _data` and
+    // dropped, so every restart silently lost the whole blob.
+    let extra: BTreeMap<String, Value> = serde_json::from_str(&data_json).unwrap_or_default();
 
     Ok(Combo {
         id,
@@ -69,6 +76,7 @@ fn row_to_combo(row: &rusqlite::Row<'_>) -> rusqlite::Result<Combo> {
         models,
         created_at: Some(created_at),
         updated_at: Some(updated_at),
+        extra,
         ..Default::default()
     })
 }
@@ -89,6 +97,7 @@ mod tests {
             models: vec!["openai/gpt-4o".into(), "anthropic/claude-sonnet".into()],
             created_at: Some("2026-01-01".into()),
             updated_at: Some("2026-01-01".into()),
+            extra: BTreeMap::from([("strategy".into(), json!("round-robin"))]),
             ..Default::default()
         };
         db.with_transaction(|tx| create(tx, &combo)).unwrap();
@@ -97,6 +106,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(read.models.len(), 2);
+        assert_eq!(read.extra.get("strategy"), Some(&json!("round-robin")));
     }
 
     #[test]
