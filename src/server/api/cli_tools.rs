@@ -1191,7 +1191,9 @@ async fn check_opencode_installed() -> bool {
 }
 
 async fn read_opencode_config() -> anyhow::Result<Option<Value>> {
-    read_json_optional(&opencode_config_path()).await
+    Ok(read_opencode_jsonc(&opencode_config_path())
+        .await?
+        .map(|(value, _comments)| value))
 }
 
 async fn check_openclaw_installed() -> bool {
@@ -1426,10 +1428,9 @@ async fn write_opencode_settings(
         fs::create_dir_all(parent).await?;
     }
 
-    let mut config = match fs::read_to_string(&config_path).await {
-        Ok(existing) => parse_json_object_or_default(&existing),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
-        Err(error) => return Err(error.into()),
+    let (mut config, comments) = match read_opencode_jsonc(&config_path).await? {
+        Some((value, comments)) => (opencode_config_object(&config_path, value)?, comments),
+        None => (serde_json::Map::new(), JsoncComments::default()),
     };
 
     let normalized_base_url = normalize_v1_base_url(&req.base_url);
@@ -1539,7 +1540,7 @@ async fn write_opencode_settings(
 
     fs::write(
         &config_path,
-        serde_json::to_vec_pretty(&Value::Object(config))?,
+        serialize_jsonc(&Value::Object(config), &comments).as_bytes(),
     )
     .await?;
     Ok(config_path.to_string_lossy().to_string())
@@ -1547,16 +1548,13 @@ async fn write_opencode_settings(
 
 async fn patch_opencode_config(req: &PatchOpenCodeSettingsRequest) -> anyhow::Result<Value> {
     let config_path = opencode_config_path();
-    let mut config = match fs::read_to_string(&config_path).await {
-        Ok(existing) => parse_json_object_required(&existing)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(json!({
-                "success": true,
-                "message": "No config file found",
-            }));
-        }
-        Err(error) => return Err(error.into()),
+    let Some((value, comments)) = read_opencode_jsonc(&config_path).await? else {
+        return Ok(json!({
+            "success": true,
+            "message": "No config file found",
+        }));
     };
+    let mut config = opencode_config_object(&config_path, value)?;
 
     if req.clear_active_model
         && config
@@ -1569,7 +1567,7 @@ async fn patch_opencode_config(req: &PatchOpenCodeSettingsRequest) -> anyhow::Re
 
     fs::write(
         &config_path,
-        serde_json::to_vec_pretty(&Value::Object(config))?,
+        serialize_jsonc(&Value::Object(config), &comments).as_bytes(),
     )
     .await?;
     Ok(json!({
@@ -1580,16 +1578,13 @@ async fn patch_opencode_config(req: &PatchOpenCodeSettingsRequest) -> anyhow::Re
 
 async fn reset_opencode_settings(model_to_remove: Option<String>) -> anyhow::Result<Value> {
     let config_path = opencode_config_path();
-    let mut config = match fs::read_to_string(&config_path).await {
-        Ok(existing) => parse_json_object_required(&existing)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(json!({
-                "success": true,
-                "message": "No config file to reset",
-            }));
-        }
-        Err(error) => return Err(error.into()),
+    let Some((value, comments)) = read_opencode_jsonc(&config_path).await? else {
+        return Ok(json!({
+            "success": true,
+            "message": "No config file to reset",
+        }));
     };
+    let mut config = opencode_config_object(&config_path, value)?;
 
     if let Some(model_to_remove) = model_to_remove.clone() {
         let active_model_matches = config
@@ -1662,7 +1657,7 @@ async fn reset_opencode_settings(model_to_remove: Option<String>) -> anyhow::Res
 
     fs::write(
         &config_path,
-        serde_json::to_vec_pretty(&Value::Object(config))?,
+        serialize_jsonc(&Value::Object(config), &comments).as_bytes(),
     )
     .await?;
     Ok(json!({
@@ -1942,6 +1937,527 @@ fn parse_json_object_required(content: &str) -> anyhow::Result<serde_json::Map<S
     match serde_json::from_str::<Value>(content)? {
         Value::Object(object) => Ok(object),
         _ => Err(anyhow::anyhow!("Expected JSON object")),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// JSONC — opencode.jsonc
+//
+// opencode.jsonc is JSON *with comments*; that is what the extension is for.
+// Reading it with a strict JSON parser fails on the first `//`, and the old
+// failure path then wrote a freshly built config over the user's file — model,
+// MCP servers, permissions and comments all gone. The helpers below read
+// JSONC, refuse to touch a file they cannot parse, and put the comments back
+// where they were when writing.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Comments lifted out of a JSONC document. Each one is filed under the object
+/// it sits in and the key it documents, then re-emitted directly above that
+/// key when the file is written back.
+#[derive(Debug, Default, Clone)]
+struct JsoncComments {
+    /// Comments seen before the document's first token (a header block).
+    leading: Vec<String>,
+    /// Object path -> (member key, comment text), in document order.
+    by_key: BTreeMap<String, Vec<(String, String)>>,
+    /// Object path -> comments that trail the object's last member.
+    after_last: BTreeMap<String, Vec<String>>,
+}
+
+/// Child of `parent` in comment-path form. `/` and `~` are escaped so a model
+/// key like `oa/gpt-4.1` cannot forge a path.
+fn jsonc_child_path(parent: &str, key: &str) -> String {
+    let escaped = key.replace('~', "~0").replace('/', "~1");
+    format!("{parent}/{escaped}")
+}
+
+fn jsonc_line_of(src: &str, offset: usize) -> usize {
+    src[..offset].matches('\n').count() + 1
+}
+
+/// Overwrite `from..to` with spaces, keeping newlines, so every byte offset
+/// and line number of the blanked copy still addresses the original text.
+fn blank_jsonc_range(out: &mut [u8], src: &str, from: usize, to: usize) {
+    for (offset, ch) in src[from..to].char_indices() {
+        if ch == '\n' {
+            continue;
+        }
+        let start = from + offset;
+        for slot in &mut out[start..start + ch.len_utf8()] {
+            *slot = b' ';
+        }
+    }
+}
+
+/// True when the comma at `offset` is a JSONC trailing comma, i.e. the next
+/// meaningful character (whitespace and comments skipped) closes a container.
+fn is_jsonc_trailing_comma(bytes: &[u8], offset: usize) -> bool {
+    let mut index = offset + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b' ' | b'\t' | b'\r' | b'\n' => index += 1,
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            b'}' | b']' => return true,
+            _ => return false,
+        }
+    }
+    false
+}
+
+/// Replace comments and trailing commas with spaces, preserving byte offsets
+/// and line breaks so a `serde_json` error points at the line the user sees.
+/// Only whole characters are blanked, so the result stays valid UTF-8.
+fn blank_jsonc_noise(src: &str) -> Result<String, String> {
+    let bytes = src.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        if byte == b'"' {
+            in_string = true;
+            index += 1;
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            let end = src[index..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| index + offset);
+            blank_jsonc_range(&mut out, src, index, end);
+            index = end;
+        } else if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            let start = index;
+            let mut cursor = index + 2;
+            let end = loop {
+                if cursor + 1 >= bytes.len() {
+                    return Err(format!(
+                        "unterminated block comment starting at line {}",
+                        jsonc_line_of(src, start)
+                    ));
+                }
+                if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
+                    break cursor + 2;
+                }
+                cursor += 1;
+            };
+            blank_jsonc_range(&mut out, src, start, end);
+            index = end;
+        } else if byte == b',' && is_jsonc_trailing_comma(bytes, index) {
+            out[index] = b' ';
+            index += 1;
+        } else {
+            index += 1;
+        }
+    }
+    String::from_utf8(out)
+        .map_err(|error| format!("invalid UTF-8 at byte {}", error.utf8_error().valid_up_to()))
+}
+
+/// One container being walked by the comment collector.
+struct JsoncFrame {
+    /// Path of this container; the document root is `""`.
+    path: String,
+    /// `true` for `{...}`, `false` for `[...]`.
+    is_object: bool,
+    /// Comments seen since the last member value, waiting for the key that
+    /// follows them.
+    pending: Vec<String>,
+    /// Key of the member being read, while the parent is an object.
+    pending_key: Option<String>,
+}
+
+/// Hand a comment to the nearest enclosing object to file against the key that
+/// comes next. Comments in arrays land on the array's owning object rather
+/// than being dropped. A comment with no object around it is a header (before
+/// the document's value) or a footer (after it).
+fn record_jsonc_comment(
+    comments: &mut JsoncComments,
+    stack: &mut [JsoncFrame],
+    after_root: bool,
+    text: String,
+) {
+    match stack.iter_mut().rposition(|frame| frame.is_object) {
+        Some(position) => stack[position].pending.push(text),
+        None if after_root => comments
+            .after_last
+            .entry(String::new())
+            .or_default()
+            .push(text),
+        None => comments.leading.push(text),
+    }
+}
+
+/// Close a container: comments with no key after them trail its last member.
+fn close_jsonc_frame(comments: &mut JsoncComments, frame: JsoncFrame) {
+    if !frame.pending.is_empty() {
+        comments
+            .after_last
+            .entry(frame.path)
+            .or_default()
+            .extend(frame.pending);
+    }
+}
+
+fn complete_jsonc_value(frame: &mut JsoncFrame) {
+    frame.pending_key = None;
+}
+
+/// Read the string token starting at `start`, returning its unescaped value
+/// and the offset just past the closing quote.
+fn read_jsonc_string(src: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = src.as_bytes();
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => {
+                return serde_json::from_str::<String>(&src[start..=index])
+                    .ok()
+                    .map(|value| (value, index + 1));
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Walk a JSONC document and collect every comment with the position it should
+/// be re-emitted at.
+fn collect_jsonc_comments(src: &str) -> JsoncComments {
+    let bytes = src.as_bytes();
+    let mut comments = JsoncComments::default();
+    let mut stack: Vec<JsoncFrame> = Vec::new();
+    let mut expect_key = false;
+    let mut after_root = false;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte.is_ascii_whitespace() {
+            index += 1;
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'/') {
+            let end = src[index..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| index + offset);
+            record_jsonc_comment(
+                &mut comments,
+                &mut stack,
+                after_root,
+                src[index..end].trim_end().to_string(),
+            );
+            index = end;
+            continue;
+        }
+        if byte == b'/' && bytes.get(index + 1) == Some(&b'*') {
+            let mut cursor = index + 2;
+            while cursor + 1 < bytes.len() && !(bytes[cursor] == b'*' && bytes[cursor + 1] == b'/')
+            {
+                cursor += 1;
+            }
+            let end = (cursor + 2).min(bytes.len());
+            record_jsonc_comment(
+                &mut comments,
+                &mut stack,
+                after_root,
+                src[index..end].trim().to_string(),
+            );
+            index = end;
+            continue;
+        }
+        after_root = true;
+        match byte {
+            b'{' | b'[' => {
+                let path = match stack.last_mut() {
+                    Some(parent) => match parent.pending_key.take() {
+                        Some(key) if parent.is_object => jsonc_child_path(&parent.path, &key),
+                        _ => parent.path.clone(),
+                    },
+                    None => String::new(),
+                };
+                stack.push(JsoncFrame {
+                    path,
+                    is_object: byte == b'{',
+                    pending: Vec::new(),
+                    pending_key: None,
+                });
+                expect_key = byte == b'{';
+                index += 1;
+            }
+            b'}' | b']' => {
+                if let Some(frame) = stack.pop() {
+                    close_jsonc_frame(&mut comments, frame);
+                }
+                expect_key = false;
+                index += 1;
+            }
+            b',' => {
+                expect_key = stack.last().is_some_and(|frame| frame.is_object);
+                index += 1;
+            }
+            b':' => {
+                expect_key = false;
+                index += 1;
+            }
+            b'"' => match read_jsonc_string(src, index) {
+                Some((key, end)) => {
+                    index = end;
+                    if expect_key {
+                        if let Some(frame) = stack.last_mut() {
+                            if frame.is_object {
+                                // Comments seen since the last member document
+                                // the key that follows them.
+                                if !frame.pending.is_empty() {
+                                    let path = frame.path.clone();
+                                    comments.by_key.entry(path).or_default().extend(
+                                        frame
+                                            .pending
+                                            .drain(..)
+                                            .map(|comment| (key.clone(), comment)),
+                                    );
+                                }
+                                frame.pending_key = Some(key);
+                                expect_key = false;
+                                continue;
+                            }
+                        }
+                    }
+                    if let Some(frame) = stack.last_mut() {
+                        complete_jsonc_value(frame);
+                    }
+                }
+                None => index += 1,
+            },
+            _ => {
+                let start = index;
+                while index < bytes.len()
+                    && !bytes[index].is_ascii_whitespace()
+                    && !matches!(
+                        bytes[index],
+                        b',' | b'}' | b']' | b':' | b'"' | b'/' | b'{' | b'['
+                    )
+                {
+                    index += 1;
+                }
+                if index == start {
+                    index += 1;
+                    continue;
+                }
+                if let Some(frame) = stack.last_mut() {
+                    complete_jsonc_value(frame);
+                }
+            }
+        }
+    }
+
+    // An unterminated document: nothing is left dangling.
+    while let Some(frame) = stack.pop() {
+        close_jsonc_frame(&mut comments, frame);
+    }
+
+    comments
+}
+
+/// Comments that document `key` in the object at `path`, in document order.
+fn jsonc_key_comments<'a>(comments: &'a JsoncComments, path: &str, key: &str) -> Vec<&'a str> {
+    comments
+        .by_key
+        .get(path)
+        .into_iter()
+        .flatten()
+        .filter(|(name, _)| name == key)
+        .map(|(_, text)| text.as_str())
+        .collect()
+}
+
+/// Comments that trail the last member of the object at `path`.
+fn jsonc_trailing_comments<'a>(
+    comments: &'a JsoncComments,
+    path: &str,
+) -> impl Iterator<Item = &'a str> {
+    comments
+        .after_last
+        .get(path)
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+}
+
+fn write_jsonc_indent(out: &mut String, depth: usize) {
+    for _ in 0..depth {
+        out.push_str("  ");
+    }
+}
+
+/// Emit one comment at `depth`, re-indenting the lines of a block comment.
+fn write_jsonc_comment(out: &mut String, text: &str, depth: usize) {
+    for line in text.lines() {
+        write_jsonc_indent(out, depth);
+        out.push_str(line.trim());
+        out.push('\n');
+    }
+}
+
+/// Emit the comments documenting `key`, each ending on its own line.
+fn write_jsonc_key_comments(
+    out: &mut String,
+    comments: &JsoncComments,
+    path: &str,
+    key: &str,
+    depth: usize,
+) {
+    for comment in jsonc_key_comments(comments, path, key) {
+        write_jsonc_comment(out, comment, depth);
+    }
+}
+
+fn write_jsonc_value(
+    out: &mut String,
+    value: &Value,
+    path: &str,
+    comments: &JsoncComments,
+    depth: usize,
+) {
+    let Value::Object(map) = value else {
+        out.push_str(&serde_json::to_string_pretty(value).unwrap_or_default());
+        return;
+    };
+
+    let has_comments = comments
+        .after_last
+        .get(path)
+        .is_some_and(|trailing| !trailing.is_empty())
+        || map
+            .keys()
+            .any(|key| !jsonc_key_comments(comments, path, key).is_empty());
+
+    if map.is_empty() {
+        if !has_comments {
+            out.push_str("{}");
+            return;
+        }
+        out.push_str("{\n");
+        for comment in jsonc_trailing_comments(comments, path) {
+            write_jsonc_comment(out, comment, depth + 1);
+        }
+        write_jsonc_indent(out, depth);
+        out.push('}');
+        return;
+    }
+
+    out.push('{');
+    for (index, (key, child)) in map.iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push('\n');
+        // Comments are newline-terminated, so the key's own indent goes after
+        // them and the two land on the right lines.
+        write_jsonc_key_comments(out, comments, path, key, depth + 1);
+        write_jsonc_indent(out, depth + 1);
+        out.push_str(&serde_json::to_string(&Value::String(key.clone())).unwrap_or_default());
+        out.push_str(": ");
+        write_jsonc_value(
+            out,
+            child,
+            &jsonc_child_path(path, key),
+            comments,
+            depth + 1,
+        );
+    }
+    out.push('\n');
+    for comment in jsonc_trailing_comments(comments, path) {
+        write_jsonc_comment(out, comment, depth + 1);
+    }
+    write_jsonc_indent(out, depth);
+    out.push('}');
+}
+
+/// Pretty-print `value` like `serde_json::to_string_pretty`, then put the
+/// comments back at the same structural position. With no comments the output
+/// is byte-identical to `serde_json::to_string_pretty`.
+fn serialize_jsonc(value: &Value, comments: &JsoncComments) -> String {
+    let mut out = String::new();
+    for comment in &comments.leading {
+        write_jsonc_comment(&mut out, comment, 0);
+    }
+    write_jsonc_value(&mut out, value, "", comments, 0);
+    out
+}
+
+/// Parse JSONC. `Err` carries a message naming the offending line/column, so
+/// the caller can refuse to write over the user's file instead of replacing it.
+/// A file with no content at all is an empty config, not a broken one.
+fn parse_jsonc(content: &str) -> Result<(Value, JsoncComments), String> {
+    if content.trim().is_empty() {
+        return Ok((
+            Value::Object(serde_json::Map::new()),
+            JsoncComments::default(),
+        ));
+    }
+    let stripped = blank_jsonc_noise(content)?;
+    let value = serde_json::from_str::<Value>(&stripped).map_err(|error| {
+        format!(
+            "not valid JSON/JSONC (line {}, column {}): {error}",
+            error.line(),
+            error.column()
+        )
+    })?;
+    Ok((value, collect_jsonc_comments(content)))
+}
+
+/// Read an `opencode.jsonc` file. `None` when it does not exist; `Err` when it
+/// exists but is not readable as JSONC — the file is then left untouched.
+async fn read_opencode_jsonc(path: &FsPath) -> anyhow::Result<Option<(Value, JsoncComments)>> {
+    match fs::read_to_string(path).await {
+        Ok(content) => parse_jsonc(&content).map(Some).map_err(|error| {
+            anyhow::anyhow!(
+                "{}: {error}. OpenProxy left the file untouched; \
+                 fix it by hand, then apply again.",
+                path.display()
+            )
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The opencode config must be a JSON object. A top-level array or scalar means
+/// the file is not something we understand — never write over it.
+fn opencode_config_object(
+    path: &FsPath,
+    value: Value,
+) -> anyhow::Result<serde_json::Map<String, Value>> {
+    match value {
+        Value::Object(object) => Ok(object),
+        _ => Err(anyhow::anyhow!(
+            "{}: the top level is not a JSON object. \
+             OpenProxy left the file untouched; fix it by hand, then apply again.",
+            path.display()
+        )),
     }
 }
 
