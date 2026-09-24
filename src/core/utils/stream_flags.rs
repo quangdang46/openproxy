@@ -16,9 +16,22 @@ pub fn provider_requires_streaming(provider: &str) -> bool {
             | "commandcode"
             | "command-code"
             | "codebuddy-cn"
+            // 9router providers/registry/codebuddy-cn.js declares
+            // `alias: "cbcn"` and `uiAlias: "cbcn"` on an entry that sets
+            // forceStream: true. OpenProxy accepts BOTH ids as a provider
+            // (chat.rs dispatches `provider == "cbcn"`), so the short alias
+            // must force stream too — otherwise a request routed by the alias
+            // asks upstream for a non-streaming body and gets raw SSE handed
+            // to a non-streaming client.
+            | "cbcn"
             | "codebuddy-intl"
             | "cbai"
             | "grok-cli"
+            // 9router providers/registry/grok-cli.js:23
+            // `aliases: ["grok-build", "gb"]` on the same forceStream entry.
+            // chat.rs accepts "grok-build" as a provider id, so it belongs here
+            // for the same reason "cbcn" does.
+            | "grok-build"
             | "gcli"
             | "gb"
             // 9router PR #4132 (decolua/9router): the OpenCode Zen free-tier
@@ -119,6 +132,34 @@ pub fn resolve_stream_flags(
 
 #[cfg(test)]
 mod tests {
+    /// Regression (audit finding #120): 9router declares `cbcn` and
+    /// `grok-build` as ALIASES on registry entries that set forceStream
+    /// (codebuddy-cn.js `alias: "cbcn"`, grok-cli.js `aliases: ["grok-build",
+    /// "gb"]`). OpenProxy accepts both as provider ids — chat.rs dispatches
+    /// them — but the force-stream table only listed the canonical ids, so a
+    /// request routed by the short alias asked upstream for a non-streaming
+    /// body and handed raw SSE to a client that never asked to stream.
+    #[test]
+    fn provider_aliases_of_forced_stream_providers_also_force_stream() {
+        for alias in ["cbcn", "grok-build"] {
+            assert!(
+                super::provider_requires_streaming(alias),
+                "{alias} is an accepted provider id whose 9router entry forces stream"
+            );
+        }
+        // The canonical ids must keep forcing, and a genuinely unrelated
+        // provider must not start forcing.
+        for canonical in ["codebuddy-cn", "grok-cli", "gb", "codex", "zed"] {
+            assert!(super::provider_requires_streaming(canonical), "{canonical}");
+        }
+        for other in ["openai-chat", "anthropic", "gemini", ""] {
+            assert!(
+                !super::provider_requires_streaming(other),
+                "{other} must not force stream"
+            );
+        }
+    }
+
     use super::*;
 
     #[test]
