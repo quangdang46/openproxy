@@ -128,6 +128,51 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         ("gweb", "gemini-web"),
         ("muse-spark-web", "muse-spark-web"),
         ("ms-web", "muse-spark-web"),
+        // ── 9router registry aliases not previously mapped ──────────────
+        // Each entry mirrors `alias:` / `aliases:` on the matching
+        // 9router providers/registry/*.js file, and every target is verified
+        // to exist as a PROVIDER_CONFIGS key. Without these, a request
+        // addressed as `cbcn/glm-5.2` or `kgw/some-model` passed the alias
+        // through as the provider name and routed to a provider that does
+        // not exist.
+        ("af", "api-airforce"),
+        ("airforce", "api-airforce"),
+        ("baidu-qianfan", "baidu"),
+        ("bazaar-link", "bazaarlink"),
+        ("bb", "blackbox"),
+        ("bfl", "black-forest-labs"),
+        ("blue-sminds", "bluesminds"),
+        ("bm", "bluesminds"),
+        ("bzl", "bazaarlink"),
+        ("cbai", "codebuddy-intl"),
+        ("cbcn", "codebuddy-cn"),
+        ("cf", "cloudflare-ai"),
+        ("ernie", "baidu"),
+        ("fal", "fal-ai"),
+        ("fl", "featherless"),
+        ("gpse", "google-pse"),
+        ("hf", "huggingface"),
+        ("hunyuan", "tencent"),
+        ("jina", "jina-ai"),
+        ("kgw", "kilo-gateway"),
+        ("kilogateway", "kilo-gateway"),
+        ("kimi-coding", "kimi"),
+        ("llm-7", "llm7"),
+        ("mimo", "xiaomi-mimo"),
+        ("mimo-desktop", "xiaomi-mimo"),
+        ("morphllm", "morph"),
+        ("pplx-agent", "perplexity-agent"),
+        ("pplx-responses", "perplexity-agent"),
+        ("ps", "poolside"),
+        ("runway", "runwayml"),
+        ("samba", "sambanova"),
+        ("sambanova-ai", "sambanova"),
+        ("tencent-hunyuan", "tencent"),
+        ("vercel", "vercel-ai-gateway"),
+        ("vn", "venice"),
+        ("xmd", "xiaomi-mimo"),
+        ("xmtp", "xiaomi-tokenplan"),
+        ("zd", "zed"),
     ])
 });
 
@@ -340,5 +385,71 @@ fn infer_provider_from_model_name(model_name: &str) -> &'static str {
         // Common model families that land here: llama-*, codellama-*, phi-*,
         // nemotron-*, dbrx-*, qwen-*, yi-*, gemma-*.
         "openai"
+    }
+}
+
+#[cfg(test)]
+mod alias_parity_tests {
+    /// Regression (audit finding #48): 9router declares `alias` / `aliases`
+    /// on its provider registry entries and accepts an addressed model of the
+    /// form `<alias>/<model>`. OpenProxy's hand table carried only a subset,
+    /// so `cbcn/glm-5.2`, `kgw/some-model`, `mimo/x` and 35 others passed the
+    /// alias straight through as the provider name and routed to a provider
+    /// that does not exist.
+    #[test]
+    fn added_aliases_resolve_to_the_9router_canonical_id() {
+        for (alias, expected) in [
+            ("cbcn", "codebuddy-cn"),
+            ("cbai", "codebuddy-intl"),
+            ("kimi-coding", "kimi"),
+            ("kgw", "kilo-gateway"),
+            ("kilogateway", "kilo-gateway"),
+            ("mimo", "xiaomi-mimo"),
+            ("mimo-desktop", "xiaomi-mimo"),
+            ("xmd", "xiaomi-mimo"),
+            ("xmtp", "xiaomi-tokenplan"),
+            ("baidu-qianfan", "baidu"),
+            ("ernie", "baidu"),
+            ("sambanova-ai", "sambanova"),
+            ("pplx-agent", "perplexity-agent"),
+            ("pplx-responses", "perplexity-agent"),
+            ("af", "api-airforce"),
+            ("airforce", "api-airforce"),
+            ("bfl", "black-forest-labs"),
+            ("bm", "bluesminds"),
+            ("cf", "cloudflare-ai"),
+            ("gpse", "google-pse"),
+            ("hf", "huggingface"),
+            ("hunyuan", "tencent"),
+            ("tencent-hunyuan", "tencent"),
+            ("jina", "jina-ai"),
+            ("llm-7", "llm7"),
+            ("morphllm", "morph"),
+            ("ps", "poolside"),
+            ("runway", "runwayml"),
+            ("vercel", "vercel-ai-gateway"),
+            ("vn", "venice"),
+            ("zd", "zed"),
+        ] {
+            assert_eq!(
+                super::resolve_provider_alias(alias),
+                expected,
+                "alias {alias} must resolve to {expected}"
+            );
+        }
+    }
+
+    /// An addressable model string must route to the canonical id, not the
+    /// alias — that is the whole point of the table.
+    #[test]
+    fn parsing_an_addressed_model_normalises_the_provider() {
+        let parsed = super::parse_model("cbcn/glm-5.2");
+        assert_eq!(parsed.provider.as_deref(), Some("codebuddy-cn"));
+        assert_eq!(parsed.model.as_deref(), Some("glm-5.2"));
+        assert_eq!(parsed.provider_alias.as_deref(), Some("cbcn"));
+
+        let kgw = super::parse_model("kgw/some-model");
+        assert_eq!(kgw.provider.as_deref(), Some("kilo-gateway"));
+        assert_eq!(kgw.model.as_deref(), Some("some-model"));
     }
 }
