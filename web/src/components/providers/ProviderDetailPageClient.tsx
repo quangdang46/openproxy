@@ -39,6 +39,15 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Turn a failed response into a message a user can act on. 401 is the routine
+// trigger here (expired dashboard session) and must not read as a generic
+// server fault — the fix is to sign in again.
+function describeFailure(res: { status?: number } | null | undefined, what: string) {
+  if (res?.status === 401) return `Your session expired. Sign in again to ${what}.`;
+  if (res?.status === 403) return `Not authorized to ${what}.`;
+  return `Failed to ${what} (${res?.status ?? "network error"}).`;
+}
+
 export default function ProviderDetailPageClient() {
   // useParams/useRouter shims for Astro (no Next.js runtime)
   const [params, setParams] = useState<{ id: string }>({ id: "" });
@@ -57,7 +66,7 @@ export default function ProviderDetailPageClient() {
   const providerId = params.id;
   // Authoritative Available Models list (catalog + live + custom, merged).
   const am = useAvailableModels(providerId);
-  const [connections, setConnections] = useState([]);
+  const [connections, setConnections] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [providerNode, setProviderNode] = useState(null);
   const [proxyPools, setProxyPools] = useState([]);
@@ -105,6 +114,12 @@ export default function ProviderDetailPageClient() {
   const [deleteNodeTarget, setDeleteNodeTarget] = useState<{ name: string; type: string } | null>(null);
   const [deletingNode, setDeletingNode] = useState<boolean>(false);
   const [disableAllTarget, setDisableAllTarget] = useState<string[] | null>(null);
+  // A failed connections/nodes fetch used to leave `connections = []` and
+  // `providerNode = null`, which renders "No connections yet" plus a working
+  // Add-Connection CTA, or "Provider not found" for a compatible node — both
+  // of which invite the user to create a duplicate. 401 (expired session) is
+  // the routine trigger, and this page is not auth-gated.
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const providerInfo = providerNode
     ? {
@@ -245,11 +260,21 @@ export default function ProviderDetailPageClient() {
         fetch("/api/proxy-pools?isActive=true", { cache: "no-store" }),
         fetch("/api/settings", { cache: "no-store" }),
       ]);
-      const connectionsData = await connectionsRes.json();
-      const nodesData = await nodesRes.json();
-      const proxyPoolsData = await proxyPoolsRes.json();
+      // Only `.json()` a response that is actually JSON — a 401 comes back as
+      // an HTML login page and would throw here, hiding the real status.
+      const connectionsData = connectionsRes.ok
+        ? await connectionsRes.json().catch(() => ({}))
+        : null;
+      const nodesData = nodesRes.ok
+        ? await nodesRes.json().catch(() => ({}))
+        : null;
+      const proxyPoolsData = await proxyPoolsRes.json().catch(() => ({}));
       const settingsData = settingsRes.ok ? await settingsRes.json() : {};
-      if (connectionsRes.ok) {
+      if (!connectionsRes.ok || !nodesRes.ok) {
+        const worst = !connectionsRes.ok ? connectionsRes : nodesRes;
+        throw new Error(describeFailure(worst, "load this provider"));
+      }
+      {
         const filtered = (connectionsData.connections || []).filter(c => c.provider === providerId);
         setConnections(filtered);
       }
@@ -285,8 +310,15 @@ export default function ProviderDetailPageClient() {
 
         setProviderNode(node);
       }
+      setLoadError(null);
     } catch (error) {
       console.log("Error fetching connections:", error);
+      setConnections([]);
+      setLoadError(
+        error instanceof Error
+          ? error.message
+          : "Failed to load this provider.",
+      );
     } finally {
       setLoading(false);
     }
@@ -299,14 +331,18 @@ export default function ProviderDetailPageClient() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(formData),
       });
-      const data = await res.json();
-      if (res.ok) {
-        setProviderNode(data.node);
-        await fetchConnections();
-        setShowEditNodeModal(false);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        notify.error(err.error || describeFailure(res, "update this node"));
+        return;
       }
+      const data = await res.json();
+      setProviderNode(data.node);
+      await fetchConnections();
+      setShowEditNodeModal(false);
     } catch (error) {
       console.log("Error updating provider node:", error);
+      notify.error("Failed to update this node.");
     }
   };
 
@@ -330,13 +366,22 @@ export default function ProviderDetailPageClient() {
         updated[providerId] = override;
       }
 
-      await fetch("/api/settings", {
+      const res = await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providerStrategies: updated }),
       });
+      if (!res.ok) {
+        notify.error(describeFailure(res, "save routing strategy"));
+        // Drop the optimistic flag so the control stops claiming a value the
+        // server rejected.
+        await fetchConnections();
+        return;
+      }
     } catch (error) {
       console.log("Error saving provider strategy:", error);
+      notify.error("Failed to save routing strategy.");
+      await fetchConnections();
     }
   };
 
@@ -364,13 +409,20 @@ export default function ProviderDetailPageClient() {
       } else {
         updated[providerId] = { mode };
       }
-      await fetch("/api/settings", {
+      const res = await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ providerThinking: updated }),
       });
+      if (!res.ok) {
+        notify.error(describeFailure(res, "save thinking mode"));
+        await fetchConnections();
+        return;
+      }
     } catch (error) {
       console.log("Error saving thinking config:", error);
+      notify.error("Failed to save thinking mode.");
+      await fetchConnections();
     }
   };
 
@@ -384,13 +436,19 @@ export default function ProviderDetailPageClient() {
     if (!autoPingSettingsKey) return;
     setAutoPing(next);
     try {
-      await fetch("/api/settings", {
+      const res = await fetch("/api/settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ [autoPingSettingsKey]: next }),
       });
+      if (!res.ok) {
+        notify.error(describeFailure(res, "save auto-ping setting"));
+        await fetchConnections();
+      }
     } catch (error) {
       console.log("Error saving auto-ping config:", error);
+      notify.error("Failed to save auto-ping setting.");
+      await fetchConnections();
     }
   };
 
@@ -678,12 +736,15 @@ export default function ProviderDetailPageClient() {
       if (res.ok) {
         await fetchAliases();
         am.refresh();
-      } else {
-        const data = await res.json();
-        notify.error(data.error || "Failed to set alias");
+        return true;
       }
+      const data = await res.json().catch(() => ({}));
+      notify.error(data.error || describeFailure(res, "set alias"));
+      return false;
     } catch (error) {
       console.log("Error setting alias:", error);
+      notify.error("Failed to set alias.");
+      return false;
     }
   };
 
@@ -695,12 +756,19 @@ export default function ProviderDetailPageClient() {
       if (res.ok) {
         await fetchAliases();
         am.refresh();
+        return;
       }
+      const data = await res.json().catch(() => ({}));
+      notify.error(data.error || describeFailure(res, "delete alias"));
     } catch (error) {
       console.log("Error deleting alias:", error);
+      notify.error("Failed to delete alias.");
     }
   };
 
+  // Returns whether the model was actually saved. AddCustomModelModal keeps
+  // the typed id and stays open on false — it used to close unconditionally,
+  // because this callee never threw and a network failure produced no toast.
   const handleAddCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias) => {
     try {
       const res = await fetch("/api/models/custom", {
@@ -712,12 +780,15 @@ export default function ProviderDetailPageClient() {
         await fetchCustomModels();
         am.refresh();
         if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
-      } else {
-        const data = await res.json();
-        notify.error(data.error || "Failed to add custom model");
+        return true;
       }
+      const data = await res.json().catch(() => ({}));
+      notify.error(data.error || describeFailure(res, "add custom model"));
+      return false;
     } catch (error) {
       console.log("Error adding custom model:", error);
+      notify.error("Failed to add custom model.");
+      return false;
     }
   };
 
@@ -729,9 +800,13 @@ export default function ProviderDetailPageClient() {
         await fetchCustomModels();
         am.refresh();
         if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent("customModelChanged"));
+        return;
       }
+      const data = await res.json().catch(() => ({}));
+      notify.error(data.error || describeFailure(res, "delete custom model"));
     } catch (error) {
       console.log("Error deleting custom model:", error);
+      notify.error("Failed to delete custom model.");
     }
   };
 
@@ -809,9 +884,13 @@ export default function ProviderDetailPageClient() {
       if (res.ok) {
         await fetchConnections();
         setShowEditModal(false);
+        return;
       }
+      const data = await res.json().catch(() => ({}));
+      notify.error(data.error || describeFailure(res, "update connection"));
     } catch (error) {
       console.log("Error updating connection:", error);
+      notify.error("Failed to update connection.");
     }
   };
 
@@ -824,9 +903,15 @@ export default function ProviderDetailPageClient() {
       });
       if (res.ok) {
         setConnections(prev => prev.map(c => c.id === id ? { ...c, isActive } : c));
+        return;
       }
+      notify.error(describeFailure(res, isActive ? "enable connection" : "disable connection"));
+      // Re-sync rather than leave the toggle showing the rejected value.
+      await fetchConnections();
     } catch (error) {
       console.log("Error updating connection status:", error);
+      notify.error("Failed to change connection status.");
+      await fetchConnections();
     }
   };
 
@@ -837,7 +922,9 @@ export default function ProviderDetailPageClient() {
     setConnections(newConnections);
 
     try {
-      await Promise.all([
+      // Promise.all only rejects on a thrown fetch; a 401/500 resolves fine, so
+      // each response has to be checked or a rejected reorder reads as applied.
+      const results = await Promise.all([
         fetch(`/api/providers/${newConnections[index1].id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -849,10 +936,17 @@ export default function ProviderDetailPageClient() {
           body: JSON.stringify({ priority: index2 }),
         }),
       ]);
+      const failed = results.filter((r) => !r.ok);
+      if (failed.length > 0) {
+        notify.error(describeFailure(failed[0], "reorder connections"));
+      }
     } catch (error) {
       console.log("Error swapping priority:", error);
-      await fetchConnections();
+      notify.error("Failed to reorder connections.");
     }
+    // Always re-sync: the optimistic order and the server's order can disagree
+    // after a partial failure.
+    await fetchConnections();
   };
 
   const selectedConnections = connections.filter((conn) => selectedConnectionIds.includes(conn.id));
@@ -911,6 +1005,7 @@ export default function ProviderDetailPageClient() {
     setBulkUpdatingProxy(true);
     try {
       let failed = 0;
+      let failedStatus: number | undefined;
       for (const { connectionId, proxyPoolId } of assignments) {
         try {
           const res = await fetch(`/api/providers/${connectionId}`, {
@@ -918,15 +1013,24 @@ export default function ProviderDetailPageClient() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ proxyPoolId }),
           });
-          if (!res.ok) failed += 1;
+          if (!res.ok) {
+            failedStatus ??= res.status;
+            failed += 1;
+          }
         } catch (e) {
           console.log("Error applying proxy for", connectionId, e);
           failed += 1;
         }
       }
-      if (failed > 0) notify.error(`Updated with ${failed} failed request(s).`);
+      if (failed > 0) {
+        notify.error(
+          `${failed} of ${assignments.length} binding(s) failed — ${describeFailure({ status: failedStatus }, "apply proxy bindings")}`,
+        );
+      }
       await fetchConnections();
-      setShowBulkProxyModal(false);
+      // Only close on a clean run; a partial failure leaves the modal open with
+      // the assignments still listed so the user can retry the failed rows.
+      if (failed === 0) setShowBulkProxyModal(false);
     } finally {
       setBulkUpdatingProxy(false);
     }
@@ -962,29 +1066,42 @@ export default function ProviderDetailPageClient() {
       return;
     }
     setBulkDeleting(true);
-    let failed = 0;
+    const deletedIds = new Set<string>();
+    const failedIds: string[] = [];
+    let failedStatus: number | undefined;
     try {
       for (const id of idsToDelete) {
         try {
           const res = await fetch(`/api/providers/${id}`, { method: "DELETE" });
-          if (!res.ok) failed += 1;
+          if (res.ok) {
+            deletedIds.add(id);
+          } else {
+            failedStatus ??= res.status;
+            failedIds.push(id);
+          }
         } catch (error) {
           console.log("Error deleting connection:", error);
-          failed += 1;
+          failedIds.push(id);
         }
       }
-      setConnections((prev) => prev.filter((c) => !idsToDelete.includes(c.id)));
-      setSelectedConnectionIds([]);
-      if (failed > 0) {
+      // Drop only the rows the server actually deleted. The previous version
+      // filtered by the full idsToDelete, so on a 401 every row vanished while
+      // the toast admitted none had been deleted.
+      setConnections((prev) => prev.filter((c) => !deletedIds.has(c.id)));
+      setSelectedConnectionIds((prev) => prev.filter((id) => failedIds.includes(id)));
+      if (failedIds.length > 0) {
         notify.error(
-          `Deleted ${idsToDelete.length - failed} connection(s), ${failed} failed.`,
+          `Deleted ${deletedIds.size} connection(s), ${failedIds.length} failed — ${describeFailure({ status: failedStatus }, "delete connections")}`,
         );
       } else {
         notify.success(
-          `Deleted ${idsToDelete.length} connection${idsToDelete.length > 1 ? "s" : ""}`,
+          `Deleted ${deletedIds.size} connection${deletedIds.size > 1 ? "s" : ""}`,
         );
       }
     } finally {
+      // Re-sync from the server: a partial failure leaves the local list
+      // guessing, and the count in the toast must match what is on screen.
+      await fetchConnections();
       setBulkDeleting(false);
       setBulkDeletePending(false);
     }
@@ -1035,10 +1152,16 @@ export default function ProviderDetailPageClient() {
                           ? { ...c, providerSpecificData: { ...c.providerSpecificData, proxyPoolId: proxyPoolId || null } }
                           : c
                       ));
+                      return;
                     }
+                    notify.error(describeFailure(res, "update proxy binding"));
                   } catch (error) {
                     console.log("Error updating proxy:", error);
+                    notify.error("Failed to update proxy binding.");
                   }
+                  // The row was not changed server-side; re-read so the binding
+                  // shown matches the one in effect.
+                  await fetchConnections();
                 }}
                 onEdit={() => {
                   setSelectedConnection(conn);
@@ -1146,9 +1269,11 @@ export default function ProviderDetailPageClient() {
       );
     }
     // Single source of truth: catalog + live + custom, merged by the hook.
-    const customModelRows = am.customRows;
+    // These two lists reconstruct `am.enabledRows` exactly, which is the set
+    // ModelSelectModal renders — that is what keeps the two surfaces mirrored.
+    const customModelRows = am.enabledCustomRows;
     const displayModels = am.enabledCoreRows;
-    const disabledDisplayModels = am.disabledCoreRows;
+    const disabledDisplayModels = am.disabledRows;
 
     return (
       <div className="flex flex-wrap gap-3">
@@ -1178,6 +1303,7 @@ export default function ProviderDetailPageClient() {
             thinkingSuffix={resolveThinkingSuffix(model.id)}
             isFavorite={am.isFavorite(model.id)}
             onToggleFavorite={() => am.toggleFavorite(model.id)}
+            onDisable={() => handleDisableModel(model.id)}
           />
         ))}
 
@@ -1312,6 +1438,33 @@ export default function ProviderDetailPageClient() {
       </div>
     );
 }
+
+  // Must precede the `!providerInfo` branch: on a failed fetch providerNode
+  // stays null, so a compatible provider would otherwise report "Provider not
+  // found" — and a catalog provider would offer a working Add-Connection CTA
+  // on top of data that never loaded.
+  if (loadError) {
+    return (
+      <div
+        role="alert"
+        className="flex flex-col items-center gap-3 border border-red-500/40 bg-red-500/5 rounded-xl py-12"
+      >
+        <span className="material-symbols-outlined text-[32px] text-red-500">
+          cloud_off
+        </span>
+        <p className="text-sm text-red-600 dark:text-red-400 text-center px-4">
+          {loadError}
+        </p>
+        <p className="text-xs text-text-muted text-center px-4 max-w-md">
+          This provider&apos;s data is hidden until it loads, so nothing is
+          missing from your account.
+        </p>
+        <a href="/dashboard/providers" className="text-sm text-primary hover:underline">
+          Back to Providers
+        </a>
+      </div>
+    );
+  }
 
   if (!providerInfo) {
     return (
@@ -1778,7 +1931,7 @@ export default function ProviderDetailPageClient() {
                     Free only
                   </button>
                 )}
-                {am.disabledCoreRows.length > 0 && (
+                {am.disabledRows.length > 0 && (
                   <Button size="sm" variant="secondary" icon="restart_alt" onClick={handleEnableAll}>
                     Active All
                   </Button>
@@ -1888,8 +2041,10 @@ export default function ProviderDetailPageClient() {
           providerAlias={providerStorageAlias}
           providerDisplayAlias={providerDisplayAlias}
           onSave={async (modelId) => {
-            await handleAddCustomModel(modelId, "llm", providerStorageAlias);
-            setShowAddCustomModel(false);
+            const ok = await handleAddCustomModel(modelId, "llm", providerStorageAlias);
+            // Close only on success — closing on failure destroyed the typed id
+            // and left the user with no trace of what they had entered.
+            if (ok) setShowAddCustomModel(false);
           }}
           onClose={() => setShowAddCustomModel(false)}
         />
@@ -1950,7 +2105,12 @@ export default function ProviderDetailPageClient() {
           }
         }}
         title="Delete compatible node"
-        message={deleteNodeTarget ? <>Delete this {deleteNodeTarget.type} Compatible node <code>{deleteNodeTarget.name}</code>?</> : null}
+        message={deleteNodeTarget ? (
+          <>
+            Delete this {deleteNodeTarget.type} Compatible node <code>{deleteNodeTarget.name}</code>?
+            Its connections and custom models are deleted with it.
+          </>
+        ) : null}
         confirmText="Delete"
         variant="danger"
         loading={deletingNode}

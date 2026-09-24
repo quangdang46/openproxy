@@ -8,7 +8,7 @@ import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { getModelsByProviderId, useEnsureCatalog } from "@/shared/constants/models";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, AI_PROVIDERS, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, getProviderAlias } from "@/shared/constants/providers";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
-import { buildAvailableModels, fetchLiveModels, useFavorites, type LiveModel } from "@/shared/models/availableModels";
+import { buildAvailableModels, fetchLiveModels, loadFreeOnly, useFavorites, type LiveModel } from "@/shared/models/availableModels";
 import React from "react";
 
 interface Model {
@@ -100,7 +100,10 @@ export default function ModelSelectModal({
   selectionMode = "single",
   onSelectIds,
 }: ModelSelectModalProps) {
-  useEnsureCatalog();
+  // `catalogReady` gates the grouping memo: without it as a dependency the
+  // memo runs once against an empty catalog and the modal opens showing zero
+  // models with no way to recover.
+  const catalogReady = useEnsureCatalog();
   const { getCaps } = useModelCaps();
   // Filter activeProviders by serviceKinds when kindFilter set (e.g. "webSearch", "webFetch")
   const filteredActiveProviders = useMemo(() => {
@@ -112,6 +115,11 @@ export default function ModelSelectModal({
     });
   }, [activeProviders, kindFilter]);
   const [searchQuery, setSearchQuery] = useState("");
+  // Fallback source for model aliases. Several tool pickers (ClineToolCard,
+  // DefaultToolCard, KiloToolCard) never pass the `modelAliases` prop, and for
+  // compatible providers it is the ONLY source of real models — an empty prop
+  // used to degrade the list to a literal placeholder row.
+  const [fetchedAliases, setFetchedAliases] = useState<Record<string, string>>({});
   const [combos, setCombos] = useState<Combo[]>([]);
   const [providerNodes, setProviderNodes] = useState<ProviderNode[]>([]);
   const [customModels, setCustomModels] = useState<CustomModel[]>([]);
@@ -203,6 +211,22 @@ export default function ModelSelectModal({
     if (isOpen) fetchCustomModels();
   }, [isOpen]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    (async () => {
+      try {
+        const res = await fetch("/api/models/alias", { cache: "no-store" });
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.aliases && typeof data.aliases === "object") {
+          setFetchedAliases(data.aliases as Record<string, string>);
+        }
+      } catch {
+        /* keep the empty fallback */
+      }
+    })();
+  }, [isOpen]);
+
   const fetchDisabledMap = async () => {
     try {
       const res = await fetch("/api/models/disabled", { cache: "no-store" });
@@ -244,21 +268,30 @@ export default function ModelSelectModal({
       })
       .catch(() => {});
 
-    fetch("/api/providers/filters", { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        const filters = (data && data.filters) || {};
+    // Read freeOnly through the same loader the provider page uses, so a failed
+    // GET falls back to localStorage instead of silently dropping the filter and
+    // desynchronising the two surfaces.
+    const aliases = Object.keys(AI_PROVIDERS).map((id) => getProviderAlias(id));
+    Promise.all(
+      [...new Set(aliases)].map(async (alias) => [alias, await loadFreeOnly(alias)] as const)
+    )
+      .then((entries) => {
         const map: Record<string, boolean> = {};
-        for (const [alias, entry] of Object.entries(filters)) {
-          const freeOnly = (entry as { freeOnly?: boolean } | null)?.freeOnly;
-          if (typeof freeOnly === "boolean") map[alias] = freeOnly;
-        }
+        for (const [alias, freeOnly] of entries) map[alias] = freeOnly;
         setFreeOnlyByAlias(map);
       })
       .catch(() => {});
   }, [isOpen]);
 
   const allProviders = useMemo(() => ({ ...OAUTH_PROVIDERS, ...FREE_PROVIDERS, ...FREE_TIER_PROVIDERS, ...APIKEY_PROVIDERS }), []);
+
+  // The prop wins when the caller supplies one; otherwise use what we fetched.
+  // Pickers that omit the prop would otherwise see an empty map and, for
+  // compatible providers, degrade to a single literal placeholder row.
+  const resolvedAliases = useMemo(
+    () => (Object.keys(modelAliases).length > 0 ? modelAliases : fetchedAliases),
+    [modelAliases, fetchedAliases],
+  );
 
   // Group models by provider with priority order
   const groupedModels = useMemo(() => {
@@ -296,6 +329,11 @@ export default function ModelSelectModal({
     });
 
     sortedProviderIds.forEach((providerId) => {
+      // hidden:true providers (devin-cli, mimo-free) reach the picker via
+      // NO_AUTH_PROVIDER_IDS. Without this they render phantom groups the
+      // Providers page never shows.
+      if (AI_PROVIDERS[providerId]?.hidden) return;
+
       const alias = getProviderAlias(providerId);
       const providerInfo = allProviders[providerId] || { name: providerId, color: "#666" };
       const isCustomProvider = isOpenAICompatibleProvider(providerId) || isAnthropicCompatibleProvider(providerId);
@@ -311,7 +349,7 @@ export default function ModelSelectModal({
       }
 
       if (providerInfo.passthroughModels) {
-        const aliasModels = Object.entries(modelAliases)
+        const aliasModels = Object.entries(resolvedAliases)
           .filter(([, fullModel]) => fullModel.startsWith(`${alias}/`))
           .map(([aliasName, fullModel]) => ({
             id: fullModel.replace(`${alias}/`, ""),
@@ -333,7 +371,7 @@ export default function ModelSelectModal({
             catalogModels: getModelsByProviderId(providerId) as any,
             liveModels: liveModelsByAlias[alias] || [],
             customModels: customModels as any,
-            modelAliases,
+            modelAliases: resolvedAliases,
             disabledIds: disabledMap[alias] || [],
             providerAlias: alias,
             type: "llm",
@@ -369,7 +407,7 @@ export default function ModelSelectModal({
         const matchedNode = providerNodes.find(node => node.id === providerId);
         const displayName = connection?.name || matchedNode?.name || providerInfo.name;
         const nodePrefix = connection?.providerSpecificData?.prefix || matchedNode?.prefix || providerId;
-        const nodeModels = Object.entries(modelAliases)
+        const nodeModels = Object.entries(resolvedAliases)
           .filter(([, fullModel]) => fullModel.startsWith(`${providerId}/`))
           .map(([aliasName, fullModel]) => ({
             id: fullModel.replace(`${providerId}/`, ""),
@@ -389,17 +427,17 @@ export default function ModelSelectModal({
           const hardcodedModels = allCatalog.filter((m) => !isDisabled(alias, m.id));
           const customRows = getProviderCustomModelRows({
             customModels: customModels as any,
-            modelAliases,
+            modelAliases: resolvedAliases,
             providerAlias: alias,
             builtInModels: allCatalog as any,
             type: kindFilter as any,
           });
           const customAliasModels = customRows
             .filter((r) => r.source === "legacyAlias")
-            .map((r) => ({ id: r.id, name: r.alias || r.id, value: r.fullModel, isCustom: true }));
+            .map((r) => ({ id: r.id, name: r.alias || r.id, value: r.fullModel, type: r.type, isCustom: true }));
           const customRegisteredModels = customRows
             .filter((r) => r.source === "custom")
-            .map((r) => ({ id: r.id, name: r.name || r.id, value: r.fullModel, isCustom: true }));
+            .map((r) => ({ id: r.id, name: r.name || r.id, value: r.fullModel, type: r.type, isCustom: true }));
 
           let allModels = filterByKind([
             ...hardcodedModels.map((m) => ({ id: m.id, name: m.name, value: `${alias}/${m.id}`, type: m.type })),
@@ -422,7 +460,7 @@ export default function ModelSelectModal({
             catalogModels: getModelsByProviderId(providerId) as any,
             liveModels: liveModelsByAlias[alias] || [],
             customModels: customModels as any,
-            modelAliases,
+            modelAliases: resolvedAliases,
             disabledIds: disabledMap[alias] || [],
             providerAlias: alias,
             type: "llm",
@@ -437,21 +475,23 @@ export default function ModelSelectModal({
             isCustom: r.source === "custom" || r.source === "legacyAlias",
           }));
 
-          if (allModels.length === 0 && kindFilter === null && (providerInfo.serviceKinds || ["llm"]).includes("llm")) {
+          // Gate on the provider being genuinely empty, not on the enabled set
+          // being empty. Otherwise a fully-disabled provider still offers a bare
+          // `{ value: alias }` row, which resolves to the wrong provider
+          // (core/model/mod.rs falls back to its default route).
+          if (built.allRows.length === 0 && kindFilter === null && (providerInfo.serviceKinds || ["llm"]).includes("llm")) {
             allModels = [{ id: providerId, name: providerInfo.name, value: alias }];
           }
 
           if (allModels.length > 0) {
             groups[providerId] = { name: providerInfo.name, alias, color: providerInfo.color, models: allModels };
-          } else if (allModels.length === 0 && kindFilter === null && (providerInfo.serviceKinds || ["llm"]).includes("llm")) {
-            groups[providerId] = { name: providerInfo.name, alias, color: providerInfo.color, models: [{ id: providerId, name: providerInfo.name, value: alias }] };
           }
         }
       }
     });
 
     return groups;
-  }, [filteredActiveProviders, modelAliases, allProviders, providerNodes, customModels, kindFilter, disabledMap, liveModelsByAlias, freeOnlyByAlias]);
+  }, [filteredActiveProviders, resolvedAliases, allProviders, providerNodes, customModels, kindFilter, disabledMap, liveModelsByAlias, freeOnlyByAlias, catalogReady]);
 
   // Filter combos by search query (and hide combos when kindFilter is set — combos are LLM-only by design)
   const filteredCombos = useMemo(() => {
@@ -485,16 +525,24 @@ export default function ModelSelectModal({
         ? models.filter(
             (m) =>
               m.name.toLowerCase().includes(query) ||
-              m.id.toLowerCase().includes(query),
+              m.id.toLowerCase().includes(query) ||
+              m.value.toLowerCase().includes(query),
           )
         : sortModels(models);
 
-      const providerNameMatches = group.name.toLowerCase().includes(query);
+      // A provider-name hit should show that provider's models, not an empty
+      // group. Matching on the alias matters too: 39 of 105 providers have an
+      // alias that is not a substring of the display name ("kilo" -> Kilo Code).
+      const groupMatches = group.name.toLowerCase().includes(query) ||
+        group.alias.toLowerCase().includes(query);
+      const visibleModels = groupMatches ? sortModels(models) : matchedModels;
 
-      if (matchedModels.length > 0 || providerNameMatches) {
+      // Never emit a group with zero models — it renders a bare "(0)" header
+      // and suppresses the "No models found" fallback.
+      if (visibleModels.length > 0) {
         filtered[providerId] = {
           ...group,
-          models: matchedModels,
+          models: visibleModels,
         };
       }
     });
