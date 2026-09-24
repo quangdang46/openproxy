@@ -123,7 +123,7 @@ async fn run_list(db: &Db, ctx: OutputCtx) -> anyhow::Result<()> {
                 format!(
                     "  {}  [{}]  {} model(s)",
                     combo.name,
-                    combo.kind.as_deref().unwrap_or("fallback"),
+                    display_strategy(combo),
                     combo.models.len()
                 ),
             );
@@ -141,9 +141,10 @@ async fn run_get(db: &Db, ctx: OutputCtx, name: &str) -> anyhow::Result<()> {
         emit_robot("openproxy.v1.combo.get", serde_json::to_value(&combo)?)?;
     } else {
         humanln(ctx, format!("Combo: {}", combo.name));
+        humanln(ctx, format!("  strategy: {}", display_strategy(&combo)));
         humanln(
             ctx,
-            format!("  kind: {}", combo.kind.as_deref().unwrap_or("fallback")),
+            format!("  kind: {}", combo.kind.as_deref().unwrap_or("-")),
         );
         humanln(ctx, format!("  models ({}):", combo.models.len()));
         for m in &combo.models {
@@ -182,15 +183,17 @@ async fn run_create(
     }
 
     let now = chrono::Utc::now().to_rfc3339();
+    let mut extra = BTreeMap::new();
+    set_strategy(&mut extra, &strategy);
     let combo = Combo {
         id: uuid::Uuid::new_v4().to_string(),
         name: name.clone(),
         models,
         disabled_models: Vec::new(),
-        kind: normalize_strategy(&strategy),
+        kind: None,
         created_at: Some(now.clone()),
         updated_at: Some(now),
-        extra: BTreeMap::new(),
+        extra,
     };
 
     db.update(|db| db.combos.push(combo.clone())).await?;
@@ -221,7 +224,7 @@ async fn run_edit(
                 combo.models = m.clone();
             }
             if let Some(s) = &strategy {
-                combo.kind = normalize_strategy(s);
+                set_strategy(&mut combo.extra, s);
             }
             combo.updated_at = Some(chrono::Utc::now().to_rfc3339());
             updated = Some(combo.clone());
@@ -401,10 +404,9 @@ async fn run_apply(db: &Db, ctx: OutputCtx, from_file: &str, prune: bool) -> any
 
     db.update(|app| {
         for item in &items {
-            let target_kind = item
-                .kind
-                .clone()
-                .or_else(|| item.strategy.as_ref().and_then(|s| normalize_strategy(s)));
+            // `kind` is the media modality only. A strategy belongs in
+            // `extra["strategy"]`, which is what `strategy_for_combo` reads.
+            let target_kind = item.kind.clone().filter(|kind| !kind.is_empty());
             if let Some(existing) = app.combos.iter_mut().find(|c| c.name == item.name) {
                 let mut changed = false;
                 if existing.models != item.models {
@@ -414,6 +416,14 @@ async fn run_apply(db: &Db, ctx: OutputCtx, from_file: &str, prune: bool) -> any
                 if existing.kind != target_kind {
                     existing.kind = target_kind.clone();
                     changed = true;
+                }
+                if let Some(s) = &item.strategy {
+                    let mut extra = existing.extra.clone();
+                    set_strategy(&mut extra, s);
+                    if existing.extra != extra {
+                        existing.extra = extra;
+                        changed = true;
+                    }
                 }
                 if let Some(active) = item.is_active {
                     let prev = existing.extra.get("isActive").and_then(Value::as_bool);
@@ -434,6 +444,9 @@ async fn run_apply(db: &Db, ctx: OutputCtx, from_file: &str, prune: bool) -> any
                 let mut extra = BTreeMap::new();
                 if let Some(active) = item.is_active {
                     extra.insert("isActive".into(), Value::Bool(active));
+                }
+                if let Some(s) = &item.strategy {
+                    set_strategy(&mut extra, s);
                 }
                 app.combos.push(Combo {
                     id: uuid::Uuid::new_v4().to_string(),
@@ -485,6 +498,39 @@ fn is_valid_combo_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+}
+
+/// Store the dispatch strategy where `strategy_for_combo` actually reads it:
+/// `extra["strategy"]`. It must never go into `Combo.kind` — `kind` is the
+/// media modality (`llm` / `tts` / `image`), and the Combos page and
+/// `GET /v1/models` both filter on it, so a strategy parked there hides the
+/// combo entirely. An empty / whitespace-only strategy clears the override so
+/// the combo follows the global default again.
+fn set_strategy(extra: &mut BTreeMap<String, Value>, strategy: &str) {
+    match normalize_strategy(strategy) {
+        Some(canonical) => {
+            extra.insert("strategy".into(), Value::String(canonical));
+        }
+        None => {
+            extra.remove("strategy");
+        }
+    }
+}
+
+/// The strategy to show a human: `extra["strategy"]`, else a legacy
+/// strategy parked in `kind` by an older release, else the global default.
+fn display_strategy(combo: &Combo) -> &str {
+    combo
+        .extra
+        .get("strategy")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            combo
+                .kind
+                .as_deref()
+                .filter(|kind| crate::db::sqlite::patch::COMBO_KIND_STRATEGY_LEAKS.contains(kind))
+        })
+        .unwrap_or("fallback")
 }
 
 fn normalize_strategy(s: &str) -> Option<String> {

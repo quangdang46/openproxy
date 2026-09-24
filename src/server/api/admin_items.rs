@@ -434,7 +434,18 @@ struct UpdateComboRequest {
     /// leaves the current value untouched so callers can update
     /// `name`/`models`/`kind` independently.
     disabled_models: Option<Vec<String>>,
+    /// Media modality (`llm` / `tts` / `image`). Never a dispatch strategy:
+    /// the Combos page and `GET /v1/models` filter on it.
     kind: Option<String>,
+    /// Dispatch strategy. Merged into `extra["strategy"]`, which is what
+    /// `strategy_for_combo` resolves.
+    strategy: Option<String>,
+    /// Shorthand for the `isActive` entry of `extra`.
+    #[serde(default)]
+    is_active: Option<bool>,
+    /// Free-form combo extras (`fusionConfig`, `judgeModel`, …). Merged
+    /// key-by-key into the stored `extra`; omitted fields are left untouched.
+    extra: Option<std::collections::BTreeMap<String, Value>>,
 }
 
 async fn update_combo(
@@ -482,6 +493,21 @@ async fn update_combo(
                 }
                 if let Some(kind) = req.kind.clone() {
                     combo.kind = Some(kind);
+                }
+                if let Some(extra) = req.extra.clone() {
+                    for (key, value) in extra {
+                        combo.extra.insert(key, value);
+                    }
+                }
+                if let Some(strategy) = req.strategy.clone() {
+                    combo
+                        .extra
+                        .insert("strategy".into(), Value::String(strategy));
+                }
+                if let Some(is_active) = req.is_active {
+                    combo
+                        .extra
+                        .insert("isActive".into(), Value::Bool(is_active));
                 }
                 combo.updated_at = Some(Utc::now().to_rfc3339());
             }
