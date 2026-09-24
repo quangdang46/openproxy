@@ -4,30 +4,29 @@
 //! per-provider refresh functions that each wrap the upstream token-refresh
 //! API for that provider.
 //!
-//! # Dedup guarantees (H28 — verified correct)
+//! # Dedup guarantees
 //!
 //! - Only **one** HTTP refresh request is in flight per `(provider, old_token)`
 //!   pair at any time. Concurrent callers all await the same `OnceCell`.
 //! - The result is cached for `REFRESH_RESULT_TTL_MS` (10 s) so that burst
 //!   callers within that window reuse the same response instead of sending
 //!   duplicate HTTP requests.
-//! - The per-token mutex in the old code prevented `refresh_token_reused`
-//!   errors from Auth0; this dedup layer provides the same mutual exclusion
-//!   *within process*.
+//! - After that window the dedup entry is EVICTED, so the next call performs a
+//!   real HTTP refresh. This eviction is load-bearing, not an optimisation: the
+//!   `OnceCell` memoizes its value permanently, so reusing a completed entry
+//!   would replay the first refresh result forever. For a non-rotating provider
+//!   (the refresh response omits `refresh_token`, so the caller keeps using the
+//!   same old token as the key) that pinned every later refresh, killed the
+//!   account once its access token expired, and required deleting and re-adding
+//!   the connection to recover.
 //!
-//! ## Verification (H28)
+//! The per-token mutex in the old code prevented `refresh_token_reused`
+//! errors from Auth0; this dedup layer provides the same mutual exclusion
+//! *within process*. All per-provider refresh functions route through
+//! `dispatch_oauth_refresh` -> `dedup_refresh`, whose call site is the 401/403
+//! retry in `forward_with_provider_fallback`.
 //!
-//! The `dedup_refresh` function calls `GLOBAL_REFRESH_DEDUP.dedup()` which
-//! uses `tokio::sync::OnceCell::get_or_init()` to share a single in-flight
-//! future across concurrent callers. The `OnceCell` is stored per key in a
-//! `HashMap` behind a `parking_lot::Mutex`, so the critical section is
-//! brief (map insertion). Success results are cached for 10 s; errors are
-//! NOT cached so retries (via `refresh_with_retry`) can make additional
-//! attempts. All per-provider refresh functions route through
-//! `dispatch_oauth_refresh` which calls `dedup_refresh`, and the sole
-//! call site (`chat.rs` 401/403 retry in `forward_with_provider_fallback`)
-//! invokes `dispatch_oauth_refresh` with the correct provider/token values.
-//! The dedup mechanism is fully wired and correct as of this audit.
+//! Regression test: `dedup_performs_a_real_refresh_after_ttl_expiry`.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -259,6 +258,19 @@ impl RefreshDedup {
                     if let Some(ref cached) = entry.cached_result {
                         return cached.clone();
                     }
+                } else {
+                    // TTL expired. The entry's OnceCell is ALREADY COMPLETE,
+                    // so reusing it would hand back the memoized result forever
+                    // and no real HTTP refresh would ever run again. Evict it so
+                    // the get-or-insert below builds a fresh cell.
+                    //
+                    // This matters most for non-rotating providers, where the
+                    // refresh response omits refresh_token and the caller keeps
+                    // using the same old token as the dedup key: their first
+                    // refresh would be pinned for the life of the process, the
+                    // access token would expire, and the account would be dead
+                    // until the connection was deleted and re-added.
+                    cache.remove(&key);
                 }
             }
 
@@ -1298,6 +1310,83 @@ async fn parse_json_refresh_response(resp: reqwest::Response) -> Result<RefreshR
 
 #[cfg(test)]
 mod tests {
+    /// Regression (release-readiness blocker B2): the dedup entry's OnceCell
+    /// memoizes its value permanently. On TTL expiry the old code returned the
+    /// memoized result instead of performing a real refresh, so after the first
+    /// refresh no further HTTP refresh ever happened for that key. For a
+    /// non-rotating provider (github: the response omits refresh_token, so the
+    /// same old token is the key forever) the account was dead once its access
+    /// token expired, and recovery meant deleting and re-adding the connection.
+    #[tokio::test]
+    async fn dedup_performs_a_real_refresh_after_ttl_expiry() {
+        let dedup = RefreshDedup::default();
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c1 = calls.clone();
+        let first = dedup
+            .dedup("github", "rt-fixed", || {
+                let c = c1.clone();
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(RefreshResult {
+                        access_token: "a1".into(),
+                        refresh_token: None,
+                        expires_in: Some(1),
+                    })
+                }
+            })
+            .await
+            .expect("first refresh");
+        assert_eq!(first.access_token, "a1");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // Within the TTL the cached result is reused — no second HTTP call.
+        let c2 = calls.clone();
+        let warm = dedup
+            .dedup("github", "rt-fixed", || {
+                let c = c2.clone();
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(RefreshResult {
+                        access_token: "should-not-be-used".into(),
+                        refresh_token: None,
+                        expires_in: Some(1),
+                    })
+                }
+            })
+            .await
+            .expect("warm refresh");
+        assert_eq!(warm.access_token, "a1", "TTL window must still dedup");
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // After the TTL, a REAL refresh must happen. Before the fix this
+        // returned the memoized "a1" forever and the counter never moved.
+        tokio::time::sleep(std::time::Duration::from_millis(REFRESH_RESULT_TTL_MS + 50)).await;
+        let c3 = calls.clone();
+        let cold = dedup
+            .dedup("github", "rt-fixed", || {
+                let c = c3.clone();
+                async move {
+                    c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(RefreshResult {
+                        access_token: "a2".into(),
+                        refresh_token: None,
+                        expires_in: Some(1),
+                    })
+                }
+            })
+            .await
+            .expect("cold refresh");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a real refresh must run after TTL expiry"
+        );
+        assert_eq!(
+            cold.access_token, "a2",
+            "must not replay the memoized first result"
+        );
+    }
+
     use super::*;
 
     /// Parse helper mirroring the expiresIn resolution in
