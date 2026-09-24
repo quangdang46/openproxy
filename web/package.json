@@ -40,7 +40,7 @@
     "proper-lockfile": "^4.1.2",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "react-is": "^19.2.7",
+    "react-is": "^19.2.8",
     "recharts": "^3.7.0",
     "selfsigned": "^5.5.0",
     "socks-proxy-agent": "^10.0.0",
