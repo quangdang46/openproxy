@@ -200,6 +200,11 @@ pub fn iflow() -> OAuthProviderConfig {
 }
 
 /// Kimi Coding — device-code flow (dual-auth provider merged in 68566f5).
+///
+/// Registering a new OAuth provider here also requires a matching
+/// `PROVIDER_CONFIGS` entry (see `tests/provider_configs_complete.rs`): a
+/// connection from this flow carries no `provider_node`, so a missing routing
+/// entry makes every request fail with `UnsupportedProvider` -> HTTP 500.
 pub fn kimi_coding() -> OAuthProviderConfig {
     OAuthProviderConfig {
         id: "kimi-coding",
