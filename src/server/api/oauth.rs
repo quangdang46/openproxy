@@ -1377,6 +1377,35 @@ async fn handle_xai_proxy_connection(
     proxy_state.stop().await;
 }
 
+/// Merge a re-authorisation token response into an existing connection.
+///
+/// 9router preserves whatever the provider chose not to re-send:
+/// `refreshToken: data.refresh_token || refreshToken` (testUtils.js:239), and
+/// likewise for scope. Many providers are non-rotating and simply omit
+/// `refresh_token` from a re-authorisation response; assigning the field
+/// unconditionally replaced a good token with null, so the next refresh had
+/// nothing to use and the account had to be re-authenticated by hand.
+///
+/// `expires_at` arrives pre-computed as an Option, so `None` (upstream sent no
+/// `expires_in`) must not clear a known expiry either.
+pub(super) fn merge_reauth_tokens(
+    conn: &mut crate::types::ProviderConnection,
+    token_response: &TokenResponse,
+    expires_at: Option<String>,
+) {
+    conn.access_token = Some(token_response.access_token.clone());
+    if let Some(rt) = &token_response.refresh_token {
+        conn.refresh_token = Some(rt.clone());
+    }
+    if let Some(sc) = &token_response.scope {
+        conn.scope = Some(sc.clone());
+    }
+    if expires_at.is_some() {
+        conn.expires_at = expires_at.clone();
+    }
+    conn.updated_at = Some(chrono::Utc::now().to_rfc3339());
+}
+
 async fn store_connection(
     db: &crate::db::Db,
     account_id: &str,
@@ -1414,14 +1443,8 @@ async fn store_connection(
             .iter()
             .position(|conn| conn.provider == provider && conn.id.contains(account_id))
         {
-            snapshot.provider_connections[conn_idx].access_token =
-                Some(token_response.access_token.clone());
-            snapshot.provider_connections[conn_idx].refresh_token =
-                token_response.refresh_token.clone();
-            snapshot.provider_connections[conn_idx].expires_at = expires_at;
-            snapshot.provider_connections[conn_idx].scope = token_response.scope.clone();
-            snapshot.provider_connections[conn_idx].updated_at =
-                Some(chrono::Utc::now().to_rfc3339());
+            let conn = &mut snapshot.provider_connections[conn_idx];
+            merge_reauth_tokens(conn, token_response, expires_at);
         } else {
             let connection_id = format!("{}-{}", account_id, Uuid::new_v4());
             let connection = ProviderConnection {
@@ -6973,6 +6996,66 @@ async fn handle_zed_proxy_connection(
 
 #[cfg(test)]
 mod tests {
+    /// Regression (audit finding #99, 9router parity): re-authorisation
+    /// assigned refresh_token / scope / expires_at unconditionally, so a
+    /// non-rotating provider that omits refresh_token replaced a perfectly
+    /// good token with null. The next refresh had nothing to work with and the
+    /// account had to be re-authenticated by hand. 9router keeps the old value:
+    /// `refreshToken: data.refresh_token || refreshToken`.
+    #[test]
+    fn reauth_preserves_credentials_the_provider_omits() {
+        use super::merge_reauth_tokens;
+        use crate::types::ProviderConnection;
+
+        let mut conn = ProviderConnection {
+            id: "c1".into(),
+            provider: "github".into(),
+            access_token: Some("old-access".into()),
+            refresh_token: Some("old-refresh".into()),
+            scope: Some("repo".into()),
+            expires_at: Some("2030-01-01T00:00:00Z".into()),
+            ..Default::default()
+        };
+
+        let partial = TokenResponse {
+            access_token: "new-access".into(),
+            refresh_token: None,
+            expires_in: None,
+            scope: None,
+            id_token: None,
+            token_type: None,
+        };
+        merge_reauth_tokens(&mut conn, &partial, None);
+
+        assert_eq!(conn.access_token.as_deref(), Some("new-access"));
+        assert_eq!(
+            conn.refresh_token.as_deref(),
+            Some("old-refresh"),
+            "a provider that omits refresh_token must not wipe the stored one"
+        );
+        assert_eq!(conn.scope.as_deref(), Some("repo"), "scope must survive");
+        assert_eq!(
+            conn.expires_at.as_deref(),
+            Some("2030-01-01T00:00:00Z"),
+            "an omitted expires_in must not clear a known expiry"
+        );
+
+        // A rotating provider that DOES send new values must still win.
+        let rotating = TokenResponse {
+            access_token: "a2".into(),
+            refresh_token: Some("new-refresh".into()),
+            expires_in: Some(3600),
+            scope: Some("repo user".into()),
+            id_token: None,
+            token_type: None,
+        };
+        let new_expiry = "2026-01-01T00:00:00Z";
+        merge_reauth_tokens(&mut conn, &rotating, Some(new_expiry.into()));
+        assert_eq!(conn.refresh_token.as_deref(), Some("new-refresh"));
+        assert_eq!(conn.scope.as_deref(), Some("repo user"));
+        assert_eq!(conn.expires_at.as_deref(), Some(new_expiry));
+    }
+
     use super::*;
 
     fn jwt_with_payload(payload: &serde_json::Value) -> String {
