@@ -49,6 +49,15 @@ pub fn apply_pending_migrations(conn: &Connection) -> rusqlite::Result<()> {
     // (free-tier Feature 3). Safe to run on every open — no-op when present.
     add_api_keys_budget_column(conn)?;
 
+    // Repair the combos whose `kind` column was written with a dispatch
+    // strategy by `openproxy combo create --strategy` (bead openproxy-63hh).
+    // `kind` means media modality, so a value like "round-robin" hides the
+    // combo from the Combos page and from GET /v1/models. The write path is
+    // fixed, but existing databases still hold the corrupted rows, so the
+    // repair has to run on open — otherwise the fix only ever helps newly
+    // created databases. Idempotent: a no-op once no rows match.
+    crate::db::sqlite::patch::clear_combo_kind_strategy_leak(conn)?;
+
     let current = get_schema_version(conn)?;
     if current < SCHEMA_VERSION {
         set_schema_version(conn, SCHEMA_VERSION)?;

@@ -124,6 +124,13 @@ async fn build_models_list(
     let mut models = Vec::new();
 
     for combo in &snapshot.combos {
+        // A combo switched off with `openproxy combo disable` is no longer
+        // dispatchable (get_combo_models_from_data requires is_active), so
+        // advertising it in GET /v1/models would offer clients a model that
+        // 400s on use. The Combos page filters the same way.
+        if !combo.is_active() {
+            continue;
+        }
         if !combo_matches_kinds(combo.kind.as_deref(), kind_filter) {
             continue;
         }
