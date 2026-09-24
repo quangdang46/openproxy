@@ -713,7 +713,11 @@ export default function ModelSelectModal({
               )}
             </div>
 
-            <div className="flex flex-wrap gap-1.5">
+            <div
+              role="listbox"
+              aria-multiselectable={selectionMode === "multi"}
+              aria-label="Available models"
+              className="flex flex-wrap gap-1.5">
               {group.models.map((model) => {
                 const isPlaceholder = model.isPlaceholder;
                 const isLlm = model.type === "llm";
@@ -732,6 +736,27 @@ export default function ModelSelectModal({
                   <div
                     key={model.value}
                     onClick={rowClick}
+                    // Release-readiness blocker B7: this row was a bare
+                    // <div onClick>, with no tabIndex, no role and no key
+                    // handler, so a keyboard-only user could not focus or
+                    // select a model at all. In single-select mode no checkbox
+                    // renders, so the div was the ONLY selection affordance —
+                    // WCAG 2.1.1 failed outright on the judge-model picker,
+                    // the media combo picker and the opencode subagent picker.
+                    // A div carrying role="option" is the standard listbox
+                    // pattern; converting the wrapper to <button> was rejected
+                    // because the star button and the multi-select checkbox are
+                    // nested inside it, and interactive content inside a
+                    // button is invalid HTML.
+                    role="option"
+                    aria-selected={isMultiSelected || isSingleSelected}
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        rowClick();
+                      }
+                    }}
                     title={isPlaceholder ? "Select to pre-fill, then edit model ID in the input" : undefined}
                     className={`
                       inline-flex items-center gap-1 px-2 py-1 rounded-xl text-xs font-medium transition-all border hover:cursor-pointer

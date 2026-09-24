@@ -67,12 +67,32 @@ export default function DashboardLayout({ children }: DashboardLayoutProps) {
 
   return (
     <div className="flex h-screen w-full overflow-hidden bg-canvas">
-      <div className="fixed top-4 right-4 z-[80] flex w-[min(92vw,380px)] flex-col gap-2">
+      {/* Release-readiness blocker B8: the toast container and every toast were
+          bare divs with no aria-live, role="status" or role="alert" anywhere in
+          the block (and none anywhere in the repo). Toasts render in the
+          top-right corner, outside reading order, and self-destruct after 5s
+          (8s for errors). On the error path the row stays put and the toast is
+          the ONLY feedback channel — so a screen-reader user deleting a
+          connection that 500s gets no announcement at all and cannot tell
+          whether the delete worked. aria-live="polite" on the container plus
+          role="alert" on error toasts makes the announcement. */}
+      <div
+        className="fixed top-4 right-4 z-[80] flex w-[min(92vw,380px)] flex-col gap-2"
+        role="status"
+        aria-live="polite"
+        aria-atomic="false"
+        aria-label="Notifications"
+      >
         {notifications.map((n) => {
           const style = getToastStyle(n.type);
           return (
             <div
               key={n.id}
+              // Errors assert immediately (assertive); successes and info wait
+              // for a pause in speech, so a burst of success toasts cannot drown
+              // out the one failure that matters.
+              role={n.type === "error" ? "alert" : undefined}
+              aria-live={n.type === "error" ? "assertive" : undefined}
               className={`relative overflow-hidden rounded-mini-md pl-4 pr-3 py-3 shadow-modal before:absolute before:left-0 before:top-0 before:bottom-0 before:w-[3px] ${style.wrapper}`}
             >
               <div className="flex items-start gap-2.5">
