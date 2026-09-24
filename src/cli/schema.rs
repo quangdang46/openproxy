@@ -126,7 +126,11 @@ fn normalize(resource: &str) -> String {
     resource.replace('-', "_")
 }
 
-fn schema_for(resource: &str) -> Option<Value> {
+/// JSON Schema for `resource`, or `None` when the resource is unknown.
+///
+/// Public so integration tests can assert that the advertised shape matches
+/// what the write path actually honours.
+pub fn schema_for(resource: &str) -> Option<Value> {
     Some(match resource {
         "provider" => json!({
             "$schema": "http://json-schema.org/draft-07/schema#",
@@ -165,8 +169,17 @@ fn schema_for(resource: &str) -> Option<Value> {
             "properties": {
                 "id": {"type": "string"},
                 "name": {"type": "string"},
-                "strategy": {"type": "string", "enum": ["fallback", "round-robin", "sticky-round-robin", "fusion", "auto-combo", "hedging", "shadow"], "default": "fallback"},
+                "strategy": {
+                    "type": "string",
+                    "enum": ["fallback", "round-robin", "sticky-round-robin", "fusion", "auto-combo", "hedging", "shadow", "cheapest", "fastest", "quality"],
+                    "default": "fallback",
+                    "description": "Dispatch strategy, stored as extra.strategy. NEVER put it in `kind`."
+                },
                 "models": {"type": "array", "items": {"type": "string"}},
+                "kind": {
+                    "type": ["string", "null"],
+                    "description": "Media modality (llm / tts / image), not a dispatch strategy."
+                },
                 "isActive": {"type": "boolean", "default": true}
             }
         }),
@@ -303,7 +316,11 @@ fn schema_for(resource: &str) -> Option<Value> {
     })
 }
 
-fn example_for(resource: &str) -> Option<Value> {
+/// Example payload for `resource`, or `None` when the resource is unknown.
+///
+/// Public so integration tests can round-trip the example through the write
+/// path it documents.
+pub fn example_for(resource: &str) -> Option<Value> {
     Some(match resource {
         "provider" => json!({
             "name": "openai-main",
@@ -319,7 +336,7 @@ fn example_for(resource: &str) -> Option<Value> {
         }),
         "combo" => json!({
             "name": "premium-coding",
-            "strategy": "fallback",
+            "strategy": "round-robin",
             "models": ["openai/gpt-4o", "anthropic/claude-3-5-sonnet", "groq/llama-3.1-70b"]
         }),
         "key" => json!({

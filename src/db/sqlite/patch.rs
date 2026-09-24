@@ -322,6 +322,52 @@ fn disabled_from_extra(extra: &BTreeMap<String, Value>) -> DisabledMap {
     }
 }
 
+/// Dispatch-strategy names that older `openproxy combo` releases wrote into
+/// `combos.kind` instead of `extra["strategy"]`.
+pub const COMBO_KIND_STRATEGY_LEAKS: &[&str] = &[
+    "fallback",
+    "round-robin",
+    "sticky-round-robin",
+    "fusion",
+    "auto-combo",
+    "hedging",
+    "shadow",
+    "cheapest",
+    "fastest",
+    "quality",
+];
+
+/// Repair rows corrupted by the old `--strategy` handling: a dispatch strategy
+/// stored in `combos.kind` is cleared so the combo is no longer hidden from
+/// the Combos page / `GET /v1/models` (both filter on the modality `kind`).
+///
+/// A real modality (`llm`, `tts`, `image`, …) is left alone, `NULL` kinds are
+/// already clean, and re-running is a no-op. Returns the number of rows fixed.
+pub fn clear_combo_kind_strategy_leak(conn: &Connection) -> rusqlite::Result<usize> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='combos'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|count| count > 0)
+        .unwrap_or(false);
+    if !table_exists {
+        return Ok(0);
+    }
+
+    let placeholders = (1..=COMBO_KIND_STRATEGY_LEAKS.len())
+        .map(|i| format!("?{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "UPDATE combos SET kind = NULL \
+         WHERE kind IS NOT NULL AND LOWER(kind) IN ({placeholders})"
+    );
+    let params = rusqlite::params_from_iter(COMBO_KIND_STRATEGY_LEAKS.iter().copied());
+    conn.execute(&sql, params)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

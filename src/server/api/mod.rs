@@ -1453,8 +1453,16 @@ struct CreateComboRequest {
     name: Option<String>,
     #[serde(default)]
     models: Vec<String>,
+    /// Media modality (`llm` / `tts` / `image`). Never a dispatch strategy.
     kind: Option<String>,
-    /// Free-form extra fields (e.g. `strategy`) preserved on the created combo.
+    /// Dispatch strategy. Stored as `extra["strategy"]`, which is what
+    /// `strategy_for_combo` resolves — putting it in `kind` would hide the
+    /// combo from the Combos page and `GET /v1/models`.
+    strategy: Option<String>,
+    /// Shorthand for `extra["isActive"]`.
+    #[serde(default, rename = "isActive")]
+    is_active: Option<bool>,
+    /// Free-form extra fields (e.g. `fusionConfig`) preserved on the combo.
     #[serde(default)]
     extra: std::collections::BTreeMap<String, serde_json::Value>,
 }
@@ -1511,6 +1519,14 @@ async fn create_combo_api(
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339();
 
+    let mut extra = req.extra;
+    if let Some(strategy) = req.strategy {
+        extra.insert("strategy".into(), serde_json::Value::String(strategy));
+    }
+    if let Some(is_active) = req.is_active {
+        extra.insert("isActive".into(), serde_json::Value::Bool(is_active));
+    }
+
     let combo = Combo {
         id,
         name: name.to_string(),
@@ -1519,7 +1535,7 @@ async fn create_combo_api(
         kind: req.kind.filter(|kind| !kind.is_empty()),
         created_at: Some(now.clone()),
         updated_at: Some(now),
-        extra: req.extra,
+        extra,
     };
 
     let result = state
@@ -1545,7 +1561,10 @@ async fn create_combo_api(
 struct UpdateComboRequest {
     #[serde(default)]
     models: Option<Vec<String>>,
+    /// Media modality (`llm` / `tts` / `image`). Never a dispatch strategy.
     kind: Option<String>,
+    /// Dispatch strategy, stored as `extra["strategy"]`.
+    strategy: Option<String>,
 }
 
 /// **Unused** — no corresponding route. Kept for future use.
@@ -1580,6 +1599,11 @@ async fn update_combo_api(
                 }
                 if let Some(kind) = req.kind {
                     combo.kind = Some(kind);
+                }
+                if let Some(strategy) = req.strategy {
+                    combo
+                        .extra
+                        .insert("strategy".into(), serde_json::Value::String(strategy));
                 }
                 combo.updated_at = Some(chrono::Utc::now().to_rfc3339());
             }
