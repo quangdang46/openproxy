@@ -4507,16 +4507,28 @@ async fn collect_upstream_response_bytes(response: UpstreamResponse) -> (Bytes, 
 /// Strip the SSE `data:` prefix from a chunk, returning the JSON payload.
 /// SSE data lines look like `data: {...}` or `data: {...}\n\nbuffer`.
 /// If the body is valid JSON already (non-streaming path), return as-is.
+///
+/// The scan takes the first line that STARTS WITH `data:`, not line 0.
+/// Anthropic names every event, so a frame arrives as
+///   `event: message_start\ndata: {...}`
+/// and taking line 0 meant the `data:` branch never ran for a single Claude
+/// frame — the whole usage path returned None for Anthropic streams. That
+/// silently reduced the usage merge to a no-op: the accumulator stayed None
+/// and every Claude streaming request still recorded tokens:null / cost 0.00.
+/// Found by the openproxy-kh7f bead review, which also showed the merge's own
+/// tests had been written against pre-built TokenUsage values and so could not
+/// have caught it.
 fn strip_sse_data_prefix(body: &[u8]) -> &[u8] {
-    let trimmed = body.split(|&b| b == b'\n').next().unwrap_or(body);
-    if trimmed.starts_with(b"data:") {
-        let after = &trimmed[b"data:".len()..];
-        let after = after
-            .strip_prefix(b" ")
-            .or_else(|| after.strip_prefix(b"\t"))
-            .unwrap_or(after);
-        if serde_json::from_slice::<serde_json::Value>(after).is_ok() {
-            return after;
+    for line in body.split(|&b| b == b'\n') {
+        if line.starts_with(b"data:") {
+            let after = &line[b"data:".len()..];
+            let after = after
+                .strip_prefix(b" ")
+                .or_else(|| after.strip_prefix(b"\t"))
+                .unwrap_or(after);
+            if serde_json::from_slice::<serde_json::Value>(after).is_ok() {
+                return after;
+            }
         }
     }
     // Fall back: try parsing the whole body as JSON (non-streaming / already-stripped).
@@ -4582,9 +4594,24 @@ fn extract_token_usage_from_bytes(body: &[u8]) -> Option<TokenUsage> {
     let body = strip_sse_data_prefix(body);
     let value = serde_json::from_slice::<Value>(body).ok()?;
 
-    let usage_obj = value
-        .get("usage")
-        .and_then(Value::as_object)
+    // Claude/Anthropic names every stream event, and splits usage across two
+    // shapes (9router extractUsage, usageTracking.js:239-263):
+    //   message_start  -> usage nested under `message.usage`  (input + cache)
+    //   message_delta  -> usage at the top level             (output)
+    // The Anthropic branch was missing entirely, so neither the input tokens
+    // nor either cache counter could ever be read off a Claude stream. The
+    // generic top-level `usage` lookup below still serves message_delta and
+    // every OpenAI-shaped provider; the nested lookup is added, not moved.
+    let anthropic_nested = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|t| *t == "message_start")
+        .and_then(|_| value.get("message"))
+        .and_then(|m| m.get("usage"))
+        .and_then(Value::as_object);
+
+    let usage_obj = anthropic_nested
+        .or_else(|| value.get("usage").and_then(Value::as_object))
         .or_else(|| {
             value
                 .get("data")
@@ -5824,5 +5851,84 @@ mod usage_merge_tests {
         let carried = merge_token_usage(Some(anthropic_start()), None);
         assert_eq!(carried.expect("carried").input_tokens, Some(1200));
         assert!(merge_token_usage(None, None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod extractor_framing_tests {
+    /// message_start is the ONLY Anthropic event carrying input tokens and the
+    /// two cache counters. Losing it loses the cache accounting entirely.
+    #[test]
+    fn extractor_reads_cache_counters_off_message_start() {
+        let frame = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"output_tokens\":0,\"cache_read_input_tokens\":8000,\"cache_creation_input_tokens\":400}}}\n\n";
+        let u = super::extract_token_usage_from_bytes(frame).expect("usage");
+        assert_eq!(u.input_tokens.or(u.prompt_tokens), Some(1200));
+        assert_eq!(u.cache_read_input_tokens, Some(8000));
+        assert_eq!(u.cache_creation_input_tokens, Some(400));
+    }
+
+    /// message_delta carries the cumulative output at the TOP level.
+    #[test]
+    fn extractor_reads_output_off_message_delta() {
+        let frame = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":180}}\n\n";
+        let u = super::extract_token_usage_from_bytes(frame).expect("usage");
+        assert_eq!(u.output_tokens.or(u.completion_tokens), Some(180));
+    }
+
+    /// The end-to-end shape of the original defect: run BOTH real Anthropic
+    /// frames through extract-then-merge, exactly as the stream arms do, and
+    /// assert the total that reaches the ledger. Before the fix this was None.
+    #[test]
+    fn a_real_anthropic_stream_yields_a_complete_total() {
+        let start = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"output_tokens\":0,\"cache_read_input_tokens\":8000,\"cache_creation_input_tokens\":400}}}\n\n";
+        let delta = b"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":180}}\n\n";
+        let stop = b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
+
+        let mut acc: Option<crate::types::TokenUsage> = None;
+        for frame in [&start[..], &delta[..], &stop[..]] {
+            acc = super::merge_token_usage(acc, super::extract_token_usage_from_bytes(frame));
+        }
+        let total = acc.expect("a Claude stream must record usage, not None");
+        assert_eq!(
+            total.input_tokens.or(total.prompt_tokens),
+            Some(1200),
+            "prompt tokens"
+        );
+        assert_eq!(
+            total.output_tokens.or(total.completion_tokens),
+            Some(180),
+            "output tokens"
+        );
+        assert_eq!(total.cache_read_input_tokens, Some(8000), "cache read");
+        assert_eq!(
+            total.cache_creation_input_tokens,
+            Some(400),
+            "cache creation"
+        );
+    }
+
+    /// The OpenAI shape must keep working — the data: scan and the new nested
+    /// branch must not regress a provider that was already fine.
+    #[test]
+    fn openai_data_only_frames_still_extract() {
+        let frame = b"data: {\"usage\":{\"prompt_tokens\":42,\"completion_tokens\":7}}\n\n";
+        let u = super::extract_token_usage_from_bytes(frame).expect("usage");
+        assert_eq!(u.prompt_tokens, Some(42));
+        assert_eq!(u.completion_tokens, Some(7));
+    }
+
+    /// The reviewer of bead openproxy-kh7f caught this: the usage MERGE was
+    /// implemented and unit-tested, but the tests fed it pre-built TokenUsage,
+    /// so they never checked that the extractor can actually read a real
+    /// Anthropic frame. It cannot: strip_sse_data_prefix takes the FIRST line,
+    /// which on an Anthropic frame is `event: ...`, never `data: ...`.
+    #[test]
+    fn extractor_reads_a_named_event_anthropic_frame() {
+        let frame = b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1200,\"cache_read_input_tokens\":8000}}}\n\n";
+        let got = super::extract_token_usage_from_bytes(frame);
+        assert!(
+            got.is_some(),
+            "extractor must find the data: line in a named-event frame, got {got:?}"
+        );
     }
 }
