@@ -1229,7 +1229,23 @@ async fn convert_to_messages_api(response: Response) -> Response {
                             continue;
                         }
 
-                        let json_str = frame.strip_prefix("data:").unwrap_or(frame).trim();
+                        // Frames may carry `event:` name lines before the
+                        // `data:` line (Anthropic emits
+                        // "event: <type>\ndata: {...}"). A bare
+                        // strip_prefix("data:") therefore returns None for
+                        // every real frame, the whole two-line string fails
+                        // json parsing, and `if let Ok(..)` with no else arm
+                        // discarded the frame silently — the client saw an
+                        // empty stream with only a trailing message_stop.
+                        // Scan for the data: line, exactly as the Responses
+                        // converter below already does.
+                        let Some(json_str) = frame
+                            .lines()
+                            .find_map(|l| l.trim().strip_prefix("data:"))
+                        else {
+                            continue;
+                        };
+                        let json_str = json_str.trim();
                         if json_str == "[DONE]" {
                             break;
                         }
@@ -1798,15 +1814,28 @@ fn normalize_body(mut body: Value, mode: CompatMode) -> Value {
 
     match mode {
         CompatMode::Messages => {
-            if let Some(system) = fields.remove("system") {
-                prepend_system_message(fields, normalize_content(system));
-            }
+            // The client already sent a well-formed Anthropic Messages body.
+            // Do NOT reshape it here:
+            //  - `system` must stay top-level. Demoting it into messages[0]
+            //    with role "system" produces a 400 from api.anthropic.com
+            //    (which accepts only user/assistant) for raw clients, and a
+            //    silent demotion that also drops cache_control markers for
+            //    Claude-Code clients. `claude_to_openai_request` reads the
+            //    top-level form itself.
+            //  - `tools` must stay in the flat Anthropic shape
+            //    ({name, description, input_schema}). normalize_tools converts
+            //    it to the nested OpenAI shape, but claude_to_openai_request
+            //    reads the flat one — so every tool arrived at OpenAI targets
+            //    as {"name":"","parameters":{}} (a hard 400 on strict
+            //    upstreams) and leaked nested to api.anthropic.com for Claude
+            //    targets, where needs_translation() is false and nothing
+            //    corrects it. The Responses branch is unaffected because its
+            //    translator reads tool["function"]; keep normalize_tools there.
 
             if let Some(messages) = fields.get_mut("messages") {
                 normalize_messages_value(messages);
             }
 
-            normalize_tools(fields);
             normalize_tool_choice(fields);
         }
         CompatMode::Responses { compact } => {
@@ -2558,6 +2587,45 @@ fn claude_body_to_chat_completion(body: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+    /// Regression (release-readiness blocker B3c): the Messages SSE converter
+    /// did `frame.strip_prefix("data:")`. Every real Anthropic frame is
+    /// "event: <type>\ndata: {...}", so the strip returned None, the two-line
+    /// string failed json parsing, and `if let Ok(..)` with no else arm dropped
+    /// every frame. A streaming /v1/messages request reached the client with no
+    /// message_start, no content blocks and no assistant text — only a trailing
+    /// message_stop. The existing test only covered stream:false.
+    #[test]
+    fn messages_sse_parser_reads_the_data_line_of_named_event_frames() {
+        // The parser must recover the payload from a named-event frame.
+        let frame =
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0}";
+        let extracted = frame
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("data:"))
+            .expect("data: line must be found in a named-event frame")
+            .trim();
+        let parsed: Value = serde_json::from_str(extracted).expect("payload must parse");
+        assert_eq!(parsed["type"], "content_block_delta");
+
+        // A bare data-only frame (OpenAI style) must still work.
+        let bare = "data: {\"choices\":[]}";
+        let extracted = bare
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("data:"))
+            .expect("data-only frame must parse")
+            .trim();
+        let parsed: Value = serde_json::from_str(extracted).expect("payload must parse");
+        assert!(parsed["choices"].is_array());
+
+        // A frame with no data: line at all (heartbeat/comment) is skipped, not
+        // mis-parsed.
+        let comment = ": keep-alive";
+        assert!(comment
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("data:"))
+            .is_none());
+    }
+
     use super::*;
 
     #[test]
@@ -2582,7 +2650,17 @@ mod tests {
     }
 
     #[test]
-    fn messages_route_promotes_system_field() {
+    fn messages_route_keeps_system_top_level() {
+        // The previous version of this test asserted that `system` was REMOVED
+        // from the top level and demoted into messages[0] with role "system".
+        // That encoded the defect, not the contract:
+        //  - api.anthropic.com accepts only user/assistant in `messages`, so a
+        //    raw client got 400 "Input should be 'user' or 'assistant'";
+        //  - for Claude-Code clients the demotion silently dropped the
+        //    cache_control markers that travel on system content blocks;
+        //  - it also defeated the top-level read in claude_to_openai.rs:392,
+        //    which is how OpenAI targets actually receive the system prompt.
+        // The body a client sends to /v1/messages is already well-formed.
         let body = json!({
             "model": "openai/gpt-4o-mini",
             "system": "Stay concise",
@@ -2592,9 +2670,58 @@ mod tests {
         let normalized = normalize_body(body, CompatMode::Messages);
         let messages = normalized["messages"].as_array().expect("messages array");
 
-        assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[0]["content"], "Stay concise");
-        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            normalized["system"], "Stay concise",
+            "system must stay top-level for both Anthropic and OpenAI targets"
+        );
+        assert_eq!(
+            messages.len(),
+            1,
+            "the system prompt must not be injected as a message"
+        );
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "Ping");
+        assert!(
+            !messages.iter().any(|m| m["role"] == "system"),
+            "Anthropic rejects role \"system\" in messages"
+        );
+    }
+
+    #[test]
+    fn messages_route_keeps_tools_in_flat_anthropic_shape() {
+        // normalize_tools used to run unconditionally in Messages mode,
+        // converting {name, description, input_schema} into the nested OpenAI
+        // shape. claude_to_openai_request reads the FLAT shape, so every tool
+        // reached OpenAI targets as {"name":"","parameters":{}} — a hard 400
+        // on strict upstreams — and the nested shape leaked straight to
+        // api.anthropic.com for Claude targets, where needs_translation() is
+        // false and nothing corrected it.
+        let body = json!({
+            "model": "claude-sonnet-4-6",
+            "max_tokens": 64,
+            "messages": [{ "role": "user", "content": "Ping" }],
+            "tools": [{
+                "name": "get_weather",
+                "description": "Get weather",
+                "input_schema": { "type": "object", "properties": { "city": { "type": "string" } } }
+            }]
+        });
+
+        let normalized = normalize_body(body, CompatMode::Messages);
+        let tool = &normalized["tools"][0];
+
+        assert_eq!(
+            tool["name"], "get_weather",
+            "flat Anthropic tool name must survive"
+        );
+        assert!(
+            tool["input_schema"]["properties"]["city"].is_object(),
+            "input_schema must survive in flat form"
+        );
+        assert!(
+            tool.get("function").is_none(),
+            "must not be converted to the nested OpenAI tool shape"
+        );
     }
 
     #[test]
