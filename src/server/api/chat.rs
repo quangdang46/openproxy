@@ -23,10 +23,10 @@ use crate::core::combo::{
         augment_models_with_capacity_adapter, get_active_adapter_strategy,
         strip_history_for_context,
     },
-    check_fallback_error, detect_required_capabilities, execute_combo_strategy_full,
-    get_combo_models_from_data, get_disabled_members_for_combo, mark_combo_member_quarantined,
-    strategy_for_combo, ComboAttemptError, ComboExecutionError, ComboStrategy, FusionConfig,
-    ModelCapacity,
+    check_fallback_error, combo_quarantine_for, detect_required_capabilities,
+    execute_combo_strategy_full, get_combo_models_from_data, get_disabled_members_for_combo,
+    mark_combo_member_quarantined, strategy_for_combo, ComboAttemptError, ComboExecutionError,
+    ComboStrategy, FusionConfig, ModelCapacity,
 };
 use crate::core::executor::UpstreamResponse;
 use crate::core::model::{get_model_info, ModelRouteKind};
@@ -393,17 +393,69 @@ async fn chat_completions_impl(
     }
 
     // Feature4: ResponseCache — consult before provider dispatch.
-    // Only non-streaming requests are cached: the cache stores a single JSON
-    // body, and a streaming client would misinterpret a cached non-SSE body.
-    // Simulation bypass (live-E2E fix): any x-openproxy-sim-* control header
-    // bypasses lookup AND store — fault/override/latency are test controls,
-    // and sim responses must never poison the cache for real requests.
-    let is_streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+    // The cache stores a single JSON body and replays it as `application/json`,
+    // so it must be gated on the SAME resolved stream decision the dispatcher
+    // uses (resolve_stream_flags), never on an independent default read from the
+    // raw body. An omitted `stream` field means streaming (9router parity), so a
+    // second independent default here previously took the cache path while the
+    // response was actually an SSE stream, poisoning the cache with SSE bytes
+    // under a JSON key (openproxy-w3nh). Simulation bypass (live-E2E fix): any
+    // x-openproxy-sim-* control header bypasses lookup AND store — fault/
+    // override/latency are test controls, and sim responses must never poison
+    // the cache for real requests.
+    //
+    // Resolve the plan up-front using the exact inputs the Direct dispatch
+    // later feeds to apply_stream_plan (same provider/model/accept/client_tool
+    // and the same source-format detection as RequestPlan::new), so the guard
+    // and the dispatcher cannot drift. For a Combo the per-member provider is
+    // not known until dispatch, so the top-level resolved name is used and the
+    // guard errs toward the streaming default — the safe direction.
+    let stream_plan = {
+        let source_format = if let Some(path) = endpoint {
+            registry::detect_source_format_by_endpoint_with_body(path, Some(&body))
+                .unwrap_or_else(|| registry::detect_source_format(&body))
+        } else {
+            registry::detect_source_format(&body)
+        };
+        resolve_stream_flags(
+            body.get("stream").and_then(Value::as_bool),
+            accept_header.as_deref(),
+            resolved.provider.as_deref().unwrap_or(model_str),
+            &resolved.model,
+            source_format,
+            client_tool,
+            None,
+        )
+    };
+    // A live SSE stream reaches the client only when the plan streams upstream
+    // and is NOT aggregated back to a single JSON body (sse_to_json). Those are
+    // the responses that must never be stored in or served from the cache;
+    // `!stream` (non-streaming) and `sse_to_json` (forceStream aggregated to
+    // JSON) both yield a single cacheable JSON body.
+    let is_sse_response = stream_plan.stream && !stream_plan.sse_to_json;
     let sim_controlled = headers_map
         .keys()
         .any(|k| k == "x-openproxy-sim" || k.starts_with("x-openproxy-sim-"));
 
-    if !is_streaming && !sim_controlled {
+    // Combo responses are never cached.
+    //
+    // The guard above resolves the stream decision from the TOP-LEVEL provider
+    // and the real Accept header, but the combo dispatch builds its own plan
+    // inside the closure with `accept: None` (the header is not in scope
+    // there). The two therefore disagree whenever Accept changes the outcome:
+    // a client sending `Accept: application/json` flips the guard to
+    // "cacheable" while the combo leg still streams, and the SSE body gets
+    // stored under a JSON key — then served back with Content-Type
+    // application/json and x-cache: HIT. That is the exact defect this guard
+    // exists to prevent, and it is reachable with ordinary client headers.
+    //
+    // Threading the header into the closure is the general fix, but until that
+    // lands the two decisions cannot be proven to agree for every provider in
+    // a combo. Skipping the cache for combos is conservative, costs only a
+    // small amount of hit rate, and removes the entire class of drift.
+    let is_cacheable_route = resolved.route_kind == ModelRouteKind::Direct;
+
+    if is_cacheable_route && !is_sse_response && !sim_controlled {
         if let Some((cached, ttl_remaining)) = state.response_cache.get_with_ttl(&body) {
             let mut resp = Response::new(Body::from(cached));
             resp.headers_mut().insert(
@@ -498,14 +550,67 @@ async fn chat_completions_impl(
             let combo_name_for_quarantine = combo_name.clone();
             let client_tool_for_combo = client_tool;
             let result = if strategy == ComboStrategy::Fusion {
+                // openproxy-s2oc: the Fusion fan-out must honour the same
+                // pre-gates as the sequential strategies. Passing the raw
+                // member list here dispatched to — and billed — members the
+                // operator muted, and members already parked in the
+                // auto-quarantine map, even though the Combos page renders
+                // them as "Disabled — never dispatched" / "cooling down".
+                let mut skip: HashSet<String> = disabled_members.iter().cloned().collect();
+                skip.extend(
+                    combo_quarantine_for(&combo_name)
+                        .into_iter()
+                        .map(|(model, _)| model),
+                );
+                skip.extend(
+                    combo_models
+                        .iter()
+                        .filter(|model| crate::core::health::is_model_degraded(model))
+                        .cloned(),
+                );
+                let fusion_panels: Vec<String> = combo_models
+                    .iter()
+                    .filter(|model| !skip.contains(model.as_str()))
+                    .cloned()
+                    .collect();
+
+                if fusion_panels.is_empty() {
+                    // Same 400/503 split the sequential path returns when
+                    // no member is dispatchable, instead of fanning out to
+                    // an empty panel set.
+                    let only_quarantine = disabled_members.is_empty()
+                        && combo_models.iter().all(|m| skip.contains(m));
+                    return combo_error_response(ComboExecutionError {
+                        status: if only_quarantine { 503 } else { 400 },
+                        message: if only_quarantine {
+                            "All combo members are currently quarantined or degraded after recent failures"
+                                .into()
+                        } else {
+                            "All combo members are disabled".into()
+                        },
+                        earliest_retry_after: None,
+                        upstream_body: None,
+                    });
+                }
+
                 let f_state = state.clone();
                 let f_body = body.clone();
                 let f_api_key = presented_api_key.clone();
                 let f_client_tool = client_tool;
                 let f_headers = headers_map.clone();
+                // openproxy-s2oc: record the panels that actually FAILED so a
+                // failed fusion parks only the broken members. A panel that
+                // answered must not be quarantined just because the judge
+                // leg later failed.
+                let failed_panels: std::sync::Arc<parking_lot::Mutex<Vec<String>>> =
+                    std::sync::Arc::new(parking_lot::Mutex::new(Vec::new()));
 
-                let panel_count = combo_models.len();
+                let panel_count = fusion_panels.len();
                 let fusion_cfg = fusion_config_for(&snapshot, &combo_name, panel_count);
+                // One clone per fan-out arm: each `move` closure takes its
+                // own handle, and the outer list stays readable afterwards.
+                let deferred_failures = failed_panels.clone();
+                let direct_failures = failed_panels.clone();
                 // 9router combo.js: the judge (and single-survivor) leg runs
                 // with the ORIGINAL client stream flag — a streaming client
                 // must get SSE, not a buffered JSON blob. The buffered-Value
@@ -517,7 +622,7 @@ async fn chat_completions_impl(
                 let fusion_result = if client_wants_stream {
                     handle_fusion_chat_deferred(
                         &mut body.clone(),
-                        &combo_models,
+                        &fusion_panels,
                         &fusion_cfg,
                         None,
                         move |model: String, panel_body: Value| {
@@ -526,8 +631,9 @@ async fn chat_completions_impl(
                             let api_key = f_api_key.clone();
                             let client_tool = f_client_tool;
                             let headers = f_headers.clone();
+                            let failed_panels = deferred_failures.clone();
                             async move {
-                                let response = dispatch_fusion_leg(
+                                let response = match dispatch_fusion_leg(
                                     &state,
                                     &body,
                                     &panel_body,
@@ -539,9 +645,16 @@ async fn chat_completions_impl(
                                     Some(false),
                                 )
                                 .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Fusion panel failed: {}", e.message)
-                                })?;
+                                {
+                                    Ok(response) => response,
+                                    Err(e) => {
+                                        failed_panels.lock().push(model.clone());
+                                        return Err(anyhow::anyhow!(
+                                            "Fusion panel failed: {}",
+                                            e.message
+                                        ));
+                                    }
+                                };
                                 let body_bytes =
                                     axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
                                         .await
@@ -557,7 +670,7 @@ async fn chat_completions_impl(
                 } else {
                     handle_fusion_chat(
                         &mut body.clone(),
-                        &combo_models,
+                        &fusion_panels,
                         &fusion_cfg,
                         None,
                         move |model: String, panel_body: Value| {
@@ -566,8 +679,9 @@ async fn chat_completions_impl(
                             let api_key = f_api_key.clone();
                             let client_tool = f_client_tool;
                             let headers = f_headers.clone();
+                            let failed_panels = direct_failures.clone();
                             async move {
-                                let response = dispatch_fusion_leg(
+                                let response = match dispatch_fusion_leg(
                                     &state,
                                     &body,
                                     &panel_body,
@@ -579,9 +693,16 @@ async fn chat_completions_impl(
                                     Some(false),
                                 )
                                 .await
-                                .map_err(|e| {
-                                    anyhow::anyhow!("Fusion panel failed: {}", e.message)
-                                })?;
+                                {
+                                    Ok(response) => response,
+                                    Err(e) => {
+                                        failed_panels.lock().push(model.clone());
+                                        return Err(anyhow::anyhow!(
+                                            "Fusion panel failed: {}",
+                                            e.message
+                                        ));
+                                    }
+                                };
                                 let body_bytes =
                                     axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
                                         .await
@@ -640,12 +761,25 @@ async fn chat_completions_impl(
                             json_str,
                         )))
                     }
-                    Err(e) => Err(ComboExecutionError {
-                        status: e.status,
-                        message: e.message,
-                        earliest_retry_after: None,
-                        upstream_body: None,
-                    }),
+                    Err(e) => {
+                        // openproxy-s2oc: park the panels that actually
+                        // failed so the next request does not immediately
+                        // re-attempt the same broken member.
+                        let cooldown = check_fallback_error(e.status, &e.message, 0).cooldown;
+                        for member in failed_panels.lock().iter() {
+                            mark_combo_member_quarantined(
+                                &combo_name_for_quarantine,
+                                member,
+                                cooldown,
+                            );
+                        }
+                        Err(ComboExecutionError {
+                            status: e.status,
+                            message: e.message,
+                            earliest_retry_after: None,
+                            upstream_body: None,
+                        })
+                    }
                 }
             } else {
                 let attempted_members = attempted_members.clone();
@@ -783,8 +917,13 @@ async fn chat_completions_impl(
     };
 
     // Feature4: populate the cache on a successful non-streaming miss.
-    // Skipped for simulation-controlled requests (see lookup bypass above).
-    if !is_streaming && !sim_controlled {
+    // Gated on the same resolved decision as the lookup above so a live SSE
+    // body is never stored under a JSON cache key. Skipped for
+    // simulation-controlled requests (see lookup bypass above), and for combo
+    // routes for the same reason — the guard and the combo leg resolve the
+    // stream decision from different inputs, so neither side can be trusted
+    // to agree with the other.
+    if is_cacheable_route && !is_sse_response && !sim_controlled {
         return cache_miss_response(&state, &body, cache_provider, response).await;
     }
     response
@@ -1029,6 +1168,26 @@ async fn execute_single_model(
     client_headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<Response, ComboAttemptError> {
     let snapshot = state.db.snapshot();
+
+    // Bead openproxy-umtq: simulation mock must engage for EVERY provider,
+    // not just the OpenAI-shaped else-arm of the dispatch ladder. When the
+    // effective mode is `mock` we neutralize the plan's `target_format` to
+    // the client's `source_format` so the request is NOT translated into a
+    // provider-native dialect and the simulated envelope is NOT re-translated
+    // on the way back. The mock executor renders in the source dialect
+    // (`sim_format_for_source`) and the envelope round-trips verbatim.
+    let sim_header_value = client_headers
+        .and_then(|headers| headers.get("x-openproxy-sim"))
+        .map(String::as_str);
+    let mock_active = effective_mock_for(state, &plan.provider, sim_header_value);
+    let neutralized_plan: Option<RequestPlan> = if mock_active {
+        let mut neutral = plan.clone();
+        neutral.target_format = neutral.source_format;
+        Some(neutral)
+    } else {
+        None
+    };
+    let plan: &RequestPlan = neutralized_plan.as_ref().unwrap_or(plan);
 
     // 9router chatCore.js:229 — the `x-9router-token-saver` request header
     // opts a single request out of RTK/headroom/caveman/ponytail when its
@@ -1313,6 +1472,51 @@ async fn execute_single_model(
     .await
 }
 
+/// Whether the effective simulation mode for `provider` is `mock` on this
+/// request (bead openproxy-umtq).
+///
+/// Mirrors the resolution the status endpoint uses (`status_for`, which folds
+/// in `OPENPROXY_DEV_MOCK` / `settings.dev_mock_all` / the per-provider
+/// configured mode) so `/api/mock/status` and the execution path can never
+/// disagree: anything the status surface reports as `effective:mock` really
+/// executes in mock mode here. `sim_header_value` is the per-request
+/// `x-openproxy-sim` header (a per-request promotion the status surface
+/// documents but cannot see); pass `None` when absent.
+fn effective_mock_for(state: &AppState, provider: &str, sim_header_value: Option<&str>) -> bool {
+    use crate::core::simulation::ProviderExecutionMode;
+    let settings_force = state.db.snapshot().settings.dev_mock_all;
+    let configured_mock = state
+        .db
+        .sqlite
+        .with_conn(|conn| {
+            let status = crate::core::simulation::status_for(conn, provider, settings_force);
+            Ok::<_, rusqlite::Error>(status.effective == ProviderExecutionMode::Mock)
+        })
+        .unwrap_or(false);
+    if configured_mock {
+        return true;
+    }
+    sim_header_value.is_some_and(|v| v.trim().eq_ignore_ascii_case("mock"))
+}
+
+/// Map the client's source `Format` to the simulation `ProviderFormat` the
+/// mock executor should render (bead openproxy-umtq).
+///
+/// The simulator only speaks OpenAI / Anthropic / Gemini dialects. Because the
+/// short-circuit neutralizes `target_format` to `source_format` (see
+/// `execute_single_model`), the envelope is rendered in the *client's* dialect
+/// and returned verbatim. Exotic provider-native sources that have no
+/// simulator (Kiro, Codex, Cursor, …) fall back to OpenAI — the universal
+/// simulation dialect — rather than failing the whole mock.
+fn sim_format_for_source(source: Format) -> crate::core::executor::ProviderFormat {
+    use crate::core::executor::ProviderFormat;
+    match source {
+        Format::Claude => ProviderFormat::Anthropic,
+        Format::Gemini | Format::GeminiCli => ProviderFormat::Gemini,
+        _ => ProviderFormat::OpenAI,
+    }
+}
+
 async fn forward_with_provider_fallback(
     state: &AppState,
     provider: &str,
@@ -1329,6 +1533,55 @@ async fn forward_with_provider_fallback(
     let mut last_error: Option<ComboAttemptError> = None;
     let mut reloaded = false;
     let registry = &state.account_registry;
+
+    // Bead openproxy-i8fi: connections whose OAuth token was already refreshed
+    // during THIS request. Guards the refresh arm from re-refreshing a
+    // connection whose freshly-refreshed token is still rejected.
+    let mut refreshed_this_request: HashSet<String> = HashSet::new();
+
+    // Bead openproxy-i8fi (P0): hard ceiling on dispatch iterations.
+    //
+    // This loop has no `break` and no attempt counter — its only exits are
+    // `return`. Every error arm is expected to `continue` AFTER inserting the
+    // connection into `excluded`, so the candidate set shrinks and the loop
+    // drains. The 401/403 OAuth-refresh arm did not: on a successful refresh
+    // it persisted the new token and `continue`d WITHOUT excluding the
+    // connection, leaving `select_connection` free to re-pick the very same
+    // connection. An upstream that keeps answering 401 while its refresh
+    // endpoint keeps succeeding (a revoked-but-refreshable account, a scope
+    // the provider refuses, a token it accepts then rejects) therefore spun
+    // forever, pinning a worker and an in-flight slot — a self-inflicted DoS.
+    //
+    // The budget is the backstop that makes termination structural rather
+    // than dependent on every arm remembering to advance. Size it from the
+    // connection count so a legitimate multi-account fallback is never
+    // truncated: each account may be dispatched once, then retried once after
+    // its refresh, plus a small constant for the stale-snapshot reload and the
+    // final no-candidate check.
+    let attempt_budget = {
+        let snapshot = state.db.snapshot();
+        let accounts = snapshot
+            .provider_connections
+            .iter()
+            .filter(|connection| connection.provider == provider)
+            .count();
+        accounts.saturating_mul(2).saturating_add(2)
+    };
+    let mut attempts = 0usize;
+
+    // Bead openproxy-umtq: resolve the effective simulation mode ONCE, before
+    // the dispatch loop. The per-request `x-openproxy-sim` header is the one
+    // signal `status_for` cannot see, so the effective mode here = (status
+    // effective == mock) OR (header promotes real→mock). The dispatch ladder
+    // below short-circuits to the simulator when this is true, so mock mode is
+    // honored for EVERY provider — not just the OpenAI-shaped else-arm.
+    let sim_header_value = sim_headers
+        .get(crate::core::simulation::SIM_HEADER)
+        .and_then(|value| value.to_str().ok());
+    let mock_active = effective_mock_for(state, provider, sim_header_value);
+    // The simulator renders in the client's dialect; the plan passed in was
+    // already neutralized (target := source) by `execute_single_model`.
+    let mock_sim_format = sim_format_for_source(plan.source_format);
 
     // Per-key monthly budget kill-switch (free-tier Feature 3): block the
     // request with 429 before any provider dispatch when the cap is reached.
@@ -1366,6 +1619,25 @@ async fn forward_with_provider_fallback(
         });
 
     loop {
+        // Bead openproxy-i8fi: the iteration ceiling. Reaching it means some
+        // arm re-entered the loop without advancing `excluded`; surface the
+        // last upstream error instead of spinning forever.
+        if attempts >= attempt_budget {
+            let retry_after = last_error
+                .as_ref()
+                .and_then(|error| error.retry_after)
+                .or_else(|| earliest_retry_after(&state.db.snapshot(), provider, model, &excluded));
+            return Err(last_error.take().unwrap_or(ComboAttemptError {
+                status: 503,
+                message: format!(
+                    "Provider dispatch exceeded the attempt budget for {provider}/{model}"
+                ),
+                retry_after,
+                upstream_body: None,
+            }));
+        }
+        attempts += 1;
+
         let snapshot = state.db.snapshot();
         // Simulation credentialless path (sim-16 dispatch completion): mock
         // mode needs NO credentials by design. When selection finds nothing
@@ -1507,7 +1779,39 @@ async fn forward_with_provider_fallback(
         let is_cursor_model =
             model.starts_with("cursor/") || provider == "cu" || provider == "cursor";
         let executor_result: Result<KiroExecutorResponse, ComboAttemptError> =
-            if provider == "kiro" {
+            if mock_active {
+                // Bead openproxy-umtq: simulation short-circuit. When the
+                // effective mode is `mock`, route EVERY provider through
+                // `DefaultExecutor` — the only executor that implements the
+                // simulator — instead of entering the per-provider match. The
+                // mock branch never reads credentials, base_url, or the pool,
+                // so this works for providers with a dedicated arm (kiro,
+                // codex, cursor, …) that have no `PROVIDER_CONFIGS` entry.
+                let executor = crate::core::executor::DefaultExecutor::new_for_mock(
+                    provider.to_string(),
+                    mock_sim_format,
+                    state.client_pool.clone(),
+                );
+                let result = executor
+                    .execute(ExecutionRequest {
+                        model: model.to_string(),
+                        body: request_body.clone(),
+                        stream,
+                        credentials: connection.clone(),
+                        proxy,
+                        sim_headers: sim_headers.clone(),
+                        force_mock: true,
+                    })
+                    .await
+                    .map_err(|err| err.into_combo_attempt_error())?;
+                Ok(KiroExecutorResponse {
+                    response: result.response,
+                    url: result.url,
+                    headers: result.headers,
+                    transformed_body: result.transformed_body,
+                    transport: result.transport,
+                })
+            } else if provider == "kiro" {
                 let executor = KiroExecutor::new(state.client_pool.clone(), provider_node)
                     .map_err(|e| ComboAttemptError {
                         status: 500,
@@ -2489,8 +2793,19 @@ async fn forward_with_provider_fallback(
                 // before giving up on this connection (9router parity).
                 // On success, merge credentials (expires_at, refresh, PSD) and
                 // continue the loop so the fresh snapshot picks up the token.
+                //
+                // Bead openproxy-i8fi: refresh each connection at most ONCE per
+                // request. A second 401/403 after a refresh that already
+                // succeeded means the freshly-minted credential is being
+                // rejected too, so refreshing again cannot help — and because
+                // this arm does not exclude the connection, `select_connection`
+                // would re-pick it and spin forever. `refreshed_this_request`
+                // makes the repeat fall through to the normal
+                // `decision.should_fallback` branch below, which excludes the
+                // connection and lets the loop advance to the next account.
                 if (status.as_u16() == 401 || status.as_u16() == 403)
                     && connection.refresh_token.is_some()
+                    && !refreshed_this_request.contains(&connection.id)
                 {
                     if let Some(ref rt) = connection.refresh_token.clone() {
                         let refresh_provider = plan.provider.as_str();
@@ -2533,6 +2848,7 @@ async fn forward_with_provider_fallback(
                                     }
                                 })
                                 .await;
+                            refreshed_this_request.insert(connection.id.clone());
                             continue;
                         }
                     }
