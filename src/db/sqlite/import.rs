@@ -167,7 +167,7 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
                     item.get("name").and_then(Value::as_str).unwrap_or(""),
                     item.get("kind").and_then(Value::as_str),
                     models_str,
-                    "{}",
+                    combo_data_json(item),
                     item.get("createdAt").and_then(Value::as_str).unwrap_or(""),
                     item.get("updatedAt").and_then(Value::as_str).unwrap_or(""),
                 ],
@@ -218,6 +218,29 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
         .unwrap_or(0);
 
     Ok(count as usize)
+}
+
+/// Rebuild the `combos.data` blob — i.e. `Combo.extra` — from an exported
+/// combo object. `export_all` flattens the blob back to the top level, so the
+/// canonical columns are stripped here. A nested `extra` object, as written by
+/// hand-authored backups, is folded in as the base.
+fn combo_data_json(item: &Value) -> String {
+    let mut obj = match item.get("extra") {
+        Some(Value::Object(fields)) => fields.clone(),
+        _ => serde_json::Map::new(),
+    };
+    if let Some(fields) = item.as_object() {
+        for (key, value) in fields {
+            if matches!(
+                key.as_str(),
+                "id" | "name" | "kind" | "models" | "createdAt" | "updatedAt" | "extra"
+            ) {
+                continue;
+            }
+            obj.insert(key.clone(), value.clone());
+        }
+    }
+    serde_json::to_string(&Value::Object(obj)).unwrap_or_else(|_| "{}".into())
 }
 
 fn import_usage_impl(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {

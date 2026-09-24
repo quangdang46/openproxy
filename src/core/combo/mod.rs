@@ -727,7 +727,7 @@ pub fn get_combo_models_from_data(model_str: &str, combos: &[Combo]) -> Option<V
 
     combos
         .iter()
-        .find(|combo| combo.name == model_str && !combo.models.is_empty())
+        .find(|combo| combo.name == model_str && combo.is_active() && !combo.models.is_empty())
         .map(|combo| combo.models.clone())
 }
 
