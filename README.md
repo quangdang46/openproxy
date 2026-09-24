@@ -274,7 +274,7 @@ Most operators only set `JWT_SECRET` and leave the rest at defaults. The dashboa
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `JWT_SECRET` | `openproxy-default-secret-change-me` | Sign the dashboard session cookie. **Change in production.** |
+| `JWT_SECRET` | random per process | Signs the dashboard session cookie. Leave unset for a safe default (sessions end on restart); set it to `$(openssl rand -hex 32)` to persist them. The old shipped placeholder is rejected at startup. |
 | `INITIAL_PASSWORD` | _random, generated once_ | First-login password when no saved hash exists. When unset, a random password is generated at first boot and **printed once in the startup banner** (`$DATA_DIR/initial_password` is persisted so it stays stable). Reset it anytime with `openproxy auth reset-password`. |
 | `DATA_DIR` | `~/.openproxy` | Where `openproxy.sqlite`, data, and logs live. |
 | `PORT` | `4623` | HTTP listen port. |
