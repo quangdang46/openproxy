@@ -191,7 +191,13 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
     try {
       setError(null);
 
-      // Must match backend device-code providers (oauth.rs is_device_code_provider + kiro/qoder/grok-cli)
+      // Must match backend device-code providers (oauth.rs is_device_code_provider
+      // + kiro/qoder/grok-cli). It used to list `kimchi` instead of
+      // `codebuddy-intl`: the backend rejected kimchi as not-device-code —
+      // correctly, it is a browser_token flow — while codebuddy-intl was
+      // admitted and unreachable from the UI. There is a matching unit test on
+      // the Rust side that every admitted provider has a config, so a provider
+      // cannot be admitted without one; the two lists still have to agree here.
       const deviceCodeProviders = [
         "github",
         "qwen",
@@ -201,9 +207,9 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
         "kilocode",
         "codebuddy",
         "codebuddy-cn",
+        "codebuddy-intl",
         "qoder",
         "grok-cli",
-        "kimchi",
       ];
       if (deviceCodeProviders.includes(provider)) {
         setIsDeviceCode(true);

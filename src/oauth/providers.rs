@@ -284,6 +284,34 @@ pub fn xai() -> OAuthProviderConfig {
     }
 }
 
+/// Grok CLI — device-code flow against the same x.ai OAuth as `xai()`.
+///
+/// It was listed in `is_device_code_provider` and offered by the dashboard
+/// modal, but had no entry here, so `get_config` returned None and the
+/// device-code start answered "Unknown provider". Same public client and the
+/// same scope set as xai; only the entry point differs — device code instead
+/// of an authorize redirect.
+pub fn grok_cli() -> OAuthProviderConfig {
+    OAuthProviderConfig {
+        id: "grok-cli",
+        client_id: "b1a00492-073a-47ea-816f-4c329264a828",
+        authorize_url: "https://auth.x.ai/oauth2/device/code",
+        token_url: "https://auth.x.ai/oauth2/token",
+        scopes: &[
+            "openid",
+            "profile",
+            "email",
+            "offline_access",
+            "grok-cli:access",
+            "api:access",
+        ],
+        // Device code has no redirect to protect, so there is no verifier.
+        uses_pkce: false,
+        extra_params: &[],
+        refresh_lead_ms: 5 * 60 * 1000,
+    }
+}
+
 /// Gemini CLI — PKCE auth-code flow (Google OAuth).
 pub fn gemini_cli() -> OAuthProviderConfig {
     OAuthProviderConfig {
@@ -555,6 +583,7 @@ pub fn get_config(provider: &str) -> Option<OAuthProviderConfig> {
         "openai-native" => Some(openai_native()),
         "xai" => Some(xai()),
         "gemini-cli" => Some(gemini_cli()),
+        "grok-cli" => Some(grok_cli()),
         "qoder" => Some(qoder()),
         "kimchi" => Some(kimchi()),
         "cursor" => Some(cursor()),
@@ -582,5 +611,52 @@ mod tests {
         assert_eq!(cfg.get_param("rsaKeyExchange"), Some("true"));
         // Dispatcher resolves it.
         assert!(get_config("zed").is_some());
+    }
+}
+
+#[cfg(test)]
+mod device_code_registry {
+    use super::*;
+
+    /// openproxy-uncm: `is_device_code_provider` admitted providers that had no
+    /// config, so the device-code start answered "Unknown provider" for a
+    /// provider the dashboard offered. This is the invariant that lets both
+    /// lists be checked without a running server.
+    #[test]
+    fn every_admitted_device_code_provider_has_a_config() {
+        for provider in [
+            "github",
+            "kiro",
+            "kimi",
+            "kimi-coding",
+            "kilocode",
+            "codebuddy",
+            "codebuddy-cn",
+            "codebuddy-intl",
+            "qoder",
+            "grok-cli",
+            "qwen",
+        ] {
+            assert!(
+                get_config(provider).is_some(),
+                "{provider} is admitted as a device-code provider but has no config, \
+                 so starting the flow 400s as Unknown provider"
+            );
+        }
+    }
+
+    #[test]
+    fn grok_cli_shares_the_xai_client_and_scope() {
+        let grok = grok_cli();
+        assert_eq!(grok.client_id, xai().client_id);
+        assert_eq!(grok.token_url, xai().token_url);
+        assert!(
+            grok.scopes.contains(&"grok-cli:access"),
+            "grok-cli needs its own scope; the executor sends it as a header"
+        );
+        assert!(
+            !grok.uses_pkce,
+            "device code has no redirect to protect, so there is no verifier"
+        );
     }
 }
