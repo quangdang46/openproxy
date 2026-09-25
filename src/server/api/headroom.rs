@@ -22,6 +22,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use bytes::Bytes;
+use futures_util::TryStreamExt;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -33,6 +34,10 @@ use crate::server::state::AppState;
 
 /// Recognized compression extras (closed set — not arbitrary strings).
 const HEADROOM_EXTRAS: &[&str] = &["code", "ml"];
+
+/// 9router detect.js:49 — used whenever a stored `headroom_url` is empty,
+/// instead of short-circuiting the status probe.
+const DEFAULT_HEADROOM_URL: &str = "http://localhost:8787";
 
 /// Marker packages that each extra pulls in.
 const EXTRA_MARKERS: &[(&str, &[&str])] = &[
@@ -95,6 +100,14 @@ fn clear_dead_pid() {
             set_managed_pid(None);
         }
     }
+}
+
+/// What Start should do with an already-tracked proxy. 9router process.js:64-65
+/// returns the live pid untouched instead of killing and respawning, so a
+/// double-click on Start cannot drop in-flight `/v1/compress` calls.
+/// `None` means "nothing is running — go spawn one".
+fn start_decision(existing: Option<u32>) -> Option<(u32, bool)> {
+    existing.map(|pid| (pid, true))
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -264,15 +277,19 @@ fn append_install_log(line: &str) {
     }
 }
 
+/// The "no headroom-ai on this interpreter" answer, shared by the pip probe and
+/// the status aggregate. 9router detect.js:151.
+fn no_extras() -> Value {
+    json!({
+        "installed": false,
+        "version": null,
+        "extras": { "code": false, "ml": false },
+    })
+}
+
 /// Detect installed headroom extras via `pip list --format=json`.
 fn get_installed_extras(python: &str) -> Value {
-    let empty = || {
-        json!({
-            "installed": false,
-            "version": null,
-            "extras": { "code": false, "ml": false },
-        })
-    };
+    let empty = no_extras;
     let output = match std::process::Command::new(python)
         .args([
             "-m",
@@ -344,20 +361,13 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
     }
 
     let snapshot = state.db.snapshot();
-    let url = snapshot.settings.headroom_url.clone();
-
-    if url.is_empty() {
-        return Json(json!({
-            "installed": false,
-            "running": false,
-            "python": null,
-            "loading": false,
-            "localUrl": false,
-            "canStart": false,
-            "managedPid": false,
-        }))
-        .into_response();
-    }
+    // 9router status/route.js:11 substitutes the default rather than
+    // short-circuiting, so an empty setting still reports the real install.
+    let url = if snapshot.settings.headroom_url.is_empty() {
+        DEFAULT_HEADROOM_URL.to_string()
+    } else {
+        snapshot.settings.headroom_url.clone()
+    };
 
     // Probe the headroom health endpoint
     let health_url = format!("{}/health", url.trim_end_matches('/'));
@@ -373,18 +383,36 @@ pub async fn status(State(state): State<AppState>, headers: HeaderMap) -> Respon
 
     let local_url = is_loopback_url(&url);
 
+    // `installed` means "the CLI is on disk" — 9router detect.js:52-64,151-152.
+    // The pip probe only runs when it is, and `canStart` stays independent of
+    // `running` so the Start control survives while the proxy is up.
+    let path = find_headroom_binary();
+    let installed = path.is_some();
+    let python = find_python();
+    let extras = if installed {
+        python
+            .as_deref()
+            .map_or_else(no_extras, get_installed_extras)
+    } else {
+        no_extras()
+    };
+
     // Check for managed PID
     clear_dead_pid();
     let managed_pid = get_managed_pid().is_some();
 
     Json(json!({
-        "installed": running || local_url,
+        "installed": installed,
+        "path": path,
         "running": running,
-        "python": std::env::var("HEADROOM_PYTHON").ok(),
-        "loading": false,
+        "python": python,
         "localUrl": local_url,
-        "canStart": local_url && !running,
+        "canStart": installed && local_url,
+        "version": extras["version"],
+        "extras": extras["extras"],
         "managedPid": managed_pid,
+        "url": url,
+        "loading": false,
     }))
     .into_response()
 }
@@ -402,7 +430,8 @@ pub async fn start(State(state): State<AppState>, headers: HeaderMap) -> Respons
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "Headroom is configured for a remote URL; start it externally."
+                "error": "Headroom is configured for a remote URL; start it externally.",
+                "code": "EXTERNAL_PROXY"
             })),
         )
             .into_response();
@@ -413,33 +442,41 @@ pub async fn start(State(state): State<AppState>, headers: HeaderMap) -> Respons
         Some(p) if !p.is_empty() => p,
         _ => {
             return (
-                StatusCode::PRECONDITION_FAILED,
+                StatusCode::BAD_REQUEST,
                 Json(json!({
-                    "error": "Python >= 3.10 is required to start Headroom locally."
+                    "error": "Python >= 3.10 is required to start Headroom locally.",
+                    "code": "NO_PYTHON"
                 })),
             )
                 .into_response();
         }
     };
 
-    // Check for headroom binary
+    // Check for headroom binary — 9router start/route.js:32 maps NOT_INSTALLED
+    // to 400, not 412.
     if find_headroom_binary().is_none() {
         return (
-            StatusCode::PRECONDITION_FAILED,
+            StatusCode::BAD_REQUEST,
             Json(json!({
-                "error": "Headroom CLI not found. Run: pip install \"headroom-ai[proxy]\""
+                "error": "Headroom CLI not found. Run: pip install \"headroom-ai[proxy]\"",
+                "code": "NOT_INSTALLED"
             })),
         )
             .into_response();
     }
 
-    // Kill existing managed process if alive
+    // Start is idempotent: a live managed proxy is handed back untouched, so a
+    // second click cannot drop in-flight /v1/compress calls.
+    // 9router process.js:64-65.
     clear_dead_pid();
-    if let Some(old_pid) = get_managed_pid() {
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &old_pid.to_string()])
-            .output();
-        set_managed_pid(None);
+    if let Some((pid, already_running)) = start_decision(get_managed_pid()) {
+        return Json(json!({
+            "success": true,
+            "pid": pid,
+            "alreadyRunning": already_running,
+            "message": "Headroom proxy already running.",
+        }))
+        .into_response();
     }
 
     let port = parse_port(&url);
@@ -488,8 +525,9 @@ pub async fn start(State(state): State<AppState>, headers: HeaderMap) -> Respons
     });
 
     Json(json!({
-        "started": true,
+        "success": true,
         "pid": pid,
+        "alreadyRunning": false,
         "message": "Headroom proxy starting…"
     }))
     .into_response()
@@ -525,7 +563,7 @@ pub async fn stop(State(state): State<AppState>, headers: HeaderMap) -> Response
         }
         return Json(json!({
             "stopped": true,
-            "message": "Managed Headroom proxy stopped."
+            "pid": pid
         }))
         .into_response();
     }
@@ -548,11 +586,16 @@ pub async fn stop(State(state): State<AppState>, headers: HeaderMap) -> Response
         }
     }
 
-    Json(json!({
-        "stopped": true,
-        "message": "Headroom proxy stopped."
-    }))
-    .into_response()
+    // Nothing of ours to stop — 9router stop/route.js:9-10 answers 409 rather
+    // than reporting a stop that never happened.
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "stopped": false,
+            "reason": "not_running"
+        })),
+    )
+        .into_response()
 }
 
 /// POST /api/headroom/restart
@@ -1033,8 +1076,11 @@ pub async fn proxy_handler(
     let is_loopback = is_loopback_url(target.as_str());
     let has_body = !matches!(method, Method::GET | Method::HEAD);
 
+    // Only connection establishment is bounded: a whole-request timeout would
+    // cap the lifetime of long-lived upstream streams such as
+    // `transformations/feed` (9router forwards `response.body` untouched).
     let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()
     {
@@ -1088,29 +1134,10 @@ pub async fn proxy_handler(
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("")
                 .to_ascii_lowercase();
-            let resp_body = match resp.bytes().await {
-                Ok(b) => b,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_GATEWAY,
-                        Json(json!({ "error": format!("upstream read error: {e}") })),
-                    )
-                        .into_response();
-                }
-            };
-
             // Rewrite dashboard HTML so absolute fetch('/stats…') calls hit the
             // same-origin reverse proxy instead of the OpenProxy origin root.
             let is_dashboard_html =
                 path_joined == "dashboard" && content_type.contains("text/html");
-            let final_body: Bytes = if is_dashboard_html {
-                match std::str::from_utf8(&resp_body) {
-                    Ok(html) => Bytes::from(rewrite_dashboard_html(html)),
-                    Err(_) => resp_body,
-                }
-            } else {
-                resp_body
-            };
 
             let mut out = Response::builder().status(status);
             for (name, value) in resp_headers.iter() {
@@ -1118,19 +1145,47 @@ pub async fn proxy_handler(
                 if HOP_BY_HOP.contains(&name_lower.as_str()) {
                     continue;
                 }
-                // Content-Length may no longer match after HTML rewrite.
-                if is_dashboard_html && name_lower == "content-length" {
+                // The upstream length is either unknown (streamed body) or
+                // wrong after the HTML rewrite, so it is re-set below.
+                if name_lower == "content-length" {
                     continue;
                 }
                 out = out.header(name.as_str(), value);
             }
+
             if is_dashboard_html {
+                // Only the rewrite needs the whole document in hand.
+                let resp_body = match resp.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_GATEWAY,
+                            Json(json!({ "error": format!("upstream read error: {e}") })),
+                        )
+                            .into_response();
+                    }
+                };
+                let final_body: Bytes = match std::str::from_utf8(&resp_body) {
+                    Ok(html) => Bytes::from(rewrite_dashboard_html(html)),
+                    Err(_) => resp_body,
+                };
                 out = out.header(
                     axum::http::header::CONTENT_LENGTH,
                     final_body.len().to_string(),
                 );
+                return out.body(Body::from(final_body)).unwrap_or_else(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(json!({ "error": format!("response build error: {e}") })),
+                    )
+                        .into_response()
+                });
             }
-            out.body(Body::from(final_body)).unwrap_or_else(|e| {
+
+            out.body(Body::from_stream(
+                resp.bytes_stream().map_ok(|chunk: Bytes| chunk),
+            ))
+            .unwrap_or_else(|e| {
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(json!({ "error": format!("response build error: {e}") })),
@@ -1143,5 +1198,118 @@ pub async fn proxy_handler(
             Json(json!({ "error": format!("proxy error: {e}") })),
         )
             .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        clear_dead_pid, get_managed_pid, set_managed_pid, start, start_decision, AppState,
+    };
+    use crate::db::Db;
+    use crate::types::ApiKey;
+    use axum::extract::State;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::response::IntoResponse;
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+
+    const TEST_KEY: &str = "headroom-lifecycle-test-key";
+
+    async fn test_state() -> AppState {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
+        db.update(|state| {
+            state.api_keys = vec![ApiKey {
+                id: "key-1".to_string(),
+                name: "test".to_string(),
+                key: TEST_KEY.to_string(),
+                machine_id: None,
+                is_active: Some(true),
+                created_at: None,
+                monthly_budget_usd: None,
+                extra: BTreeMap::new(),
+            }];
+        })
+        .await
+        .expect("seed auth");
+        AppState::new(db)
+    }
+
+    fn bearer() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {TEST_KEY}").parse().expect("header"),
+        );
+        headers
+    }
+
+    async fn response_json(response: axum::response::Response) -> Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("json")
+    }
+
+    #[test]
+    fn start_decision_adopts_a_live_pid() {
+        assert_eq!(start_decision(Some(4321)), Some((4321, true)));
+        assert_eq!(start_decision(None), None);
+    }
+
+    #[test]
+    fn clear_dead_pid_drops_a_reaped_process() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("0")
+            .spawn()
+            .expect("child");
+        let pid = child.id();
+        let _ = child.wait();
+        set_managed_pid(Some(pid));
+        clear_dead_pid();
+        let after = get_managed_pid();
+        set_managed_pid(None);
+        assert_eq!(after, None);
+    }
+
+    /// 9router process.js:64-65 — Start adopts a live managed proxy instead of
+    /// SIGTERM-and-respawn, which would drop its in-flight `/v1/compress`
+    /// calls. The probes ahead of the check need a real install, so the test
+    /// stands down where headroom-ai is absent rather than failing on it.
+    #[tokio::test]
+    async fn start_does_not_kill_an_existing_managed_process() {
+        if super::find_headroom_binary().is_none() || super::find_python().is_none() {
+            return;
+        }
+
+        let state = test_state().await;
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("sleeper");
+        let pid = sleeper.id();
+        set_managed_pid(Some(pid));
+
+        let response = start(State(state), bearer()).await.into_response();
+
+        let status = response.status();
+        let body = response_json(response).await;
+        // `try_wait`, not `is_pid_alive`: a SIGTERMed child we have not reaped
+        // is still a live pid, so signal 0 would answer true either way.
+        let survived = matches!(sleeper.try_wait(), Ok(None));
+        set_managed_pid(None);
+        let _ = sleeper.kill();
+        let _ = sleeper.wait();
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"].as_bool(), Some(true));
+        assert_eq!(body["alreadyRunning"].as_bool(), Some(true));
+        assert_eq!(body["pid"].as_u64(), Some(u64::from(pid)));
+        assert!(
+            survived,
+            "start killed the managed proxy instead of adopting it"
+        );
     }
 }
