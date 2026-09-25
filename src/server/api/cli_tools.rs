@@ -999,7 +999,13 @@ async fn write_codex_settings(settings: &CodexSettings) -> anyhow::Result<String
     fs::create_dir_all(codex_dir()).await?;
 
     let mut parsed = match fs::read_to_string(&config_path).await {
-        Ok(existing_config) => parse_toml_table(&existing_config).unwrap_or_default(),
+        // A parse failure must abort, not start from an empty table: the write
+        // below would then replace the user's config.toml with only the
+        // openproxy keys. reset_codex_settings, 60 lines down, already does
+        // this correctly.
+        Ok(existing_config) => parse_toml_table(&existing_config).map_err(|error| {
+            anyhow::anyhow!("Refusing to rewrite {}: {error}", config_path.display())
+        })?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => TomlMap::new(),
         Err(error) => return Err(error.into()),
     };
@@ -1035,8 +1041,13 @@ async fn write_codex_settings(settings: &CodexSettings) -> anyhow::Result<String
     fs::write(&config_path, config_content).await?;
 
     let mut auth_data = match fs::read_to_string(&auth_path).await {
-        Ok(existing_auth) => serde_json::from_str::<serde_json::Map<String, Value>>(&existing_auth)
-            .unwrap_or_default(),
+        // This file holds the user's OAuth tokens (tokens, id_token,
+        // refresh_token). Starting from an empty map on a parse failure wrote
+        // back a file containing only OPENAI_API_KEY, silently discarding the
+        // tokens and switching the CLI to apikey auth.
+        Ok(existing_auth) => parse_json_object_required(&existing_auth).map_err(|error| {
+            anyhow::anyhow!("Refusing to rewrite {}: {error}", auth_path.display())
+        })?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
         Err(error) => return Err(error.into()),
     };
@@ -1241,7 +1252,9 @@ async fn write_copilot_settings(req: &CopilotSettingsRequest) -> anyhow::Result<
     }
 
     let mut config = match fs::read_to_string(&config_path).await {
-        Ok(existing) => parse_json_array_or_default(&existing),
+        Ok(existing) => parse_json_array_required(&existing).map_err(|error| {
+            anyhow::anyhow!("Refusing to rewrite {}: {error}", config_path.display())
+        })?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error.into()),
     };
@@ -1291,7 +1304,9 @@ async fn write_copilot_settings(req: &CopilotSettingsRequest) -> anyhow::Result<
 async fn reset_copilot_settings() -> anyhow::Result<Value> {
     let config_path = copilot_config_path();
     let mut config = match fs::read_to_string(&config_path).await {
-        Ok(existing) => parse_json_array_or_default(&existing),
+        Ok(existing) => parse_json_array_required(&existing).map_err(|error| {
+            anyhow::anyhow!("Refusing to rewrite {}: {error}", config_path.display())
+        })?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(json!({
                 "success": true,
@@ -1954,10 +1969,18 @@ async fn read_json_optional(path: &FsPath) -> anyhow::Result<Option<Value>> {
     }
 }
 
-fn parse_json_array_or_default(content: &str) -> Vec<Value> {
-    match serde_json::from_str::<Value>(content) {
-        Ok(Value::Array(entries)) => entries,
-        _ => Vec::new(),
+/// Array-shaped twin of [`parse_json_object_required`].
+///
+/// Copilot's config is a top-level JSON array, so the object-shaped fix could
+/// not cover it. `parse_json_array_or_default` used to sit directly beneath
+/// the object helper and returned an empty vec on any parse failure, so a
+/// malformed file was replaced by a one-entry array holding only OpenProxy —
+/// every other provider the user had configured was gone, and the response
+/// was a 200.
+fn parse_json_array_required(content: &str) -> anyhow::Result<Vec<Value>> {
+    match serde_json::from_str::<Value>(content)? {
+        Value::Array(entries) => Ok(entries),
+        _ => Err(anyhow::anyhow!("Expected JSON array")),
     }
 }
 
