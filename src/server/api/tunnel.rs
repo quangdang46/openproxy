@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 use std::process::Command;
+use std::time::Duration;
 
 use crate::core::tunnel::TunnelProvider;
 use crate::server::state::AppState;
@@ -122,23 +123,42 @@ async fn tunnel_status(State(state): State<AppState>, headers: HeaderMap) -> imp
 
     let tunnel = state.tunnel_manager.status().await;
     let settings = state.db.snapshot().settings.clone();
-    let tailscale_running =
-        settings.tailscale_enabled || matches!(tunnel.provider.as_deref(), Some("tailscale"));
+
+    // 9router reports intent and run state as separate fields: `settingsEnabled`
+    // is what the user asked for, `enabled` is that intent AND a live process.
+    // The dashboard reads `settingsEnabled` (EndpointPageClient.tsx:222) so a
+    // tunnel the watchdog is restarting never reads back as "user turned it off".
+    let cf_intent = settings.tunnel_enabled;
+    let ts_intent = settings.tailscale_enabled;
+
+    // The manager holds a single child and a single status, so the live process
+    // belongs to whichever provider was started last. Reporting each provider's
+    // run state off that one status is what `status_for` gives once the manager
+    // is provider-scoped.
+    let cf_running = tunnel.running && tunnel.provider.as_deref() == Some("cloudflare");
+    let ts_running = tunnel.running && tunnel.provider.as_deref() == Some("tailscale");
+
+    // 9router skips the probe entirely when the user turned tailscale off
+    // (manager.js:124) — a disabled funnel has no daemon worth asking about.
+    let ts_logged_in = ts_intent && tailscale_logged_in().await;
 
     (
         axum::http::StatusCode::OK,
         Json(json!({
             "tunnel": {
-                "enabled": settings.tunnel_enabled && matches!(tunnel.provider.as_deref(), Some("cloudflare")),
+                "enabled": cf_intent && cf_running,
+                "settingsEnabled": cf_intent,
                 "tunnelUrl": settings.tunnel_url,
                 "shortId": "",
                 "publicUrl": "",
-                "running": tunnel.running && matches!(tunnel.provider.as_deref(), Some("cloudflare"))
+                "running": cf_running
             },
             "tailscale": {
-                "enabled": settings.tailscale_enabled,
+                "enabled": ts_intent && ts_running,
+                "settingsEnabled": ts_intent,
                 "tunnelUrl": settings.tailscale_url,
-                "running": tailscale_running
+                "running": ts_running,
+                "loggedIn": ts_logged_in
             },
             "download": {
                 "installed": command_exists("cloudflared")
@@ -187,7 +207,7 @@ async fn tailscale_check(State(state): State<AppState>, headers: HeaderMap) -> i
         axum::http::StatusCode::OK,
         Json(json!({
             "installed": command_exists("tailscale"),
-            "loggedIn": false,
+            "loggedIn": tailscale_logged_in().await,
             "platform": std::env::consts::OS,
             "brewAvailable": command_exists("brew"),
             "daemonRunning": daemon_running
@@ -211,6 +231,99 @@ fn command_exists(command: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+/// Budget for the whole `loggedIn` probe. 9router gives each socket attempt
+/// 1.5s behind a TTL cache (tailscale.js:41); this is the total, and it has to
+/// stay short so `GET /api/tunnel/status` cannot hang on a dead daemon.
+const TAILSCALE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 9router probes its own userspace socket, then the system one
+/// (tailscale.js:139). OpenProxy never starts a userspace daemon, so only the
+/// system socket and the bare invocation (macOS app bundle, Windows) are worth
+/// trying.
+fn tailscale_socket_flags() -> Vec<Vec<&'static str>> {
+    if cfg!(target_os = "windows") {
+        vec![vec![]]
+    } else {
+        vec![
+            vec!["--socket", "/var/run/tailscale/tailscaled.sock"],
+            vec![],
+        ]
+    }
+}
+
+/// 9router's `loggedIn` (tailscale.js:128): the device is only in the tailnet
+/// while the backend is `Running` *and* the node itself is online.
+fn tailscale_logged_in_from_status(status: &serde_json::Value) -> bool {
+    status
+        .get("BackendState")
+        .and_then(serde_json::Value::as_str)
+        == Some("Running")
+        && status
+            .pointer("/Self/Online")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+/// Every failure — missing binary, non-zero exit, unparseable stdout, timeout —
+/// collapses to `false`, so callers never have to tell them apart.
+async fn tailscale_logged_in() -> bool {
+    tokio::time::timeout(TAILSCALE_PROBE_TIMEOUT, async {
+        for socket in tailscale_socket_flags() {
+            let mut probe = tokio::process::Command::new("tailscale");
+            probe.args(socket).args(["status", "--json"]);
+            let Ok(output) = probe.output().await else {
+                continue;
+            };
+            if !output.status.success() {
+                continue;
+            }
+            let Ok(status) = serde_json::from_slice::<serde_json::Value>(&output.stdout) else {
+                continue;
+            };
+            // First socket that answers authoritatively decides, exactly as
+            // 9router's `probeStatusAsync` does.
+            return tailscale_logged_in_from_status(&status);
+        }
+        false
+    })
+    .await
+    .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dashboard's login poller advances on this boolean, so a `Running`
+    /// backend alone must not read as logged in — a stopped backend must not
+    /// either, even when the node claims to be online.
+    #[test]
+    fn logged_in_requires_a_running_backend_and_an_online_node() {
+        let status = |backend: &str, online: Option<bool>| {
+            let online = online.map(|v| json!({ "Online": v }));
+            json!({ "BackendState": backend, "Self": online })
+        };
+
+        assert!(tailscale_logged_in_from_status(&status(
+            "Running",
+            Some(true)
+        )));
+        assert!(!tailscale_logged_in_from_status(&status(
+            "Running",
+            Some(false)
+        )));
+        assert!(!tailscale_logged_in_from_status(&status(
+            "Stopped",
+            Some(true)
+        )));
+        // Device removed from the tailnet: the daemon still runs, but `Self`
+        // is gone.
+        assert!(!tailscale_logged_in_from_status(&status("Running", None)));
+        assert!(!tailscale_logged_in_from_status(&json!({})));
+        assert!(!tailscale_logged_in_from_status(&json!(null)));
+    }
 }
 
 async fn tailscale_install() -> impl IntoResponse {
