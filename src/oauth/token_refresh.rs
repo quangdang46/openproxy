@@ -460,7 +460,7 @@ pub async fn refresh_google_token(
 /// Refresh a Qwen access token.
 pub async fn refresh_qwen_token(refresh_token: &str) -> Result<RefreshResult, String> {
     refresh_form_token(
-        QWEN_TOKEN_URL,
+        &qwen_token_url(),
         vec![
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
@@ -468,6 +468,19 @@ pub async fn refresh_qwen_token(refresh_token: &str) -> Result<RefreshResult, St
         ],
     )
     .await
+}
+
+/// Resolve the qwen token URL (allows env-override).
+///
+/// The env seam exists because `QwenExecutor` is the only executor that hands
+/// the dispatch loop a raw upstream 401, and the loop's 401 refresh arm is
+/// otherwise unobservable from a test: without it a refresh would call the real
+/// Qwen IdP. `codex_token_url` is the same seam for the same reason.
+fn qwen_token_url() -> String {
+    std::env::var("OPENPROXY_QWEN_TOKEN_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| QWEN_TOKEN_URL.to_string())
 }
 
 /// Refresh an iFlow access token (uses Basic Auth).
@@ -1457,6 +1470,31 @@ mod tests {
         assert_eq!(body["refreshToken"], serde_json::json!("cline-old"));
         assert_eq!(body["grantType"], serde_json::json!("refresh_token"));
         assert_eq!(body["clientType"], serde_json::json!("extension"));
+    }
+
+    #[test]
+    fn qwen_token_url_prefers_the_env_override() {
+        // One test does the whole set/assert/restore cycle rather than splitting
+        // it across cases: the variable is process-global and the lib test
+        // binary runs tests in parallel, so a second reader would be a flake.
+        let previous = std::env::var("OPENPROXY_QWEN_TOKEN_URL").ok();
+        let restore = || match previous.clone() {
+            Some(value) => std::env::set_var("OPENPROXY_QWEN_TOKEN_URL", value),
+            None => std::env::remove_var("OPENPROXY_QWEN_TOKEN_URL"),
+        };
+
+        std::env::set_var("OPENPROXY_QWEN_TOKEN_URL", "http://127.0.0.1:1/mock-token");
+        assert_eq!(qwen_token_url(), "http://127.0.0.1:1/mock-token");
+
+        // Blank is not a URL: falling back to the constant beats posting the
+        // refresh at an empty host.
+        std::env::set_var("OPENPROXY_QWEN_TOKEN_URL", "   ");
+        assert_eq!(qwen_token_url(), QWEN_TOKEN_URL);
+
+        std::env::remove_var("OPENPROXY_QWEN_TOKEN_URL");
+        assert_eq!(qwen_token_url(), QWEN_TOKEN_URL);
+
+        restore();
     }
 
     #[test]

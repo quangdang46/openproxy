@@ -40,14 +40,18 @@
 //! URL from the connection's `resourceUrl`, so with the scheme carried through
 //! (bead openproxy-e42f) a local plain-HTTP mock can answer 401 and that 401
 //! arrives at the status handling in `forward_with_provider_fallback` as an
-//! `Ok`. What that test cannot yet prove is the ARM firing and looping: the
-//! qwen refresh targets the hard-coded `QWEN_TOKEN_URL`
-//! (src/oauth/token_refresh.rs) with no env override, so a mock token endpoint
-//! is unreachable until that constant grows the same
-//! `OPENPROXY_CODEX_TOKEN_URL` seam `codex_token_url()` already has. Test 4
-//! therefore leaves `refresh_token` unset — the guard the arm is tested against
-//! — and the non-advancing `continue` it would take stays covered only by
-//! inspection, not by a red-to-green test.
+//! `Ok`. It leaves `refresh_token` unset, so it proves the raw 401 reaches the
+//! arm's condition but not that the arm fires and loops.
+//!
+//! Test 5 is the arm itself. `qwen_token_url()` in `src/oauth/token_refresh.rs`
+//! grew the same env seam `codex_token_url()` already had, so the refresh can
+//! land on a mock instead of the real Qwen IdP and the arm can be armed for
+//! real. That is what makes the pair red-to-green: the request re-enters the
+//! loop through the arm's NON-ADVANCING `continue` and must still terminate
+//! inside `TERMINATION_TIMEOUT`. Empty `refreshed_this_request` and raise
+//! `attempt_budget` and the loop re-picks the same connection until the
+//! timeout fires — the delta the status-only assertions in tests 1-3 cannot
+//! express.
 //!
 //! Test 1 pins a hard wall-clock timeout: if the dispatch loop is unbounded the
 //! request is still in flight when it fires, so the test FAILS instead of
@@ -430,11 +434,17 @@ fn qwen_node() -> ProviderNode {
 
 /// One `qwen` account pointed at `resource_url`.
 ///
-/// `refresh_token` stays `None` on purpose: arming it would send the refresh
-/// to qwen's real IdP (a live third-party call from CI) rather than to a mock,
-/// because `refresh_qwen_token` has no URL override to redirect it with. See
-/// the module doc for what that costs this file.
-fn qwen_connection(id: &str, resource_url: &str) -> ProviderConnection {
+/// `refresh_token` is what arms the 401 refresh branch in the dispatch loop.
+/// Callers that leave it `None` get the plain fallback path, which excludes the
+/// connection on the first 401 and always terminates; only a caller that has
+/// also redirected `OPENPROXY_QWEN_TOKEN_URL` at a mock can safely set it,
+/// because an armed refresh with an un-redirected URL would call qwen's real
+/// IdP.
+fn qwen_connection(
+    id: &str,
+    resource_url: &str,
+    refresh_token: Option<&str>,
+) -> ProviderConnection {
     ProviderConnection {
         id: id.into(),
         provider: "qwen".into(),
@@ -443,7 +453,7 @@ fn qwen_connection(id: &str, resource_url: &str) -> ProviderConnection {
         priority: Some(1),
         is_active: Some(true),
         access_token: Some("revoked-access-token".into()),
-        refresh_token: None,
+        refresh_token: refresh_token.map(str::to_string),
         default_model: Some("qwen3-coder".into()),
         api_key: None,
         created_at: None,
@@ -513,6 +523,10 @@ fn qwen_chat_request() -> Request<Body> {
 /// `http://127.0.0.1:<port>`, the TLS handshake against a plaintext listener
 /// failed, and `received_requests()` was empty: the dispatch never reached the
 /// status handling under test.
+///
+/// The credential is left unarmed (`refresh_token: None`) so this test covers
+/// only the seam. The armed arm — the refresh actually firing and the loop
+/// re-entering through it — is the test below this one.
 #[tokio::test]
 async fn qwen_dispatch_surfaces_a_raw_401_to_the_status_arm() {
     let upstream = MockServer::start().await;
@@ -525,7 +539,7 @@ async fn qwen_dispatch_surfaces_a_raw_401_to_the_status_arm() {
 
     let state = seeded_state(
         qwen_node(),
-        vec![qwen_connection("conn-qwen", &upstream.uri())],
+        vec![qwen_connection("conn-qwen", &upstream.uri(), None)],
     )
     .await;
     let app = openproxy::build_app(state);
@@ -554,6 +568,117 @@ async fn qwen_dispatch_surfaces_a_raw_401_to_the_status_arm() {
 
     // The account is permanently rejected, so the request must fail — but only
     // after upstream actually saw the dispatch.
+    let status = response.status();
+    let text = body_text(response).await;
+    assert!(
+        !status.is_success(),
+        "a permanently-rejected qwen credential must not produce a success, got {status}: {text}"
+    );
+}
+
+/// A qwen token endpoint that always hands back a usable token, so the dispatch
+/// loop's refresh arm always takes its success path and `continue`s.
+///
+/// `OPENPROXY_QWEN_TOKEN_URL` is the seam `qwen_token_url()` reads (bead
+/// openproxy-e42f). Process-global, but nothing else in this binary sets it.
+async fn always_succeeding_qwen_refresh() -> MockServer {
+    let refresh = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "fresh-access-token",
+            "refresh_token": "refresh-me-2",
+            "expires_in": 3600
+        })))
+        .mount(&refresh)
+        .await;
+    std::env::set_var("OPENPROXY_QWEN_TOKEN_URL", refresh.uri());
+    refresh
+}
+
+/// Bead openproxy-e42f — the refresh arm, armed for real.
+///
+/// Same defect as test 1, reached through the only arm that can re-enter the
+/// dispatch loop WITHOUT advancing `excluded`: a 401/403 whose OAuth refresh
+/// succeeds (chat.rs:2882). That arm persists the new token and `continue`s
+/// without excluding the connection, so `select_connection` may hand back the
+/// very same account. With upstream rejecting every dispatch and the token
+/// endpoint minting a fresh token every time, an unguarded loop spins forever
+/// — pinning a worker and an in-flight slot.
+///
+/// Arming it needs both seams at once: a qwen connection (the executor returns
+/// the raw upstream status, unlike `DefaultExecutor`, which absorbs the 401
+/// into `MaxRetriesExhausted` and always advances), and
+/// `OPENPROXY_QWEN_TOKEN_URL` so the refresh lands on a mock rather than
+/// qwen's live IdP.
+///
+/// The timeout IS the assertion, and the two counts are what make it
+/// red-to-green rather than another status check: `dispatched >= 2` proves the
+/// loop actually re-entered through the non-advancing `continue` (a single
+/// dispatch would mean the connection was excluded on the first 401 and the
+/// arm never ran), and the request must still come back inside
+/// `TERMINATION_TIMEOUT`. Empty `refreshed_this_request` and raise
+/// `attempt_budget` and the timeout fires instead — the delta tests 1-3
+/// cannot express.
+#[tokio::test]
+async fn dispatch_loop_terminates_when_refresh_arm_repeats_forever() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": { "message": "invalid token", "type": "authentication_error" }
+        })))
+        .mount(&upstream)
+        .await;
+
+    let _refresh = always_succeeding_qwen_refresh().await;
+
+    let state = seeded_state(
+        qwen_node(),
+        vec![qwen_connection(
+            "conn-qwen",
+            &upstream.uri(),
+            Some("refresh-me"),
+        )],
+    )
+    .await;
+    let app = openproxy::build_app(state);
+
+    let outcome = tokio::time::timeout(TERMINATION_TIMEOUT, app.oneshot(qwen_chat_request())).await;
+
+    let response = match outcome {
+        Ok(Ok(response)) => response,
+        Ok(Err(never)) => match never {},
+        Err(_) => panic!(
+            "dispatch loop did not terminate within {TERMINATION_TIMEOUT:?}: the 401 refresh \
+             arm re-entered the loop without advancing the excluded set and spun forever \
+             (bead openproxy-e42f)"
+        ),
+    };
+
+    let refreshed = _refresh
+        .received_requests()
+        .await
+        .expect("refresh mock recorded requests")
+        .len();
+    assert!(
+        refreshed >= 1,
+        "the refresh arm never fired, so this test never reached the non-advancing \
+         `continue` it exists to guard (bead openproxy-e42f)"
+    );
+
+    let dispatched = upstream
+        .received_requests()
+        .await
+        .expect("upstream recorded requests")
+        .len();
+    assert!(
+        dispatched >= 2,
+        "the loop did not re-dispatch after a successful refresh ({dispatched} dispatch(es)), \
+         so the refresh-once guard was never exercised (bead openproxy-e42f)"
+    );
+
+    // The account is rejected on every dispatch, refresh included, so the
+    // request must fail — but only after the arm ran and the bound drained the
+    // candidate set.
     let status = response.status();
     let text = body_text(response).await;
     assert!(
