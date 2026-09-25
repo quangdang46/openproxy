@@ -760,7 +760,40 @@ async fn test_api_key_connection(
             )
             .await
         }
-        _ => invalid("Provider test not supported"),
+        // 9router probes several API-key providers this table has no arm for
+        // (alims-intl, blackbox, chutes, codebuddy-cn, grok-web, llm7, …), and
+        // they used to fall into "not supported" — so their test always failed
+        // and every one of them looked broken in the dashboard.
+        //
+        // Rather than a hand-written URL per provider, fall back to the one
+        // probe every OpenAI-compatible provider exposes: GET {base}/models
+        // with the connection's own key. The base URL comes from the provider's
+        // configured entry, so this cannot drift from what the executor dials —
+        // the failure mode behind the oauth probe arms fixed earlier.
+        _ => {
+            let Some(base) = generic_probe_base_url(connection) else {
+                return invalid("Provider test not supported");
+            };
+            let api_key = connection.api_key.clone().unwrap_or_default();
+            let request = PreparedRequest {
+                method: Method::GET,
+                url: format!("{}/models", base.trim_end_matches('/')),
+                headers: vec![
+                    ("Authorization".to_string(), format!("Bearer {api_key}")),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+            };
+            status_test_excluding(
+                state,
+                connection,
+                effective_proxy,
+                request,
+                &[StatusCode::UNAUTHORIZED, StatusCode::FORBIDDEN],
+                "Invalid API key",
+            )
+            .await
+        }
     };
 
     response
@@ -2111,6 +2144,24 @@ fn invalid(error: &str) -> ConnectionTestResult {
         refreshed: false,
         new_tokens: None,
     }
+}
+
+/// The base URL a generic `{base}/models` probe should use.
+///
+/// Prefers what the connection itself is configured with, then the provider's
+/// registry entry. Never guesses a host: a provider with neither is left
+/// unsupported rather than dialled at a URL invented here.
+fn generic_probe_base_url(connection: &ProviderConnection) -> Option<String> {
+    if let Some(base) = connection
+        .provider_specific_data
+        .get("baseUrl")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        return Some(base.trim_end_matches('/').to_string());
+    }
+    crate::core::executor::provider_config_base_url(&connection.provider)
+        .filter(|base| !base.trim().is_empty())
 }
 
 #[cfg(test)]

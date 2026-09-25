@@ -26,7 +26,7 @@ function generateCrc(machineId: string, keyId: string): string {
     .createHmac("sha256", API_KEY_SECRET)
     .update(machineId + keyId)
     .digest("hex")
-    .slice(0, 8);
+    .slice(0, 12);
 }
 
 interface ApiKeyResult {
