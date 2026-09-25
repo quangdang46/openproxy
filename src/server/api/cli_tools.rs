@@ -13,6 +13,7 @@ use std::env;
 use std::path::{Path as FsPath, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use anyhow::Context as _;
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
@@ -1328,8 +1329,10 @@ async fn write_droid_settings(
     }
 
     let mut settings = match fs::read_to_string(&settings_path).await {
-        Ok(existing) => parse_json_object_or_default(&existing),
-        Err(_) => serde_json::Map::new(),
+        Ok(existing) => parse_json_object_required(&existing)
+            .with_context(|| format!("Refusing to rewrite {}", settings_path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => return Err(error.into()),
     };
 
     let custom_models_value = settings.remove("customModels");
@@ -1408,7 +1411,8 @@ async fn write_droid_settings(
 async fn reset_droid_settings() -> anyhow::Result<Value> {
     let settings_path = droid_settings_path();
     let mut settings = match fs::read_to_string(&settings_path).await {
-        Ok(existing) => parse_json_object_or_default(&existing),
+        Ok(existing) => parse_json_object_required(&existing)
+            .with_context(|| format!("Refusing to rewrite {}", settings_path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(json!({
                 "success": true,
@@ -1704,7 +1708,8 @@ async fn write_openclaw_settings(req: &OpenClawSettingsRequest) -> anyhow::Resul
     }
 
     let mut settings = match fs::read_to_string(&settings_path).await {
-        Ok(existing) => parse_json_object_or_default(&existing),
+        Ok(existing) => parse_json_object_required(&existing)
+            .with_context(|| format!("Refusing to rewrite {}", settings_path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
         Err(error) => return Err(error.into()),
     };
@@ -1905,7 +1910,8 @@ async fn write_openclaw_agent_models(
     fs::create_dir_all(&agent_dir).await?;
     let models_path = agent_dir.join("models.json");
     let mut existing = match fs::read_to_string(&models_path).await {
-        Ok(content) => parse_json_object_or_default(&content),
+        Ok(content) => parse_json_object_required(&content)
+            .with_context(|| format!("Refusing to rewrite {}", models_path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
         Err(error) => return Err(error.into()),
     };
@@ -1952,13 +1958,6 @@ fn parse_json_array_or_default(content: &str) -> Vec<Value> {
     match serde_json::from_str::<Value>(content) {
         Ok(Value::Array(entries)) => entries,
         _ => Vec::new(),
-    }
-}
-
-fn parse_json_object_or_default(content: &str) -> serde_json::Map<String, Value> {
-    match serde_json::from_str::<Value>(content) {
-        Ok(Value::Object(object)) => object,
-        _ => serde_json::Map::new(),
     }
 }
 
