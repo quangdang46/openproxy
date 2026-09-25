@@ -502,6 +502,17 @@ async fn generic_media_handler(
     }
 }
 
+/// Route a media/embeddings request to the next eligible credential when one
+/// fails on auth or quota.
+///
+/// 9router rotates across accounts for these surfaces (embeddings.js:97-164,
+/// and videoGeneration.js the same way), so one quota-limited or revoked
+/// account does not fail a request that a second account could serve. The last
+/// error is returned only when every credential has been tried.
+///
+/// Scoped to auth/quota statuses. A 400 or 5xx is the request's own problem,
+/// not the credential's, and retrying it on every account would multiply
+/// latency for a guaranteed-same answer.
 async fn execute_media_provider(
     state: &AppState,
     request_body: &Value,
@@ -515,17 +526,53 @@ async fn execute_media_provider(
     };
 
     let snapshot = state.db.snapshot();
-    let connection = match select_media_connection(&snapshot, provider, model) {
-        Some(conn) => conn,
-        None => {
-            return json_error_response(
-                StatusCode::BAD_REQUEST,
-                &format!("No credentials for provider: {}", provider),
-            )
-        }
-    };
+    let connections = select_media_connections(&snapshot, provider);
+    if connections.is_empty() {
+        return json_error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("No credentials for provider: {}", provider),
+        );
+    }
 
-    let proxy = resolve_proxy_target(&snapshot, &connection, &snapshot.settings);
+    let mut last_auth_failure = None;
+    for connection in &connections {
+        let response = execute_media_provider_on_connection(
+            state,
+            request_body,
+            provider,
+            model,
+            route_kind,
+            connection,
+        )
+        .await;
+
+        if !matches!(response.status().as_u16(), 401 | 403 | 429) {
+            return response;
+        }
+
+        tracing::warn!(
+            "MEDIA-ROTATE provider={} connection={} status={} trying next",
+            provider,
+            connection.id,
+            response.status().as_u16()
+        );
+        last_auth_failure = Some(response);
+    }
+
+    last_auth_failure.expect("the connection list was checked non-empty above")
+}
+
+async fn execute_media_provider_on_connection(
+    state: &AppState,
+    request_body: &Value,
+    provider: &str,
+    model: &str,
+    route_kind: &str,
+    connection: &crate::types::ProviderConnection,
+) -> Response {
+    let snapshot = state.db.snapshot();
+
+    let proxy = resolve_proxy_target(&snapshot, connection, &snapshot.settings);
 
     // Try the provider-specific media adapter first (image / tts /
     // embeddings / search). Falls through to the generic upstream
