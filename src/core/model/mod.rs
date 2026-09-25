@@ -173,6 +173,28 @@ static ALIAS_TO_PROVIDER_ID: Lazy<HashMap<&'static str, &'static str>> = Lazy::n
         ("xmd", "xiaomi-mimo"),
         ("xmtp", "xiaomi-tokenplan"),
         ("zd", "zed"),
+        // ── Aliases served by a dedicated executor or the media path ────
+        // None of these targets is a PROVIDER_CONFIGS key: each is dispatched
+        // by its own arm in chat.rs / media.rs, or by a media adapter. That
+        // dispatch is not what makes them reachable, though — the credential
+        // gate runs first and compares the connection's provider byte for byte
+        // (`conn.provider != provider`, account_fallback; the same test in
+        // select_media_connections). An unmapped alias 400s with "No
+        // credentials for provider" before the arm that would serve it is ever
+        // entered, so the `|| provider == "gcli"` arm beside `grok-cli` does
+        // not make `gcli/` work on its own. The table is the routing step.
+        ("brave", "brave-search"),
+        ("cmc", "commandcode"),
+        ("devin", "devin-cli"),
+        ("fish", "fish-audio"),
+        ("gb", "grok-cli"),
+        ("gcli", "grok-cli"),
+        ("grok-build", "grok-cli"),
+        ("marscode", "trae"),
+        ("polly", "aws-polly"),
+        ("qd", "qoder"),
+        ("stability", "stability-ai"),
+        ("tr", "trae"),
     ])
 });
 
@@ -239,10 +261,16 @@ pub fn parse_model(model_str: &str) -> ParsedModel {
 ///
 /// Without it `grok-build` fell through to prefix inference, which OpenProxy
 /// routes to `xai` — a different provider than the one the alias names.
+///
+/// The builtin's target is the string `"gcli/grok-build"`, and 9router feeds
+/// that target's provider half back through `resolveProviderAlias`
+/// (model.js:73), so the bare name lands on the canonical `grok-cli`. Spelling
+/// the alias out here left the two forms of one provider disagreeing, and
+/// `gcli` is a display alias that no connection is ever stored under.
 fn builtin_model_alias(model: &str) -> Option<ProviderModelRef> {
     match model {
         "grok-build" => Some(ProviderModelRef {
-            provider: "gcli".to_string(),
+            provider: resolve_provider_alias("gcli"),
             model: "grok-build".to_string(),
             extra: BTreeMap::new(),
         }),
@@ -450,6 +478,18 @@ mod alias_parity_tests {
             ("vercel", "vercel-ai-gateway"),
             ("vn", "venice"),
             ("zd", "zed"),
+            ("brave", "brave-search"),
+            ("cmc", "commandcode"),
+            ("devin", "devin-cli"),
+            ("fish", "fish-audio"),
+            ("gb", "grok-cli"),
+            ("gcli", "grok-cli"),
+            ("grok-build", "grok-cli"),
+            ("marscode", "trae"),
+            ("polly", "aws-polly"),
+            ("qd", "qoder"),
+            ("stability", "stability-ai"),
+            ("tr", "trae"),
         ] {
             assert_eq!(
                 super::resolve_provider_alias(alias),
@@ -483,10 +523,10 @@ mod builtin_alias_parity {
     /// prefix inference, which OpenProxy routes to xai — a different provider
     /// from the one the alias names.
     #[test]
-    fn built_in_grok_build_alias_resolves_to_gcli() {
+    fn built_in_grok_build_alias_resolves_to_grok_cli() {
         let db = AppDb::default();
         let resolved = get_model_info("grok-build", &db);
-        assert_eq!(resolved.provider.as_deref(), Some("gcli"));
+        assert_eq!(resolved.provider.as_deref(), Some("grok-cli"));
         assert_eq!(resolved.model, "grok-build");
         assert_eq!(resolved.route_kind, ModelRouteKind::Direct);
     }
@@ -569,13 +609,14 @@ mod prefix_inference_parity {
     }
 
     /// Guards the ordering dependency: with the `grok-` arm pruned, `grok-build`
-    /// reaches gcli through the built-in alias rather than the openai fallback.
+    /// reaches grok-cli through the built-in alias rather than the openai
+    /// fallback.
     #[test]
     fn the_builtin_alias_still_wins_over_the_openai_fallback() {
         let db = AppDb::default();
         assert_eq!(
             get_model_info("grok-build", &db).provider.as_deref(),
-            Some("gcli")
+            Some("grok-cli")
         );
     }
 }
