@@ -4949,8 +4949,18 @@ pub async fn poll_device_code(
     // reached the field lookup below — the pending→authorized transition was
     // unreachable from the UI. The connection is stored against the flow's own
     // account_id, not this one, so accepting a session changes nothing else.
+    //
+    // The retry is not redundant: the snapshot can be stale, because the CLI
+    // mints a key through SQLite while the server has not seen it yet. Start
+    // already reloads on that path, so without this a freshly minted key would
+    // start successfully and then 401 on the very next poll.
     if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
-        return response;
+        if state.db.reload_snapshot().await.is_err() {
+            return response;
+        }
+        if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+            return response;
+        }
     }
 
     // The dashboard posts camelCase (OAuthModal.tsx:153-157); the CLI posts
