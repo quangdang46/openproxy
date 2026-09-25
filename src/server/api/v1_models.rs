@@ -102,6 +102,15 @@ async fn build_models_list(
 ) -> Vec<ModelCard> {
     let catalog = provider_catalog();
     let alias_to_provider_id = catalog.alias_to_provider_id();
+    // Same store the Providers page and ModelSelectModal read via
+    // /api/models/disabled — a model the operator switched off must not keep
+    // being advertised here, or the dashboard and the client picker disagree.
+    let disabled = super::models_disabled::disabled_models_from_db(snapshot);
+    let is_disabled = |alias: &str, model_id: &str| {
+        disabled
+            .get(alias)
+            .is_some_and(|ids| ids.iter().any(|id| id == model_id))
+    };
     let created = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -164,6 +173,9 @@ async fn build_models_list(
 
             for model in &provider_entry.models {
                 if !kind_filter.iter().any(|kind| *kind == model.kind) {
+                    continue;
+                }
+                if is_disabled(&provider_entry.alias, &model.id) {
                     continue;
                 }
 
@@ -284,6 +296,12 @@ async fn build_models_list(
                     .copied()
                     .unwrap_or_else(|| infer_kind_from_unknown_model_id(&model_id));
                 if !kind_filter.contains(&kind) {
+                    continue;
+                }
+                // A connection carrying a `prefix` is listed under the output
+                // alias, but the operator toggles the model on the Providers
+                // page under the static alias — both must hide it.
+                if is_disabled(&output_alias, &model_id) || is_disabled(static_alias, &model_id) {
                     continue;
                 }
 
@@ -638,20 +656,115 @@ struct ModelCard {
     max_completion_tokens: Option<u32>,
 }
 
-/// GET /v1/models/info?model={model_id}
+/// Does the router actually know this model id?
+///
+/// 9router's `lookup()` (models/info/route.js:45-77) answers from the static
+/// catalog alone, so an unknown id 404s instead of being handed the provider
+/// `get_model_info` guesses from the model name. OpenProxy also knows about
+/// combos, custom models and connection-pinned models, so those count as known
+/// too — otherwise the 404 would reject ids `/v1/models` advertises.
+fn model_is_known(
+    snapshot: &AppDb,
+    catalog: &crate::core::model::catalog::ProviderCatalog,
+    model_str: &str,
+    resolved: &crate::core::model::ResolvedModel,
+    requested_kind: Option<&str>,
+) -> bool {
+    if matches!(
+        resolved.route_kind,
+        crate::core::model::ModelRouteKind::Combo
+    ) {
+        return snapshot
+            .combos
+            .iter()
+            .any(|combo| combo.name == resolved.model);
+    }
+
+    // Catalog models are addressed as `{alias}/{modelId}`; route.js:46 rejects
+    // anything without a slash.
+    let Some((alias, model_id)) = model_str.split_once('/').filter(|(_, id)| !id.is_empty()) else {
+        return false;
+    };
+    let provider_id = resolved.provider.as_deref().unwrap_or(alias);
+
+    if let Some(provider_info) = catalog.provider_info(provider_id) {
+        if catalog
+            .find_model(provider_id, model_id)
+            .is_some_and(|model| requested_kind.is_none_or(|kind| kind == model.kind))
+        {
+            return true;
+        }
+        // `search` / `fetch` are virtual ids that /v1/models/web advertises.
+        if (model_id == "search" && provider_info.has_search)
+            || (model_id == "fetch" && provider_info.has_fetch)
+        {
+            return true;
+        }
+    }
+
+    if snapshot
+        .custom_models
+        .iter()
+        .any(|custom| custom.provider_alias.trim() == alias && custom.id.trim() == model_id)
+    {
+        return true;
+    }
+
+    snapshot.provider_connections.iter().any(|connection| {
+        if !connection.is_active() {
+            return false;
+        }
+        let provider = connection.provider.as_str();
+        let static_alias = catalog
+            .static_alias_for_provider(provider)
+            .unwrap_or(provider);
+        let output = output_alias(catalog, connection, provider, static_alias);
+        if alias != output && alias != static_alias && alias != provider {
+            return false;
+        }
+        // Only an explicit enabledModels list proves this id exists; a
+        // connection without one already advertises the catalog, and treating
+        // that as "any id is known" would make the 404 arm unreachable.
+        let (ids, had_enabled) = enabled_model_ids(connection);
+        had_enabled
+            && ids
+                .iter()
+                .filter_map(|id| {
+                    strip_provider_prefix(id, &[output.as_str(), static_alias, provider])
+                })
+                .any(|id| id == model_id)
+    })
+}
+
+/// GET /v1/models/info?id={alias}/{model_id}
 pub async fn models_info(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    use crate::core::model::{get_model_info, parse_model, resolve_provider_alias};
-    let model_str = params.get("model").map(String::as_str).unwrap_or("");
+    use crate::core::model::{get_model_info, parse_model};
+    // 9router names the param `id`; `model` stays as a fallback so callers
+    // written against the older OpenProxy contract keep working.
+    let model_str = params
+        .get("id")
+        .or_else(|| params.get("model"))
+        .map(String::as_str)
+        .unwrap_or("");
     if model_str.is_empty() {
-        return (
+        return with_cors_json(
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": { "message": "model parameter required", "type": "invalid_request_error" } })),
-        ).into_response();
+            json!({
+                "error": {
+                    "message": "Missing required query param: id (e.g. ?id=openai/dall-e-3)",
+                    "type": "invalid_request_error"
+                }
+            }),
+        );
     }
+    let requested_kind = params
+        .get("kind")
+        .map(String::as_str)
+        .filter(|kind| !kind.is_empty());
     let snapshot = state.db.snapshot();
     let resolved = get_model_info(model_str, &snapshot);
 
@@ -667,6 +780,18 @@ pub async fn models_info(
         }
         None => (None, None),
     };
+
+    if !model_is_known(&snapshot, catalog, model_str, &resolved, requested_kind) {
+        return with_cors_json(
+            StatusCode::NOT_FOUND,
+            json!({
+                "error": {
+                    "message": format!("Model not found: {model_str}"),
+                    "type": "not_found"
+                }
+            }),
+        );
+    }
 
     let mut info = json!({
         "id": model_str,
@@ -720,7 +845,7 @@ pub async fn models_info(
         }
     }
 
-    Json(json!({ "object": "model.info", "data": info })).into_response()
+    with_cors_response(Json(info).into_response())
 }
 
 #[cfg(test)]
@@ -728,8 +853,11 @@ mod tests {
     use super::*;
     use crate::server::state::AppState;
     use crate::types::{CustomModel, ProviderConnection};
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use tower::util::ServiceExt;
 
     async fn test_state() -> AppState {
         let dir = tempfile::tempdir().unwrap();
@@ -915,5 +1043,193 @@ mod tests {
             models.iter().any(|m| m.id == "ollama-local/local-qwen-2.5"),
             "dynamically discovered models of a catalog-less built-in provider should appear in /v1/models"
         );
+    }
+
+    fn disabled_snapshot(alias: &str, ids: &[&str]) -> AppDb {
+        AppDb {
+            extra: BTreeMap::from([("disabledModels".into(), json!({ alias: ids }))]),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_catalog_models_are_hidden_from_the_static_branch() {
+        // The Providers page toggle is the operator's kill-switch for a model;
+        // /v1/models must not keep advertising it to client model pickers.
+        let snapshot = disabled_snapshot("openai", &["gpt-4o-mini"]);
+
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        assert!(
+            !models.iter().any(|m| m.id == "openai/gpt-4o-mini"),
+            "a model disabled on the Providers page must not appear in /v1/models"
+        );
+        assert!(
+            models.iter().any(|m| m.id.starts_with("openai/")),
+            "disabling one model must not empty the rest of that provider's list"
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_connection_models_are_hidden_under_either_alias() {
+        // A prefixed connection is listed under the output alias, but the
+        // operator toggles the model under the static alias on the Providers
+        // page — hiding it must work for both.
+        let connection = ProviderConnection {
+            id: "conn-openai".into(),
+            provider: "openai".into(),
+            auth_type: "apikey".into(),
+            provider_specific_data: BTreeMap::from([
+                ("prefix".into(), json!("oa")),
+                ("enabledModels".into(), json!(["gpt-4o", "gpt-4o-mini"])),
+            ]),
+            ..Default::default()
+        };
+
+        for (label, alias) in [("output alias", "oa"), ("static alias", "openai")] {
+            let snapshot = AppDb {
+                provider_connections: vec![connection.clone()],
+                ..disabled_snapshot(alias, &["gpt-4o-mini"])
+            };
+
+            let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+            assert!(
+                !models.iter().any(|m| m.id == "oa/gpt-4o-mini"),
+                "model disabled under the {label} must not appear in /v1/models"
+            );
+            assert!(
+                models.iter().any(|m| m.id == "oa/gpt-4o"),
+                "an enabled sibling must survive a {label} disable"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn disabled_models_are_hidden_from_every_kind_route() {
+        // /v1/models/{kind} funnels through the same builder, so a disable
+        // must bite for the non-LLM kinds too.
+        let state = test_state().await;
+        let snapshot = disabled_snapshot(
+            "openai",
+            &["text-embedding-3-small", "tts-1", "dall-e-3", "whisper-1"],
+        );
+
+        for (kind_filter, disabled_id) in [
+            (vec!["embedding"], "openai/text-embedding-3-small"),
+            (vec!["tts"], "openai/tts-1"),
+            (vec!["image"], "openai/dall-e-3"),
+            (vec!["stt"], "openai/whisper-1"),
+        ] {
+            let models = build_models_list(&state, &snapshot, &kind_filter).await;
+            assert!(
+                !models.iter().any(|m| m.id == disabled_id),
+                "{disabled_id} disabled on the Providers page must not appear in /v1/models/{kind_filter:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_models_are_not_subject_to_the_disabled_filter() {
+        // 9router's two isDisabled call sites cover the catalog and the
+        // per-connection list only — custom models stay visible.
+        let snapshot = AppDb {
+            custom_models: vec![CustomModel {
+                provider_alias: "tr".into(),
+                id: "MiniMax-M3".into(),
+                r#type: String::new(),
+                name: None,
+                extra: BTreeMap::new(),
+            }],
+            ..disabled_snapshot("tr", &["MiniMax-M3"])
+        };
+
+        let models = build_models_list(&test_state().await, &snapshot, &[LLM_KIND]).await;
+        assert!(
+            models.iter().any(|m| m.id == "tr/MiniMax-M3"),
+            "9router does not filter custom models; matching that quirk"
+        );
+    }
+
+    async fn models_info_request(state: &AppState, uri: &str) -> (StatusCode, serde_json::Value) {
+        let app = routes().with_state(state.clone());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        (status, serde_json::from_slice(&bytes).expect("json body"))
+    }
+
+    async fn openai_info_state() -> AppState {
+        let dir = tempfile::tempdir().unwrap();
+        let db = crate::db::Db::load_from(dir.path()).await.unwrap();
+        let db = Arc::new(db);
+        db.update(|state| {
+            state.provider_connections = vec![ProviderConnection {
+                id: "conn-openai".into(),
+                provider: "openai".into(),
+                auth_type: "apikey".into(),
+                ..Default::default()
+            }];
+        })
+        .await
+        .unwrap();
+        AppState::new(db)
+    }
+
+    #[tokio::test]
+    async fn models_info_accepts_the_9router_id_param_and_returns_a_bare_object() {
+        let state = openai_info_state().await;
+        let (status, body) = models_info_request(&state, "/v1/models/info?id=openai/gpt-4.1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], json!("openai/gpt-4.1"));
+        assert!(
+            body.get("data").is_none() && body.get("object").is_none(),
+            "9router returns the info object bare, not wrapped in {{object,data}}: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn models_info_404s_on_an_unknown_id() {
+        let state = openai_info_state().await;
+        let (status, body) =
+            models_info_request(&state, "/v1/models/info?id=openai/definitely-not-real").await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["type"], json!("not_found"));
+        assert_eq!(
+            body["error"]["message"],
+            json!("Model not found: openai/definitely-not-real")
+        );
+    }
+
+    #[tokio::test]
+    async fn models_info_400s_without_an_id() {
+        let state = openai_info_state().await;
+        let (status, body) = models_info_request(&state, "/v1/models/info").await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            body["error"]["message"],
+            json!("Missing required query param: id (e.g. ?id=openai/dall-e-3)")
+        );
+    }
+
+    #[tokio::test]
+    async fn models_info_still_accepts_the_model_param_as_a_fallback() {
+        let state = openai_info_state().await;
+        let (status, body) =
+            models_info_request(&state, "/v1/models/info?model=openai/gpt-4.1").await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["id"], json!("openai/gpt-4.1"));
     }
 }
