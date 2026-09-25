@@ -228,6 +228,141 @@ pub const TABLES_SQL: &[&str] = &[
     "#,
 ];
 
+/// Column registry for the additive sync in
+/// [`crate::db::sqlite::migrations::sync_schema_from_tables`] — the port of
+/// 9router's declarative `TABLES` map (`9router/src/lib/db/schema.js`).
+///
+/// `TABLES_SQL` above builds fresh databases; this list brings pre-existing
+/// ones up to date, so every entry must match the matching `CREATE TABLE` body
+/// above. Defs are written as they appear in the DDL — the sync strips
+/// `PRIMARY KEY` / `UNIQUE` before issuing `ADD COLUMN`, which SQLite rejects.
+/// Table-level constraints (`kv` and `disabledModels` composite keys) are not
+/// listed because `ADD COLUMN` cannot express them.
+pub const DECLARED_COLUMNS: &[(&str, &[(&str, &str)])] = &[
+    (
+        "_meta",
+        &[("key", "TEXT PRIMARY KEY"), ("value", "TEXT NOT NULL")],
+    ),
+    (
+        "settings",
+        &[
+            ("id", "INTEGER PRIMARY KEY CHECK (id = 1)"),
+            ("data", "TEXT NOT NULL"),
+        ],
+    ),
+    (
+        "providerConnections",
+        &[
+            ("id", "TEXT PRIMARY KEY"),
+            ("provider", "TEXT NOT NULL"),
+            ("authType", "TEXT NOT NULL DEFAULT 'oauth'"),
+            ("name", "TEXT"),
+            ("email", "TEXT"),
+            ("priority", "INTEGER"),
+            ("isActive", "INTEGER NOT NULL DEFAULT 1"),
+            ("data", "TEXT NOT NULL"),
+            ("createdAt", "TEXT NOT NULL"),
+            ("updatedAt", "TEXT NOT NULL"),
+        ],
+    ),
+    (
+        "providerNodes",
+        &[
+            ("id", "TEXT PRIMARY KEY"),
+            ("type", "TEXT"),
+            ("name", "TEXT"),
+            ("data", "TEXT NOT NULL"),
+            ("createdAt", "TEXT NOT NULL"),
+            ("updatedAt", "TEXT NOT NULL"),
+        ],
+    ),
+    (
+        "proxyPools",
+        &[
+            ("id", "TEXT PRIMARY KEY"),
+            ("isActive", "INTEGER NOT NULL DEFAULT 1"),
+            ("testStatus", "TEXT"),
+            ("data", "TEXT NOT NULL"),
+            ("createdAt", "TEXT NOT NULL"),
+            ("updatedAt", "TEXT NOT NULL"),
+        ],
+    ),
+    (
+        "apiKeys",
+        &[
+            ("id", "TEXT PRIMARY KEY"),
+            ("key", "TEXT UNIQUE NOT NULL"),
+            ("name", "TEXT"),
+            ("machineId", "TEXT"),
+            ("isActive", "INTEGER NOT NULL DEFAULT 1"),
+            ("createdAt", "TEXT NOT NULL"),
+            ("monthly_budget_usd", "REAL"),
+        ],
+    ),
+    (
+        "combos",
+        &[
+            ("id", "TEXT PRIMARY KEY"),
+            ("name", "TEXT UNIQUE NOT NULL"),
+            ("kind", "TEXT"),
+            ("models", "TEXT NOT NULL"),
+            ("data", "TEXT NOT NULL DEFAULT '{}'"),
+            ("createdAt", "TEXT NOT NULL"),
+            ("updatedAt", "TEXT NOT NULL"),
+        ],
+    ),
+    (
+        "kv",
+        &[
+            ("scope", "TEXT NOT NULL"),
+            ("key", "TEXT NOT NULL"),
+            ("value", "TEXT NOT NULL"),
+        ],
+    ),
+    (
+        "usageHistory",
+        &[
+            ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+            ("timestamp", "TEXT NOT NULL"),
+            ("provider", "TEXT"),
+            ("model", "TEXT"),
+            ("connectionId", "TEXT"),
+            ("apiKey", "TEXT"),
+            ("endpoint", "TEXT"),
+            ("promptTokens", "INTEGER DEFAULT 0"),
+            ("completionTokens", "INTEGER DEFAULT 0"),
+            ("cost", "REAL DEFAULT 0"),
+            ("status", "TEXT"),
+            ("tokens", "TEXT"),
+            ("meta", "TEXT"),
+            ("bytesBefore", "INTEGER DEFAULT 0"),
+            ("bytesAfter", "INTEGER DEFAULT 0"),
+            ("bytesSaved", "INTEGER DEFAULT 0"),
+            ("imagePrompts", "INTEGER DEFAULT 0"),
+        ],
+    ),
+    (
+        "usageDaily",
+        &[("dateKey", "TEXT PRIMARY KEY"), ("data", "TEXT NOT NULL")],
+    ),
+    (
+        "requestDetails",
+        &[
+            ("id", "TEXT PRIMARY KEY"),
+            ("timestamp", "TEXT NOT NULL"),
+            ("provider", "TEXT"),
+            ("model", "TEXT"),
+            ("connectionId", "TEXT"),
+            ("status", "TEXT"),
+            ("data", "TEXT NOT NULL"),
+        ],
+    ),
+    (
+        "disabledModels",
+        &[("provider", "TEXT NOT NULL"), ("model", "TEXT NOT NULL")],
+    ),
+];
+
 /// PRAGMA statements to run on every new connection. Idempotent (most
 /// return the current value rather than mutate state).
 ///
@@ -281,6 +416,39 @@ mod tests {
     fn pragmas_are_well_formed() {
         for p in PRAGMAS {
             assert!(p.to_ascii_uppercase().starts_with("PRAGMA "));
+        }
+    }
+
+    /// The additive sync only sees the tables named in `DECLARED_COLUMNS`, so a
+    /// table added to `TABLES_SQL` without a registry entry silently stops
+    /// receiving new columns on existing databases.
+    #[test]
+    fn declared_columns_cover_every_created_table() {
+        const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS";
+
+        let ddl_tables: Vec<&str> = TABLES_SQL
+            .iter()
+            .filter_map(|stmt| {
+                let rest = stmt.trim().strip_prefix(CREATE_TABLE)?.trim_start();
+                rest.split(['(', ' ', '\n', '\r', '\t']).next()
+            })
+            .collect();
+
+        assert!(
+            !ddl_tables.is_empty(),
+            "no CREATE TABLE found in TABLES_SQL"
+        );
+        for table in &ddl_tables {
+            assert!(
+                DECLARED_COLUMNS.iter().any(|(name, _)| name == table),
+                "table `{table}` is created by TABLES_SQL but missing from DECLARED_COLUMNS"
+            );
+        }
+        for (table, _) in DECLARED_COLUMNS {
+            assert!(
+                ddl_tables.contains(table),
+                "DECLARED_COLUMNS names `{table}`, which TABLES_SQL never creates"
+            );
         }
     }
 }

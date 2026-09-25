@@ -2,24 +2,31 @@
 
 import { useState, useEffect } from "react";
 import type { ChangeEvent, KeyboardEvent } from "react";
-import { Button, Modal } from "@/shared/components";
+import { Button, Modal, Toggle } from "@/shared/components";
+import { CAPACITY_META, type CapacityKey } from "@/shared/constants/models";
+
+const CAPABILITY_KEYS = Object.keys(CAPACITY_META) as CapacityKey[];
+
+const defaultCaps = (): Record<string, boolean> =>
+  Object.fromEntries(CAPABILITY_KEYS.map((key) => [key, false]));
 
 interface AddCustomModelModalProps {
   isOpen: boolean;
   providerAlias: string;
   providerDisplayAlias: string;
-  onSave: (modelId: string) => Promise<void>;
+  onSave: (modelId: string, caps: Record<string, boolean>) => Promise<void>;
   onClose: () => void;
 }
 
 export default function AddCustomModelModal({ isOpen, providerAlias, providerDisplayAlias, onSave, onClose }: AddCustomModelModalProps): React.ReactNode {
   const [modelId, setModelId] = useState<string>("");
+  const [caps, setCaps] = useState<Record<string, boolean>>(defaultCaps);
   const [testStatus, setTestStatus] = useState<null | "testing" | "ok" | "error">(null);
   const [testError, setTestError] = useState<string>("");
   const [saving, setSaving] = useState<boolean>(false);
 
   useEffect(() => {
-    if (isOpen) { setModelId(""); setTestStatus(null); setTestError(""); }
+    if (isOpen) { setModelId(""); setCaps(defaultCaps()); setTestStatus(null); setTestError(""); }
   }, [isOpen]);
 
   const stripAlias = (id: string): string => {
@@ -52,7 +59,7 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
     if (!cleanId || saving) return;
     setSaving(true);
     try {
-      await onSave(cleanId);
+      await onSave(cleanId, caps);
     } finally {
       setSaving(false);
     }
@@ -93,6 +100,25 @@ export default function AddCustomModelModal({ isOpen, providerAlias, providerDis
               <> · display: <code className="font-mono bg-sidebar px-1 rounded">{providerDisplayAlias}/{stripAlias(modelId.trim()) || "model-id"}</code></>
             ) : null}
           </p>
+        </div>
+
+        <div>
+          <label className="text-sm font-medium mb-1.5 block">Capabilities</label>
+          <div className="flex flex-wrap gap-4">
+            {CAPABILITY_KEYS.map((key) => {
+              const meta = CAPACITY_META[key];
+              return (
+                <Toggle
+                  key={key}
+                  checked={caps[key] === true}
+                  onChange={(v: boolean) => { setCaps((prev) => ({ ...prev, [key]: v })); }}
+                  label={meta.label}
+                  description={meta.desc}
+                  size="sm"
+                />
+              );
+            })}
+          </div>
         </div>
 
         {testStatus === "ok" && (

@@ -98,8 +98,8 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
             // Derive lightweight caps for dashboard CapacityBadges.
             // Prefer explicit catalog capabilities; fall back to name heuristics.
             let caps = {
-                let mut vision = false;
-                let mut reasoning = false;
+                let (mut vision, mut reasoning) =
+                    heuristic_caps(&model.id, model.name.as_deref().unwrap_or_default());
                 if let Some(list) = model.capabilities.as_ref() {
                     for c in list {
                         let lower = c.to_ascii_lowercase();
@@ -110,25 +110,6 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
                             reasoning = true;
                         }
                     }
-                }
-                let id_lower = model.id.to_ascii_lowercase();
-                let name_lower = model.name.as_deref().unwrap_or("").to_ascii_lowercase();
-                if !vision
-                    && (id_lower.contains("vision")
-                        || id_lower.contains("vl")
-                        || name_lower.contains("vision"))
-                {
-                    vision = true;
-                }
-                if !reasoning
-                    && (id_lower.contains("reason")
-                        || id_lower.contains("thinking")
-                        || id_lower.contains("o1")
-                        || id_lower.contains("o3")
-                        || id_lower.contains("o4")
-                        || name_lower.contains("reason"))
-                {
-                    reasoning = true;
                 }
                 if let Some(pi) = provider_info {
                     if pi.vision == Some(true) {
@@ -153,7 +134,72 @@ async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Respo
         }
     }
 
+    // Custom models ride along; a stored `caps` overrides the name heuristic
+    // (9router `api/models/route.js:55-61`). Catalog rows already claimed their
+    // own `<alias>/<id>`, so a custom model that duplicates one is skipped.
+    let seen: std::collections::HashSet<String> = models
+        .iter()
+        .filter_map(|model| model["fullModel"].as_str().map(str::to_string))
+        .collect();
+    for custom in &snapshot.custom_models {
+        if !(custom.r#type.is_empty() || custom.r#type == "llm" || custom.r#type == "chat") {
+            continue;
+        }
+        let model_id = custom.id.trim();
+        let provider_alias = custom.provider_alias.trim();
+        if model_id.is_empty() || provider_alias.is_empty() {
+            continue;
+        }
+        let full_model = format!("{provider_alias}/{model_id}");
+        if seen.contains(&full_model) {
+            continue;
+        }
+        let alias = snapshot
+            .model_aliases
+            .get(&full_model)
+            .map(model_alias_path)
+            .unwrap_or_else(|| model_id.to_string());
+        let (vision, reasoning) = heuristic_caps(model_id, "");
+        let stored_caps = custom
+            .extra
+            .get("caps")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut caps = serde_json::Map::new();
+        caps.insert("vision".to_string(), json!(vision));
+        caps.insert("reasoning".to_string(), json!(reasoning));
+        caps.extend(stored_caps);
+
+        models.push(serde_json::json!({
+            "provider": provider_alias,
+            "model": model_id,
+            "name": custom.name,
+            "kind": custom.r#type,
+            "fullModel": full_model,
+            "alias": alias,
+            "caps": caps,
+        }));
+    }
+
     Json(serde_json::json!({ "models": models })).into_response()
+}
+
+/// Capability flags read off a model id or display name — 9router's
+/// `getCapabilitiesForModel` floor, minus the catalog lookups a custom model
+/// cannot satisfy. Catalog rows also feed this from their display name; a
+/// custom row is derived from its id alone, as upstream does.
+fn heuristic_caps(id: &str, name: &str) -> (bool, bool) {
+    let id = id.to_ascii_lowercase();
+    let name = name.to_ascii_lowercase();
+    let vision = id.contains("vision") || id.contains("vl") || name.contains("vision");
+    let reasoning = id.contains("reason")
+        || id.contains("thinking")
+        || id.contains("o1")
+        || id.contains("o3")
+        || id.contains("o4")
+        || name.contains("reason");
+    (vision, reasoning)
 }
 
 // PUT /api/models — update model alias (with duplicate check)

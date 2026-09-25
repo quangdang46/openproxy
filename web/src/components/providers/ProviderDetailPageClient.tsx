@@ -770,12 +770,12 @@ export default function ProviderDetailPageClient() {
   // Returns whether the model was actually saved. AddCustomModelModal keeps
   // the typed id and stays open on false — it used to close unconditionally,
   // because this callee never threw and a network failure produced no toast.
-  const handleAddCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias) => {
+  const handleAddCustomModel = async (modelId, type = "llm", providerAliasOverride = providerStorageAlias, caps) => {
     try {
       const res = await fetch("/api/models/custom", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerAlias: providerAliasOverride, id: modelId, type }),
+        body: JSON.stringify({ providerAlias: providerAliasOverride, id: modelId, type, ...(caps ? { caps } : {}) }),
       });
       if (res.ok) {
         await fetchCustomModels();
@@ -2041,8 +2041,8 @@ export default function ProviderDetailPageClient() {
           isOpen={showAddCustomModel}
           providerAlias={providerStorageAlias}
           providerDisplayAlias={providerDisplayAlias}
-          onSave={async (modelId) => {
-            const ok = await handleAddCustomModel(modelId, "llm", providerStorageAlias);
+          onSave={async (modelId, caps) => {
+            const ok = await handleAddCustomModel(modelId, "llm", providerStorageAlias, caps);
             // Close only on success — closing on failure destroyed the typed id
             // and left the user with no trace of what they had entered.
             if (ok) setShowAddCustomModel(false);
