@@ -71,14 +71,6 @@ function createId(): string {
   return `chat_${Date.now()}_${Math.random().toString(16).slice(2)}`;
 }
 
-function safeParse<T>(value: string, fallback: T): T {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
-  }
-}
-
 function textValue(value: any): string {
   if (typeof value === "string") return value;
   if (value == null) return "";
@@ -257,6 +249,13 @@ export default function BasicChatPageClient() {
   const [streamingMessageId, setStreamingMessageId] = useState<string>("");
   const [streamingText, setStreamingText] = useState<string>("");
   const [isHydrated, setIsHydrated] = useState<boolean>(false);
+  // Cleared when the stored history cannot be parsed. While false, the persist
+  // effect below must not write: it would persist the empty state it derived
+  // from a failed read, which is how a corrupt value became permanent data loss.
+  const [storageWritable, setStorageWritable] = useState<boolean>(true);
+  // Separate from loadError, which loadData resets to "" on every run and
+  // would therefore wipe this a tick after mount.
+  const [storageError, setStorageError] = useState<string>("");
   const [modelMenuOpen, setModelMenuOpen] = useState<boolean>(false);
   const [historyOpen, setHistoryOpen] = useState<boolean>(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -267,7 +266,22 @@ export default function BasicChatPageClient() {
 
   useEffect(() => {
     try {
-      const savedSessions = safeParse(globalThis.localStorage.getItem(STORAGE_KEYS.sessions), []);
+      const rawSessions = globalThis.localStorage.getItem(STORAGE_KEYS.sessions);
+      let savedSessions: unknown;
+      try {
+        savedSessions = rawSessions === null ? [] : JSON.parse(rawSessions);
+      } catch {
+        // The stored history is present but unreadable. Loading it as [] would
+        // look identical to "no history yet" to every consumer, and the
+        // persist effect below would then write that [] back over the real
+        // data — erasing the user's chat history just for opening the page.
+        // Surface it and leave the stored bytes untouched so a later version,
+        // or a manual copy-out, can still recover them.
+        console.error("Stored chat history is unreadable; leaving it on disk instead of overwriting it.");
+        setStorageError("Saved chat history could not be read. It has been left on disk untouched — copy it out of localStorage before clearing site data.");
+        setStorageWritable(false);
+        return;
+      }
       setSessions(Array.isArray(savedSessions) ? savedSessions.map((session) => ({
         ...session,
         messages: Array.isArray(session.messages) ? session.messages : [],
@@ -436,7 +450,7 @@ export default function BasicChatPageClient() {
   const canSend = !isSending && !!activeModel && (draft.trim().length > 0 || attachments.length > 0);
 
   useEffect(() => {
-    if (!isHydrated) return;
+    if (!isHydrated || !storageWritable) return;
     try {
       globalThis.localStorage.setItem(STORAGE_KEYS.sessions, JSON.stringify(sessions));
       globalThis.localStorage.setItem(STORAGE_KEYS.activeSessionId, activeSessionId);
@@ -445,7 +459,7 @@ export default function BasicChatPageClient() {
     } catch {
       // Ignore storage errors.
     }
-  }, [isHydrated, sessions, activeSessionId, activeProviderId, draft]);
+  }, [isHydrated, storageWritable, sessions, activeSessionId, activeProviderId, draft]);
 
   useEffect(() => {
     if (!isHydrated || loadingData || initializedRef.current) return;
@@ -924,6 +938,15 @@ export default function BasicChatPageClient() {
             <div className="flex items-start gap-3">
               <span className="material-symbols-outlined text-[20px]">error</span>
               <p className="text-sm leading-6">{loadError}</p>
+            </div>
+          </div>
+        ) : null}
+
+        {storageError ? (
+          <div className="mt-4 rounded-[18px] border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-amber-100">
+            <div className="flex items-start gap-3">
+              <span className="material-symbols-outlined text-[20px]">warning</span>
+              <p className="text-sm leading-6">{storageError}</p>
             </div>
           </div>
         ) : null}
