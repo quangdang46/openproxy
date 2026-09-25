@@ -454,8 +454,12 @@ fn scan_message_capabilities(m: &Value, required: &mut HashSet<String>) {
         required.insert("audioInput".to_string());
     }
 
-    // Array / string content.
-    match obj.get("content") {
+    // Array / string content. Gemini-native messages carry their blocks under
+    // `parts` rather than `content`, so reading only `content` meant a
+    // contents[].parts[].inlineData image registered no requirement at all —
+    // the inlineData/fileData handling in scan_block was unreachable for the
+    // one request shape that uses it.
+    match obj.get("content").or_else(|| obj.get("parts")) {
         Some(Value::Array(blocks)) => {
             for b in blocks {
                 scan_block(b, required);
