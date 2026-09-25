@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -137,6 +138,15 @@ async fn gitlab_pat_route_upserts_existing_oauth_connection_by_provider_and_emai
                     email: Some("me@example.com".to_string()),
                     access_token: Some("old-token".to_string()),
                     refresh_token: Some("old-refresh".to_string()),
+                    // The username is part of the identity, not decoration:
+                    // 9router only collapses an OAuth row onto another when
+                    // BOTH sides carry one, so a row without it is a distinct
+                    // identity and the PAT route would open a second connection
+                    // (connectionsRepo.js:150-158).
+                    provider_specific_data: BTreeMap::from([(
+                        "username".to_string(),
+                        json!("gitlab-user"),
+                    )]),
                     ..Default::default()
                 });
         })
