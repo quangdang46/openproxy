@@ -2321,36 +2321,39 @@ impl CursorExecutor {
             let body_value = request.body.clone();
             let cursor_model = request.model.clone();
 
-            let (body_string, content_type) = if is_stream {
-                let sse = transform_protobuf_to_sse(&raw_body, &cursor_model, &body_value)?;
-                (sse, "text/event-stream")
-            } else {
-                let json = transform_protobuf_to_json(&raw_body, &cursor_model, &body_value)?;
-                (json, "application/json")
-            };
-
             // A Cursor rate limit can arrive INSIDE a 200 protobuf frame.
             // Returning it as 200 makes the client read a successful turn, and
             // status-driven account rotation never fires. 9router normalises
             // at the same point (cursor.js:936, cursor.js:1092) via
-            // createErrorResponse; build_cursor_error_body is that function
-            // and was previously only reachable from the non-200 branch below.
-            let mut status = 200u16;
+            // createErrorResponse; build_cursor_error_body is that function.
+            //
+            // The status is taken from the decoded frame, never from the
+            // rendered text — the streaming branch renders the model's answer
+            // into the same string, so a model that merely writes
+            // "rate_limit_error" in its reply would otherwise be reported as
+            // a 429 and cost the user a healthy account.
+            let (body_string, content_type, mut status) = if is_stream {
+                let (sse, status) =
+                    transform_protobuf_to_sse(&raw_body, &cursor_model, &body_value)?;
+                (sse, "text/event-stream", status)
+            } else {
+                let json = transform_protobuf_to_json(&raw_body, &cursor_model, &body_value)?;
+                (json, "application/json", None)
+            };
+
             let body_string = if is_stream {
-                if is_rate_limit_error_body(&body_string) {
-                    status = 429;
-                }
                 body_string
             } else {
                 match serde_json::from_str::<Value>(&body_string) {
                     Ok(value) if value.get("error").is_some_and(|error| !error.is_null()) => {
                         let (normalized, code) = build_cursor_error_body(&value);
-                        status = code;
+                        status = Some(code);
                         normalized
                     }
                     _ => body_string,
                 }
             };
+            let status = status.unwrap_or(200);
 
             let http_response = http::Response::builder()
                 .status(status)
@@ -2787,11 +2790,19 @@ fn build_chat_completion_response(
 
 /// Transform Cursor protobuf response into OpenAI SSE chunks.
 /// Mirrors transformProtobufToSSE from cursor.js lines 302-516.
+/// Render Cursor protobuf frames as SSE, alongside the status the response
+/// should carry.
+///
+/// `Some(code)` means a frame was structurally identified as an error while
+/// decoding. It is deliberately not derived from the rendered text: that text
+/// also contains the model's generated answer, and an assistant that explains
+/// rate limiting would otherwise produce a 429 for a successful turn, which
+/// rotates and burns a healthy account.
 pub fn transform_protobuf_to_sse(
     buffer: &[u8],
     model: &str,
     _body: &Value,
-) -> Result<String, CursorExecutorError> {
+) -> Result<(String, Option<u16>), CursorExecutorError> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -2821,11 +2832,18 @@ pub fn transform_protobuf_to_sse(
                     if has_content {
                         break;
                     }
-                    // Return error as SSE
+                    // Return error as SSE. The status comes from the frame we
+                    // just decoded, never from inspecting the rendered text:
+                    // that text also carries the model's own answer, and an
+                    // assistant explaining rate limiting would otherwise turn
+                    // a successful turn into a 429 and burn a healthy account.
+                    let status = serde_json::from_str::<Value>(text)
+                        .map(|value| build_cursor_error_body(&value).1)
+                        .unwrap_or(400);
                     let error_chunk = format!("data: {}\n\n", text);
                     chunks.push(error_chunk);
                     chunks.push(SSE_DONE.to_string());
-                    return Ok(chunks.concat());
+                    return Ok((chunks.concat(), Some(status)));
                 }
             }
         }
@@ -2838,10 +2856,13 @@ pub fn transform_protobuf_to_sse(
 
         // Handle error in frame
         if let Some(err) = frame.error {
+            let status = serde_json::from_str::<Value>(&err)
+                .map(|value| build_cursor_error_body(&value).1)
+                .unwrap_or(400);
             let error_sse = format!("data: {}\n\n", err);
             chunks.push(error_sse);
             chunks.push(SSE_DONE.to_string());
-            return Ok(chunks.concat());
+            return Ok((chunks.concat(), Some(status)));
         }
 
         // Handle tool call
@@ -3037,7 +3058,7 @@ pub fn transform_protobuf_to_sse(
     ));
     chunks.push(SSE_DONE.to_string());
 
-    Ok(chunks.concat())
+    Ok((chunks.concat(), None))
 }
 
 // ==================== TRANSFORM PROTOS TO JSON ====================
