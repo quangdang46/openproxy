@@ -176,7 +176,7 @@ export default function Sidebar({ onClose }: SidebarProps) {
   const handleShutdown = async () => {
     setIsShuttingDown(true);
     try {
-      await fetch("/api/shutdown", { method: "POST" });
+      await fetch("/api/dashboard/shutdown", { method: "POST" });
     } catch (e) {
       // Expected to fail as server shuts down; ignore error
     }

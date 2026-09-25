@@ -797,7 +797,7 @@ export default function ProfilePageClient() {
   const handleShutdown = async () => {
     setIsShuttingDown(true);
     try {
-      await fetch("/api/shutdown", { method: "POST" });
+      await fetch("/api/dashboard/shutdown", { method: "POST" });
     } catch {
       // server may already be gone
     }
