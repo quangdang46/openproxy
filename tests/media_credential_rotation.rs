@@ -198,3 +198,187 @@ async fn embeddings_returns_the_401_when_every_credential_fails() {
         "the upstream 401 must survive rather than being flattened into a 500"
     );
 }
+
+// ── Usage metering (openproxy-uxj9) ─────────────────────────────────────────
+//
+// The target here is the tracker, not a rotation sequence. The metering block
+// used to sit inline in the generic upstream forwarder, AFTER the media-adapter
+// attempt, so every provider served by an adapter returned before reaching it
+// and its embedding spend was never recorded at all. This asserts the ledger
+// actually gained a row.
+
+/// A single successful adapter-backed embedding request must be metered.
+#[tokio::test]
+async fn successful_adapter_backed_embedding_is_recorded_in_the_ledger() {
+    let upstream = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(header("authorization", "Bearer sk-first"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+            "model": "text-embedding-3-small",
+            "usage": {"prompt_tokens": 42, "total_tokens": 42}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let app = openproxy::build_app(app_state(&upstream.uri()).await);
+    let (status, _body) = post_embeddings(app.clone()).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the embedding should have succeeded"
+    );
+
+    // Give the tracker a moment — track_request is fire-and-forget from the
+    // response path.
+    let mut recorded = Vec::new();
+    for _ in 0..40 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/usage/request-details?page=1&pageSize=50")
+                    .header("authorization", "Bearer valid-bearer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        recorded = value
+            .get("details")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !recorded.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    assert!(
+        !recorded.is_empty(),
+        "a successful embedding request recorded nothing in the usage ledger"
+    );
+    let entry = &recorded[0];
+    assert_eq!(
+        entry
+            .get("tokens")
+            .and_then(|t| t.get("prompt_tokens"))
+            .and_then(Value::as_i64),
+        Some(42),
+        "the ledger recorded the wrong prompt token count: {entry}"
+    );
+}
+
+/// The same assertion, but on a provider that actually HAS an embeddings
+/// adapter (`openai` is one of the arms in `embeddings::dispatch`).
+///
+/// The test above uses a node-registered provider, which has no adapter and so
+/// falls through to the generic forwarder — that path already metered, which is
+/// exactly why it passed even with the adapter-path call removed. This one
+/// exercises the branch the bead was about.
+#[tokio::test]
+async fn node_adapter_backed_embedding_is_recorded_in_the_ledger() {
+    let upstream = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1]}],
+            "model": "text-embedding-3-small",
+            "usage": {"prompt_tokens": 42, "total_tokens": 42}
+        })))
+        .mount(&upstream)
+        .await;
+
+    let temp = tempdir().expect("tempdir");
+    let db = Arc::new(Db::load_from(temp.path()).await.expect("db"));
+    let base = upstream.uri();
+    db.update(|state| {
+        state.api_keys = vec![active_key("valid-bearer")];
+        state.settings.require_login = false;
+        state.settings.require_api_key = Some(false);
+        state.provider_connections = vec![ProviderConnection {
+            provider: "custom-embedding-test".into(),
+            // get_provider_base_url reads this, NOT the node's base_url.
+            provider_specific_data: BTreeMap::from([(
+                "baseUrl".to_string(),
+                Value::String(base.clone()),
+            )]),
+            ..seed_connection("first", 1, "sk-first", &base)
+        }];
+    })
+    .await
+    .expect("seed db");
+
+    let app = openproxy::build_app(AppState::new(db));
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/embeddings")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({"model": "custom-embedding-test/text-embedding-3-small", "input": "hi"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "the adapter-backed embedding should have succeeded"
+    );
+
+    let mut recorded = Vec::new();
+    for _ in 0..40 {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/usage/request-details?page=1&pageSize=50")
+                    .header("authorization", "Bearer valid-bearer")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        recorded = value
+            .get("details")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if !recorded.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+
+    assert!(
+        !recorded.is_empty(),
+        "an adapter-backed embedding recorded nothing in the usage ledger"
+    );
+    assert_eq!(
+        recorded[0]
+            .get("tokens")
+            .and_then(|t| t.get("prompt_tokens"))
+            .and_then(Value::as_i64),
+        Some(42),
+        "the ledger recorded the wrong prompt token count: {}",
+        recorded[0]
+    );
+}
