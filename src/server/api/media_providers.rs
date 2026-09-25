@@ -242,7 +242,21 @@ async fn add_media_provider(
     match state
         .db
         .update(|db| {
-            db.provider_connections.push(connection);
+            // Re-adding a provider under a name that already exists REPLACES
+            // it rather than adding a second row. Two connections with the same
+            // name double the row in every list, split round-robin between a
+            // stale key and the new one, and make a later "update" ambiguous
+            // about which row it meant.
+            let identity = (connection.provider.clone(), connection.name.clone());
+            if let Some(existing) = db
+                .provider_connections
+                .iter()
+                .position(|c| (c.provider.clone(), c.name.clone()) == identity)
+            {
+                db.provider_connections[existing] = connection;
+            } else {
+                db.provider_connections.push(connection);
+            }
         })
         .await
     {

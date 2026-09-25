@@ -2598,8 +2598,15 @@ fn cline_access_token(raw: &str) -> String {
 /// Providers whose upstream accepts unauthenticated requests (dashboard
 /// `noAuth: true`). They must reach the upstream without an Authorization
 /// header instead of failing with `MissingCredentials`.
+///
+/// 9router carries this as `noAuth: true` on the provider registry entry, so
+/// the set travels with the provider rather than being restated here. Ten of
+/// its providers declare it; only the ones OpenProxy actually ships are
+/// listed, and the rest (coqui, devin-cli, edge-tts, google-tts, local-device,
+/// mmf, tortoise) have no provider entry here at all. `opencode-zen` is
+/// OpenProxy's own no-auth provider and is not one of 9router's.
 fn provider_allows_missing_credentials(provider: &str) -> bool {
-    matches!(provider, "opencode-zen")
+    matches!(provider, "opencode-zen" | "mimo-free" | "searxng")
 }
 
 /// 9router open-sse/executors/opencode-go.js MESSAGES_FORMAT_MODELS — these

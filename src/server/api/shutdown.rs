@@ -83,10 +83,7 @@ async fn shutdown_with_secret(State(state): State<AppState>, headers: HeaderMap)
 /// The dashboard's Shutdown button. Authenticated by the same contract as every
 /// other dashboard route — a session cookie or a management API key — so the
 /// browser can actually call it.
-async fn shutdown_with_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn shutdown_with_session(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) =
         crate::server::api::require_dashboard_or_management_api_key(&headers, &state)
     {
