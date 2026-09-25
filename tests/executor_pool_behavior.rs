@@ -2444,3 +2444,76 @@ mod sim_fallback {
         let _ = ProviderFormat::OpenAI;
     }
 }
+
+/// openproxy-we9n: a provider answering 401 on the last fallback URL used to
+/// exit the URL loop and surface a blanket HTTP 500, telling the client our own
+/// server had failed when upstream had actually rejected its key. The status is
+/// now carried out of the loop.
+///
+/// The connection carries no refresh token, so the 401/403 arm takes the
+/// "no refresh" branch and breaks to the next URL — of which there is none.
+#[tokio::test]
+async fn real_branch_single_url_401_surfaces_as_401_not_500() {
+    let upstream = MockServer::start().await;
+    let request_body = json!({
+        "model": "gpt-4.1",
+        "stream": false,
+        "messages": [{"role": "user", "content": "hello"}]
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({"error": "bad key"})))
+        .mount(&upstream)
+        .await;
+
+    let provider_node = ProviderNode {
+        id: "node-openai".into(),
+        r#type: "openai-compatible".into(),
+        name: "Node".into(),
+        prefix: Some("custom".into()),
+        api_type: Some("chat".into()),
+        base_url: Some(format!("{}/v1", upstream.uri())),
+        created_at: None,
+        updated_at: None,
+        extra: BTreeMap::new(),
+    };
+
+    let executor = DefaultExecutor::new(
+        "node-openai",
+        Arc::new(ClientPool::new()),
+        Some(provider_node),
+    )
+    .expect("compatible executor");
+
+    let result = executor
+        .execute(ExecutionRequest {
+            model: "gpt-4.1".into(),
+            body: request_body,
+            stream: false,
+            credentials: connection("node-openai"),
+            proxy: None,
+            sim_headers: HeaderMap::new(),
+            force_mock: false,
+        })
+        .await;
+
+    let error = match result {
+        Ok(_) => panic!("401 must not be reported as success"),
+        Err(error) => error,
+    };
+
+    match &error {
+        ExecutorError::UpstreamStatus(status, _) => {
+            assert_eq!(*status, reqwest::StatusCode::UNAUTHORIZED);
+        }
+        other => panic!("expected UpstreamStatus(401), got {other:?}"),
+    }
+
+    // And it must reach the caller as 401, not as the old blanket 500.
+    assert_eq!(
+        error.into_combo_attempt_error().status,
+        401,
+        "combo attempt error must carry the real upstream status"
+    );
+}

@@ -748,6 +748,17 @@ impl ExecutorError {
                 retry_after: None,
                 upstream_body: None,
             },
+            // Transport failures are 502, not 500: the request never reached
+            // the provider, so 500 would tell the client our own server broke
+            // when in fact we could not reach upstream. 9router maps fetch
+            // exceptions through the 502 bucket for the same reason
+            // (base.js:174).
+            Self::Request(_) | Self::Hyper(_) | Self::HyperClientInit(_) => ComboAttemptError {
+                status: 502,
+                message: format!("Upstream request failed: {self:?}"),
+                retry_after: None,
+                upstream_body: None,
+            },
             other => ComboAttemptError {
                 status: 500,
                 message: format!("Execution failed: {other:?}"),
@@ -2114,6 +2125,14 @@ impl DefaultExecutor {
             None
         };
 
+        // The failure that ended the most recent fallback URL. Carried out of
+        // the loop so exhaustion surfaces the real cause — the upstream status
+        // or the transport error — instead of a blanket 500
+        // (openproxy-we9n; 9router keeps `lastStatus`/`lastError` the same way
+        // and throws `lastError || All N URLs failed with status ...`,
+        // base.js:186).
+        let mut last_failure: Option<ExecutorError> = None;
+
         for url in &urls {
             let use_hyper = self.use_hyper_transport(&request, url);
 
@@ -2151,7 +2170,12 @@ impl DefaultExecutor {
                             tokio::time::sleep(Duration::from_millis(delay_ms)).await;
                             continue;
                         }
-                        return Err(err);
+                        // Retries for this URL are spent. Fall through to the
+                        // next fallback URL if there is one, remembering the
+                        // error so the last one is what the caller finally
+                        // sees — as 9router does (base.js:176-183).
+                        last_failure = Some(err);
+                        break;
                     }
                 };
                 let status = upstream.status();
@@ -2224,7 +2248,13 @@ impl DefaultExecutor {
                             }
                         }
                     }
-                    // No refresh or refresh didn't help — try next fallback URL.
+                    // No refresh or refresh didn't help — try next fallback URL,
+                    // but keep the status so exhaustion does not report a
+                    // blanket 500 for what upstream actually answered.
+                    last_failure = Some(ExecutorError::UpstreamStatus(
+                        status,
+                        format!("upstream returned {} for URL {}", status.as_u16(), url),
+                    ));
                     break;
                 }
 
@@ -2261,6 +2291,12 @@ impl DefaultExecutor {
                             },
                         });
                     }
+                    // Another fallback URL exists — try it, but remember the
+                    // status so a total wipeout reports 404/429, not 500.
+                    last_failure = Some(ExecutorError::UpstreamStatus(
+                        status,
+                        format!("upstream returned {} for URL {}", status.as_u16(), url),
+                    ));
                     break;
                 }
 
@@ -2308,7 +2344,12 @@ impl DefaultExecutor {
                         tokio::time::sleep(Duration::from_millis(retry_policy(status).1)).await;
                         continue;
                     }
-                    // After 2 retries, fall through to next fallback URL.
+                    // After 2 retries, fall through to next fallback URL, but
+                    // keep the status so exhaustion reports 504, not 500.
+                    last_failure = Some(ExecutorError::UpstreamStatus(
+                        status,
+                        format!("upstream returned {} for URL {}", status.as_u16(), url),
+                    ));
                     break;
                 }
 
@@ -2334,9 +2375,13 @@ impl DefaultExecutor {
             }
         }
 
-        Err(ExecutorError::MaxRetriesExhausted(
-            "all retries and fallback URLs exhausted".into(),
-        ))
+        // Surface the real cause of the last URL's failure when we have one.
+        // A bare MaxRetriesExhausted collapsed every upstream status into a 500,
+        // so a provider answering 401 surfaced as a server error after the
+        // client had already exhausted every account (openproxy-we9n).
+        Err(last_failure.unwrap_or_else(|| {
+            ExecutorError::MaxRetriesExhausted("all retries and fallback URLs exhausted".into())
+        }))
     }
 
     /// Send a single request without retries, returning the raw upstream response.
