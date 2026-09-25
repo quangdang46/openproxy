@@ -65,9 +65,13 @@ struct RefreshResult {
 #[derive(Debug)]
 struct ConnectionTestResult {
     valid: bool,
+    /// Hard failure — the credential is no good.
     error: Option<String>,
     refreshed: bool,
     new_tokens: Option<RefreshResult>,
+    /// Soft failure — the credential is good but the account needs attention
+    /// (9router's `result.warning`), e.g. Grok CLI's 402 spending limit.
+    soft_error: Option<String>,
 }
 
 #[derive(Debug)]
@@ -122,6 +126,7 @@ pub(super) async fn test_provider_connection(
                     error: Some(error.clone()),
                     refreshed: false,
                     new_tokens: None,
+                    soft_error: None,
                 },
             )
             .await;
@@ -145,14 +150,42 @@ pub(super) async fn test_provider_connection(
     persist_test_result(&state, &connection.id, result).await
 }
 
+/// 9router's `updateData` block (testUtils.js:863-872) — the columns a test
+/// result writes back. A soft-accepted status (Grok CLI's 402 spending limit)
+/// keeps `test_status` "active" but still records the operator warning, so the
+/// dashboard shows a green connection with something to act on instead of
+/// dropping the message on the floor.
+fn test_result_persistence(
+    result: &ConnectionTestResult,
+    now: &str,
+) -> (Option<String>, Option<String>, &'static str) {
+    let test_status = if result.valid { "active" } else { "error" };
+    let last_error = if result.valid {
+        result.soft_error.clone().or_else(|| result.error.clone())
+    } else {
+        result.error.clone()
+    };
+    let last_error_at = if result.valid {
+        last_error.as_ref().map(|_| now.to_string())
+    } else {
+        Some(now.to_string())
+    };
+    (last_error, last_error_at, test_status)
+}
+
 async fn persist_test_result(
     state: &AppState,
     connection_id: &str,
     result: ConnectionTestResult,
 ) -> Response {
-    let error = result.error.clone();
+    // 9router's route returns the soft message in `error` alongside
+    // `valid: true` (route.js:14-18), so the HTTP body and the stored
+    // warning come from the same value.
+    let error = result.soft_error.clone().or_else(|| result.error.clone());
     let refreshed = result.refreshed;
     let new_tokens = result.new_tokens.clone();
+    let (last_error, last_error_at, test_status) =
+        test_result_persistence(&result, &Utc::now().to_rfc3339());
 
     let connection_id = connection_id.to_string();
     let _ = state
@@ -166,14 +199,9 @@ async fn persist_test_result(
                 return;
             };
 
-            connection.test_status =
-                Some(if result.valid { "active" } else { "error" }.to_string());
-            connection.last_error = if result.valid { None } else { error.clone() };
-            connection.last_error_at = if result.valid {
-                None
-            } else {
-                Some(Utc::now().to_rfc3339())
-            };
+            connection.test_status = Some(test_status.to_string());
+            connection.last_error = last_error.clone();
+            connection.last_error_at = last_error_at.clone();
             connection.updated_at = Some(Utc::now().to_rfc3339());
 
             if let Some(tokens) = &new_tokens {
@@ -248,6 +276,7 @@ async fn test_oauth_connection(
                 error: None,
                 refreshed,
                 new_tokens,
+                soft_error: None,
             };
         }
 
@@ -260,6 +289,7 @@ async fn test_oauth_connection(
             error: None,
             refreshed: false,
             new_tokens: None,
+            soft_error: None,
         };
     }
 
@@ -269,6 +299,7 @@ async fn test_oauth_connection(
             error: None,
             refreshed,
             new_tokens,
+            soft_error: None,
         };
     }
 
@@ -280,6 +311,7 @@ async fn test_oauth_connection(
                 error: initial.error,
                 refreshed,
                 new_tokens,
+                soft_error: None,
             };
         }
 
@@ -294,6 +326,7 @@ async fn test_oauth_connection(
                 error: Some("Token invalid or revoked".to_string()),
                 refreshed,
                 new_tokens,
+                soft_error: None,
             };
         };
 
@@ -306,6 +339,7 @@ async fn test_oauth_connection(
                     error: retry.error,
                     refreshed: retry.valid,
                     new_tokens: if retry.valid { Some(tokens) } else { None },
+                    soft_error: None,
                 }
             }
             Err(_) => invalid("Token invalid or revoked"),
@@ -337,6 +371,7 @@ async fn test_oauth_connection(
                         error: None,
                         refreshed,
                         new_tokens,
+                        soft_error: None,
                     };
                 }
 
@@ -351,6 +386,7 @@ async fn test_oauth_connection(
                     error: Some(error),
                     refreshed,
                     new_tokens,
+                    soft_error: None,
                 }
             }
             None => invalid("Provider test not supported"),
@@ -836,6 +872,7 @@ async fn test_cloudflare_ai_connection(
                 },
                 refreshed: false,
                 new_tokens: None,
+                soft_error: None,
             }
         }
         Err(error) => invalid(&error),
@@ -895,6 +932,7 @@ async fn test_azure_connection(
                 },
                 refreshed: false,
                 new_tokens: None,
+                soft_error: None,
             }
         }
         Err(error) => invalid(&error),
@@ -923,6 +961,7 @@ async fn test_gemini_api_key_connection(
             },
             refreshed: false,
             new_tokens: None,
+            soft_error: None,
         },
         Err(error) => invalid(&error),
     }
@@ -957,6 +996,7 @@ async fn test_ollama_local_connection(
             },
             refreshed: false,
             new_tokens: None,
+            soft_error: None,
         },
         Err(_) => invalid(&format!(
             "Ollama not reachable at {}",
@@ -1024,6 +1064,7 @@ async fn test_grok_web_connection(
                 },
                 refreshed: false,
                 new_tokens: None,
+                soft_error: None,
             }
         }
         Err(error) => invalid(&error),
@@ -1068,6 +1109,7 @@ async fn test_perplexity_web_connection(
                     error: None,
                     refreshed: false,
                     new_tokens: None,
+                    soft_error: None,
                 },
                 Ok(_) => invalid("Session expired — re-paste cookie"),
                 Err(error) => invalid(&error.to_string()),
@@ -1129,6 +1171,7 @@ async fn test_deepseek_web_connection(
                 error: None,
                 refreshed: false,
                 new_tokens: None,
+                soft_error: None,
             }
         }
         Err(error) => invalid(&error),
@@ -1184,6 +1227,7 @@ async fn simple_get_token_test(
             },
             refreshed: false,
             new_tokens: None,
+            soft_error: None,
         },
         Err(error) => invalid(&error),
     }
@@ -1224,6 +1268,7 @@ async fn anthropic_first_party_test(
                 },
                 refreshed: false,
                 new_tokens: None,
+                soft_error: None,
             }
         }
         Err(error) => invalid(&error),
@@ -1376,17 +1421,22 @@ async fn status_test_excluding(
             // 9router: accepted = res.ok || acceptStatuses.includes(status).
             let accept = probe_accept_statuses(&connection.provider);
             let valid = status.is_success() || accept.contains(&status.as_u16());
-            let error = if valid {
+            let (error, soft_error) = if valid {
                 // A soft-accepted status still carries its operator warning.
-                probe_soft_fail_message(&connection.provider, status.as_u16()).map(str::to_string)
+                (
+                    None,
+                    probe_soft_fail_message(&connection.provider, status.as_u16())
+                        .map(str::to_string),
+                )
             } else {
-                Some(error_message.to_string())
+                (Some(error_message.to_string()), None)
             };
             ConnectionTestResult {
                 valid,
                 error,
                 refreshed: false,
                 new_tokens: None,
+                soft_error,
             }
         }
         Err(error) => invalid(&error),
@@ -1629,6 +1679,7 @@ async fn probe_cline_access_token(
             error: None,
             refreshed: false,
             new_tokens: None,
+            soft_error: None,
         },
         Ok(response) if response.status() == StatusCode::UNAUTHORIZED => {
             invalid("Token invalid or revoked")
@@ -2132,6 +2183,7 @@ fn compatible_result(
             },
             refreshed: false,
             new_tokens: None,
+            soft_error: None,
         },
         Err(error) => invalid(&error),
     }
@@ -2143,6 +2195,7 @@ fn invalid(error: &str) -> ConnectionTestResult {
         error: Some(error.to_string()),
         refreshed: false,
         new_tokens: None,
+        soft_error: None,
     }
 }
 
@@ -2166,7 +2219,27 @@ fn generic_probe_base_url(connection: &ProviderConnection) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{oauth_probe_request, probe_accept_statuses, probe_soft_fail_message};
+    use super::{
+        oauth_probe_request, probe_accept_statuses, probe_soft_fail_message,
+        test_result_persistence, ConnectionTestResult,
+    };
+
+    const GROK_SPENDING_LIMIT: &str =
+        "Connected, but Grok Build credits are exhausted (spending limit). Add credits or upgrade SuperGrok.";
+
+    fn test_result(
+        valid: bool,
+        error: Option<&str>,
+        soft_error: Option<&str>,
+    ) -> ConnectionTestResult {
+        ConnectionTestResult {
+            valid,
+            error: error.map(str::to_string),
+            refreshed: false,
+            new_tokens: None,
+            soft_error: soft_error.map(str::to_string),
+        }
+    }
 
     /// Regression (audit finding #59, 9router parity): the API-key probe path
     /// used "valid unless the status is 401/403", the INVERSE of 9router's
@@ -2203,6 +2276,45 @@ mod tests {
         assert!(probe_soft_fail_message("grok-cli", 500).is_none());
         // codex accepts 400 silently, with no soft message.
         assert!(probe_soft_fail_message("codex", 400).is_none());
+    }
+
+    // The persistence half of the soft-accept rule. `probe_soft_fail_message`
+    // already produced the warning; `persist_test_result` threw it away, so a
+    // Grok connection out of credits was stored as a clean "active" row with no
+    // trace of why nothing was routing.
+
+    #[test]
+    fn soft_success_keeps_test_status_active_and_records_the_warning() {
+        let result = test_result(true, None, Some(GROK_SPENDING_LIMIT));
+        let (last_error, last_error_at, test_status) =
+            test_result_persistence(&result, "2026-01-01T00:00:00+00:00");
+
+        assert_eq!(test_status, "active");
+        assert_eq!(last_error.as_deref(), Some(GROK_SPENDING_LIMIT));
+        assert_eq!(last_error_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn clean_success_records_no_error() {
+        let result = test_result(true, None, None);
+        let (last_error, last_error_at, test_status) =
+            test_result_persistence(&result, "2026-01-01T00:00:00+00:00");
+
+        assert_eq!(test_status, "active");
+        assert_eq!(last_error, None);
+        // 9router only stamps lastErrorAt when there is a warning to date.
+        assert_eq!(last_error_at, None);
+    }
+
+    #[test]
+    fn hard_failure_still_records_the_error() {
+        let result = test_result(false, Some("Token invalid or revoked"), None);
+        let (last_error, last_error_at, test_status) =
+            test_result_persistence(&result, "2026-01-01T00:00:00+00:00");
+
+        assert_eq!(test_status, "error");
+        assert_eq!(last_error.as_deref(), Some("Token invalid or revoked"));
+        assert_eq!(last_error_at.as_deref(), Some("2026-01-01T00:00:00+00:00"));
     }
 }
 

@@ -1126,6 +1126,10 @@ async fn create_provider_api(
             .into_response();
     }
 
+    if !is_valid_provider(provider) {
+        return bad_request_response("Invalid provider");
+    }
+
     let Some(name) = req
         .name
         .as_deref()
@@ -1165,6 +1169,17 @@ async fn create_provider_api(
     ) {
         Ok(proxy_pool_id) => proxy_pool_id,
         Err(message) => return bad_request_response(&message),
+    };
+    // A `*-compatible-` connection is only valid once its node is found: the
+    // node supplies the baseUrl its executor dials, so without it the
+    // connection would be created active and route nowhere. 9router resolves
+    // the node here too (route.js:131-162), before the row is built.
+    let compatible_node_fields = {
+        let snapshot = state.db.snapshot();
+        match resolve_compatible_node(&snapshot.provider_nodes, provider) {
+            Ok(fields) => fields,
+            Err(response) => return response,
+        }
     };
 
     let id = Uuid::new_v4().to_string();
@@ -1224,6 +1239,12 @@ async fn create_provider_api(
         default_conn
             .provider_specific_data
             .insert("proxyPoolId".to_string(), Value::String(proxy_pool_id));
+    }
+    // Applied last, on purpose. 9router overwrites providerSpecificData with
+    // the node's (route.js:136-141), so the node — not a `baseUrl` typed into
+    // the request body — decides which endpoint this connection dials.
+    if let Some(fields) = compatible_node_fields {
+        default_conn.provider_specific_data.extend(fields);
     }
 
     let result = state
@@ -3023,6 +3044,211 @@ fn bad_request_response(message: &str) -> Response {
 /// `api_key` field). Must match `WEB_COOKIE_PROVIDERS` in the dashboard.
 fn is_web_cookie_provider(provider: &str) -> bool {
     matches!(provider, "grok-web" | "perplexity-web" | "deepseek-web")
+}
+
+/// Providers that authenticate with an API key — the union 9router's
+/// `isValidProvider` accepts through that one arm: `APIKEY_PROVIDERS`,
+/// `FREE_TIER_PROVIDERS`, and the dual-auth providers whose `authModes` include
+/// `"apikey"` (codebuddy-cn, xai, qoder, … live under the oauth category but
+/// also take a key). OAuth-only and no-auth providers are deliberately absent:
+/// they reach the database through the OAuth flow, never through
+/// `POST /api/providers`. Must match those same three tables in
+/// `web/src/shared/constants/providers.ts`.
+const API_KEY_PROVIDERS: &[&str] = &[
+    "agentrouter",
+    "agnes",
+    "ai21",
+    "aimlapi",
+    "aion",
+    "alicode",
+    "alicode-intl",
+    "alims-intl",
+    "alitp-intl",
+    "anthropic",
+    "api-airforce",
+    "assemblyai",
+    "aws-polly",
+    "azure",
+    "baidu",
+    "baseten",
+    "bazaarlink",
+    "black-forest-labs",
+    "blackbox",
+    "bluesminds",
+    "brave-search",
+    "byteplus",
+    "bytez",
+    "cartesia",
+    "cerebras",
+    "chutes",
+    "clinepass",
+    "cloudflare-ai",
+    "codebuddy-cn",
+    "codebuddy-intl",
+    "cohere",
+    "comfyui",
+    "commandcode",
+    "completions",
+    "coqui",
+    "deepgram",
+    "deepseek",
+    "edge-tts",
+    "elevenlabs",
+    "enally",
+    "exa",
+    "fal-ai",
+    "featherless",
+    "firecrawl",
+    "fireworks",
+    "fish-audio",
+    "freetheai",
+    "gemini",
+    "glm",
+    "glm-cn",
+    "google-pse",
+    "google-tts",
+    "groq",
+    "huggingface",
+    "hyperbolic",
+    "inworld",
+    "jina-ai",
+    "jina-reader",
+    "kilo-gateway",
+    "kilocode",
+    "kimchi",
+    "kimi",
+    "kluster",
+    "linkup",
+    "llm7",
+    "local-device",
+    "longcat",
+    "minimax",
+    "minimax-cn",
+    "mistral",
+    "mmf",
+    "modal",
+    "modelscope",
+    "morph",
+    "nanobanana",
+    "nebius",
+    "nlpcloud",
+    "nous-research",
+    "nscale",
+    "nvidia",
+    "ollama",
+    "ollama-local",
+    "ollama-search",
+    "openai",
+    "opencode-go",
+    "opencode-zen",
+    "openrouter",
+    "ovhcloud",
+    "perplexity",
+    "perplexity-agent",
+    "playht",
+    "poolside",
+    "predibase",
+    "publicai",
+    "puter",
+    "qoder",
+    "recraft",
+    "reka",
+    "runwayml",
+    "sambanova",
+    "scaleway",
+    "sdwebui",
+    "searchapi",
+    "searxng",
+    "selfhosted-embedding",
+    "selfhosted-stt",
+    "selfhosted-tts",
+    "serper",
+    "serpingapi",
+    "siliconflow",
+    "stability-ai",
+    "tavily",
+    "tencent",
+    "together",
+    "tokenrouter",
+    "topaz",
+    "tortoise",
+    "uncloseai",
+    "venice",
+    "vercel-ai-gateway",
+    "vertex",
+    "vertex-partner",
+    "volcengine-ark",
+    "voyage-ai",
+    "windsurf",
+    "xai",
+    "xiaomi-mimo",
+    "xiaomi-tokenplan",
+    "xquik",
+    "youcom",
+];
+
+/// Ids of the user-defined endpoint kinds. Mirrors the same three constants in
+/// `provider_models.rs` and `web/src/shared/constants/providers.ts`.
+const OPENAI_COMPATIBLE_PREFIX: &str = "openai-compatible-";
+const ANTHROPIC_COMPATIBLE_PREFIX: &str = "anthropic-compatible-";
+const CUSTOM_EMBEDDING_PREFIX: &str = "custom-embedding-";
+
+/// 9router's `isValidProvider` (`src/app/api/providers/route.js:104-118`).
+/// Everything outside this closed set is a typo or a stale id: the connection
+/// would be created active, dispatch to nothing, and sit in the list looking
+/// healthy until someone routed a model through it.
+fn is_valid_provider(provider: &str) -> bool {
+    API_KEY_PROVIDERS.contains(&provider)
+        || is_web_cookie_provider(provider)
+        || is_compatible_provider(provider)
+}
+
+fn is_compatible_provider(provider: &str) -> bool {
+    provider.starts_with(OPENAI_COMPATIBLE_PREFIX)
+        || provider.starts_with(ANTHROPIC_COMPATIBLE_PREFIX)
+        || provider.starts_with(CUSTOM_EMBEDDING_PREFIX)
+}
+
+/// 9router's compatible-node resolution (route.js:131-162). A `*-compatible-`
+/// connection is only valid once its node is found, and the node — not the
+/// request body — supplies `baseUrl`, so a connection can never be created
+/// without the endpoint its executor needs. `Ok(None)` for every other provider.
+fn resolve_compatible_node(
+    nodes: &[crate::types::ProviderNode],
+    provider: &str,
+) -> Result<Option<serde_json::Map<String, Value>>, Response> {
+    // Each arm names itself in the miss message, so pick the arm by prefix.
+    let (missing, carries_api_type) = if provider.starts_with(OPENAI_COMPATIBLE_PREFIX) {
+        ("OpenAI Compatible node not found", true)
+    } else if provider.starts_with(ANTHROPIC_COMPATIBLE_PREFIX) {
+        ("Anthropic Compatible node not found", false)
+    } else if provider.starts_with(CUSTOM_EMBEDDING_PREFIX) {
+        ("Custom Embedding node not found", false)
+    } else {
+        return Ok(None);
+    };
+
+    let Some(node) = nodes.iter().find(|node| node.id == provider) else {
+        return Err((StatusCode::NOT_FOUND, Json(json!({ "error": missing }))).into_response());
+    };
+
+    let mut fields = serde_json::Map::new();
+    // `apiType` is the one field the anthropic/embedding arms do not carry.
+    if carries_api_type {
+        if let Some(api_type) = &node.api_type {
+            fields.insert("apiType".to_string(), Value::String(api_type.clone()));
+        }
+    }
+    for (key, value) in [
+        ("prefix", node.prefix.as_deref()),
+        ("baseUrl", node.base_url.as_deref()),
+        ("nodeName", Some(node.name.as_str())),
+    ] {
+        if let Some(value) = value {
+            fields.insert(key.to_string(), Value::String(value.to_string()));
+        }
+    }
+    Ok(Some(fields))
 }
 
 fn normalize_create_provider_proxy(
