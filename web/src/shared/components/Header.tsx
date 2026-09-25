@@ -7,13 +7,14 @@ import ThemeToggle from "@/shared/components/ThemeToggle";
 import DonateModal from "@/shared/components/DonateModal";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS, AI_PROVIDERS } from "@/shared/constants/providers";
+import { getProviderIconSrc } from "@/shared/utils/providerIcon";
 import { translate } from "@/i18n/runtime";
 import { useHeaderSearchStore } from "@/store/headerSearchStore";
 
 interface Breadcrumb {
   label: string;
   href?: string;
-  image?: string;
+  image?: string | null;
 }
 
 interface PageInfo {
@@ -44,7 +45,7 @@ const getPageInfo = (pathname: string): PageInfo => {
       breadcrumbs: [
         { label: "Media Providers", href: `/dashboard/media-providers/${kindId}` },
         { label: kindConfig?.label || kindId, href: `/dashboard/media-providers/${kindId}` },
-        { label: provider?.name || providerId, image: `/providers/${providerId}.png` },
+        { label: provider?.name || providerId, image: getProviderIconSrc(providerId) },
       ],
     };
   }
@@ -76,7 +77,7 @@ const getPageInfo = (pathname: string): PageInfo => {
           { label: "Providers", href: "/dashboard/providers" },
           {
             label: providerInfo.name,
-            image: `/providers/${providerInfo.id}.png`,
+            image: getProviderIconSrc(providerInfo.id),
           },
         ],
       };
