@@ -2139,7 +2139,15 @@ impl DefaultExecutor {
             // The retry loop for this URL.
             // One budget for the whole url: network exceptions and retryable
             // statuses share it, as in 9router.
-            let max_attempts = 3u32;
+            //
+            // 9router counts RETRIES, not total attempts. `tryRetry` increments
+            // `retryAttemptsByUrl[urlIndex]` and returns true while it is below
+            // the configured `attempts` (base.js:113), so a budget of 3 is FOUR
+            // fetches. We previously looped three times total, so every
+            // retryable status was one fetch short: 3 where 9router sends 4
+            // (network, 502, 503) and 2 where it sends 3 (504). Sourced from
+            // retry_policy rather than a literal so the two stay in step.
+            let max_attempts = retry_policy(http::StatusCode::BAD_GATEWAY).0 + 1;
             for retry in 0..max_attempts {
                 // ONE budget for both failure kinds, as 9router has.
                 //
@@ -2178,7 +2186,7 @@ impl DefaultExecutor {
                         break;
                     }
                 };
-                let status = upstream.status();
+                let mut status = upstream.status();
 
                 // Success: return immediately — unless a REAL-branch status
                 // fault overrides it (sim-15: post-execution middleware proof).
@@ -2225,14 +2233,25 @@ impl DefaultExecutor {
                                 request.stream,
                             )?;
                             // Retry immediately with refreshed credentials.
-                            let retry_resp = self
+                            //
+                            // One attempt, deliberately — a refreshed-credential
+                            // resend is a distinct semantic step and 9router has
+                            // no equivalent leg. But a TRANSPORT failure here must
+                            // not use `?`: that propagates straight out of
+                            // execute(), skipping every remaining fallback URL and
+                            // bypassing last_failure, so a DNS blip on the resend
+                            // would abandon a chain the main send would have
+                            // rotated through.
+                            let retry_resp = match self
                                 .send_one(url, &headers, &transformed_body, &request, use_hyper)
-                                .await?; // One attempt, deliberately. A
-                                         // refreshed-credential resend is a distinct
-                                         // semantic step, and the status branch below
-                                         // still governs its result. Unlike the network
-                                         // path, 9router has no equivalent leg to
-                                         // copy — this decision is OpenProxy's own.
+                                .await
+                            {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    last_failure = Some(error);
+                                    break;
+                                }
+                            };
                             if retry_resp.status().is_success() {
                                 return Ok(ExecutionResponse {
                                     response: retry_resp,
@@ -2246,6 +2265,12 @@ impl DefaultExecutor {
                                     },
                                 });
                             }
+                            // The resend's own status is the one upstream
+                            // finally answered. Reporting the pre-refresh 401
+                            // instead misstates why rotation failed — a 401
+                            // that became a 429 is a quota problem, and the
+                            // caller picks cooldown and backoff from this.
+                            status = retry_resp.status();
                         }
                     }
                     // No refresh or refresh didn't help — try next fallback URL,
@@ -2302,7 +2327,7 @@ impl DefaultExecutor {
 
                 // 502 Bad Gateway: 3 retries x 3s, then surface the raw 502.
                 if status == http::StatusCode::BAD_GATEWAY {
-                    if retry + 1 < retry_policy(status).0 && url == urls.last().unwrap() {
+                    if retry < retry_policy(status).0 {
                         tokio::time::sleep(Duration::from_millis(retry_policy(status).1)).await;
                         continue;
                     }
@@ -2321,7 +2346,7 @@ impl DefaultExecutor {
 
                 // 503 Service Unavailable: 3 retries x 2s, then surface the raw 503.
                 if status == http::StatusCode::SERVICE_UNAVAILABLE {
-                    if retry + 1 < retry_policy(status).0 && url == urls.last().unwrap() {
+                    if retry < retry_policy(status).0 {
                         tokio::time::sleep(Duration::from_millis(retry_policy(status).1)).await;
                         continue;
                     }
@@ -2340,7 +2365,7 @@ impl DefaultExecutor {
 
                 // 504 Gateway Timeout: 2 retries x 3s
                 if status == http::StatusCode::GATEWAY_TIMEOUT {
-                    if retry + 1 < retry_policy(status).0 {
+                    if retry < retry_policy(status).0 {
                         tokio::time::sleep(Duration::from_millis(retry_policy(status).1)).await;
                         continue;
                     }
