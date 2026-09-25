@@ -417,7 +417,7 @@ export default function LoginPageClient() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     required
-                    autoFocus={!ssoAvailable}
+                    autoFocus={!oidcAvailable}
                     autoComplete="current-password"
                     disabled={retryAfter > 0}
                   />
