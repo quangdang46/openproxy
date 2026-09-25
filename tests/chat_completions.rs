@@ -535,7 +535,11 @@ async fn chat_completions_uses_combo_fallback_across_models() {
         .respond_with(ResponseTemplate::new(503).set_body_json(json!({
             "error": { "message": "temporary upstream issue" }
         })))
-        .expect(3)
+        // 503 carries a retry budget of 3, and 9router spends it as RETRIES
+        // rather than attempts: tryRetry gates on the already-used count, so
+        // three retries means four fetches (executors/base.js:113,
+        // runtimeConfig.js:81).
+        .expect(4)
         .mount(&upstream)
         .await;
     Mock::given(method("POST"))
@@ -976,7 +980,10 @@ async fn chat_completions_preserves_earliest_retry_after_when_all_accounts_fail(
         .respond_with(ResponseTemplate::new(503).set_body_json(json!({
             "error": { "message": "temporary upstream issue" }
         })))
-        .expect(3)
+        // Four fetches, not three: the 503 budget of 3 is a RETRY count in
+        // 9router, so the first fetch plus three retries is what burns it
+        // (executors/base.js:113, runtimeConfig.js:81).
+        .expect(4)
         .mount(&upstream)
         .await;
 
