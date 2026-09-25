@@ -401,9 +401,11 @@ pub fn grep_impl(input: &str) -> String {
             Some(i) => i,
             None => continue,
         };
-        let second = match line.find(':') {
-            Some(i) if i > first => i,
-            _ => continue,
+        // grep.js:25 `line.indexOf(":", first + 1)` — the search must start
+        // past the first colon or it can never advance.
+        let second = match line[first + 1..].find(':') {
+            Some(i) => first + 1 + i,
+            None => continue,
         };
 
         let file = &line[..first];
@@ -1472,6 +1474,21 @@ mod tests {
         let input = "this is not grep output";
         let result = grep_impl(input);
         assert_eq!(result, input);
+    }
+
+    #[test]
+    fn grep_impl_groups_by_file_and_formats_matches() {
+        let input = "src/main.rs:10:fn main() {\nsrc/lib.rs:5:use std::;\n";
+        assert_eq!(
+            grep_impl(input),
+            "2 matches in 2F:\n\n[file] src/lib.rs (1):\n     5: use std::;\n\n[file] src/main.rs (1):\n    10: fn main() {\n\n"
+        );
+    }
+
+    #[test]
+    fn grep_impl_passes_through_non_grep_input() {
+        let input = "hello\nworld\n";
+        assert_eq!(grep_impl(input), input);
     }
 
     #[test]

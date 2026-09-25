@@ -352,56 +352,6 @@ fn test_inject_caveman_is_idempotent() {
 }
 
 // =============================================================================
-// Tests for should_auto_apply_caveman
-// =============================================================================
-
-#[test]
-fn test_should_auto_apply_caveman_small_prompt() {
-    let body = json!({
-        "messages": [
-            { "role": "user", "content": "Hello" }
-        ]
-    });
-
-    assert!(!should_auto_apply_caveman(&body, "gpt-4o-mini"));
-}
-
-#[test]
-fn test_should_auto_apply_caveman_large_prompt() {
-    let body = json!({
-        "messages": [
-            { "role": "user", "content": "x".repeat(10000) }
-        ]
-    });
-
-    assert!(should_auto_apply_caveman(&body, "gpt-4o-mini"));
-}
-
-#[test]
-fn test_should_auto_apply_caveman_claude_large() {
-    let body = json!({
-        "messages": [
-            { "role": "user", "content": "x".repeat(10000) }
-        ]
-    });
-
-    // Claude has larger context window
-    assert!(should_auto_apply_caveman(&body, "claude-sonnet-4-20250514"));
-}
-
-#[test]
-fn test_should_auto_apply_caveman_gemini_large() {
-    let body = json!({
-        "messages": [
-            { "role": "user", "content": "x".repeat(10000) }
-        ]
-    });
-
-    // Gemini 2.0 has larger context window
-    assert!(should_auto_apply_caveman(&body, "gemini-2.0-flash"));
-}
-
-// =============================================================================
 // Tests for apply_request_preprocessing
 // =============================================================================
 
@@ -444,8 +394,15 @@ fn test_apply_request_preprocessing_small_request() {
         ]
     });
 
+    // 9router chatCore.js:278 has no context-pressure gate — a short request
+    // still gets the caveman system prompt.
     let result = apply_request_preprocessing(&mut body, &settings, "gpt-4o-mini");
-    assert!(!result);
+    assert!(result);
+    assert_eq!(body["messages"][0]["role"], "system");
+    assert_eq!(
+        body["messages"][0]["content"],
+        CompressionLevel::Ultra.prompt()
+    );
 }
 
 #[test]
@@ -529,25 +486,6 @@ fn test_inject_caveman_nested_gemini_request() {
 }
 
 #[test]
-fn test_should_auto_apply_caveman_empty_messages() {
-    let body = json!({
-        "messages": []
-    });
-    assert!(!should_auto_apply_caveman(&body, "gpt-4o-mini"));
-}
-
-#[test]
-fn test_should_auto_apply_caveman_null_content() {
-    let body = json!({
-        "messages": [
-            { "role": "user", "content": null }
-        ]
-    });
-    // Should not panic, just return false
-    assert!(!should_auto_apply_caveman(&body, "gpt-4o-mini"));
-}
-
-#[test]
 fn test_compression_level_parse_with_whitespace() {
     assert_eq!(
         " lite ".parse::<CompressionLevel>(),
@@ -557,77 +495,6 @@ fn test_compression_level_parse_with_whitespace() {
         "  full  ".parse::<CompressionLevel>(),
         Ok(CompressionLevel::Full)
     );
-}
-
-// =============================================================================
-// Tests for context window inference
-// =============================================================================
-
-#[test]
-fn test_context_window_inference_claude() {
-    let models = vec![
-        "claude-3-5-sonnet",
-        "claude-sonnet-4-20250514",
-        "claude-opus-4",
-        "claude-haiku-4",
-    ];
-    for model in models {
-        let body = json!({
-            "messages": [
-                { "role": "user", "content": "x".repeat(10000) }
-            ]
-        });
-        assert!(
-            should_auto_apply_caveman(&body, model),
-            "Failed for {}",
-            model
-        );
-    }
-}
-
-#[test]
-fn test_context_window_inference_gemini_large() {
-    let models = vec!["gemini-1.5-pro", "gemini-2.0-flash", "gemini-2.5-pro"];
-    for model in models {
-        let body = json!({
-            "messages": [
-                { "role": "user", "content": "x".repeat(10000) }
-            ]
-        });
-        assert!(
-            should_auto_apply_caveman(&body, model),
-            "Failed for {}",
-            model
-        );
-    }
-}
-
-#[test]
-fn test_context_window_inference_openai() {
-    let models = vec!["gpt-4o", "gpt-4.1", "o1-preview", "o3", "o4"];
-    for model in models {
-        let body = json!({
-            "messages": [
-                { "role": "user", "content": "x".repeat(10000) }
-            ]
-        });
-        assert!(
-            should_auto_apply_caveman(&body, model),
-            "Failed for {}",
-            model
-        );
-    }
-}
-
-#[test]
-fn test_context_window_inference_default() {
-    // Unknown model should use default 16k context
-    let body = json!({
-        "messages": [
-            { "role": "user", "content": "x".repeat(10000) }
-        ]
-    });
-    assert!(should_auto_apply_caveman(&body, "unknown-model-v1"));
 }
 
 // =============================================================================

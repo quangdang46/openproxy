@@ -1,16 +1,18 @@
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 const SEP: &str = "\n\n";
 
 /// Inject a system prompt into the request body, dispatching by format.
 /// 9router systemInject.js `injectSystemPrompt(body, format, prompt)`.
 ///
+/// - `"kiro"` → the first `conversationState.history[].userInputMessage`, or
+///   `currentMessage.userInputMessage`.
 /// - `"claude"` → `body.system` (string or array, inserted before the last
 ///   cache_control block).
 /// - `"gemini"` / `"gemini-cli"` / `"vertex"` / `"antigravity"` →
 ///   `body.systemInstruction` / `body.request.systemInstruction` (`{parts:[{text}]}`).
-/// - Everything else (OpenAI chat / Responses / codex / cursor / kiro /
-///   ollama) → `messages[]` / `input[]` / `instructions`.
+/// - Everything else (OpenAI chat / Responses / codex / cursor / ollama) →
+///   `messages[]` / `input[]` / `instructions`.
 ///
 /// Returns `true` if the body was modified.
 pub fn inject_system_prompt(body: &mut Value, format: &str, prompt: &str) -> bool {
@@ -18,6 +20,7 @@ pub fn inject_system_prompt(body: &mut Value, format: &str, prompt: &str) -> boo
         return false;
     }
     match format {
+        "kiro" => inject_kiro_system(body, prompt),
         "claude" => inject_claude_system(body, prompt),
         "gemini" | "gemini-cli" | "vertex" | "antigravity" => inject_gemini_system(body, prompt),
         _ => inject_messages_system(body, prompt),
@@ -25,7 +28,7 @@ pub fn inject_system_prompt(body: &mut Value, format: &str, prompt: &str) -> boo
 }
 
 /// OpenAI-shaped: `messages[]` (chat) or `input[]` (responses) or
-/// `instructions` (responses top-level string). 9router injectMessagesSystem.
+/// `instructions` (responses top-level string). 9router injectSystemPrompt.
 fn inject_messages_system(body: &mut Value, prompt: &str) -> bool {
     // OpenAI Responses API: top-level string field.
     if let Some(Value::String(instructions)) = body.get_mut("instructions") {
@@ -36,29 +39,126 @@ fn inject_messages_system(body: &mut Value, prompt: &str) -> bool {
         return true;
     }
 
-    let arr = if body.get("messages").is_some() {
-        body.get_mut("messages").and_then(Value::as_array_mut)
-    } else {
-        body.get_mut("input").and_then(Value::as_array_mut)
-    };
-    let Some(arr) = arr else {
-        return false;
-    };
+    if let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) {
+        return inject_chat_system(messages, prompt);
+    }
 
-    let idx = arr.iter().position(|m| {
+    if let Some(input) = body.get_mut("input").and_then(Value::as_array_mut) {
+        return inject_responses_input(input, prompt);
+    }
+
+    false
+}
+
+/// Chat `messages[]` takes a bare `{role, content}` system entry.
+/// 9router injectChatSystem.
+fn inject_chat_system(messages: &mut Vec<Value>, prompt: &str) -> bool {
+    let idx = messages.iter().position(|m| {
         let role = m.get("role").and_then(Value::as_str).unwrap_or("");
         role == "system" || role == "developer"
     });
     match idx {
-        Some(i) => append_to_openai_message(&mut arr[i], prompt),
+        Some(i) => append_to_openai_message(&mut messages[i], prompt),
         None => {
-            arr.insert(
+            messages.insert(
                 0,
                 serde_json::json!({ "role": "system", "content": prompt }),
             );
             true
         }
     }
+}
+
+/// Responses `input[]` items are typed: only `type == "message"` entries with a
+/// system/developer role qualify, and the injected content is an `input_text`
+/// part. 9router injectResponsesInputSystem.
+fn inject_responses_input(input: &mut Vec<Value>, prompt: &str) -> bool {
+    let idx = input.iter().position(|item| {
+        item.get("type").and_then(Value::as_str) == Some("message")
+            && matches!(
+                item.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            )
+    });
+    match idx {
+        Some(i) => append_to_responses_message(&mut input[i], prompt),
+        None => {
+            input.insert(
+                0,
+                serde_json::json!({
+                    "type": "message",
+                    "role": "system",
+                    "content": [{ "type": "input_text", "text": prompt }]
+                }),
+            );
+            true
+        }
+    }
+}
+
+/// Append a prompt to a Responses message item, which unlike a chat message
+/// takes typed `input_text` content. 9router appendToResponsesMessage.
+fn append_to_responses_message(message: &mut Value, prompt: &str) -> bool {
+    match message.get_mut("content") {
+        Some(Value::String(content)) => {
+            if !content.is_empty() {
+                content.push_str(SEP);
+            }
+            content.push_str(prompt);
+            true
+        }
+        Some(Value::Array(parts)) => {
+            parts.push(serde_json::json!({ "type": "input_text", "text": prompt }));
+            true
+        }
+        _ => {
+            message["content"] = serde_json::json!([{ "type": "input_text", "text": prompt }]);
+            true
+        }
+    }
+}
+
+/// Kiro wire shape: append to the first user turn's `content` string, the same
+/// place the Kiro translator mirrors system text via its `contentPrefix`.
+/// 9router injectKiroSystem.
+fn inject_kiro_system(body: &mut Value, prompt: &str) -> bool {
+    let Some(state) = body
+        .get_mut("conversationState")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+
+    if let Some(history) = state.get_mut("history").and_then(Value::as_array_mut) {
+        for item in history.iter_mut() {
+            if let Some(message) = item
+                .get_mut("userInputMessage")
+                .and_then(Value::as_object_mut)
+            {
+                return append_kiro_prompt(message, prompt);
+            }
+        }
+    }
+
+    state
+        .get_mut("currentMessage")
+        .and_then(|current| current.get_mut("userInputMessage"))
+        .and_then(Value::as_object_mut)
+        .is_some_and(|message| append_kiro_prompt(message, prompt))
+}
+
+fn append_kiro_prompt(message: &mut Map<String, Value>, prompt: &str) -> bool {
+    let current = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let next = if current.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{current}{SEP}{prompt}")
+    };
+    message.insert("content".into(), Value::String(next));
+    true
 }
 
 /// Append a prompt to an OpenAI message (string content, array of parts, or
@@ -294,12 +394,86 @@ mod tests {
     fn responses_input_array_appends_to_developer() {
         let mut body = json!({
             "input": [
-                { "role": "developer", "content": [ { "type": "input_text", "text": "a" } ] }
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [ { "type": "input_text", "text": "a" } ]
+                }
             ]
         });
         assert!(inject_system_prompt(&mut body, "openai", "b"));
         let parts = body["input"][0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[1]["text"], "b");
+    }
+
+    #[test]
+    fn responses_input_inserts_typed_message_item() {
+        let mut body = json!({
+            "input": [
+                { "type": "message", "role": "user", "content": [ { "type": "input_text", "text": "hi" } ] }
+            ]
+        });
+        assert!(inject_system_prompt(&mut body, "openai", "PROMPT"));
+        assert_eq!(
+            body["input"][0],
+            json!({
+                "type": "message",
+                "role": "system",
+                "content": [ { "type": "input_text", "text": "PROMPT" } ]
+            })
+        );
+        assert_eq!(body["input"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn responses_input_ignores_untyped_role_item() {
+        // A bare `{role, content}` entry is not a Responses message item, so it
+        // must be left alone and a typed item inserted ahead of it.
+        let mut body = json!({
+            "input": [ { "role": "system", "content": "pre-existing" } ]
+        });
+        assert!(inject_system_prompt(&mut body, "openai", "PROMPT"));
+        assert_eq!(body["input"][0]["type"], "message");
+        assert_eq!(body["input"][1]["content"], "pre-existing");
+    }
+
+    #[test]
+    fn kiro_format_arm_appends_to_first_user_turn() {
+        let mut body = json!({
+            "conversationState": {
+                "history": [
+                    { "userInputMessage": { "content": "first" } },
+                    { "userInputMessage": { "content": "second" } }
+                ]
+            }
+        });
+        assert!(inject_system_prompt(&mut body, "kiro", "PROMPT"));
+        assert_eq!(
+            body["conversationState"]["history"][0]["userInputMessage"]["content"],
+            "first\n\nPROMPT"
+        );
+        assert_eq!(
+            body["conversationState"]["history"][1]["userInputMessage"]["content"],
+            "second"
+        );
+    }
+
+    #[test]
+    fn kiro_format_arm_falls_back_to_current_message() {
+        let mut body = json!({
+            "conversationState": { "currentMessage": { "userInputMessage": { "content": "hi" } } }
+        });
+        assert!(inject_system_prompt(&mut body, "kiro", "PROMPT"));
+        assert_eq!(
+            body["conversationState"]["currentMessage"]["userInputMessage"]["content"],
+            "hi\n\nPROMPT"
+        );
+    }
+
+    #[test]
+    fn kiro_format_arm_without_user_turn_is_a_noop() {
+        let mut body = json!({ "conversationState": { "history": [] } });
+        assert!(!inject_system_prompt(&mut body, "kiro", "PROMPT"));
     }
 }

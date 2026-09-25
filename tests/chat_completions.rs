@@ -268,7 +268,7 @@ async fn chat_completions_injects_caveman_prompt_for_long_requests() {
 }
 
 #[tokio::test]
-async fn chat_completions_skips_caveman_prompt_for_short_requests() {
+async fn chat_completions_injects_caveman_prompt_for_short_requests() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/v1/chat/completions"))
@@ -342,9 +342,13 @@ async fn chat_completions_skips_caveman_prompt_for_short_requests() {
     }
     let forwarded: serde_json::Value = requests[0].body_json().expect("forwarded body");
     let messages = forwarded["messages"].as_array().expect("messages array");
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages[0]["role"], "user");
-    assert_eq!(messages[0]["content"], "hi");
+    // A short prompt is no exception: the body had no system turn, so the
+    // caveman prompt arrives as a newly prepended one (9router chatCore.js:278).
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0]["role"], "system");
+    assert_eq!(messages[0]["content"], CompressionLevel::Lite.prompt());
+    assert_eq!(messages[1]["role"], "user");
+    assert_eq!(messages[1]["content"], "hi");
 }
 
 #[tokio::test]
