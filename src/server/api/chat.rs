@@ -3753,39 +3753,43 @@ async fn proxy_response_with_pending_tracking(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_lowercase();
-    if !ct.is_empty()
-        && !ct.contains("text/event-stream")
-        && !ct.contains("application/octet-stream")
-        && !ct.contains("application/x-ndjson")
-        && (ct.contains("text/html")
-            || ct.contains("application/json")
-            || ct.contains("text/plain"))
-    {
-        // Collect body and return structured error instead of piping garbage as SSE
+
+    // 9router rule (streamingHandler.js:60-77), ported as-is:
+    //   block when the type is NEITHER text/event-stream NOR application/json.
+    // That is an ALLOW-list of what may be piped into the SSE transform, not the
+    // previous deny-list of three types. The deny-list let every other type
+    // through into the transform, where it produced garbage frames with no
+    // terminal [DONE] — the hang this guard exists to prevent.
+    if should_block_non_sse(&ct) {
+        // Read the body so an HTML error page does not go through the SSE pipe
+        // (9router's stated reason: it crashes the chat router downstream).
         let (body_bytes, _) = collect_upstream_response_bytes(response).await;
-        let msg = String::from_utf8_lossy(&body_bytes);
-        let msg = if msg.len() > 500 {
-            format!("{}…", &msg[..500])
-        } else {
-            msg.to_string()
-        };
+        let body_text = String::from_utf8_lossy(&body_bytes);
+
+        let short_msg = upstream_error_message(&body_text, &ct);
+
         tracing::warn!(
             target: "openproxy::chat",
-            "STREAM_GUARD non-SSE content-type={} status={} body_snip={}",
+            "STREAM_GUARD blocked non-SSE content-type={} status={} msg_len={}",
             ct,
             status.as_u16(),
-            msg.chars().take(120).collect::<String>()
+            short_msg.chars().count()
         );
+
+        // Preserve the UPSTREAM status (9router: `providerResponse.status || 502`).
+        // Returning a hardcoded 502 for a 200-with-error-body is what made this
+        // path a retry storm: 502 is retryable, so one flaky provider that
+        // ignored stream:true triggered retries across the whole combo.
         let err = json!({
             "error": {
-                "message": format!("Upstream returned non-SSE content-type '{ct}': {msg}"),
-                "type": "server_error",
+                "message": format!("[{}]: {}", status.as_u16(), short_msg),
+                "type": "upstream_non_sse",
                 "code": "upstream_non_sse"
             }
         });
         return with_cors_response(
             (
-                StatusCode::BAD_GATEWAY,
+                status,
                 [(header::CONTENT_TYPE, "application/json")],
                 err.to_string(),
             )
@@ -4264,6 +4268,82 @@ async fn record_streaming_usage(
         .await;
 }
 
+/// Whether an upstream content-type must be blocked before its body is piped
+/// into the SSE transform.
+///
+/// 9router `streamingHandler.js:60` is an ALLOW-list:
+///   if (upstreamContentType && !upstreamContentType.includes('text/event-stream')
+///       && !upstreamContentType.includes('application/json')) { block }
+/// so exactly two families pass. The previous OpenProxy code was a DENY-list of
+/// three types (text/html, application/json, text/plain), which let every other
+/// type through into the transform, where it produced garbage frames with no
+/// terminal [DONE] — the hang the guard exists to prevent — and it blocked
+/// application/json, so a provider that ignored stream:true and returned a JSON
+/// body was turned into a hardcoded 502, which is RETRYABLE and therefore a
+/// retry-storm amplifier across a combo.
+///
+/// Extracted as a predicate so the rule is testable; an inline condition in the
+/// stream handler cannot be.
+pub(crate) fn should_block_non_sse(content_type: &str) -> bool {
+    let ct = content_type.to_lowercase();
+    !ct.is_empty() && !ct.contains("text/event-stream") && !ct.contains("application/json")
+}
+
+/// Build the short, sanitized message for a blocked non-SSE upstream response.
+///
+/// Ported from 9router `streamingHandler.js:61-67`:
+///   const titleMatch = bodyText.match(/<title>([^<]+)<\/title>/i);
+///   const sanitizedTitle = (titleMatch?.[1] || '').replace(/<[^>]*>/g, '')
+///                               .replace(/[\r\n]+/g, ' ').trim().slice(0, 160);
+///   const shortMsg = sanitizedTitle
+///     || (bodyText.length < 200 ? bodyText.replace(/<[^>]*>/g, '').trim().slice(0, 160)
+///                               : `Upstream returned non-SSE response (${ct})`);
+///
+/// The point of the extraction is that UNTRUSTED upstream bytes never reach the
+/// client verbatim — the dashboard may render error.message as HTML, so echoing
+/// a raw error page is an XSS sink. Extracted as a pure function so the rule is
+/// testable; the previous inline version embedded the body directly.
+pub(crate) fn upstream_error_message(body: &str, content_type: &str) -> String {
+    let strip_tags = |s: &str| -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut in_tag = false;
+        for ch in s.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => out.push(ch),
+                _ => {}
+            }
+        }
+        out
+    };
+    let flatten_ws = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
+    let clamp = |s: &str| -> String { s.chars().take(160).collect() };
+
+    // 9router's regex is /<title>([^<]+)<\/title>/i — `[^<]+` means a title
+    // containing ANY further '<' does NOT match, and the code falls through to
+    // the body branch. Mirrored here: a title carrying markup is rejected
+    // rather than unwrapped, so `<title><script>alert(1)</script>x</title>`
+    // degrades to a plain message instead of handing the script's text a
+    // place to sit.
+    let raw_title = body
+        .split_once("<title>")
+        .and_then(|(_, rest)| rest.split_once("</title>").map(|(t, _)| t))
+        .filter(|t| !t.contains('<'))
+        .unwrap_or_default();
+    let from_title = clamp(&flatten_ws(&strip_tags(raw_title)));
+    if !from_title.is_empty() {
+        return from_title;
+    }
+    if body.chars().count() < 200 {
+        let stripped = clamp(&flatten_ws(&strip_tags(body)));
+        if !stripped.is_empty() {
+            return stripped;
+        }
+    }
+    format!("Upstream returned non-SSE response ({content_type})")
+}
+
 /// Strip provider-specific fields from one raw upstream SSE chunk before it
 /// reaches the client (9router parity: sanitizeResponse). Chunks can split a
 /// frame across reads, so each `data:` line is sanitized in isolation and
@@ -4696,6 +4776,13 @@ pub(crate) fn take_terminal_passthrough_frame(buffer: &mut Vec<u8>) -> Option<By
     if last.is_empty() {
         return None;
     }
+    // The terminal frame needs the \n\n separator too. Without it the client
+    // buffers an event that never sees a blank line and DISCARDS it at EOF
+    // (per the SSE event dispatch rules), which would defeat the entire point
+    // of flushing: we would send the last frame and lose it anyway. This also
+    // keeps passthrough symmetric — every drained frame goes through
+    // passthrough_frame_bytes, and so does this one.
+    last.extend_from_slice(b"\n\n");
     Some(Bytes::from(last))
 }
 
@@ -6307,6 +6394,14 @@ mod passthrough_framing_tests {
             text.contains("data:"),
             "final frame must reach the client: {text:?}"
         );
+        // The delimiter is what makes the flush WORK: per the SSE event
+        // dispatch rules a client buffers an event that never sees a blank line
+        // and discards it at EOF. Sending the last frame without \n\n would
+        // send it and lose it anyway.
+        assert!(
+            text.ends_with("\n\n"),
+            "terminal frame must keep its delimiter: {text:?}"
+        );
         assert!(leftover.is_empty(), "buffer is drained by the extraction");
     }
 
@@ -6326,5 +6421,167 @@ mod passthrough_framing_tests {
         let text = String::from_utf8_lossy(&framed).into_owned();
         assert_eq!(text, "event: ping\n\n", "event lines pass through as-is");
         assert!(!text.starts_with("data: event:"));
+    }
+}
+
+#[cfg(test)]
+mod non_sse_guard_tests {
+    use super::upstream_error_message;
+
+    /// Regression (bead openproxy-n12c). 9router
+    /// streamingHandler.js:61-67 pulls a short message out of <title>, strips
+    /// tags and clamps, precisely because "untrusted upstream text never
+    /// reaches the client verbatim (the UI may render error.message as HTML)".
+    /// The previous OpenProxy guard pasted the first 500 raw bytes of the
+    /// upstream body into error.message, so an HTML error page became an XSS
+    /// sink.
+    #[test]
+    fn an_html_error_page_never_reaches_the_client_verbatim() {
+        let hostile = concat!(
+            "<html><head><title>",
+            "<script>alert('xss')</script>Gateway Timeout",
+            "</title></head><body>nginx</body></html>"
+        );
+        let msg = upstream_error_message(hostile, "text/html");
+        // No tag markup may survive — this is the actual XSS boundary, since
+        // the dashboard may render error.message as HTML.
+        assert!(!msg.contains('<'), "tags must be stripped: {msg:?}");
+        assert!(!msg.contains('>'), "tags must be stripped: {msg:?}");
+        // A title containing markup is not unwrapped at all (9router's [^<]+
+        // rule) — the message degrades to the body branch.
+        //
+        // Note on the threat model, checked here so it is not assumed: 9router's
+        // tag regex removes the MARKUP and keeps the text between tags, so a
+        // script BODY still appears as plain text. That is not a hole — the
+        // message carries no tags, so a UI rendering error.message as HTML shows
+        // inert characters. The property that actually matters, and that is
+        // asserted above, is that no '<' or '>' survives. Asserting the script
+        // text is gone would demand a behaviour 9router does not have.
+        assert!(
+            msg.contains("Gateway Timeout"),
+            "the page is still described: {msg:?}"
+        );
+    }
+
+    /// A plain title IS extracted — the happy path, so the guard does not
+    /// degrade every real upstream HTML page to a generic message.
+    #[test]
+    fn a_plain_html_title_becomes_the_message() {
+        let msg = upstream_error_message(
+            "<html><head><title>Gateway Timeout</title></head><body>nginx</body></html>",
+            "text/html",
+        );
+        assert_eq!(msg, "Gateway Timeout");
+    }
+
+    /// Tag stripping still applies to the BODY branch (no title present).
+    #[test]
+    fn the_body_branch_also_strips_markup() {
+        let msg = upstream_error_message("error: <b>bad</b> gateway", "text/plain");
+        assert!(
+            !msg.contains('<'),
+            "tags stripped in the body branch too: {msg:?}"
+        );
+        assert_eq!(msg, "error: bad gateway");
+    }
+
+    /// 9router clamps to 160 characters; a long title must not be relayed whole.
+    #[test]
+    fn the_message_is_clamped_to_160_chars() {
+        let long = format!("<title>{}</title>", "A".repeat(500));
+        let msg = upstream_error_message(&long, "text/html");
+        assert_eq!(msg.chars().count(), 160, "clamped: {}", msg.len());
+    }
+
+    /// Newlines in a title must collapse — they would otherwise split the
+    /// JSON error body across lines.
+    #[test]
+    fn newlines_in_a_title_are_flattened() {
+        let msg = upstream_error_message(
+            "<title>line one\nline two\r\nline three</title>",
+            "text/html",
+        );
+        assert!(!msg.contains('\n'), "newlines flattened: {msg:?}");
+        assert!(!msg.contains('\r'), "CR flattened: {msg:?}");
+        assert_eq!(msg, "line one line two line three");
+    }
+
+    /// No title, small body: 9router uses the body itself (tags stripped).
+    #[test]
+    fn a_small_bodiless_title_body_is_used() {
+        let msg = upstream_error_message("upstream said no", "text/plain");
+        assert_eq!(msg, "upstream said no");
+    }
+
+    /// No title, LARGE body: 9router substitutes a generic message rather than
+    /// dumping an arbitrary amount of untrusted text.
+    #[test]
+    fn a_large_bodiless_title_body_becomes_a_generic_message() {
+        let big = "X".repeat(500);
+        let msg = upstream_error_message(&big, "text/plain");
+        assert_eq!(msg, "Upstream returned non-SSE response (text/plain)");
+    }
+
+    /// An empty body must not produce an empty error message.
+    #[test]
+    fn an_empty_body_still_yields_a_usable_message() {
+        let msg = upstream_error_message("", "application/xml");
+        assert_eq!(msg, "Upstream returned non-SSE response (application/xml)");
+        assert!(!msg.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod non_sse_predicate_tests {
+    use super::should_block_non_sse;
+
+    /// Regression (bead openproxy-n12c): 9router's rule is an ALLOW-list of
+    /// text/event-stream and application/json. OpenProxy shipped a DENY-list of
+    /// three types, which had two opposite failures — it blocked
+    /// application/json (turning a 200-with-JSON-body into a retryable 502,
+    /// i.e. a retry-storm amplifier) and let every OTHER type through into the
+    /// SSE transform, producing garbage frames with no terminal [DONE].
+    #[test]
+    fn only_non_sse_non_json_types_are_blocked() {
+        // allowed: these two families are exactly what 9router lets through
+        assert!(!should_block_non_sse("text/event-stream"));
+        assert!(!should_block_non_sse("text/event-stream; charset=utf-8"));
+        assert!(!should_block_non_sse("application/json"));
+        assert!(!should_block_non_sse("application/json; charset=utf-8"));
+        // an EMPTY content-type is not blocked, matching 9router's
+        // `upstreamContentType &&` guard
+        assert!(!should_block_non_sse(""));
+        // everything else is blocked — including the types the old deny-list
+        // let through
+        for blocked in [
+            "text/html",
+            "text/plain",
+            "application/xml",
+            "application/octet-stream",
+            "application/x-ndjson",
+            "application/pdf",
+            "image/png",
+        ] {
+            assert!(should_block_non_sse(blocked), "{blocked} must be blocked");
+        }
+    }
+
+    /// Case-insensitive, like 9router's `.toLowerCase()` on the header.
+    #[test]
+    fn the_content_type_check_is_case_insensitive() {
+        assert!(!should_block_non_sse("TEXT/EVENT-STREAM"));
+        assert!(!should_block_non_sse("Application/JSON"));
+        assert!(should_block_non_sse("TEXT/HTML"));
+    }
+
+    /// The exact failure the deny-list caused: a provider that ignored
+    /// stream:true and returned a JSON body must NOT be blocked, or the client
+    /// gets a retryable 502 instead of the body.
+    #[test]
+    fn a_json_body_from_a_streaming_request_is_not_blocked() {
+        assert!(
+            !should_block_non_sse("application/json"),
+            "blocking this is what produced the 502 retry storm"
+        );
     }
 }
