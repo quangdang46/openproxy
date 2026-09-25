@@ -2,12 +2,22 @@
 //! Regression tests for openproxy-muwe: a CLI-tool settings write must never
 //! destroy a config file it could not parse.
 //!
-//! The four (six, counting the `droid_settings` submodule) write paths read the
-//! user's file, mutate one key, and write the map back. They used to funnel
-//! every parse failure through a helper that returns an empty map, so a config
-//! containing a trailing comma — or a BOM, or a half-written file from an
-//! unclean shutdown — was silently replaced by a stub holding only the one key
-//! being written. Every other setting the user had was gone, with a 200 back.
+//! Each write path reads the user's file, mutates one key, and writes the
+//! result back. They used to funnel every parse failure through a helper that
+//! returns an empty map/vec, so a config containing a trailing comma — or a
+//! BOM, or a half-written file from an unclean shutdown — was silently replaced
+//! by a stub holding only the key being written. Every other setting the user
+//! had was gone, with a 200 back.
+//!
+//! Covered: openclaw, droid (object), copilot (array), codex config.toml and
+//! codex auth.json. Codex auth.json is the sharpest case — it holds the user's
+//! OAuth tokens, so a swallowed parse error did not merely drop a setting, it
+//! discarded the refresh_token and switched the CLI to apikey auth.
+//!
+//! NOTE: `src/server/api/cli_tools/droid_settings.rs` also carries this
+//! pattern, but that module is not declared anywhere and never compiles into
+//! the binary. Editing it changes nothing at runtime; the live droid path is
+//! inline in `cli_tools.rs`. It is left untouched rather than half-fixed.
 //!
 //! These tests assert on BYTES, not on parsed content. That is the whole point:
 //! after the destructive write the file still parses cleanly, so a
@@ -218,5 +228,151 @@ async fn openclaw_settings_post_preserves_unrelated_keys() {
     assert_eq!(
         updated["agents"]["defaults"]["model"]["primary"], "openproxy/new-model",
         "the requested key was not updated"
+    );
+}
+
+// ── Codex ────────────────────────────────────────────────────────────────────
+// auth.json holds the user's OAuth tokens. A parse failure used to start from
+// an empty map, write back a file containing only OPENAI_API_KEY, and silently
+// switch the CLI to apikey auth — the refresh_token simply disappeared.
+
+fn codex_auth_path(home: &Path) -> PathBuf {
+    home.join(".codex").join("auth.json")
+}
+
+fn codex_config_path(home: &Path) -> PathBuf {
+    home.join(".codex").join("config.toml")
+}
+
+/// Malformed JSON that still *contains* a refresh token, so a test can prove
+/// the token survived rather than merely that the file is unchanged.
+const CODEX_AUTH_MALFORMED: &str = r#"{
+  "tokens": {"access_token": "at-1", "refresh_token": "rt-SECRET"},
+  "trailing": 1,
+}"#;
+
+#[tokio::test]
+async fn codex_settings_post_refuses_to_rewrite_malformed_auth_json() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let auth = codex_auth_path(home.path());
+    std::fs::create_dir_all(auth.parent().unwrap()).unwrap();
+    std::fs::write(&auth, CODEX_AUTH_MALFORMED).unwrap();
+
+    let status = post_json(
+        openproxy::build_app(app_state().await),
+        "/api/cli-tools/codex-settings",
+        json!({
+            "baseUrl": "http://127.0.0.1:4623/v1",
+            "apiKey": "sk-test",
+            "model": "gpt-5",
+        }),
+    )
+    .await;
+
+    assert!(
+        status.is_server_error(),
+        "expected an error status, got {status}"
+    );
+    let after = std::fs::read_to_string(&auth).unwrap();
+    assert_eq!(
+        after, CODEX_AUTH_MALFORMED,
+        "auth.json was rewritten; the OAuth tokens would be gone"
+    );
+    assert!(
+        after.contains("rt-SECRET"),
+        "the refresh token must survive a refused save"
+    );
+}
+
+#[tokio::test]
+async fn codex_settings_post_refuses_to_rewrite_malformed_config_toml() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    let config = codex_config_path(home.path());
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let seed = "model = \"gpt-5\"\nthis is = = not toml\n";
+    std::fs::write(&config, seed).unwrap();
+
+    let status = post_json(
+        openproxy::build_app(app_state().await),
+        "/api/cli-tools/codex-settings",
+        json!({
+            "baseUrl": "http://127.0.0.1:4623/v1",
+            "apiKey": "sk-test",
+            "model": "gpt-5",
+        }),
+    )
+    .await;
+
+    assert!(
+        status.is_server_error(),
+        "expected an error status, got {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        seed,
+        "config.toml was rewritten even though it could not be parsed"
+    );
+}
+
+// ── Copilot ─────────────────────────────────────────────────────────────────
+// Copilot's config is a top-level JSON ARRAY, so the object-shaped fix could
+// not reach it: a malformed file was replaced by a one-entry array holding
+// only OpenProxy, dropping every other provider the user had configured.
+
+fn copilot_config_path(home: &Path) -> PathBuf {
+    if cfg!(windows) {
+        home.join("Code")
+            .join("User")
+            .join("chatLanguageModels.json")
+    } else if cfg!(target_os = "macos") {
+        home.join("Library")
+            .join("Application Support")
+            .join("Code")
+            .join("User")
+            .join("chatLanguageModels.json")
+    } else {
+        home.join(".config")
+            .join("Code")
+            .join("User")
+            .join("chatLanguageModels.json")
+    }
+}
+
+#[tokio::test]
+async fn copilot_settings_post_refuses_to_rewrite_malformed_config() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = tempdir().unwrap();
+    let _home = EnvVarGuard::set_path("HOME", home.path());
+    // On Windows the path resolves through APPDATA, not HOME. Set both so the
+    // test never writes to the real machine's VS Code config.
+    let _appdata = EnvVarGuard::set_path("APPDATA", home.path());
+    let config = copilot_config_path(home.path());
+    std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+    let seed = r#"[{"name":"Someone Else","vendor":"other"},]"#;
+    std::fs::write(&config, seed).unwrap();
+
+    let status = post_json(
+        openproxy::build_app(app_state().await),
+        "/api/cli-tools/copilot-settings",
+        json!({
+            "baseUrl": "http://127.0.0.1:4623/v1",
+            "apiKey": "sk-test",
+            "models": ["gpt-4.1"],
+        }),
+    )
+    .await;
+
+    assert!(
+        status.is_server_error(),
+        "expected an error status, got {status}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&config).unwrap(),
+        seed,
+        "the other provider in the array was dropped by a refused save"
     );
 }

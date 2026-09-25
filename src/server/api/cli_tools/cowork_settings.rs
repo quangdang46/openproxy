@@ -768,10 +768,14 @@ async fn read_json_optional(path: &Path) -> AnyhowResult<Option<Value>> {
 
     // Tolerate JSONC (trailing commas) like 9router does.
     let stripped = strip_trailing_commas(&content);
-    match serde_json::from_str(&stripped).or_else(|_| serde_json::from_str(&content)) {
-        Ok(v) => Ok(Some(v)),
-        Err(_) => Ok(None),
-    }
+    // A present-but-unparseable file must NOT read as absent: the write paths
+    // below treat "absent" as "start empty" and then write the result back,
+    // which replaced the user's cowork config.json and
+    // claude_desktop_config.json wholesale.
+    serde_json::from_str(&stripped)
+        .or_else(|_| serde_json::from_str(&content))
+        .map(Some)
+        .map_err(Into::into)
 }
 
 fn strip_trailing_commas(input: &str) -> String {
@@ -791,8 +795,19 @@ fn strip_trailing_commas(input: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        // Copy the whole UTF-8 sequence rather than casting a single byte.
+        // `bytes[i] as char` turned every byte >= 0x80 into its own Latin-1
+        // codepoint, so any non-ASCII in a WELL-FORMED config — MCP server
+        // names, CJK, accents — was rewritten as mojibake on every save, with
+        // no malformed file required. Only the copy was wrong: the scanner
+        // above only ever matches ASCII.
+        match input[i..].chars().next() {
+            Some(ch) => {
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+            None => break,
+        }
     }
     out
 }
@@ -928,4 +943,70 @@ async fn meta_path(root: PathBuf) -> AnyhowResult<PathBuf> {
 
 async fn write_meta_path() -> AnyhowResult<PathBuf> {
     Ok(write_config_dir().await?.join("_meta.json"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    /// The scanner only ever matches ASCII (`,` `}` `]` and whitespace), so it
+    /// is byte-safe. The copy was not: `bytes[i] as char` cast each byte
+    /// individually, turning every byte >= 0x80 into its own Latin-1 codepoint.
+    /// That corrupted any WELL-FORMED config containing non-ASCII — MCP server
+    /// names, CJK, accents — on every save, with no malformed file required.
+    #[test]
+    fn strip_trailing_commas_preserves_non_ascii() {
+        let input = r#"{"servers":{"编辑":{"command":"npx"}},"trailing":1,}"#;
+        let out = strip_trailing_commas(input);
+
+        assert!(out.contains("编辑"), "CJK text was corrupted: {out}");
+        assert!(
+            !out.contains('\u{80}') && !out.contains('\u{c3}'),
+            "byte-as-char casting left Latin-1 mojibake: {out}"
+        );
+        // And it must still parse, with the trailing comma actually removed.
+        let parsed: Value = serde_json::from_str(&out).expect("output must still be valid JSON");
+        assert_eq!(parsed["servers"]["编辑"]["command"], "npx");
+    }
+
+    /// Latin-1 range and emoji, to pin both the 1-byte-per-codepoint failure
+    /// and the multi-byte case.
+    #[test]
+    fn strip_trailing_commas_preserves_multibyte_and_emoji() {
+        let input = r#"{"a":"café","b":"🙂","c":"日本語","d":[1,2,]}"#;
+        let out = strip_trailing_commas(input);
+        let parsed: Value = serde_json::from_str(&out).expect("output must still be valid JSON");
+
+        assert_eq!(parsed["a"], "café");
+        assert_eq!(parsed["b"], "🙂");
+        assert_eq!(parsed["c"], "日本語");
+        assert_eq!(parsed["d"][1], 2);
+    }
+
+    /// A file that is present but unparseable must not read as absent — the
+    /// write paths treat "absent" as "start empty" and then write back, which
+    /// replaced cowork's config.json and claude_desktop_config.json wholesale.
+    #[tokio::test]
+    async fn present_but_unparseable_is_not_reported_as_absent() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        tokio::fs::write(&path, "{ this is not json").await.unwrap();
+
+        let result = read_json_optional(&path).await;
+
+        assert!(
+            result.is_err(),
+            "a malformed file must surface an error, not Ok(None)"
+        );
+    }
+
+    /// Genuinely absent still reads as absent.
+    #[tokio::test]
+    async fn absent_file_is_still_none() {
+        let dir = tempdir().expect("tempdir");
+        let result = read_json_optional(&dir.path().join("nope.json")).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
 }
