@@ -2,6 +2,31 @@
 
 use serde_json::Value;
 
+/// Extract plain text from a system/developer message for Responses
+/// `instructions`.
+///
+/// Array content is joined from its text parts. Anything else falls back to an
+/// empty string rather than leaking a debug blob upstream — an empty
+/// `instructions` is recoverable (the caller substitutes a default), whereas a
+/// serialised object is not.
+fn extract_instructions_text(content: Option<&Value>) -> String {
+    match content {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .map(|part| {
+                part.get("text")
+                    .and_then(Value::as_str)
+                    .or_else(|| part.get("content").and_then(Value::as_str))
+                    .unwrap_or_default()
+            })
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
 fn normalize_tool_parameters(params: Option<&Value>) -> Value {
     match params {
         None => serde_json::json!({"type": "object", "properties": {}}),
@@ -627,12 +652,7 @@ pub fn chat_to_openai_responses_request(
 
         if role == "system" || role == "developer" {
             if !has_system {
-                result["instructions"] = msg
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string()
-                    .into();
+                result["instructions"] = extract_instructions_text(msg.get("content")).into();
                 has_system = true;
             }
             continue;
@@ -812,6 +832,53 @@ pub fn chat_to_openai_responses_request(
 
 #[cfg(test)]
 mod tests {
+    /// Regression (openproxy-we9n): the system/developer message is the ONLY
+    /// carrier of the client prompt in a Responses request — it is read here and
+    /// then `continue`d, never added to `input`. Extracting it with `as_str`
+    /// meant an array-shaped `content` (schema-legal, and what several SDKs
+    /// emit) yielded "", and CodexExecutor substitutes an 11.8 KB default
+    /// instruction set. The client's actual prompt was sent nowhere.
+    #[test]
+    fn array_shaped_system_content_survives_the_translate() {
+        let mut body = serde_json::json!({
+            "model": "gpt-5",
+            "messages": [
+                {
+                    "role": "system",
+                    "content": [
+                        {"type": "text", "text": "You are a legal assistant."},
+                        {"type": "text", "text": "Answer in French."}
+                    ]
+                },
+                {"role": "user", "content": "hello"}
+            ]
+        });
+
+        super::chat_to_openai_responses_request("gpt-5", &mut body, true, None);
+
+        assert_eq!(
+            body["instructions"].as_str(),
+            Some("You are a legal assistant.\nAnswer in French."),
+            "array-shaped system content was dropped, not extracted"
+        );
+    }
+
+    /// The string form must keep working — the array branch is additive.
+    #[test]
+    fn string_shaped_system_content_is_unchanged() {
+        let mut body = serde_json::json!({
+            "model": "gpt-5",
+            "messages": [
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+
+        super::chat_to_openai_responses_request("gpt-5", &mut body, true, None);
+
+        assert_eq!(body["instructions"].as_str(), Some("You are terse."));
+    }
+
     /// Regression (audit finding B4): the clamp used to slice at a fixed BYTE
     /// offset, which panics when the offset lands inside a multi-byte char.
     /// `[profile.release]` sets `panic = "abort"`, so that panic aborts the
