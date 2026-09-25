@@ -24,8 +24,72 @@ pub fn import_usage(db: &SqliteDb, payload: &Value) -> anyhow::Result<usize> {
         .map_err(|e| anyhow::anyhow!("SQLite usage import: {e}"))
 }
 
+/// Import the legacy `disabledModels.json` (`{"disabled": {provider: [model]}}`).
+/// 9router stores this map in a `kv` scope; OpenProxy owns a dedicated
+/// `disabledModels` table holding the same rows.
+pub fn import_legacy_disabled(db: &SqliteDb, payload: &Value) -> anyhow::Result<usize> {
+    db.with_transaction(|conn| -> rusqlite::Result<usize> {
+        let Some(disabled) = payload.get("disabled").and_then(Value::as_object) else {
+            return Ok(0);
+        };
+        let mut count = 0;
+        for (provider, models) in disabled {
+            for model in models
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                conn.execute(
+                    "INSERT OR IGNORE INTO disabledModels(provider, model) VALUES(?1,?2)",
+                    rusqlite::params![provider, model],
+                )?;
+                count += 1;
+            }
+        }
+        Ok(count)
+    })
+    .map_err(|e| anyhow::anyhow!("SQLite disabledModels import: {e}"))
+}
+
+/// Import the legacy `request-details.json` (`{"records": [...]}`) into
+/// `requestDetails`. A record with no timestamp is stamped now, as 9router does.
+pub fn import_legacy_details(db: &SqliteDb, payload: &Value) -> anyhow::Result<usize> {
+    db.with_transaction(|conn| -> rusqlite::Result<usize> {
+        let Some(records) = payload.get("records").and_then(Value::as_array) else {
+            return Ok(0);
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut count = 0;
+        for record in records {
+            let Some(id) = record.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            super::repo::request_repo::save(
+                conn,
+                id,
+                record
+                    .get("timestamp")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&now),
+                record.get("provider").and_then(Value::as_str),
+                record.get("model").and_then(Value::as_str),
+                record.get("connectionId").and_then(Value::as_str),
+                record.get("status").and_then(Value::as_str),
+                record,
+            )?;
+            count += 1;
+        }
+        Ok(count)
+    })
+    .map_err(|e| anyhow::anyhow!("SQLite requestDetails import: {e}"))
+}
+
 fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
-    // Wipe all data (keep _meta)
+    // Wipe the configuration tables (keep `_meta`) — the same set 9router
+    // clears. `usageHistory` / `usageDaily` / `requestDetails` are appended
+    // incrementally and never appear in an `AppDb` payload, so wiping them
+    // would destroy usage data that nothing here can write back.
     let tables = [
         "settings",
         "providerConnections",
@@ -35,9 +99,6 @@ fn import_all(conn: &Connection, payload: &Value) -> rusqlite::Result<usize> {
         "combos",
         "kv",
         "disabledModels",
-        "usageHistory",
-        "usageDaily",
-        "requestDetails",
     ];
     for table in &tables {
         conn.execute(&format!("DELETE FROM {table}"), [])?;
@@ -272,6 +333,23 @@ fn import_usage_impl(conn: &Connection, payload: &Value) -> rusqlite::Result<usi
         .and_then(Value::as_array)
         .map(|a| a.len())
         .unwrap_or(0);
+
+    // Day rollups outlive `usageHistory` in the 90-day window, so a payload
+    // that carries them has to restore them rather than let the loader
+    // re-derive from a history list that no longer covers those days.
+    if let Some(days) = payload.get("dailySummary").and_then(Value::as_object) {
+        for (date_key, day) in days {
+            let Ok(summary) = serde_json::from_value::<crate::types::DailySummary>(day.clone())
+            else {
+                continue;
+            };
+            super::repo::usage_repo::upsert_daily(conn, date_key, &summary)?;
+        }
+    }
+    if let Some(total) = payload.get("totalRequestsLifetime").and_then(Value::as_u64) {
+        super::repo::meta_repo::set(conn, super::repo::meta_repo::TOTAL_REQUESTS_LIFETIME, total)?;
+    }
+
     Ok(count)
 }
 
@@ -333,5 +411,78 @@ mod tests {
         let invalid = json!({"providerConnections": "not_an_array"});
         let result = import_db(&db, &invalid).unwrap();
         assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn import_usage_restores_daily_rollup_and_lifetime_counter() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        import_usage(
+            &db,
+            &json!({
+                "history": [{ "timestamp": "2026-01-01T00:00:00Z", "model": "gpt-4o", "cost": 0.5 }],
+                "dailySummary": { "2026-01-01": { "requests": 9, "cost": 4.5 } },
+                "totalRequestsLifetime": 4242,
+            }),
+        )
+        .unwrap();
+
+        // Both outlive the history list in the payload — the rollup covers 90
+        // days against history's 30, and the count covers everything ever seen.
+        let days = db
+            .with_conn(|conn| crate::db::sqlite::repo::usage_repo::all_daily(conn))
+            .unwrap();
+        assert_eq!(days["2026-01-01"].requests, 9);
+        assert_eq!(days["2026-01-01"].cost, 4.5);
+
+        let lifetime = db
+            .with_conn(|conn| {
+                crate::db::sqlite::repo::meta_repo::get(
+                    conn,
+                    crate::db::sqlite::repo::meta_repo::TOTAL_REQUESTS_LIFETIME,
+                )
+            })
+            .unwrap();
+        assert_eq!(lifetime, Some(4242));
+    }
+
+    #[test]
+    fn import_db_preserves_usage_and_request_detail_tables() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.with_transaction(|conn| {
+            conn.execute(
+                "INSERT INTO usageHistory(timestamp, model) VALUES('2026-01-01T00:00:00Z','gpt-4o')",
+                [],
+            )?;
+            conn.execute(
+                "INSERT INTO usageDaily(dateKey, data) VALUES('2026-01-01','{\"requests\":1}')",
+                [],
+            )?;
+            crate::db::sqlite::repo::request_repo::save(
+                conn,
+                "r1",
+                "2026-01-01T00:00:00Z",
+                Some("openai"),
+                Some("gpt-4o"),
+                None,
+                Some("ok"),
+                &json!({"prompt": "hi"}),
+            )
+        })
+        .unwrap();
+
+        // An AppDb payload carries no usage data, so an import that wiped
+        // these tables would destroy rows nothing puts back.
+        import_db(&db, &json!({"providerConnections": []})).unwrap();
+
+        for table in ["usageHistory", "usageDaily", "requestDetails"] {
+            let count: i64 = db
+                .with_conn(|conn| {
+                    conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                })
+                .unwrap();
+            assert_eq!(count, 1, "{table} must survive an app-db import");
+        }
     }
 }

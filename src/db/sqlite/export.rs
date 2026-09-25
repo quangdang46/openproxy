@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 
 use crate::types::{AppDb, UsageDb};
 
+use super::repo::{meta_repo, usage_repo};
 use super::SqliteDb;
 
 /// Export ALL scopes to the canonical JSON format. Returns pretty-printed
@@ -235,10 +236,13 @@ pub(crate) fn export_all(conn: &Connection) -> rusqlite::Result<Value> {
 
 pub(crate) fn export_usage_impl(conn: &Connection) -> rusqlite::Result<Value> {
     let history: Vec<Value> = {
+        // No row cap: retention already prunes `usageHistory` to 30 days, and
+        // a silent LIMIT would quietly drop the oldest days from every
+        // downstream total derived from this list.
         let mut stmt = conn.prepare(
             "SELECT timestamp, provider, model, connectionId, apiKey, endpoint,
                     promptTokens, completionTokens, cost, status, tokens, meta
-             FROM usageHistory ORDER BY timestamp DESC LIMIT 10000",
+             FROM usageHistory ORDER BY timestamp DESC",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(json!({
@@ -258,13 +262,21 @@ pub(crate) fn export_usage_impl(conn: &Connection) -> rusqlite::Result<Value> {
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    // Daily summaries are derived (UsageDb::normalize rebuilds them from
-    // history on load) — exporting them is unnecessary and would duplicate
-    // state. Keep the payload minimal like before; the in-memory snapshot
-    // always recomputes daily_summary.
+    // 9router keeps the lifetime count in `_meta`, bumped in the same
+    // transaction as each history insert. Reading the stored value is what
+    // makes the total survive history pruning; the history length is only a
+    // floor for databases written before the counter existed.
+    let total_requests_lifetime =
+        meta_repo::get(conn, meta_repo::TOTAL_REQUESTS_LIFETIME)?.unwrap_or(history.len() as u64);
+
+    // Day rollups live in `usageDaily` for 90 days, two months past the
+    // `usageHistory` window, so they cannot be re-derived from the list above.
+    let daily_summary = usage_repo::all_daily(conn)?;
+
     Ok(json!({
         "history": history,
-        "totalRequestsLifetime": history.len(),
+        "totalRequestsLifetime": total_requests_lifetime,
+        "dailySummary": daily_summary,
     }))
 }
 
@@ -344,5 +356,49 @@ mod tests {
         let (bytes, _) = export_usage(&db);
         let val: Value = serde_json::from_slice(&bytes).unwrap();
         assert!(val.get("history").is_some());
+    }
+
+    #[test]
+    fn export_usage_reads_lifetime_counter_from_meta() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.with_transaction(|conn| {
+            meta_repo::set(conn, meta_repo::TOTAL_REQUESTS_LIFETIME, 12345)?;
+            for _ in 0..2 {
+                usage_repo::insert(
+                    conn,
+                    &crate::types::UsageEntry {
+                        model: "gpt-4o".into(),
+                        timestamp: Some("2026-01-01T00:00:00Z".into()),
+                        ..Default::default()
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+
+        let (bytes, _) = export_usage(&db);
+        let val: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["totalRequestsLifetime"].as_u64(), Some(12345));
+    }
+
+    #[test]
+    fn export_usage_falls_back_to_history_length_without_a_counter() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        db.with_transaction(|conn| {
+            usage_repo::insert(
+                conn,
+                &crate::types::UsageEntry {
+                    model: "gpt-4o".into(),
+                    timestamp: Some("2026-01-01T00:00:00Z".into()),
+                    ..Default::default()
+                },
+            )
+        })
+        .unwrap();
+
+        let (bytes, _) = export_usage(&db);
+        let val: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(val["totalRequestsLifetime"].as_u64(), Some(1));
     }
 }

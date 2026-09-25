@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -7,12 +8,57 @@ use serde_json::Value;
 use tokio::fs;
 use tokio::sync::RwLock;
 
-use crate::types::{AppDb, Combo, ModelAliasTarget, ProviderConnection, ProviderNode, UsageDb};
+use crate::types::{
+    AppDb, Combo, DailySummary, ModelAliasTarget, ProviderConnection, ProviderNode, UsageDb,
+};
 
 pub mod backups;
 pub mod crypto;
 pub mod sqlite;
 pub mod watcher;
+
+/// `UsageDb::normalize` re-derives `daily_summary` from `history`, but
+/// retention prunes `usageHistory` at 30 days while the `usageDaily` rollup
+/// keeps 90 — deriving alone silently drops the older days. Carry them over;
+/// a day in both keeps the derived value, so this call's appends are counted.
+fn retain_rolled_up_days(
+    mut derived: BTreeMap<String, DailySummary>,
+    rolled_up: BTreeMap<String, DailySummary>,
+) -> BTreeMap<String, DailySummary> {
+    for (date_key, day) in rolled_up {
+        derived.entry(date_key).or_insert(day);
+    }
+    derived
+}
+
+/// Read a legacy JSON file if it is present and hand it to `import`, returning
+/// whether it was there. Parses as plain JSON — the encrypted `db.json`
+/// envelope has its own call site.
+async fn import_legacy_json(
+    sqlite: &sqlite::SqliteDb,
+    path: &Path,
+    import: fn(&sqlite::SqliteDb, &Value) -> anyhow::Result<usize>,
+) -> anyhow::Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    let bytes = fs::read(path)
+        .await
+        .with_context(|| format!("read legacy {}", path.display()))?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse legacy {}", path.display()))?;
+    let sq = sqlite.clone();
+    let imported = tokio::task::spawn_blocking(move || import(&sq, &value))
+        .await
+        .with_context(|| format!("spawn_blocking for {} import", path.display()))??;
+    tracing::info!(
+        target: "openproxy::db",
+        file = %path.display(),
+        imported,
+        "legacy JSON imported into SQLite"
+    );
+    Ok(true)
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ProviderConnectionFilter {
@@ -80,12 +126,22 @@ impl Db {
             )
         })?;
 
-        // ---- One-time migration from legacy db.json / usage.json ----
+        // ---- One-time migration from the legacy JSON files ----
         let migrated_marker = data_dir.join(".migrated-from-json");
         let db_json_path = data_dir.join("db.json");
         let usage_json_path = data_dir.join("usage.json");
+        let disabled_json_path = data_dir.join("disabledModels.json");
+        let details_json_path = data_dir.join("request-details.json");
+        let has_legacy = [
+            &db_json_path,
+            &usage_json_path,
+            &disabled_json_path,
+            &details_json_path,
+        ]
+        .iter()
+        .any(|path| path.exists());
 
-        if !migrated_marker.exists() && (db_json_path.exists() || usage_json_path.exists()) {
+        if !migrated_marker.exists() && has_legacy {
             tracing::info!(
                 target: "openproxy::db",
                 "Legacy JSON files detected — importing into SQLite once"
@@ -116,21 +172,22 @@ impl Db {
                 tracing::info!(target: "openproxy::db", "db.json imported into SQLite");
             }
 
-            if usage_json_path.exists() {
-                let bytes = fs::read(&usage_json_path)
-                    .await
-                    .with_context(|| format!("read legacy {}", usage_json_path.display()))?;
-                let usage_value: Value = serde_json::from_slice(&bytes)
-                    .with_context(|| format!("parse legacy {}", usage_json_path.display()))?;
-                let sq = sqlite.clone();
-                tokio::task::spawn_blocking(move || {
-                    crate::db::sqlite::import::import_usage(&sq, &usage_value)
-                })
-                .await
-                .context("spawn_blocking for usage.json import")??;
-                tracing::info!(target: "openproxy::db", "usage.json imported into SQLite");
-            }
+            import_legacy_json(&sqlite, &usage_json_path, sqlite::import::import_usage).await?;
+            import_legacy_json(
+                &sqlite,
+                &disabled_json_path,
+                sqlite::import::import_legacy_disabled,
+            )
+            .await?;
+            import_legacy_json(
+                &sqlite,
+                &details_json_path,
+                sqlite::import::import_legacy_details,
+            )
+            .await?;
 
+            // Written only after every file landed, so a failed import leaves
+            // the gate open for the next boot instead of stranding the rest.
             fs::write(&migrated_marker, b"1").await.with_context(|| {
                 format!("write migrated marker at {}", migrated_marker.display())
             })?;
@@ -158,7 +215,12 @@ impl Db {
                 let usage_db = sq.with_conn(|conn| -> rusqlite::Result<UsageDb> {
                     let json_val = crate::db::sqlite::export::export_usage_impl(conn)
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
-                    Ok(UsageDb::from_json_value(json_val))
+                    let mut usage_db = UsageDb::from_json_value(json_val);
+                    usage_db.daily_summary = retain_rolled_up_days(
+                        std::mem::take(&mut usage_db.daily_summary),
+                        sqlite::repo::usage_repo::all_daily(conn)?,
+                    );
+                    Ok(usage_db)
                 })?;
                 Ok((app_db, usage_db))
             })
@@ -342,6 +404,10 @@ impl Db {
         let mut next = prev.clone();
         updater(&mut next);
         next.normalize();
+        next.daily_summary = retain_rolled_up_days(
+            std::mem::take(&mut next.daily_summary),
+            prev.daily_summary.clone(),
+        );
 
         if next != prev {
             // Incremental append (9router usageRepo.saveRequestUsage): only
@@ -354,11 +420,33 @@ impl Db {
                 .cloned()
                 .collect();
             if !appended.is_empty() {
+                // `normalize` folded every history row into days, so an
+                // appended entry's day is always present — and that fold is
+                // the durable rollup, the same one 9router reads-modify-writes.
+                let days: BTreeMap<String, DailySummary> = appended
+                    .iter()
+                    .filter_map(|entry| {
+                        let date_key = sqlite::repo::usage_repo::date_key_for(entry);
+                        Some((date_key.clone(), next.daily_summary.get(&date_key)?.clone()))
+                    })
+                    .collect();
                 let sq = self.sqlite.clone();
                 tokio::task::spawn_blocking(move || {
+                    // 9router writes all three in one transaction: the history
+                    // row, the day rollup and the lifetime counter are one
+                    // fact, so they must not be able to disagree.
                     sq.with_transaction(|conn| {
                         for entry in &appended {
-                            crate::db::sqlite::repo::usage_repo::insert(conn, entry)?;
+                            sqlite::repo::usage_repo::insert(conn, entry)?;
+                        }
+                        for (date_key, day) in &days {
+                            sqlite::repo::usage_repo::upsert_daily(conn, date_key, day)?;
+                        }
+                        for _ in &appended {
+                            sqlite::repo::meta_repo::increment(
+                                conn,
+                                sqlite::repo::meta_repo::TOTAL_REQUESTS_LIFETIME,
+                            )?;
                         }
                         Ok(())
                     })
@@ -545,5 +633,47 @@ mod tests {
             })
             .unwrap();
         assert!(usage_db.history.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifetime_counter_survives_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::load_from(dir.path()).await.unwrap();
+
+        db.update_usage(|usage| {
+            for day in [
+                "2026-01-01T00:00:00Z",
+                "2026-01-01T00:01:00Z",
+                "2026-01-02T00:00:00Z",
+            ] {
+                usage.history.push(crate::types::UsageEntry {
+                    model: "gpt-4o".into(),
+                    timestamp: Some(day.into()),
+                    ..Default::default()
+                });
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(db.usage_snapshot().total_requests_lifetime, 3);
+
+        // A database that predates the counter (or one pruned down) still
+        // reports its stored value rather than the surviving history length.
+        let sq = db.sqlite_handle();
+        sq.with_conn(|conn| sqlite::repo::meta_repo::set(conn, "totalRequestsLifetime", 7))
+            .unwrap();
+
+        let reloaded = Db::load_from(dir.path()).await.unwrap();
+        assert_eq!(reloaded.usage_snapshot().total_requests_lifetime, 7);
+        let stored: String = sq
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT value FROM _meta WHERE key = 'totalRequestsLifetime'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(stored, "7");
     }
 }

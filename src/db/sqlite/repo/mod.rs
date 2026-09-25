@@ -7,6 +7,7 @@ pub mod api_key_repo;
 pub mod combo_repo;
 pub mod connection_repo;
 pub mod kv_repo;
+pub mod meta_repo;
 pub mod node_repo;
 pub mod pool_repo;
 pub mod request_repo;

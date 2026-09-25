@@ -1,5 +1,7 @@
 //! Repository for `usageHistory` and `usageDaily` tables.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params, Connection};
 use serde_json::Value;
 
@@ -82,6 +84,40 @@ pub fn upsert_daily(
     Ok(())
 }
 
+/// Every durable day rollup, keyed by `dateKey`. `usageDaily` is retained for
+/// 90 days while `usageHistory` is pruned at 30, so this is the only place the
+/// days in between still exist.
+pub fn all_daily(conn: &Connection) -> rusqlite::Result<BTreeMap<String, DailySummary>> {
+    let mut stmt = conn.prepare("SELECT dateKey, data FROM usageDaily")?;
+    let rows = stmt.query_map([], |row| {
+        let date_key: String = row.get(0)?;
+        let data: String = row.get(1)?;
+        let day = serde_json::from_str(&data)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        Ok((date_key, day))
+    })?;
+    rows.collect()
+}
+
+/// The `usageDaily` bucket an entry belongs to. Mirrors the key
+/// `UsageDb::normalize` derives when it folds history into days — the durable
+/// rollup and the in-memory summary have to agree, or the two drift apart.
+/// Unparseable or missing timestamps land in `"unknown"`, as they do there.
+pub fn date_key_for(entry: &UsageEntry) -> String {
+    entry
+        .timestamp
+        .as_deref()
+        .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+        .map(|timestamp| timestamp.date_naive().to_string())
+        .or_else(|| {
+            entry
+                .timestamp
+                .as_ref()
+                .map(|timestamp| timestamp.chars().take(10).collect())
+        })
+        .unwrap_or_else(|| "unknown".into())
+}
+
 fn row_to_usage(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageEntry> {
     let timestamp: Option<String> = row.get(0)?;
     let provider: Option<String> = row.get(1)?;
@@ -120,6 +156,7 @@ fn row_to_usage(row: &rusqlite::Row<'_>) -> rusqlite::Result<UsageEntry> {
 mod tests {
     use super::*;
     use crate::db::sqlite::SqliteDb;
+    use crate::types::UsageDb;
     use serde_json::json;
 
     #[test]
@@ -135,5 +172,33 @@ mod tests {
         let history = db.with_conn(|c| get_history(c, 10, 0)).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].model, "gpt-4o");
+    }
+
+    #[test]
+    fn daily_rollup_roundtrips() {
+        let db = SqliteDb::open_in_memory().unwrap();
+        let entry = UsageEntry {
+            model: "gpt-4o".into(),
+            provider: Some("openai".into()),
+            timestamp: Some("2026-01-01T12:00:00Z".into()),
+            cost: Some(0.25),
+            ..Default::default()
+        };
+        assert_eq!(date_key_for(&entry), "2026-01-01");
+
+        // Fold the entry the way `Db::update_usage` does, then persist.
+        let mut folded = UsageDb {
+            history: vec![entry],
+            ..Default::default()
+        };
+        folded.normalize();
+        db.with_transaction(|tx| {
+            upsert_daily(tx, "2026-01-01", &folded.daily_summary["2026-01-01"])
+        })
+        .unwrap();
+
+        let days = db.with_conn(|conn| all_daily(conn)).unwrap();
+        assert_eq!(days["2026-01-01"].requests, 1);
+        assert_eq!(days["2026-01-01"].cost, 0.25);
     }
 }
