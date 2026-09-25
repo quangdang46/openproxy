@@ -902,34 +902,92 @@ async fn chat_completions_impl(
             }
         }
         ModelRouteKind::Direct => {
-            let mut plan = RequestPlan::new(
-                endpoint,
-                &body,
-                resolved.provider.as_deref().unwrap_or(model_str),
-                &resolved.model,
+            // 9router parity (chat.js:143-158): a SOLO provider registered on
+            // a capacity adapter gets a fallback chain too. Without this a
+            // plain provider whose capacity is exhausted has nowhere to go and
+            // the request fails outright, while the same provider sitting
+            // inside a combo would have fallen back to the pool.
+            let required_caps = detect_required_capabilities(&body);
+            let solo_chain = augment_models_with_capacity_adapter(
+                std::slice::from_ref(&model_str.to_string()),
+                &required_caps,
+                &snapshot.settings.capacity_adapter,
             );
-            plan.passthrough = is_native_passthrough(client_tool, &plan.provider);
-            apply_stream_plan(
-                &mut plan,
-                &body,
-                accept_header.as_deref(),
-                client_tool,
-                None,
-            );
-            match execute_single_model(
-                &state,
-                &body,
-                model_str,
-                presented_api_key.as_deref(),
-                endpoint,
-                &plan,
-                client_tool,
-                Some(&headers_map),
-            )
-            .await
-            {
-                Ok(response) => response,
-                Err(error) => attempt_error_response(error),
+            // History stripping applies only to models the adapter added,
+            // never to the one the client actually asked for.
+            let solo_adapter_added: HashSet<String> = solo_chain
+                .iter()
+                .filter(|m| *m != model_str)
+                .cloned()
+                .collect();
+
+            let mut last_error = None;
+            let mut solo_response = None;
+            for candidate in &solo_chain {
+                let mut plan = RequestPlan::new(
+                    endpoint,
+                    &body,
+                    resolved.provider.as_deref().unwrap_or(model_str),
+                    &resolved.model,
+                );
+                plan.passthrough = is_native_passthrough(client_tool, &plan.provider);
+                apply_stream_plan(
+                    &mut plan,
+                    &body,
+                    accept_header.as_deref(),
+                    client_tool,
+                    None,
+                );
+
+                let mut attempt_body = body.clone();
+                if solo_adapter_added.contains(candidate) {
+                    let context_window = crate::core::model::catalog::provider_catalog()
+                        .find_model(
+                            candidate.split('/').next().unwrap_or(""),
+                            candidate.split('/').nth(1).unwrap_or(""),
+                        )
+                        .and_then(|m| m.context_window.map(u64::from));
+                    strip_history_for_context(&mut attempt_body, context_window);
+                }
+
+                match execute_single_model(
+                    &state,
+                    &attempt_body,
+                    candidate,
+                    presented_api_key.as_deref(),
+                    endpoint,
+                    &plan,
+                    client_tool,
+                    Some(&headers_map),
+                )
+                .await
+                {
+                    Ok(response) => {
+                        solo_response = Some(response);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "SOLO-CAPACITY model={} adapter={} error={:?}",
+                            candidate,
+                            solo_adapter_added.contains(candidate),
+                            error
+                        );
+                        last_error = Some(error);
+                    }
+                }
+            }
+
+            match solo_response {
+                Some(response) => response,
+                None => attempt_error_response(last_error.unwrap_or(
+                    crate::core::combo::ComboAttemptError {
+                        status: 502,
+                        message: "no capacity adapter candidate succeeded".to_string(),
+                        retry_after: None,
+                        upstream_body: None,
+                    },
+                )),
             }
         }
     };

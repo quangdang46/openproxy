@@ -2,7 +2,22 @@
 *.db
 *.db-journal
 *.db-shm
-*.db-wal
+# Sidecars derive from the db name, so a bare `*.db-wal` misses every
+# suffixed variant the frankensqlite engine writes (…-wal-cert, …-wal-cert-head).
+*.db-wal*
+
+# frankensqlite engine state (schema 19+): namespace gate/use leases, WAL
+# certificates, and the in-flight migration marker. All are machine-local and
+# rewritten on every open — committing any of them corrupts another checkout.
+*-fsqlite-ns-gate
+*-fsqlite-ns-use
+*.vacuum-wal-cert*
+*.fsqlite-migration-state
+
+# Advisory lock sidecars (br takes <db>-lock-{pending,reserved,shared})
+*-lock-pending
+*-lock-reserved
+*-lock-shared
 
 # Lock files
 *.lock
