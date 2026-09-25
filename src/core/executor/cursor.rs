@@ -737,16 +737,23 @@ async fn consume_agent_stream(
                         AgentEvent::Error(msg, is_rate_limit) => {
                             // JS createErrorResponse: resource_exhausted → 429
                             // rate_limit_error so account rotation fires.
-                            chunks.push(format!(
-                                "data: {}\n\n",
-                                json!({"error": {
-                                    "message": msg,
-                                    "type": if is_rate_limit { "rate_limit_error" } else { "api_error" },
-                                    "code": if is_rate_limit { "resource_exhausted" } else { "unknown" },
-                                }})
-                            ));
-                            chunks.push(SSE_DONE.to_string());
-                            return Ok(chunks.concat().into_bytes());
+                            let error_json = json!({"error": {
+                                "message": msg,
+                                "type": if is_rate_limit { "rate_limit_error" } else { "api_error" },
+                                "code": if is_rate_limit { "resource_exhausted" } else { "unknown" },
+                            }});
+                            if stream {
+                                chunks.push(format!("data: {error_json}\n\n"));
+                                chunks.push(SSE_DONE.to_string());
+                                return Ok(chunks.concat().into_bytes());
+                            }
+                            // Non-streaming gets a clean JSON envelope, not an
+                            // SSE body. The caller detects it and answers 400
+                            // (429 for a rate limit) as 9router does at
+                            // cursor.js:756-767; returning `data: {...}\n\ndata:
+                            // [DONE]` under a JSON content-type hands the client
+                            // a stream it never asked for, as a 200.
+                            return Ok(serde_json::to_vec(&error_json)?);
                         }
                     }
                 }
@@ -1883,6 +1890,16 @@ fn is_rate_limit_error_body(text: &str) -> bool {
     text.contains("\"rate_limit_error\"") && !text.contains("\"connection_error\"")
 }
 
+/// True when the body is a bare JSON error envelope rather than a completion.
+///
+/// Parses rather than substring-matches, so an SSE frame or a completion that
+/// merely mentions the word "error" is not mistaken for a failure.
+fn is_json_error_envelope(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .map(|value| value.get("error").is_some_and(|error| !error.is_null()))
+        .unwrap_or(false)
+}
+
 /// Build a structured JSON error body (cursor.js:257-275 `createErrorResponse`):
 /// deep `error.details[0].debug.details.title|detail` wins, then
 /// `error.message`, else "API Error". `resource_exhausted` maps to
@@ -2182,13 +2199,29 @@ impl CursorExecutor {
         // account rotation / combo fallback reacts instead of treating the
         // turn as a successful empty completion.
         let is_rate_limit = is_rate_limit_error_body(&String::from_utf8_lossy(&body_bytes));
+        // A non-streaming error is a bare JSON envelope, not a completion.
+        // Answering 200 told the client the turn succeeded, so account
+        // rotation never fired and the failure was reported as an empty
+        // answer (openproxy-x9sm).
+        let is_error_envelope = !request.stream && is_json_error_envelope(&body_bytes);
+        let status = if is_error_envelope {
+            if is_rate_limit {
+                429
+            } else {
+                400
+            }
+        } else if is_rate_limit {
+            429
+        } else {
+            200
+        };
         let content_type = if request.stream {
             "text/event-stream"
         } else {
             "application/json"
         };
         let http_response = http::Response::builder()
-            .status(if is_rate_limit { 429 } else { 200 })
+            .status(status)
             .header("content-type", content_type)
             .header("cache-control", "no-cache")
             .body(reqwest::Body::from(body_bytes))
@@ -2296,8 +2329,31 @@ impl CursorExecutor {
                 (json, "application/json")
             };
 
+            // A Cursor rate limit can arrive INSIDE a 200 protobuf frame.
+            // Returning it as 200 makes the client read a successful turn, and
+            // status-driven account rotation never fires. 9router normalises
+            // at the same point (cursor.js:936, cursor.js:1092) via
+            // createErrorResponse; build_cursor_error_body is that function
+            // and was previously only reachable from the non-200 branch below.
+            let mut status = 200u16;
+            let body_string = if is_stream {
+                if is_rate_limit_error_body(&body_string) {
+                    status = 429;
+                }
+                body_string
+            } else {
+                match serde_json::from_str::<Value>(&body_string) {
+                    Ok(value) if value.get("error").is_some_and(|error| !error.is_null()) => {
+                        let (normalized, code) = build_cursor_error_body(&value);
+                        status = code;
+                        normalized
+                    }
+                    _ => body_string,
+                }
+            };
+
             let http_response = http::Response::builder()
-                .status(200)
+                .status(status)
                 .header("content-type", content_type)
                 .header("cache-control", "no-cache")
                 .body(reqwest::Body::from(body_string))
