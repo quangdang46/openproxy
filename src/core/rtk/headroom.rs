@@ -367,7 +367,7 @@ pub async fn compress_with_headroom_diag(
 ///
 /// Ports `callCompress()` from upstream 9router.
 async fn call_compress(config: &HeadroomConfig, messages: &[Value], model: &str) -> Option<Value> {
-    let endpoint = format!("{}/v1/compress", config.url.trim_end_matches('/'));
+    let endpoint = build_compress_endpoint(&config.url);
 
     let mut payload = build_openai_body(messages, model);
     if config.compress_user_messages {
@@ -595,103 +595,126 @@ fn collect_kiro_headroom_messages(body: &Value) -> Option<(Vec<Value>, Vec<Strin
     let mut messages: Vec<Value> = Vec::new();
     let mut targets: Vec<String> = Vec::new();
 
-    let history = state.get("history").and_then(Value::as_array)?;
-    for (idx, item) in history.iter().enumerate() {
-        let user = item.get("userInputMessage");
-        if let Some(user) = user {
-            if let Some(text) = user.get("systemInstruction").and_then(Value::as_str) {
-                messages.push(json!({ "role": "system", "content": text }));
-                targets.push(format!(
-                    "/conversationState/history/{idx}/userInputMessage/systemInstruction"
-                ));
-            }
-            if let Some(text) = user.get("content").and_then(Value::as_str) {
-                messages.push(json!({ "role": "user", "content": text }));
-                targets.push(format!(
-                    "/conversationState/history/{idx}/userInputMessage/content"
-                ));
-            }
-            if let Some(tool_results) = user
-                .get("userInputMessageContext")
-                .and_then(|ctx| ctx.get("toolResults"))
-                .and_then(Value::as_array)
-            {
-                for (ri, tool_result) in tool_results.iter().enumerate() {
-                    let Some(content) = tool_result.get("content").and_then(Value::as_array) else {
-                        continue;
-                    };
-                    for (pi, part) in content.iter().enumerate() {
-                        let Some(text) = part.get("text").and_then(Value::as_str) else {
-                            continue;
-                        };
-                        let mut msg = json!({ "role": "tool", "content": text });
-                        if let Some(id) = tool_result.get("toolUseId").and_then(Value::as_str) {
-                            msg["tool_call_id"] = json!(id);
-                        }
-                        messages.push(msg);
-                        targets.push(format!(
-                            "/conversationState/history/{idx}/userInputMessage/userInputMessageContext/toolResults/{ri}/content/{pi}/text"
-                        ));
-                    }
-                }
-            }
-            continue;
-        }
-
-        let assistant = item.get("assistantResponseMessage");
-        if let Some(assistant) = assistant {
-            let mut msg = json!({ "role": "assistant", "content": "" });
-            let mut has_tool_calls = false;
-            let tool_calls: Vec<Value> = assistant
-                .get("toolUses")
-                .and_then(Value::as_array)
-                .map(|uses| {
-                    uses.iter()
-                        .map(|tu| {
-                            let args = tu
-                                .get("input")
-                                .map(|input| {
-                                    serde_json::to_string(input)
-                                        .unwrap_or_else(|_| "{}".to_string())
-                                })
-                                .unwrap_or_else(|| "{}".to_string());
-                            json!({
-                                "id": tu.get("toolUseId").and_then(Value::as_str).unwrap_or(""),
-                                "type": "function",
-                                "function": {
-                                    "name": tu.get("name").and_then(Value::as_str).unwrap_or(""),
-                                    "arguments": args
-                                }
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            if !tool_calls.is_empty() {
-                msg["tool_calls"] = Value::Array(tool_calls);
-                has_tool_calls = true;
-            }
-            if let Some(text) = assistant.get("content").and_then(Value::as_str) {
-                msg["content"] = json!(text);
-            }
-            if !has_tool_calls
-                && msg
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .is_none_or(str::is_empty)
-            {
-                continue;
-            }
-            messages.push(msg);
-            targets.push(format!(
-                "/conversationState/history/{idx}/assistantResponseMessage/content"
-            ));
+    // `history` is optional and the newest turn also lives in `currentMessage`
+    // — a single-turn request carries all of its payload there, and that is
+    // exactly where the freshest tool-result bloat sits (9router headroom.js:164-166).
+    if let Some(history) = state.get("history").and_then(Value::as_array) {
+        for (idx, item) in history.iter().enumerate() {
+            collect_kiro_item(
+                item,
+                &format!("/conversationState/history/{idx}"),
+                &mut messages,
+                &mut targets,
+            );
         }
     }
+    if let Some(current) = state.get("currentMessage") {
+        collect_kiro_item(
+            current,
+            "/conversationState/currentMessage",
+            &mut messages,
+            &mut targets,
+        );
+    }
+
     if messages.is_empty() {
         return None;
     }
     Some((messages, targets))
+}
+
+/// Project one Kiro turn onto the flat message list. `base_ptr` is the JSON
+/// pointer prefix of the turn, so history entries and `currentMessage` share
+/// this code (9router headroom.js `visit`).
+fn collect_kiro_item(
+    item: &Value,
+    base_ptr: &str,
+    messages: &mut Vec<Value>,
+    targets: &mut Vec<String>,
+) {
+    let user = item.get("userInputMessage");
+    if let Some(user) = user {
+        if let Some(text) = user.get("systemInstruction").and_then(Value::as_str) {
+            messages.push(json!({ "role": "system", "content": text }));
+            targets.push(format!("{base_ptr}/userInputMessage/systemInstruction"));
+        }
+        if let Some(text) = user.get("content").and_then(Value::as_str) {
+            messages.push(json!({ "role": "user", "content": text }));
+            targets.push(format!("{base_ptr}/userInputMessage/content"));
+        }
+        if let Some(tool_results) = user
+            .get("userInputMessageContext")
+            .and_then(|ctx| ctx.get("toolResults"))
+            .and_then(Value::as_array)
+        {
+            for (ri, tool_result) in tool_results.iter().enumerate() {
+                let Some(content) = tool_result.get("content").and_then(Value::as_array) else {
+                    continue;
+                };
+                for (pi, part) in content.iter().enumerate() {
+                    let Some(text) = part.get("text").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    let mut msg = json!({ "role": "tool", "content": text });
+                    if let Some(id) = tool_result.get("toolUseId").and_then(Value::as_str) {
+                        msg["tool_call_id"] = json!(id);
+                    }
+                    messages.push(msg);
+                    targets.push(format!(
+                        "{base_ptr}/userInputMessage/userInputMessageContext/toolResults/{ri}/content/{pi}/text"
+                    ));
+                }
+            }
+        }
+        return;
+    }
+
+    let assistant = item.get("assistantResponseMessage");
+    if let Some(assistant) = assistant {
+        let mut msg = json!({ "role": "assistant", "content": "" });
+        let mut has_tool_calls = false;
+        let tool_calls: Vec<Value> = assistant
+            .get("toolUses")
+            .and_then(Value::as_array)
+            .map(|uses| {
+                uses.iter()
+                    .map(|tu| {
+                        let args = tu
+                            .get("input")
+                            .map(|input| {
+                                serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string())
+                            })
+                            .unwrap_or_else(|| "{}".to_string());
+                        json!({
+                            "id": tu.get("toolUseId").and_then(Value::as_str).unwrap_or(""),
+                            "type": "function",
+                            "function": {
+                                "name": tu.get("name").and_then(Value::as_str).unwrap_or(""),
+                                "arguments": args
+                            }
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !tool_calls.is_empty() {
+            msg["tool_calls"] = Value::Array(tool_calls);
+            has_tool_calls = true;
+        }
+        if let Some(text) = assistant.get("content").and_then(Value::as_str) {
+            msg["content"] = json!(text);
+        }
+        if !has_tool_calls
+            && msg
+                .get("content")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+        {
+            return;
+        }
+        messages.push(msg);
+        targets.push(format!("{base_ptr}/assistantResponseMessage/content"));
+    }
 }
 
 /// Extract the text content from a headroom-compressed message
@@ -887,8 +910,30 @@ fn json_bytes(v: &Value) -> usize {
 
 /// Build the `/v1/compress` endpoint from a base URL, stripping a trailing
 /// slash (9router `buildCompressEndpoint`).
+/// Build the Headroom `/v1/compress` endpoint, preserving the base URL's query
+/// string — a tenant selector or token carried there is part of the endpoint,
+/// not decoration (9router `buildCompressEndpoint`, headroom.js:65-77).
 pub fn build_compress_endpoint(base_url: &str) -> String {
-    format!("{}/v1/compress", base_url.trim_end_matches('/'))
+    match url::Url::parse(base_url) {
+        Ok(mut parsed) => {
+            let base = parsed.path().trim_end_matches('/');
+            parsed.set_path(&format!("{base}/v1/compress"));
+            parsed.set_fragment(None);
+            parsed.to_string()
+        }
+        Err(_) => {
+            let raw = base_url.split('#').next().unwrap_or(base_url);
+            let (base, query) = match raw.split_once('?') {
+                Some((base, query)) => (base, Some(query)),
+                None => (raw, None),
+            };
+            let endpoint = format!("{}/v1/compress", base.trim_end_matches('/'));
+            match query {
+                Some(query) => format!("{endpoint}?{query}"),
+                None => endpoint,
+            }
+        }
+    }
 }
 
 /// Mask credentials/query/fragment from a URL for diagnostics
@@ -1063,6 +1108,57 @@ mod tests {
     }
 
     #[test]
+    fn headroom_kiro_projection_includes_current_message() {
+        // The newest turn lives in `currentMessage`; skipping it drops exactly
+        // the tool result Headroom is most able to compress.
+        let body = json!({
+            "conversationState": {
+                "history": [
+                    { "userInputMessage": { "content": "earlier" } }
+                ],
+                "currentMessage": {
+                    "userInputMessage": {
+                        "content": "newest",
+                        "userInputMessageContext": {
+                            "toolResults": [
+                                { "toolUseId": "t1", "content": [ { "text": "fresh tool output" } ] }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let (messages, targets) = collect_kiro_headroom_messages(&body).expect("projects a turn");
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2]["role"], "tool");
+        assert_eq!(
+            targets[2],
+            "/conversationState/currentMessage/userInputMessage/userInputMessageContext/toolResults/0/content/0/text"
+        );
+    }
+
+    #[test]
+    fn headroom_kiro_projection_without_history() {
+        let body = json!({
+            "conversationState": {
+                "currentMessage": { "userInputMessage": { "content": "only turn" } }
+            }
+        });
+        let (messages, targets) =
+            collect_kiro_headroom_messages(&body).expect("history is optional");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            targets[0],
+            "/conversationState/currentMessage/userInputMessage/content"
+        );
+    }
+
+    #[test]
+    fn headroom_kiro_projection_empty_state_returns_none() {
+        assert!(collect_kiro_headroom_messages(&json!({ "conversationState": {} })).is_none());
+    }
+
+    #[test]
     fn headroom_phantom_savings_detected() {
         // Acceptance: tokens_saved>0 with before/after where after >= before*0.95
         // → is_headroom_phantom_savings true.
@@ -1137,6 +1233,34 @@ mod tests {
         assert_eq!(
             mask_endpoint("http://user:pass@host:1/x?q=1#f"),
             "http://host:1/x"
+        );
+    }
+
+    #[test]
+    fn build_compress_endpoint_preserves_query() {
+        assert_eq!(
+            build_compress_endpoint("https://hr.example.com/base?tenant=acme&token=xyz"),
+            "https://hr.example.com/base/v1/compress?tenant=acme&token=xyz"
+        );
+    }
+
+    #[test]
+    fn build_compress_endpoint_strips_trailing_slash_and_fragment() {
+        assert_eq!(
+            build_compress_endpoint("https://hr.example.com/base/#frag"),
+            "https://hr.example.com/base/v1/compress"
+        );
+    }
+
+    #[test]
+    fn build_compress_endpoint_fallback_reappends_query() {
+        // Unparseable base: the string fallback still has to carry the query,
+        // or a tenant selector silently vanishes.
+        let endpoint = build_compress_endpoint("not a url?tenant=acme");
+        assert!(endpoint.ends_with("?tenant=acme"), "got: {endpoint}");
+        assert!(
+            endpoint.starts_with("not a url/v1/compress"),
+            "got: {endpoint}"
         );
     }
 

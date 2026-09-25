@@ -19,10 +19,6 @@ use autodetect::{auto_detect_filter, FilterFn};
 use constants::*;
 
 const PROMPT_SEPARATOR: &str = "\n\n";
-const CHARS_PER_TOKEN: usize = 4;
-const MIN_TRIGGER_TOKENS: usize = 512;
-const MAX_TRIGGER_TOKENS: usize = 2048;
-const DEFAULT_CONTEXT_WINDOW: usize = 16_384;
 
 // 9router cavemanPrompts.js shared directives (verbatim) — appended to every
 // caveman level prompt.
@@ -131,20 +127,18 @@ pub fn normalize_caveman_level(value: &str) -> &'static str {
     CompressionLevel::parse_or_default(value).as_str()
 }
 
-pub fn apply_request_preprocessing(body: &mut Value, settings: &Settings, model: &str) -> bool {
+pub fn apply_request_preprocessing(body: &mut Value, settings: &Settings, _model: &str) -> bool {
     // JS keeps RTK compression and Caveman prompting as separate toggles.
     // The RTK body-compression pass is tracked independently; this hook only
-    // owns context-pressure-triggered Caveman injection.
+    // owns Caveman/Ponytail injection.
     let mut modified = false;
     if settings.caveman_enabled {
-        // 9router parity: only inject under context pressure — short requests
-        // stay untouched (shouldAutoApplyCaveman gate in combo.js/chatCore).
-        if should_auto_apply_caveman(body, model) {
-            modified |= inject_caveman_prompt(
-                body,
-                CompressionLevel::parse_or_default(&settings.caveman_level),
-            );
-        }
+        // 9router chatCore.js:278 injects on every request once the toggle is
+        // on — there is no context-pressure gate in the caveman path.
+        modified |= inject_caveman_prompt(
+            body,
+            CompressionLevel::parse_or_default(&settings.caveman_level),
+        );
     }
     if settings.ponytail_enabled {
         // Ponytail has NO context-pressure auto-trigger — always applies if enabled.
@@ -182,9 +176,11 @@ fn apply_rtk_system_injection(body: &mut Value, settings: &Settings) -> bool {
     match prompt {
         Some(p) => {
             // Dispatch by body shape (9router injectSystemPrompt format switch):
-            // Claude → body.system; Gemini → systemInstruction/request;
-            // else OpenAI messages/input/instructions.
-            let format = if body.get("system").is_some() {
+            // Kiro → conversationState; Claude → body.system; Gemini →
+            // systemInstruction/request; else OpenAI messages/input/instructions.
+            let format = if body.as_object().is_some_and(is_kiro_body) {
+                "kiro"
+            } else if body.get("system").is_some() {
                 "claude"
             } else if body.get("systemInstruction").is_some()
                 || body.get("system_instruction").is_some()
@@ -206,15 +202,15 @@ fn apply_rtk_system_injection(body: &mut Value, settings: &Settings) -> bool {
     }
 }
 
-pub fn should_auto_apply_caveman(body: &Value, model: &str) -> bool {
-    estimate_context_tokens(body) >= caveman_trigger_threshold(model)
-}
-
 pub fn inject_caveman_prompt(body: &mut Value, level: CompressionLevel) -> bool {
     let prompt = level.prompt();
     let Some(fields) = body.as_object_mut() else {
         return false;
     };
+
+    if is_kiro_body(fields) {
+        return inject_kiro_system(fields, &prompt);
+    }
 
     if fields.contains_key("system") {
         return inject_claude_system(fields, &prompt);
@@ -227,6 +223,77 @@ pub fn inject_caveman_prompt(body: &mut Value, level: CompressionLevel) -> bool 
     inject_openai_shape(fields, &prompt)
 }
 
+/// Kiro's wire shape is unique (`conversationState`) — it carries none of the
+/// `instructions` / `messages` / `input` keys the OpenAI dispatch looks for, so
+/// it has to be sniffed ahead of the Claude/Gemini shape dispatch.
+/// 9router systemInject.js:62-71.
+fn is_kiro_body(fields: &Map<String, Value>) -> bool {
+    let Some(state) = fields.get("conversationState").and_then(Value::as_object) else {
+        return false;
+    };
+    // A top-level `systemPrompt` used to be the marker, but the Kiro translator
+    // no longer emits it (kiro.dev rejects the field), so gate on the turn shape.
+    let history_turn = state
+        .get("history")
+        .and_then(Value::as_array)
+        .is_some_and(|history| {
+            history.iter().any(|item| {
+                item.get("userInputMessage").is_some()
+                    || item.get("assistantResponseMessage").is_some()
+            })
+        });
+    history_turn
+        || state
+            .get("currentMessage")
+            .is_some_and(|current| current.get("userInputMessage").is_some())
+}
+
+/// Append to the first `history[].userInputMessage`, falling back to
+/// `currentMessage.userInputMessage` — the same place the Kiro translator
+/// already mirrors system text via its `contentPrefix`.
+/// 9router systemInject.js:273-292.
+fn inject_kiro_system(fields: &mut Map<String, Value>, prompt: &str) -> bool {
+    let Some(state) = fields
+        .get_mut("conversationState")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+
+    if let Some(history) = state.get_mut("history").and_then(Value::as_array_mut) {
+        for item in history.iter_mut() {
+            if let Some(message) = item
+                .get_mut("userInputMessage")
+                .and_then(Value::as_object_mut)
+            {
+                return append_kiro_prompt(message, prompt);
+            }
+        }
+    }
+
+    state
+        .get_mut("currentMessage")
+        .and_then(|current| current.get_mut("userInputMessage"))
+        .and_then(Value::as_object_mut)
+        .is_some_and(|message| append_kiro_prompt(message, prompt))
+}
+
+fn append_kiro_prompt(message: &mut Map<String, Value>, prompt: &str) -> bool {
+    let current = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let next = if current.is_empty() {
+        prompt.to_string()
+    } else if has_prompt(current, prompt) {
+        return false;
+    } else {
+        format!("{current}{PROMPT_SEPARATOR}{prompt}")
+    };
+    message.insert("content".into(), Value::String(next));
+    true
+}
+
 fn inject_openai_shape(fields: &mut Map<String, Value>, prompt: &str) -> bool {
     if let Some(Value::String(instructions)) = fields.get_mut("instructions") {
         return append_prompt_text(instructions, prompt);
@@ -237,7 +304,7 @@ fn inject_openai_shape(fields: &mut Map<String, Value>, prompt: &str) -> bool {
     }
 
     if let Some(input) = fields.get_mut("input").and_then(Value::as_array_mut) {
-        return inject_openai_message_prompt(input, prompt, "input_text");
+        return inject_responses_input_prompt(input, prompt);
     }
 
     false
@@ -254,6 +321,58 @@ fn inject_openai_message_prompt(messages: &mut Vec<Value>, prompt: &str, part_ty
     } else {
         messages.insert(0, json!({ "role": "system", "content": prompt }));
         true
+    }
+}
+
+/// OpenAI Responses `input[]` carries *typed* items, so both the item and its
+/// content parts are matched on `type` — a bare `{role, content}` entry is not
+/// a message item and must be left alone. 9router systemInject.js:156-174.
+fn inject_responses_input_prompt(input: &mut Vec<Value>, prompt: &str) -> bool {
+    if let Some(existing) = input.iter_mut().find(|item| {
+        item.get("type").and_then(Value::as_str) == Some("message")
+            && matches!(
+                item.get("role").and_then(Value::as_str),
+                Some("system" | "developer")
+            )
+    }) {
+        append_to_responses_message(existing, prompt)
+    } else {
+        input.insert(
+            0,
+            json!({
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": prompt }]
+            }),
+        );
+        true
+    }
+}
+
+fn append_to_responses_message(message: &mut Value, prompt: &str) -> bool {
+    let Some(fields) = message.as_object_mut() else {
+        return false;
+    };
+
+    match fields.get_mut("content") {
+        Some(Value::String(content)) => append_prompt_text(content, prompt),
+        Some(Value::Array(parts)) => {
+            if parts
+                .iter()
+                .any(|part| part_text(part).is_some_and(|text| text == prompt))
+            {
+                return false;
+            }
+            parts.push(json!({ "type": "input_text", "text": prompt }));
+            true
+        }
+        _ => {
+            fields.insert(
+                "content".into(),
+                json!([{ "type": "input_text", "text": prompt }]),
+            );
+            true
+        }
     }
 }
 
@@ -299,7 +418,7 @@ fn inject_claude_system(fields: &mut Map<String, Value>, prompt: &str) -> bool {
 fn inject_claude_system_blocks(blocks: &mut Vec<Value>, prompt: &str) -> bool {
     if blocks
         .iter()
-        .any(|block| part_text(block).is_some_and(|text| text.contains(prompt)))
+        .any(|block| part_text(block).is_some_and(|text| text == prompt))
     {
         return false;
     }
@@ -398,7 +517,7 @@ fn gemini_parts_from_value(value: Value) -> Vec<Value> {
 }
 
 fn append_prompt_text(content: &mut String, prompt: &str) -> bool {
-    if content.contains(prompt) {
+    if has_prompt(content, prompt) {
         return false;
     }
 
@@ -410,6 +529,13 @@ fn append_prompt_text(content: &mut String, prompt: &str) -> bool {
     content.push_str(PROMPT_SEPARATOR);
     content.push_str(prompt);
     true
+}
+
+/// Exact idempotency: the prompt counts as present only when it stands as its
+/// own `PROMPT_SEPARATOR`-delimited segment (or the whole string), never as a
+/// substring of unrelated text (9router systemInject.js:75-79).
+fn has_prompt(haystack: &str, prompt: &str) -> bool {
+    haystack == prompt || haystack.split(PROMPT_SEPARATOR).any(|seg| seg == prompt)
 }
 
 fn is_gemini_shape(fields: &Map<String, Value>) -> bool {
@@ -424,135 +550,6 @@ fn is_gemini_shape(fields: &Map<String, Value>) -> bool {
                     || request.contains_key("system_instruction")
                     || request.contains_key("contents")
             })
-}
-
-fn estimate_context_tokens(body: &Value) -> usize {
-    estimate_context_chars(body).saturating_add(CHARS_PER_TOKEN - 1) / CHARS_PER_TOKEN
-}
-
-fn estimate_context_chars(body: &Value) -> usize {
-    let Some(fields) = body.as_object() else {
-        return 0;
-    };
-
-    let mut total = 0;
-    total += fields
-        .get("instructions")
-        .and_then(Value::as_str)
-        .map(str::len)
-        .unwrap_or_default();
-    total += count_message_array(fields.get("messages"));
-    total += count_message_array(fields.get("input"));
-    total += count_claude_system(fields.get("system"));
-    total += count_gemini_system(fields);
-    total += count_gemini_contents(fields.get("contents"));
-
-    if let Some(request) = fields.get("request").and_then(Value::as_object) {
-        total += count_gemini_system(request);
-        total += count_gemini_contents(request.get("contents"));
-    }
-
-    total
-}
-
-fn count_message_array(value: Option<&Value>) -> usize {
-    value
-        .and_then(Value::as_array)
-        .map(|items| items.iter().map(count_message_item).sum())
-        .unwrap_or_default()
-}
-
-fn count_message_item(item: &Value) -> usize {
-    let Some(fields) = item.as_object() else {
-        return 0;
-    };
-
-    count_text_node(fields.get("content"))
-        + count_text_node(fields.get("output"))
-        + fields
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::len)
-            .unwrap_or_default()
-}
-
-fn count_claude_system(value: Option<&Value>) -> usize {
-    match value {
-        Some(Value::String(system)) => system.len(),
-        Some(Value::Array(blocks)) => blocks.iter().map(count_text_node_value).sum(),
-        _ => 0,
-    }
-}
-
-fn count_gemini_system(fields: &Map<String, Value>) -> usize {
-    ["systemInstruction", "system_instruction"]
-        .into_iter()
-        .filter_map(|key| fields.get(key))
-        .map(count_text_node_value)
-        .sum()
-}
-
-fn count_gemini_contents(value: Option<&Value>) -> usize {
-    value
-        .and_then(Value::as_array)
-        .map(|contents| contents.iter().map(count_text_node_value).sum())
-        .unwrap_or_default()
-}
-
-fn count_text_node(value: Option<&Value>) -> usize {
-    value.map(count_text_node_value).unwrap_or_default()
-}
-
-fn count_text_node_value(value: &Value) -> usize {
-    match value {
-        Value::String(text) => text.len(),
-        Value::Array(items) => items.iter().map(count_text_node_value).sum(),
-        Value::Object(fields) => {
-            fields
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::len)
-                .unwrap_or_default()
-                + count_text_node(fields.get("content"))
-                + count_text_node(fields.get("output"))
-                + count_text_node(fields.get("parts"))
-        }
-        _ => 0,
-    }
-}
-
-fn caveman_trigger_threshold(model: &str) -> usize {
-    infer_context_window(model)
-        .saturating_div(8)
-        .clamp(MIN_TRIGGER_TOKENS, MAX_TRIGGER_TOKENS)
-}
-
-fn infer_context_window(model: &str) -> usize {
-    let model = model.trim().to_ascii_lowercase();
-
-    if ["claude", "sonnet", "opus", "haiku"]
-        .iter()
-        .any(|needle| model.contains(needle))
-    {
-        200_000
-    } else if ["gemini-1.5", "gemini-2.0", "gemini-2.5"]
-        .iter()
-        .any(|needle| model.contains(needle))
-    {
-        1_000_000
-    } else if ["gemini", "gpt-4.1", "gpt-4o", "o1", "o3", "o4"]
-        .iter()
-        .any(|needle| model.contains(needle))
-    {
-        128_000
-    } else if ["deepseek", "qwen", "mistral", "llama"]
-        .iter()
-        .any(|needle| model.contains(needle))
-    {
-        64_000
-    } else {
-        DEFAULT_CONTEXT_WINDOW
-    }
 }
 
 fn part_text(value: &Value) -> Option<&str> {
@@ -593,11 +590,20 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
         return Some(compress_kiro_format(body));
     }
 
-    let mut items = {
+    // Carry the selected key alongside the items: a body can hold a
+    // non-array `messages` (string/null/object) next to a real `input[]`, and
+    // re-deriving the key by presence at write-back time would clobber the
+    // wrong field (9router index.js:14-18 picks the array first, then writes
+    // back to that same array).
+    let (key, mut items) = {
         let fields = body.as_object()?;
-        let arr = fields.get("messages").and_then(Value::as_array);
-        let input = fields.get("input").and_then(Value::as_array);
-        arr.or(input)?.clone()
+        if let Some(messages) = fields.get("messages").and_then(Value::as_array) {
+            ("messages", messages.clone())
+        } else if let Some(input) = fields.get("input").and_then(Value::as_array) {
+            ("input", input.clone())
+        } else {
+            return None;
+        }
     };
 
     let mut stats = RtkStats {
@@ -608,7 +614,11 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
     };
 
     for msg in items.iter_mut() {
-        let msg_fields = msg.as_object_mut()?;
+        // One malformed element costs only that element — 9router index.js:26
+        // `if (!msg) continue`, not an abort of the whole pass.
+        let Some(msg_fields) = msg.as_object_mut() else {
+            continue;
+        };
         let role = msg_fields.get("role").and_then(Value::as_str);
 
         if role == Some("tool") {
@@ -670,7 +680,9 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
             }
         } else if let Some(content) = msg_fields.get_mut("content").and_then(Value::as_array_mut) {
             for block in content.iter_mut() {
-                let block_fields = block.as_object_mut()?;
+                let Some(block_fields) = block.as_object_mut() else {
+                    continue;
+                };
                 if block_fields.get("type").and_then(Value::as_str) != Some("tool_result") {
                     if is_image_block(block_fields) {
                         let block_bytes =
@@ -717,12 +729,7 @@ pub fn compress_messages(body: &mut Value, enabled: bool) -> Option<RtkStats> {
         }
     }
 
-    // Write the modified items back into the request body.
-    let key = if body.as_object().is_some_and(|f| f.contains_key("messages")) {
-        "messages"
-    } else {
-        "input"
-    };
+    // Write the modified items back into the key they were selected from.
     body[key] = Value::Array(items);
 
     Some(stats)
@@ -837,7 +844,7 @@ fn compress_tool_text_owned(text: &str, stats: &mut RtkStats, shape: &str) -> St
 mod tests {
     use super::{
         apply_request_preprocessing, compress_messages, inject_caveman_prompt,
-        normalize_caveman_level, should_auto_apply_caveman, CompressionLevel,
+        normalize_caveman_level, CompressionLevel,
     };
     use crate::types::Settings;
     use serde_json::json;
@@ -934,6 +941,7 @@ mod tests {
         let mut body = json!({
             "input": [
                 {
+                    "type": "message",
                     "role": "developer",
                     "content": [{ "type": "input_text", "text": "Keep format" }]
                 }
@@ -946,6 +954,164 @@ mod tests {
             parts.last().expect("last part"),
             &json!({ "type": "input_text", "text": CompressionLevel::Lite.prompt() })
         );
+    }
+
+    #[test]
+    fn inject_caveman_responses_input_inserts_typed_message_item() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{ "type": "input_text", "text": "hi" }]
+                }
+            ]
+        });
+
+        assert!(inject_caveman_prompt(&mut body, CompressionLevel::Full));
+        assert_eq!(
+            body["input"][0],
+            json!({
+                "type": "message",
+                "role": "system",
+                "content": [{ "type": "input_text", "text": CompressionLevel::Full.prompt() }]
+            })
+        );
+        assert_eq!(body["input"].as_array().expect("input").len(), 2);
+    }
+
+    #[test]
+    fn inject_caveman_responses_input_appends_to_typed_system_item() {
+        let mut body = json!({
+            "input": [
+                { "type": "message", "role": "system", "content": "Existing rules" }
+            ]
+        });
+
+        assert!(inject_caveman_prompt(&mut body, CompressionLevel::Lite));
+        assert_eq!(body["input"].as_array().expect("input").len(), 1);
+        assert_eq!(
+            body["input"][0]["content"],
+            format!("Existing rules\n\n{}", CompressionLevel::Lite.prompt())
+        );
+    }
+
+    #[test]
+    fn inject_caveman_responses_input_ignores_untyped_role_item() {
+        // A bare `{role, content}` entry is not a Responses message item.
+        let mut body = json!({
+            "input": [{ "role": "system", "content": "pre-existing" }]
+        });
+
+        assert!(inject_caveman_prompt(&mut body, CompressionLevel::Full));
+        assert_eq!(body["input"][0]["type"], "message");
+        assert_eq!(body["input"][0]["role"], "system");
+        assert_eq!(body["input"][1]["content"], "pre-existing");
+    }
+
+    #[test]
+    fn inject_caveman_kiro_appends_to_first_user_turn() {
+        let mut body = json!({
+            "conversationState": {
+                "history": [
+                    { "userInputMessage": { "content": "first" } },
+                    { "userInputMessage": { "content": "second" } }
+                ]
+            }
+        });
+
+        assert!(inject_caveman_prompt(&mut body, CompressionLevel::Full));
+        let history = body["conversationState"]["history"]
+            .as_array()
+            .expect("history");
+        assert_eq!(
+            history[0]["userInputMessage"]["content"],
+            format!("first\n\n{}", CompressionLevel::Full.prompt())
+        );
+        assert_eq!(history[1]["userInputMessage"]["content"], "second");
+    }
+
+    #[test]
+    fn inject_caveman_kiro_falls_back_to_current_message() {
+        let mut body = json!({
+            "conversationState": {
+                "currentMessage": { "userInputMessage": { "content": "newest" } }
+            }
+        });
+
+        assert!(inject_caveman_prompt(&mut body, CompressionLevel::Lite));
+        assert_eq!(
+            body["conversationState"]["currentMessage"]["userInputMessage"]["content"],
+            format!("newest\n\n{}", CompressionLevel::Lite.prompt())
+        );
+    }
+
+    #[test]
+    fn inject_caveman_kiro_is_idempotent() {
+        let mut body = json!({
+            "conversationState": {
+                "history": [{ "userInputMessage": { "content": "first" } }]
+            }
+        });
+
+        assert!(inject_caveman_prompt(&mut body, CompressionLevel::Full));
+        let once = body["conversationState"]["history"][0]["userInputMessage"]["content"].clone();
+        assert!(!inject_caveman_prompt(&mut body, CompressionLevel::Full));
+        assert_eq!(
+            body["conversationState"]["history"][0]["userInputMessage"]["content"],
+            once
+        );
+    }
+
+    #[test]
+    fn inject_caveman_kiro_without_user_turn_is_a_noop() {
+        let mut body = json!({ "conversationState": { "history": [] } });
+        assert!(!inject_caveman_prompt(&mut body, CompressionLevel::Full));
+    }
+
+    #[test]
+    fn inject_caveman_appends_when_prompt_only_appears_as_a_substring() {
+        let prompt = CompressionLevel::Full.prompt();
+        let mut body = json!({
+            "messages": [
+                {
+                    "role": "system",
+                    "content": format!("Style described here: \"{}\".", prompt)
+                }
+            ]
+        });
+
+        assert!(inject_caveman_prompt(&mut body, CompressionLevel::Full));
+        assert_eq!(
+            body["messages"][0]["content"],
+            format!("Style described here: \"{}\".\n\n{}", prompt, prompt)
+        );
+    }
+
+    #[test]
+    fn inject_caveman_dedupes_an_exact_segment() {
+        let prompt = CompressionLevel::Full.prompt();
+        let content = format!("preamble\n\n{prompt}\n\npostamble");
+        let mut body = json!({
+            "messages": [{ "role": "system", "content": content }]
+        });
+
+        assert!(!inject_caveman_prompt(&mut body, CompressionLevel::Full));
+        assert_eq!(body["messages"][0]["content"], content);
+    }
+
+    #[test]
+    fn inject_caveman_claude_blocks_compare_exactly() {
+        let mut body = json!({
+            "system": [
+                { "type": "text", "text": format!("note: {}", CompressionLevel::Full.prompt()) }
+            ]
+        });
+
+        assert!(inject_caveman_prompt(&mut body, CompressionLevel::Full));
+        let blocks = body["system"].as_array().expect("system");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[1]["text"], CompressionLevel::Full.prompt());
     }
 
     #[test]
@@ -1020,10 +1186,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_request_preprocessing_skips_short_requests() {
+    fn apply_request_preprocessing_injects_caveman_on_short_request() {
         let settings = Settings {
             caveman_enabled: true,
-            caveman_level: "ultra".into(),
+            caveman_level: "full".into(),
             ..Settings::default()
         };
         let mut body = json!({
@@ -1032,8 +1198,33 @@ mod tests {
             ]
         });
 
-        // 9router parity: short requests stay untouched — injection is gated
-        // by context pressure (shouldAutoApplyCaveman).
+        // 9router chatCore.js:278 injects on every request once the toggle is
+        // on — a short prompt is no exception.
+        assert!(apply_request_preprocessing(
+            &mut body,
+            &settings,
+            "gpt-4o-mini"
+        ));
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(
+            body["messages"][0]["content"],
+            CompressionLevel::Full.prompt()
+        );
+    }
+
+    #[test]
+    fn apply_request_preprocessing_skips_when_caveman_disabled() {
+        let settings = Settings {
+            caveman_enabled: false,
+            caveman_level: "full".into(),
+            ..Settings::default()
+        };
+        let mut body = json!({
+            "messages": [
+                { "role": "user", "content": "x".repeat(9000) }
+            ]
+        });
+
         assert!(!apply_request_preprocessing(
             &mut body,
             &settings,
@@ -1055,7 +1246,6 @@ mod tests {
             ]
         });
 
-        assert!(should_auto_apply_caveman(&body, "gpt-4o-mini"));
         assert!(apply_request_preprocessing(
             &mut body,
             &settings,
@@ -1091,26 +1281,6 @@ mod tests {
             body["messages"][0]["content"],
             CompressionLevel::Lite.prompt()
         );
-    }
-
-    #[test]
-    fn should_auto_apply_caveman_short_content_stays_short() {
-        let body = json!({
-            "messages": [
-                { "role": "user", "content": "Hello world" }
-            ]
-        });
-        assert!(!should_auto_apply_caveman(&body, "gpt-4o-mini"));
-    }
-
-    #[test]
-    fn should_auto_apply_caveman_long_content_triggers() {
-        let body = json!({
-            "messages": [
-                { "role": "user", "content": "x".repeat(16000) }
-            ]
-        });
-        assert!(should_auto_apply_caveman(&body, "gpt-4o-mini"));
     }
 
     #[test]
@@ -1492,5 +1662,82 @@ mod tests {
             0,
             "no text compression hits for image-only message"
         );
+    }
+
+    #[test]
+    fn compress_messages_writes_back_to_the_key_it_selected() {
+        // A body can carry a non-array `messages` next to a real `input[]`;
+        // the compressed items belong in `input`, not over `messages`.
+        let dump = npm_install_log();
+        let mut body = json!({
+            "messages": "not-an-array",
+            "input": [{ "type": "function_call_output", "output": dump }]
+        });
+
+        compress_messages(&mut body, true).expect("input array is a chat body");
+
+        assert_eq!(body["messages"], json!("not-an-array"));
+        assert_ne!(body["input"][0]["output"], json!(dump));
+        let compressed = body["input"][0]["output"].as_str().expect("output");
+        assert!(compressed.len() < dump.len());
+    }
+
+    #[test]
+    fn compress_messages_prefers_messages_when_both_are_arrays() {
+        let dump = npm_install_log();
+        let input_dump = dump.clone();
+        let mut body = json!({
+            "messages": [{ "type": "function_call_output", "output": dump }],
+            "input": [{ "type": "function_call_output", "output": input_dump }]
+        });
+
+        compress_messages(&mut body, true).expect("messages array is a chat body");
+
+        assert_ne!(body["messages"][0]["output"], json!(dump));
+        assert_eq!(body["input"][0]["output"], json!(input_dump));
+    }
+
+    #[test]
+    fn compress_messages_skips_non_object_elements_and_compresses_the_rest() {
+        // A single malformed element must cost only that element — the whole
+        // pass used to abort and the body went upstream uncompressed.
+        let dump = npm_install_log();
+        let mut body = json!({
+            "messages": [
+                "a bare string",
+                { "type": "function_call_output", "output": dump },
+                42
+            ]
+        });
+
+        let stats = compress_messages(&mut body, true).expect("malformed siblings do not abort");
+
+        assert_eq!(stats.hits.len(), 1);
+        assert_eq!(body["messages"][0], json!("a bare string"));
+        assert_eq!(body["messages"][2], json!(42));
+        assert_ne!(body["messages"][1]["output"], json!(dump));
+    }
+
+    #[test]
+    fn compress_messages_skips_non_object_content_blocks() {
+        let dump = npm_install_log();
+        let mut body = json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    "a bare string block",
+                    { "type": "tool_result", "content": dump }
+                ]
+            }]
+        });
+
+        let stats = compress_messages(&mut body, true).expect("malformed blocks do not abort");
+
+        assert_eq!(stats.hits.len(), 1);
+        assert_eq!(
+            body["messages"][0]["content"][0],
+            json!("a bare string block")
+        );
+        assert_ne!(body["messages"][0]["content"][1]["content"], json!(dump));
     }
 }

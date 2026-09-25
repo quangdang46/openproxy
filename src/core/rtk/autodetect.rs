@@ -4,10 +4,9 @@ use regex::Regex;
 use crate::core::rtk::constants::*;
 use crate::core::rtk::filters::{
     build_output_impl, dedup_log_impl, find_impl, git_diff_impl, git_log_impl, git_status_impl,
-    grep_impl, json_summary_impl, ls_impl, read_numbered_impl, search_list_impl,
-    smart_truncate_impl, test_runner_impl, tree_impl, READ_NUMBERED_LINE_RE, SEARCH_LIST_HEADER_RE,
+    grep_impl, ls_impl, read_numbered_impl, search_list_impl, smart_truncate_impl, tree_impl,
+    READ_NUMBERED_LINE_RE, SEARCH_LIST_HEADER_RE,
 };
-use crate::core::rtk::smartcrusher::SmartCrusher;
 
 // git-log detector — checked FIRST (9router autodetect.js:21,32 RE_GIT_LOG).
 static RE_GIT_LOG: Lazy<Regex> =
@@ -33,15 +32,9 @@ static RE_BUILD_OUTPUT: Lazy<Regex> = Lazy::new(|| {
         .unwrap()
 });
 
-/// Test-runner output detector. Catches cargo test, pytest, jest, go test output.
-static RE_TEST_RUNNER: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(?im)^(running \d+ test(s)?|ok \d+|not ok \d+|test result:|test \S+ \.\.\.\s+(ok|FAILED)|PASS|FAIL(ED)?|testsuite:\s+)" )
-        .unwrap()
-});
-
-/// JSON/NDJSON bulk detector: checks if text starts with `[`, `{`, or has
-/// many newline-separated `{` lines.
-static RE_NDJSON_LINE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?m)^\{.*\}\s*$").unwrap());
+/// A drive-letter prefix (`C:\Users\me`, `C:/src/main.rs`) marks a Windows
+/// absolute path, so the whole line is path-like (9router autodetect.js:86).
+static RE_DRIVE_LETTER_PATH: Lazy<Regex> = Lazy::new(|| Regex::new(r"^[A-Za-z]:[\\/]").unwrap());
 
 pub type FilterFn = fn(&str) -> String;
 
@@ -88,18 +81,6 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
             filter_fn: build_output_impl,
             filter_name: FILTER_BUILD_OUTPUT,
         });
-    }
-
-    // Test-runner detection: check for test output patterns BEFORE generic
-    // text heuristics so cargo test/pytest/jest output gets proper compression.
-    if RE_TEST_RUNNER.is_match(head) {
-        let test_lines: Vec<&str> = head.lines().collect();
-        if test_lines.len() >= TEST_RUNNER_MIN_LINES {
-            return Some(DetectedFilter {
-                filter_fn: test_runner_impl,
-                filter_name: FILTER_TEST_RUNNER,
-            });
-        }
     }
 
     if is_mostly_porcelain(head) {
@@ -152,41 +133,11 @@ pub fn auto_detect_filter(text: &str) -> Option<DetectedFilter> {
         });
     }
 
-    let text_lines: Vec<&str> = text.lines().collect();
-    if text_lines.len() >= SMART_TRUNCATE_MIN_LINES && is_line_numbered(&text_lines) {
+    if lines.len() >= SMART_TRUNCATE_MIN_LINES && is_line_numbered(&lines) {
         return Some(DetectedFilter {
             filter_fn: read_numbered_impl,
             filter_name: FILTER_READ_NUMBERED,
         });
-    }
-
-    // JSON/NDJSON bulk detector: catches large JSON blobs (API response dumps,
-    // config dumps) before they hit dedup-log. Check is cheap — just peek at
-    // first non-whitespace char and count NDJSON lines.
-    // Use text.len() (not head.len()) because JSON_SUMMARY_MIN_BYTES (2000)
-    // exceeds DETECT_WINDOW (1024), so the head window would never trigger.
-    if text.len() >= JSON_SUMMARY_MIN_BYTES {
-        let peek_start = text[..DETECT_WINDOW.min(text.len())].trim_start();
-        let is_json_like = peek_start.starts_with('{') || peek_start.starts_with('[');
-        if is_json_like || is_mostly_ndjson(&text[..DETECT_WINDOW.min(text.len())]) {
-            return Some(DetectedFilter {
-                filter_fn: json_summary_impl,
-                filter_name: FILTER_JSON_SUMMARY,
-            });
-        }
-    }
-
-    // SmartCrusher tabular data detector: catches CSV, TSV, pipe-separated,
-    // and JSON arrays of objects. Runs before dedup-log because tabular data
-    // gets better compression through GCF/TOON than deduplication alone.
-    // Only activates on bodies >= 500 B (same MIN_COMPRESS_SIZE threshold).
-    if text.len() >= MIN_COMPRESS_SIZE {
-        if let Some(table_type) = SmartCrusher::detect(text) {
-            return Some(DetectedFilter {
-                filter_fn: crate::core::rtk::apply_filter::smartcrusher,
-                filter_name: table_type.filter_name(),
-            });
-        }
     }
 
     if non_empty.len() >= 5 {
@@ -224,6 +175,9 @@ fn is_path_like(line: &&str) -> bool {
     if t.is_empty() {
         return false;
     }
+    if RE_DRIVE_LETTER_PATH.is_match(t) {
+        return true;
+    }
     if t.contains(':') {
         return false;
     }
@@ -257,22 +211,6 @@ fn is_line_numbered(lines: &[&str]) -> bool {
 
 fn count_matches(text: &str, re: &Regex) -> usize {
     re.find_iter(text).count()
-}
-
-/// Check if text is mostly NDJSON: at least 3 non-empty lines and >=80% of them
-/// look like JSON objects (start with `{`).
-fn is_mostly_ndjson(text: &str) -> bool {
-    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    if lines.len() < 3 {
-        return false;
-    }
-    let sample: Vec<&&str> = lines.iter().take(50).collect();
-    let sampled = sample.len();
-    if sampled < 3 {
-        return false;
-    }
-    let hits = sample.iter().filter(|l| RE_NDJSON_LINE.is_match(l)).count();
-    hits * 10 >= sampled * 8
 }
 
 #[cfg(test)]
@@ -352,6 +290,8 @@ mod tests {
 
     #[test]
     fn test_detects_test_runner_cargo_output() {
+        // 9router has no test-runner stage: cargo-test output falls through to
+        // the `non_empty >= 5` dedup-log fallback.
         let mut lines: Vec<String> = Vec::new();
         lines.push("running 12 tests".to_string());
         for i in 0..12 {
@@ -364,42 +304,107 @@ mod tests {
         );
         let input = lines.join("\n");
         let result = auto_detect_filter(&input);
-        assert!(result.is_some(), "test-runner should be detected");
-        assert_eq!(result.unwrap().filter_name, FILTER_TEST_RUNNER);
+        assert!(result.is_some(), "dedup-log should be selected");
+        assert_eq!(result.unwrap().filter_name, FILTER_DEDUP_LOG);
     }
 
     #[test]
     fn test_detects_json_summary_bracket_start() {
-        // Pad the JSON payload to exceed JSON_SUMMARY_MIN_BYTES (2000)
-        let large_json = format!("{{{}}}", "\"key\": ".repeat(2000));
+        // 9router has no json-summary stage: a large JSON array reaches the
+        // dedup-log fallback.
+        let rows: Vec<String> = (0..80)
+            .map(|i| format!("  {{\"id\": {i}, \"name\": \"row_{i}\"}},"))
+            .collect();
+        let large_json = format!("[\n{}\n]", rows.join("\n"));
+        assert!(large_json.len() > JSON_SUMMARY_MIN_BYTES);
         let result = auto_detect_filter(&large_json);
         assert!(
             result.is_some(),
-            "json-summary should be detected: len={}",
+            "dedup-log should be selected: len={}",
             large_json.len()
         );
-        assert_eq!(result.unwrap().filter_name, FILTER_JSON_SUMMARY);
+        assert_eq!(result.unwrap().filter_name, FILTER_DEDUP_LOG);
     }
 
     #[test]
     fn test_detects_ndjson_blob() {
-        // Build enough lines to exceed JSON_SUMMARY_MIN_BYTES (2000)
+        // 9router has no json-summary stage: an NDJSON blob reaches dedup-log.
         let lines: Vec<String> = (0..100)
             .map(|i| format!("{{\"id\": {:>4}, \"name\": \"test_value_{}\"}}", i, i))
             .collect();
         let input = lines.join("\n");
-        assert!(
-            input.len() > JSON_SUMMARY_MIN_BYTES,
-            "fixture too small: {} < {}",
-            input.len(),
-            JSON_SUMMARY_MIN_BYTES
-        );
         let result = auto_detect_filter(&input);
         assert!(
             result.is_some(),
-            "NDJSON should be detected for large blobs: len={}",
+            "dedup-log should be selected: len={}",
             input.len()
         );
-        assert_eq!(result.unwrap().filter_name, FILTER_JSON_SUMMARY);
+        assert_eq!(result.unwrap().filter_name, FILTER_DEDUP_LOG);
+    }
+
+    #[test]
+    fn test_tabular_data_falls_through_to_dedup_log() {
+        // 9router has no SmartCrusher stage: a CSV body reaches dedup-log.
+        let mut lines: Vec<String> = Vec::new();
+        lines.push("id,name,score,team,region".to_string());
+        for i in 0..60 {
+            lines.push(format!(
+                "{i},row_value_{i},{},team_{},region_{}",
+                i * 7,
+                i % 5,
+                i % 3
+            ));
+        }
+        let input = lines.join("\n");
+        assert!(input.len() >= MIN_COMPRESS_SIZE, "fixture must clear 500 B");
+        let result = auto_detect_filter(&input);
+        assert!(result.is_some(), "dedup-log should be selected");
+        assert_eq!(result.unwrap().filter_name, FILTER_DEDUP_LOG);
+    }
+
+    #[test]
+    fn test_detects_find_windows_drive_letter_paths() {
+        let input = "C:\\Users\\me\\project\\main.js\nC:\\Users\\me\\project\\lib.js\nC:\\Users\\me\\project\\util.js\n";
+        let result = auto_detect_filter(input);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().filter_name, FILTER_FIND);
+    }
+
+    #[test]
+    fn test_is_path_like_still_rejects_non_drive_colon_lines() {
+        // The drive-letter arm must not swallow grep lines or URLs.
+        assert!(!is_path_like(&"http://example.com/x"));
+        assert!(!is_path_like(&"src/a.rs:12:code"));
+    }
+
+    #[test]
+    fn test_read_numbered_uses_the_detection_window() {
+        // 300 numbered lines then 4000 bytes of prose: the whole body clears
+        // SMART_TRUNCATE_MIN_LINES but the 1024-char head does not.
+        let mut lines: Vec<String> = (1..=300).map(|i| format!("{i:>4}|alpha")).collect();
+        lines.push("x".repeat(4000));
+        let input = lines.join("\n");
+        let result = auto_detect_filter(&input);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().filter_name, FILTER_DEDUP_LOG);
+    }
+
+    #[test]
+    fn test_read_numbered_fires_inside_a_short_window() {
+        // The counter repeats every 100 lines purely so 260 numbered lines fit
+        // inside DETECT_WINDOW — a strictly ascending 260-line dump needs
+        // ~1.2 kB and would leave the head under SMART_TRUNCATE_MIN_LINES.
+        let input = (0..260)
+            .map(|i| format!("{}|", i % 100))
+            .collect::<Vec<String>>()
+            .join("\n");
+        let head_line_count = input[..DETECT_WINDOW.min(input.len())].lines().count();
+        assert!(
+            head_line_count >= SMART_TRUNCATE_MIN_LINES,
+            "fixture head holds only {head_line_count} lines"
+        );
+        let result = auto_detect_filter(&input);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().filter_name, FILTER_READ_NUMBERED);
     }
 }
