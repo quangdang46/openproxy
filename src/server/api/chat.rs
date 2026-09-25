@@ -3970,6 +3970,13 @@ async fn proxy_response_with_pending_tracking(
                                         } else {
                                             passthrough_pending.extend_from_slice(&chunk);
                                             for line in drain_complete_sse_lines(&mut passthrough_pending) {
+                                                // An upstream terminator means we must not append a
+                                                // second one at EOF. This flag was declared and read but
+                                                // never assigned in the first version of this commit, while
+                                                // the commit message described it as tracked.
+                                                if line.trim() == "data: [DONE]" {
+                                                    saw_done = true;
+                                                }
                                                 yield Ok::<Bytes, std::io::Error>(
                                                     sanitize_sse_chunk(
                                                         &passthrough_frame_bytes(
@@ -4179,6 +4186,9 @@ async fn proxy_response_with_pending_tracking(
                                 } else {
                                     passthrough_pending2.extend_from_slice(&data);
                                     for line in drain_complete_sse_lines(&mut passthrough_pending2) {
+                                        if line.trim() == "data: [DONE]" {
+                                            saw_done2 = true;
+                                        }
                                         yield Ok::<Bytes, std::io::Error>(
                                             sanitize_sse_chunk(
                                                 &passthrough_frame_bytes(
@@ -5024,13 +5034,10 @@ pub(crate) fn take_terminal_passthrough_frame(buffer: &mut Vec<u8>) -> Option<By
     if last.is_empty() {
         return None;
     }
-    // The terminal frame needs the \n\n separator too. Without it the client
-    // buffers an event that never sees a blank line and DISCARDS it at EOF
-    // (per the SSE event dispatch rules), which would defeat the entire point
-    // of flushing: we would send the last frame and lose it anyway. This also
-    // keeps passthrough symmetric — every drained frame goes through
-    // passthrough_frame_bytes, and so does this one.
-    last.extend_from_slice(b"\n\n");
+    // No separator here: the call site runs this through passthrough_frame_bytes,
+    // which attaches the \n\n. Appending it in both places gave every terminal
+    // frame a four-newline tail. Harmless in practice — SSE ignores blank lines
+    // between events — but it contradicted the symmetry the call site claims.
     Some(Bytes::from(last))
 }
 
@@ -6642,14 +6649,12 @@ mod passthrough_framing_tests {
             text.contains("data:"),
             "final frame must reach the client: {text:?}"
         );
-        // The delimiter is what makes the flush WORK: per the SSE event
-        // dispatch rules a client buffers an event that never sees a blank line
-        // and discards it at EOF. Sending the last frame without \n\n would
-        // send it and lose it anyway.
-        assert!(
-            text.ends_with("\n\n"),
-            "terminal frame must keep its delimiter: {text:?}"
-        );
+        // The extractor itself does NOT append a separator: the call site
+        // routes this through passthrough_frame_bytes, which is where the
+        // delimiter is attached. Appending it in both places gave every terminal
+        // frame a four-newline tail. What matters here is that the frame is
+        // recovered at all, and that it is not pre-terminated. The
+        // passthrough_frame_bytes test covers the delimiter.
         assert!(leftover.is_empty(), "buffer is drained by the extraction");
     }
 
