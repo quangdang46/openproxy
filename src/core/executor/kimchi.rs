@@ -22,7 +22,7 @@ use super::provider::{
 };
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
-const KIMCHI_BASE_URL: &str = "https://llm.kimchi.dev/openai/v1";
+pub const KIMCHI_BASE_URL: &str = "https://llm.kimchi.dev/openai/v1";
 
 /// Dedicated executor for the `kimchi` provider.
 #[derive(Clone)]

@@ -20,7 +20,7 @@ use crate::types::{ProviderConnection, ProviderNode};
 
 use super::{ClientPool, TransportKind, UpstreamResponse};
 
-const GROK_CLI_RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
+pub const GROK_CLI_RESPONSES_URL: &str = "https://cli-chat-proxy.grok.com/v1/responses";
 const CLIENT_VERSION: &str = "0.2.93";
 const CLIENT_IDENTIFIER: &str = "grok-pager";
 const TOKEN_AUTH: &str = "xai-grok-cli";

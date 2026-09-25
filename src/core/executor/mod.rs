@@ -83,7 +83,7 @@ pub use github::{
 pub use grok_cli::{
     count_grok_cli_user_turns, reset_grok_cli_turn_store, resolve_effort_from_model,
     resolve_grok_cli_turn_idx, GrokCliExecutionRequest, GrokCliExecutor, GrokCliExecutorError,
-    GrokCliExecutorResponse,
+    GrokCliExecutorResponse, GROK_CLI_RESPONSES_URL,
 };
 pub use grok_web::{
     GrokWebExecutionRequest, GrokWebExecutor, GrokWebExecutorError, GrokWebExecutorResponse,
@@ -91,7 +91,7 @@ pub use grok_web::{
     PerplexityWebExecutorResponse,
 };
 pub use iflow::{IFlowExecutionRequest, IFlowExecutor, IFlowExecutorError, IFlowExecutorResponse};
-pub use kimchi::KimchiExecutor;
+pub use kimchi::{KimchiExecutor, KIMCHI_BASE_URL};
 pub use kiro::{
     consumed_eventstream_bytes, AwsCredentials, EventStreamDecoder, KiroEvent,
     KiroExecutionRequest, KiroExecutor, KiroExecutorError, KiroExecutorResponse,
