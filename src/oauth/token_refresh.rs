@@ -31,7 +31,11 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+// tokio::time::Instant, not std: the dedup TTL is read on an async runtime, and
+// std::time::Instant ignores a paused tokio clock, which made the TTL-boundary
+// test un-runnable deterministically (and it was flaky on a real 10s sleep).
+use tokio::time::Instant;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
@@ -1317,7 +1321,10 @@ mod tests {
     /// non-rotating provider (github: the response omits refresh_token, so the
     /// same old token is the key forever) the account was dead once its access
     /// token expired, and recovery meant deleting and re-adding the connection.
-    #[tokio::test]
+    // Paused clock: this test is about a TTL boundary, and a real 10s sleep made
+    // it flaky — under load the window could elapse between the "warm" call and
+    // its assertion, turning it into a real refresh and failing the count.
+    #[tokio::test(start_paused = true)]
     async fn dedup_performs_a_real_refresh_after_ttl_expiry() {
         let dedup = RefreshDedup::default();
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1360,7 +1367,8 @@ mod tests {
 
         // After the TTL, a REAL refresh must happen. Before the fix this
         // returned the memoized "a1" forever and the counter never moved.
-        tokio::time::sleep(std::time::Duration::from_millis(REFRESH_RESULT_TTL_MS + 50)).await;
+        tokio::time::advance(std::time::Duration::from_millis(REFRESH_RESULT_TTL_MS + 50)).await;
+        tokio::task::yield_now().await;
         let c3 = calls.clone();
         let cold = dedup
             .dedup("github", "rt-fixed", || {

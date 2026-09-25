@@ -139,6 +139,11 @@ open = "5"
 quick-xml = "0.42.0"
 
 [dev-dependencies]
+# `test-util` provides tokio::time::pause/advance so TTL-boundary tests can use a
+# virtual clock. Without it, a real 10s sleep made dedup_performs_a_real_refresh_
+# after_ttl_expiry flaky under load: the window could elapse between the "warm"
+# call and its assertion, turning it into a real refresh and failing the count.
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
 wiremock = "0.6"
 assert_cmd = "2"
