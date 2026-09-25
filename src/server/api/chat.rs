@@ -276,7 +276,11 @@ async fn chat_completions_impl(
     strip_forwarding_headers(&mut headers);
 
     let presented_api_key = extract_api_key(&headers);
-    if require_api_key_auth && state.db.snapshot().settings.require_login {
+    // Gate on requireApiKey, NOT requireLogin (bead openproxy-d5lf). The two
+    // are separate settings in 9router; reading require_login here meant
+    // locking the dashboard also locked every API client, and leaving the
+    // dashboard open silently removed API auth from /v1.
+    if require_api_key_auth && state.db.snapshot().settings.require_api_key() {
         if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
         }

@@ -522,6 +522,21 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub require_login: bool,
+    /// 9router `settingsRepo.js:27` — `requireApiKey` defaults TRUE, and it is
+    /// a setting SEPARATE from `requireLogin`. Conflating them means locking the
+    /// dashboard also locks every API client, and leaving the dashboard open
+    /// (the usual posture for a headless proxy) silently removes API auth from
+    /// `/v1` entirely.
+    ///
+    /// `Option` on purpose. A settings blob written before this field existed
+    /// simply does not contain the key, so it deserializes to `None` and
+    /// [`Self::require_api_key`] falls back to `require_login` — the exact
+    /// behaviour in force today. That grandfathers existing installs instead of
+    /// 401-ing them without warning, while `Settings::default()` gives a fresh
+    /// install `Some(true)`, matching 9router. Once anyone sets it, the two knobs
+    /// are fully independent.
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    pub require_api_key: Option<bool>,
     #[serde(
         default = "default_true",
         deserialize_with = "deserialize_null_default"
@@ -732,6 +747,8 @@ impl Default for Settings {
             // 9router settingsRepo.js:26 requireLogin defaults TRUE — a fresh
             // install must not expose /v1/* or admin routes unauthenticated.
             require_login: true,
+            // 9router settingsRepo.js:27 — true for a fresh install.
+            require_api_key: Some(true),
             tunnel_dashboard_access: true,
             observability_enabled: true,
             observability_max_records: default_observability_max_records(),
@@ -786,6 +803,16 @@ impl Default for Settings {
 }
 
 impl Settings {
+
+    /// Whether `/v1` LLM API routes require a client API key.
+    ///
+    /// `None` means the settings blob predates the `requireApiKey` field; the
+    /// install is grandfathered onto `require_login`, which is what the gate
+    /// read before this field existed. That keeps every current install
+    /// behaving identically while letting anyone set the two knobs apart.
+    pub fn require_api_key(&self) -> bool {
+        self.require_api_key.unwrap_or(self.require_login)
+    }
     pub fn normalize(&mut self) {
         if !self.outbound_proxy_enabled && !self.outbound_proxy_url.trim().is_empty() {
             self.outbound_proxy_enabled = true;
