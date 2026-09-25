@@ -226,13 +226,20 @@ export function filterQuotaStateByConnections<T>(
   ) as Record<string, T>;
 }
 
+/** True when the cache exists but could not be parsed. Writing on top of a
+ * failed read would replace the stored cache with a single entry, so the flag
+ * is checked before any write rather than after the fact. */
+let quotaCacheUnreadable = false;
+
 export function getQuotaCache(): Record<string, any> {
   if (typeof window === "undefined") return {};
   try {
     const cached = window.localStorage.getItem(QUOTA_CACHE_KEY);
+    quotaCacheUnreadable = false;
     return cached ? JSON.parse(cached) : {};
   } catch (error) {
     console.error("Error reading quota cache:", error);
+    quotaCacheUnreadable = true;
     return {};
   }
 }
@@ -241,6 +248,14 @@ export function setQuotaCache(connectionId: string, quotaEntry: Record<string, a
   if (typeof window === "undefined") return;
   try {
     const cache = getQuotaCache();
+    if (quotaCacheUnreadable) {
+      // Same shape as the settings bug: an unreadable cache is not an empty
+      // one. Lower stakes than settings — this is a display cache that refills
+      // from the next fetch — but writing here would discard every other
+      // connection's cached quota, so it is left alone.
+      console.error("Skipping quota cache write: the existing cache is unreadable");
+      return;
+    }
     cache[connectionId] = {
       ...quotaEntry,
       cachedAt: new Date().toISOString(),
