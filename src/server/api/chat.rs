@@ -4402,7 +4402,7 @@ pub(crate) fn apply_passthrough_transforms(line: &str, _provider: &str) -> Strin
         return line.to_string();
     };
     let payload = payload.trim();
-    if payload.is_empty() || payload == "[DONE]" {
+    if payload.is_empty() || is_done_sentinel(line) {
         return line.to_string();
     }
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {

@@ -2118,33 +2118,40 @@ impl DefaultExecutor {
             let use_hyper = self.use_hyper_transport(&request, url);
 
             // The retry loop for this URL.
-            for retry in 0..3 {
-                // Network exceptions get the same budget as a 502, matching
-                // 9router base.js:174 which routes fetch failures through
-                // `tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, ...)`. The `?`
-                // that used to sit here made a single refused connection fatal,
-                // while a 502 on the same url got three attempts.
-                let (max_attempts, retry_delay_ms) = retry_policy(http::StatusCode::BAD_GATEWAY);
-                let mut attempt = 0u32;
-                let upstream = loop {
-                    match self
-                        .send_one(url, &headers, &transformed_body, &request, use_hyper)
-                        .await
-                    {
-                        Ok(response) => break response,
-                        Err(err) => {
-                            attempt += 1;
-                            if attempt >= max_attempts {
-                                return Err(err);
-                            }
+            // One budget for the whole url: network exceptions and retryable
+            // statuses share it, as in 9router.
+            let max_attempts = 3u32;
+            for retry in 0..max_attempts {
+                // ONE budget for both failure kinds, as 9router has.
+                //
+                // The first version of this bead put a 3-attempt inner loop
+                // around send_one while keeping the outer 0..3 status loop, so
+                // a mixed case (network error, then 502, then network error...)
+                // multiplied into 9 send_one calls and ~24s of sleeping — 3x
+                // 9router's total, on a fix whose whole point was retrying too
+                // LITTLE. 9router has a single counter: a fetch exception is
+                // pushed through the 502 bucket and spends the same budget
+                // (base.js:174).
+                let upstream = match self
+                    .send_one(url, &headers, &transformed_body, &request, use_hyper)
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(err) => {
+                        let (_, delay_ms) = retry_policy(http::StatusCode::BAD_GATEWAY);
+                        if retry + 1 < max_attempts {
                             tracing::warn!(
                                 target: "openproxy::executor",
                                 provider = %self.provider,
-                                attempt, max_attempts, delay_ms = retry_delay_ms,
+                                attempt = retry + 1,
+                                max_attempts,
+                                delay_ms,
                                 "network error, retrying"
                             );
-                            tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
+                            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                            continue;
                         }
+                        return Err(err);
                     }
                 };
                 let status = upstream.status();
@@ -2196,7 +2203,9 @@ impl DefaultExecutor {
                             // Retry immediately with refreshed credentials.
                             let retry_resp = self
                                 .send_one(url, &headers, &transformed_body, &request, use_hyper)
-                                .await?;
+                                .await?; // a single attempt: 9router re-enters its
+                                         // own tryRetry for this leg, and the
+                                         // status branch below still applies.
                             if retry_resp.status().is_success() {
                                 return Ok(ExecutionResponse {
                                     response: retry_resp,
@@ -2254,8 +2263,8 @@ impl DefaultExecutor {
 
                 // 502 Bad Gateway: 3 retries x 3s, then surface the raw 502.
                 if status == http::StatusCode::BAD_GATEWAY {
-                    if retry < 2 && url == urls.last().unwrap() {
-                        tokio::time::sleep(Duration::from_secs(3)).await;
+                    if retry + 1 < retry_policy(status).0 && url == urls.last().unwrap() {
+                        tokio::time::sleep(Duration::from_millis(retry_policy(status).1)).await;
                         continue;
                     }
                     return Ok(ExecutionResponse {
@@ -2273,8 +2282,8 @@ impl DefaultExecutor {
 
                 // 503 Service Unavailable: 3 retries x 2s, then surface the raw 503.
                 if status == http::StatusCode::SERVICE_UNAVAILABLE {
-                    if retry < 2 && url == urls.last().unwrap() {
-                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    if retry + 1 < retry_policy(status).0 && url == urls.last().unwrap() {
+                        tokio::time::sleep(Duration::from_millis(retry_policy(status).1)).await;
                         continue;
                     }
                     return Ok(ExecutionResponse {
@@ -2292,7 +2301,7 @@ impl DefaultExecutor {
 
                 // 504 Gateway Timeout: 2 retries x 3s
                 if status == http::StatusCode::GATEWAY_TIMEOUT {
-                    if retry < 1 {
+                    if retry + 1 < retry_policy(status).0 {
                         tokio::time::sleep(Duration::from_secs(3)).await;
                         continue;
                     }
