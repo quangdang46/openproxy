@@ -106,9 +106,6 @@
         // Method 2: localStorage event (triggers 'storage' event in other tabs)
         try {
           localStorage.setItem('oauth_callback', JSON.stringify(data));
-          setTimeout(function () {
-            try { localStorage.removeItem('oauth_callback'); } catch (_) {}
-          }, 1000);
           sentByStorage = true;
         } catch (e) {
           // localStorage unavailable — fall through
