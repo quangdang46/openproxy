@@ -530,7 +530,8 @@ async fn execute_media_provider(
     // Try the provider-specific media adapter first (image / tts /
     // embeddings / search). Falls through to the generic upstream
     // forwarder below when no adapter handles this provider+route.
-    if let Some(resp) = try_provider_adapter(
+    let adapter_url = build_media_url(provider, model, route_kind, &connection);
+    if let Some(result) = try_provider_adapter(
         state,
         &connection,
         provider,
@@ -540,7 +541,16 @@ async fn execute_media_provider(
     )
     .await
     {
-        return resp;
+        // 9router meters on the primary path. The adapter used to return
+        // before the forwarder's metering block, so every provider served by a
+        // media adapter recorded nothing and its embedding spend was invisible.
+        if route_kind == "embeddings" {
+            if let Ok(body) = &result {
+                track_embeddings_usage(state, &connection, provider, model, &adapter_url, body)
+                    .await;
+            }
+        }
+        return media_result_to_response(result);
     }
 
     let url = build_media_url(provider, model, route_kind, &connection);
@@ -618,64 +628,88 @@ async fn execute_media_provider(
             }
         };
         if let Ok(parsed) = serde_json::from_slice::<Value>(&bytes) {
-            let usage = parsed.get("usage").filter(|v| v.is_object());
-            let estimated = usage
-                .and_then(|u| u.get("estimated"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let prompt_tokens = usage
-                .and_then(|u| u.get("prompt_tokens"))
-                .or_else(|| usage.and_then(|u| u.get("input_tokens")))
-                .and_then(|v| v.as_u64());
-            let completion_tokens = usage
-                .and_then(|u| u.get("completion_tokens"))
-                .or_else(|| usage.and_then(|u| u.get("output_tokens")))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let total_tokens = usage
-                .and_then(|u| u.get("total_tokens"))
-                .and_then(|v| v.as_u64());
-            if !estimated
-                && prompt_tokens.is_some_and(|p| p > 0)
-                && completion_tokens == 0
-                && total_tokens == prompt_tokens
-            {
-                let connection_id = connection.id.as_str();
-                let api_key = connection
-                    .api_key
-                    .as_deref()
-                    .map(String::from)
-                    .unwrap_or_else(|| connection.access_token.clone().unwrap_or_default());
-                let token_usage = crate::types::TokenUsage {
-                    prompt_tokens,
-                    input_tokens: None,
-                    completion_tokens: Some(0),
-                    output_tokens: None,
-                    total_tokens,
-                    reasoning_tokens: None,
-                    cached_tokens: None,
-                    cache_read_input_tokens: None,
-                    cache_creation_input_tokens: None,
-                    extra: Default::default(),
-                };
-                state
-                    .usage_tracker()
-                    .track_request(
-                        provider,
-                        model,
-                        Some(&token_usage),
-                        Some(connection_id),
-                        Some(&api_key),
-                        Some(url.as_str()),
-                        None,
-                    )
-                    .await;
-            }
+            track_embeddings_usage(state, &connection, provider, model, &url, &parsed).await;
         }
         return rebuild_json_response(status, bytes.to_vec());
     }
 
     proxy_upstream_response(response, headers).await
+}
+
+/// Record embedding token usage from a successful upstream body.
+///
+/// Only a non-estimated, internally consistent shape is accepted: embeddings
+/// report `prompt_tokens` with zero completion, and the totals have to agree.
+/// Anything else would put a fabricated number into the ledger.
+///
+/// 9router meters on the primary path (embeddings.js:137-150). This used to be
+/// inline in the forwarder, which meant any provider served by a media adapter
+/// returned before reaching it — so adapter-backed embedding spend, the common
+/// case, was never metered at all.
+async fn track_embeddings_usage(
+    state: &AppState,
+    connection: &crate::types::ProviderConnection,
+    provider: &str,
+    model: &str,
+    url: &str,
+    parsed: &Value,
+) {
+    let usage = parsed.get("usage").filter(|v| v.is_object());
+    let estimated = usage
+        .and_then(|u| u.get("estimated"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let prompt_tokens = usage
+        .and_then(|u| u.get("prompt_tokens"))
+        .or_else(|| usage.and_then(|u| u.get("input_tokens")))
+        .and_then(|v| v.as_u64());
+    let completion_tokens = usage
+        .and_then(|u| u.get("completion_tokens"))
+        .or_else(|| usage.and_then(|u| u.get("output_tokens")))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let total_tokens = usage
+        .and_then(|u| u.get("total_tokens"))
+        .and_then(|v| v.as_u64());
+
+    if estimated
+        || !prompt_tokens.is_some_and(|p| p > 0)
+        || completion_tokens != 0
+        || total_tokens != prompt_tokens
+    {
+        return;
+    }
+
+    let connection_id = connection.id.as_str();
+    let api_key = connection
+        .api_key
+        .as_deref()
+        .map(String::from)
+        .unwrap_or_else(|| connection.access_token.clone().unwrap_or_default());
+    let token_usage = crate::types::TokenUsage {
+        prompt_tokens,
+        input_tokens: None,
+        completion_tokens: Some(0),
+        output_tokens: None,
+        total_tokens,
+        reasoning_tokens: None,
+        cached_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        extra: Default::default(),
+    };
+    state
+        .usage_tracker()
+        .track_request(
+            provider,
+            model,
+            Some(&token_usage),
+            Some(connection_id),
+            Some(&api_key),
+            Some(url),
+            None,
+        )
+        .await;
 }
 
 /// Fallback when the upstream body could not be consumed: return an empty
@@ -1077,7 +1111,7 @@ async fn try_provider_adapter(
     model: &str,
     route_kind: &str,
     request_body: &Value,
-) -> Option<Response> {
+) -> Option<Result<Value, crate::core::media::MediaError>> {
     use crate::core::media::{embeddings, image, search, tts, MediaError};
 
     let snapshot = state.db.snapshot();
@@ -1098,7 +1132,7 @@ async fn try_provider_adapter(
         _ => None,
     };
 
-    Some(media_result_to_response(result?))
+    Some(result?)
 }
 
 fn media_result_to_response(result: Result<Value, crate::core::media::MediaError>) -> Response {
