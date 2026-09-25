@@ -4017,79 +4017,79 @@ async fn proxy_response_with_pending_tracking(
                                     }
                                 }
                             }
-                            if let Some(transformer) = transformer.as_mut() {
-                                for line in flush_dashboard_sse_chunk(transformer.as_mut(), &mut pending_text) {
-                                    if let Some(frame) = sse_frame_for_dashboard(&line) {
-                                        yield Ok::<Bytes, std::io::Error>(frame);
-                                    }
-                                }
+                            {
+                    // Everything the stream still owes the client, computed in ONE
+                    // place so the ORDER is a unit-testable contract instead of
+                    // something only a live stream can reveal (bead openproxy-jkit).
+                    // A client stops reading at [DONE], so getting this order
+                    // wrong silently discards the chunk we were holding.
+                    let dashboard_lines = match transformer.as_deref_mut() {
+                        Some(t) => flush_dashboard_sse_chunk(t, &mut pending_text),
+                        None => Vec::new(),
+                    };
+                    let translate_lines =
+                        if needs_stream_translation && !translate_pending.is_empty() {
+                            let last = std::mem::take(&mut translate_pending);
+                            match t_state.as_mut() {
+                                Some(ts) => registry::global_registry().translate_response(
+                                    stream_target_format,
+                                    stream_source_format,
+                                    &Bytes::from(last),
+                                    ts,
+                                ),
+                                None => Vec::new(),
                             }
-                            // EOF flush for the translation / passthrough branch: a
-                            // provider may end the stream without a trailing newline, and
-                            // that last frame is real content, not a truncated fragment.
-                            if needs_stream_translation && !translate_pending.is_empty() {
-                                let last = std::mem::take(&mut translate_pending);
-                                if let Some(ref mut ts) = t_state {
-                                    let chunks = registry::global_registry()
-                                        .translate_response(
-                                            stream_target_format,
-                                            stream_source_format,
-                                            &Bytes::from(last),
-                                            ts,
-                                        );
-                                    for out in chunks {
-                                        if let Some(frame) = sse_frame_for_dashboard(&out) {
-                                            yield Ok::<Bytes, std::io::Error>(frame);
-                                        }
-                                    }
-                                }
+                        } else {
+                            Vec::new()
+                        };
+                    let passthrough_terminal =
+                        take_terminal_passthrough_frame(&mut passthrough_pending).map(|final_frame| {
+                            // The terminal frame runs the SAME pipeline as every
+                            // other frame — fixInvalidId, object/created
+                            // injection and empty-tool_calls deletion all apply,
+                            // or the last frame is the one frame nobody
+                            // normalised.
+                            let text = String::from_utf8_lossy(&final_frame).into_owned();
+                            sanitize_sse_chunk(&passthrough_frame_bytes(
+                                &apply_passthrough_transforms(&text, &provider),
+                            ))
+                        });
+                    let coalescer_lines = if qoder_sse_unwrap {
+                        qoder_coalescer_flush(qoder_coalescer.as_mut())
+                    } else {
+                        Vec::new()
+                    };
+                    let finish_lines = match t_state.as_mut() {
+                        Some(ts) => registry::global_registry().finish_stream(
+                            stream_source_format,
+                            stream_target_format,
+                            ts,
+                        ),
+                        None => Vec::new(),
+                    };
+                    for emit in plan_eof_emits(
+                        took_passthrough,
+                        &provider,
+                        saw_done,
+                        dashboard_lines,
+                        translate_lines,
+                        passthrough_terminal,
+                        coalescer_lines,
+                        finish_lines,
+                    ) {
+                        match emit {
+                            EofEmit::Frame(bytes) => {
+                                yield Ok::<Bytes, std::io::Error>(bytes);
                             }
-                            if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending) {
-                                // The terminal frame runs the SAME pipeline as every other
-                                // frame: without this it skipped fixInvalidId, the
-                                // object/created injection and the empty-tool_calls
-                                // deletion — the same "last frame is special" oversight
-                                // that lost its delimiter.
-                                let text = String::from_utf8_lossy(&final_frame).into_owned();
-                                yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(
-                                    &passthrough_frame_bytes(&apply_passthrough_transforms(&text, &provider)),
+                            EofEmit::Done => {
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                                    b"data: [DONE]\n\n",
                                 ));
                             }
-
-                            // Qoder end-of-stream: flush the usage coalescer (held
-                            // finish+usage → terminal chunk). Qoder only uses Reqwest
-                            // transport so the Hyper branch needs no equivalent.
-                            if qoder_sse_unwrap {
-                                for line in qoder_coalescer_flush(qoder_coalescer.as_mut()) {
-                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
-                                }
-                            }
-                            // End-of-stream flush: emit the terminal chunk + [DONE] for
-                            // buffered binary transforms (kiro EventStream → SSE).
-                            if let Some(ref mut t_state) = t_state {
-                                for line in registry::global_registry().finish_stream(
-                                    stream_source_format,
-                                    stream_target_format,
-                                    t_state,
-                                ) {
-                                    if let Some(frame) = sse_frame_for_dashboard(&line) {
-                                        yield Ok::<Bytes, std::io::Error>(frame);
-                                    }
-                                }
-                            }
-                            // THE [DONE] SENTINEL IS THE LAST YIELD OF THE EOF SEQUENCE.
-                            // Placed after qoder_coalescer_flush and after finish_stream on
-                            // purpose: a client stops reading at [DONE], so emitting it
-                            // earlier makes it discard the finish+usage chunk the coalescer
-                            // holds back, and the terminal chunk finish_stream emits — which
-                            // silently truncated qoder and kiro streams. It is also gated on
-                            // the branch actually taken: a request that went through the
-                            // qoder, dashboard or translation path already has its own
-                            // terminator and must not receive a second one.
-                            if should_emit_done_sentinel(took_passthrough, &provider, saw_done) {
-                                yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
-                            }
-                            record_streaming_usage(&state, &provider, &model,
+                        }
+                    }
+                }
+                record_streaming_usage(&state, &provider, &model,
                                 connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                             state
                                 .usage_live
@@ -4229,58 +4229,70 @@ async fn proxy_response_with_pending_tracking(
                         }
                     }
                 }
-                if let Some(transformer) = transformer.as_mut() {
-                    for line in flush_dashboard_sse_chunk(transformer.as_mut(), &mut pending_text) {
-                        if let Some(frame) = sse_frame_for_dashboard(&line) {
-                            yield Ok::<Bytes, std::io::Error>(frame);
-                        }
-                    }
-                }
-                // EOF flush for the Hyper arm's framing buffers: a provider may
-                // end a stream without a trailing newline, and that last frame
-                // is real content. Ordered BEFORE finish_stream so the frame is
-                // emitted before the terminal [DONE].
-                if !translate_pending2.is_empty() {
-                    let last = std::mem::take(&mut translate_pending2);
-                    if let Some(ref mut ts) = t_state {
-                        let chunks = registry::global_registry().translate_response(
-                            stream_target_format,
+                {
+                    // Same single-source EOF plan as the Reqwest arm, so the
+                    // two cannot drift. See plan_eof_emits for why the ORDER is
+                    // the contract, not an implementation detail.
+                    let dashboard_lines = match transformer.as_deref_mut() {
+                        Some(t) => flush_dashboard_sse_chunk(t, &mut pending_text),
+                        None => Vec::new(),
+                    };
+                    let translate_lines =
+                        if needs_stream_translation && !translate_pending2.is_empty() {
+                            let last = std::mem::take(&mut translate_pending2);
+                            match t_state.as_mut() {
+                                Some(ts) => registry::global_registry().translate_response(
+                                    stream_target_format,
+                                    stream_source_format,
+                                    &Bytes::from(last),
+                                    ts,
+                                ),
+                                None => Vec::new(),
+                            }
+                        } else {
+                            Vec::new()
+                        };
+                    let passthrough_terminal =
+                        take_terminal_passthrough_frame(&mut passthrough_pending2).map(|final_frame| {
+                            let text = String::from_utf8_lossy(&final_frame).into_owned();
+                            sanitize_sse_chunk(&passthrough_frame_bytes(
+                                &apply_passthrough_transforms(&text, &provider),
+                            ))
+                        });
+                    let coalescer_lines = if qoder_sse_unwrap {
+                        qoder_coalescer_flush(qoder_coalescer.as_mut())
+                    } else {
+                        Vec::new()
+                    };
+                    let finish_lines = match t_state.as_mut() {
+                        Some(ts) => registry::global_registry().finish_stream(
                             stream_source_format,
-                            &Bytes::from(last),
+                            stream_target_format,
                             ts,
-                        );
-                        for out in chunks {
-                            if let Some(frame) = sse_frame_for_dashboard(&out) {
-                                yield Ok::<Bytes, std::io::Error>(frame);
+                        ),
+                        None => Vec::new(),
+                    };
+                    for emit in plan_eof_emits(
+                        took_passthrough2,
+                        &provider,
+                        saw_done2,
+                        dashboard_lines,
+                        translate_lines,
+                        passthrough_terminal,
+                        coalescer_lines,
+                        finish_lines,
+                    ) {
+                        match emit {
+                            EofEmit::Frame(bytes) => {
+                                yield Ok::<Bytes, std::io::Error>(bytes);
+                            }
+                            EofEmit::Done => {
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                                    b"data: [DONE]\n\n",
+                                ));
                             }
                         }
                     }
-                }
-                if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending2) {
-                    let text = String::from_utf8_lossy(&final_frame).into_owned();
-                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(
-                        &passthrough_frame_bytes(&apply_passthrough_transforms(&text, &provider)),
-                    ));
-                }
-                // End-of-stream flush: emit the terminal chunk + [DONE] for
-                // buffered binary transforms (kiro EventStream → SSE).
-                if let Some(ref mut t_state) = t_state {
-                    for line in registry::global_registry().finish_stream(
-                        stream_source_format,
-                        stream_target_format,
-                        t_state,
-                    ) {
-                        if let Some(frame) = sse_frame_for_dashboard(&line) {
-                            yield Ok::<Bytes, std::io::Error>(frame);
-                        }
-                    }
-                }
-
-                // The [DONE] sentinel is the LAST yield of the EOF sequence, and
-                // only for a request that actually took the passthrough branch.
-                // See the arm-1 comment for why ordering and gating both matter.
-                if should_emit_done_sentinel(took_passthrough2, &provider, saw_done2) {
-                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
                 }
                 record_streaming_usage(&state, &provider, &model,
                     connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
@@ -4353,6 +4365,74 @@ pub(crate) fn is_done_sentinel(line: &str) -> bool {
     line.trim()
         .strip_prefix("data:")
         .is_some_and(|payload| payload.trim() == "[DONE]")
+}
+
+/// One thing the stream does at end-of-stream, in the order it must happen.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EofEmit {
+    /// A frame already framed for the client (sanitised, delimited).
+    Frame(Bytes),
+    /// The OpenAI terminator, appended only for a passthrough stream.
+    Done,
+}
+
+/// The order of the end-of-stream sequence, as ONE function.
+///
+/// Six review rounds in this epic found the same shape of defect: the fix was
+/// right at the helper and wrong at the call site. A [DONE] sentinel gated on
+/// the provider but not the branch, emitted before the terminal flushes, cut
+/// qoder and kiro streams; a flag declared, read and never assigned; a
+/// terminal frame that skipped every other transform. Every unit test stayed
+/// GREEN through all of them, because they called the helper in isolation and
+/// nothing reached the stream generator.
+///
+/// This makes the ORDER the unit under test:
+///   1. dashboard transformer flush
+///   2. translation flush        (last frame with no trailing newline)
+///   3. passthrough terminal frame, through the SAME transform as every frame
+///   4. qoder usage coalescer flush   (holds a finish+usage chunk)
+///   5. finish_stream terminal chunk  (kiro EventStream -> SSE)
+///   6. the [DONE] sentinel, LAST, and only for a passthrough request
+///
+/// A client stops reading at [DONE]. Emitting it before step 4 or 5 makes the
+/// client discard exactly the chunk those steps exist to deliver.
+pub(crate) fn plan_eof_emits(
+    took_passthrough: bool,
+    provider: &str,
+    saw_done: bool,
+    dashboard_lines: Vec<String>,
+    translate_lines: Vec<String>,
+    passthrough_terminal: Option<Bytes>,
+    coalescer_lines: Vec<String>,
+    finish_lines: Vec<String>,
+) -> Vec<EofEmit> {
+    let mut out = Vec::new();
+
+    for line in dashboard_lines {
+        if let Some(frame) = sse_frame_for_dashboard(&line) {
+            out.push(EofEmit::Frame(frame));
+        }
+    }
+    for out_line in translate_lines {
+        if let Some(frame) = sse_frame_for_dashboard(&out_line) {
+            out.push(EofEmit::Frame(frame));
+        }
+    }
+    if let Some(frame) = passthrough_terminal {
+        out.push(EofEmit::Frame(frame));
+    }
+    for line in coalescer_lines {
+        out.push(EofEmit::Frame(Bytes::from(line)));
+    }
+    for line in finish_lines {
+        if let Some(frame) = sse_frame_for_dashboard(&line) {
+            out.push(EofEmit::Frame(frame));
+        }
+    }
+    if should_emit_done_sentinel(took_passthrough, provider, saw_done) {
+        out.push(EofEmit::Done);
+    }
+    out
 }
 
 /// Whether an upstream content-type must be blocked before its body is piped
@@ -7171,5 +7251,143 @@ mod sse_stall_clock_tests {
                 crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS
             )
         );
+    }
+}
+
+#[cfg(test)]
+mod eof_order_tests {
+    use super::{plan_eof_emits, EofEmit};
+
+    fn f(s: &str) -> bytes::Bytes {
+        bytes::Bytes::copy_from_slice(s.as_bytes())
+    }
+
+    /// Bead openproxy-jkit. A client stops reading at [DONE], so everything the
+    /// stream still owes the client must be emitted BEFORE it. This is the
+    /// order a unit test could never check while the sequence lived inline in
+    /// the async_stream closure — which is how a [DONE] emitted too early went
+    /// unnoticed through six review rounds while every helper test was green.
+    #[test]
+    fn the_done_sentinel_is_always_last() {
+        let plan = plan_eof_emits(
+            true,
+            "openai",
+            false,
+            vec!["data: {\"d\":1}".into()], // dashboard
+            vec!["data: {\"t\":1}".into()], // translate
+            Some(f("data: {\"p\":1}")),
+            vec!["data: {\"c\":1}".into()], // qoder coalescer
+            vec!["data: {\"f\":1}".into()], // finish_stream
+        );
+        assert_eq!(plan.len(), 6);
+        assert_eq!(plan.last(), Some(&EofEmit::Done), "sentinel must be last");
+        assert_eq!(
+            plan.iter().filter(|e| **e == EofEmit::Done).count(),
+            1,
+            "exactly one sentinel"
+        );
+    }
+
+    /// The regression that actually shipped: a kiro request's finish_stream
+    /// terminal chunk arrived AFTER the sentinel, so the client stopped reading
+    /// and lost it.
+    #[test]
+    fn a_kiro_terminal_chunk_precedes_the_sentinel() {
+        let plan = plan_eof_emits(
+            false,
+            "kiro",
+            false,
+            vec![],
+            vec![],
+            None,
+            vec![],
+            vec!["data: {\"type\":\"message_stop\"}".into()],
+        );
+        assert!(
+            plan.iter().all(|e| *e != EofEmit::Done),
+            "a translated stream has no passthrough sentinel at all: {plan:?}"
+        );
+        assert_eq!(plan.len(), 1, "the finish_stream chunk is delivered");
+    }
+
+    /// Same for qoder: the coalescer holds a finish+usage chunk back, and a
+    /// sentinel emitted before it would swallow the usage accounting.
+    #[test]
+    fn a_qoder_usage_chunk_precedes_any_sentinel() {
+        let plan = plan_eof_emits(
+            false,
+            "qoder",
+            false,
+            vec![],
+            vec![],
+            None,
+            vec!["data: {\"usage\":{\"total_tokens\":5}}".into()],
+            vec![],
+        );
+        assert!(plan.iter().all(|e| *e != EofEmit::Done));
+        assert_eq!(plan.len(), 1, "the coalescer chunk is delivered");
+    }
+
+    /// A real passthrough stream gets its frames and then exactly one sentinel.
+    #[test]
+    fn a_passthrough_stream_ends_with_one_sentinel() {
+        let plan = plan_eof_emits(
+            true,
+            "openai",
+            false,
+            vec![],
+            vec![],
+            Some(f("data: {\"p\":1}")),
+            vec![],
+            vec![],
+        );
+        assert_eq!(plan.len(), 2);
+        assert_eq!(plan[0], EofEmit::Frame(f("data: {\"p\":1}")));
+        assert_eq!(plan[1], EofEmit::Done);
+    }
+
+    /// Upstream already terminated: no second sentinel.
+    #[test]
+    fn an_upstream_terminator_is_not_duplicated() {
+        let plan = plan_eof_emits(
+            true,
+            "openai",
+            true,
+            vec![],
+            vec![],
+            Some(f("data: [DONE]")),
+            vec![],
+            vec![],
+        );
+        assert!(plan.iter().all(|e| *e != EofEmit::Done));
+    }
+
+    /// The gemini family still rejects the sentinel even on passthrough.
+    #[test]
+    fn the_gemini_family_gets_no_sentinel() {
+        for p in ["antigravity", "gemini", "vertex"] {
+            let plan = plan_eof_emits(
+                true,
+                p,
+                false,
+                vec![],
+                vec![],
+                Some(f("data: {\"p\":1}")),
+                vec![],
+                vec![],
+            );
+            assert!(
+                plan.iter().all(|e| *e != EofEmit::Done),
+                "{p} must not receive it"
+            );
+        }
+    }
+
+    /// Everything is empty -> nothing is emitted. A no-op EOF must not invent
+    /// a terminator on a stream that produced nothing.
+    #[test]
+    fn an_empty_eof_emits_nothing() {
+        let plan = plan_eof_emits(false, "openai", false, vec![], vec![], None, vec![], vec![]);
+        assert!(plan.is_empty(), "{plan:?}");
     }
 }

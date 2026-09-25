@@ -2302,7 +2302,7 @@ impl DefaultExecutor {
                 // 504 Gateway Timeout: 2 retries x 3s
                 if status == http::StatusCode::GATEWAY_TIMEOUT {
                     if retry + 1 < retry_policy(status).0 {
-                        tokio::time::sleep(Duration::from_secs(3)).await;
+                        tokio::time::sleep(Duration::from_millis(retry_policy(status).1)).await;
                         continue;
                     }
                     // After 2 retries, fall through to next fallback URL.
