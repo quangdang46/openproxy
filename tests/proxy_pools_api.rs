@@ -8,7 +8,7 @@ use axum::http::{Request, StatusCode};
 use jsonwebtoken::{encode, EncodingKey, Header as JwtHeader};
 use once_cell::sync::Lazy;
 use openproxy::db::Db;
-use openproxy::server::auth::jwt_secret;
+use openproxy::server::auth::{generate_jti, jwt_secret};
 use openproxy::server::state::AppState;
 use openproxy::types::{ApiKey, ProviderConnection, ProxyPool};
 use serde::Serialize;
@@ -165,6 +165,7 @@ fn proxy_pool(id: &str, name: &str, is_active: bool, updated_at: &str) -> ProxyP
 struct DashboardClaims {
     authenticated: bool,
     exp: usize,
+    jti: String,
 }
 
 fn dashboard_cookie() -> String {
@@ -177,6 +178,10 @@ fn dashboard_cookie() -> String {
         &DashboardClaims {
             authenticated: true,
             exp: now + 3600,
+            // Every session the server issues carries a jti, and the session
+            // gate rejects one without it (auth/mod.rs:318) — mint through the
+            // same helper the login/OIDC/SAML issuers use.
+            jti: generate_jti(),
         },
         &EncodingKey::from_secret(jwt_secret().as_bytes()),
     )
