@@ -3823,10 +3823,13 @@ async fn proxy_response_with_pending_tracking(
             let compression = compression.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
-            // Framing buffer for the translation / passthrough branches
-            // (bead openproxy-0ph4). Distinct from `pending_text`, which the
-            // dashboard transformer branch uses.
-            let mut translate_pending = String::new();
+            // Byte framing buffers for the translation and raw-passthrough
+            // branches (bead openproxy-0ph4). Bytes, not String, so a
+            // multi-byte character split across two reads is not corrupted.
+            // Distinct from `pending_text`, which the dashboard transformer
+            // branch uses.
+            let mut translate_pending: Vec<u8> = Vec::new();
+            let mut passthrough_pending: Vec<u8> = Vec::new();
             let custom_tool_names = custom_tool_names.clone();
             let stream = async_stream::stream! {
                 let mut upstream = response.bytes_stream();
@@ -3931,8 +3934,12 @@ async fn proxy_response_with_pending_tracking(
                                 // one the dashboard transformer path already
                                 // used, generalised so all three stream
                                 // branches share it.
-                                translate_pending.push_str(&String::from_utf8_lossy(&chunk));
-                                for line in split_complete_sse_lines(&mut translate_pending) {
+                                translate_pending.extend_from_slice(&chunk);
+                                for line in drain_complete_sse_lines(&mut translate_pending) {
+                                    // t_state is Some whenever
+                                    // needs_stream_translation is true, so the
+                                    // None arm is unreachable; it is kept as a
+                                    // compile-time total match, not a fallback.
                                     if let Some(ref mut ts) = t_state {
                                         let chunks = registry::global_registry()
                                             .translate_response(
@@ -3946,12 +3953,13 @@ async fn proxy_response_with_pending_tracking(
                                                 yield Ok::<Bytes, std::io::Error>(frame);
                                             }
                                         }
-                                    } else {
-                                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
                                     }
                                 }
                             } else {
-                                yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&chunk));
+                                passthrough_pending.extend_from_slice(&chunk);
+                                for line in drain_complete_sse_lines(&mut passthrough_pending) {
+                                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
+                                }
                             }
                         }
                         Ok(Ok(None)) => break,
@@ -3981,27 +3989,26 @@ async fn proxy_response_with_pending_tracking(
                 // provider may end the stream without a trailing newline, and
                 // that last frame is real content, not a truncated fragment.
                 if needs_stream_translation && !translate_pending.is_empty() {
-                    let mut last = std::mem::take(&mut translate_pending);
-                    if last.ends_with('\r') {
-                        last.pop();
-                    }
-                    if !last.is_empty() {
-                        if let Some(ref mut ts) = t_state {
-                            let chunks = registry::global_registry()
-                                .translate_response(
-                                    stream_target_format,
-                                    stream_source_format,
-                                    &Bytes::from(last),
-                                    ts,
-                                );
-                            for out in chunks {
-                                if let Some(frame) = sse_frame_for_dashboard(&out) {
-                                    yield Ok::<Bytes, std::io::Error>(frame);
-                                }
+                    let last = std::mem::take(&mut translate_pending);
+                    if let Some(ref mut ts) = t_state {
+                        let chunks = registry::global_registry()
+                            .translate_response(
+                                stream_target_format,
+                                stream_source_format,
+                                &Bytes::from(last),
+                                ts,
+                            );
+                        for out in chunks {
+                            if let Some(frame) = sse_frame_for_dashboard(&out) {
+                                yield Ok::<Bytes, std::io::Error>(frame);
                             }
-                        } else {
-                            yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(last)));
                         }
+                    }
+                }
+                if !passthrough_pending.is_empty() {
+                    let mut last = std::mem::take(&mut passthrough_pending);
+                    for line in drain_complete_sse_lines(&mut last) {
+                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
                     }
                 }
                 // Qoder end-of-stream: flush the usage coalescer (held
@@ -4044,6 +4051,13 @@ async fn proxy_response_with_pending_tracking(
             let compression = compression.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
+            // Byte framing buffers for the SECOND (Hyper) stream arm — the
+            // DEFAULT arm: use_hyper_transport (executor/default.rs:2409) is
+            // true whenever there is no proxy and the URL ends in
+            // /chat/completions, which is most non-proxy traffic. It carried
+            // the same raw-chunk defect the Reqwest arm had.
+            let mut translate_pending2: Vec<u8> = Vec::new();
+            let mut passthrough_pending2: Vec<u8> = Vec::new();
             let custom_tool_names2 = custom_tool_names.clone();
             let stream = async_stream::stream! {
                 // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
@@ -4106,24 +4120,28 @@ async fn proxy_response_with_pending_tracking(
                                         }
                                     }
                                 } else if needs_stream_translation {
-                                    if let Some(ref mut t_state) = t_state {
-                                        let chunks = registry::global_registry()
-                                            .translate_response(
-                                                stream_target_format,
-                                                stream_source_format,
-                                                &data,
-                                                t_state,
-                                            );
-                                        for line in chunks {
-                                            if let Some(frame) = sse_frame_for_dashboard(&line) {
-                                                yield Ok::<Bytes, std::io::Error>(frame);
+                                    translate_pending2.extend_from_slice(&data);
+                                    for line in drain_complete_sse_lines(&mut translate_pending2) {
+                                        if let Some(ref mut ts) = t_state {
+                                            let chunks = registry::global_registry()
+                                                .translate_response(
+                                                    stream_target_format,
+                                                    stream_source_format,
+                                                    &Bytes::from(line),
+                                                    ts,
+                                                );
+                                            for out in chunks {
+                                                if let Some(frame) = sse_frame_for_dashboard(&out) {
+                                                    yield Ok::<Bytes, std::io::Error>(frame);
+                                                }
                                             }
                                         }
-                                    } else {
-                                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&data));
                                     }
                                 } else {
-                                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&data));
+                                    passthrough_pending2.extend_from_slice(&data);
+                                    for line in drain_complete_sse_lines(&mut passthrough_pending2) {
+                                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
+                                    }
                                 }
                             }
                         }
@@ -4147,6 +4165,32 @@ async fn proxy_response_with_pending_tracking(
                         if let Some(frame) = sse_frame_for_dashboard(&line) {
                             yield Ok::<Bytes, std::io::Error>(frame);
                         }
+                    }
+                }
+                // EOF flush for the Hyper arm's framing buffers: a provider may
+                // end a stream without a trailing newline, and that last frame
+                // is real content. Ordered BEFORE finish_stream so the frame is
+                // emitted before the terminal [DONE].
+                if !translate_pending2.is_empty() {
+                    let last = std::mem::take(&mut translate_pending2);
+                    if let Some(ref mut ts) = t_state {
+                        let chunks = registry::global_registry().translate_response(
+                            stream_target_format,
+                            stream_source_format,
+                            &Bytes::from(last),
+                            ts,
+                        );
+                        for out in chunks {
+                            if let Some(frame) = sse_frame_for_dashboard(&out) {
+                                yield Ok::<Bytes, std::io::Error>(frame);
+                            }
+                        }
+                    }
+                }
+                if !passthrough_pending2.is_empty() {
+                    let mut last = std::mem::take(&mut passthrough_pending2);
+                    for line in drain_complete_sse_lines(&mut last) {
+                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
                     }
                 }
                 // End-of-stream flush: emit the terminal chunk + [DONE] for
@@ -4572,6 +4616,48 @@ pub(crate) fn split_complete_sse_lines(buffer: &mut String) -> Vec<String> {
         if !line.is_empty() {
             out.push(line);
         }
+    }
+    out
+}
+
+/// Drain complete SSE lines out of a raw byte buffer.
+///
+/// A transport chunk is NOT one SSE event: a single read can carry several
+/// frames, and one frame can straddle two reads. 9router buffers per line and
+/// only acts on COMPLETE lines
+/// (.tmp/9router/open-sse/utils/stream.js:110-119: "const lines =
+/// buffer.split(chr(10)); buffer = lines.pop() || ''").
+///
+/// The buffer is BYTES, not a decoded String, and that is the point rather than
+/// an implementation detail. Decoding each chunk independently with
+/// `String::from_utf8_lossy` corrupts any multi-byte character that straddles a
+/// read boundary — a 2-byte Vietnamese diacritic or a 4-byte emoji yields U+FFFD
+/// at the end of one chunk AND again at the start of the next, turning ONE
+/// character into TWO replacement characters, permanently, on the main
+/// OpenAI-compatible path. A line terminated by `\n` is a safe decode boundary
+/// for valid UTF-8, so decoding each COMPLETE line — and only complete lines —
+/// removes that whole failure class.
+///
+/// A trailing fragment with no terminator is always retained for the caller's
+/// EOF flush; it is never acted on early.
+pub(crate) fn drain_complete_sse_lines(buffer: &mut Vec<u8>) -> Vec<String> {
+    let mut out = Vec::new();
+    loop {
+        let Some(nl) = buffer.iter().position(|b| *b == b'\n') else {
+            break;
+        };
+        let mut raw: Vec<u8> = buffer.drain(..=nl).collect();
+        raw.pop(); // the newline
+        if raw.last() == Some(&b'\r') {
+            raw.pop();
+        }
+        if raw.is_empty() {
+            continue;
+        }
+        // An incomplete multi-byte sequence cannot be silently mangled here:
+        // the line is complete, so String::from_utf8_lossy only replaces bytes
+        // that were never valid UTF-8 to begin with.
+        out.push(String::from_utf8_lossy(&raw).into_owned());
     }
     out
 }
@@ -6006,80 +6092,121 @@ mod extractor_framing_tests {
 }
 
 #[cfg(test)]
+#[cfg(test)]
 mod sse_framing_tests {
-    use super::split_complete_sse_lines;
+    use super::drain_complete_sse_lines;
+
+    fn buf_of(bytes: &[u8]) -> Vec<u8> {
+        bytes.to_vec()
+    }
 
     /// Regression (bead openproxy-0ph4): one transport chunk is NOT one SSE
-    /// event. A single read can carry several frames, and one frame can
-    /// straddle two reads. 9router buffers per line and only acts on COMPLETE
-    /// lines (open-sse/utils/stream.js:110-119), so both cases must produce the
-    /// same frames as the equivalent single-read stream.
+    /// event. One read can carry several frames; one frame can straddle two
+    /// reads. 9router acts only on COMPLETE lines
+    /// (.tmp/9router/open-sse/utils/stream.js:110-119).
     #[test]
     fn one_chunk_carrying_two_frames_yields_two_lines() {
-        let mut buf = String::new();
-        buf.push_str("data: {\"a\":1}\ndata: {\"a\":2}\n");
-        let lines = split_complete_sse_lines(&mut buf);
-        assert_eq!(lines, vec!["data: {\"a\":1}", "data: {\"a\":2}"]);
-        assert!(buf.is_empty(), "both frames consumed");
+        let mut buf = buf_of(b"data: {\"a\":1}\ndata: {\"a\":2}\n");
+        assert_eq!(
+            drain_complete_sse_lines(&mut buf),
+            vec!["data: {\"a\":1}", "data: {\"a\":2}"]
+        );
+        assert!(buf.is_empty());
     }
 
     #[test]
     fn a_frame_split_across_two_reads_is_emitted_exactly_once() {
-        let mut buf = String::new();
-        // read 1: half a frame
-        buf.push_str("data: {\"a\"");
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"data: {\"a\"");
         assert!(
-            split_complete_sse_lines(&mut buf).is_empty(),
+            drain_complete_sse_lines(&mut buf).is_empty(),
             "an incomplete frame must not be acted on"
         );
-        // read 2: the rest
-        buf.push_str(":1}\n");
-        let lines = split_complete_sse_lines(&mut buf);
-        assert_eq!(lines, vec!["data: {\"a\":1}"], "emitted exactly once");
+        buf.extend_from_slice(b":1}\n");
+        assert_eq!(drain_complete_sse_lines(&mut buf), vec!["data: {\"a\":1}"]);
         assert!(buf.is_empty());
     }
 
-    /// Splitting on a naive newline scan corrupts any frame whose JSON string
-    /// value contains a newline — the buffer is a LINE buffer, so the embedded
-    /// newline is part of the line until the REAL terminator arrives.
+    /// THE FINDING review surfaced: the buffer is bytes, and decoding each
+    /// CHUNK with String::from_utf8_lossy turns ONE multi-byte character into
+    /// TWO U+FFFD when it straddles a read boundary. That is permanent
+    /// corruption on the main OpenAI-compatible path. A line terminated by
+    /// \n is a safe decode boundary, so draining whole lines removes it.
     #[test]
-    fn a_brace_inside_a_string_value_does_not_split_a_frame() {
-        let mut buf = String::new();
-        // real newlines are escaped in JSON, so a single physical line can hold
-        // braces and quotes freely
-        buf.push_str("data: {\"text\":\"a}b{c}\",\"n\":1}\n");
-        let lines = split_complete_sse_lines(&mut buf);
+    fn a_multibyte_char_split_across_reads_survives_intact() {
+        let full = "data: {\"text\":\"xin chào\"}"; // 2-byte diacritic
+        let bytes = full.as_bytes();
+        // find a byte offset that lands INSIDE the multi-byte char
+        let split = full.find("ào").unwrap() + 1; // between the two bytes of 'à'
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&bytes[..split]);
+        assert!(drain_complete_sse_lines(&mut buf).is_empty());
+        buf.extend_from_slice(&bytes[split..]);
+        buf.push(b'\n');
+        let lines = drain_complete_sse_lines(&mut buf);
+        assert_eq!(lines, vec![full], "the character must survive intact");
+        assert!(
+            !lines[0].contains('\u{FFFD}'),
+            "no replacement char emitted"
+        );
+    }
+
+    #[test]
+    fn a_four_byte_emoji_split_across_reads_survives_intact() {
+        let full = "data: {\"e\":\"\u{1F600}\"}";
+        let bytes = full.as_bytes();
+        let pos = full.find('\u{1F600}').unwrap();
+        let split = pos + 2; // mid emoji
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&bytes[..split]);
+        assert!(drain_complete_sse_lines(&mut buf).is_empty());
+        buf.extend_from_slice(&bytes[split..]);
+        buf.push(b'\n');
+        let lines = drain_complete_sse_lines(&mut buf);
+        assert_eq!(lines, vec![full]);
+        assert!(!lines[0].contains('\u{FFFD}'));
+    }
+
+    /// A frame whose JSON string value contains braces must not be split.
+    #[test]
+    fn braces_inside_a_string_value_do_not_split_a_frame() {
+        let mut buf = buf_of(b"data: {\"text\":\"a}b{c}\"}\n");
+        let lines = drain_complete_sse_lines(&mut buf);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("a}b{c}"));
     }
 
-    /// Named-event frames: the event: line and the data: line are separate
-    /// physical lines and BOTH must survive intact.
+    /// A named-event frame is TWO physical lines and both must survive.
     #[test]
-    fn a_named_event_frame_keeps_both_of_its_lines() {
-        let mut buf = String::new();
-        buf.push_str("event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
-        let lines = split_complete_sse_lines(&mut buf);
+    fn a_named_event_frame_keeps_both_lines() {
+        let mut buf = buf_of(b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
         assert_eq!(
-            lines,
+            drain_complete_sse_lines(&mut buf),
             vec!["event: message_start", "data: {\"type\":\"message_start\"}"]
         );
     }
 
-    /// Whatever survives without a trailing newline is the caller's EOF flush
-    /// responsibility; the buffer must still hold it, not drop it.
+    /// No trailing newline: held for the caller's EOF flush, never dropped.
     #[test]
     fn a_trailing_frame_without_a_newline_stays_in_the_buffer() {
-        let mut buf = String::new();
-        buf.push_str("data: {\"a\":1}");
-        assert!(split_complete_sse_lines(&mut buf).is_empty());
-        assert_eq!(buf, "data: {\"a\":1}", "held for the EOF flush");
+        let mut buf = buf_of(b"data: {\"a\":1}");
+        assert!(drain_complete_sse_lines(&mut buf).is_empty());
+        assert_eq!(buf, b"data: {\"a\":1}");
     }
 
     #[test]
     fn crlf_terminators_are_normalised() {
-        let mut buf = String::new();
-        buf.push_str("data: {\"a\":1}\r\n");
-        assert_eq!(split_complete_sse_lines(&mut buf), vec!["data: {\"a\":1}"]);
+        let mut buf = buf_of(b"data: {\"a\":1}\r\n");
+        assert_eq!(drain_complete_sse_lines(&mut buf), vec!["data: {\"a\":1}"]);
+    }
+
+    /// Blank keep-alive lines are separators, not frames.
+    #[test]
+    fn blank_separator_lines_produce_no_output() {
+        let mut buf = buf_of(b"data: {\"a\":1}\n\ndata: {\"a\":2}\n");
+        assert_eq!(
+            drain_complete_sse_lines(&mut buf),
+            vec!["data: {\"a\":1}", "data: {\"a\":2}"]
+        );
     }
 }
