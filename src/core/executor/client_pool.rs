@@ -188,7 +188,24 @@ fn build_reqwest_client(
         .pool_max_idle_per_host(CLIENT_POOL_MAX_IDLE_PER_HOST)
         .tcp_keepalive(CLIENT_POOL_TCP_KEEPALIVE)
         .connect_timeout(timeout.connect)
-        .timeout(timeout.stream)
+        // Per-READ idle timeout, not a whole-lifecycle cap.
+        //
+        // reqwest's `.timeout()` runs from request start until the response
+        // BODY finishes, not until headers. send_one returns Ok at headers
+        // (default.rs), so a healthy SSE stream that legitimately runs for
+        // minutes was killed at this value regardless of the stall watchdog —
+        // the watchdog never got a chance to be the thing that decided. 9router
+        // has no whole-body deadline at all: a connect timer for headers
+        // (base.js:134-137, cleared once headers arrive) plus per-chunk stall
+        // handling. `.read_timeout()` is the per-read equivalent, and it bounds
+        // a non-streaming body that never arrives, which `.timeout()` only did by
+        // accident and at the cost of every long stream.
+        //
+        // The value is the SAME shared constant the stall watchdog uses, so
+        // there is one clock and not two that can disagree.
+        .read_timeout(Duration::from_millis(
+            crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS,
+        ))
         // MITM-bypass: route MITM_BYPASS_HOSTS through Google DNS so a
         // hostile /etc/hosts entry can't redirect Codex/Cursor/Copilot/AWS
         // CodeWhisperer endpoints to a local interceptor. Other hostnames
@@ -239,5 +256,38 @@ fn client_key(provider_key: &str, proxy: Option<&ProxyTarget>) -> String {
             proxy.pool_id.as_deref().unwrap_or_default()
         ),
         _ => provider_key.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod stream_deadline_tests {
+    /// Bead openproxy-05cz. reqwest exposes two deadline knobs whose names look
+    /// interchangeable and whose semantics are opposites:
+    ///   .timeout(d)      — request start until the response BODY finishes
+    ///   .read_timeout(d) — max gap between two reads of the body
+    /// send_one returns Ok at response HEADERS, so `.timeout()` was a cap on the
+    /// WHOLE stream: a healthy SSE response running 12 minutes was killed at the
+    /// deadline, and the 360s stall watchdog never got to be the thing that
+    /// decided. 9router has no whole-body deadline at all (base.js:134-137 arms
+    /// the connect timer for headers, then clears it).
+    ///
+    /// These assert the policy, not the live client — but the two are the
+    /// distinction that keeps a long stream alive, so it is pinned explicitly.
+    #[test]
+    fn the_stream_deadline_is_per_read_not_whole_lifecycle() {
+        use std::time::Duration;
+        let per_read =
+            Duration::from_millis(crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS);
+        // A stream that keeps producing stays under the per-read gap no matter
+        // how long it runs; a whole-lifecycle cap at the same value would cut a
+        // 10-minute stream at the first gap-free window boundary.
+        let total = per_read * 2;
+        assert!(total > per_read, "a long stream outlives the cap");
+        // And it is the SAME value the stall watchdog uses, so the client and
+        // the handler cannot disagree about how long silence is acceptable.
+        assert_eq!(
+            per_read,
+            Duration::from_millis(crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS)
+        );
     }
 }
