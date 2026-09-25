@@ -21,6 +21,7 @@ use axum::{
         header::{self, HeaderName},
         HeaderMap, HeaderValue, Method, Request, StatusCode, Uri,
     },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     Router,
 };
@@ -29,6 +30,7 @@ use futures_util::TryStreamExt;
 #[cfg(feature = "embed-web")]
 use rust_embed::RustEmbed;
 
+use crate::server::auth::require_dashboard_session;
 use crate::server::state::AppState;
 
 /// Embedded copy of `web/dist/`, baked at build time. The `embed-web` feature
@@ -38,8 +40,94 @@ use crate::server::state::AppState;
 #[folder = "web/dist/"]
 struct WebAssets;
 
-pub fn routes() -> Router<AppState> {
-    Router::new().fallback(dashboard_fallback)
+pub fn routes(state: AppState) -> Router<AppState> {
+    Router::new()
+        .fallback(dashboard_fallback)
+        .layer(middleware::from_fn_with_state(state, dashboard_access_gate))
+}
+
+/// Pages that must stay reachable without a session, or onboarding breaks:
+/// you cannot log in from a login page that needs a login, and the OAuth
+/// callback has to land somewhere after the provider redirect.
+fn is_public_page(path: &str) -> bool {
+    matches!(path, "/" | "/login" | "/callback" | "/landing")
+}
+
+/// Gate the dashboard shell.
+///
+/// The shell was served for ANY unauthenticated `/dashboard/*` deep link, so a
+/// crawler or an uptime monitor saw 200 for a route that had been deleted or
+/// renamed — route regressions were undetectable — and a stale deep link landed
+/// on a plausible-looking but wrong screen with no not-found signal. This is
+/// navigation only: `is_rust_owned_path` hard-404s `/api`, `/v1` and `/codex`,
+/// and the API layer keeps its own gate, so no request path or data is exposed
+/// by serving the shell.
+///
+/// The tunnel/tailscale host gate is applied here for the same reason it is
+/// applied to the API: a deployment reached over a tunnel should not serve the
+/// dashboard to a host it was not meant to be reachable from.
+async fn dashboard_access_gate(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Result<Response, Response> {
+    let path = request.uri().path().to_string();
+    if is_public_page(&path) || is_rust_owned_path(&path) {
+        return Ok(next.run(request).await);
+    }
+
+    let snapshot = state.db.snapshot();
+    let settings = &snapshot.settings;
+
+    if let Err(error) = require_dashboard_session(request.headers(), &state.db) {
+        // Without a session there is nothing to show but the login form, and
+        // a redirect is what a browser follows and a crawler records.
+        let _ = error;
+        return Ok(axum::response::Redirect::temporary("/login").into_response());
+    }
+
+    if is_tunnel_host(request.headers(), settings) && !settings.tunnel_dashboard_access {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            "Dashboard is not reachable over a tunnel or tailscale host",
+        )
+            .into_response());
+    }
+
+    Ok(next.run(request).await)
+}
+
+/// Whether the request arrived on a configured tunnel/tailscale host.
+/// Mirrors the API surface's check so both agree on what "tunnel" means.
+fn is_tunnel_host(headers: &HeaderMap, settings: &crate::types::Settings) -> bool {
+    let host = headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            value
+                .split(':')
+                .next()
+                .unwrap_or(value)
+                .to_ascii_lowercase()
+        })
+        .unwrap_or_default();
+    if host.is_empty() {
+        return false;
+    }
+    let matches = |url: &str| {
+        url.split("://")
+            .nth(1)
+            .unwrap_or(url)
+            .split('/')
+            .next()
+            .unwrap_or("")
+            .split(':')
+            .next()
+            .unwrap_or("")
+            .eq_ignore_ascii_case(&host)
+    };
+    (!settings.tunnel_url.trim().is_empty() && matches(&settings.tunnel_url))
+        || (!settings.tailscale_url.trim().is_empty() && matches(&settings.tailscale_url))
 }
 
 async fn dashboard_fallback(State(state): State<AppState>, request: Request<Body>) -> Response {
