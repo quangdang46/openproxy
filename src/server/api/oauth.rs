@@ -2939,15 +2939,31 @@ async fn kiro_social_exchange(
 }
 
 async fn start_device_code_compat(
+    State(state): State<AppState>,
     Path(provider): Path<String>,
     Query(query): Query<DeviceCodeCompatQuery>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
+    // Kiro has its own register-client handshake below. Every other
+    // device-code provider goes through the shared implementation, which the
+    // dashboard could never reach before: this handler used to answer 400 for
+    // anything that was not literally "kiro", so 10 of the 11 providers the
+    // modal offers failed instantly.
     if provider != "kiro" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "Provider does not support device code flow" })),
+        if !is_device_code_provider(&provider) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "Provider does not support device code flow" })),
+            )
+                .into_response();
+        }
+        return start_device_code(
+            State(state),
+            Path(provider),
+            Query(DeviceCodeBody { redirect_uri: None }),
+            headers,
         )
-            .into_response();
+        .await;
     }
 
     let region = normalize_kiro_region(query.region.as_deref());
@@ -4759,11 +4775,23 @@ pub async fn start_device_code(
     Query(_query): Query<DeviceCodeBody>,
     headers: axum::http::HeaderMap,
 ) -> Response {
-    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
-        Ok(key) => key,
-        Err(e) => return crate::server::api::auth_error_response(e),
+    // The CLI presents an API key; the dashboard presents a session cookie and
+    // no key at all, which used to make this endpoint unreachable from the UI.
+    // A session-only caller gets a fresh id for this flow: store_connection
+    // reuses a connection by `id.contains(account_id)`, so a fresh value can
+    // never match — and therefore never update — some other provider's
+    // connection. Reconnecting creates a new connection, which is the safe
+    // direction.
+    let account_id = match require_api_key_with_reload(&headers, &state.db).await {
+        Ok(key) => key.id,
+        Err(_) => {
+            if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state)
+            {
+                return response;
+            }
+            format!("dashboard-{}", uuid::Uuid::new_v4())
+        }
     };
-    let account_id = api_key.id;
 
     if !is_device_code_provider(&provider) {
         return make_error_response(
@@ -4916,13 +4944,24 @@ pub async fn poll_device_code(
         return poll_kiro_device_code_compat(&state, body).await;
     }
 
-    let api_key = match require_api_key_with_reload(&headers, &state.db).await {
-        Ok(key) => key,
-        Err(e) => return crate::server::api::auth_error_response(e),
-    };
-    let account_id = api_key.id;
+    // The dashboard drives this flow with a session cookie and sends no API
+    // key, so requiring one made every non-kiro poll fail 401 before it ever
+    // reached the field lookup below — the pending→authorized transition was
+    // unreachable from the UI. The connection is stored against the flow's own
+    // account_id, not this one, so accepting a session changes nothing else.
+    if let Err(response) = super::require_dashboard_or_management_api_key(&headers, &state) {
+        return response;
+    }
 
-    let device_code = match body.get("device_code").and_then(|v| v.as_str()) {
+    // The dashboard posts camelCase (OAuthModal.tsx:153-157); the CLI posts
+    // snake_case (cli/provider_oauth.rs:128). Requiring one spelling made the
+    // transition unreachable from the UI, and the kiro-scoped compat struct
+    // already showed the intended shape. Accept both.
+    let device_code = match body
+        .get("device_code")
+        .or_else(|| body.get("deviceCode"))
+        .and_then(|v| v.as_str())
+    {
         Some(code) => code.trim().to_string(),
         None => {
             return make_error_response(
@@ -4933,8 +4972,6 @@ pub async fn poll_device_code(
             );
         }
     };
-
-    let _account_id = account_id;
 
     let pending_flow = state.pending_flows.get(&device_code);
     let flow = match pending_flow {
