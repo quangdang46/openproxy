@@ -3274,6 +3274,34 @@ pub enum SseEvent {
 mod tests {
     use super::*;
 
+    /// openproxy-x9sm: the status for a non-streaming turn is decided by
+    /// whether the body is a bare error envelope. Parsing, not substring
+    /// matching, is what keeps a completion that merely mentions "error" from
+    /// being answered with a 400.
+    #[test]
+    fn error_envelope_detection_distinguishes_failures_from_completions() {
+        let failure = br#"{"error":{"message":"boom","type":"api_error"}}"#;
+        assert!(
+            is_json_error_envelope(failure),
+            "a bare error envelope must be detected"
+        );
+
+        let completion = br#"{"id":"chatcmpl-1","choices":[{"message":{"content":"hi"}}]}"#;
+        assert!(
+            !is_json_error_envelope(completion),
+            "a normal completion must not be read as a failure"
+        );
+
+        // The old shape: SSE framing under a JSON content-type. Not JSON, so
+        // not an envelope — which is why the emitter had to change too rather
+        // than rely on sniffing alone.
+        let sse = b"data: {\"error\":{}}\n\ndata: [DONE]\n\n";
+        assert!(!is_json_error_envelope(sse));
+
+        assert!(!is_json_error_envelope(b""));
+        assert!(!is_json_error_envelope(b"not json at all"));
+    }
+
     #[test]
     fn test_encode_varint() {
         // Test basic varint encoding
