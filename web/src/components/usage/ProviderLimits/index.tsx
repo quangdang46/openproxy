@@ -8,18 +8,31 @@ import {
   parseQuotaData,
   calculatePercentage,
   QUOTA_SORT_OPTIONS,
+  ACCOUNT_FILTER_OPTIONS,
+  ACCOUNT_PAGE_SIZE_OPTIONS,
+  ACCOUNT_PAGE_SIZE_MAX,
+  CONNECTIONS_PAGE_SIZE,
   CLAUDE_REFRESH_INTERVAL_MS,
   setQuotaCache,
   buildLoadingState,
   filterQuotaStateByConnections,
   filterQuotasByVisibility,
+  getConnectionsEmptyMessage,
+  getConnectionsPaginationSummary,
   getHiddenQuotaRows,
+  getPageSizeLabel,
+  getPaginationPageValue,
+  getProviderOptions,
   getQuotaVisibilityKey,
+  getSafePagination,
+  getSafeTotals,
   getConnectionLabel as getSharedConnectionLabel,
+  shouldResetPage,
   sortVisibleConnections as sortVisibleConnectionsSh,
   kiroMethodLabel,
   kiroRegion,
 } from "./utils";
+import type { ConnectionsPagination, ConnectionsTotals } from "./utils";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import { useSettingsStore } from "@/store/settingsStore";
 import Card from "@/shared/components/Card";
@@ -166,6 +179,25 @@ export default function ProviderLimits() {
   const [selectedConnection, setSelectedConnection] = useState<Connection | null>(null);
   const [proxyPools, setProxyPools] = useState<ProxyPool[]>([]);
   const [providerFilter, setProviderFilter] = useState<string>("all");
+  // Provider list for the dropdown comes from the server: it spans every eligible
+  // connection, not just the rows on the current page.
+  const [providerOptions, setProviderOptions] = useState<string[]>([]);
+  const [accountFilter, setAccountFilter] = useState<string>("all");
+  const [page, setPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<number>(CONNECTIONS_PAGE_SIZE);
+  const [customPageSizeInput, setCustomPageSizeInput] = useState(
+    String(CONNECTIONS_PAGE_SIZE),
+  );
+  const [pagination, setPagination] = useState<ConnectionsPagination>({
+    page: 1,
+    pageSize: CONNECTIONS_PAGE_SIZE,
+    total: 0,
+    totalPages: 1,
+  });
+  const [totals, setTotals] = useState<ConnectionsTotals>({
+    eligibleConnections: 0,
+    providerFilteredConnections: 0,
+  });
   const [expiringFirst, setExpiringFirst] = useState<boolean>(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState<boolean>(false);
   const [bulkToggling, setBulkToggling] = useState<boolean>(false);
@@ -182,22 +214,46 @@ export default function ProviderLimits() {
   const intervalRef = useRef<NodeJS.Timeout | null>(null);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Fetch all provider connections
-  const fetchConnections = useCallback(async () => {
-    try {
-      const response = await fetch("/api/providers");
-      if (!response.ok) throw new Error("Failed to fetch connections");
+  // Fetch one page of provider connections. The server applies the usage-eligible
+  // filter, the provider filter, the account-status filter and the page window,
+  // so `connections` is already the final set to render.
+  const fetchConnections = useCallback(
+    async (targetPage: number = page) => {
+      try {
+        const params = new URLSearchParams({
+          page: String(targetPage),
+          pageSize: String(pageSize),
+          accountStatus: accountFilter,
+          sort: "priority",
+        });
+        if (providerFilter !== "all") {
+          params.set("provider", providerFilter);
+        }
 
-      const data = await response.json();
-      const connectionList = data.connections || [];
-      setConnections(connectionList);
-      return connectionList;
-    } catch (error) {
-      console.error("Error fetching connections:", error);
-      setConnections([]);
-      return [];
-    }
-  }, []);
+        const response = await fetch(`/api/providers?${params.toString()}`);
+        if (!response.ok) throw new Error("Failed to fetch connections");
+
+        const data = await response.json();
+        const connectionList = data.connections || [];
+        setConnections(connectionList);
+        setProviderOptions(getProviderOptions(data.providerOptions));
+        setPagination(getSafePagination(data.pagination, pageSize));
+        setTotals(getSafeTotals(data.totals, connectionList.length));
+        // The server clamps a page past the end back to the last real page, so a
+        // delete or a filter change can move the user without a click.
+        setPage(getPaginationPageValue(data.pagination, targetPage));
+        return connectionList;
+      } catch (error) {
+        console.error("Error fetching connections:", error);
+        setConnections([]);
+        setProviderOptions([]);
+        setPagination({ page: 1, pageSize, total: 0, totalPages: 1 });
+        setTotals({ eligibleConnections: 0, providerFilteredConnections: 0 });
+        return [];
+      }
+    },
+    [accountFilter, page, pageSize, providerFilter],
+  );
 
   // Fetch quota for a specific connection
   const fetchQuota = useCallback(async (connectionId: string, provider: string, { force = false }: { force?: boolean } = {}) => {
@@ -578,21 +634,18 @@ export default function ProviderLimits() {
       force || conn.provider !== "claude" || tick % claudeEvery === 0;
 
     try {
-      const conns = await fetchConnections();
+      const visibleConnections = await fetchConnections(page);
 
-      // Filter eligible connections (OAuth + whitelisted apikey)
-      const eligibleConnections = conns.filter(isUsageEligible);
-
-      setLoading(buildLoadingState(eligibleConnections));
+      setLoading(buildLoadingState(visibleConnections));
       setErrors((prev) =>
-        filterQuotaStateByConnections(prev, eligibleConnections),
+        filterQuotaStateByConnections(prev, visibleConnections),
       );
       setQuotaData((prev) =>
-        filterQuotaStateByConnections(prev, eligibleConnections),
+        filterQuotaStateByConnections(prev, visibleConnections),
       );
 
       await Promise.all(
-        eligibleConnections
+        visibleConnections
           .filter(shouldFetch)
           .map((conn) => fetchQuota(conn.id, conn.provider, { force })),
       );
@@ -603,34 +656,34 @@ export default function ProviderLimits() {
     } finally {
       setRefreshingAll(false);
     }
-  }, [refreshingAll, fetchConnections, fetchQuota]);
+  }, [refreshingAll, fetchConnections, fetchQuota, page]);
 
-  // Initial load: fetch connections first so cards render immediately, then fetch quotas
+  // Initial load: fetch connections first so cards render immediately, then fetch
+  // quotas. Re-runs whenever a filter or the page changes, because
+  // `fetchConnections` is rebuilt for those.
   useEffect(() => {
     const initializeData = async () => {
       setConnectionsLoading(true);
-      const conns = await fetchConnections();
+      const visibleConnections = await fetchConnections(page);
       setConnectionsLoading(false);
 
-      const eligibleConnections = conns.filter(isUsageEligible);
-
       // Always fetch fresh quota on mount, no cache display
-      setLoading(buildLoadingState(eligibleConnections));
+      setLoading(buildLoadingState(visibleConnections));
       setErrors((prev) =>
-        filterQuotaStateByConnections(prev, eligibleConnections),
+        filterQuotaStateByConnections(prev, visibleConnections),
       );
       setQuotaData((prev) =>
-        filterQuotaStateByConnections(prev, eligibleConnections),
+        filterQuotaStateByConnections(prev, visibleConnections),
       );
 
       await Promise.all(
-        eligibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
+        visibleConnections.map((conn) => fetchQuota(conn.id, conn.provider)),
       );
       setLastUpdated(new Date());
     };
 
     initializeData();
-  }, [fetchConnections, fetchQuota]);
+  }, [fetchConnections, fetchQuota, page]);
 
   // Persist auto-refresh preference
   useEffect(() => {
@@ -711,18 +764,13 @@ export default function ProviderLimits() {
     };
   }, [autoRefresh, refreshAll]);
 
-  // Filter only supported providers (OAuth or whitelisted apikey)
-  const filteredConnections = connections.filter(isUsageEligible);
-
-  const providerFilteredConnections = filteredConnections.filter(
-    (conn) => providerFilter === "all" || conn.provider === providerFilter,
-  );
-
+  // The server already scoped `connections` to usage-eligible connections that
+  // match the provider + account-status filters, so no client-side filtering here.
   // Sort: codex remaining-% modes via shared helper, else USAGE_SUPPORTED_PROVIDERS
   // order with optional expiring-first (9router parity).
   const sortedConnections = useMemo(() => {
     const base = sortVisibleConnectionsSh(
-      providerFilteredConnections,
+      connections,
       quotaData,
       expiringFirst,
       providerFilter,
@@ -732,13 +780,13 @@ export default function ProviderLimits() {
     // ordering on top for non-codex-sort modes.
     if (quotaSortMode !== "default" && providerFilter === "codex") return base;
     if (expiringFirst) return base;
-    return [...providerFilteredConnections].sort((a, b) => {
+    return [...connections].sort((a, b) => {
       const orderA = USAGE_SUPPORTED_PROVIDERS.indexOf(a.provider);
       const orderB = USAGE_SUPPORTED_PROVIDERS.indexOf(b.provider);
       if (orderA !== orderB) return orderA - orderB;
       return a.provider.localeCompare(b.provider);
     });
-  }, [providerFilteredConnections, quotaData, expiringFirst, providerFilter, quotaSortMode]);
+  }, [connections, quotaData, expiringFirst, providerFilter, quotaSortMode]);
 
   // Connection is depleted when any quota entry hit the threshold
   const isConnectionDepleted = (conn: Connection): boolean => {
@@ -808,8 +856,13 @@ export default function ProviderLimits() {
     bulkSetActive(ids, true);
   };
 
-  const providerOptions = Array.from(new Set(filteredConnections.map((conn) => conn.provider))).sort();
   const selectedProviderLabel = providerFilter === "all" ? "All providers" : providerFilter;
+  const hasEligibleConnections = totals.eligibleConnections > 0;
+  const hasVisibleConnections = sortedConnections.length > 0;
+  const emptyState = getConnectionsEmptyMessage(totals, providerFilter, accountFilter);
+  const connectionsPageSummary = getConnectionsPaginationSummary(pagination);
+  const isCustomPageSize = !(ACCOUNT_PAGE_SIZE_OPTIONS as readonly number[]).includes(pageSize);
+  const pageSizeLabel = getPageSizeLabel(pageSize, isCustomPageSize);
 
   // Calculate summary stats
   const totalProviders = sortedConnections.length;
@@ -829,8 +882,9 @@ export default function ProviderLimits() {
     return count + (hasLowQuota ? 1 : 0);
   }, 0);
 
-  // Empty state
-  if (!connectionsLoading && sortedConnections.length === 0) {
+  // Empty state — distinguishes "no providers at all" from "the current filters
+  // match nothing" from "this page is empty".
+  if (!connectionsLoading && !hasEligibleConnections) {
     return (
       <Card padding="lg">
         <div className="text-center py-12">
@@ -843,6 +897,24 @@ export default function ProviderLimits() {
           <p className="mt-2 text-sm text-text-muted max-w-md mx-auto">
             Connect to providers with OAuth to track your API quota limits and
             usage.
+          </p>
+        </div>
+      </Card>
+    );
+  }
+
+  if (!connectionsLoading && !hasVisibleConnections) {
+    return (
+      <Card padding="lg">
+        <div className="text-center py-12">
+          <span className="material-symbols-outlined text-[64px] text-text-muted opacity-20">
+            {emptyState.icon}
+          </span>
+          <h3 className="mt-4 text-lg font-semibold text-text-primary">
+            {emptyState.title}
+          </h3>
+          <p className="mt-2 text-sm text-text-muted max-w-md mx-auto">
+            {emptyState.description}
           </p>
         </div>
       </Card>
@@ -898,7 +970,7 @@ export default function ProviderLimits() {
                 <div className="absolute left-0 z-40 mt-2 w-64 overflow-hidden rounded-2xl border border-black/10 bg-surface/95 p-1.5 shadow-xl shadow-black/10 backdrop-blur dark:border-white/10 dark:bg-surface/95 sm:w-72">
                   <button
                     type="button"
-                    onClick={() => { setProviderFilter("all"); setProviderMenuOpen(false); }}
+                    onClick={() => { if (shouldResetPage(providerFilter, "all")) setPage(1); setProviderFilter("all"); setProviderMenuOpen(false); }}
                     className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${providerFilter === "all" ? "bg-primary/10 text-primary" : "text-text-primary hover:bg-black/5 dark:hover:bg-white/10"}`}
                   >
                     <span className="material-symbols-outlined text-[22px]">apps</span>
@@ -911,7 +983,7 @@ export default function ProviderLimits() {
                       <button
                         key={provider}
                         type="button"
-                        onClick={() => { setProviderFilter(provider); setProviderMenuOpen(false); }}
+                        onClick={() => { if (shouldResetPage(providerFilter, provider)) setPage(1); setProviderFilter(provider); setProviderMenuOpen(false); }}
                         className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${providerFilter === provider ? "bg-primary/10 text-primary" : "text-text-primary hover:bg-black/5 dark:hover:bg-white/10"}`}
                       >
                         <ProviderIcon
@@ -931,6 +1003,24 @@ export default function ProviderLimits() {
               </>
             )}
           </div>
+          <select
+            value={accountFilter}
+            onChange={(event) => {
+              const nextValue = event.target.value;
+              if (shouldResetPage(accountFilter, nextValue)) {
+                setPage(1);
+              }
+              setAccountFilter(nextValue);
+            }}
+            className="h-8 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+            aria-label="Filter accounts by status"
+          >
+            {ACCOUNT_FILTER_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
           {providerFilter === "codex" && (
             <select
               value={quotaSortMode}
@@ -948,6 +1038,7 @@ export default function ProviderLimits() {
           <button
             type="button"
             onClick={() => setExpiringFirst((prev) => !prev)}
+            aria-pressed={expiringFirst}
             className={`flex h-8 shrink-0 items-center gap-1 rounded-lg border px-2 text-xs transition-colors ${expiringFirst ? "border-amber-500/40 bg-amber-500/10 text-amber-500" : "border-black/10 text-text-primary hover:bg-black/5 dark:border-white/10 dark:hover:bg-white/5"}`}
             title="Sort accounts by earliest quota reset time"
           >
@@ -1104,8 +1195,8 @@ export default function ProviderLimits() {
                         <button
                           type="button"
                           onClick={() => toggleAutoPing(conn.id, conn.provider, !(autoPingMaps[conn.provider]?.[conn.id] === true))}
+                          aria-label="Toggle auto-ping"
                           className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-black/5 dark:hover:bg-white/5 ${autoPingMaps[conn.provider]?.[conn.id] === true ? "text-primary" : "text-text-muted"}`}
-                          title="Toggle auto-ping warmup"
                         >
                           <span className="material-symbols-outlined text-[18px]">bolt</span>
                         </button>
@@ -1167,46 +1258,52 @@ export default function ProviderLimits() {
                         </Tooltip>
                       </>
                     )}
-                    <button
-                      type="button"
-                      onClick={() => refreshProvider(conn.id, conn.provider)}
-                      disabled={isLoading || rowBusy}
-                      className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
-                      title="Refresh quota"
-                    >
-                      <span
-                        className={`material-symbols-outlined text-[18px] text-text-muted ${isLoading ? "animate-spin" : ""}`}
+                    <Tooltip text="Refresh quota">
+                      <button
+                        type="button"
+                        onClick={() => refreshProvider(conn.id, conn.provider)}
+                        disabled={isLoading || rowBusy}
+                        aria-label="Refresh quota"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-black/5 dark:hover:bg-white/5 transition-colors disabled:opacity-50"
                       >
-                        refresh
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedConnection(conn);
-                        setShowEditModal(true);
-                      }}
-                      disabled={rowBusy}
-                      className="p-1.5 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-text-muted hover:text-primary transition-colors disabled:opacity-50"
-                      title="Edit connection"
-                    >
-                      <span className="material-symbols-outlined text-[18px]">
-                        edit
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDeleteConnection(conn.id)}
-                      disabled={rowBusy}
-                      className="p-1.5 rounded-lg hover:bg-red-500/10 text-red-500 transition-colors disabled:opacity-50"
-                      title="Delete connection"
-                    >
-                      <span
-                        className={`material-symbols-outlined text-[18px] ${deletingId === conn.id ? "animate-pulse" : ""}`}
+                        <span
+                          className={`material-symbols-outlined text-[18px] text-text-muted ${isLoading ? "animate-spin" : ""}`}
+                        >
+                          refresh
+                        </span>
+                      </button>
+                    </Tooltip>
+                    <Tooltip text="Edit connection">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedConnection(conn);
+                          setShowEditModal(true);
+                        }}
+                        disabled={rowBusy}
+                        aria-label="Edit connection"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-text-muted hover:text-primary transition-colors disabled:opacity-50"
                       >
-                        delete
-                      </span>
-                    </button>
+                        <span className="material-symbols-outlined text-[18px]">
+                          edit
+                        </span>
+                      </button>
+                    </Tooltip>
+                    <Tooltip text="Delete connection">
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteConnection(conn.id)}
+                        disabled={rowBusy}
+                        aria-label="Delete connection"
+                        className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-red-500/10 text-red-500 transition-colors disabled:opacity-50"
+                      >
+                        <span
+                          className={`material-symbols-outlined text-[18px] ${deletingId === conn.id ? "animate-pulse" : ""}`}
+                        >
+                          delete
+                        </span>
+                      </button>
+                    </Tooltip>
                     <div
                       className="inline-flex items-center pl-0.5"
                       title={
@@ -1296,6 +1393,116 @@ export default function ProviderLimits() {
             </Card>
           );
         })}
+      </div>
+
+      {/* Pagination */}
+      <div className="rounded-xl border border-black/10 bg-black/[0.02] px-3 py-2 dark:border-white/10 dark:bg-white/[0.03]">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <span className="text-xs text-text-muted">{connectionsPageSummary}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={isCustomPageSize ? "custom" : String(pageSize)}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                if (nextValue === "custom") return;
+                const nextPageSize = Number.parseInt(nextValue, 10);
+                if (Number.isFinite(nextPageSize)) {
+                  setPage(1);
+                  setPageSize(nextPageSize);
+                  setCustomPageSizeInput(String(nextPageSize));
+                }
+              }}
+              className="h-8 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+              aria-label="Accounts per page"
+            >
+              {ACCOUNT_PAGE_SIZE_OPTIONS.map((option) => (
+                <option key={option} value={String(option)}>
+                  {option} / page
+                </option>
+              ))}
+              <option value="custom">{isCustomPageSize ? pageSizeLabel : "Custom"}</option>
+            </select>
+            <input
+              type="number"
+              min="1"
+              max={String(ACCOUNT_PAGE_SIZE_MAX)}
+              inputMode="numeric"
+              value={customPageSizeInput}
+              onChange={(event) => setCustomPageSizeInput(event.target.value)}
+              onBlur={() => {
+                const parsedValue = Number.parseInt(customPageSizeInput, 10);
+                if (!Number.isFinite(parsedValue)) {
+                  setCustomPageSizeInput(String(pageSize));
+                  return;
+                }
+                const nextPageSize = Math.min(ACCOUNT_PAGE_SIZE_MAX, Math.max(1, parsedValue));
+                setPage(1);
+                setPageSize(nextPageSize);
+                setCustomPageSizeInput(String(nextPageSize));
+              }}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                const parsedValue = Number.parseInt(customPageSizeInput, 10);
+                if (!Number.isFinite(parsedValue)) {
+                  setCustomPageSizeInput(String(pageSize));
+                  return;
+                }
+                const nextPageSize = Math.min(ACCOUNT_PAGE_SIZE_MAX, Math.max(1, parsedValue));
+                setPage(1);
+                setPageSize(nextPageSize);
+                setCustomPageSizeInput(String(nextPageSize));
+              }}
+              className="h-8 w-20 rounded-lg border border-black/10 bg-black/[0.02] px-2 text-xs text-text-primary outline-none transition-colors hover:bg-black/5 dark:border-white/10 dark:bg-white/[0.03] dark:hover:bg-white/10"
+              aria-label="Custom accounts per page"
+              placeholder="Custom"
+            />
+            <span className="text-xs text-text-muted">
+              Page {pagination.page} / {pagination.totalPages}
+            </span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => setPage(1)}
+              disabled={pagination.page <= 1 || connectionsLoading || refreshingAll}
+              className="flex h-8 items-center rounded-lg border border-black/10 px-3 text-xs text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+            >
+              First Page
+            </button>
+            <button
+              type="button"
+              onClick={() => setPage((currentPage) => Math.max(1, currentPage - 1))}
+              disabled={pagination.page <= 1 || connectionsLoading || refreshingAll}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-black/10 text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+              aria-label="Previous accounts page"
+            >
+              <span className="material-symbols-outlined text-[16px]">
+                chevron_left
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                setPage((currentPage) => Math.min(pagination.totalPages, currentPage + 1))
+              }
+              disabled={pagination.page >= pagination.totalPages || connectionsLoading || refreshingAll}
+              className="flex h-8 w-8 items-center justify-center rounded-lg border border-black/10 text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+              aria-label="Next accounts page"
+            >
+              <span className="material-symbols-outlined text-[16px]">
+                chevron_right
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setPage(pagination.totalPages)}
+              disabled={pagination.page >= pagination.totalPages || connectionsLoading || refreshingAll}
+              className="flex h-8 items-center rounded-lg border border-black/10 px-3 text-xs text-text-primary transition-colors hover:bg-black/5 disabled:cursor-not-allowed disabled:opacity-40 dark:border-white/10 dark:hover:bg-white/5"
+            >
+              Last Page
+            </button>
+          </div>
+        </div>
       </div>
 
       <EditConnectionModal

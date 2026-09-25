@@ -1,10 +1,11 @@
-import { Suspense, useState, useEffect } from "react";
+import { Suspense, useState, useEffect, useMemo } from "react";
 // import { useSearchParams, useRouter } from "next/navigation";  // ported: next.js -> Astro+React
 import { UsageStats, RequestLogger, CardSkeleton, SegmentedControl } from "@/shared/components";
 import RequestDetailsTab from "@/components/usage/RequestDetailsTab";
 import ProviderBreakdownTable from "@/components/usage/ProviderBreakdownTable";
 import UsageAnalyticsGrid from "@/components/usage/UsageAnalyticsGrid";
 import CompressionStats from "@/components/usage/CompressionStats";
+import type { UsageRouter } from "@/shared/components/UsageStats";
 
 const PERIODS = [
   { value: "today", label: "Today" },
@@ -32,12 +33,19 @@ function UsageContent() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
-  const router = {
+  // This page owns the query string, so children write through this shim
+  // instead of touching history themselves. Memoized so the identity survives
+  // re-renders — a fresh object per render would churn their callbacks.
+  const router = useMemo<UsageRouter & { push: (url: string, _opts?: { scroll?: boolean }) => void }>(() => ({
     push: (url: string, _opts?: { scroll?: boolean }) => {
       window.history.pushState(null, "", url);
       setSearchParams(new URLSearchParams(window.location.search));
     },
-  };
+    replace: (url: string) => {
+      window.history.replaceState(null, "", url);
+      setSearchParams(new URLSearchParams(window.location.search));
+    },
+  }), []);
 
   const [tabLoading, setTabLoading] = useState(false);
   const [period, setPeriod] = useState("today");
@@ -91,7 +99,7 @@ function UsageContent() {
         <>
           {activeTab === "overview" && (
             <Suspense fallback={<CardSkeleton />}>
-              <UsageStats period={period} setPeriod={setPeriod} hidePeriodSelector />
+              <UsageStats period={period} setPeriod={setPeriod} hidePeriodSelector router={router} />
             </Suspense>
           )}
           {activeTab === "logs" && <RequestLogger />}

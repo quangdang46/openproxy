@@ -6,14 +6,21 @@ import Badge from "./Badge";
 import Card from "./Card";
 import OverviewCards from "@/components/usage/OverviewCards";
 import UsageTable, { fmt, fmtTime } from "@/components/usage/UsageTable";
+import UsageChart from "@/components/usage/UsageChart";
 import ProviderTopology from "@/components/usage/ProviderTopologyWrapper";
-import ProviderBreakdownTable from "@/components/usage/ProviderBreakdownTable";
 import React from "react";
+
+// The slice of Next's router the usage page actually needs: rewriting the
+// current query string in place, without a history entry.
+export interface UsageRouter {
+  replace: (url: string) => void;
+}
 
 interface UsageStatsProps {
   period?: string;
   setPeriod?: (period: string) => void;
   hidePeriodSelector?: boolean;
+  router?: UsageRouter;
 }
 
 interface StatsData {
@@ -212,9 +219,30 @@ const PERIODS = [
   { value: "60d", label: "60D" },
 ];
 
-export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false }: UsageStatsProps = {}) {
-  const [sortBy, setSortBy] = useState("rawModel");
-  const [sortOrder, setSortOrder] = useState("asc");
+// Astro has no useSearchParams, so the query string is read directly.
+const readSearchParams = () =>
+  new URLSearchParams(typeof window !== "undefined" ? window.location.search : "");
+
+// Astro has no useRouter either. The usage page owns the query string, so it
+// hands down a shim; standalone renders fall back to the same history write.
+const defaultRouter: UsageRouter = {
+  replace: (url: string) => window.history.replaceState(null, "", url),
+};
+
+export default function UsageStats({ period: periodProp, setPeriod: setPeriodProp, hidePeriodSelector = false, router = defaultRouter }: UsageStatsProps = {}) {
+  // Sort lives in the query string (9router parity) so a reload or a shared link
+  // keeps the ordering.
+  const [sortBy, setSortBy] = useState(() => readSearchParams().get("sortBy") || "rawModel");
+  const [sortOrder, setSortOrder] = useState(() => readSearchParams().get("sortOrder") || "asc");
+  useEffect(() => {
+    const syncFromUrl = () => {
+      const params = new URLSearchParams(window.location.search);
+      setSortBy(params.get("sortBy") || "rawModel");
+      setSortOrder(params.get("sortOrder") || "asc");
+    };
+    window.addEventListener("popstate", syncFromUrl);
+    return () => window.removeEventListener("popstate", syncFromUrl);
+  }, []);
 
   const [stats, setStats] = useState<StatsData | null>(null);
   const [loading, setLoading] = useState(true);
@@ -291,17 +319,18 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   }, []);
 
   const toggleSort = useCallback((tableType: string, field: string) => {
-    setSortBy((prev) => {
-      if (prev === field) {
-        // Toggle order when clicking the same field
-        setSortOrder((o) => (o === "asc" ? "desc" : "asc"));
-        return prev;
-      }
-      // New field: default to ascending
-      setSortOrder("asc");
-      return field;
-    });
-  }, []);
+    // Copy the live query string so ?tab= and the rest of the page state survive.
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("sortBy") === field) {
+      params.set("sortOrder", params.get("sortOrder") === "asc" ? "desc" : "asc");
+    } else {
+      params.set("sortBy", field);
+      params.set("sortOrder", "asc");
+    }
+    router.replace(`?${params.toString()}`);
+    setSortBy(params.get("sortBy") || "rawModel");
+    setSortOrder(params.get("sortOrder") || "asc");
+  }, [router]);
 
   // Compute active table data
   const activeTableConfig = useMemo(() => {
@@ -454,11 +483,6 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       {/* Overview cards */}
       {loading ? spinner : <OverviewCards stats={stats} />}
 
-      {/* Provider breakdown */}
-      {loading ? spinner : (stats.byProvider && Object.keys(stats.byProvider).length > 0 ? (
-        <ProviderBreakdownTable byProvider={stats.byProvider} />
-      ) : null)}
-
       {/* Provider topology + Recent Requests */}
       {loading ? spinner : (
         <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
@@ -471,6 +495,9 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           <RecentRequests requests={stats.recentRequests || []} />
         </div>
       )}
+
+      {/* Token / Cost chart - sync period */}
+      {loading ? spinner : <UsageChart period={period} />}
 
       {/* Table with dropdown selector */}
       <div className="flex flex-col gap-3">
