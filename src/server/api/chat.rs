@@ -105,9 +105,23 @@ fn strip_forwarding_headers(headers: &mut HeaderMap) {
 
 /// Maximum time we'll wait for the next byte from an upstream SSE stream before
 /// considering the connection stalled. 3 minutes matches what most providers
-/// use for their keep-alive heartbeats (OpenAI sends a comment every ~30s,
-/// Anthropic every ~60s, Gemini every ~30s — 180s is well past any of them).
-const SSE_STALL_TIMEOUT: Duration = Duration::from_secs(180);
+/// use for their keep-alive heartbeats.
+///
+/// The value now comes from the shared runtime config rather than a second
+/// literal. `runtime_config::STREAM_STALL_TIMEOUT_MS` already carried 360s
+/// with the comment "matching the 9router default" — and nothing read it, while
+/// this constant said 180s. 9router sets 360s
+/// (config/runtimeConfig.js:53) specifically so "slow reasoning models aren't
+/// aborted mid-stream"; a reasoning turn that pauses 3-6 minutes was being cut
+/// here and not there.
+///
+/// Kept as a function so the value is resolved once at first use rather than in
+/// a const, and so the env override has somewhere to land (9router reads
+/// STREAM_STALL_TIMEOUT_MS; OpenProxy has no such env var yet — the follow-up
+/// is adding one, not silently keeping two constants).
+fn sse_stall_timeout() -> Duration {
+    Duration::from_millis(crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS)
+}
 
 /// Maximum number of concurrent in-flight requests per provider account.
 ///
@@ -3871,7 +3885,7 @@ async fn proxy_response_with_pending_tracking(
                             // field-wise max, matching 9router mergeUsage.
                             let mut stream_usage: Option<TokenUsage> = None;
                             loop {
-                                let next = tokio::time::timeout(SSE_STALL_TIMEOUT, upstream.try_next()).await;
+                                let next = tokio::time::timeout(sse_stall_timeout(), upstream.try_next()).await;
                                 match next {
                                     Err(_elapsed) => {
                                         // Upstream went silent for SSE_STALL_TIMEOUT; treat
@@ -4128,7 +4142,7 @@ async fn proxy_response_with_pending_tracking(
                 // structurally insufficient.
                 let mut stream_usage: Option<TokenUsage> = None;
                 loop {
-                    let next = tokio::time::timeout(SSE_STALL_TIMEOUT, body.frame()).await;
+                    let next = tokio::time::timeout(sse_stall_timeout(), body.frame()).await;
                     let frame_result = match next {
                         Err(_elapsed) => {
                             tracing::warn!(
@@ -7126,5 +7140,36 @@ mod done_sentinel_detection_tests {
         ] {
             assert!(!is_done_sentinel(line), "{line:?} must not match");
         }
+    }
+}
+
+#[cfg(test)]
+mod sse_stall_clock_tests {
+    use super::sse_stall_timeout;
+
+    /// Bead openproxy-qzj8. 9router sets 360s
+    /// (config/runtimeConfig.js:53) "so slow reasoning models aren't aborted
+    /// mid-stream". OpenProxy hard-coded 180s in chat.rs while
+    /// runtime_config::STREAM_STALL_TIMEOUT_MS already carried 360s labelled
+    /// "matching the 9router default" — and nothing read it. A reasoning turn
+    /// that pauses three to six minutes was cut here and not there, and there
+    /// were two constants claiming to be the same policy.
+    #[test]
+    fn the_stall_clock_is_9routers_and_not_the_old_180s() {
+        let d = sse_stall_timeout();
+        assert_eq!(d, std::time::Duration::from_secs(360));
+        assert_ne!(d, std::time::Duration::from_secs(180));
+    }
+
+    /// The value must be the SHARED one, not a second literal that happens to
+    /// agree. If someone changes the runtime config, the stream must follow.
+    #[test]
+    fn the_stall_clock_tracks_the_shared_runtime_config() {
+        assert_eq!(
+            sse_stall_timeout(),
+            std::time::Duration::from_millis(
+                crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS
+            )
+        );
     }
 }
