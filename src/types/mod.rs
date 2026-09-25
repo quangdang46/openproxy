@@ -542,8 +542,16 @@ pub struct Settings {
         deserialize_with = "deserialize_null_default"
     )]
     pub tunnel_dashboard_access: bool,
+    /// 9router's `DEFAULT_SETTINGS.enableObservability` is **false**
+    /// (`settingsRepo.js:42`) — a fresh install records no request details.
+    /// The alias lets a 9router settings blob, which persists the flag under
+    /// `enableObservability`, land on this field instead of falling through to
+    /// the `extra` catch-all. (9router's own reader is inconsistent with its
+    /// default: `requestDetailsRepo.js:31` falls back to
+    /// `OBSERVABILITY_ENABLED !== "false"`, i.e. on. We follow DEFAULT_SETTINGS.)
     #[serde(
-        default = "default_true",
+        default,
+        alias = "enableObservability",
         deserialize_with = "deserialize_null_default"
     )]
     pub observability_enabled: bool,
@@ -750,7 +758,7 @@ impl Default for Settings {
             // 9router settingsRepo.js:27 — true for a fresh install.
             require_api_key: Some(true),
             tunnel_dashboard_access: true,
-            observability_enabled: true,
+            observability_enabled: false,
             observability_max_records: default_observability_max_records(),
             observability_batch_size: default_observability_batch_size(),
             observability_flush_interval_ms: default_observability_flush_interval_ms(),

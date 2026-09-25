@@ -2281,6 +2281,9 @@ struct UpdateSettingsRequest {
     rtk_enabled: Option<bool>,
     caveman_enabled: Option<bool>,
     caveman_level: Option<String>,
+    /// Also accepted as 9router's own key for this flag, so an imported 9router
+    /// settings blob lands on the typed field instead of the `extra` catch-all.
+    #[serde(alias = "enableObservability")]
     observability_enabled: Option<bool>,
     cloud_enabled: Option<bool>,
     cloud_url: Option<String>,
@@ -2333,12 +2336,35 @@ struct UpdateSettingsRequest {
     /// Force all supported providers into simulation mock mode (bead sim-20).
     /// Typed Settings field (not extra); same effect as OPENPROXY_DEV_MOCK=1.
     dev_mock_all: Option<bool>,
+    /// Catch-all for keys this struct does not declare. 9router persists a
+    /// settings PATCH as a raw JSON merge (`next = { ...current, ...updates }`,
+    /// `9router/src/app/api/settings/route.js`); a closed field list would drop
+    /// every such key, including `ccFilterNaming` and `quotaVisibility`, which
+    /// this tree already reads and PATCHes.
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+/// camelCase names of the declared `Settings` fields. A PATCH key that lands on
+/// one of these must not also be merged into `settings.extra` — `Settings` has
+/// its own `#[serde(flatten)] extra`, and serde would meet the same name twice
+/// on the next load.
+fn declared_settings_keys() -> &'static std::collections::BTreeSet<String> {
+    static KEYS: std::sync::OnceLock<std::collections::BTreeSet<String>> =
+        std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        serde_json::to_value(crate::types::Settings::default())
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .map(|object| object.keys().cloned().collect())
+            .unwrap_or_default()
+    })
 }
 
 async fn update_settings_api(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<UpdateSettingsRequest>,
+    Json(mut req): Json<UpdateSettingsRequest>,
 ) -> Response {
     if let Err(response) = require_dashboard_or_management_api_key(&headers, &state) {
         return response;
@@ -2639,6 +2665,16 @@ async fn update_settings_api(
             }
             if let Some(v) = req.dev_mock_all {
                 db.settings.dev_mock_all = v;
+            }
+            // 9router's `{ ...current, ...updates }` tail: whatever the PATCH
+            // carried that no field above claimed lands in `settings.extra`, so
+            // dashboard toggles this struct has never heard of still persist.
+            // Declared field names are skipped — those already applied above.
+            let declared = declared_settings_keys();
+            for (key, value) in std::mem::take(&mut req.extra) {
+                if !declared.contains(&key) {
+                    db.settings.extra.insert(key, value);
+                }
             }
             db.settings.normalize();
         })

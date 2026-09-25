@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::extract::State;
 use axum::{
     http::HeaderMap,
@@ -10,6 +12,11 @@ use serde_json::json;
 
 use crate::server::state::AppState;
 use crate::types::CustomModel;
+
+/// Capability keys a custom model may declare — 9router's `CAPACITY_META`
+/// (`9router/src/shared/constants/models.js:43`). `search` is commented out
+/// upstream and stays out here.
+const CAPABILITY_KEYS: &[&str] = &["vision", "reasoning"];
 
 fn require_management_access(headers: &HeaderMap, state: &AppState) -> Result<(), Response> {
     super::require_dashboard_or_management_api_key(headers, state)
@@ -39,10 +46,26 @@ pub struct CreateCustomModelRequest {
     #[serde(default = "default_model_type", alias = "type")]
     pub r#type: String,
     pub name: Option<String>,
+    /// Per-model capability overrides the dashboard toggles off. Only the
+    /// whitelisted boolean keys survive — see [`sanitize_caps`].
+    pub caps: Option<BTreeMap<String, bool>>,
 }
 
 fn default_model_type() -> String {
     "llm".to_string()
+}
+
+/// Whitelist capability keys to boolean values, ignoring anything else — 9router
+/// `sanitizeCaps` (`9router/src/app/api/models/custom/route.js:9`). Returns
+/// `None` when nothing whitelisted was supplied, so the model is stored without
+/// a `caps` key at all rather than with an empty one.
+fn sanitize_caps(caps: Option<&BTreeMap<String, bool>>) -> Option<BTreeMap<String, bool>> {
+    let caps = caps?;
+    let clean: BTreeMap<String, bool> = CAPABILITY_KEYS
+        .iter()
+        .filter_map(|key| caps.get(*key).map(|value| ((*key).to_string(), *value)))
+        .collect();
+    (!clean.is_empty()).then_some(clean)
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -107,12 +130,19 @@ async fn create_custom_model(
             && model.r#type == req.r#type
     });
 
+    // `caps` rides in `extra`; `CustomModel`'s `#[serde(flatten)]` puts it back
+    // at the top level, which is the shape 9router stores.
+    let mut extra = BTreeMap::new();
+    if let Some(caps) = sanitize_caps(req.caps.as_ref()) {
+        extra.insert("caps".to_string(), json!(caps));
+    }
+
     let custom_model = CustomModel {
         provider_alias: req.provider_alias.clone(),
         id: req.id.clone(),
         r#type: req.r#type.clone(),
         name: req.name.clone(),
-        extra: Default::default(),
+        extra,
     };
 
     let result = state
