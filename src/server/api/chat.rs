@@ -3958,7 +3958,9 @@ async fn proxy_response_with_pending_tracking(
                             } else {
                                 passthrough_pending.extend_from_slice(&chunk);
                                 for line in drain_complete_sse_lines(&mut passthrough_pending) {
-                                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
+                                    yield Ok::<Bytes, std::io::Error>(
+                                        sanitize_sse_chunk(&passthrough_frame_bytes(&line)),
+                                    );
                                 }
                             }
                         }
@@ -4005,11 +4007,8 @@ async fn proxy_response_with_pending_tracking(
                         }
                     }
                 }
-                if !passthrough_pending.is_empty() {
-                    let mut last = std::mem::take(&mut passthrough_pending);
-                    for line in drain_complete_sse_lines(&mut last) {
-                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
-                    }
+                if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending) {
+                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&final_frame));
                 }
                 // Qoder end-of-stream: flush the usage coalescer (held
                 // finish+usage → terminal chunk). Qoder only uses Reqwest
@@ -4140,7 +4139,9 @@ async fn proxy_response_with_pending_tracking(
                                 } else {
                                     passthrough_pending2.extend_from_slice(&data);
                                     for line in drain_complete_sse_lines(&mut passthrough_pending2) {
-                                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
+                                        yield Ok::<Bytes, std::io::Error>(
+                                            sanitize_sse_chunk(&passthrough_frame_bytes(&line)),
+                                        );
                                     }
                                 }
                             }
@@ -4187,11 +4188,8 @@ async fn proxy_response_with_pending_tracking(
                         }
                     }
                 }
-                if !passthrough_pending2.is_empty() {
-                    let mut last = std::mem::take(&mut passthrough_pending2);
-                    for line in drain_complete_sse_lines(&mut last) {
-                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
-                    }
+                if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending2) {
+                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&final_frame));
                 }
                 // End-of-stream flush: emit the terminal chunk + [DONE] for
                 // buffered binary transforms (kiro EventStream → SSE).
@@ -4660,6 +4658,45 @@ pub(crate) fn drain_complete_sse_lines(buffer: &mut Vec<u8>) -> Vec<String> {
         out.push(String::from_utf8_lossy(&raw).into_owned());
     }
     out
+}
+
+/// Re-frame one drained line for the raw-passthrough path.
+///
+/// `drain_complete_sse_lines` strips the terminator, which is correct for the
+/// translation path (the transformer re-emits its own framing) but WRONG here:
+/// the passthrough path is supposed to relay the upstream framing verbatim, and
+/// `sanitize_sse_body` only re-appends a newline when the line it was given
+/// already ends in one. Emitting drained lines bare therefore concatenates
+/// consecutive frames into a single SSE line — `data: {"a":1}data: {"a":2}` —
+/// which the client parses as one malformed JSON frame and the stream dies.
+/// Re-attach the `\n\n` frame separator so passthrough keeps upstream framing.
+pub(crate) fn passthrough_frame_bytes(line: &str) -> Bytes {
+    let mut framed = line.as_bytes().to_vec();
+    framed.extend_from_slice(b"\n\n");
+    Bytes::from(framed)
+}
+
+/// Take the final newline-free leftover out of a passthrough buffer, if it holds
+/// a complete frame.
+///
+/// This exists as a function so it can be TESTED. The bug it replaces passed the
+/// leftover back through `drain_complete_sse_lines`, which by construction
+/// returns [] for input with no terminator — so the final frame was silently
+/// dropped on both stream arms, and no test caught it because the tests only
+/// exercised the drain helper in isolation. A regression here now fails a test
+/// that runs the real extraction.
+pub(crate) fn take_terminal_passthrough_frame(buffer: &mut Vec<u8>) -> Option<Bytes> {
+    if buffer.is_empty() {
+        return None;
+    }
+    let mut last = std::mem::take(buffer);
+    if last.last() == Some(&b'\r') {
+        last.pop();
+    }
+    if last.is_empty() {
+        return None;
+    }
+    Some(Bytes::from(last))
 }
 
 /// Strip the SSE `data:` prefix from a chunk, returning the JSON payload.
@@ -6208,5 +6245,86 @@ mod sse_framing_tests {
             drain_complete_sse_lines(&mut buf),
             vec!["data: {\"a\":1}", "data: {\"a\":2}"]
         );
+    }
+}
+
+#[cfg(test)]
+mod passthrough_framing_tests {
+    use super::{drain_complete_sse_lines, passthrough_frame_bytes};
+    use crate::server::api::sanitization::sanitize_sse_body;
+
+    /// Regression (openproxy-24's review of 764469cd): the passthrough path is
+    /// supposed to relay upstream framing VERBATIM. drain_complete_sse_lines
+    /// strips the terminator, which is right for the translation path but broke
+    /// this one: sanitize_sse_body only re-appends a newline when the line it is
+    /// given already ends in one, so two consecutive frames were emitted as
+    ///     data: {"a":1}data: {"a":2}
+    /// which a client parses as ONE malformed frame and the stream dies.
+    #[test]
+    fn two_passthrough_frames_stay_two_frames() {
+        let mut buf: Vec<u8> = b"data: {\"a\":1}\n\ndata: {\"a\":2}\n\n".to_vec();
+        let mut emitted = String::new();
+        for line in drain_complete_sse_lines(&mut buf) {
+            let bytes = passthrough_frame_bytes(&line);
+            emitted.push_str(&sanitize_sse_body(&String::from_utf8_lossy(&bytes)));
+        }
+        // Count SSE data lines the way a client would: split on blank line.
+        let frames: Vec<&str> = emitted
+            .split("\n\n")
+            .filter(|f| !f.trim().is_empty())
+            .collect();
+        assert_eq!(
+            frames.len(),
+            2,
+            "two frames in, two frames out; got {emitted:?}"
+        );
+        for f in &frames {
+            assert!(
+                f.trim_start().starts_with("data: "),
+                "each frame keeps its data: prefix: {f:?}"
+            );
+        }
+        assert!(
+            !emitted.contains("data: {\"a\":1}data:"),
+            "frames must not be concatenated: {emitted:?}"
+        );
+    }
+
+    /// The second defect, pinned against the REAL extraction this time: the
+    /// flush used to pass a newline-free leftover back through
+    /// drain_complete_sse_lines, which returns [] for terminator-free input, so
+    /// the final frame was dropped on BOTH arms. The earlier version of this
+    /// test asserted the property of the drain helper instead and stayed green
+    /// against the bug — exactly the "test that cannot fail" trap. This one
+    /// runs the function the flush actually calls.
+    #[test]
+    fn a_newline_free_leftover_is_still_a_frame() {
+        let mut leftover: Vec<u8> = b"data: {\"a\":2}".to_vec();
+        let frame = super::take_terminal_passthrough_frame(&mut leftover)
+            .expect("a terminator-free leftover holding a frame must still be emitted");
+        let text = String::from_utf8_lossy(&frame).into_owned();
+        assert!(
+            text.contains("data:"),
+            "final frame must reach the client: {text:?}"
+        );
+        assert!(leftover.is_empty(), "buffer is drained by the extraction");
+    }
+
+    #[test]
+    fn an_empty_or_whitespace_leftover_emits_nothing() {
+        assert!(super::take_terminal_passthrough_frame(&mut Vec::new()).is_none());
+        let mut crlf_only: Vec<u8> = b"\r".to_vec();
+        assert!(super::take_terminal_passthrough_frame(&mut crlf_only).is_none());
+    }
+
+    /// A passthrough frame must keep SSE framing, never be re-wrapped as
+    /// `data: <whole line>` — that would change the semantics of a line that is
+    /// not itself a data line.
+    #[test]
+    fn passthrough_framing_does_not_rewrap_non_data_lines() {
+        let framed = passthrough_frame_bytes("event: ping");
+        let text = String::from_utf8_lossy(&framed).into_owned();
+        assert_eq!(text, "event: ping\n\n", "event lines pass through as-is");
+        assert!(!text.starts_with("data: event:"));
     }
 }
