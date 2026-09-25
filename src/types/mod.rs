@@ -803,7 +803,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-
     /// Whether `/v1` LLM API routes require a client API key.
     ///
     /// `None` means the settings blob predates the `requireApiKey` field; the

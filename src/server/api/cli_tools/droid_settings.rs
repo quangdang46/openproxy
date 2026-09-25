@@ -142,7 +142,8 @@ async fn write_droid_settings(
     }
 
     let mut settings = match fs::read_to_string(&settings_path).await {
-        Ok(existing) => parse_json_object_or_default(&existing),
+        Ok(existing) => parse_json_object_required(&existing)
+            .map_err(|error| anyhow::anyhow!("Refusing to rewrite {}: {error}", settings_path.display()))?,
         Err(_) => serde_json::Map::new(),
     };
 
@@ -222,7 +223,8 @@ async fn write_droid_settings(
 async fn reset_droid_settings() -> AnyhowResult<Value> {
     let settings_path = droid_settings_path();
     let mut settings = match fs::read_to_string(&settings_path).await {
-        Ok(existing) => parse_json_object_or_default(&existing),
+        Ok(existing) => parse_json_object_required(&existing)
+            .map_err(|error| anyhow::anyhow!("Refusing to rewrite {}: {error}", settings_path.display()))?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(json!({
                 "success": true,
@@ -288,10 +290,16 @@ fn normalize_v1_base_url(base_url: &str) -> String {
     }
 }
 
-fn parse_json_object_or_default(content: &str) -> Map<String, Value> {
-    match serde_json::from_str::<Value>(content) {
-        Ok(Value::Object(object)) => object,
-        _ => serde_json::Map::new(),
+/// Parse a config file that is expected to already exist.
+///
+/// Deliberately propagates the parse error instead of falling back to an empty
+/// map: the callers write the result straight back to the user's file, so
+/// swallowing a parse failure would replace their whole config with a stub.
+/// "File is absent" is handled by the caller, before this is reached.
+fn parse_json_object_required(content: &str) -> AnyhowResult<Map<String, Value>> {
+    match serde_json::from_str::<Value>(content)? {
+        Value::Object(object) => Ok(object),
+        _ => Err(anyhow::anyhow!("Expected JSON object")),
     }
 }
 
