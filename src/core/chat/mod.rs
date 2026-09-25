@@ -86,16 +86,28 @@ impl RequestPlan {
             upstream_model_id = stripped;
         }
 
-        // 9router chatCore `useTransport` guard (modelTargetFormat is checked
-        // first in Rust, transport second): only use the sourceFormat-matched
+        // 9router chatCore `useTransport` guard: only use the sourceFormat-matched
         // transport when the model declares support for that sourceFormat —
         // opencode-go models differ in endpoint support (kimi/glm only do
         // /chat/completions). Undeclared models keep the upstream default
         // (use the transport).
         let transport = resolve_transport(provider, source_format)
             .filter(|_| model_supports_source_format(provider, &upstream_model_id, source_format));
-        let mut target_format = model_target
-            .or_else(|| transport.as_ref().map(|t| t.format))
+        // Transport first, then the model target, then the provider default —
+        // 9router's order (chatCore.js: `useTransport?.format || modelTargetFormat
+        // || getTargetFormat(...)`).
+        //
+        // A source-format-matched endpoint keeps the request lossless, so it
+        // outranks a model-level targetFormat, which is only the fallback for a
+        // client whose wire format has no supported transport. Checking the
+        // model target first sent a Claude-format request for a multi-endpoint
+        // provider to /messages where the provider only serves
+        // /chat/completions (kimi, glm) — a transport error rather than a
+        // translation.
+        let mut target_format = transport
+            .as_ref()
+            .map(|t| t.format)
+            .or(model_target)
             .unwrap_or_else(|| registry::get_target_format_for_provider(provider));
 
         // GitHub Copilot Claude models use the Anthropic-native /v1/messages
@@ -1000,5 +1012,53 @@ mod tests {
             "kimi-k2.6",
             Format::Claude
         ));
+    }
+}
+
+#[cfg(test)]
+mod target_format_precedence {
+    use super::*;
+
+    /// openproxy-e43o: 9router resolves `useTransport?.format ||
+    /// modelTargetFormat || getTargetFormat(...)` — transport FIRST, because a
+    /// source-format-matched endpoint keeps the request lossless. We checked
+    /// the model target first, so a Claude-format request for a
+    /// multi-endpoint provider went to /messages where kimi and glm only serve
+    /// /chat/completions: a transport error where 9router translated nothing.
+    ///
+    /// The plan-level test needs a live endpoint, so this pins the two halves
+    /// that are reachable here: the transport is still gated on the model
+    /// declaring support for the source format, and the fallback order holds
+    /// when there is no transport at all.
+    #[test]
+    fn transport_gate_is_a_passthrough_outside_the_multi_transport_namespace() {
+        // model_supports_source_format returns true for every provider that is
+        // not opencode-go/ocg, so only that namespace can suppress a
+        // transport. This is the property the precedence change depends on:
+        // flipping the order must not change routing for anyone else.
+        for (provider, model) in [
+            ("kimi", "kimi-k2-turbo"),
+            ("glm", "glm-5"),
+            ("deepseek", "deepseek-chat"),
+            ("openai", "gpt-4o"),
+        ] {
+            assert!(
+                model_supports_source_format(provider, model, Format::Claude),
+                "{provider} must keep its transport"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_default_is_the_last_resort() {
+        // With no transport and no model target, the provider default decides.
+        assert_eq!(
+            registry::get_target_format_for_provider("anthropic"),
+            Format::Claude
+        );
+        assert_eq!(
+            registry::get_target_format_for_provider("gemini"),
+            Format::Gemini
+        );
     }
 }
