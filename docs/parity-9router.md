@@ -64,6 +64,7 @@ Decision logs: `target: openproxy::chat|translator|combo|fusion|github`.
 | **PXPIPE token-saver** | Optional JS image-context compressor; requires external `pxpipe-proxy`. Not ported — use RTK + Headroom + Caveman/Ponytail. |
 | **Hedging / Shadow / Auto-combo** | Modules scaffolded under `src/core/combo/{hedging,shadow,auto_combo}.rs`; chat dispatcher maps unknown names to **fallback** until product demand. |
 | Combo capacity precheck | OpenProxy skips saturated members; optional future gate `capacity_precheck=false` for 9router try-anyway. |
+| Bare-name prefix routing | `infer_provider_from_model_name` mirrors 9router's `MODEL_PREFIX_PROVIDERS` exactly, so a bare `grok-4` / `command-r-plus` / `mistral-large` / `jamba-*` goes to `openai` — 9router's fallback — not to the native vendor. Sending a bare name to the vendor that serves it is tempting, but 9router is canonical, and the `jamba-*` arm in particular could only dead-end: `ai21` is configurable as an API-key provider but has no entry in the merged catalog, so no `jamba-*` name could resolve through it. `grok-build` still reaches `gcli` through the built-in alias. |
 
 ## Key pipeline (current)
 

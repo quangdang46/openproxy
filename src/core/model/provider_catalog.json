@@ -2095,6 +2095,12 @@
       "alias": "minimax",
       "models": [
         {
+          "id": "MiniMax-M3",
+          "name": "MiniMax M3",
+          "kind": "llm",
+          "targetFormat": "claude"
+        },
+        {
           "id": "MiniMax-M2.7",
           "name": "MiniMax M2.7",
           "kind": "llm"
@@ -2209,6 +2215,12 @@
     {
       "alias": "minimax-cn",
       "models": [
+        {
+          "id": "MiniMax-M3",
+          "name": "MiniMax M3",
+          "kind": "llm",
+          "targetFormat": "claude"
+        },
         {
           "id": "MiniMax-M2.7",
           "name": "MiniMax M2.7",
@@ -4078,6 +4090,13 @@
           "id": "mimo-v2.5-pro",
           "name": "MiMo V2.5 Pro",
           "kind": "llm"
+        },
+        {
+          "id": "mimo-v2.5-pro-claude",
+          "name": "MiMo V2.5 Pro (Claude Native)",
+          "kind": "llm",
+          "targetFormat": "claude",
+          "upstreamModelId": "mimo-v2.5-pro"
         },
         {
           "id": "mimo-v2.5",

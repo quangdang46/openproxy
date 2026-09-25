@@ -356,34 +356,33 @@ pub fn get_model_info(model_str: &str, db: &AppDb) -> ResolvedModel {
 /// explicit alias or combo maps the model — it avoids forcing every unknown
 /// model to "openai".
 ///
-/// Known model-family prefix → provider mappings:
+/// Known model-family prefix → provider mappings, mirroring 9router's
+/// `MODEL_PREFIX_PROVIDERS` (open-sse/services/model.js:126-133) rule for rule
+/// — first match wins, `"openai"` is the fallback:
 ///
-/// | Prefix(es)                        | Provider      | In 9router? |
-/// |-----------------------------------|---------------|-------------|
-/// | `codex-auto-review` (exact)       | `codex`       | yes         |
-/// | `claude-`                         | `anthropic`   | yes         |
-/// | `gemini-`                         | `gemini`      | yes         |
-/// | `gpt-`, `o1`, `o3`, `o4`         | `openai`      | yes         |
-/// | `deepseek-`                       | `openrouter`  | yes         |
-/// | `mistral-`, `open-mistral-`, …   | `mistral`     | no          |
-/// | `command-`, `command-r`           | `cohere`      | no          |
-/// | `grok-`                           | `xai`         | no          |
-/// | `jamba-`                          | `ai21`        | no          |
-/// | Everything else (llama, phi, …)   | `openai`      | yes         |
+/// | Prefix(es)                  | Provider     |
+/// |-----------------------------|--------------|
+/// | `claude-`                   | `anthropic`  |
+/// | `gemini-`                   | `gemini`     |
+/// | `gpt-`, `o1`, `o3`, `o4`   | `openai`     |
+/// | `deepseek-`                 | `openrouter` |
+/// | Everything else (llama, …)  | `openai`     |
 ///
-/// The four marked "no" are OpenProxy's own: 9router has no rule for those
-/// families, so an unqualified `mistral-large` or `grok-4` would fall to its
-/// `openai` default. Sending them to a provider that actually serves them is
-/// the better behaviour and the divergence is deliberate — removing the rules
-/// would break real routing to fix a difference that only shows up for names no
-/// user sends bare. Product decision, not an oversight; flagged, not settled.
+/// Four further families used to be inferred to their native vendor here
+/// (`mistral-*` → mistral, `command-*` → cohere, `grok-*` → xai, `jamba-*` →
+/// ai21). 9router has no such rule, so a bare name in any of them reaches its
+/// `openai` fallback there. The `jamba-*` arm in particular could only
+/// dead-end: `ai21` is a configurable API-key provider but has no entry in the
+/// merged provider catalog, so nothing could resolve a `jamba-*` name through
+/// it. The one bare name that does need a non-openai route, `grok-build`, is
+/// covered by `builtin_model_alias` above. See docs/parity-9router.md.
 fn infer_provider_from_model_name(model_name: &str) -> &'static str {
     let model_name = model_name.to_lowercase();
 
-    // Checked before the family prefixes, as in 9router's MODEL_PREFIX_PROVIDERS
-    // (model.js:126-133): the Codex CLI sends this bare virtual model for
-    // auto-review, and it must stay on OAuth Codex rather than falling through
-    // to the openai fallback.
+    // Checked before the family prefixes: the Codex CLI sends this bare virtual
+    // model for auto-review, and it must stay on OAuth Codex rather than
+    // falling through to the openai fallback. Not a 9router rule — kept because
+    // the CLI depends on it.
     if model_name == "codex-auto-review" {
         return "codex";
     }
@@ -400,24 +399,11 @@ fn infer_provider_from_model_name(model_name: &str) -> &'static str {
         "openai"
     } else if model_name.starts_with("deepseek-") {
         "openrouter"
-    } else if model_name.starts_with("mistral-")
-        || model_name.starts_with("open-mistral-")
-        || model_name.starts_with("mistralai-")
-        || model_name.starts_with("codestral-")
-        || model_name.starts_with("ministral-")
-        || model_name.starts_with("mixtral-")
-    {
-        "mistral"
-    } else if model_name.starts_with("command-") || model_name.starts_with("command-r") {
-        "cohere"
-    } else if model_name.starts_with("grok-") {
-        "xai"
-    } else if model_name.starts_with("jamba-") {
-        "ai21"
     } else {
         // Unknown model prefixes route to "openai" as the generic fallback.
         // Common model families that land here: llama-*, codellama-*, phi-*,
-        // nemotron-*, dbrx-*, qwen-*, yi-*, gemma-*.
+        // nemotron-*, dbrx-*, qwen-*, yi-*, gemma-* — and, matching 9router,
+        // mistral-*, command-*, grok-* and jamba-*.
         "openai"
     }
 }
@@ -531,5 +517,65 @@ mod builtin_alias_parity {
         let db = AppDb::default();
         let resolved = get_model_info("codex-auto-review", &db);
         assert_eq!(resolved.provider.as_deref(), Some("codex"));
+    }
+}
+
+/// openproxy-e43o: `infer_provider_from_model_name` used to carry four
+/// provider-inference rules 9router does not have (mistral → mistral,
+/// command → cohere, grok → xai, jamba → ai21), so a bare model name reached a
+/// different vendor here than there. model.js:126-142 has exactly five entries
+/// and falls back to "openai".
+#[cfg(test)]
+mod prefix_inference_parity {
+    use super::*;
+
+    #[test]
+    fn bare_names_9router_sends_to_openai_reach_the_openai_fallback() {
+        let db = AppDb::default();
+        for model in [
+            "grok-4",
+            "command-r-plus",
+            "mistral-large",
+            "jamba-1.5-large",
+            "llama-3.3-70b",
+        ] {
+            let resolved = get_model_info(model, &db);
+            assert_eq!(
+                resolved.provider.as_deref(),
+                Some("openai"),
+                "9router routes bare {model} to openai"
+            );
+            assert_eq!(resolved.model, model);
+        }
+    }
+
+    #[test]
+    fn the_9router_prefix_rules_still_win() {
+        let db = AppDb::default();
+        for (model, provider) in [
+            ("claude-sonnet-4-5", "anthropic"),
+            ("gemini-2.5-pro", "gemini"),
+            ("gpt-4o", "openai"),
+            ("o3-mini", "openai"),
+            ("deepseek-chat", "openrouter"),
+            ("codex-auto-review", "codex"),
+        ] {
+            assert_eq!(
+                get_model_info(model, &db).provider.as_deref(),
+                Some(provider),
+                "{model} must stay on {provider}"
+            );
+        }
+    }
+
+    /// Guards the ordering dependency: with the `grok-` arm pruned, `grok-build`
+    /// reaches gcli through the built-in alias rather than the openai fallback.
+    #[test]
+    fn the_builtin_alias_still_wins_over_the_openai_fallback() {
+        let db = AppDb::default();
+        assert_eq!(
+            get_model_info("grok-build", &db).provider.as_deref(),
+            Some("gcli")
+        );
     }
 }

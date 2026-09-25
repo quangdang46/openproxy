@@ -128,6 +128,17 @@ pub struct SourceModel {
     pub context_length: Option<u64>,
     #[serde(default)]
     pub max_output_tokens: Option<u64>,
+    /// 9router `models[].targetFormat` — the per-model wire-format override
+    /// (e.g. minimax `MiniMax-M3` → claude, xiaomi-tokenplan
+    /// `mimo-v2.5-pro-claude` → claude). Read by `resolve_model_metadata` on
+    /// the static catalog and surfaced in `/v1/models/info`; declaring it here
+    /// keeps the sync pipeline from dropping it on the floor.
+    #[serde(default)]
+    pub target_format: Option<String>,
+    /// 9router `models[].upstreamModelId` — the id actually sent upstream when
+    /// the listed id is an alias for another model.
+    #[serde(default)]
+    pub upstream_model_id: Option<String>,
 }
 
 fn default_model_kind() -> String {
@@ -392,6 +403,12 @@ fn build_extra(
     if let Some(mot) = model.max_output_tokens {
         extra.insert("maxOutputTokens".into(), Value::from(mot));
     }
+    if let Some(fmt) = &model.target_format {
+        extra.insert("targetFormat".into(), Value::String(fmt.clone()));
+    }
+    if let Some(up) = &model.upstream_model_id {
+        extra.insert("upstreamModelId".into(), Value::String(up.clone()));
+    }
     if let Some(fmt) = &provider.format {
         extra.insert("providerFormat".into(), Value::String(fmt.clone()));
     }
@@ -558,6 +575,8 @@ fn owned_extra_keys() -> &'static [&'static str] {
         "sourceProviderId",
         "contextLength",
         "maxOutputTokens",
+        "targetFormat",
+        "upstreamModelId",
         "providerFormat",
         "providerBaseUrl",
         "providerAuthType",
@@ -632,6 +651,8 @@ mod tests {
                     kind: "llm".into(),
                     context_length: Some(1_047_576),
                     max_output_tokens: None,
+                    target_format: None,
+                    upstream_model_id: None,
                 }],
             }],
         }
@@ -705,6 +726,36 @@ mod tests {
         assert_eq!(plan.diff.unchanged.len(), 1);
         assert_eq!(plan.diff.created.len(), 0);
         assert_eq!(plan.diff.updated.len(), 0);
+    }
+
+    /// 9router's per-model `targetFormat` / `upstreamModelId` overrides (P274-001)
+    /// used to be dropped at extraction: `SourceModel` had no field for them, so a
+    /// regenerated catalog silently lost rows like minimax `MiniMax-M3` and
+    /// xiaomi-tokenplan `mimo-v2.5-pro-claude`. They are carried into the model's
+    /// `extra` here, and listed in `owned_extra_keys` so a re-sync that stops
+    /// seeing them removes them rather than leaving an orphan behind.
+    #[test]
+    fn target_format_and_upstream_id_survive_the_sync() {
+        let mut app = empty_app();
+        let mut snap = sample_snapshot();
+        let model = &mut snap.providers[0].models[0];
+        model.target_format = Some("claude".into());
+        model.upstream_model_id = Some("fakeprov/real-model-id".into());
+
+        let plan = compute_plan(&app, &snap, SyncSource::NineRouter, "now", false);
+        assert_eq!(plan.new_models.len(), 1);
+        let extra = &plan.new_models[0].extra;
+        assert_eq!(extra.get("targetFormat").unwrap().as_str(), Some("claude"));
+        assert_eq!(
+            extra.get("upstreamModelId").unwrap().as_str(),
+            Some("fakeprov/real-model-id")
+        );
+        for key in ["targetFormat", "upstreamModelId"] {
+            assert!(
+                owned_extra_keys().contains(&key),
+                "{key} must be sync-owned so a dropped override is cleaned up"
+            );
+        }
     }
 
     #[test]
