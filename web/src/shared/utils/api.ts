@@ -113,3 +113,24 @@ async function handleResponse<T>(response: Response): Promise<T> {
 
 const api = { get, post, put, del };
 export default api;
+
+/**
+ * Fetch `/api/settings`, refusing to fabricate a value on failure.
+ *
+ * Settings are read-modify-written: a caller fetches the whole settings object,
+ * changes one key, and PATCHes the result back. Degrading a failed read to `{}`
+ * therefore makes the caller believe every other provider has no override and
+ * PATCH that emptiness over the top — silently deleting settings it never read.
+ * A toggle click is enough to trigger it, and the response is a normal 200.
+ *
+ * Throws instead, so the caller's existing error path runs and nothing is
+ * written. Treat the absence of an override as an empty map only when the read
+ * genuinely succeeded.
+ */
+export async function fetchSettingsStrict(): Promise<Record<string, unknown>> {
+  const res = await fetch("/api/settings", { cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`Failed to load settings (HTTP ${res.status})`);
+  }
+  return (await res.json()) as Record<string, unknown>;
+}

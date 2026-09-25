@@ -5,6 +5,7 @@ import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal } from 
 import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
 import { ConfirmModal } from "@/shared/components/Modal";
 import { useNotificationStore } from "@/store/notificationStore";
+import { fetchSettingsStrict } from "@/shared/utils/api";
 
 // ── CooldownTimer ──────────────────────────────────────────────
 interface CooldownTimerProps {
@@ -359,7 +360,7 @@ export default function ConnectionsCard({ providerId, isOAuth = false }: Connect
   const saveStrategy = async (strategy: string | null, stickyLimit: string) => {
     try {
       const res = await fetch("/api/settings", { cache: "no-store" });
-      const data = res.ok ? await res.json() : {};
+      const data = await fetchSettingsStrict();
       const current = data.providerStrategies || {};
       const override: Record<string, any> = {};
       if (strategy) override.fallbackStrategy = strategy;
