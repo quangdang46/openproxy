@@ -2375,7 +2375,10 @@ impl QoderExecutor {
     }
 
     /// Inference host for this credential (api2 for jt-, api3 otherwise).
-    fn inference_base(credentials: &ProviderConnection) -> String {
+    /// Public so the connection-test probe uses the same host the executor
+    /// dials. Qoder serves two hosts and the choice depends on the token
+    /// prefix, so re-deriving it here would drift.
+    pub fn inference_base(credentials: &ProviderConnection) -> String {
         let raw = credentials
             .api_key
             .as_deref()

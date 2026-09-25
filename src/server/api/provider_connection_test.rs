@@ -1683,6 +1683,67 @@ fn oauth_probe_request(provider: &str, access_token: &str) -> Option<PreparedReq
             )],
             body: None,
         }),
+        // These three had no arm at all, so `_ => None` turned every probe
+        // into invalid("Provider test not supported") and persisted
+        // testStatus "error" regardless of whether the token was valid.
+        //
+        // The endpoints come from the providers' own executors rather than
+        // 9router's registry, which disagrees with the in-tree hosts: 9router
+        // lists openapi.qoder.sh for qoder while the executor dials
+        // api2/api3.qoder.sh depending on the token prefix, and 9router has a
+        // userInfoUrl OpenProxy has no equivalent of. A GET on /models is the
+        // one cheap, auth-required endpoint all three expose.
+        "grok-cli" => {
+            let base = crate::core::executor::GROK_CLI_RESPONSES_URL.trim_end_matches("/responses");
+            Some(PreparedRequest {
+                method: Method::GET,
+                url: format!("{base}/models"),
+                headers: vec![
+                    (
+                        "Authorization".to_string(),
+                        format!("Bearer {access_token}"),
+                    ),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+            })
+        }
+        "qoder" => {
+            let base = crate::core::executor::QoderExecutor::inference_base(
+                &crate::types::ProviderConnection {
+                    api_key: Some(access_token.to_string()),
+                    access_token: Some(access_token.to_string()),
+                    ..Default::default()
+                },
+            );
+            Some(PreparedRequest {
+                method: Method::GET,
+                url: format!("{}/models", base.trim_end_matches('/')),
+                headers: vec![
+                    (
+                        "Authorization".to_string(),
+                        format!("Bearer {access_token}"),
+                    ),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+            })
+        }
+        "kimchi" => {
+            let base = crate::core::executor::KIMCHI_BASE_URL;
+            Some(PreparedRequest {
+                method: Method::GET,
+                url: format!("{}/models", base.trim_end_matches('/')),
+                headers: vec![
+                    (
+                        "Authorization".to_string(),
+                        format!("Bearer {access_token}"),
+                    ),
+                    ("Accept".to_string(), "application/json".to_string()),
+                ],
+                body: None,
+            })
+        }
         _ => None,
     }
 }
@@ -2054,7 +2115,7 @@ fn invalid(error: &str) -> ConnectionTestResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{probe_accept_statuses, probe_soft_fail_message};
+    use super::{oauth_probe_request, probe_accept_statuses, probe_soft_fail_message};
 
     /// Regression (audit finding #59, 9router parity): the API-key probe path
     /// used "valid unless the status is 401/403", the INVERSE of 9router's
@@ -2091,5 +2152,49 @@ mod tests {
         assert!(probe_soft_fail_message("grok-cli", 500).is_none());
         // codex accepts 400 silently, with no soft message.
         assert!(probe_soft_fail_message("codex", 400).is_none());
+    }
+}
+
+/// openproxy-l0r0 finding 3: grok-cli, qoder and kimchi OAuth connections used
+/// to have no probe arm, so every test of one returned
+/// invalid("Provider test not supported") and persisted testStatus "error"
+/// regardless of whether the token was valid. The negative case already
+/// existed by default, which is exactly why this went unnoticed — only the
+/// positive arm was missing.
+#[cfg(test)]
+mod oauth_probe_coverage {
+    use super::oauth_probe_request;
+
+    #[test]
+    fn the_three_missing_providers_now_have_a_probe() {
+        for provider in ["grok-cli", "qoder", "kimchi"] {
+            let probe = oauth_probe_request(provider, "test-token")
+                .unwrap_or_else(|| panic!("{provider} still has no probe arm"));
+            assert_eq!(probe.method, reqwest::Method::GET, "{provider}");
+            assert!(
+                probe.url.starts_with("https://"),
+                "{provider} probe must not be relative: {}",
+                probe.url
+            );
+            assert!(
+                probe
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("authorization")),
+                "{provider} probe must send the credential"
+            );
+        }
+    }
+
+    /// Qoder serves two hosts and picks between them by token prefix, so the
+    /// probe must follow the executor rather than hardcode one.
+    #[test]
+    fn qoder_probe_follows_the_executors_host_choice() {
+        let plain = oauth_probe_request("qoder", "sk-plain").unwrap();
+        let session = oauth_probe_request("qoder", "jt-session").unwrap();
+        assert_ne!(
+            plain.url, session.url,
+            "the qoder probe ignores the token-prefix host choice"
+        );
     }
 }
