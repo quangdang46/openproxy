@@ -3833,227 +3833,248 @@ async fn proxy_response_with_pending_tracking(
             // Distinct from `pending_text`, which the dashboard transformer
             // branch uses.
             let mut translate_pending: Vec<u8> = Vec::new();
+            // Captured BEFORE the closure, because `transformer` is moved into
+            // it and cannot be inspected here. The [DONE] sentinel terminates a
+            // PASSTHROUGH stream; emitting it when the request took the qoder /
+            // dashboard / translation branch injects a terminator into a stream
+            // that already has its own, and the client stops reading at it.
+            let took_passthrough =
+                !qoder_sse_unwrap && transformer.is_none() && !needs_stream_translation;
+            let mut saw_done = false;
             let mut passthrough_pending: Vec<u8> = Vec::new();
             let custom_tool_names = custom_tool_names.clone();
             let stream = async_stream::stream! {
-                let mut upstream = response.bytes_stream();
-                // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
-                let mut t_state = if needs_stream_translation {
-                    let mut s = crate::core::translator::registry::ResponseTransformState::default();
-                    // Thread custom-tool names into streaming state so
-                    // function_call vs custom_tool_call branching survives
-                    // (9router chatCore customToolNames → stream handler).
-                    if let Some(ref names) = custom_tool_names {
-                        if !names.is_empty() {
-                            s.responses.state.insert(
-                                "customToolNames".to_string(),
-                                Value::String(names.clone()),
-                            );
-                        }
-                    }
-                    Some(s)
-                } else {
-                    None
-                };
-                // Accumulate usage across EVERY frame, not just the last one.
-                // Anthropic splits usage across events (message_start carries
-                // input + cache counters, message_delta carries the cumulative
-                // output, message_stop carries none), so reading only the final
-                // frame structurally cannot see the prompt tokens. Merged with
-                // field-wise max, matching 9router mergeUsage.
-                let mut stream_usage: Option<TokenUsage> = None;
-                loop {
-                    let next = tokio::time::timeout(SSE_STALL_TIMEOUT, upstream.try_next()).await;
-                    match next {
-                        Err(_elapsed) => {
-                            // Upstream went silent for SSE_STALL_TIMEOUT; treat
-                            // as an error so the client can retry.
-                            tracing::warn!(
-                                target: "openproxy::chat::stream",
-                                provider = %provider,
-                                model = %model,
-                                "SSE stalled, closing stream"
-                            );
-                            record_streaming_usage(&state, &provider, &model,
-                                connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
-                            state
-                                .usage_live
-                                .finish_request(&model, &provider, connection_id.as_deref(), true)
-                                .await;
-                            yield Ok::<Bytes, std::io::Error>(Bytes::from(write_streaming_error(
-                                "Upstream SSE stream stalled",
-                                "server_error",
-                            )));
-                            return;
-                        }
-                        Ok(Ok(Some(chunk))) => {
-                            stream_usage = merge_token_usage(
-                                stream_usage,
-                                extract_token_usage_from_bytes(&chunk),
-                            );
-                            if qoder_sse_unwrap {
-                                for line in qoder_unwrap_sse_chunk(
-                                    &chunk,
-                                    &mut pending_text,
-                                    &mut qoder_seen_first_frame,
-                                    &mut qoder_billing_block,
-                                    qoder_coalescer.as_mut(),
-                                ) {
-                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
+                            let mut upstream = response.bytes_stream();
+                            // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
+                            let mut t_state = if needs_stream_translation {
+                                let mut s = crate::core::translator::registry::ResponseTransformState::default();
+                                // Thread custom-tool names into streaming state so
+                                // function_call vs custom_tool_call branching survives
+                                // (9router chatCore customToolNames → stream handler).
+                                if let Some(ref names) = custom_tool_names {
+                                    if !names.is_empty() {
+                                        s.responses.state.insert(
+                                            "customToolNames".to_string(),
+                                            Value::String(names.clone()),
+                                        );
+                                    }
                                 }
-                                if qoder_billing_block {
-                                    // Billing block: close the stream now so the
-                                    // client sees the 403-shaped error frame.
-                                    // (Combo fallback itself happens in the
-                                    // executor's pre-stream peek; this flag is
-                                    // the backstop for already-open streams.)
-                                    record_streaming_usage(&state, &provider, &model,
-                                        connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
-                                    state
-                                        .usage_live
-                                        .finish_request(&model, &provider, connection_id.as_deref(), true)
-                                        .await;
-                                    return;
+                                Some(s)
+                            } else {
+                                None
+                            };
+                            // Accumulate usage across EVERY frame, not just the last one.
+                            // Anthropic splits usage across events (message_start carries
+                            // input + cache counters, message_delta carries the cumulative
+                            // output, message_stop carries none), so reading only the final
+                            // frame structurally cannot see the prompt tokens. Merged with
+                            // field-wise max, matching 9router mergeUsage.
+                            let mut stream_usage: Option<TokenUsage> = None;
+                            loop {
+                                let next = tokio::time::timeout(SSE_STALL_TIMEOUT, upstream.try_next()).await;
+                                match next {
+                                    Err(_elapsed) => {
+                                        // Upstream went silent for SSE_STALL_TIMEOUT; treat
+                                        // as an error so the client can retry.
+                                        tracing::warn!(
+                                            target: "openproxy::chat::stream",
+                                            provider = %provider,
+                                            model = %model,
+                                            "SSE stalled, closing stream"
+                                        );
+                                        record_streaming_usage(&state, &provider, &model,
+                                            connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
+                                        state
+                                            .usage_live
+                                            .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                            .await;
+                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(write_streaming_error(
+                                            "Upstream SSE stream stalled",
+                                            "server_error",
+                                        )));
+                                        return;
+                                    }
+                                    Ok(Ok(Some(chunk))) => {
+                                        stream_usage = merge_token_usage(
+                                            stream_usage,
+                                            extract_token_usage_from_bytes(&chunk),
+                                        );
+                                        if qoder_sse_unwrap {
+                                            for line in qoder_unwrap_sse_chunk(
+                                                &chunk,
+                                                &mut pending_text,
+                                                &mut qoder_seen_first_frame,
+                                                &mut qoder_billing_block,
+                                                qoder_coalescer.as_mut(),
+                                            ) {
+                                                yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
+                                            }
+                                            if qoder_billing_block {
+                                                // Billing block: close the stream now so the
+                                                // client sees the 403-shaped error frame.
+                                                // (Combo fallback itself happens in the
+                                                // executor's pre-stream peek; this flag is
+                                                // the backstop for already-open streams.)
+            record_streaming_usage(&state, &provider, &model,
+                                                    connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
+                                                state
+                                                    .usage_live
+                                                    .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                                    .await;
+                                                return;
+                                            }
+                                        } else if let Some(transformer) = transformer.as_mut() {
+                                            for line in transform_dashboard_sse_chunk(&chunk, transformer.as_mut(), &mut pending_text) {
+                                                if let Some(frame) = sse_frame_for_dashboard(&line) {
+                                                    yield Ok::<Bytes, std::io::Error>(frame);
+                                                }
+                                            }
+                                        } else if needs_stream_translation {
+                                            // Framing parity (bead openproxy-0ph4): a
+                                            // transport chunk is NOT one SSE event. One read
+                                            // can carry several frames, and one frame can
+                                            // straddle two reads. 9router buffers per line
+                                            // and only acts on COMPLETE lines
+                                            // (.tmp/9router/open-sse/utils/stream.js:110-119:
+                                            // "const lines = buffer.split(chr(10));
+                                            //  buffer = lines.pop() || ''").
+                                            //
+                                            // Passing the raw chunk straight to
+                                            // translate_response dropped every frame that
+                                            // was not a whole chunk, and double-handled
+                                            // any that was. The buffer below is the same
+                                            // one the dashboard transformer path already
+                                            // used, generalised so all three stream
+                                            // branches share it.
+                                            translate_pending.extend_from_slice(&chunk);
+                                            for line in drain_complete_sse_lines(&mut translate_pending) {
+                                                // t_state is Some whenever
+                                                // needs_stream_translation is true, so the
+                                                // None arm is unreachable; it is kept as a
+                                                // compile-time total match, not a fallback.
+                                                if let Some(ref mut ts) = t_state {
+                                                    let chunks = registry::global_registry()
+                                                        .translate_response(
+                                                            stream_target_format,
+                                                            stream_source_format,
+                                                            &Bytes::from(line),
+                                                            ts,
+                                                        );
+                                                    for out in chunks {
+                                                        if let Some(frame) = sse_frame_for_dashboard(&out) {
+                                                            yield Ok::<Bytes, std::io::Error>(frame);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            passthrough_pending.extend_from_slice(&chunk);
+                                            for line in drain_complete_sse_lines(&mut passthrough_pending) {
+                                                yield Ok::<Bytes, std::io::Error>(
+                                                    sanitize_sse_chunk(
+                                                        &passthrough_frame_bytes(
+                                                            &apply_passthrough_transforms(&line, &provider),
+                                                        ),
+                                                    ),
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Ok(Ok(None)) => break,
+                                    Ok(Err(_)) => {
+                                        record_streaming_usage(&state, &provider, &model,
+                                            connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
+                                        state
+                                            .usage_live
+                                            .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                            .await;
+                                        yield Ok::<Bytes, std::io::Error>(Bytes::from(write_streaming_error(
+                                            "Upstream stream error",
+                                            "server_error",
+                                        )));
+                                        return;
+                                    }
                                 }
-                            } else if let Some(transformer) = transformer.as_mut() {
-                                for line in transform_dashboard_sse_chunk(&chunk, transformer.as_mut(), &mut pending_text) {
+                            }
+                            if let Some(transformer) = transformer.as_mut() {
+                                for line in flush_dashboard_sse_chunk(transformer.as_mut(), &mut pending_text) {
                                     if let Some(frame) = sse_frame_for_dashboard(&line) {
                                         yield Ok::<Bytes, std::io::Error>(frame);
                                     }
                                 }
-                            } else if needs_stream_translation {
-                                // Framing parity (bead openproxy-0ph4): a
-                                // transport chunk is NOT one SSE event. One read
-                                // can carry several frames, and one frame can
-                                // straddle two reads. 9router buffers per line
-                                // and only acts on COMPLETE lines
-                                // (.tmp/9router/open-sse/utils/stream.js:110-119:
-                                // "const lines = buffer.split(chr(10));
-                                //  buffer = lines.pop() || ''").
-                                //
-                                // Passing the raw chunk straight to
-                                // translate_response dropped every frame that
-                                // was not a whole chunk, and double-handled
-                                // any that was. The buffer below is the same
-                                // one the dashboard transformer path already
-                                // used, generalised so all three stream
-                                // branches share it.
-                                translate_pending.extend_from_slice(&chunk);
-                                for line in drain_complete_sse_lines(&mut translate_pending) {
-                                    // t_state is Some whenever
-                                    // needs_stream_translation is true, so the
-                                    // None arm is unreachable; it is kept as a
-                                    // compile-time total match, not a fallback.
-                                    if let Some(ref mut ts) = t_state {
-                                        let chunks = registry::global_registry()
-                                            .translate_response(
-                                                stream_target_format,
-                                                stream_source_format,
-                                                &Bytes::from(line),
-                                                ts,
-                                            );
-                                        for out in chunks {
-                                            if let Some(frame) = sse_frame_for_dashboard(&out) {
-                                                yield Ok::<Bytes, std::io::Error>(frame);
-                                            }
+                            }
+                            // EOF flush for the translation / passthrough branch: a
+                            // provider may end the stream without a trailing newline, and
+                            // that last frame is real content, not a truncated fragment.
+                            if needs_stream_translation && !translate_pending.is_empty() {
+                                let last = std::mem::take(&mut translate_pending);
+                                if let Some(ref mut ts) = t_state {
+                                    let chunks = registry::global_registry()
+                                        .translate_response(
+                                            stream_target_format,
+                                            stream_source_format,
+                                            &Bytes::from(last),
+                                            ts,
+                                        );
+                                    for out in chunks {
+                                        if let Some(frame) = sse_frame_for_dashboard(&out) {
+                                            yield Ok::<Bytes, std::io::Error>(frame);
                                         }
                                     }
                                 }
-                            } else {
-                                passthrough_pending.extend_from_slice(&chunk);
-                                for line in drain_complete_sse_lines(&mut passthrough_pending) {
-                                    yield Ok::<Bytes, std::io::Error>(
-                                        sanitize_sse_chunk(
-                                            &passthrough_frame_bytes(
-                                                &apply_passthrough_transforms(&line, &provider),
-                                            ),
-                                        ),
-                                    );
+                            }
+                            if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending) {
+                                // The terminal frame runs the SAME pipeline as every other
+                                // frame: without this it skipped fixInvalidId, the
+                                // object/created injection and the empty-tool_calls
+                                // deletion — the same "last frame is special" oversight
+                                // that lost its delimiter.
+                                let text = String::from_utf8_lossy(&final_frame).into_owned();
+                                yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(
+                                    &passthrough_frame_bytes(&apply_passthrough_transforms(&text, &provider)),
+                                ));
+                            }
+
+                            // Qoder end-of-stream: flush the usage coalescer (held
+                            // finish+usage → terminal chunk). Qoder only uses Reqwest
+                            // transport so the Hyper branch needs no equivalent.
+                            if qoder_sse_unwrap {
+                                for line in qoder_coalescer_flush(qoder_coalescer.as_mut()) {
+                                    yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
                                 }
                             }
-                        }
-                        Ok(Ok(None)) => break,
-                        Ok(Err(_)) => {
+                            // End-of-stream flush: emit the terminal chunk + [DONE] for
+                            // buffered binary transforms (kiro EventStream → SSE).
+                            if let Some(ref mut t_state) = t_state {
+                                for line in registry::global_registry().finish_stream(
+                                    stream_source_format,
+                                    stream_target_format,
+                                    t_state,
+                                ) {
+                                    if let Some(frame) = sse_frame_for_dashboard(&line) {
+                                        yield Ok::<Bytes, std::io::Error>(frame);
+                                    }
+                                }
+                            }
+                            // THE [DONE] SENTINEL IS THE LAST YIELD OF THE EOF SEQUENCE.
+                            // Placed after qoder_coalescer_flush and after finish_stream on
+                            // purpose: a client stops reading at [DONE], so emitting it
+                            // earlier makes it discard the finish+usage chunk the coalescer
+                            // holds back, and the terminal chunk finish_stream emits — which
+                            // silently truncated qoder and kiro streams. It is also gated on
+                            // the branch actually taken: a request that went through the
+                            // qoder, dashboard or translation path already has its own
+                            // terminator and must not receive a second one.
+                            if should_emit_done_sentinel(took_passthrough, &provider, saw_done) {
+                                yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
+                            }
                             record_streaming_usage(&state, &provider, &model,
                                 connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
                             state
                                 .usage_live
-                                .finish_request(&model, &provider, connection_id.as_deref(), true)
+                                .finish_request(&model, &provider, connection_id.as_deref(), false)
                                 .await;
-                            yield Ok::<Bytes, std::io::Error>(Bytes::from(write_streaming_error(
-                                "Upstream stream error",
-                                "server_error",
-                            )));
-                            return;
-                        }
-                    }
-                }
-                if let Some(transformer) = transformer.as_mut() {
-                    for line in flush_dashboard_sse_chunk(transformer.as_mut(), &mut pending_text) {
-                        if let Some(frame) = sse_frame_for_dashboard(&line) {
-                            yield Ok::<Bytes, std::io::Error>(frame);
-                        }
-                    }
-                }
-                // EOF flush for the translation / passthrough branch: a
-                // provider may end the stream without a trailing newline, and
-                // that last frame is real content, not a truncated fragment.
-                if needs_stream_translation && !translate_pending.is_empty() {
-                    let last = std::mem::take(&mut translate_pending);
-                    if let Some(ref mut ts) = t_state {
-                        let chunks = registry::global_registry()
-                            .translate_response(
-                                stream_target_format,
-                                stream_source_format,
-                                &Bytes::from(last),
-                                ts,
-                            );
-                        for out in chunks {
-                            if let Some(frame) = sse_frame_for_dashboard(&out) {
-                                yield Ok::<Bytes, std::io::Error>(frame);
-                            }
-                        }
-                    }
-                }
-                if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending) {
-                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&final_frame));
-                }
-                // 9router stream.js:398-401: "In passthrough mode we still must
-                // terminate the SSE stream. Some clients (e.g. OpenClaw) expect
-                // the OpenAI-style sentinel. Without it they can hang until
-                // timeout and trigger failover." Withheld for the Gemini family,
-                // which rejects it with a 400 syntax error.
-                if passthrough_needs_done_sentinel(&provider) {
-                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
-                }
-                // Qoder end-of-stream: flush the usage coalescer (held
-                // finish+usage → terminal chunk). Qoder only uses Reqwest
-                // transport so the Hyper branch needs no equivalent.
-                if qoder_sse_unwrap {
-                    for line in qoder_coalescer_flush(qoder_coalescer.as_mut()) {
-                        yield Ok::<Bytes, std::io::Error>(Bytes::from(line));
-                    }
-                }
-                // End-of-stream flush: emit the terminal chunk + [DONE] for
-                // buffered binary transforms (kiro EventStream → SSE).
-                if let Some(ref mut t_state) = t_state {
-                    for line in registry::global_registry().finish_stream(
-                        stream_source_format,
-                        stream_target_format,
-                        t_state,
-                    ) {
-                        if let Some(frame) = sse_frame_for_dashboard(&line) {
-                            yield Ok::<Bytes, std::io::Error>(frame);
-                        }
-                    }
-                }
-                record_streaming_usage(&state, &provider, &model,
-                    connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
-                state
-                    .usage_live
-                    .finish_request(&model, &provider, connection_id.as_deref(), false)
-                    .await;
-            };
+                        };
             Body::from_stream(stream)
         }
         UpstreamResponse::Hyper(response) => {
@@ -4073,6 +4094,9 @@ async fn proxy_response_with_pending_tracking(
             // the same raw-chunk defect the Reqwest arm had.
             let mut translate_pending2: Vec<u8> = Vec::new();
             let mut passthrough_pending2: Vec<u8> = Vec::new();
+            let took_passthrough2 =
+                !qoder_sse_unwrap && transformer.is_none() && !needs_stream_translation;
+            let mut saw_done2 = false;
             let custom_tool_names2 = custom_tool_names.clone();
             let stream = async_stream::stream! {
                 // Persistent state for streaming format translation (e.g. Responses API -> Chat Completions).
@@ -4209,10 +4233,10 @@ async fn proxy_response_with_pending_tracking(
                     }
                 }
                 if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending2) {
-                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&final_frame));
-                }
-                if passthrough_needs_done_sentinel(&provider) {
-                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
+                    let text = String::from_utf8_lossy(&final_frame).into_owned();
+                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(
+                        &passthrough_frame_bytes(&apply_passthrough_transforms(&text, &provider)),
+                    ));
                 }
                 // End-of-stream flush: emit the terminal chunk + [DONE] for
                 // buffered binary transforms (kiro EventStream → SSE).
@@ -4226,6 +4250,13 @@ async fn proxy_response_with_pending_tracking(
                             yield Ok::<Bytes, std::io::Error>(frame);
                         }
                     }
+                }
+
+                // The [DONE] sentinel is the LAST yield of the EOF sequence, and
+                // only for a request that actually took the passthrough branch.
+                // See the arm-1 comment for why ordering and gating both matter.
+                if should_emit_done_sentinel(took_passthrough2, &provider, saw_done2) {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
                 }
                 record_streaming_usage(&state, &provider, &model,
                     connection_id.as_deref(), api_key.as_deref(), endpoint, &stream_usage, compression.clone()).await;
@@ -4467,6 +4498,31 @@ pub(crate) fn normalise_passthrough_chunk(payload: &mut Value) -> bool {
 
     let _ = Value::Null; // keep the import used across cfg paths
     changed
+}
+
+/// Whether the OpenAI `data: [DONE]` sentinel must be appended at EOF.
+///
+/// Three conditions, all required (openproxy-24's review of 3ac819b3):
+///
+///  * `took_passthrough` — the sentinel terminates a PASSTHROUGH stream. Emitting
+///    it when the request actually took the qoder, dashboard-transformer or
+///    translation branch injects a terminator into a stream that already has its
+///    own, and a client stops reading at it.
+///  * `!saw_done` — the upstream may have sent its own `[DONE]`; appending a
+///    second one is usually harmless but is a duplicate terminator.
+///  * the provider is not in the Gemini family, which rejects the sentinel with
+///    a 400 syntax error (9router stream.js:400-401).
+///
+/// It must also be the LAST yield of the EOF sequence — after
+/// qoder_coalescer_flush and after finish_stream. Emitting it first makes the
+/// client stop reading and discard the finish+usage chunk coalescer holds, and
+/// discard the terminal chunk finish_stream emits.
+pub(crate) fn should_emit_done_sentinel(
+    took_passthrough: bool,
+    provider: &str,
+    saw_done: bool,
+) -> bool {
+    took_passthrough && !saw_done && passthrough_needs_done_sentinel(provider)
 }
 
 /// Whether a passthrough stream must be terminated with the OpenAI
@@ -6960,6 +7016,56 @@ mod passthrough_transform_tests {
                 &mut serde_json::from_str::<Value>(raw.trim_start_matches("data:").trim())
                     .unwrap_or(Value::Null),
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod done_sentinel_tests {
+    use super::should_emit_done_sentinel;
+
+    /// Regression (openproxy-24's review of 3ac819b3): the sentinel was gated
+    /// only on the PROVIDER name, with no knowledge of which stream branch the
+    /// request actually took, and it was emitted BEFORE qoder_coalescer_flush
+    /// and finish_stream. A client stops reading at [DONE], so that ordering
+    /// made it discard the finish+usage chunk the coalescer holds and the
+    /// terminal chunk finish_stream emits — silently truncating qoder and kiro
+    /// streams. The first version of this test asserted only the provider
+    /// predicate, which stayed green through both defects.
+    #[test]
+    fn no_sentinel_when_the_request_did_not_take_passthrough() {
+        for (took, provider) in [
+            (false, "qoder"),  // coalescer holds a finish+usage chunk
+            (false, "kiro"),   // finish_stream emits a terminal chunk
+            (false, "openai"), // translation branch
+            (false, "claude"), // translation branch
+        ] {
+            assert!(
+                !should_emit_done_sentinel(took, provider, false),
+                "{provider} on a non-passthrough branch must not receive a sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_passthrough_stream_gets_the_sentinel() {
+        assert!(should_emit_done_sentinel(true, "openai", false));
+        assert!(should_emit_done_sentinel(true, "openrouter", false));
+    }
+
+    #[test]
+    fn no_duplicate_sentinel_when_upstream_sent_one() {
+        assert!(
+            !should_emit_done_sentinel(true, "openai", true),
+            "upstream already terminated the stream"
+        );
+    }
+
+    #[test]
+    fn the_gemini_family_still_rejects_the_sentinel() {
+        // Even on passthrough: these reject it with a 400 syntax error.
+        for p in ["antigravity", "gemini", "vertex"] {
+            assert!(!should_emit_done_sentinel(true, p, false), "{p}");
         }
     }
 }
