@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Card from "./Card";
 import Select from "./Select";
 import Badge from "./Badge";
+import { fetchSettingsStrict } from "@/shared/utils/api";
 
 const NONE_PROXY_POOL_VALUE = "__none__";
 

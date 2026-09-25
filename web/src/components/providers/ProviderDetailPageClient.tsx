@@ -27,6 +27,7 @@ import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
+import { fetchSettingsStrict } from "@/shared/utils/api";
 
 const ONE_BY_ONE_DELAY_MS = 1000;
 
@@ -269,7 +270,7 @@ export default function ProviderDetailPageClient() {
         ? await nodesRes.json().catch(() => ({}))
         : null;
       const proxyPoolsData = await proxyPoolsRes.json().catch(() => ({}));
-      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
+      const settingsData = await fetchSettingsStrict();
       if (!connectionsRes.ok || !nodesRes.ok) {
         const worst = !connectionsRes.ok ? connectionsRes : nodesRes;
         throw new Error(describeFailure(worst, "load this provider"));
@@ -349,7 +350,7 @@ export default function ProviderDetailPageClient() {
   const saveProviderStrategy = async (strategy, stickyLimit) => {
     try {
       const settingsRes = await fetch("/api/settings", { cache: "no-store" });
-      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
+      const settingsData = await fetchSettingsStrict();
       const current = settingsData.providerStrategies || {};
 
       // Build override: null strategy means remove override, use global
@@ -401,7 +402,7 @@ export default function ProviderDetailPageClient() {
   const saveThinkingConfig = async (mode) => {
     try {
       const settingsRes = await fetch("/api/settings", { cache: "no-store" });
-      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
+      const settingsData = await fetchSettingsStrict();
       const current = settingsData.providerThinking || {};
       const updated = { ...current };
       if (!mode || mode === "auto") {
