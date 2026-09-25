@@ -3,13 +3,20 @@
 //! `getTunnelStatus` / `getTailscaleStatus` do. The dashboard reads
 //! `settingsEnabled` so a tunnel the watchdog is restarting does not read back
 //! as "user turned it off".
+//!
+//! Boot resume has the same shape of requirement: which providers a restart
+//! brings back is a decision about persisted intent, made independently per
+//! provider the way 9router's two startup guards are.
 
 use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
+use openproxy::core::tunnel::TunnelProvider;
 use openproxy::db::Db;
+use openproxy::server::api::quota_auto_ping::boot_resume_providers;
 use openproxy::server::state::AppState;
+use openproxy::types::Settings;
 use serde_json::Value;
 use tempfile::tempdir;
 use tower::util::ServiceExt;
@@ -116,4 +123,44 @@ async fn tunnel_status_skips_the_login_probe_when_tailscale_is_off() {
     // 9router gates the probe on the setting (manager.js:124); with the
     // funnel disabled the answer is false without ever shelling out.
     assert_eq!(body["tailscale"]["loggedIn"], Value::Bool(false));
+}
+
+fn settings_with(tunnel_enabled: bool, tailscale_enabled: bool) -> Settings {
+    Settings {
+        tunnel_enabled,
+        tailscale_enabled,
+        ..Settings::default()
+    }
+}
+
+#[test]
+fn boot_resume_resumes_both_providers_when_both_flags_are_set() {
+    // 9router guards the two resumes independently
+    // (initializeApp.js:87 and :94), so a user who persisted both intents gets
+    // both back. An `if`/`else if` pair can only ever return one of them.
+    let settings = settings_with(true, true);
+
+    assert_eq!(
+        boot_resume_providers(&settings),
+        vec![TunnelProvider::Cloudflare, TunnelProvider::Tailscale]
+    );
+}
+
+#[test]
+fn boot_resume_resumes_neither_provider_when_nothing_is_enabled() {
+    assert!(boot_resume_providers(&settings_with(false, false)).is_empty());
+}
+
+#[test]
+fn boot_resume_resumes_only_the_provider_whose_flag_is_set() {
+    // Guards the helper against being over-corrected into "always resume both":
+    // each flag alone has to select exactly its own provider.
+    assert_eq!(
+        boot_resume_providers(&settings_with(true, false)),
+        vec![TunnelProvider::Cloudflare]
+    );
+    assert_eq!(
+        boot_resume_providers(&settings_with(false, true)),
+        vec![TunnelProvider::Tailscale]
+    );
 }

@@ -36,6 +36,7 @@ use tracing::{info, warn};
 
 use crate::core::executor::{CodexExecutionRequest, CodexExecutor, UpstreamResponse};
 use crate::core::proxy::resolve_proxy_target;
+use crate::core::tunnel::TunnelProvider;
 use crate::oauth::token_refresh::dispatch_oauth_refresh;
 use crate::server::api::usage::fetch_oauth_quota;
 use crate::server::state::AppState;
@@ -729,6 +730,25 @@ fn auto_ping_connections(settings: &Settings, key: &str) -> BTreeMap<String, boo
         .collect()
 }
 
+/// The tunnel providers a boot should resume, in 9router's statement order.
+///
+/// 9router guards the two resumes independently
+/// (`.tmp/9router/src/shared/services/initializeApp.js:87` and `:94`), so a
+/// persisted intent on either flag resumes that provider regardless of the
+/// other — two separate `if`s, not an `if`/`else if` pair. Cloudflare is
+/// first because that is the order 9router resumes in, and because it is the
+/// default provider on our side too.
+pub fn boot_resume_providers(settings: &Settings) -> Vec<TunnelProvider> {
+    let mut providers = Vec::new();
+    if settings.tunnel_enabled {
+        providers.push(TunnelProvider::Cloudflare);
+    }
+    if settings.tailscale_enabled {
+        providers.push(TunnelProvider::Tailscale);
+    }
+    providers
+}
+
 /// Resume tunnel / tailscale from persisted settings after process boot.
 pub fn spawn_boot_resume(state: AppState, port: u16) {
     tokio::spawn(async move {
@@ -737,35 +757,45 @@ pub fn spawn_boot_resume(state: AppState, port: u16) {
         let settings = state.db.snapshot().settings.clone();
         let tunnel_mgr = state.tunnel_manager.clone();
 
-        if settings.tunnel_enabled {
-            info!(
-                target: "openproxy::boot",
-                "tunnel was enabled — auto-resuming cloudflared"
-            );
-            if let Err(err) = tunnel_mgr
-                .start(crate::core::tunnel::TunnelProvider::Cloudflare, port)
-                .await
-            {
+        // `TunnelManager` holds a single child: `start()` runs
+        // `stop_process_only()` before spawning, so resuming a second provider
+        // here would kill the process the first one just started. Resume the
+        // first enabled provider and name the one that lost, rather than the
+        // previous `else if`, which dropped tailscale without a word whenever
+        // both flags were persisted. Giving the manager one child and one
+        // status per provider turns this loop into one with no `resumed` guard.
+        let mut resumed: Option<TunnelProvider> = None;
+
+        for provider in boot_resume_providers(&settings) {
+            if let Some(held) = resumed {
                 warn!(
                     target: "openproxy::boot",
+                    %provider,
+                    held = %held,
+                    "tunnel auto-resume skipped — the tunnel manager runs one provider at a time"
+                );
+                continue;
+            }
+
+            match provider {
+                TunnelProvider::Cloudflare => info!(
+                    target: "openproxy::boot",
+                    "tunnel was enabled — auto-resuming cloudflared"
+                ),
+                TunnelProvider::Tailscale => info!(
+                    target: "openproxy::boot",
+                    "tailscale was enabled — auto-resuming funnel"
+                ),
+            }
+
+            match tunnel_mgr.start(provider, port).await {
+                Ok(()) => resumed = Some(provider),
+                Err(err) => warn!(
+                    target: "openproxy::boot",
+                    %provider,
                     error = %err,
                     "tunnel auto-resume failed"
-                );
-            }
-        } else if settings.tailscale_enabled {
-            info!(
-                target: "openproxy::boot",
-                "tailscale was enabled — auto-resuming funnel"
-            );
-            if let Err(err) = tunnel_mgr
-                .start(crate::core::tunnel::TunnelProvider::Tailscale, port)
-                .await
-            {
-                warn!(
-                    target: "openproxy::boot",
-                    error = %err,
-                    "tailscale auto-resume failed"
-                );
+                ),
             }
         }
     });
