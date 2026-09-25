@@ -22,11 +22,14 @@ interface PonytailLevel {
 
 interface HeadroomStatus {
   installed: boolean;
+  path?: string | null;
   running: boolean;
   python: string | null;
   loading: boolean;
   localUrl?: string | false;
   canStart?: boolean;
+  version?: string | null;
+  extras?: { code: boolean; ml: boolean };
   managedPid?: boolean | number | null;
 }
 
