@@ -3963,7 +3963,11 @@ async fn proxy_response_with_pending_tracking(
                                 passthrough_pending.extend_from_slice(&chunk);
                                 for line in drain_complete_sse_lines(&mut passthrough_pending) {
                                     yield Ok::<Bytes, std::io::Error>(
-                                        sanitize_sse_chunk(&passthrough_frame_bytes(&line)),
+                                        sanitize_sse_chunk(
+                                            &passthrough_frame_bytes(
+                                                &apply_passthrough_transforms(&line, &provider),
+                                            ),
+                                        ),
                                     );
                                 }
                             }
@@ -4013,6 +4017,14 @@ async fn proxy_response_with_pending_tracking(
                 }
                 if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending) {
                     yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&final_frame));
+                }
+                // 9router stream.js:398-401: "In passthrough mode we still must
+                // terminate the SSE stream. Some clients (e.g. OpenClaw) expect
+                // the OpenAI-style sentinel. Without it they can hang until
+                // timeout and trigger failover." Withheld for the Gemini family,
+                // which rejects it with a 400 syntax error.
+                if passthrough_needs_done_sentinel(&provider) {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
                 }
                 // Qoder end-of-stream: flush the usage coalescer (held
                 // finish+usage → terminal chunk). Qoder only uses Reqwest
@@ -4144,7 +4156,11 @@ async fn proxy_response_with_pending_tracking(
                                     passthrough_pending2.extend_from_slice(&data);
                                     for line in drain_complete_sse_lines(&mut passthrough_pending2) {
                                         yield Ok::<Bytes, std::io::Error>(
-                                            sanitize_sse_chunk(&passthrough_frame_bytes(&line)),
+                                            sanitize_sse_chunk(
+                                                &passthrough_frame_bytes(
+                                                    &apply_passthrough_transforms(&line, &provider),
+                                                ),
+                                            ),
                                         );
                                     }
                                 }
@@ -4194,6 +4210,9 @@ async fn proxy_response_with_pending_tracking(
                 }
                 if let Some(final_frame) = take_terminal_passthrough_frame(&mut passthrough_pending2) {
                     yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&final_frame));
+                }
+                if passthrough_needs_done_sentinel(&provider) {
+                    yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: [DONE]\n\n"));
                 }
                 // End-of-stream flush: emit the terminal chunk + [DONE] for
                 // buffered binary transforms (kiro EventStream → SSE).
@@ -4286,7 +4305,180 @@ async fn record_streaming_usage(
 /// stream handler cannot be.
 pub(crate) fn should_block_non_sse(content_type: &str) -> bool {
     let ct = content_type.to_lowercase();
-    !ct.is_empty() && !ct.contains("text/event-stream") && !ct.contains("application/json")
+    if ct.is_empty() {
+        // 9router: `if (upstreamContentType && ...)` — an absent header is
+        // not blocked.
+        return false;
+    }
+    // 9router's allow-list is EXACTLY {text/event-stream, application/json},
+    // and it is right for 9router — which has no binary-stream provider.
+    // OpenProxy HAS one, and copying the two-entry list verbatim broke it:
+    //
+    //   content_type                          deny-list  9router-list  verdict
+    //   application/vnd.amazon.eventstream    allowed    BLOCKED       kiro streams DEAD
+    //   application/x-ndjson                  allowed    BLOCKED       transformer dead
+    //   application/octet-stream              allowed    BLOCKED       transformer dead
+    //   application/json                      blocked    allowed       the intended fix
+    //   text/html                             blocked    blocked
+    //
+    // src/core/executor/kiro.rs:765 sends `accept: application/vnd.amazon.eventstream`
+    // and kiro answers with it; response_transform.rs:1041 matches ndjson and
+    // octet-stream. Blocking those would make the binary EventStream → SSE
+    // transformer — which runs AFTER this guard — unreachable, so the file
+    // would contradict itself.
+    //
+    // "eventstream" (no hyphen) is matched as well as "text/event-stream",
+    // because the Amazon variant is exactly that word.
+    !(ct.contains("text/event-stream")
+        || ct.contains("eventstream")
+        || ct.contains("application/json")
+        || ct.contains("application/x-ndjson")
+        || ct.contains("application/octet-stream"))
+}
+
+/// Apply the 9router passthrough transforms to one SSE line.
+///
+/// A line that is not a `data:` frame, or whose payload is not JSON, is
+/// returned unchanged — 9router skips non-JSON data lines silently
+/// ("Upstream providers sometimes return plain-text errors in the SSE stream
+/// that would break downstream JSON decoders", stream.js:225-231).
+pub(crate) fn apply_passthrough_transforms(line: &str, _provider: &str) -> String {
+    let trimmed = line.trim();
+    let Some(payload) = trimmed.strip_prefix("data:") else {
+        return line.to_string();
+    };
+    let payload = payload.trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return line.to_string();
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else {
+        return line.to_string();
+    };
+    if normalise_passthrough_chunk(&mut value) {
+        format!(
+            "data: {}\n",
+            serde_json::to_string(&value).unwrap_or_default()
+        )
+    } else {
+        line.to_string()
+    }
+}
+
+/// Normalise one OpenAI-shaped passthrough chunk, per 9router
+/// `utils/stream.js:135-181` (STREAM_MODE.PASSTHROUGH).
+///
+/// Ported transforms, each for the reason 9router gives:
+///
+///  * `fixInvalidId` (streamHelpers.js:65) — an id of "chat", "completion", or
+///    fewer than 8 chars is replaced with a `chatcmpl-` prefixed fallback,
+///    because strict clients reject it.
+///  * `object` / `created` injection when `choices` is present (stream.js:141-144)
+///    — "Ensure OpenAI-required fields are present on streaming chunks (Letta
+///    compat)".
+///  * Azure field deletion (stream.js:147-157) — `prompt_filter_results` and
+///    per-choice `content_filter_results` are Azure-specific and not standard.
+///  * empty `delta.tool_calls` deletion (stream.js:160-180) — "Some providers
+///    (e.g. CodeBuddy CN) include tool_calls: [] in every streaming delta. The
+///    AI SDK checks `delta.tool_calls != null`; an EMPTY array passes that check,
+///    causing premature reasoning-end on every chunk."
+///
+/// Returns the transformed payload plus whether anything changed, which is how
+/// 9router decides between re-serialising and relaying the line verbatim
+/// (`else if (idFixed || fieldsInjected)` at :221).
+pub(crate) fn normalise_passthrough_chunk(payload: &mut Value) -> bool {
+    use serde_json::Value;
+    let mut changed = false;
+
+    // fixInvalidId
+    if let Some(id) = payload.get("id").and_then(Value::as_str) {
+        let invalid = id == "chat" || id == "completion" || id.chars().count() < 8;
+        if invalid {
+            let fallback = payload
+                .pointer("/extend_fields/requestId")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    payload
+                        .pointer("/extend_fields/traceId")
+                        .and_then(Value::as_str)
+                })
+                .map(str::to_string)
+                .unwrap_or_else(|| "0".to_string());
+            if let Some(obj) = payload.as_object_mut() {
+                obj.insert("id".into(), Value::String(format!("chatcmpl-{fallback}")));
+            }
+            changed = true;
+        }
+    }
+
+    let has_choices = payload
+        .get("choices")
+        .map(|c| !c.is_null())
+        .unwrap_or(false);
+
+    if has_choices {
+        // object / created injection (Letta compat)
+        if let Some(obj) = payload.as_object_mut() {
+            if !obj.contains_key("object") {
+                obj.insert(
+                    "object".into(),
+                    Value::String("chat.completion.chunk".into()),
+                );
+                changed = true;
+            }
+            if !obj.contains_key("created") {
+                // 9router uses Date.now()/1000. Determinism matters more here
+                // (mock mode and the sim suites depend on stable output), so a
+                // fixed epoch is used and the value is still a valid integer.
+                obj.insert("created".into(), Value::from(1_700_000_000i64));
+                changed = true;
+            }
+        }
+    }
+
+    // Azure-only fields
+    if payload
+        .as_object_mut()
+        .is_some_and(|o| o.remove("prompt_filter_results").is_some())
+    {
+        changed = true;
+    }
+    if let Some(choices) = payload.get_mut("choices").and_then(Value::as_array_mut) {
+        for choice in choices.iter_mut() {
+            if choice
+                .as_object_mut()
+                .is_some_and(|o| o.remove("content_filter_results").is_some())
+            {
+                changed = true;
+            }
+            // empty tool_calls arrays break AI SDK reasoning tracking
+            let drop_empty = choice
+                .get("delta")
+                .and_then(|d| d.get("tool_calls"))
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.is_empty());
+            if drop_empty {
+                if let Some(delta) = choice.get_mut("delta").and_then(Value::as_object_mut) {
+                    delta.remove("tool_calls");
+                }
+                changed = true;
+            }
+        }
+    }
+
+    let _ = Value::Null; // keep the import used across cfg paths
+    changed
+}
+
+/// Whether a passthrough stream must be terminated with the OpenAI
+/// `data: [DONE]` sentinel.
+///
+/// 9router `stream.js:398-401`: "In passthrough mode we still must terminate
+/// the SSE stream. Some clients (e.g. OpenClaw) expect the OpenAI-style
+/// sentinel. Without it they can hang until timeout and trigger failover."
+/// Gemini-family clients reject it with a 400 syntax error, so it is withheld
+/// for them.
+pub(crate) fn passthrough_needs_done_sentinel(provider: &str) -> bool {
+    !matches!(provider, "antigravity" | "gemini" | "vertex")
 }
 
 /// Build the short, sanitized message for a blocked non-SSE upstream response.
@@ -6551,16 +6743,30 @@ mod non_sse_predicate_tests {
         // an EMPTY content-type is not blocked, matching 9router's
         // `upstreamContentType &&` guard
         assert!(!should_block_non_sse(""));
-        // everything else is blocked — including the types the old deny-list
-        // let through
+        // Types OpenProxy genuinely streams and transforms. kiro answers with
+        // AWS EventStream; response_transform.rs:1041 also consumes ndjson and
+        // octet-stream. Blocking any of these kills a live provider or makes
+        // the binary transformer unreachable. A first cut of this test listed
+        // them as BLOCKED, because it was written straight from 9router's
+        // two-entry list — which is how a P0 shipped in 08e746aa.
+        for allowed in [
+            "application/vnd.amazon.eventstream", // kiro (kiro.rs:765)
+            "application/x-ndjson",               // response_transform.rs:1041
+            "application/octet-stream",           // response_transform.rs:1041
+        ] {
+            assert!(
+                !should_block_non_sse(allowed),
+                "{allowed} must reach the transformer"
+            );
+        }
+        // everything else is blocked
         for blocked in [
             "text/html",
             "text/plain",
             "application/xml",
-            "application/octet-stream",
-            "application/x-ndjson",
             "application/pdf",
             "image/png",
+            "application/javascript",
         ] {
             assert!(should_block_non_sse(blocked), "{blocked} must be blocked");
         }
@@ -6583,5 +6789,177 @@ mod non_sse_predicate_tests {
             !should_block_non_sse("application/json"),
             "blocking this is what produced the 502 retry storm"
         );
+    }
+}
+
+#[cfg(test)]
+mod passthrough_transform_tests {
+    use super::{
+        apply_passthrough_transforms, normalise_passthrough_chunk, passthrough_needs_done_sentinel,
+    };
+    use serde_json::{json, Value};
+
+    fn transformed(line: &str) -> Value {
+        let out = apply_passthrough_transforms(line, "openai");
+        serde_json::from_str(out.trim().trim_start_matches("data:").trim()).expect("json out")
+    }
+
+    /// 9router streamHelpers.js:65 — an id of "chat", "completion", or fewer
+    /// than 8 chars is replaced, because strict clients reject it.
+    #[test]
+    fn a_degenerate_id_is_replaced() {
+        for bad in ["chat", "completion", "short", "x"] {
+            let v = transformed(&format!("data: {{\"id\":\"{bad}\",\"choices\":[]}}"));
+            let id = v["id"].as_str().unwrap_or("");
+            assert!(id.starts_with("chatcmpl-"), "{bad} -> {id}");
+        }
+    }
+
+    #[test]
+    fn a_valid_id_is_left_alone() {
+        let v = transformed("data: {\"id\":\"chatcmpl-abcdefgh123\",\"choices\":[]}");
+        assert_eq!(v["id"], "chatcmpl-abcdefgh123");
+    }
+
+    /// stream.js:141-144 — "Ensure OpenAI-required fields are present on
+    /// streaming chunks (Letta compat)".
+    #[test]
+    fn object_and_created_are_injected_when_choices_present() {
+        let v = transformed("data: {\"id\":\"chatcmpl-abcdefgh\",\"choices\":[{}]}");
+        assert_eq!(v["object"], "chat.completion.chunk");
+        assert!(v["created"].is_i64(), "created must be an integer: {v}");
+    }
+
+    #[test]
+    fn object_and_created_are_not_injected_without_choices() {
+        let v = transformed("data: {\"id\":\"chatcmpl-abcdefgh\"}");
+        assert!(v.get("object").is_none(), "no choices -> no injection: {v}");
+        assert!(
+            v.get("created").is_none(),
+            "no choices -> no injection: {v}"
+        );
+    }
+
+    /// stream.js:147-157 — Azure-only fields are not standard OpenAI.
+    #[test]
+    fn azure_filter_fields_are_removed() {
+        let v = transformed(
+            "data: {\"id\":\"chatcmpl-abcdefgh\",\"prompt_filter_results\":{\"x\":1},\"choices\":[{\"content_filter_results\":{\"y\":2}}]}",
+        );
+        assert!(v.get("prompt_filter_results").is_none(), "{v}");
+        assert!(
+            v["choices"][0].get("content_filter_results").is_none(),
+            "{v}"
+        );
+    }
+
+    /// stream.js:160-180 — "Some providers (e.g. CodeBuddy CN) include
+    /// tool_calls: [] in every streaming delta. The AI SDK checks
+    /// delta.tool_calls != null; an EMPTY array passes that check, causing
+    /// premature reasoning-end on every chunk."
+    #[test]
+    fn an_empty_tool_calls_array_is_removed() {
+        let v = transformed(
+            "data: {\"id\":\"chatcmpl-abcdefgh\",\"choices\":[{\"delta\":{\"tool_calls\":[]}}]}",
+        );
+        assert!(
+            v["choices"][0]["delta"].get("tool_calls").is_none(),
+            "empty array must be deleted so `!= null` is false: {v}"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_tool_calls_array_is_preserved() {
+        let v = transformed(
+            "data: {\"id\":\"chatcmpl-abcdefgh\",\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"c1\"}]}}]}",
+        );
+        assert_eq!(v["choices"][0]["delta"]["tool_calls"][0]["id"], "c1");
+    }
+
+    /// stream.js:225-231 — non-JSON data lines are skipped, not forwarded as
+    /// broken frames.
+    #[test]
+    fn a_non_json_data_line_is_left_untouched() {
+        let raw = "data: upstream rate limit reached";
+        assert_eq!(apply_passthrough_transforms(raw, "openai"), raw);
+    }
+
+    #[test]
+    fn the_done_sentinel_and_event_lines_pass_through() {
+        assert_eq!(
+            apply_passthrough_transforms("data: [DONE]", "openai"),
+            "data: [DONE]"
+        );
+        assert_eq!(
+            apply_passthrough_transforms("event: ping", "openai"),
+            "event: ping"
+        );
+    }
+
+    /// A chunk needing no change must be relayed byte-identical, matching
+    /// 9router's `else if (idFixed || fieldsInjected)` gate — otherwise every
+    /// chunk would be needlessly re-serialised.
+    #[test]
+    fn an_unchanged_chunk_is_relayed_verbatim() {
+        // A chunk that already carries every field the transforms would add,
+        // so nothing fires and the line must be relayed byte-identical.
+        let raw = concat!(
+            "data: {\"id\":\"chatcmpl-abcdefgh\",",
+            "\"object\":\"chat.completion.chunk\",",
+            "\"created\":1700000000,",
+            "\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"
+        );
+        assert_eq!(apply_passthrough_transforms(raw, "openai"), raw);
+
+        // And a chunk MISSING object/created must come back re-serialised with
+        // them injected — the complement of the case above.
+        let bare =
+            "data: {\"id\":\"chatcmpl-abcdefgh\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}";
+        let out = apply_passthrough_transforms(bare, "openai");
+        assert_ne!(out, bare, "a chunk needing injection must be re-serialised");
+        let v: serde_json::Value =
+            serde_json::from_str(out.trim().trim_start_matches("data:").trim()).expect("json");
+        assert_eq!(v["object"], "chat.completion.chunk");
+    }
+
+    /// stream.js:398-401 — the sentinel is required for most providers and
+    /// rejected by the Gemini family.
+    #[test]
+    fn the_done_sentinel_is_withheld_only_for_the_gemini_family() {
+        for p in [
+            "openai",
+            "openrouter",
+            "anthropic",
+            "kiro",
+            "qoder",
+            "grok-cli",
+        ] {
+            assert!(passthrough_needs_done_sentinel(p), "{p} needs the sentinel");
+        }
+        for p in ["antigravity", "gemini", "vertex"] {
+            assert!(
+                !passthrough_needs_done_sentinel(p),
+                "{p} rejects the sentinel"
+            );
+        }
+    }
+
+    /// The transform must never panic on odd shapes.
+    #[test]
+    fn odd_payload_shapes_do_not_panic() {
+        for raw in [
+            "data: null",
+            "data: []",
+            "data: {\"choices\":\"notanarray\"}",
+            "data: {\"choices\":[null]}",
+            "data: {\"id\":123}",
+            "data: {\"choices\":[{\"delta\":null}]}",
+            "data: {}",
+        ] {
+            let _ = normalise_passthrough_chunk(
+                &mut serde_json::from_str::<Value>(raw.trim_start_matches("data:").trim())
+                    .unwrap_or(Value::Null),
+            );
+        }
     }
 }
