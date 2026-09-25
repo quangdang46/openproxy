@@ -55,11 +55,25 @@ export default function UsageChartInner({ period = "7d" }: UsageChartInnerProps)
     fetchData();
   }, [fetchData]);
 
+  // A period can legitimately return buckets that are all zero; drawing an empty
+  // axis there reads as a broken chart, so show the empty state instead.
+  const hasData = data.some((d) => (d.tokens ?? 0) > 0 || (d.cost ?? 0) > 0);
+
   if (loading) {
     return (
       <Card padding="lg">
         <div className="flex items-center justify-center h-64">
           <span className="material-symbols-outlined animate-spin text-2xl">progress_activity</span>
+        </div>
+      </Card>
+    );
+  }
+
+  if (!hasData) {
+    return (
+      <Card padding="lg">
+        <div className="h-48 flex items-center justify-center text-text-muted text-sm">
+          No data for this period
         </div>
       </Card>
     );
