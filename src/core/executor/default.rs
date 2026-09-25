@@ -895,6 +895,34 @@ pub fn provider_config_names() -> Vec<String> {
     names
 }
 
+/// Per-status same-URL retry policy, ported from 9router
+/// `config/runtimeConfig.js:78-83` (`DEFAULT_RETRY_CONFIG`):
+///
+///   429 -> attempts 0, delay 0      never retried on the SAME url
+///   502 -> attempts 3, delay 3000   also the bucket for network exceptions
+///   503 -> attempts 3, delay 2000
+///   504 -> attempts 2, delay 3000
+///   anything else -> attempts 0
+///
+/// 9router maps fetch/network exceptions onto the 502 entry (base.js:174:
+/// `tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, ...)`), so a connection refusal
+/// or TLS error is retried 3 times with a 3s gap. OpenProxy propagated those
+/// with `?` on the very first failure, so one refused connection failed the
+/// request outright while a 502 on the same url got three attempts.
+///
+/// "attempts" counts TOTAL attempts, not extra retries.
+fn retry_policy(status: http::StatusCode) -> (u32, u64) {
+    match status {
+        http::StatusCode::BAD_GATEWAY => (3, 3_000),
+        http::StatusCode::SERVICE_UNAVAILABLE => (3, 2_000),
+        http::StatusCode::GATEWAY_TIMEOUT => (2, 3_000),
+        // 429 is deliberately absent: retrying a rate-limited request
+        // immediately makes the limit worse. 9router moves to the NEXT url
+        // instead (base.js:84, shouldRetry fires only when another url exists).
+        _ => (0, 0),
+    }
+}
+
 impl DefaultExecutor {
     pub fn new(
         provider: impl Into<String>,
@@ -2091,9 +2119,34 @@ impl DefaultExecutor {
 
             // The retry loop for this URL.
             for retry in 0..3 {
-                let upstream = self
-                    .send_one(url, &headers, &transformed_body, &request, use_hyper)
-                    .await?;
+                // Network exceptions get the same budget as a 502, matching
+                // 9router base.js:174 which routes fetch failures through
+                // `tryRetry(urlIndex, HTTP_STATUS.BAD_GATEWAY, ...)`. The `?`
+                // that used to sit here made a single refused connection fatal,
+                // while a 502 on the same url got three attempts.
+                let (max_attempts, retry_delay_ms) = retry_policy(http::StatusCode::BAD_GATEWAY);
+                let mut attempt = 0u32;
+                let upstream = loop {
+                    match self
+                        .send_one(url, &headers, &transformed_body, &request, use_hyper)
+                        .await
+                    {
+                        Ok(response) => break response,
+                        Err(err) => {
+                            attempt += 1;
+                            if attempt >= max_attempts {
+                                return Err(err);
+                            }
+                            tracing::warn!(
+                                target: "openproxy::executor",
+                                provider = %self.provider,
+                                attempt, max_attempts, delay_ms = retry_delay_ms,
+                                "network error, retrying"
+                            );
+                            tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
+                        }
+                    }
+                };
                 let status = upstream.status();
 
                 // Success: return immediately — unless a REAL-branch status
@@ -3701,6 +3754,57 @@ mod tests {
             assert!(
                 url.contains(host),
                 "region {region} must route to {host}, got {url}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod retry_policy_tests {
+    use super::retry_policy;
+    // `use hyper::http;` exists at file scope; a child module reaches it via super.
+    use super::http;
+
+    /// Ported from 9router `config/runtimeConfig.js:78-83`
+    /// (`DEFAULT_RETRY_CONFIG`). "attempts" counts TOTAL attempts.
+    #[test]
+    fn the_policy_matches_9router_default_retry_config() {
+        assert_eq!(retry_policy(http::StatusCode::BAD_GATEWAY), (3, 3_000));
+        assert_eq!(
+            retry_policy(http::StatusCode::SERVICE_UNAVAILABLE),
+            (3, 2_000)
+        );
+        assert_eq!(retry_policy(http::StatusCode::GATEWAY_TIMEOUT), (2, 3_000));
+        // 429 is NOT in 9router's table: retrying a rate-limited request
+        // immediately deepens the limit. It advances to the next URL instead
+        // (base.js:84 - shouldRetry fires only when another url exists).
+        assert_eq!(retry_policy(http::StatusCode::TOO_MANY_REQUESTS), (0, 0));
+    }
+
+    /// 9router maps a fetch/network exception onto the 502 bucket
+    /// (base.js:174), so a refused connection or TLS error deserves the same
+    /// three attempts a 502 gets. That is the defect this bead fixes: the old
+    /// `?` made a single network failure fatal while a 502 was retried.
+    #[test]
+    fn network_errors_use_the_502_budget() {
+        assert_eq!(retry_policy(http::StatusCode::BAD_GATEWAY), (3, 3_000));
+    }
+
+    /// Every other status is terminal on the same url.
+    #[test]
+    fn other_statuses_are_not_retried_on_the_same_url() {
+        for code in [
+            http::StatusCode::OK,
+            http::StatusCode::UNAUTHORIZED,
+            http::StatusCode::FORBIDDEN,
+            http::StatusCode::NOT_FOUND,
+            http::StatusCode::INTERNAL_SERVER_ERROR,
+            http::StatusCode::IM_A_TEAPOT,
+        ] {
+            assert_eq!(
+                retry_policy(code),
+                (0, 0),
+                "{code} must not be retried on the same url"
             );
         }
     }

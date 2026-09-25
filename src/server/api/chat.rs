@@ -4186,7 +4186,7 @@ async fn proxy_response_with_pending_tracking(
                                 } else {
                                     passthrough_pending2.extend_from_slice(&data);
                                     for line in drain_complete_sse_lines(&mut passthrough_pending2) {
-                                        if line.trim() == "data: [DONE]" {
+                                        if is_done_sentinel(&line) {
                                             saw_done2 = true;
                                         }
                                         yield Ok::<Bytes, std::io::Error>(
@@ -4326,6 +4326,19 @@ async fn record_streaming_usage(
             compression,
         )
         .await;
+}
+
+/// Whether an SSE line is the OpenAI terminator sentinel.
+///
+/// Shared by the passthrough transform, the `saw_done` tracker and the EOF gate.
+/// These were parsing the same line by two different rules —
+/// `line.trim() == "data: [DONE]"` versus a `strip_prefix("data:")` + trim
+/// comparison — and SSE permits `data:[DONE]` with no space, which only the
+/// second rule accepted. Two definitions of one thing is how they drift.
+pub(crate) fn is_done_sentinel(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("data:")
+        .is_some_and(|payload| payload.trim() == "[DONE]")
 }
 
 /// Whether an upstream content-type must be blocked before its body is piped
@@ -6655,6 +6668,11 @@ mod passthrough_framing_tests {
         // frame a four-newline tail. What matters here is that the frame is
         // recovered at all, and that it is not pre-terminated. The
         // passthrough_frame_bytes test covers the delimiter.
+        assert!(
+            !text.ends_with("\n\n"),
+            "the extractor must not pre-terminate — passthrough_frame_bytes owns \
+             the delimiter, so adding it here would double it: {text:?}"
+        );
         assert!(leftover.is_empty(), "buffer is drained by the extraction");
     }
 
@@ -7071,6 +7089,42 @@ mod done_sentinel_tests {
         // Even on passthrough: these reject it with a 400 syntax error.
         for p in ["antigravity", "gemini", "vertex"] {
             assert!(!should_emit_done_sentinel(true, p, false), "{p}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod done_sentinel_detection_tests {
+    use super::is_done_sentinel;
+
+    /// SSE permits `data:[DONE]` with no space. The `saw_done` tracker compared
+    /// against the exact string "data: [DONE]" while the transform used a
+    /// prefix+trim comparison, so a no-space terminator set the transform's
+    /// early return but NOT the tracker's flag, and the stream still got a
+    /// duplicate terminator. One definition now, used by all three sites.
+    #[test]
+    fn both_spellings_of_the_terminator_are_detected() {
+        for line in [
+            "data: [DONE]",
+            "data:[DONE]",
+            "  data: [DONE]  ",
+            "\tdata:[DONE]",
+        ] {
+            assert!(is_done_sentinel(line), "{line:?} must be detected");
+        }
+    }
+
+    #[test]
+    fn ordinary_data_lines_are_not_mistaken_for_the_terminator() {
+        for line in [
+            "data: {\"a\":1}",
+            "data: [DONE ]",
+            "data: [DONE",
+            "event: message_stop",
+            "[DONE]",
+            "",
+        ] {
+            assert!(!is_done_sentinel(line), "{line:?} must not match");
         }
     }
 }
