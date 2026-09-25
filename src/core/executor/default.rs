@@ -2203,9 +2203,12 @@ impl DefaultExecutor {
                             // Retry immediately with refreshed credentials.
                             let retry_resp = self
                                 .send_one(url, &headers, &transformed_body, &request, use_hyper)
-                                .await?; // a single attempt: 9router re-enters its
-                                         // own tryRetry for this leg, and the
-                                         // status branch below still applies.
+                                .await?; // One attempt, deliberately. A
+                                         // refreshed-credential resend is a distinct
+                                         // semantic step, and the status branch below
+                                         // still governs its result. Unlike the network
+                                         // path, 9router has no equivalent leg to
+                                         // copy — this decision is OpenProxy's own.
                             if retry_resp.status().is_success() {
                                 return Ok(ExecutionResponse {
                                     response: retry_resp,

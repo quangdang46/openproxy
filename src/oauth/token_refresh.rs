@@ -1324,6 +1324,12 @@ mod tests {
     // Paused clock: this test is about a TTL boundary, and a real 10s sleep made
     // it flaky — under load the window could elapse between the "warm" call and
     // its assertion, turning it into a real refresh and failing the count.
+    //
+    // CONSTRAINT: `start_paused` requires a current-thread runtime, and
+    // `advance` only moves the clock while the runtime is idle — which is why
+    // the `yield_now` below is load-bearing, not decoration. If this test ever
+    // needs a multi-thread runtime, the paused-clock approach stops working and
+    // it goes back to being flaky.
     #[tokio::test(start_paused = true)]
     async fn dedup_performs_a_real_refresh_after_ttl_expiry() {
         let dedup = RefreshDedup::default();

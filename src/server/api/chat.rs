@@ -4259,6 +4259,13 @@ async fn proxy_response_with_pending_tracking(
                                 &apply_passthrough_transforms(&text, &provider),
                             ))
                         });
+                    // NOT a pure refactor on this arm. `qoder_sse_unwrap` and
+                    // the coalescer are shared by both arms, and the Hyper main
+                    // loop already fed the coalescer — but the Hyper arm had NO
+                    // EOF flush, so a qoder request over Hyper silently dropped
+                    // the finish+usage chunk the coalescer was holding. Routing
+                    // this arm through plan_eof_emits added the flush and
+                    // fixed that. Do not "simplify" it away.
                     let coalescer_lines = if qoder_sse_unwrap {
                         qoder_coalescer_flush(qoder_coalescer.as_mut())
                     } else {
