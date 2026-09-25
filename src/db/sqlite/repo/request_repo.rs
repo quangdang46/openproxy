@@ -14,8 +14,12 @@ pub fn save(
     data: &Value,
 ) -> rusqlite::Result<()> {
     let data_str = serde_json::to_string(data).unwrap_or_else(|_| "{}".into());
+    // `id` is the natural key, and a detail row is immutable once written, so
+    // re-saving the same id replaces it. This keeps the legacy JSON import
+    // re-runnable: it is retried until every file lands, and a duplicate id
+    // must not abort the retry with a UNIQUE violation.
     conn.execute(
-        "INSERT INTO requestDetails(id, timestamp, provider, model, connectionId, status, data) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        "INSERT OR REPLACE INTO requestDetails(id, timestamp, provider, model, connectionId, status, data) VALUES(?1,?2,?3,?4,?5,?6,?7)",
         params![id, timestamp, provider, model, connection_id, status, data_str],
     )?;
     Ok(())
