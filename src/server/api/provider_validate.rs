@@ -8,6 +8,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::core::executor::ProviderFormat;
 use crate::server::state::AppState;
 
 /// Reject an operator-supplied endpoint that points back at the host or a
@@ -117,6 +118,9 @@ async fn validate_provider(
         "comfyui",
         "ollama-local",
         "opencode-zen",
+        // 9router registry/mimo-free.js:17 declares `noAuth: true`; the
+        // registry's default arm would otherwise send it a bearer probe.
+        "mimo-free",
     ];
     if no_auth.contains(&provider.as_str()) {
         return Json(json!({ "valid": true })).into_response();
@@ -418,7 +422,78 @@ async fn validate_provider(
             }
         }
 
-        _ => (true, None),
+        _ => {
+            // 9router:236-253 — the config-driven web and media probes run
+            // ahead of the default arm, so a provider they claim is never
+            // answered by it. They sit inside this catch-all rather than
+            // before the switch so the explicit arms above keep priority:
+            // 9router has no `deepgram` case at all, so its `POST /v1/listen`
+            // media probe would otherwise shadow the explicit
+            // `GET /v1/projects` probe here.
+            if let Some(result) = probe_service_provider(&client, &provider, &api_key).await {
+                let (valid, error) = result;
+                return Json(json!({
+                    "valid": valid,
+                    "error": if valid { None::<String> } else { error.or_else(|| Some("Invalid API key".into())) }
+                })).into_response();
+            }
+            match default_arm_for(&provider) {
+                DefaultArm::Unsupported => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "error": "Provider validation not supported" })),
+                    )
+                        .into_response();
+                }
+                DefaultArm::NoProbe => (true, None),
+                DefaultArm::ProbeOpenAi { base_url } => {
+                    // 9router:610-612 — the registry's default auth header is
+                    // bearer. 9router:614 — GET /models first because it is a fast
+                    // GET; the chat probe only runs when that answer is ambiguous
+                    // (a transport error, or a status that is neither 2xx nor
+                    // 401/403).
+                    let mut probe_ok: Option<bool> = None;
+                    if let Ok(resp) = client
+                        .get(probe_models_url(&base_url))
+                        .header("Authorization", format!("Bearer {api_key}"))
+                        .send()
+                        .await
+                    {
+                        let status = resp.status();
+                        let code = status.as_u16();
+                        if code == 401 || code == 403 {
+                            probe_ok = Some(false);
+                        } else if status.is_success() {
+                            probe_ok = Some(true);
+                        }
+                    }
+                    match probe_ok {
+                        Some(valid) => (
+                            valid,
+                            if valid { None } else { Some("Invalid API key".into()) },
+                        ),
+                        // 9router:625-631 — minimal chat probe against cfg.baseUrl.
+                        None => match client
+                            .post(&base_url)
+                            .header("Authorization", format!("Bearer {api_key}"))
+                            .json(&json!({
+                                "model": default_model_for(&provider),
+                                "messages": [{"role": "user", "content": "ping"}],
+                                "max_tokens": 1,
+                            }))
+                            .send()
+                            .await
+                        {
+                            Ok(resp) => {
+                                let code = resp.status().as_u16();
+                                (code != 401 && code != 403, None)
+                            }
+                            Err(e) => (false, Some(e.to_string())),
+                        },
+                    }
+                }
+            }
+        }
     };
 
     Json(json!({
@@ -506,9 +581,505 @@ fn is_anthropic_compatible(provider: &str) -> bool {
     )
 }
 
+/// 9router parity for the `default:` arm of the provider match
+/// (`.tmp/9router/src/app/api/providers/validate/route.js:599-604`).
+///
+/// The arm is not a stub: it looks the provider up in `PROVIDERS` and probes
+/// the entry when its declared transport format is `"openai"` — the registry
+/// barrel defaults every format-less entry to it (`open-sse/providers/index.js:14`),
+/// so that covers most of the catalog. Only a provider that declares some other
+/// transport, or is missing from the registry entirely, reaches the 400.
+/// Reporting those as valid instead rubber-stamps every key, and the modal
+/// persists a passing result as `testStatus: "active"`
+/// (`web/src/components/providers/AddApiKeyModal.tsx:203`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DefaultArm {
+    /// `PROVIDERS[provider]` exists with `format === "openai"` — run the
+    /// config-driven probe against this base URL.
+    ProbeOpenAi { base_url: String },
+    /// A provider this product knows, with no entry to probe against here.
+    /// Reporting it unsupported would be wrong — the connection works, and
+    /// 9router's wider registry does probe it — but there is no URL to send a
+    /// key to, so validation stays advisory as it was before this gate.
+    NoProbe,
+    /// `!cfg || cfg.format !== "openai" || !cfg.baseUrl` — HTTP 400
+    /// `{error: "Provider validation not supported"}`.
+    Unsupported,
+}
+
+/// Whether this product knows the provider at all. The catalog is the record of
+/// that; a provider missing from it and from `PROVIDER_CONFIGS` is a mistyped
+/// id, which is the case the 400 is actually for.
+fn is_known_provider(provider: &str) -> bool {
+    crate::core::model::catalog::provider_catalog()
+        .provider_info(provider)
+        .is_some()
+}
+
+fn default_arm_for(provider: &str) -> DefaultArm {
+    // Providers whose 9router registry entry declares a transport format that
+    // is not "openai", so `cfg.format !== "openai"` fires. Listed with the
+    // declaration each one cites; `kimi-coding` has no registry entry at all,
+    // so `!cfg` fires instead.
+    const NON_OPENAI_TRANSPORT: &[&str] = &[
+        "claude",           // registry/claude.js:22            format: "claude"
+        "kimi-coding",      // no registry entry               -> !cfg
+        "antigravity",      // registry/antigravity.js:23      format: "antigravity"
+        "cursor",           // registry/cursor.js:19           format: "cursor"
+        "perplexity-agent", // registry/perplexity-agent.js:24 format: "openai-responses"
+    ];
+    if NON_OPENAI_TRANSPORT.contains(&provider) {
+        return DefaultArm::Unsupported;
+    }
+
+    // The `!cfg` and `!cfg.baseUrl` arms, resolved from PROVIDER_CONFIGS — the
+    // same map chat/media dispatch reads, so there is no second registry.
+    // 9router's `!cfg` tests its own registry, which is broader: media-only
+    // providers carry their endpoint in a media adapter instead
+    // (`core/media/image/openai_compat.rs`), so a missing entry here is not
+    // evidence that the provider is unsupported. The catalog is the record of
+    // which providers this product knows, and only a provider absent from both
+    // is a typo or an id we do not serve.
+    let Some(base_url) = crate::core::executor::provider_config_base_url(provider) else {
+        return if is_known_provider(provider) {
+            DefaultArm::NoProbe
+        } else {
+            DefaultArm::Unsupported
+        };
+    };
+    if base_url.trim().is_empty() {
+        return DefaultArm::Unsupported;
+    }
+
+    // Gate on the resolved transport rather than the raw config string:
+    // `ProviderConfig::anthropic()` delegates to `openai()` and so stores
+    // "openai", losing the distinction the 9router registry keeps.
+    let cfg_format = crate::core::executor::provider_config_format(provider).unwrap_or_default();
+    match crate::core::executor::provider_sim_format(provider, &cfg_format) {
+        ProviderFormat::OpenAI | ProviderFormat::OpenAICompatible => {
+            DefaultArm::ProbeOpenAi { base_url }
+        }
+        _ => DefaultArm::Unsupported,
+    }
+}
+
+/// 9router:614 — the `/models` endpoint derived from the chat base URL. 9router
+/// uses two `$`-anchored replaces, so only a trailing occurrence is rewritten
+/// and each rewrite consumes the suffix for the next; `strip_suffix` keeps that
+/// ordering where a plain `str::replace` would also rewrite mid-URL matches.
+fn probe_models_url(base_url: &str) -> String {
+    let mut url = base_url.to_string();
+    if let Some(stem) = url.strip_suffix("/chat/completions") {
+        url = format!("{stem}/models");
+    }
+    if let Some(stem) = url.strip_suffix("/chatbot") {
+        url = format!("{stem}/models");
+    }
+    url
+}
+
+/// 9router's `getDefaultModel` (`open-sse/config/providerModels.js:16-19`),
+/// including its `|| "test"` fallback for a provider with no catalog models.
+fn default_model_for(provider: &str) -> String {
+    let catalog = crate::core::model::catalog::provider_catalog();
+    catalog
+        .static_alias_for_provider(provider)
+        .and_then(|alias| catalog.models_for_alias(alias))
+        .and_then(|models| models.first())
+        .map(|model| model.id.clone())
+        .unwrap_or_else(|| "test".to_string())
+}
+
+/// How a webSearch/webFetch-only or media-only provider is validated.
+///
+/// 9router reads the probe config off the provider registry entry
+/// (`p.searchConfig || p.fetchConfig`, `p.ttsConfig || ... || p.musicConfig`),
+/// which has no Rust-side equivalent, so it is transcribed into
+/// [`WEB_PROBES`] and [`MEDIA_PROBES`]. Absence from a table is meaningful:
+/// it is the `return null` of a config 9router does not find or cannot
+/// authenticate, which hands the provider to the default arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceProbe {
+    /// 9router fetches `url` and accepts every status but 401/403.
+    Fetch {
+        url: &'static str,
+        method: ProbeMethod,
+        auth: ProbeAuth,
+        body: ProbeBody,
+    },
+    /// 9router short-circuits to `true` and issues no request: `noAuth`,
+    /// `authType === "none"`, a media entry with no config at all, or an
+    /// auth scheme that needs provider-specific data (`playht`, `aws-sigv4`).
+    Accept,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeMethod {
+    Get,
+    Post,
+}
+
+/// How a [`ServiceProbe::Fetch`] carries the key. 9router applies the same
+/// switch to both probes, and the two query-string forms are verbatim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeAuth {
+    /// A single header, with the scheme prefix 9router writes in front of the
+    /// key (`"Bearer "`, `"Token "`, `""` for a bare `x-api-key`).
+    Header {
+        name: &'static str,
+        prefix: &'static str,
+    },
+    /// google-pse / searchapi take the key in the query string, percent-encoded
+    /// by `query_pairs_mut`, followed by 9router's fixed probe parameters.
+    Query {
+        param: &'static str,
+        extra: &'static [(&'static str, &'static str)],
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeBody {
+    /// A GET sends no body (9router leaves `body` undefined).
+    None,
+    /// 9router:36 — the web POST body.
+    WebPing,
+    /// 9router:80 — the media POST body, whose `model` is resolved per provider.
+    MediaPing,
+}
+
+/// The auth shapes 9router's two switches write. Named so each table row
+/// states the scheme it sends rather than burying it in a struct literal.
+const BEARER: ProbeAuth = ProbeAuth::Header {
+    name: "Authorization",
+    prefix: "Bearer ",
+};
+const TOKEN: ProbeAuth = ProbeAuth::Header {
+    name: "Authorization",
+    prefix: "Token ",
+};
+const BASIC: ProbeAuth = ProbeAuth::Header {
+    name: "Authorization",
+    prefix: "Basic ",
+};
+const X_API_KEY: ProbeAuth = ProbeAuth::Header {
+    name: "x-api-key",
+    prefix: "",
+};
+const XI_API_KEY: ProbeAuth = ProbeAuth::Header {
+    name: "xi-api-key",
+    prefix: "",
+};
+const SUBSCRIPTION_TOKEN: ProbeAuth = ProbeAuth::Header {
+    name: "x-subscription-token",
+    prefix: "",
+};
+
+/// 9router:14-45 — webSearch/webFetch-only providers. The switch there has no
+/// `default:`, so an unrecognised `authHeader` would still fetch, unauthenticated;
+/// every entry below declares a recognised one.
+const WEB_PROBES: &[(&str, ServiceProbe)] = &[
+    (
+        "brave-search",
+        ServiceProbe::Fetch {
+            url: "https://api.search.brave.com/res/v1",
+            method: ProbeMethod::Get,
+            auth: SUBSCRIPTION_TOKEN,
+            body: ProbeBody::None,
+        },
+    ),
+    (
+        "exa",
+        ServiceProbe::Fetch {
+            url: "https://api.exa.ai/search",
+            method: ProbeMethod::Post,
+            auth: X_API_KEY,
+            body: ProbeBody::WebPing,
+        },
+    ),
+    (
+        "firecrawl",
+        ServiceProbe::Fetch {
+            url: "https://api.firecrawl.dev/v1/scrape",
+            method: ProbeMethod::Post,
+            auth: BEARER,
+            body: ProbeBody::WebPing,
+        },
+    ),
+    (
+        "google-pse",
+        ServiceProbe::Fetch {
+            url: "https://www.googleapis.com/customsearch/v1",
+            method: ProbeMethod::Get,
+            auth: ProbeAuth::Query {
+                param: "key",
+                extra: &[("q", "ping"), ("cx", "test")],
+            },
+            body: ProbeBody::None,
+        },
+    ),
+    (
+        "jina-reader",
+        ServiceProbe::Fetch {
+            url: "https://r.jina.ai",
+            method: ProbeMethod::Get,
+            auth: BEARER,
+            body: ProbeBody::None,
+        },
+    ),
+    (
+        "linkup",
+        ServiceProbe::Fetch {
+            url: "https://api.linkup.so/v1/search",
+            method: ProbeMethod::Post,
+            auth: BEARER,
+            body: ProbeBody::WebPing,
+        },
+    ),
+    (
+        "ollama-search",
+        ServiceProbe::Fetch {
+            url: "https://ollama.com/api/web_search",
+            method: ProbeMethod::Post,
+            auth: BEARER,
+            body: ProbeBody::WebPing,
+        },
+    ),
+    (
+        "searchapi",
+        ServiceProbe::Fetch {
+            url: "https://www.searchapi.io/api/v1/search",
+            method: ProbeMethod::Get,
+            auth: ProbeAuth::Query {
+                param: "api_key",
+                extra: &[("q", "ping"), ("engine", "google")],
+            },
+            body: ProbeBody::None,
+        },
+    ),
+    // registry/searxng.js:18 — `authType: "none"`.
+    ("searxng", ServiceProbe::Accept),
+    (
+        "serper",
+        ServiceProbe::Fetch {
+            url: "https://google.serper.dev",
+            method: ProbeMethod::Post,
+            auth: X_API_KEY,
+            body: ProbeBody::WebPing,
+        },
+    ),
+    (
+        "tavily",
+        ServiceProbe::Fetch {
+            url: "https://api.tavily.com/search",
+            method: ProbeMethod::Post,
+            auth: BEARER,
+            body: ProbeBody::WebPing,
+        },
+    ),
+    (
+        "xquik",
+        ServiceProbe::Fetch {
+            url: "https://xquik.com/api/v1/credits",
+            method: ProbeMethod::Get,
+            auth: X_API_KEY,
+            body: ProbeBody::None,
+        },
+    ),
+    (
+        "youcom",
+        ServiceProbe::Fetch {
+            url: "https://ydc-index.io/v1/search",
+            method: ProbeMethod::Get,
+            auth: X_API_KEY,
+            body: ProbeBody::None,
+        },
+    ),
+];
+
+/// 9router:47-82 — media-only providers. The switch here *does* have
+/// `default: return null`, so a config that declares no recognised
+/// `authHeader` is deliberately absent below and falls through to the default
+/// arm: `assemblyai` (declares `authorization`, which the switch does not
+/// list), `black-forest-labs`, `comfyui`, `fal-ai`, `huggingface`,
+/// `nanobanana`, `recraft`, `runwayml`, `sdwebui`, `selfhosted-tts`,
+/// `stability-ai`, `voyage-ai`. `serpingapi` is absent from the web table for
+/// the same reason — it has no 9router registry entry at all.
+const MEDIA_PROBES: &[(&str, ServiceProbe)] = &[
+    // `ttsConfig` declares `aws-sigv4`, which needs provider-specific data.
+    ("aws-polly", ServiceProbe::Accept),
+    (
+        "cartesia",
+        ServiceProbe::Fetch {
+            url: "https://api.cartesia.ai/tts/bytes",
+            method: ProbeMethod::Post,
+            auth: X_API_KEY,
+            body: ProbeBody::MediaPing,
+        },
+    ),
+    ("coqui", ServiceProbe::Accept),
+    (
+        "deepgram",
+        ServiceProbe::Fetch {
+            url: "https://api.deepgram.com/v1/listen",
+            method: ProbeMethod::Post,
+            auth: TOKEN,
+            body: ProbeBody::MediaPing,
+        },
+    ),
+    ("edge-tts", ServiceProbe::Accept),
+    (
+        "elevenlabs",
+        ServiceProbe::Fetch {
+            url: "https://api.elevenlabs.io/v1/text-to-speech",
+            method: ProbeMethod::Post,
+            auth: XI_API_KEY,
+            body: ProbeBody::MediaPing,
+        },
+    ),
+    (
+        "fish-audio",
+        ServiceProbe::Fetch {
+            url: "https://api.fish.audio/v1/tts",
+            method: ProbeMethod::Post,
+            auth: BEARER,
+            body: ProbeBody::MediaPing,
+        },
+    ),
+    ("google-tts", ServiceProbe::Accept),
+    (
+        "inworld",
+        ServiceProbe::Fetch {
+            url: "https://api.inworld.ai/tts/v1/voice",
+            method: ProbeMethod::Post,
+            auth: BASIC,
+            body: ProbeBody::MediaPing,
+        },
+    ),
+    (
+        "jina-ai",
+        ServiceProbe::Fetch {
+            url: "https://api.jina.ai/v1/embeddings",
+            method: ProbeMethod::Post,
+            auth: BEARER,
+            body: ProbeBody::MediaPing,
+        },
+    ),
+    ("local-device", ServiceProbe::Accept),
+    // `ttsConfig` declares `playht`, which needs provider-specific data.
+    ("playht", ServiceProbe::Accept),
+    // No tts/stt/embedding/image/video/music config at all, so 9router's
+    // `if (!cfg) return true` applies.
+    ("topaz", ServiceProbe::Accept),
+    ("tortoise", ServiceProbe::Accept),
+];
+
+/// 9router:15-18 — a provider whose every service kind is a web kind is probed
+/// as a web provider. A provider with no kinds listed is treated as `["llm"]`
+/// (9router's `p.serviceKinds || ["llm"]`) and so is neither web-only nor
+/// media-only, which the `is_empty` guard reproduces.
+fn is_web_only(kinds: &[String]) -> bool {
+    !kinds.is_empty() && kinds.iter().all(|k| k == "webSearch" || k == "webFetch")
+}
+
+/// 9router:56-60 — likewise for media kinds.
+fn is_media_only(kinds: &[String]) -> bool {
+    const MEDIA_KINDS: &[&str] = &[
+        "tts",
+        "embedding",
+        "stt",
+        "image",
+        "video",
+        "music",
+        "imageToText",
+    ];
+    !kinds.is_empty() && kinds.iter().all(|k| MEDIA_KINDS.contains(&k.as_str()))
+}
+
+/// 9router:236-253. Returns `None` when neither probe claims the provider,
+/// leaving the default arm to decide.
+async fn probe_service_provider(
+    client: &reqwest::Client,
+    provider: &str,
+    api_key: &str,
+) -> Option<(bool, Option<String>)> {
+    let catalog = crate::core::model::catalog::provider_catalog();
+    let info = catalog.provider_info(provider)?;
+    let kinds = &info.service_kinds;
+    if is_web_only(kinds) {
+        return run_service_probe(client, provider, api_key, WEB_PROBES).await;
+    }
+    if is_media_only(kinds) {
+        return run_service_probe(client, provider, api_key, MEDIA_PROBES).await;
+    }
+    None
+}
+
+async fn run_service_probe(
+    client: &reqwest::Client,
+    provider: &str,
+    api_key: &str,
+    table: &[(&str, ServiceProbe)],
+) -> Option<(bool, Option<String>)> {
+    let (_, probe) = table.iter().find(|(id, _)| *id == provider)?;
+    let ServiceProbe::Fetch {
+        url,
+        method,
+        auth,
+        body,
+    } = probe
+    else {
+        return Some((true, None));
+    };
+
+    let mut target = (*url).to_string();
+    if let ProbeAuth::Query { param, extra } = auth {
+        let Ok(mut parsed) = reqwest::Url::parse(url) else {
+            return Some((false, Some(format!("invalid probe url: {url}"))));
+        };
+        parsed.query_pairs_mut().append_pair(param, api_key);
+        for (key, value) in *extra {
+            parsed.query_pairs_mut().append_pair(key, value);
+        }
+        target = parsed.into();
+    }
+
+    let mut req = match method {
+        ProbeMethod::Get => client.get(target),
+        ProbeMethod::Post => client.post(target),
+    };
+    if let ProbeAuth::Header { name, prefix } = auth {
+        req = req.header(*name, format!("{prefix}{api_key}"));
+    }
+    req = match body {
+        ProbeBody::None => req,
+        ProbeBody::WebPing => req.json(&json!({
+            "query": "ping",
+            "q": "ping",
+            "url": "https://example.com",
+        })),
+        ProbeBody::MediaPing => req.json(&json!({
+            "input": "ping",
+            "text": "ping",
+            "prompt": "ping",
+            "model": default_model_for(provider),
+        })),
+    };
+
+    match req.send().await {
+        Ok(resp) => {
+            let code = resp.status().as_u16();
+            Some((code != 401 && code != 403, None))
+        }
+        Err(e) => Some((false, Some(e.to_string()))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::endpoint_is_safe;
+    use super::{
+        default_arm_for, endpoint_is_safe, is_media_only, is_web_only, probe_models_url,
+        DefaultArm, ProbeAuth, ServiceProbe, MEDIA_PROBES, WEB_PROBES,
+    };
 
     /// Regression (audit finding #30): `azureEndpoint` is interpolated into a
     /// URL the server then POSTs to. The response distinguished
@@ -550,6 +1121,201 @@ mod tests {
                 "must accept {good:?}: {:?}",
                 endpoint_is_safe(good)
             );
+        }
+    }
+
+    /// Regression: the catch-all arm returned `(true, None)` for every provider
+    /// with no explicit case, so a mistyped provider id — or one whose transport
+    /// 9router refuses to probe — was reported valid and persisted by the modal
+    /// as `testStatus: "active"`. 9router answers those with HTTP 400
+    /// `{error: "Provider validation not supported"}` (route.js:601-602).
+    #[test]
+    fn unknown_provider_is_not_reported_valid() {
+        for provider in ["not-a-provider", "typo-opanai", "gpt-4o", ""] {
+            assert_eq!(
+                default_arm_for(provider),
+                DefaultArm::Unsupported,
+                "{provider:?} has no PROVIDER_CONFIGS entry and must not be probed"
+            );
+        }
+    }
+
+    /// These reach the 400 in 9router because their registry entry declares a
+    /// transport format other than `"openai"`, so `cfg.format !== "openai"`
+    /// fires. Without this the anthropic family slips through the raw config
+    /// string, which `ProviderConfig::anthropic()` stores as plain "openai".
+    #[test]
+    fn non_openai_transport_providers_are_unsupported() {
+        for provider in [
+            "claude",
+            "kimi-coding",
+            "antigravity",
+            "cursor",
+            "perplexity-agent",
+        ] {
+            assert_eq!(
+                default_arm_for(provider),
+                DefaultArm::Unsupported,
+                "{provider:?} declares a non-openai transport in the 9router registry"
+            );
+        }
+    }
+
+    /// The guard against over-gating: these declare `format: "openai"` (the
+    /// registry barrel's default) and 9router does probe them, so they must not
+    /// be answered with a 400.
+    #[test]
+    fn openai_transport_providers_still_probe() {
+        for (provider, base_url) in [
+            (
+                "kilocode",
+                "https://api.kilo.ai/api/openrouter/chat/completions",
+            ),
+            ("cline", "https://api.cline.bot/api/v1/chat/completions"),
+            ("venice", "https://api.venice.ai/api/v1/chat/completions"),
+            (
+                "github-models",
+                "https://models.github.ai/inference/chat/completions",
+            ),
+        ] {
+            assert_eq!(
+                default_arm_for(provider),
+                DefaultArm::ProbeOpenAi {
+                    base_url: base_url.to_string()
+                },
+                "{provider:?} is openai-format in the 9router registry and must be probed"
+            );
+        }
+    }
+
+    /// A known media provider with no `PROVIDER_CONFIGS` entry keeps the
+    /// advisory answer instead of being told validation is unsupported: 9router
+    /// resolves its registry more widely than the chat executor does, and these
+    /// carry their endpoint in a media adapter.
+    #[test]
+    fn known_providers_without_a_probe_url_stay_advisory() {
+        for provider in ["recraft", "stability-ai", "voyage-ai"] {
+            assert_eq!(
+                default_arm_for(provider),
+                DefaultArm::NoProbe,
+                "{provider:?} is in the catalog, so a 400 would misreport it"
+            );
+        }
+    }
+
+    #[test]
+    fn probe_models_url_strips_only_anchored_suffixes() {
+        assert_eq!(
+            probe_models_url("https://api.kilo.ai/api/openrouter/chat/completions"),
+            "https://api.kilo.ai/api/openrouter/models"
+        );
+        assert_eq!(
+            probe_models_url("https://nlpcloud.io/v1/gpu/chatbot"),
+            "https://nlpcloud.io/v1/gpu/models"
+        );
+        // 9router's replaces are `$`-anchored and run in sequence, so only the
+        // trailing occurrence is rewritten and the first consumes the suffix.
+        assert_eq!(
+            probe_models_url("https://h/v1/chat/completions/chat/completions"),
+            "https://h/v1/chat/completions/models"
+        );
+        assert_eq!(probe_models_url("https://h/v1"), "https://h/v1");
+    }
+
+    #[test]
+    fn web_and_media_probes_only_claim_their_own_kinds() {
+        let kinds = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+
+        assert!(is_web_only(&kinds(&["webSearch"])));
+        assert!(is_web_only(&kinds(&["webSearch", "webFetch"])));
+        // 9router:17 skips a dual-purpose provider so the LLM probe keeps it.
+        assert!(!is_web_only(&kinds(&["llm", "webSearch"])));
+        // 9router's `p.serviceKinds || ["llm"]` makes an absent list `["llm"]`.
+        assert!(!is_web_only(&kinds(&[])));
+
+        assert!(is_media_only(&kinds(&["tts"])));
+        assert!(!is_media_only(&kinds(&["llm", "embedding", "image"])));
+
+        // Asserted against the real catalog so a reclassified provider cannot
+        // silently start claiming a probe.
+        let catalog = crate::core::model::catalog::provider_catalog();
+        let kinds_of = |id: &str| catalog.provider_info(id).unwrap().service_kinds.clone();
+        assert!(is_web_only(&kinds_of("tavily")));
+        assert!(is_media_only(&kinds_of("elevenlabs")));
+        assert!(!is_web_only(&kinds_of("perplexity-agent")));
+        assert!(!is_media_only(&kinds_of("tokenrouter")));
+    }
+
+    /// The tables are transcribed from the 9router registry, so pin the three
+    /// outcomes per provider. Getting one wrong either 400s a provider 9router
+    /// probes, or — worse — probes one 9router accepts without a request.
+    #[test]
+    fn service_probe_tables_match_the_9router_registry() {
+        // 9router:47-82 issues no request for these: `noAuth`/`authType: none`,
+        // a media entry with no config, or an auth scheme that needs
+        // provider-specific data.
+        for provider in [
+            "searxng",
+            "aws-polly",
+            "coqui",
+            "edge-tts",
+            "google-tts",
+            "local-device",
+            "playht",
+            "topaz",
+            "tortoise",
+        ] {
+            let found = WEB_PROBES
+                .iter()
+                .chain(MEDIA_PROBES.iter())
+                .find(|(id, _)| *id == provider);
+            assert_eq!(
+                found.map(|(_, probe)| *probe),
+                Some(ServiceProbe::Accept),
+                "{provider:?} is a no-request short-circuit in 9router"
+            );
+        }
+
+        // 9router hands these back to the default arm instead of probing.
+        for provider in [
+            "serpingapi",
+            "assemblyai",
+            "black-forest-labs",
+            "comfyui",
+            "fal-ai",
+            "huggingface",
+            "nanobanana",
+            "recraft",
+            "runwayml",
+            "sdwebui",
+            "selfhosted-tts",
+            "stability-ai",
+            "voyage-ai",
+        ] {
+            let found = WEB_PROBES
+                .iter()
+                .chain(MEDIA_PROBES.iter())
+                .find(|(id, _)| *id == provider);
+            assert!(found.is_none(), "{provider:?} must fall through, not probe");
+        }
+
+        // Every remaining table entry carries the auth scheme 9router's switch
+        // writes for that provider.
+        for (provider, probe) in WEB_PROBES.iter().chain(MEDIA_PROBES.iter()) {
+            let ServiceProbe::Fetch { url, auth, .. } = probe else {
+                continue;
+            };
+            assert!(
+                url.starts_with("https://") || url.starts_with("http://localhost"),
+                "{provider}: {url}"
+            );
+            if let ProbeAuth::Query { param, extra } = auth {
+                assert!(
+                    !extra.is_empty(),
+                    "{provider}: query probe needs its fixed params"
+                );
+                let _ = param;
+            }
         }
     }
 }
