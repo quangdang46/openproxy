@@ -725,10 +725,71 @@ pub fn get_combo_models_from_data(model_str: &str, combos: &[Combo]) -> Option<V
         return None;
     }
 
+    let combo = combos
+        .iter()
+        .find(|combo| combo.name == model_str && combo.is_active() && !combo.models.is_empty())?;
+
+    let mut visiting = vec![model_str.to_string()];
+    Some(expand_combo_members(
+        &combo.models,
+        combos,
+        0,
+        &mut visiting,
+    ))
+}
+
+/// A combo may name another combo as a member. Dispatching the nested name
+/// reaches no provider, and the entry reached the client as the literal string
+/// "unknown" (chat.rs:847). 9router avoids this by re-entering the chat
+/// handler for each member, which re-runs the combo lookup; expanding here gets
+/// the same result without the re-entry.
+///
+/// `visiting` breaks cycles, so `A contains A` — directly, or through B —
+/// terminates instead of recursing forever. Such a member is dropped rather
+/// than emitted, because it has no resolvable leaves and would otherwise become
+/// another "unknown".
+fn expand_combo_members(
+    members: &[String],
+    combos: &[Combo],
+    depth: usize,
+    visiting: &mut Vec<String>,
+) -> Vec<String> {
+    /// Backstop for a chain longer than any real configuration; the cycle guard
+    /// is what actually keeps this finite.
+    const MAX_DEPTH: usize = 8;
+
+    if depth >= MAX_DEPTH {
+        return members.to_vec();
+    }
+
+    let mut expanded = Vec::with_capacity(members.len());
+    for member in members {
+        let Some(nested) = find_combo_by_name(member, combos) else {
+            expanded.push(member.clone());
+            continue;
+        };
+
+        if visiting.iter().any(|name| name == &nested.name) {
+            continue;
+        }
+
+        visiting.push(nested.name.clone());
+        expanded.extend(expand_combo_members(
+            &nested.models,
+            combos,
+            depth + 1,
+            visiting,
+        ));
+        visiting.pop();
+    }
+    expanded
+}
+
+/// The member list of `name` if it is an active, non-empty combo.
+fn find_combo_by_name<'a>(name: &str, combos: &'a [Combo]) -> Option<&'a Combo> {
     combos
         .iter()
-        .find(|combo| combo.name == model_str && combo.is_active() && !combo.models.is_empty())
-        .map(|combo| combo.models.clone())
+        .find(|combo| combo.name == name && combo.is_active() && !combo.models.is_empty())
 }
 
 /// Returns the set of disabled members for a combo by name, or empty if
@@ -1103,6 +1164,95 @@ mod capability_scan_tests {
 
 mod tests {
     use super::*;
+
+    fn combo(name: &str, models: &[&str]) -> crate::types::Combo {
+        crate::types::Combo {
+            id: format!("combo-{name}"),
+            name: name.to_string(),
+            models: models.iter().map(|m| (*m).to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// openproxy-zair: a combo may name another combo as a member. The nested
+    /// name reached dispatch unresolved and became the literal string
+    /// "unknown" (chat.rs:847). Nested members are now expanded to their real
+    /// leaves, so every entry names a provider.
+    #[test]
+    fn nested_combo_member_is_expanded_to_real_models() {
+        let combos = vec![
+            combo("outer", &["openai/gpt-4o", "inner"]),
+            combo(
+                "inner",
+                &["anthropic/claude-sonnet-4", "openai/gpt-4o-mini"],
+            ),
+        ];
+
+        let models = get_combo_models_from_data("outer", &combos).expect("outer is a combo");
+
+        assert_eq!(
+            models,
+            vec![
+                "openai/gpt-4o",
+                "anthropic/claude-sonnet-4",
+                "openai/gpt-4o-mini"
+            ],
+            "the nested combo must be expanded, not passed through as a name"
+        );
+        assert!(
+            !models.iter().any(|m| !m.contains('/')),
+            "no member may reach dispatch without a provider: {models:?}"
+        );
+    }
+
+    /// A direct self-reference must terminate. Without the cycle guard this
+    /// recurses until the stack gives out.
+    #[test]
+    fn self_referencing_combo_terminates() {
+        let combos = vec![combo("a", &["a", "openai/gpt-4o"])];
+
+        let models = get_combo_models_from_data("a", &combos).expect("a is a combo");
+
+        assert_eq!(models, vec!["openai/gpt-4o"], "the cycle member is dropped");
+    }
+
+    /// And a longer loop, A -> B -> A, which a depth cap alone would not catch
+    /// as a cycle.
+    #[test]
+    fn mutually_referencing_combos_terminate() {
+        let combos = vec![
+            combo("a", &["b", "openai/gpt-4o"]),
+            combo("b", &["a", "anthropic/claude-sonnet-4"]),
+        ];
+
+        let models = get_combo_models_from_data("a", &combos).expect("a is a combo");
+
+        assert!(
+            models.iter().all(|m| m.contains('/')),
+            "only resolvable members may survive: {models:?}"
+        );
+        assert!(models.contains(&"openai/gpt-4o".to_string()));
+        assert!(models.contains(&"anthropic/claude-sonnet-4".to_string()));
+    }
+
+    /// Flat combos are the overwhelmingly common case and must be untouched.
+    #[test]
+    fn flat_combo_is_unchanged() {
+        let combos = vec![combo("flat", &["openai/gpt-4o", "openai/gpt-4o-mini"])];
+
+        let models = get_combo_models_from_data("flat", &combos).expect("flat is a combo");
+
+        assert_eq!(models, vec!["openai/gpt-4o", "openai/gpt-4o-mini"]);
+    }
+
+    /// A model name that merely shares a name with a combo, in provider/model
+    /// form, is never a combo reference.
+    #[test]
+    fn provider_slash_name_is_never_expanded() {
+        let combos = vec![combo("thing", &["openai/gpt-4o"])];
+
+        assert!(get_combo_models_from_data("thing/gpt-4o", &combos).is_none());
+    }
 
     #[test]
     fn combo_retry_after_from_body_parsed() {
