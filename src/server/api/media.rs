@@ -304,6 +304,16 @@ async fn video_edits_extensions_proxy(
     request: axum::extract::Request,
     action: &'static str,
 ) -> Response {
+    // This handler takes the raw request rather than Json<Value>, so it never
+    // reached generic_media_handler's check — both the JSON and the multipart
+    // arm were reachable with no API key at all. Gate it the same way, on
+    // requireApiKey, before branching on content type.
+    if state.db.snapshot().settings.require_api_key() {
+        if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
+            return auth_error_response(error);
+        }
+    }
+
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -461,7 +471,12 @@ async fn generic_media_handler(
     body_result: Result<Json<Value>, JsonRejection>,
     route_kind: &'static str,
 ) -> Response {
-    if state.db.snapshot().settings.require_login {
+    // /v1 gates on requireApiKey, NOT on requireLogin. Keying the API surface
+    // to a dashboard flag is the conflation 9router does not have: locking the
+    // dashboard would lock every API client, and the usual headless posture
+    // (dashboard open) would silently remove API auth entirely. The dashboard
+    // keeps its own gate on requireLogin.
+    if state.db.snapshot().settings.require_api_key() {
         if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
         }
@@ -1261,7 +1276,12 @@ async fn video_create_handler(
     body_result: Result<Json<Value>, JsonRejection>,
     action: &'static str,
 ) -> Response {
-    if state.db.snapshot().settings.require_login {
+    // /v1 gates on requireApiKey, NOT on requireLogin. Keying the API surface
+    // to a dashboard flag is the conflation 9router does not have: locking the
+    // dashboard would lock every API client, and the usual headless posture
+    // (dashboard open) would silently remove API auth entirely. The dashboard
+    // keeps its own gate on requireLogin.
+    if state.db.snapshot().settings.require_api_key() {
         if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
         }
@@ -1584,7 +1604,12 @@ async fn video_get_handler_with_query(
     request_id: String,
     raw_query: Option<String>,
 ) -> Response {
-    if state.db.snapshot().settings.require_login {
+    // /v1 gates on requireApiKey, NOT on requireLogin. Keying the API surface
+    // to a dashboard flag is the conflation 9router does not have: locking the
+    // dashboard would lock every API client, and the usual headless posture
+    // (dashboard open) would silently remove API auth entirely. The dashboard
+    // keeps its own gate on requireLogin.
+    if state.db.snapshot().settings.require_api_key() {
         if let Err(error) = require_api_key_with_reload(&headers, &state.db).await {
             return auth_error_response(error);
         }
