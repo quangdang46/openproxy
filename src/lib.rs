@@ -39,7 +39,7 @@ pub fn build_app(state: server::state::AppState) -> Router {
         .allow_headers(Any);
 
     server::api::routes(state.clone())
-        .merge(server::dashboard::routes())
+        .merge(server::dashboard::routes(state.clone()))
         // Real-IP middleware: stamps the verified TCP peer IP as
         // `x-9r-real-ip` and strips client-supplied forwarding headers.
         .layer(middleware::from_fn(server::api::guard::real_ip_middleware))
