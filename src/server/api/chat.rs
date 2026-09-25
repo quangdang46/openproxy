@@ -3823,6 +3823,10 @@ async fn proxy_response_with_pending_tracking(
             let compression = compression.clone();
             let mut transformer = transformer;
             let mut pending_text = String::new();
+            // Framing buffer for the translation / passthrough branches
+            // (bead openproxy-0ph4). Distinct from `pending_text`, which the
+            // dashboard transformer branch uses.
+            let mut translate_pending = String::new();
             let custom_tool_names = custom_tool_names.clone();
             let stream = async_stream::stream! {
                 let mut upstream = response.bytes_stream();
@@ -3911,21 +3915,40 @@ async fn proxy_response_with_pending_tracking(
                                     }
                                 }
                             } else if needs_stream_translation {
-                                if let Some(ref mut t_state) = t_state {
-                                    let chunks = registry::global_registry()
-                                        .translate_response(
-                                            stream_target_format,
-                                            stream_source_format,
-                                            &chunk,
-                                            t_state,
-                                        );
-                                    for line in chunks {
-                                        if let Some(frame) = sse_frame_for_dashboard(&line) {
-                                            yield Ok::<Bytes, std::io::Error>(frame);
+                                // Framing parity (bead openproxy-0ph4): a
+                                // transport chunk is NOT one SSE event. One read
+                                // can carry several frames, and one frame can
+                                // straddle two reads. 9router buffers per line
+                                // and only acts on COMPLETE lines
+                                // (.tmp/9router/open-sse/utils/stream.js:110-119:
+                                // "const lines = buffer.split(chr(10));
+                                //  buffer = lines.pop() || ''").
+                                //
+                                // Passing the raw chunk straight to
+                                // translate_response dropped every frame that
+                                // was not a whole chunk, and double-handled
+                                // any that was. The buffer below is the same
+                                // one the dashboard transformer path already
+                                // used, generalised so all three stream
+                                // branches share it.
+                                translate_pending.push_str(&String::from_utf8_lossy(&chunk));
+                                for line in split_complete_sse_lines(&mut translate_pending) {
+                                    if let Some(ref mut ts) = t_state {
+                                        let chunks = registry::global_registry()
+                                            .translate_response(
+                                                stream_target_format,
+                                                stream_source_format,
+                                                &Bytes::from(line),
+                                                ts,
+                                            );
+                                        for out in chunks {
+                                            if let Some(frame) = sse_frame_for_dashboard(&out) {
+                                                yield Ok::<Bytes, std::io::Error>(frame);
+                                            }
                                         }
+                                    } else {
+                                        yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(line)));
                                     }
-                                } else {
-                                    yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&chunk));
                                 }
                             } else {
                                 yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&chunk));
@@ -3951,6 +3974,33 @@ async fn proxy_response_with_pending_tracking(
                     for line in flush_dashboard_sse_chunk(transformer.as_mut(), &mut pending_text) {
                         if let Some(frame) = sse_frame_for_dashboard(&line) {
                             yield Ok::<Bytes, std::io::Error>(frame);
+                        }
+                    }
+                }
+                // EOF flush for the translation / passthrough branch: a
+                // provider may end the stream without a trailing newline, and
+                // that last frame is real content, not a truncated fragment.
+                if needs_stream_translation && !translate_pending.is_empty() {
+                    let mut last = std::mem::take(&mut translate_pending);
+                    if last.ends_with('\r') {
+                        last.pop();
+                    }
+                    if !last.is_empty() {
+                        if let Some(ref mut ts) = t_state {
+                            let chunks = registry::global_registry()
+                                .translate_response(
+                                    stream_target_format,
+                                    stream_source_format,
+                                    &Bytes::from(last),
+                                    ts,
+                                );
+                            for out in chunks {
+                                if let Some(frame) = sse_frame_for_dashboard(&out) {
+                                    yield Ok::<Bytes, std::io::Error>(frame);
+                                }
+                            }
+                        } else {
+                            yield Ok::<Bytes, std::io::Error>(sanitize_sse_chunk(&Bytes::from(last)));
                         }
                     }
                 }
@@ -4502,6 +4552,28 @@ async fn collect_upstream_response_bytes(response: UpstreamResponse) -> (Bytes, 
             (Bytes::from(collected), complete)
         }
     }
+}
+
+/// One complete SSE line in, one sanitized line out. The streaming branches
+/// feed this rather than the raw transport chunk, so a frame split across two
+/// reads is acted on exactly once and a chunk carrying several frames yields
+/// several calls (bead openproxy-0ph4).
+///
+/// Exposed for tests: the buffer itself is a local in the stream generator, so
+/// the line-splitting contract is pinned here instead.
+pub(crate) fn split_complete_sse_lines(buffer: &mut String) -> Vec<String> {
+    let mut out = Vec::new();
+    while let Some(nl) = buffer.find('\n') {
+        let mut line = buffer[..nl].to_string();
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        buffer.drain(..=nl);
+        if !line.is_empty() {
+            out.push(line);
+        }
+    }
+    out
 }
 
 /// Strip the SSE `data:` prefix from a chunk, returning the JSON payload.
@@ -5930,5 +6002,84 @@ mod extractor_framing_tests {
             got.is_some(),
             "extractor must find the data: line in a named-event frame, got {got:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod sse_framing_tests {
+    use super::split_complete_sse_lines;
+
+    /// Regression (bead openproxy-0ph4): one transport chunk is NOT one SSE
+    /// event. A single read can carry several frames, and one frame can
+    /// straddle two reads. 9router buffers per line and only acts on COMPLETE
+    /// lines (open-sse/utils/stream.js:110-119), so both cases must produce the
+    /// same frames as the equivalent single-read stream.
+    #[test]
+    fn one_chunk_carrying_two_frames_yields_two_lines() {
+        let mut buf = String::new();
+        buf.push_str("data: {\"a\":1}\ndata: {\"a\":2}\n");
+        let lines = split_complete_sse_lines(&mut buf);
+        assert_eq!(lines, vec!["data: {\"a\":1}", "data: {\"a\":2}"]);
+        assert!(buf.is_empty(), "both frames consumed");
+    }
+
+    #[test]
+    fn a_frame_split_across_two_reads_is_emitted_exactly_once() {
+        let mut buf = String::new();
+        // read 1: half a frame
+        buf.push_str("data: {\"a\"");
+        assert!(
+            split_complete_sse_lines(&mut buf).is_empty(),
+            "an incomplete frame must not be acted on"
+        );
+        // read 2: the rest
+        buf.push_str(":1}\n");
+        let lines = split_complete_sse_lines(&mut buf);
+        assert_eq!(lines, vec!["data: {\"a\":1}"], "emitted exactly once");
+        assert!(buf.is_empty());
+    }
+
+    /// Splitting on a naive newline scan corrupts any frame whose JSON string
+    /// value contains a newline — the buffer is a LINE buffer, so the embedded
+    /// newline is part of the line until the REAL terminator arrives.
+    #[test]
+    fn a_brace_inside_a_string_value_does_not_split_a_frame() {
+        let mut buf = String::new();
+        // real newlines are escaped in JSON, so a single physical line can hold
+        // braces and quotes freely
+        buf.push_str("data: {\"text\":\"a}b{c}\",\"n\":1}\n");
+        let lines = split_complete_sse_lines(&mut buf);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("a}b{c}"));
+    }
+
+    /// Named-event frames: the event: line and the data: line are separate
+    /// physical lines and BOTH must survive intact.
+    #[test]
+    fn a_named_event_frame_keeps_both_of_its_lines() {
+        let mut buf = String::new();
+        buf.push_str("event: message_start\ndata: {\"type\":\"message_start\"}\n\n");
+        let lines = split_complete_sse_lines(&mut buf);
+        assert_eq!(
+            lines,
+            vec!["event: message_start", "data: {\"type\":\"message_start\"}"]
+        );
+    }
+
+    /// Whatever survives without a trailing newline is the caller's EOF flush
+    /// responsibility; the buffer must still hold it, not drop it.
+    #[test]
+    fn a_trailing_frame_without_a_newline_stays_in_the_buffer() {
+        let mut buf = String::new();
+        buf.push_str("data: {\"a\":1}");
+        assert!(split_complete_sse_lines(&mut buf).is_empty());
+        assert_eq!(buf, "data: {\"a\":1}", "held for the EOF flush");
+    }
+
+    #[test]
+    fn crlf_terminators_are_normalised() {
+        let mut buf = String::new();
+        buf.push_str("data: {\"a\":1}\r\n");
+        assert_eq!(split_complete_sse_lines(&mut buf), vec!["data: {\"a\":1}"]);
     }
 }
