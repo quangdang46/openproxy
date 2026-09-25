@@ -4,6 +4,14 @@ import crypto from "crypto";
 // or a random per-install secret persisted at $DATA_DIR/api_key_secret). This
 // module is currently unused by the dashboard and must never fall back to a
 // hardcoded value — keys generated with a different secret won't validate.
+//
+// It also cannot work in the browser as written: `process.env` does not exist
+// there, and `import crypto from "crypto"` resolves to Node's module, not
+// WebCrypto. Fixing the CRC length below makes the two implementations agree,
+// but this stays dead code until it is either ported to WebCrypto with the
+// secret supplied by the server, or deleted. It is left in place rather than
+// removed because that is a call about whether key generation should ever move
+// client-side, not one to make inside a parity fix.
 const API_KEY_SECRET = process.env.API_KEY_SECRET || "";
 
 /**
