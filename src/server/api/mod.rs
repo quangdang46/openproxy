@@ -341,7 +341,9 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(provider_nodes::routes())
         .merge(providers::routes())
         .merge(settings_payload_rules::routes())
-        .merge(tunnel::routes())
+        // Every action here changes how this process is reachable from the
+        // network. Loopback-only, as in 9router's dashboardGuard list.
+        .merge(tunnel::routes().route_layer(middleware::from_fn(guard::require_local_only)))
         .merge(usage::routes())
         .merge(admin_items::routes())
         .merge(pricing::routes())
@@ -407,11 +409,23 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .merge(mitm_config::routes())
         // Same reasoning as mcp_server below: the plugin-bridge MCP surface
         // spawns child processes and must not sit in the unguarded set.
-        .merge(mcp::routes(state.clone()))
+        //
+        // These three also carry the loopback guard 9router applies to every
+        // process-spawning / exposure route (dashboardGuard.js:72-88). The MCP
+        // surfaces reach the plugin tool registry, which hands out a tool
+        // inventory and key metadata, and /api/tunnel/* opens a public route
+        // into this process — neither belongs in the set of things a remote
+        // caller can reach, whatever the auth layer says.
+        .merge(
+            mcp::routes(state.clone()).route_layer(middleware::from_fn(guard::require_local_only)),
+        )
         // MCP transport carries its own admin gate (dashboard session or
         // management API key) — it is not part of the unguarded `remaining`
         // set. See `mcp_server::routes` for why.
-        .merge(mcp_server::routes(state.clone()))
+        .merge(
+            mcp_server::routes(state.clone())
+                .route_layer(middleware::from_fn(guard::require_local_only)),
+        )
         .merge(auth::routes())
         .merge(a2a::routes(state.clone()))
         .merge(provider_validate::routes())

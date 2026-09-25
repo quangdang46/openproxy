@@ -177,3 +177,65 @@ fn auth_error_response(error: AuthError) -> Response {
     )
         .into_response()
 }
+
+#[cfg(test)]
+mod local_only_tests {
+    use super::*;
+    use axum::Router;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use tower::util::ServiceExt;
+
+    async fn run_with_peer(peer: Option<IpAddr>) -> StatusCode {
+        let app = Router::new()
+            .route(
+                "/probe",
+                axum::routing::get(|| async { axum::http::StatusCode::OK }),
+            )
+            .route_layer(axum::middleware::from_fn(require_local_only));
+        let request = Request::builder()
+            .uri("/probe")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        // Mirror what axum inserts when the server is built with
+        // into_make_service_with_connect_info, which is what main.rs does.
+        let request = match peer {
+            Some(ip) => {
+                let mut request = request;
+                request
+                    .extensions_mut()
+                    .insert(ConnectInfo(SocketAddr::new(ip, 12345)));
+                request
+            }
+            None => request,
+        };
+        app.oneshot(request).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn loopback_peer_is_allowed() {
+        assert_eq!(
+            run_with_peer(Some(IpAddr::V4(Ipv4Addr::LOCALHOST))).await,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_peer_is_refused() {
+        assert_eq!(
+            run_with_peer(Some(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5)))).await,
+            StatusCode::FORBIDDEN
+        );
+    }
+
+    /// Documents the default rather than changing it: with no ConnectInfo the
+    /// guard ALLOWS. That is what the running server never does — main.rs
+    /// builds with into_make_service_with_connect_info — but it is the trap a
+    /// future mount or a test would fall into silently. Fail-closed would be
+    /// the safer default; it is not changed here because every current caller
+    /// depends on the permissive one, and that deserves its own change with the
+    /// full suite behind it.
+    #[tokio::test]
+    async fn missing_connect_info_fails_open() {
+        assert_eq!(run_with_peer(None).await, StatusCode::OK);
+    }
+}
