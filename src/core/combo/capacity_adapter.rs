@@ -318,16 +318,51 @@ pub fn strip_history_for_context(body: &mut Value, context_window: Option<u64>) 
     true
 }
 
-/// True when the given capability heuristic says `entry` supports
-/// `capability` (provider-prefix / model-name patterns; 9router reads an
-/// explicit capabilities table — the heuristic mirrors `model_has_capability`).
+/// True when `entry` supports `capability`.
+///
+/// Answers from the real resolver — `get_capabilities_for_model` — the way
+/// 9router's `reorderByCapabilities` does, splitting the entry into provider
+/// and model. The old code matched provider prefixes and substrings of the
+/// model name, which cannot see a synced-catalog override and cannot see a
+/// Gemini-native body at all: a capability carried by a
+/// `contents[].parts[].inlineData` block is invisible to a name pattern.
+///
+/// The prefix heuristic survives as a fallback for entries the catalog does
+/// not know, so an unlisted model is not silently demoted to "has nothing"
+/// and dropped out of a rotation it used to qualify for.
 fn model_has_capability(entry: &str, capability: &str) -> bool {
+    let (provider, model) = match entry.split_once('/') {
+        Some((provider, model)) => (provider, model),
+        None => ("", entry),
+    };
+    let caps = crate::core::combo::capabilities::get_capabilities_for_model(provider, model);
+
+    let from_catalog = match capability {
+        "vision" => caps.vision,
+        "pdf" => caps.pdf,
+        "audioInput" => caps.audio_input,
+        "videoInput" => caps.video_input,
+        "imageOutput" => caps.image_output,
+        "audioOutput" => caps.audio_output,
+        "search" => caps.search,
+        "tools" => caps.tools,
+        "reasoning" => caps.reasoning,
+        _ => false,
+    };
+    if from_catalog {
+        return true;
+    }
+
+    prefix_heuristic(entry, capability)
+}
+
+/// The previous prefix/substring table, kept for entries the catalog does not
+/// resolve.
+fn prefix_heuristic(entry: &str, capability: &str) -> bool {
     let entry_lower = entry.to_lowercase();
 
     match capability {
         "vision" => {
-            // gpt-4 base has no vision; only 4o+ variants (matched via the
-            // `-4o` model-name pattern below).
             if entry_lower.starts_with("openai/o1")
                 || entry_lower.starts_with("openai/o3")
                 || entry_lower.starts_with("anthropic/claude")
@@ -340,29 +375,20 @@ fn model_has_capability(entry: &str, capability: &str) -> bool {
             {
                 return true;
             }
-            if entry_lower.contains("vision")
+            entry_lower.contains("vision")
                 || entry_lower.contains("-4o")
                 || entry_lower.contains("gemini")
                 || entry_lower.starts_with("oc/mimo")
-            {
-                return true;
-            }
-            false
         }
         "pdf" => {
-            if entry_lower.starts_with("anthropic/claude")
+            entry_lower.starts_with("anthropic/claude")
                 || entry_lower.starts_with("vertex/claude")
                 || entry_lower.starts_with("aws/claude")
                 || entry_lower.starts_with("google/gemini")
                 || entry_lower.starts_with("vertex/gemini")
                 || entry_lower.starts_with("gcp/gemini")
-            {
-                return true;
-            }
-            false
         }
-        "audioInput" => entry_lower.starts_with("oc/mimo"),
-        "videoInput" => entry_lower.starts_with("oc/mimo"),
+        "audioInput" | "videoInput" => entry_lower.starts_with("oc/mimo"),
         _ => false,
     }
 }
@@ -537,6 +563,80 @@ mod tests {
         assert_eq!(
             get_active_adapter_strategy(&HashSet::new(), &settings),
             "fallback"
+        );
+    }
+}
+
+#[cfg(test)]
+mod capability_classifier_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// openproxy-xhs9: the reorder used a ~10-entry provider-prefix and
+    /// model-substring table. A vision-only member has to float above one that
+    /// has no vision at all, or an image-bearing request tries the wrong model
+    /// first.
+    #[test]
+    fn vision_member_sorts_above_non_vision_member() {
+        let required: HashSet<String> = ["vision".to_string()].into_iter().collect();
+        let models = vec![
+            "openai/gpt-3.5-turbo".to_string(),
+            "openai/gpt-4o".to_string(),
+        ];
+
+        let ordered = crate::core::combo::reorder_by_capabilities(&models, &required);
+
+        assert_eq!(
+            ordered[0], "openai/gpt-4o",
+            "the vision-capable member must lead: {ordered:?}"
+        );
+    }
+
+    /// A member the catalog does not know must not be silently demoted to
+    /// "supports nothing" — it would fall to the back of every rotation it
+    /// used to qualify for.
+    #[test]
+    fn unknown_entry_keeps_its_prefix_heuristic_answer() {
+        // Not in any capability table, but the prefix heuristic has always
+        // answered true for this one.
+        assert!(super::model_has_capability("oc/mimo-v2.5-free", "vision"));
+    }
+
+    /// The classifier must agree with the real resolver for a model the catalog
+    /// DOES know — that is the whole point of the swap.
+    #[test]
+    fn classifier_agrees_with_the_catalog_resolver() {
+        use crate::core::combo::capabilities::get_capabilities_for_model;
+        for (provider, model) in [
+            ("openai", "gpt-4o"),
+            ("openai", "gpt-3.5-turbo"),
+            ("anthropic", "claude-opus-4.7"),
+        ] {
+            let caps = get_capabilities_for_model(provider, model);
+            let entry = format!("{provider}/{model}");
+            assert_eq!(
+                super::model_has_capability(&entry, "vision"),
+                caps.vision,
+                "classifier disagrees with the catalog for {entry}"
+            );
+        }
+    }
+
+    /// The bead also asks that a Gemini-native body be readable by the reorder.
+    /// inlineData/fileData are already inspected by the detector; this pins it
+    /// so a regression there is visible here too.
+    #[test]
+    fn gemini_native_image_body_requires_vision() {
+        let body = serde_json::json!({
+            "contents": [{
+                "role": "user",
+                "parts": [{"inlineData": {"mimeType": "image/png", "data": "AAAA"}}]
+            }]
+        });
+        let required = crate::core::combo::detect_required_capabilities(&body);
+        assert!(
+            required.contains("vision"),
+            "a Gemini inlineData image must register as a vision requirement: {required:?}"
         );
     }
 }
