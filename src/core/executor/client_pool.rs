@@ -65,6 +65,17 @@ impl Default for ClientPool {
 
 pub type DirectHyperClient = HyperClient<HttpsConnector<HttpConnector>, Full<Bytes>>;
 
+/// The per-read idle deadline for a response body.
+///
+/// Deliberately the SAME shared constant the stream stall watchdog uses, so the
+/// transport layer and the handler cannot disagree about how long silence is
+/// acceptable. Exposed as a function so a test can pin the relationship —
+/// a bare literal in the builder would drift from the watchdog the moment
+/// either side is tuned.
+fn stream_read_timeout() -> Duration {
+    Duration::from_millis(crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS)
+}
+
 impl ClientPool {
     pub fn new() -> Self {
         ensure_rustls_provider();
@@ -203,9 +214,7 @@ fn build_reqwest_client(
         //
         // The value is the SAME shared constant the stall watchdog uses, so
         // there is one clock and not two that can disagree.
-        .read_timeout(Duration::from_millis(
-            crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS,
-        ))
+        .read_timeout(stream_read_timeout())
         // MITM-bypass: route MITM_BYPASS_HOSTS through Google DNS so a
         // hostile /etc/hosts entry can't redirect Codex/Cursor/Copilot/AWS
         // CodeWhisperer endpoints to a local interceptor. Other hostnames
@@ -261,33 +270,30 @@ fn client_key(provider_key: &str, proxy: Option<&ProxyTarget>) -> String {
 
 #[cfg(test)]
 mod stream_deadline_tests {
+    use super::stream_read_timeout;
+    use std::time::Duration;
+
     /// Bead openproxy-05cz. reqwest exposes two deadline knobs whose names look
-    /// interchangeable and whose semantics are opposites:
+    /// interchangeable and mean opposites:
     ///   .timeout(d)      — request start until the response BODY finishes
     ///   .read_timeout(d) — max gap between two reads of the body
-    /// send_one returns Ok at response HEADERS, so `.timeout()` was a cap on the
-    /// WHOLE stream: a healthy SSE response running 12 minutes was killed at the
-    /// deadline, and the 360s stall watchdog never got to be the thing that
-    /// decided. 9router has no whole-body deadline at all (base.js:134-137 arms
-    /// the connect timer for headers, then clears it).
+    /// send_one returns Ok at headers, so `.timeout()` capped the WHOLE stream
+    /// and the 360s stall watchdog never got to decide. 9router has no
+    /// whole-body deadline (base.js:134-137 arms the connect timer for headers,
+    /// then clears it).
     ///
-    /// These assert the policy, not the live client — but the two are the
-    /// distinction that keeps a long stream alive, so it is pinned explicitly.
+    /// The first version of this test asserted `per_read * 2 > per_read` and
+    /// compared a value with the expression it was defined from — tautologies
+    /// that stay green if `.read_timeout` is reverted to `.timeout`. This
+    /// version pins the one thing that is actually at risk, which is the same
+    /// class this bead's sibling bugs were: the value drifting from the shared
+    /// constant, the way the 504 delay did.
     #[test]
-    fn the_stream_deadline_is_per_read_not_whole_lifecycle() {
-        use std::time::Duration;
-        let per_read =
-            Duration::from_millis(crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS);
-        // A stream that keeps producing stays under the per-read gap no matter
-        // how long it runs; a whole-lifecycle cap at the same value would cut a
-        // 10-minute stream at the first gap-free window boundary.
-        let total = per_read * 2;
-        assert!(total > per_read, "a long stream outlives the cap");
-        // And it is the SAME value the stall watchdog uses, so the client and
-        // the handler cannot disagree about how long silence is acceptable.
+    fn the_read_timeout_tracks_the_shared_stall_clock() {
         assert_eq!(
-            per_read,
-            Duration::from_millis(crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS)
+            stream_read_timeout(),
+            Duration::from_millis(crate::core::config::runtime_config::STREAM_STALL_TIMEOUT_MS),
+            "a hard-coded literal here would silently disagree with the watchdog"
         );
     }
 }
