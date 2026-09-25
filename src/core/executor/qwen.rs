@@ -113,22 +113,35 @@ impl QwenExecutor {
         &self.pool
     }
 
-    fn build_url(&self, credentials: &ProviderConnection) -> String {
+    /// The OAuth token response hands back a per-account `resourceUrl`; the
+    /// scheme on it is the operator's own choice (a regional portal, a
+    /// same-cluster relay), so it is carried through instead of being rewritten
+    /// to `https://`. A schemeless or absent value still resolves to the HTTPS
+    /// portal.
+    fn build_url(credentials: &ProviderConnection) -> String {
         let resource_url = credentials
             .provider_specific_data
             .get("resourceUrl")
             .and_then(|v| v.as_str());
 
-        let host = resource_url
-            .map(|u| {
-                u.trim_start_matches("https://")
+        let (scheme, host) = match resource_url {
+            Some(url) => {
+                let scheme = if url.starts_with("http://") {
+                    "http"
+                } else {
+                    "https"
+                };
+                let host = url
+                    .trim_start_matches("https://")
                     .trim_start_matches("http://")
                     .trim_end_matches('/')
-                    .to_string()
-            })
-            .unwrap_or_else(|| QWEN_DEFAULT_URL.to_string());
+                    .to_string();
+                (scheme, host)
+            }
+            None => ("https", QWEN_DEFAULT_URL.to_string()),
+        };
 
-        format!("https://{}/v1/chat/completions", host)
+        format!("{scheme}://{host}/v1/chat/completions")
     }
 
     fn build_headers(&self, credentials: &ProviderConnection, stream: bool) -> HeaderMap {
@@ -262,7 +275,7 @@ impl QwenExecutor {
         &self,
         request: QwenExecutionRequest,
     ) -> Result<QwenExecutorResponse, QwenExecutorError> {
-        let url = self.build_url(&request.credentials);
+        let url = Self::build_url(&request.credentials);
         let headers = self.build_headers(&request.credentials, request.stream);
         let transformed_body = self.transform_request(&request.body, request.stream);
 
@@ -315,5 +328,53 @@ impl QwenExecutor {
         }
 
         response.json::<QwenTokenResponse>().await.ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connection_with_resource_url(resource_url: &str) -> ProviderConnection {
+        let mut connection = ProviderConnection::default();
+        connection
+            .provider_specific_data
+            .insert("resourceUrl".into(), json!(resource_url));
+        connection
+    }
+
+    #[test]
+    fn no_resource_url_falls_back_to_the_https_portal() {
+        let url = QwenExecutor::build_url(&ProviderConnection::default());
+        assert_eq!(url, "https://portal.qwen.ai/v1/chat/completions");
+    }
+
+    #[test]
+    fn https_resource_url_keeps_its_host_and_strips_the_scheme() {
+        let url = QwenExecutor::build_url(&connection_with_resource_url(
+            "https://dashscope-intl.aliyuncs.com/",
+        ));
+        assert_eq!(
+            url,
+            "https://dashscope-intl.aliyuncs.com/v1/chat/completions"
+        );
+    }
+
+    /// The OAuth token response is free to hand back a plain-HTTP `resourceUrl`
+    /// (a same-cluster relay, a local gateway). Re-emitting `https://` for it
+    /// points the request at a listener that never speaks TLS, so the dispatch
+    /// dies on transport instead of reaching upstream at all.
+    #[test]
+    fn plain_http_resource_url_keeps_its_scheme() {
+        let url = QwenExecutor::build_url(&connection_with_resource_url("http://127.0.0.1:38421"));
+        assert_eq!(url, "http://127.0.0.1:38421/v1/chat/completions");
+    }
+
+    /// A `resourceUrl` that carries no scheme is a bare host, and the portal
+    /// contract for those is HTTPS.
+    #[test]
+    fn schemeless_resource_url_gets_the_https_scheme() {
+        let url = QwenExecutor::build_url(&connection_with_resource_url("dashscope.aliyuncs.com"));
+        assert_eq!(url, "https://dashscope.aliyuncs.com/v1/chat/completions");
     }
 }
