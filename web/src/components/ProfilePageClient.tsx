@@ -520,10 +520,10 @@ export default function ProfilePageClient() {
     const loginLabel = oidcForm.oidcLoginLabel.trim();
     const secret = oidcClientSecret.trim();
 
-    if (authMode !== "password" && (!issuerUrl || !clientId) && !settings.oidcConfigured) {
+    if (authMode !== "password" && (!issuerUrl || !clientId || !secret) && !settings.oidcConfigured) {
       setOidcStatus({
         type: "error",
-        message: "Issuer URL and client ID are required to enable OIDC.",
+        message: "Issuer URL, client ID, and client secret are required to enable OIDC.",
       });
       return;
     }
