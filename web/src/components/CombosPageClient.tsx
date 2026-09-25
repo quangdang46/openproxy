@@ -73,6 +73,10 @@ export default function CombosPage() {
   const [editingCombo, setEditingCombo] = useState<Combo | null>(null);
   const [activeProviders, setActiveProviders] = useState<Provider[]>([]);
   const [comboStrategies, setComboStrategies] = useState<Record<string, any>>({});
+  // False when the settings read failed. The strategy PATCH below is a
+  // read-modify-write over this map, so writing from an unseeded one would
+  // PATCH {} over every other combo strategy.
+  const [comboStrategiesLoaded, setComboStrategiesLoaded] = useState<boolean>(false);
   const [deleteTarget, setDeleteTarget] = useState<Combo | null>(null);
   const [deleting, setDeleting] = useState<boolean>(false);
   const notify = useNotificationStore();
@@ -115,6 +119,7 @@ export default function CombosPage() {
         setActiveProviders(providersData.connections || []);
       }
       setComboStrategies(settingsSafe.comboStrategies || {});
+      setComboStrategiesLoaded(Boolean(settingsData));
       const rawAdapter = settingsSafe.capacityAdapter || {};
       const normalized: Record<string, CapacityAdapterEntry> = {};
       for (const cap of CAPACITY_ADAPTER_CAPS) {
@@ -200,6 +205,13 @@ export default function CombosPage() {
     comboName: string,
     patch: Partial<ComboStrategyConfig>,
   ) => {
+    if (!comboStrategiesLoaded) {
+      // The settings read failed, so this map is empty because we know
+      // nothing, not because there is nothing. Writing it back would PATCH an
+      // empty comboStrategies over every other combo's setting.
+      console.warn("Refusing to write comboStrategies: settings were never loaded");
+      return;
+    }
     try {
       const updated = { ...comboStrategies };
       const next: ComboStrategyConfig = {
