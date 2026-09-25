@@ -1510,40 +1510,96 @@ fn next_provider_priority(connections: &[ProviderConnection], provider: &str) ->
         + 1
 }
 
+/// Non-empty, trimmed string value of a `provider_specific_data` key.
+fn provider_specific_str<'a>(connection: &'a ProviderConnection, key: &str) -> Option<&'a str> {
+    connection
+        .provider_specific_data
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// 9router `createProviderConnection` dedupe predicate
+/// (`connectionsRepo.js:144-164`).
+///
+/// A provider can issue several OAuth grants for the same email — a second
+/// ChatGPT workspace, or a second cross-IdP login. Refresh tokens are rotated
+/// single-use, so merging a new grant onto a bare-email row overwrites the first
+/// account's token pair and makes it look invalid. Codex must match on
+/// `chatgptAccountId`; other providers match the workspace id when both sides
+/// expose it and otherwise require `username` on both sides, treating a
+/// one-sided username as a distinct identity rather than collapsing onto the
+/// bare-email fallback.
+fn oauth_identity_matches(existing: &ProviderConnection, incoming: &ProviderConnection) -> bool {
+    // 9router only hunts for a merge target when the incoming login has an
+    // email (`connectionsRepo.js:131`).
+    let incoming_email = incoming.email.as_deref().filter(|email| !email.is_empty());
+    if incoming_email.is_none()
+        || existing.provider != incoming.provider
+        || existing.auth_type != "oauth"
+        || existing.email.as_deref() != incoming_email
+    {
+        return false;
+    }
+
+    let incoming_workspace = provider_specific_str(incoming, "chatgptAccountId");
+    let existing_workspace = provider_specific_str(existing, "chatgptAccountId");
+
+    if incoming.provider == "codex" {
+        return match (incoming_workspace, existing_workspace) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        };
+    }
+
+    match (incoming_workspace, existing_workspace) {
+        (Some(a), Some(b)) => return a == b,
+        (Some(_), None) | (None, Some(_)) => return false,
+        (None, None) => {}
+    }
+
+    match (
+        provider_specific_str(incoming, "username"),
+        provider_specific_str(existing, "username"),
+    ) {
+        (Some(a), Some(b)) => a == b,
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => true,
+    }
+}
+
 async fn create_imported_oauth_connection(
     db: &crate::db::Db,
     mut connection: ProviderConnection,
 ) -> anyhow::Result<ProviderConnection> {
     let now = chrono::Utc::now().to_rfc3339();
     let provider = connection.provider.clone();
-    let email_for_upsert = connection
-        .email
-        .as_deref()
-        .filter(|email| !email.is_empty())
-        .map(str::to_string);
     let mut saved = None;
 
     db.update(|db| {
-        if let Some(email) = email_for_upsert.as_deref() {
-            if let Some(existing) = db.provider_connections.iter_mut().find(|candidate| {
-                candidate.provider == provider
-                    && candidate.auth_type == "oauth"
-                    && candidate.email.as_deref() == Some(email)
-            }) {
-                existing.display_name = connection.display_name.clone();
-                existing.email = connection.email.clone();
-                existing.access_token = connection.access_token.clone();
-                existing.refresh_token = connection.refresh_token.clone();
-                existing.expires_at = connection.expires_at.clone();
-                existing.test_status = connection.test_status.clone();
-                existing.token_type = connection.token_type.clone();
-                existing.scope = connection.scope.clone();
-                existing.id_token = connection.id_token.clone();
-                existing.provider_specific_data = connection.provider_specific_data.clone();
-                existing.updated_at = Some(now.clone());
-                saved = Some(existing.clone());
-                return;
-            }
+        if let Some(existing) = db
+            .provider_connections
+            .iter_mut()
+            .find(|candidate| oauth_identity_matches(candidate, &connection))
+        {
+            existing.display_name = connection.display_name.clone();
+            existing.email = connection.email.clone();
+            existing.access_token = connection.access_token.clone();
+            existing.refresh_token = connection.refresh_token.clone();
+            existing.expires_at = connection.expires_at.clone();
+            existing.test_status = connection.test_status.clone();
+            existing.token_type = connection.token_type.clone();
+            existing.scope = connection.scope.clone();
+            existing.id_token = connection.id_token.clone();
+            // Merge key-by-key rather than replacing the map, so user-set proxy
+            // bindings (proxyPoolId / connectionProxyUrl) survive a re-auth.
+            existing
+                .provider_specific_data
+                .extend(connection.provider_specific_data.clone());
+            existing.updated_at = Some(now.clone());
+            saved = Some(existing.clone());
+            return;
         }
 
         if connection.name.is_none() {
@@ -4462,6 +4518,34 @@ async fn exchange_cline_compat(
     })
 }
 
+/// 9router `POST /api/oauth/[provider]/exchange` success envelope
+/// (`route.js:445-452`) — `{ success, connection: { id, provider, email?,
+/// displayName? } }`.
+fn oauth_connection_saved_response(saved: &ProviderConnection) -> Response {
+    let mut response_connection = serde_json::Map::from_iter([
+        ("id".to_string(), Value::String(saved.id.clone())),
+        (
+            "provider".to_string(),
+            Value::String(saved.provider.clone()),
+        ),
+    ]);
+    if let Some(email) = &saved.email {
+        response_connection.insert("email".to_string(), Value::String(email.clone()));
+    }
+    if let Some(display_name) = &saved.display_name {
+        response_connection.insert(
+            "displayName".to_string(),
+            Value::String(display_name.clone()),
+        );
+    }
+
+    Json(json!({
+        "success": true,
+        "connection": Value::Object(response_connection),
+    }))
+    .into_response()
+}
+
 async fn exchange_oauth_compat(
     State(state): State<AppState>,
     Path(provider): Path<String>,
@@ -4501,6 +4585,31 @@ async fn exchange_oauth_compat(
         .map(str::trim)
         .unwrap_or_default();
     let meta = body.meta.as_ref();
+
+    // 9router route.js:414-455 — a `code` that is really a raw ChatGPT/Copilot
+    // access token (JWT) is not exchanged with the token endpoint at all; it
+    // becomes an immediately-active `access_token` connection. That auth type is
+    // never deduped, so pasted tokens stack rather than overwrite.
+    if code.starts_with("eyJ") && code.contains('.') {
+        let (email, mut provider_specific_data) = extract_codex_account_info(Some(code));
+        provider_specific_data.insert(
+            "authMethod".to_string(),
+            Value::String("access_token".to_string()),
+        );
+        let connection = ProviderConnection {
+            provider: provider.clone(),
+            auth_type: "access_token".to_string(),
+            email,
+            access_token: Some(code.to_string()),
+            test_status: Some("active".to_string()),
+            provider_specific_data: provider_specific_data.into_iter().collect(),
+            ..Default::default()
+        };
+        return match create_imported_oauth_connection(&state.db, connection).await {
+            Ok(saved) => oauth_connection_saved_response(&saved),
+            Err(error) => internal_error_response(error.to_string()),
+        };
+    }
 
     if code.is_empty()
         || redirect_uri.is_empty()
@@ -4563,22 +4672,7 @@ async fn exchange_oauth_compat(
         Err(error) => return internal_error_response(error.to_string()),
     };
 
-    let mut response_connection = serde_json::Map::from_iter([
-        ("id".to_string(), Value::String(saved.id)),
-        ("provider".to_string(), Value::String(saved.provider)),
-    ]);
-    if let Some(email) = saved.email {
-        response_connection.insert("email".to_string(), Value::String(email));
-    }
-    if let Some(display_name) = saved.display_name {
-        response_connection.insert("displayName".to_string(), Value::String(display_name));
-    }
-
-    Json(json!({
-        "success": true,
-        "connection": Value::Object(response_connection),
-    }))
-    .into_response()
+    oauth_connection_saved_response(&saved)
 }
 
 // GET /api/oauth/:provider/start
